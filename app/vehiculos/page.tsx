@@ -1,12 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+import { supabase } from "@/lib/supabase";
 
 type Vehiculo = {
   id: number;
@@ -89,7 +84,9 @@ export default function VehiculosPage() {
   }
 
   async function actualizarEstadosDocumentos() {
-    const { data: docs } = await supabase.from("documentos_vehiculo").select("*");
+    const { data: docs } = await supabase
+      .from("documentos_vehiculo")
+      .select("*");
 
     for (const doc of docs || []) {
       const nuevoEstado = calcularEstadoDocumento(doc.fecha_vencimiento);
@@ -102,8 +99,13 @@ export default function VehiculosPage() {
   }
 
   async function actualizarEstadoVehiculos() {
-    const { data: listaVehiculos } = await supabase.from("vehiculos").select("*");
-    const { data: listaDocumentos } = await supabase.from("documentos_vehiculo").select("*");
+    const { data: listaVehiculos } = await supabase
+      .from("vehiculos")
+      .select("*");
+
+    const { data: listaDocumentos } = await supabase
+      .from("documentos_vehiculo")
+      .select("*");
 
     for (const vehiculo of listaVehiculos || []) {
       const docsVehiculo = (listaDocumentos || []).filter(
@@ -149,8 +151,8 @@ export default function VehiculosPage() {
       .select("*")
       .order("id", { ascending: false });
 
-    if (vehiculosData) setVehiculos(vehiculosData);
-    if (documentosData) setDocumentos(documentosData);
+    setVehiculos(vehiculosData || []);
+    setDocumentos(documentosData || []);
   }
 
   useEffect(() => {
@@ -270,18 +272,9 @@ export default function VehiculosPage() {
   }
 
   function estadoBadge(estadoDoc: string | null) {
-    if (estadoDoc === "vencido") {
-      return "bg-red-100 text-red-700";
-    }
-
-    if (estadoDoc === "por_vencer") {
-      return "bg-yellow-100 text-yellow-700";
-    }
-
-    if (estadoDoc === "vigente") {
-      return "bg-green-100 text-green-700";
-    }
-
+    if (estadoDoc === "vencido") return "bg-red-100 text-red-700";
+    if (estadoDoc === "por_vencer") return "bg-yellow-100 text-yellow-700";
+    if (estadoDoc === "vigente") return "bg-green-100 text-green-700";
     return "bg-gray-100 text-gray-700";
   }
 
@@ -299,7 +292,6 @@ export default function VehiculosPage() {
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <input className="rounded-lg border p-3" placeholder="Placa" value={placa} onChange={(e) => setPlaca(e.target.value.toUpperCase())} />
-
           <select className="rounded-lg border p-3" value={categoria} onChange={(e) => setCategoria(e.target.value)}>
             <option value="AUTO">Auto</option>
             <option value="SUV">SUV</option>
@@ -307,7 +299,6 @@ export default function VehiculosPage() {
             <option value="MINIBUS">Minibus</option>
             <option value="BUS">Bus</option>
           </select>
-
           <input className="rounded-lg border p-3" placeholder="Marca" value={marca} onChange={(e) => setMarca(e.target.value)} />
           <input className="rounded-lg border p-3" placeholder="Modelo" value={modelo} onChange={(e) => setModelo(e.target.value)} />
           <input className="rounded-lg border p-3" placeholder="Año" value={anio} onChange={(e) => setAnio(e.target.value)} />
@@ -409,13 +400,7 @@ export default function VehiculosPage() {
                   </td>
 
                   <td className="p-3">
-                    <span
-                      className={`rounded-full px-3 py-1 text-xs font-bold ${
-                        v.estado_operativo === "no_apto"
-                          ? "bg-red-100 text-red-700"
-                          : "bg-green-100 text-green-700"
-                      }`}
-                    >
+                    <span className={`rounded-full px-3 py-1 text-xs font-bold ${v.estado_operativo === "no_apto" ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700"}`}>
                       {v.estado_operativo === "no_apto" ? "NO APTO" : "APTO"}
                     </span>
                   </td>
@@ -484,7 +469,7 @@ export default function VehiculosPage() {
 
                     <td className="p-3">
                       {d.archivo_url ? (
-                        <a href={d.archivo_url} target="_blank" className="text-blue-600 underline">
+                        <a href={d.archivo_url} target="_blank" rel="noreferrer" className="text-blue-600 underline">
                           Ver archivo
                         </a>
                       ) : (

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
 type Cliente = {
@@ -37,6 +38,11 @@ type Factura = {
 };
 
 export default function FacturacionPage() {
+  const router = useRouter();
+
+  const [autorizado, setAutorizado] = useState(false);
+  const [validandoRol, setValidandoRol] = useState(true);
+
   const [clientes, setClientes] = useState<Cliente[]>([]);
   const [reservas, setReservas] = useState<Reserva[]>([]);
   const [facturas, setFacturas] = useState<Factura[]>([]);
@@ -77,8 +83,33 @@ export default function FacturacionPage() {
   };
 
   useEffect(() => {
-    cargarDatos();
-  }, []);
+    async function validarAdmin() {
+      const { data } = await supabase.auth.getSession();
+      const session = data.session;
+
+      if (!session) {
+        router.replace("/login");
+        return;
+      }
+
+      const { data: perfil } = await supabase
+        .from("usuarios")
+        .select("rol, activo")
+        .eq("id", session.user.id)
+        .single();
+
+      if (!perfil || perfil.activo === false || perfil.rol !== "admin") {
+        router.replace("/dashboard");
+        return;
+      }
+
+      setAutorizado(true);
+      setValidandoRol(false);
+      cargarDatos();
+    }
+
+    validarAdmin();
+  }, [router]);
 
   const nombreCliente = (id: number | null) =>
     clientes.find((c) => c.id === id)?.nombre || "Sin cliente";
@@ -94,7 +125,9 @@ export default function FacturacionPage() {
     setForm({
       ...form,
       reserva_id: id,
-      subtotal: reserva ? String(Number(reserva.precio_cliente || 0) / 1.18) : "",
+      subtotal: reserva
+        ? String(Number(reserva.precio_cliente || 0) / 1.18)
+        : "",
     });
   };
 
@@ -134,6 +167,7 @@ export default function FacturacionPage() {
       fecha_vencimiento: form.fecha_vencimiento || null,
       subtotal,
       igv,
+      total: subtotal + igv,
       estado: form.estado,
       metodo_pago: form.metodo_pago,
       sunat_estado: "pendiente",
@@ -188,12 +222,24 @@ export default function FacturacionPage() {
   const pendientes = facturas.filter((f) => f.estado === "pendiente").length;
   const pagadas = facturas.filter((f) => f.estado === "pagada").length;
 
+  if (validandoRol || !autorizado) {
+    return (
+      <main className="p-6">
+        <div className="bg-white rounded-xl border shadow p-6 text-center">
+          <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-gray-300 border-t-[#0b315f]" />
+          <p className="font-bold text-[#0b315f]">Validando permisos...</p>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="p-6 space-y-6">
       <div>
         <h1 className="text-3xl font-bold">Facturación</h1>
         <p className="text-gray-600">
-          Emisión de comprobantes desde reservas. SUNAT API queda preparada para integración futura.
+          Emisión de comprobantes desde reservas. SUNAT API queda preparada para
+          integración futura.
         </p>
       </div>
 
@@ -307,9 +353,7 @@ export default function FacturacionPage() {
           <select
             className="border rounded-lg p-3"
             value={form.metodo_pago}
-            onChange={(e) =>
-              setForm({ ...form, metodo_pago: e.target.value })
-            }
+            onChange={(e) => setForm({ ...form, metodo_pago: e.target.value })}
           >
             <option value="pendiente">Pago pendiente</option>
             <option value="efectivo">Efectivo</option>
@@ -373,13 +417,12 @@ export default function FacturacionPage() {
               facturas.map((f) => (
                 <tr key={f.id} className="border-t">
                   <td className="p-3 font-bold">
-                    {f.tipo_comprobante.toUpperCase()} {f.serie}-{f.numero || f.id}
+                    {f.tipo_comprobante.toUpperCase()} {f.serie}-
+                    {f.numero || f.id}
                   </td>
 
                   <td className="p-3">{nombreCliente(f.cliente_id)}</td>
-
                   <td className="p-3">Reserva #{f.reserva_id || "-"}</td>
-
                   <td className="p-3">{f.fecha_emision}</td>
 
                   <td className="p-3">

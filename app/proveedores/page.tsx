@@ -35,7 +35,7 @@ export default function ProveedoresPage() {
     observaciones: "",
   });
 
-  const cargarProveedores = async () => {
+  async function cargarProveedores() {
     setLoading(true);
 
     const { data, error } = await supabase
@@ -47,13 +47,13 @@ export default function ProveedoresPage() {
     else setProveedores(data || []);
 
     setLoading(false);
-  };
+  }
 
   useEffect(() => {
     cargarProveedores();
   }, []);
 
-  const limpiar = () => {
+  function limpiar() {
     setEditandoId(null);
     setForm({
       nombre: "",
@@ -67,9 +67,9 @@ export default function ProveedoresPage() {
       estado: "activo",
       observaciones: "",
     });
-  };
+  }
 
-  const guardar = async () => {
+  async function guardar() {
     if (!form.nombre.trim()) {
       alert("Ingresa el nombre del proveedor");
       return;
@@ -88,26 +88,21 @@ export default function ProveedoresPage() {
       observaciones: form.observaciones || null,
     };
 
-    if (editandoId) {
-      const { error } = await supabase
-        .from("proveedores")
-        .update(payload)
-        .eq("id", editandoId);
+    const { error } = editandoId
+      ? await supabase.from("proveedores").update(payload).eq("id", editandoId)
+      : await supabase.from("proveedores").insert(payload);
 
-      if (error) return alert(error.message);
-    } else {
-      const { error } = await supabase.from("proveedores").insert(payload);
-
-      if (error) return alert(error.message);
+    if (error) {
+      alert(error.message);
+      return;
     }
 
     limpiar();
     cargarProveedores();
-  };
+  }
 
-  const editar = (p: Proveedor) => {
+  function editar(p: Proveedor) {
     setEditandoId(p.id);
-
     setForm({
       nombre: p.nombre || "",
       ruc: p.ruc || "",
@@ -120,17 +115,20 @@ export default function ProveedoresPage() {
       estado: p.estado || "activo",
       observaciones: p.observaciones || "",
     });
-  };
+  }
 
-  const eliminar = async (id: number) => {
+  async function eliminar(id: number) {
     if (!confirm("¿Eliminar proveedor?")) return;
 
     const { error } = await supabase.from("proveedores").delete().eq("id", id);
 
-    if (error) return alert(error.message);
+    if (error) {
+      alert(error.message);
+      return;
+    }
 
     cargarProveedores();
-  };
+  }
 
   const activos = proveedores.filter((p) => p.estado === "activo").length;
   const bloqueados = proveedores.filter((p) => p.estado === "bloqueado").length;
@@ -173,25 +171,10 @@ export default function ProveedoresPage() {
         </h2>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <input
-            className="border rounded-lg p-3"
-            placeholder="Nombre / Razón social"
-            value={form.nombre}
-            onChange={(e) => setForm({ ...form, nombre: e.target.value })}
-          />
+          <input className="border rounded-lg p-3" placeholder="Nombre / Razón social" value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} />
+          <input className="border rounded-lg p-3" placeholder="RUC" value={form.ruc} onChange={(e) => setForm({ ...form, ruc: e.target.value })} />
 
-          <input
-            className="border rounded-lg p-3"
-            placeholder="RUC"
-            value={form.ruc}
-            onChange={(e) => setForm({ ...form, ruc: e.target.value })}
-          />
-
-          <select
-            className="border rounded-lg p-3"
-            value={form.tipo}
-            onChange={(e) => setForm({ ...form, tipo: e.target.value })}
-          >
+          <select className="border rounded-lg p-3" value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })}>
             <option value="transporte">Transporte tercerizado</option>
             <option value="taller">Taller</option>
             <option value="combustible">Combustible</option>
@@ -201,78 +184,28 @@ export default function ProveedoresPage() {
             <option value="otro">Otro</option>
           </select>
 
-          <input
-            className="border rounded-lg p-3"
-            placeholder="Teléfono"
-            value={form.telefono}
-            onChange={(e) => setForm({ ...form, telefono: e.target.value })}
-          />
+          <input className="border rounded-lg p-3" placeholder="Teléfono" value={form.telefono} onChange={(e) => setForm({ ...form, telefono: e.target.value })} />
+          <input className="border rounded-lg p-3" placeholder="Email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
 
-          <input
-            className="border rounded-lg p-3"
-            placeholder="Email"
-            value={form.email}
-            onChange={(e) => setForm({ ...form, email: e.target.value })}
-          />
-
-          <select
-            className="border rounded-lg p-3"
-            value={form.estado}
-            onChange={(e) => setForm({ ...form, estado: e.target.value })}
-          >
+          <select className="border rounded-lg p-3" value={form.estado} onChange={(e) => setForm({ ...form, estado: e.target.value })}>
             <option value="activo">Activo</option>
             <option value="inactivo">Inactivo</option>
             <option value="bloqueado">Bloqueado</option>
           </select>
 
-          <input
-            className="border rounded-lg p-3 md:col-span-3"
-            placeholder="Dirección"
-            value={form.direccion}
-            onChange={(e) => setForm({ ...form, direccion: e.target.value })}
-          />
-
-          <input
-            className="border rounded-lg p-3"
-            placeholder="Nombre de contacto"
-            value={form.contacto_nombre}
-            onChange={(e) =>
-              setForm({ ...form, contacto_nombre: e.target.value })
-            }
-          />
-
-          <input
-            className="border rounded-lg p-3"
-            placeholder="Teléfono de contacto"
-            value={form.contacto_telefono}
-            onChange={(e) =>
-              setForm({ ...form, contacto_telefono: e.target.value })
-            }
-          />
-
-          <input
-            className="border rounded-lg p-3"
-            placeholder="Observaciones"
-            value={form.observaciones}
-            onChange={(e) =>
-              setForm({ ...form, observaciones: e.target.value })
-            }
-          />
+          <input className="border rounded-lg p-3 md:col-span-3" placeholder="Dirección" value={form.direccion} onChange={(e) => setForm({ ...form, direccion: e.target.value })} />
+          <input className="border rounded-lg p-3" placeholder="Nombre de contacto" value={form.contacto_nombre} onChange={(e) => setForm({ ...form, contacto_nombre: e.target.value })} />
+          <input className="border rounded-lg p-3" placeholder="Teléfono de contacto" value={form.contacto_telefono} onChange={(e) => setForm({ ...form, contacto_telefono: e.target.value })} />
+          <input className="border rounded-lg p-3" placeholder="Observaciones" value={form.observaciones} onChange={(e) => setForm({ ...form, observaciones: e.target.value })} />
         </div>
 
         <div className="flex gap-3">
-          <button
-            onClick={guardar}
-            className="bg-slate-900 text-white px-6 py-3 rounded-lg font-bold"
-          >
+          <button onClick={guardar} className="bg-slate-900 text-white px-6 py-3 rounded-lg font-bold">
             {editandoId ? "Actualizar proveedor" : "Guardar proveedor"}
           </button>
 
           {editandoId && (
-            <button
-              onClick={limpiar}
-              className="bg-gray-200 px-6 py-3 rounded-lg font-bold"
-            >
+            <button onClick={limpiar} className="bg-gray-200 px-6 py-3 rounded-lg font-bold">
               Cancelar
             </button>
           )}
@@ -299,15 +232,11 @@ export default function ProveedoresPage() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={8} className="p-5 text-center">
-                  Cargando...
-                </td>
+                <td colSpan={8} className="p-5 text-center">Cargando...</td>
               </tr>
             ) : proveedores.length === 0 ? (
               <tr>
-                <td colSpan={8} className="p-5 text-center">
-                  No hay proveedores registrados.
-                </td>
+                <td colSpan={8} className="p-5 text-center">No hay proveedores registrados.</td>
               </tr>
             ) : (
               proveedores.map((p) => (
@@ -342,17 +271,11 @@ export default function ProveedoresPage() {
                   </td>
 
                   <td className="p-3 text-right space-x-2">
-                    <button
-                      onClick={() => editar(p)}
-                      className="bg-blue-600 text-white px-3 py-1 rounded"
-                    >
+                    <button onClick={() => editar(p)} className="bg-blue-600 text-white px-3 py-1 rounded">
                       Editar
                     </button>
 
-                    <button
-                      onClick={() => eliminar(p.id)}
-                      className="bg-red-600 text-white px-3 py-1 rounded"
-                    >
+                    <button onClick={() => eliminar(p.id)} className="bg-red-600 text-white px-3 py-1 rounded">
                       Eliminar
                     </button>
                   </td>
