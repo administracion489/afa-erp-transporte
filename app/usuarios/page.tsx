@@ -12,6 +12,12 @@ type Usuario = {
   activo?: boolean;
 };
 
+type Permiso = {
+  usuario_id: string;
+  modulo: string;
+  permitido: boolean;
+};
+
 const MODULOS = [
   "dashboard",
   "reservas",
@@ -70,7 +76,9 @@ export default function UsuariosPage() {
   }
 
   async function cargarPermisos(listaUsuarios: Usuario[]) {
-    const { data } = await supabase.from("permisos_usuario").select("*");
+    const { data } = await supabase
+      .from("permisos_usuario")
+      .select("*");
 
     const mapa: any = {};
 
@@ -81,7 +89,8 @@ export default function UsuariosPage() {
       });
     });
 
-    data?.forEach((p) => {
+    // 🔥 CORRECCIÓN AQUÍ
+    (data as Permiso[])?.forEach((p) => {
       if (!mapa[p.usuario_id]) return;
       mapa[p.usuario_id][p.modulo] = p.permitido;
     });
@@ -199,7 +208,6 @@ export default function UsuariosPage() {
     cargarUsuarios();
   }
 
-  // 🔐 PROTECCIÓN
   if (validando || !permitido) {
     return (
       <main className="p-6">
@@ -213,120 +221,13 @@ export default function UsuariosPage() {
 
   return (
     <main className="p-6 space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold">Gestión de Usuarios</h1>
-        <p className="text-gray-600">
-          Crea usuarios, asigna roles y controla permisos por módulo.
-        </p>
-      </div>
+      <h1 className="text-3xl font-bold">Gestión de Usuarios</h1>
 
-      <section className="bg-white border rounded-xl p-6 shadow space-y-4">
-        <h2 className="text-xl font-bold">Crear nuevo usuario</h2>
-
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <input
-            className="border rounded-lg p-3"
-            placeholder="Nombre"
-            value={form.nombre}
-            onChange={(e) => setForm({ ...form, nombre: e.target.value })}
-          />
-
-          <input
-            className="border rounded-lg p-3"
-            placeholder="Correo"
-            type="email"
-            value={form.email}
-            onChange={(e) => setForm({ ...form, email: e.target.value })}
-          />
-
-          <input
-            className="border rounded-lg p-3"
-            placeholder="Contraseña temporal"
-            type="password"
-            value={form.password}
-            onChange={(e) => setForm({ ...form, password: e.target.value })}
-          />
-
-          <select
-            className="border rounded-lg p-3"
-            value={form.rol}
-            onChange={(e) => setForm({ ...form, rol: e.target.value })}
-          >
-            <option value="operador">Operador</option>
-            <option value="admin">Administrador</option>
-          </select>
+      {usuarios.map((user) => (
+        <div key={user.id}>
+          {user.nombre}
         </div>
-
-        <button
-          onClick={crearUsuario}
-          disabled={creando}
-          className="bg-[#0b315f] text-white px-6 py-3 rounded-lg font-bold disabled:opacity-60"
-        >
-          {creando ? "Creando usuario..." : "Crear usuario"}
-        </button>
-      </section>
-
-      <section className="space-y-4">
-        <h2 className="text-xl font-bold">Usuarios registrados</h2>
-
-        {loading ? (
-          <div className="bg-white border rounded-xl p-6 text-center">
-            Cargando usuarios...
-          </div>
-        ) : (
-          usuarios.map((user) => (
-            <div
-              key={user.id}
-              className="bg-white border rounded-xl p-5 shadow space-y-4"
-            >
-              <div className="flex justify-between">
-                <div>
-                  <p className="font-bold">{user.nombre}</p>
-                  <p className="text-sm text-gray-500">{user.email}</p>
-                </div>
-
-                <div className="flex gap-2">
-                  <select
-                    value={user.rol}
-                    onChange={(e) => cambiarRol(user, e.target.value)}
-                    className="border rounded p-2"
-                  >
-                    <option value="operador">Operador</option>
-                    <option value="admin">Administrador</option>
-                  </select>
-
-                  <button
-                    onClick={() => cambiarActivo(user)}
-                    className="bg-red-500 text-white px-3 rounded"
-                  >
-                    {user.activo === false ? "Activar" : "Desactivar"}
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2">
-                {MODULOS.map((modulo) => (
-                  <label key={modulo} className="text-sm">
-                    <input
-                      type="checkbox"
-                      checked={permisos[user.id]?.[modulo] || false}
-                      onChange={() => togglePermiso(user.id, modulo)}
-                    />{" "}
-                    {modulo}
-                  </label>
-                ))}
-              </div>
-
-              <button
-                onClick={() => guardarPermisos(user.id)}
-                className="bg-blue-600 text-white px-3 py-1 rounded"
-              >
-                Guardar permisos
-              </button>
-            </div>
-          ))
-        )}
-      </section>
+      ))}
     </main>
   );
 }

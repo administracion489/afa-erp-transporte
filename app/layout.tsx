@@ -77,7 +77,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         .eq("usuario_id", session.user.id)
         .eq("permitido", true);
 
-      let listaPermisos = permisosData?.map((p) => p.modulo) || [];
+      let listaPermisos = permisosData?.map((p: any) => p.modulo) || [];
 
       if (perfil.rol === "admin" && listaPermisos.length === 0) {
         listaPermisos = menu.map((item) => item.modulo);

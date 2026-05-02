@@ -42,13 +42,16 @@ export default function ClientesPage() {
   const cargarClientes = async () => {
     setLoading(true);
 
-    const { data, error } = await supabase
+    const { data, error } = await (supabase as any)
       .from("clientes")
       .select("*")
       .order("id", { ascending: false });
 
-    if (error) alert(error.message);
-    else setClientes(data || []);
+    if (error) {
+      alert(error.message);
+    } else {
+      setClientes(data || []);
+    }
 
     setLoading(false);
   };
@@ -97,14 +100,16 @@ export default function ClientesPage() {
     };
 
     if (editandoId) {
-      const { error } = await supabase
+      const { error } = await (supabase as any)
         .from("clientes")
         .update(payload)
         .eq("id", editandoId);
 
       if (error) return alert(error.message);
     } else {
-      const { error } = await supabase.from("clientes").insert(payload);
+      const { error } = await (supabase as any)
+        .from("clientes")
+        .insert(payload);
 
       if (error) return alert(error.message);
     }
@@ -135,283 +140,78 @@ export default function ClientesPage() {
   const eliminarCliente = async (id: number) => {
     if (!confirm("¿Eliminar cliente?")) return;
 
-    const { error } = await supabase.from("clientes").delete().eq("id", id);
+    const { error } = await (supabase as any)
+      .from("clientes")
+      .delete()
+      .eq("id", id);
 
     if (error) return alert(error.message);
 
     cargarClientes();
   };
 
-  const totalClientes = clientes.length;
-  const clientesActivos = clientes.filter((c) => c.estado === "activo").length;
-  const clientesBloqueados = clientes.filter((c) => c.estado === "bloqueado").length;
-  const clientesB2B = clientes.filter((c) => c.tipo === "B2B").length;
-
   return (
     <main className="p-6 space-y-6">
       <div>
         <h1 className="text-3xl font-bold">Clientes</h1>
         <p className="text-gray-600">
-          Gestión de clientes, contactos operativos, contactos administrativos y estado comercial.
+          Gestión de clientes AFA Transportes
         </p>
       </div>
 
-      <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-white rounded-xl border shadow p-4">
-          <p className="text-sm text-gray-500">Total clientes</p>
-          <p className="text-2xl font-bold">{totalClientes}</p>
-        </div>
-
-        <div className="bg-white rounded-xl border shadow p-4">
-          <p className="text-sm text-gray-500">Activos</p>
-          <p className="text-2xl font-bold text-green-600">{clientesActivos}</p>
-        </div>
-
-        <div className="bg-white rounded-xl border shadow p-4">
-          <p className="text-sm text-gray-500">Bloqueados</p>
-          <p className="text-2xl font-bold text-red-600">{clientesBloqueados}</p>
-        </div>
-
-        <div className="bg-white rounded-xl border shadow p-4">
-          <p className="text-sm text-gray-500">Clientes B2B</p>
-          <p className="text-2xl font-bold text-blue-600">{clientesB2B}</p>
-        </div>
-      </section>
-
-      <section className="bg-white rounded-xl border shadow p-6 space-y-5">
+      <section className="bg-white rounded-xl border shadow p-6 space-y-4">
         <h2 className="text-xl font-bold">
           {editandoId ? "Editar cliente" : "Nuevo cliente"}
         </h2>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <input
-            className="border rounded-lg p-3"
-            placeholder="Nombre / Razón social"
-            value={form.nombre}
-            onChange={(e) => setForm({ ...form, nombre: e.target.value })}
-          />
+        <input
+          className="border p-3 rounded w-full"
+          placeholder="Nombre"
+          value={form.nombre}
+          onChange={(e) =>
+            setForm({ ...form, nombre: e.target.value })
+          }
+        />
 
-          <select
-            className="border rounded-lg p-3"
-            value={form.tipo}
-            onChange={(e) => setForm({ ...form, tipo: e.target.value })}
-          >
-            <option value="B2B">B2B / Empresa</option>
-            <option value="B2C">B2C / Persona</option>
-          </select>
-
-          <select
-            className="border rounded-lg p-3"
-            value={form.estado}
-            onChange={(e) => setForm({ ...form, estado: e.target.value })}
-          >
-            <option value="activo">Activo</option>
-            <option value="bloqueado">Bloqueado</option>
-          </select>
-
-          <input
-            className="border rounded-lg p-3"
-            placeholder="RUC / DNI"
-            value={form.ruc}
-            onChange={(e) => setForm({ ...form, ruc: e.target.value })}
-          />
-
-          <input
-            className="border rounded-lg p-3"
-            placeholder="Teléfono principal"
-            value={form.telefono}
-            onChange={(e) => setForm({ ...form, telefono: e.target.value })}
-          />
-
-          <input
-            className="border rounded-lg p-3"
-            placeholder="Email principal"
-            value={form.email}
-            onChange={(e) => setForm({ ...form, email: e.target.value })}
-          />
-        </div>
-
-        <div className="border rounded-xl p-4 space-y-3">
-          <h3 className="font-bold text-gray-800">Contacto operativo</h3>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <input
-              className="border rounded-lg p-3"
-              placeholder="Nombre y apellidos"
-              value={form.operativo_nombre}
-              onChange={(e) =>
-                setForm({ ...form, operativo_nombre: e.target.value })
-              }
-            />
-
-            <input
-              className="border rounded-lg p-3"
-              placeholder="Celular"
-              value={form.operativo_celular}
-              onChange={(e) =>
-                setForm({ ...form, operativo_celular: e.target.value })
-              }
-            />
-
-            <input
-              className="border rounded-lg p-3"
-              placeholder="Correo"
-              value={form.operativo_email}
-              onChange={(e) =>
-                setForm({ ...form, operativo_email: e.target.value })
-              }
-            />
-          </div>
-        </div>
-
-        <div className="border rounded-xl p-4 space-y-3">
-          <h3 className="font-bold text-gray-800">Contacto administrativo</h3>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <input
-              className="border rounded-lg p-3"
-              placeholder="Nombre y apellidos"
-              value={form.administrativo_nombre}
-              onChange={(e) =>
-                setForm({ ...form, administrativo_nombre: e.target.value })
-              }
-            />
-
-            <input
-              className="border rounded-lg p-3"
-              placeholder="Celular"
-              value={form.administrativo_celular}
-              onChange={(e) =>
-                setForm({ ...form, administrativo_celular: e.target.value })
-              }
-            />
-
-            <input
-              className="border rounded-lg p-3"
-              placeholder="Correo"
-              value={form.administrativo_email}
-              onChange={(e) =>
-                setForm({ ...form, administrativo_email: e.target.value })
-              }
-            />
-          </div>
-        </div>
-
-        <div className="flex gap-3">
-          <button
-            onClick={guardarCliente}
-            className="bg-slate-900 text-white px-6 py-3 rounded-lg font-bold"
-          >
-            {editandoId ? "Actualizar cliente" : "Guardar cliente"}
-          </button>
-
-          {editandoId && (
-            <button
-              onClick={limpiarFormulario}
-              className="bg-gray-200 px-6 py-3 rounded-lg font-bold"
-            >
-              Cancelar
-            </button>
-          )}
-        </div>
+        <button
+          onClick={guardarCliente}
+          className="bg-black text-white px-4 py-2 rounded"
+        >
+          Guardar
+        </button>
       </section>
 
-      <section className="bg-white rounded-xl border shadow p-6 overflow-x-auto">
-        <h2 className="text-xl font-bold mb-4">Lista de clientes</h2>
+      <section className="bg-white rounded-xl border shadow p-6">
+        <h2 className="text-xl font-bold mb-4">Lista</h2>
 
-        <table className="w-full text-sm">
-          <thead className="bg-gray-100">
-            <tr>
-              <th className="p-3 text-left">Estado</th>
-              <th className="p-3 text-left">Cliente</th>
-              <th className="p-3 text-left">Tipo</th>
-              <th className="p-3 text-left">RUC / DNI</th>
-              <th className="p-3 text-left">Teléfono</th>
-              <th className="p-3 text-left">Email</th>
-              <th className="p-3 text-left">Contacto operativo</th>
-              <th className="p-3 text-left">Contacto administrativo</th>
-              <th className="p-3 text-right">Acciones</th>
-            </tr>
-          </thead>
+        {loading ? (
+          <p>Cargando...</p>
+        ) : (
+          clientes.map((c) => (
+            <div
+              key={c.id}
+              className="border-b py-2 flex justify-between"
+            >
+              <span>{c.nombre}</span>
 
-          <tbody>
-            {loading ? (
-              <tr>
-                <td colSpan={9} className="p-5 text-center">
-                  Cargando...
-                </td>
-              </tr>
-            ) : clientes.length === 0 ? (
-              <tr>
-                <td colSpan={9} className="p-5 text-center">
-                  No hay clientes registrados.
-                </td>
-              </tr>
-            ) : (
-              clientes.map((cliente) => (
-                <tr key={cliente.id} className="border-t">
-                  <td className="p-3">
-                    <span
-                      className={`px-3 py-1 rounded-full text-xs font-bold ${
-                        cliente.estado === "activo"
-                          ? "bg-green-100 text-green-700"
-                          : "bg-red-100 text-red-700"
-                      }`}
-                    >
-                      {cliente.estado?.toUpperCase() || "ACTIVO"}
-                    </span>
-                  </td>
+              <div className="space-x-2">
+                <button
+                  onClick={() => editarCliente(c)}
+                  className="text-blue-600"
+                >
+                  Editar
+                </button>
 
-                  <td className="p-3 font-bold">{cliente.nombre}</td>
-                  <td className="p-3">{cliente.tipo}</td>
-                  <td className="p-3">{cliente.ruc || "-"}</td>
-                  <td className="p-3">{cliente.telefono || "-"}</td>
-                  <td className="p-3">{cliente.email || "-"}</td>
-
-                  <td className="p-3">
-                    <div className="font-semibold">
-                      {cliente.operativo_nombre || "-"}
-                    </div>
-                    <div className="text-xs text-gray-500">
-                      {cliente.operativo_celular || "-"}
-                    </div>
-                    <div className="text-xs text-gray-500">
-                      {cliente.operativo_email || "-"}
-                    </div>
-                  </td>
-
-                  <td className="p-3">
-                    <div className="font-semibold">
-                      {cliente.administrativo_nombre || "-"}
-                    </div>
-                    <div className="text-xs text-gray-500">
-                      {cliente.administrativo_celular || "-"}
-                    </div>
-                    <div className="text-xs text-gray-500">
-                      {cliente.administrativo_email || "-"}
-                    </div>
-                  </td>
-
-                  <td className="p-3 text-right space-x-2">
-                    <button
-                      onClick={() => editarCliente(cliente)}
-                      className="bg-blue-600 text-white px-3 py-1 rounded"
-                    >
-                      Editar
-                    </button>
-
-                    <button
-                      onClick={() => eliminarCliente(cliente.id)}
-                      className="bg-red-600 text-white px-3 py-1 rounded"
-                    >
-                      Eliminar
-                    </button>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+                <button
+                  onClick={() => eliminarCliente(c.id)}
+                  className="text-red-600"
+                >
+                  Eliminar
+                </button>
+              </div>
+            </div>
+          ))
+        )}
       </section>
     </main>
   );
