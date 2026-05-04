@@ -37,6 +37,25 @@ const MODULOS = [
   "usuarios",
 ];
 
+const nombresModulo: Record<string, string> = {
+  dashboard: "Dashboard",
+  reservas: "Reservas",
+  cotizaciones: "Cotizaciones",
+  clientes: "Clientes",
+  proveedores: "Proveedores",
+  conductores: "Conductores",
+  vehiculos: "Vehículos",
+  combustible: "Combustible",
+  mantenimiento: "Mantenimiento",
+  neumaticos: "Neumáticos",
+  documentos: "Documentos",
+  facturacion: "Facturación",
+  gastos: "Gastos",
+  seguros: "Seguros",
+  reportes: "Reportes",
+  usuarios: "Usuarios",
+};
+
 export default function UsuariosPage() {
   const { validando, permitido } = usePermiso("usuarios");
 
@@ -76,9 +95,7 @@ export default function UsuariosPage() {
   }
 
   async function cargarPermisos(listaUsuarios: Usuario[]) {
-    const { data } = await supabase
-      .from("permisos_usuario")
-      .select("*");
+    const { data } = await supabase.from("permisos_usuario").select("*");
 
     const mapa: any = {};
 
@@ -89,7 +106,6 @@ export default function UsuariosPage() {
       });
     });
 
-    // 🔥 CORRECCIÓN AQUÍ
     (data as Permiso[])?.forEach((p) => {
       if (!mapa[p.usuario_id]) return;
       mapa[p.usuario_id][p.modulo] = p.permitido;
@@ -221,13 +237,189 @@ export default function UsuariosPage() {
 
   return (
     <main className="p-6 space-y-6">
-      <h1 className="text-3xl font-bold">Gestión de Usuarios</h1>
+      <div>
+        <h1 className="text-3xl font-black text-[#0b315f]">
+          Gestión de Usuarios
+        </h1>
+        <p className="text-gray-500 text-sm mt-1">
+          Administra usuarios, roles, estado y permisos del ERP.
+        </p>
+      </div>
 
-      {usuarios.map((user) => (
-        <div key={user.id}>
-          {user.nombre}
+      <section className="bg-white rounded-2xl shadow border border-gray-100 p-5">
+        <h2 className="text-xl font-black text-[#0b315f] mb-4">
+          Crear nuevo usuario
+        </h2>
+
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+          <input
+            type="text"
+            placeholder="Nombre"
+            value={form.nombre}
+            onChange={(e) => setForm({ ...form, nombre: e.target.value })}
+            className="border border-gray-300 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-[#0b315f]"
+          />
+
+          <input
+            type="email"
+            placeholder="Correo"
+            value={form.email}
+            onChange={(e) => setForm({ ...form, email: e.target.value })}
+            className="border border-gray-300 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-[#0b315f]"
+          />
+
+          <input
+            type="password"
+            placeholder="Contraseña"
+            value={form.password}
+            onChange={(e) => setForm({ ...form, password: e.target.value })}
+            className="border border-gray-300 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-[#0b315f]"
+          />
+
+          <select
+            value={form.rol}
+            onChange={(e) => setForm({ ...form, rol: e.target.value })}
+            className="border border-gray-300 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-[#0b315f]"
+          >
+            <option value="operador">Operador</option>
+            <option value="admin">Administrador</option>
+          </select>
+
+          <button
+            onClick={crearUsuario}
+            disabled={creando}
+            className="bg-[#0b315f] hover:bg-[#08284f] text-white rounded-xl font-bold disabled:opacity-60"
+          >
+            {creando ? "Creando..." : "Crear usuario"}
+          </button>
         </div>
-      ))}
+      </section>
+
+      <section className="bg-white rounded-2xl shadow border border-gray-100 overflow-hidden">
+        <div className="p-5 border-b flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-black text-[#0b315f]">
+              Usuarios registrados
+            </h2>
+            <p className="text-sm text-gray-500">
+              {usuarios.length} usuario(s) encontrados
+            </p>
+          </div>
+
+          <button
+            onClick={cargarUsuarios}
+            className="px-4 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold text-sm"
+          >
+            Actualizar
+          </button>
+        </div>
+
+        {loading ? (
+          <div className="p-8 text-center">
+            <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-gray-300 border-t-[#0b315f]" />
+            <p className="font-bold text-[#0b315f]">Cargando usuarios...</p>
+          </div>
+        ) : usuarios.length === 0 ? (
+          <div className="p-8 text-center text-gray-500">
+            No hay usuarios registrados.
+          </div>
+        ) : (
+          <div className="divide-y">
+            {usuarios.map((user) => (
+              <div key={user.id} className="p-5 space-y-4">
+                <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                  <div>
+                    <h3 className="text-lg font-black text-gray-900">
+                      {user.nombre}
+                    </h3>
+                    <p className="text-sm text-gray-500">{user.email}</p>
+
+                    <div className="flex gap-2 mt-2">
+                      <span
+                        className={`px-3 py-1 rounded-full text-xs font-black ${
+                          user.rol === "admin"
+                            ? "bg-yellow-100 text-yellow-700"
+                            : "bg-blue-100 text-blue-700"
+                        }`}
+                      >
+                        {user.rol === "admin" ? "Administrador" : "Operador"}
+                      </span>
+
+                      <span
+                        className={`px-3 py-1 rounded-full text-xs font-black ${
+                          user.activo === false
+                            ? "bg-red-100 text-red-700"
+                            : "bg-green-100 text-green-700"
+                        }`}
+                      >
+                        {user.activo === false ? "Inactivo" : "Activo"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <select
+                      value={user.rol}
+                      onChange={(e) => cambiarRol(user, e.target.value)}
+                      className="border border-gray-300 rounded-xl px-3 py-2 text-sm"
+                    >
+                      <option value="operador">Operador</option>
+                      <option value="admin">Administrador</option>
+                    </select>
+
+                    <button
+                      onClick={() => cambiarActivo(user)}
+                      className={`px-4 py-2 rounded-xl text-sm font-bold text-white ${
+                        user.activo === false
+                          ? "bg-green-600 hover:bg-green-700"
+                          : "bg-red-600 hover:bg-red-700"
+                      }`}
+                    >
+                      {user.activo === false ? "Activar" : "Desactivar"}
+                    </button>
+
+                    <button
+                      onClick={() => guardarPermisos(user.id)}
+                      className="px-4 py-2 rounded-xl text-sm font-bold bg-[#0b315f] hover:bg-[#08284f] text-white"
+                    >
+                      Guardar permisos
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-gray-50 rounded-2xl p-4">
+                  <p className="text-sm font-black text-[#0b315f] mb-3">
+                    Permisos por módulo
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2">
+                    {MODULOS.map((modulo) => (
+                      <label
+                        key={modulo}
+                        className={`flex items-center gap-2 rounded-xl border px-3 py-2 cursor-pointer transition ${
+                          permisos[user.id]?.[modulo]
+                            ? "bg-blue-50 border-blue-300 text-[#0b315f]"
+                            : "bg-white border-gray-200 text-gray-600"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!!permisos[user.id]?.[modulo]}
+                          onChange={() => togglePermiso(user.id, modulo)}
+                          className="h-4 w-4"
+                        />
+                        <span className="text-sm font-bold">
+                          {nombresModulo[modulo] || modulo}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </main>
   );
 }

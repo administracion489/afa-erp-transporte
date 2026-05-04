@@ -13,21 +13,46 @@ export default function LoginPage() {
   const [entrando, setEntrando] = useState(false);
 
   useEffect(() => {
+    let activo = true;
+
     async function revisarSesion() {
-      const { data } = await supabase.auth.getSession();
+      try {
+        const sesionPromise = supabase.auth.getSession();
 
-      if (data.session) {
-        router.replace("/dashboard");
-        return;
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Timeout validando sesión")), 3000)
+        );
+
+        const resultado = (await Promise.race([
+          sesionPromise,
+          timeoutPromise,
+        ])) as Awaited<ReturnType<typeof supabase.auth.getSession>>;
+
+        if (!activo) return;
+
+        if (resultado.data.session) {
+          router.replace("/dashboard");
+          return;
+        }
+      } catch (error) {
+        console.warn("No se pudo validar la sesión:", error);
+      } finally {
+        if (activo) {
+          setValidando(false);
+        }
       }
-
-      setValidando(false);
     }
 
     revisarSesion();
+
+    return () => {
+      activo = false;
+    };
   }, [router]);
 
   async function handleLogin() {
+    if (entrando) return;
+
     if (!email.trim() || !password.trim()) {
       alert("Ingresa correo y contraseña");
       return;
@@ -35,18 +60,25 @@ export default function LoginPage() {
 
     setEntrando(true);
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
-      password,
-    });
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
 
-    if (error) {
+      if (error) {
+        alert("Credenciales incorrectas");
+        return;
+      }
+
+      router.replace("/dashboard");
+      router.refresh();
+    } catch (error) {
+      console.error("Error al iniciar sesión:", error);
+      alert("Error al iniciar sesión");
+    } finally {
       setEntrando(false);
-      alert("Credenciales incorrectas");
-      return;
     }
-
-    router.replace("/dashboard");
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -92,6 +124,7 @@ export default function LoginPage() {
           onChange={(e) => setEmail(e.target.value)}
           onKeyDown={handleKeyDown}
           disabled={entrando}
+          autoComplete="email"
         />
 
         <input
@@ -102,6 +135,7 @@ export default function LoginPage() {
           onChange={(e) => setPassword(e.target.value)}
           onKeyDown={handleKeyDown}
           disabled={entrando}
+          autoComplete="current-password"
         />
 
         <button

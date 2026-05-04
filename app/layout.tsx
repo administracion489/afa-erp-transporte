@@ -6,53 +6,179 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import "./globals.css";
 
-const menu = [
-  { href: "/dashboard", label: "Dashboard", sub: "Panel principal", icon: "🏠", modulo: "dashboard" },
-  { href: "/reservas", label: "Reservas", sub: "Servicios", icon: "🎫", modulo: "reservas" },
-  { href: "/cotizaciones", label: "Cotizaciones", sub: "Precios y rutas", icon: "📄", modulo: "cotizaciones" },
-  { href: "/clientes", label: "Clientes", sub: "Base comercial", icon: "👥", modulo: "clientes" },
-  { href: "/proveedores", label: "Proveedores", sub: "Tercerización", icon: "🏢", modulo: "proveedores" },
-  { href: "/conductores", label: "Conductores", sub: "Choferes", icon: "🧑‍✈️", modulo: "conductores" },
-  { href: "/vehiculos", label: "Vehículos", sub: "Flota", icon: "🚌", modulo: "vehiculos" },
-  { href: "/combustible", label: "Combustible", sub: "Consumo", icon: "⛽", modulo: "combustible" },
-  { href: "/mantenimiento", label: "Mantenimiento", sub: "Técnico", icon: "🔧", modulo: "mantenimiento" },
-  { href: "/neumaticos", label: "Neumáticos", sub: "Vida útil", icon: "🛞", modulo: "neumaticos" },
-  { href: "/documentos", label: "Documentos", sub: "SST / contratos", icon: "📁", modulo: "documentos" },
-  { href: "/facturacion", label: "Facturación", sub: "SUNAT / pagos", icon: "🧾", modulo: "facturacion" },
-  { href: "/gastos", label: "Gastos", sub: "Egresos", icon: "💸", modulo: "gastos" },
-  { href: "/seguros", label: "Seguros", sub: "Pólizas", icon: "🛡️", modulo: "seguros" },
-  { href: "/reportes", label: "Reportes", sub: "Indicadores", icon: "📊", modulo: "reportes" },
-  { href: "/usuarios", label: "Usuarios", sub: "Permisos", icon: "🔐", modulo: "usuarios" },
+const menuGrupos = [
+  {
+    grupo: "Principal",
+    items: [
+      { href: "/dashboard", label: "Dashboard",  sub: "Panel principal",     icon: "🏠", modulo: "dashboard" },
+      { href: "/calendario",label: "Calendario", sub: "Servicios del día",   icon: "📅", modulo: "dashboard" },
+    ],
+  },
+  {
+    grupo: "Comercial",
+    items: [
+      { href: "/cotizaciones", label: "Cotizaciones", sub: "Precios y rutas",  icon: "📄", modulo: "cotizaciones" },
+      { href: "/reservas",     label: "Reservas",     sub: "Servicios",        icon: "🎫", modulo: "reservas" },
+      { href: "/clientes",     label: "Clientes",     sub: "Base comercial",   icon: "👥", modulo: "clientes" },
+    ],
+  },
+  {
+    grupo: "Operaciones",
+    items: [
+      { href: "/programacion", label: "Programación", sub: "Core del sistema",      icon: "🗓️", modulo: "programacion" },
+      { href: "/seguimiento",  label: "Seguimiento",  sub: "Estado en tiempo real", icon: "🔍", modulo: "seguimiento" },
+      { href: "/incidencias",  label: "Incidencias",  sub: "Eventos y alertas",     icon: "⚠️", modulo: "incidencias" },
+    ],
+  },
+  {
+    grupo: "Flota",
+    items: [
+      { href: "/vehiculos",             label: "Vehículos",          sub: "Flota",             icon: "🚌", modulo: "vehiculos" },
+      { href: "/mantenimiento",         label: "Mantenimiento",      sub: "Historial técnico",  icon: "🔧", modulo: "mantenimiento" },
+      { href: "/mantenimiento/ordenes", label: "Órdenes de Trabajo", sub: "OT · Checklist",    icon: "📋", modulo: "mantenimiento" },
+      { href: "/neumaticos",            label: "Neumáticos",         sub: "Vida útil",          icon: "🛞", modulo: "neumaticos" },
+      { href: "/combustible",           label: "Combustible",        sub: "Consumo",            icon: "⛽", modulo: "combustible" },
+      { href: "/seguros",               label: "Seguros",            sub: "Pólizas",            icon: "🛡️", modulo: "seguros" },
+    ],
+  },
+  {
+    grupo: "RRHH",
+    items: [
+      { href: "/conductores", label: "Conductores", sub: "Choferes", icon: "🧑‍✈️", modulo: "conductores" },
+    ],
+  },
+  {
+    grupo: "Proveedores",
+    items: [
+      { href: "/proveedores", label: "Proveedores", sub: "Tercerización", icon: "🏢", modulo: "proveedores" },
+    ],
+  },
+  {
+    grupo: "Finanzas",
+    items: [
+      { href: "/facturacion", label: "Facturación", sub: "SUNAT / pagos", icon: "🧾", modulo: "facturacion" },
+      { href: "/gastos",      label: "Gastos",      sub: "Egresos",       icon: "💸", modulo: "gastos" },
+    ],
+  },
+  {
+    grupo: "Control",
+    items: [
+      { href: "/vencimientos", label: "Vencimientos", sub: "Alertas doc.",     icon: "📁", modulo: "vencimientos" },
+      { href: "/documentos",   label: "Documentos",   sub: "SST / contratos", icon: "🗂️", modulo: "documentos" },
+    ],
+  },
+  {
+    grupo: "Reportes",
+    items: [
+      { href: "/reportes", label: "Reportes", sub: "Indicadores", icon: "📊", modulo: "reportes" },
+    ],
+  },
+  {
+    grupo: "Sistema",
+    items: [
+      { href: "/usuarios", label: "Usuarios", sub: "Permisos", icon: "🔐", modulo: "usuarios" },
+    ],
+  },
 ];
+
+const menu = menuGrupos.flatMap((g) => g.items);
+
+function GrupoMenu({
+  grupo, items, pathname, permisos,
+}: {
+  grupo: string; items: typeof menu; pathname: string; permisos: string[];
+}) {
+  const itemsVisibles = items.filter((item) => permisos.includes(item.modulo));
+  if (itemsVisibles.length === 0) return null;
+
+  const grupoActivo = itemsVisibles.some(
+    (item) => pathname === item.href || pathname.startsWith(`${item.href}/`)
+  );
+
+  const [abierto, setAbierto] = useState(grupoActivo || grupo === "Principal");
+
+  useEffect(() => {
+    if (grupoActivo) setAbierto(true);
+  }, [grupoActivo]);
+
+  return (
+    <div className="mb-1">
+      {grupo !== "Principal" ? (
+        <button
+          onClick={() => setAbierto((v) => !v)}
+          className="w-full flex items-center justify-between px-3 py-1.5 text-left"
+        >
+          <span className="text-[10px] font-bold uppercase tracking-widest text-blue-300/70">
+            {grupo}
+          </span>
+          <span
+            className="text-blue-300/50 text-xs transition-transform duration-200"
+            style={{ transform: abierto ? "rotate(90deg)" : "rotate(0deg)" }}
+          >
+            ›
+          </span>
+        </button>
+      ) : null}
+
+      {abierto && (
+        <div className="space-y-0.5">
+          {itemsVisibles.map((item) => {
+            const activo =
+              pathname === item.href || pathname.startsWith(`${item.href}/`);
+
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
+                  activo ? "bg-gradient-to-r from-[#2f8ee9] to-[#1262bd]" : "hover:bg-white/10"
+                }`}
+              >
+                <div className="w-8 h-8 flex items-center justify-center text-base flex-shrink-0">
+                  {item.icon}
+                </div>
+                <div className="min-w-0">
+                  <p className="font-bold text-sm leading-tight">{item.label}</p>
+                  <p className="text-[10px] text-blue-200 truncate">{item.sub}</p>
+                </div>
+                {activo && (
+                  <div className="ml-auto w-1.5 h-1.5 rounded-full bg-white/80 flex-shrink-0" />
+                )}
+              </Link>
+            );
+          })}
+        </div>
+      )}
+
+      {grupo !== "Principal" && (
+        <div className="mt-1 border-t border-white/5" />
+      )}
+    </div>
+  );
+}
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const router = useRouter();
+  const router   = useRouter();
 
   const esLogin = pathname === "/login";
 
-  const [emailUsuario, setEmailUsuario] = useState("");
+  const [emailUsuario,  setEmailUsuario]  = useState("");
   const [nombreUsuario, setNombreUsuario] = useState("Usuario");
-  const [rolUsuario, setRolUsuario] = useState("operador");
-  const [permisos, setPermisos] = useState<string[]>([]);
-  const [cargando, setCargando] = useState(true);
+  const [rolUsuario,    setRolUsuario]    = useState("operador");
+  const [permisos,      setPermisos]      = useState<string[]>([]);
+  const [cargando,      setCargando]      = useState(true);
 
   useEffect(() => {
     async function cargarSesionPermisos() {
-      if (esLogin) {
-        setCargando(false);
-        return;
-      }
+      if (esLogin) { setCargando(false); return; }
 
       setCargando(true);
 
       const { data } = await supabase.auth.getSession();
-      const session = data.session;
+      const session  = data.session;
 
-      if (!session) {
-        router.replace("/login");
-        return;
-      }
+      if (!session) { router.replace("/login"); return; }
 
       setEmailUsuario(session.user.email || "");
 
@@ -64,12 +190,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
       if (!perfil || perfil.activo === false) {
         await supabase.auth.signOut();
-        router.replace("/login");
+        window.location.href = "/login";
         return;
       }
 
       setNombreUsuario(perfil.nombre || "Usuario");
-      setRolUsuario(perfil.rol || "operador");
+      setRolUsuario(perfil.rol       || "operador");
 
       const { data: permisosData } = await supabase
         .from("permisos_usuario")
@@ -101,11 +227,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   }, [pathname, esLogin, router]);
 
   async function cerrarSesion() {
-    await supabase.auth.signOut();
-    router.replace("/login");
+    try {
+      await supabase.auth.signOut();
+    } catch (error) {
+      console.error("Error al cerrar sesión:", error);
+    } finally {
+      window.location.href = "/login";
+    }
   }
-
-  const menuVisible = menu.filter((item) => permisos.includes(item.modulo));
 
   return (
     <html lang="es">
@@ -130,46 +259,29 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <div className="bg-white rounded-2xl p-3 shadow-lg">
                   <img src="/logoafa.png" alt="AFA Transportes" className="w-full" />
                 </div>
-
-                <div className="mt-4 bg-white/10 rounded-2xl px-4 py-3">
-                  <p className="font-bold text-base">Sistema de Gestión</p>
-                  <p className="text-xs text-blue-200">ERP Transporte</p>
+                <div className="mt-3 bg-white/10 rounded-2xl px-4 py-2.5">
+                  <p className="font-bold text-sm">Sistema de Gestión</p>
+                  <p className="text-[11px] text-blue-200">ERP Transporte</p>
                 </div>
               </div>
 
-              <nav className="flex-1 p-3 space-y-1.5 overflow-y-auto">
-                {menuVisible.map((item) => {
-                  const activo = pathname === item.href || pathname.startsWith(`${item.href}/`);
-
-                  return (
-                    <Link
-                      key={item.href}
-                      href={item.href}
-                      className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                        activo
-                          ? "bg-gradient-to-r from-[#2f8ee9] to-[#1262bd]"
-                          : "hover:bg-white/10"
-                      }`}
-                    >
-                      <div className="w-9 h-9 flex items-center justify-center">
-                        {item.icon}
-                      </div>
-
-                      <div>
-                        <p className="font-bold text-sm">{item.label}</p>
-                        <p className="text-[11px] text-blue-200">{item.sub}</p>
-                      </div>
-                    </Link>
-                  );
-                })}
+              <nav className="flex-1 p-3 overflow-y-auto">
+                {menuGrupos.map((g) => (
+                  <GrupoMenu
+                    key={g.grupo}
+                    grupo={g.grupo}
+                    items={g.items}
+                    pathname={pathname}
+                    permisos={permisos}
+                  />
+                ))}
               </nav>
 
               <div className="p-4 border-t border-white/10 bg-black/10">
                 <div className="flex items-center gap-3 mb-3">
-                  <div className="w-10 h-10 rounded-full bg-white text-[#0b315f] flex items-center justify-center font-black">
+                  <div className="w-10 h-10 rounded-full bg-white text-[#0b315f] flex items-center justify-center font-black flex-shrink-0">
                     {nombreUsuario.charAt(0).toUpperCase()}
                   </div>
-
                   <div className="min-w-0">
                     <p className="font-bold text-sm">{nombreUsuario}</p>
                     <p className="text-[11px] text-blue-200 truncate">{emailUsuario}</p>
@@ -178,10 +290,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                     </p>
                   </div>
                 </div>
-
                 <button
                   onClick={cerrarSesion}
-                  className="w-full bg-red-600 hover:bg-red-700 text-white text-sm font-bold py-2 rounded-xl"
+                  className="w-full bg-red-600 hover:bg-red-700 text-white text-sm font-bold py-2 rounded-xl transition-colors"
                 >
                   Cerrar sesión
                 </button>
