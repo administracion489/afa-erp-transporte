@@ -20,38 +20,70 @@ type Permiso = {
 
 const MODULOS = [
   "dashboard",
+  "calendario",
+
   "reservas",
   "cotizaciones",
   "clientes",
+
+  "programacion",
+  "seguimiento",
+  "incidencias",
+
   "proveedores",
+  "tercerizadas",
+
   "conductores",
+  "personal-administrativo",
+
   "vehiculos",
+  "documentos-vehiculares",
   "combustible",
   "mantenimiento",
   "neumaticos",
+  "seguros",
+
   "documentos",
+  "vencimientos",
+
   "facturacion",
   "gastos",
-  "seguros",
+
   "reportes",
   "usuarios",
 ];
 
 const nombresModulo: Record<string, string> = {
   dashboard: "Dashboard",
+  calendario: "Calendario",
+
   reservas: "Reservas",
   cotizaciones: "Cotizaciones",
   clientes: "Clientes",
+
+  programacion: "Programación",
+  seguimiento: "Seguimiento",
+  incidencias: "Incidencias",
+
   proveedores: "Proveedores",
+  tercerizadas: "Tercerizadas",
+
   conductores: "Conductores",
+  "personal-administrativo": "Personal Administrativo",
+
   vehiculos: "Vehículos",
+  "documentos-vehiculares": "Docs. Vehiculares",
   combustible: "Combustible",
   mantenimiento: "Mantenimiento",
   neumaticos: "Neumáticos",
+  seguros: "Seguros",
+
   documentos: "Documentos",
+  vencimientos: "Vencimientos",
+
   facturacion: "Facturación",
   gastos: "Gastos",
-  seguros: "Seguros",
+
   reportes: "Reportes",
   usuarios: "Usuarios",
 };
@@ -60,7 +92,7 @@ export default function UsuariosPage() {
   const { validando, permitido } = usePermiso("usuarios");
 
   const [usuarios, setUsuarios] = useState<Usuario[]>([]);
-  const [permisos, setPermisos] = useState<any>({});
+  const [permisos, setPermisos] = useState<Record<string, Record<string, boolean>>>({});
   const [loading, setLoading] = useState(false);
   const [creando, setCreando] = useState(false);
 
@@ -95,9 +127,16 @@ export default function UsuariosPage() {
   }
 
   async function cargarPermisos(listaUsuarios: Usuario[]) {
-    const { data } = await supabase.from("permisos_usuario").select("*");
+    const { data, error } = await supabase
+      .from("permisos_usuario")
+      .select("usuario_id, modulo, permitido");
 
-    const mapa: any = {};
+    if (error) {
+      alert(error.message);
+      return;
+    }
+
+    const mapa: Record<string, Record<string, boolean>> = {};
 
     listaUsuarios.forEach((u) => {
       mapa[u.id] = {};
@@ -167,19 +206,22 @@ export default function UsuariosPage() {
   }
 
   function togglePermiso(userId: string, modulo: string) {
-    const nuevo = { ...permisos };
-    nuevo[userId] = { ...nuevo[userId] };
-    nuevo[userId][modulo] = !nuevo[userId][modulo];
-    setPermisos(nuevo);
+    setPermisos((prev) => ({
+      ...prev,
+      [userId]: {
+        ...prev[userId],
+        [modulo]: !prev[userId]?.[modulo],
+      },
+    }));
   }
 
   async function guardarPermisos(userId: string) {
-    const permisosUsuario = permisos[userId];
+    const permisosUsuario = permisos[userId] || {};
 
-    const inserts = Object.keys(permisosUsuario).map((modulo) => ({
+    const inserts = MODULOS.map((modulo) => ({
       usuario_id: userId,
       modulo,
-      permitido: permisosUsuario[modulo],
+      permitido: !!permisosUsuario[modulo],
     }));
 
     const { error } = await supabase
@@ -192,10 +234,11 @@ export default function UsuariosPage() {
     }
 
     alert("Permisos guardados");
+    await cargarUsuarios();
   }
 
   async function cambiarActivo(user: Usuario) {
-    const nuevoEstado = !user.activo;
+    const nuevoEstado = user.activo === false ? true : false;
 
     const { error } = await supabase
       .from("usuarios")

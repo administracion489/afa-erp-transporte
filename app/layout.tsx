@@ -10,61 +10,65 @@ const menuGrupos = [
   {
     grupo: "Principal",
     items: [
-      { href: "/dashboard", label: "Dashboard",  sub: "Panel principal",     icon: "🏠", modulo: "dashboard" },
-      { href: "/calendario",label: "Calendario", sub: "Servicios del día",   icon: "📅", modulo: "dashboard" },
+      { href: "/dashboard", label: "Dashboard", sub: "Panel principal", icon: "🏠", modulo: "dashboard" },
+      { href: "/calendario", label: "Calendario", sub: "Servicios del día", icon: "📅", modulo: "dashboard" },
     ],
   },
   {
     grupo: "Comercial",
     items: [
-      { href: "/cotizaciones", label: "Cotizaciones", sub: "Precios y rutas",  icon: "📄", modulo: "cotizaciones" },
-      { href: "/reservas",     label: "Reservas",     sub: "Servicios",        icon: "🎫", modulo: "reservas" },
-      { href: "/clientes",     label: "Clientes",     sub: "Base comercial",   icon: "👥", modulo: "clientes" },
+      { href: "/cotizaciones", label: "Cotizaciones", sub: "Precios y rutas", icon: "📄", modulo: "cotizaciones" },
+      { href: "/reservas", label: "Reservas", sub: "Servicios", icon: "🎫", modulo: "reservas" },
+      { href: "/clientes", label: "Clientes", sub: "Base comercial", icon: "👥", modulo: "clientes" },
     ],
   },
   {
     grupo: "Operaciones",
     items: [
-      { href: "/programacion", label: "Programación", sub: "Core del sistema",      icon: "🗓️", modulo: "programacion" },
-      { href: "/seguimiento",  label: "Seguimiento",  sub: "Estado en tiempo real", icon: "🔍", modulo: "seguimiento" },
-      { href: "/incidencias",  label: "Incidencias",  sub: "Eventos y alertas",     icon: "⚠️", modulo: "incidencias" },
+      { href: "/programacion", label: "Programación", sub: "Core del sistema", icon: "🗓️", modulo: "programacion" },
+      { href: "/seguimiento", label: "Seguimiento", sub: "Estado en tiempo real", icon: "🔍", modulo: "seguimiento" },
+      { href: "/monitoreo", label: "Monitoreo", sub: "Mapa y unidades", icon: "📡", modulo: "monitoreo" },
+      { href: "/incidencias", label: "Incidencias", sub: "Eventos y alertas", icon: "⚠️", modulo: "incidencias" },
     ],
   },
   {
     grupo: "Flota",
     items: [
-      { href: "/vehiculos",             label: "Vehículos",          sub: "Flota",             icon: "🚌", modulo: "vehiculos" },
-      { href: "/mantenimiento",         label: "Mantenimiento",      sub: "Historial técnico",  icon: "🔧", modulo: "mantenimiento" },
-      { href: "/mantenimiento/ordenes", label: "Órdenes de Trabajo", sub: "OT · Checklist",    icon: "📋", modulo: "mantenimiento" },
-      { href: "/neumaticos",            label: "Neumáticos",         sub: "Vida útil",          icon: "🛞", modulo: "neumaticos" },
-      { href: "/combustible",           label: "Combustible",        sub: "Consumo",            icon: "⛽", modulo: "combustible" },
-      { href: "/seguros",               label: "Seguros",            sub: "Pólizas",            icon: "🛡️", modulo: "seguros" },
+      { href: "/vehiculos", label: "Vehículos", sub: "Flota", icon: "🚌", modulo: "vehiculos" },
+      { href: "/documentos-vehiculares", label: "Docs. Vehiculares", sub: "SOAT · CITV · MTC", icon: "📄", modulo: "vehiculos" },
+      { href: "/mantenimiento", label: "Mantenimiento", sub: "Historial técnico", icon: "🔧", modulo: "mantenimiento" },
+      { href: "/mantenimiento/ordenes", label: "Órdenes de Trabajo", sub: "OT · Checklist", icon: "📋", modulo: "mantenimiento" },
+      { href: "/neumaticos", label: "Neumáticos", sub: "Vida útil", icon: "🛞", modulo: "neumaticos" },
+      { href: "/combustible", label: "Combustible", sub: "Consumo", icon: "⛽", modulo: "combustible" },
+      { href: "/seguros", label: "Seguros", sub: "Pólizas", icon: "🛡️", modulo: "seguros" },
     ],
   },
   {
     grupo: "RRHH",
     items: [
       { href: "/conductores", label: "Conductores", sub: "Choferes", icon: "🧑‍✈️", modulo: "conductores" },
+      { href: "/personal-administrativo", label: "Personal Administrativo", sub: "Equipo interno", icon: "👔", modulo: "personal-administrativo" },
     ],
   },
   {
     grupo: "Proveedores",
     items: [
-      { href: "/proveedores", label: "Proveedores", sub: "Tercerización", icon: "🏢", modulo: "proveedores" },
+      { href: "/proveedores", label: "Proveedores", sub: "Talleres · grifos", icon: "🏢", modulo: "proveedores" },
+      { href: "/tercerizadas", label: "Tercerizadas", sub: "Flota externa", icon: "🤝", modulo: "proveedores" },
     ],
   },
   {
     grupo: "Finanzas",
     items: [
       { href: "/facturacion", label: "Facturación", sub: "SUNAT / pagos", icon: "🧾", modulo: "facturacion" },
-      { href: "/gastos",      label: "Gastos",      sub: "Egresos",       icon: "💸", modulo: "gastos" },
+      { href: "/gastos", label: "Gastos", sub: "Egresos", icon: "💸", modulo: "gastos" },
     ],
   },
   {
     grupo: "Control",
     items: [
-      { href: "/vencimientos", label: "Vencimientos", sub: "Alertas doc.",     icon: "📁", modulo: "vencimientos" },
-      { href: "/documentos",   label: "Documentos",   sub: "SST / contratos", icon: "🗂️", modulo: "documentos" },
+      { href: "/vencimientos", label: "Vencimientos", sub: "Alertas doc.", icon: "📁", modulo: "vencimientos" },
+      { href: "/documentos", label: "Documentos", sub: "SST / contratos", icon: "🗂️", modulo: "documentos" },
     ],
   },
   {
@@ -84,9 +88,15 @@ const menuGrupos = [
 const menu = menuGrupos.flatMap((g) => g.items);
 
 function GrupoMenu({
-  grupo, items, pathname, permisos,
+  grupo,
+  items,
+  pathname,
+  permisos,
 }: {
-  grupo: string; items: typeof menu; pathname: string; permisos: string[];
+  grupo: string;
+  items: typeof menu;
+  pathname: string;
+  permisos: string[];
 }) {
   const itemsVisibles = items.filter((item) => permisos.includes(item.modulo));
   if (itemsVisibles.length === 0) return null;
@@ -103,7 +113,7 @@ function GrupoMenu({
 
   return (
     <div className="mb-1">
-      {grupo !== "Principal" ? (
+      {grupo !== "Principal" && (
         <button
           onClick={() => setAbierto((v) => !v)}
           className="w-full flex items-center justify-between px-3 py-1.5 text-left"
@@ -118,7 +128,7 @@ function GrupoMenu({
             ›
           </span>
         </button>
-      ) : null}
+      )}
 
       {abierto && (
         <div className="space-y-0.5">
@@ -131,7 +141,9 @@ function GrupoMenu({
                 key={item.href}
                 href={item.href}
                 className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                  activo ? "bg-gradient-to-r from-[#2f8ee9] to-[#1262bd]" : "hover:bg-white/10"
+                  activo
+                    ? "bg-gradient-to-r from-[#2f8ee9] to-[#1262bd]"
+                    : "hover:bg-white/10"
                 }`}
               >
                 <div className="w-8 h-8 flex items-center justify-center text-base flex-shrink-0">
@@ -150,35 +162,43 @@ function GrupoMenu({
         </div>
       )}
 
-      {grupo !== "Principal" && (
-        <div className="mt-1 border-t border-white/5" />
-      )}
+      {grupo !== "Principal" && <div className="mt-1 border-t border-white/5" />}
     </div>
   );
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const router   = useRouter();
+  const router = useRouter();
 
   const esLogin = pathname === "/login";
 
-  const [emailUsuario,  setEmailUsuario]  = useState("");
+  const esPublica = ["/conductor"].some(
+    (r) => pathname === r || pathname.startsWith(r + "/")
+  );
+
+  const [emailUsuario, setEmailUsuario] = useState("");
   const [nombreUsuario, setNombreUsuario] = useState("Usuario");
-  const [rolUsuario,    setRolUsuario]    = useState("operador");
-  const [permisos,      setPermisos]      = useState<string[]>([]);
-  const [cargando,      setCargando]      = useState(true);
+  const [rolUsuario, setRolUsuario] = useState("operador");
+  const [permisos, setPermisos] = useState<string[]>([]);
+  const [cargando, setCargando] = useState(true);
 
   useEffect(() => {
     async function cargarSesionPermisos() {
-      if (esLogin) { setCargando(false); return; }
+      if (esLogin || esPublica) {
+        setCargando(false);
+        return;
+      }
 
       setCargando(true);
 
       const { data } = await supabase.auth.getSession();
-      const session  = data.session;
+      const session = data.session;
 
-      if (!session) { router.replace("/login"); return; }
+      if (!session) {
+        router.replace("/login");
+        return;
+      }
 
       setEmailUsuario(session.user.email || "");
 
@@ -195,7 +215,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       }
 
       setNombreUsuario(perfil.nombre || "Usuario");
-      setRolUsuario(perfil.rol       || "operador");
+      setRolUsuario(perfil.rol || "operador");
 
       const { data: permisosData } = await supabase
         .from("permisos_usuario")
@@ -205,8 +225,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
       let listaPermisos = permisosData?.map((p: any) => p.modulo) || [];
 
-      if (perfil.rol === "admin" && listaPermisos.length === 0) {
-        listaPermisos = menu.map((item) => item.modulo);
+      if (perfil.rol === "admin") {
+        listaPermisos = [...new Set(menu.map((item) => item.modulo))];
       }
 
       setPermisos(listaPermisos);
@@ -224,7 +244,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     }
 
     cargarSesionPermisos();
-  }, [pathname, esLogin, router]);
+  }, [pathname, esLogin, esPublica, router]);
 
   async function cerrarSesion() {
     try {
@@ -244,6 +264,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <div className="w-full max-w-md bg-white p-8 rounded-2xl shadow-xl">
               {children}
             </div>
+          </div>
+        ) : esPublica ? (
+          <div style={{ margin: 0, padding: 0, height: "100vh" }}>
+            {children}
           </div>
         ) : cargando ? (
           <div className="min-h-screen flex items-center justify-center bg-[#eef3f8]">
