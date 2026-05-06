@@ -19,18 +19,6 @@ export function usePermiso(modulo: string) {
         return;
       }
 
-      const { data: usuario } = await supabase
-        .from("usuarios")
-        .select("activo")
-        .eq("id", session.user.id)
-        .maybeSingle();
-
-      if (!usuario || usuario.activo === false) {
-        await supabase.auth.signOut();
-        router.replace("/login");
-        return;
-      }
-
       const { data: permiso } = await supabase
         .from("permisos_usuario")
         .select("permitido")
