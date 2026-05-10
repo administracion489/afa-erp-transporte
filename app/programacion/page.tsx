@@ -5,6 +5,11 @@ import { supabase } from "@/lib/supabase";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
+type ParadaTP = {
+  id: string; tipo: "inicio" | "intermedia" | "destino";
+  nombre: string; direccion: string; lat: string; lng: string; hora: string;
+};
+
 type EstadoReserva = "pendiente" | "programada" | "confirmada" | "en_curso" | "finalizada" | "cancelada";
 
 type Cliente            = { id: number; nombre: string; empresa?: string; tipo?: string; };
@@ -25,6 +30,8 @@ type Reserva = {
   tipo_asignacion: string | null;
   empresa_tercerizada_id: number | null;
   vehiculo_tercero_id: number | null;
+  paradas_json: any[] | null;
+  tipo_servicio_detalle: string | null;
 };
 
 // ─── CONSTANTES ───────────────────────────────────────────────────────────────
@@ -101,6 +108,13 @@ export default function ReservasPage() {
   const [reservas,     setReservas]     = useState<Reserva[]>([]);
   const [loading,      setLoading]      = useState(false);
   const [guardando,    setGuardando]    = useState(false);
+  const [paradasMap,   setParadasMap]   = useState<Record<number, any[]>>({});
+  const [cargandoPar,  setCargandoPar]  = useState<Record<number, boolean>>({});
+  const [pasajerosCliente, setPasajerosCliente] = useState<Record<number, any[]>>({});
+  const [pasajerosAsig,    setPasajerosAsig]    = useState<Record<number, number[]>>({});
+  const [cargandoPas,      setCargandoPas]      = useState<Record<number, boolean>>({});
+  const [paradaSelPas,     setParadaSelPas]     = useState<Record<number, number | null>>({});
+  const [guardandoPas,     setGuardandoPas]     = useState<Record<number, boolean>>({});
   const [editandoId,   setEditandoId]   = useState<number | null>(null);
   const [expandidoId,  setExpandidoId]  = useState<number | null>(null);
   const [mostrarForm,  setMostrarForm]  = useState(false);
@@ -112,6 +126,49 @@ export default function ReservasPage() {
   const f = (k: keyof typeof FORM_VACIO) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
       setForm(p => ({ ...p, [k]: e.target.value }));
+
+  const cargarPasajerosAsignados = async (reservaId: number, paradaId?: number) => {
+    const paradas = paradasMap[reservaId] || [];
+    if (paradaId) {
+      const { data } = await supabase.from("pasajeros_parada").select("pasajero_id").eq("parada_id", paradaId);
+      setPasajerosAsig(prev => ({ ...prev, [reservaId]: (data || []).map((p: any) => p.pasajero_id) }));
+    } else if (paradas.length > 0) {
+      const { data } = await supabase.from("pasajeros_parada").select("pasajero_id").in("parada_id", paradas.map((p: any) => p.id));
+      const unique = [...new Set((data || []).map((p: any) => p.pasajero_id))];
+      setPasajerosAsig(prev => ({ ...prev, [reservaId]: unique as number[] }));
+    }
+  };
+
+  const guardarPasajerosEnParada = async (reservaId: number, paradaId: number, seleccionados: number[]) => {
+    setGuardandoPas(prev => ({ ...prev, [reservaId]: true }));
+    await supabase.from("pasajeros_parada").delete().eq("parada_id", paradaId);
+    if (seleccionados.length > 0) {
+      await supabase.from("pasajeros_parada").insert(
+        seleccionados.map(pid => ({ parada_id: paradaId, pasajero_id: pid, estado: "esperando" }))
+      );
+    }
+    setGuardandoPas(prev => ({ ...prev, [reservaId]: false }));
+    await cargarPasajerosAsignados(reservaId, paradaId);
+    alert(`✅ ${seleccionados.length} pasajeros asignados`);
+  };
+
+  const crearParadasDesdeJSON = async (reservaId: number, paradasJSON: any[]) => {
+    if (!paradasJSON || paradasJSON.length === 0) return;
+    const { data: ex } = await supabase.from("paradas").select("id").eq("reserva_id", reservaId);
+    if (ex && ex.length > 0) {
+      if (!confirm("Ya tiene paradas. ¿Reemplazarlas?")) return;
+      await supabase.from("paradas").delete().eq("reserva_id", reservaId);
+    }
+    const todas = [...paradasJSON.filter((p: any) => p.tipo === "inicio"), ...paradasJSON.filter((p: any) => p.tipo === "intermedia"), ...paradasJSON.filter((p: any) => p.tipo === "destino")];
+    await supabase.from("paradas").insert(todas.map((p: any, i: number) => ({
+      reserva_id: reservaId, orden: i + 1, nombre: p.nombre, direccion: p.direccion || null,
+      lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
+      hora_estimada: p.hora || null, estado: "pendiente",
+    })));
+    const { data: nuevas } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
+    setParadasMap(prev => ({ ...prev, [reservaId]: nuevas || [] }));
+    alert(`✅ ${todas.length} paradas creadas correctamente`);
+  };
 
   const cargarDatos = async () => {
     setLoading(true);
@@ -572,7 +629,14 @@ export default function ReservasPage() {
                   <React.Fragment key={r.id}>
                     <tr className={`border-t transition-colors cursor-pointer ${editandoId === r.id ? "bg-blue-50" : "hover:bg-gray-50"}`}
                       style={{ borderColor: "#f1f5f9" }}
-                      onClick={() => setExpandidoId(expandido ? null : r.id)}>
+                      onClick={() => {
+                          const nId = expandido ? null : r.id;
+                          setExpandidoId(nId);
+                          if (nId) {
+                            cargarParadasReserva(nId);
+                            cargarPasajerosCliente(nId, r.cliente_id);
+                          }
+                        }}>
 
                       <td className="p-3 text-gray-300 text-xs">{expandido ? "▼" : "▶"}</td>
 
@@ -649,14 +713,203 @@ export default function ReservasPage() {
                     {/* FILA EXPANDIDA */}
                     {expandido && (
                       <tr style={{ background: "#f8fafc" }} className="border-t">
-                        <td colSpan={11} className="px-6 py-4">
-                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+                        <td colSpan={11} className="px-6 py-5">
+
+                          {/* Paradas del recorrido */}
+                          {(() => {
+                            const paradasR = paradasMap[r.id] || [];
+                            const tieneJSON = r.paradas_json && r.paradas_json.length > 0;
+                            return (
+                              <div className="mb-5">
+                                <div className="flex items-center justify-between mb-3">
+                                  <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">
+                                    🚏 Paradas del recorrido ({cargandoPar[r.id] ? "..." : paradasR.length})
+                                  </p>
+                                  <div className="flex gap-2">
+                                    {tieneJSON && paradasR.length === 0 && (
+                                      <button onClick={() => crearParadasDesdeJSON(r.id, r.paradas_json!)}
+                                        className="text-xs font-bold px-3 py-1.5 rounded-lg text-white"
+                                        style={{ background: "#be185d" }}>
+                                        🚏 Crear desde cotización ({r.paradas_json!.length} paradas)
+                                      </button>
+                                    )}
+                                    <a href="/pasajeros" target="_blank"
+                                      className="text-xs font-bold px-3 py-1.5 rounded-lg border hover:bg-blue-50"
+                                      style={{ borderColor: "#0b315f", color: "#0b315f" }}>
+                                      👥 Asignar pasajeros →
+                                    </a>
+                                  </div>
+                                </div>
+
+                                {paradasR.length === 0 ? (
+                                  <div className="rounded-xl border-2 border-dashed p-4 text-center text-xs text-gray-400">
+                                    {tieneJSON
+                                      ? <span>📋 Tiene <b>{r.paradas_json!.length} paradas</b> en la cotización. Haz clic en "<b>Crear desde cotización</b>" para generarlas.</span>
+                                      : "Sin paradas configuradas. Agrégalas desde Pasajeros → Asignar a paradas."}
+                                  </div>
+                                ) : (
+                                  <div className="flex items-start gap-3">
+                                    {/* Timeline dots */}
+                                    <div className="flex flex-col items-center pt-1.5">
+                                      {paradasR.map((p: any, i: number) => (
+                                        <div key={p.id} className="flex flex-col items-center">
+                                          <div className="w-5 h-5 rounded-full border-2 flex items-center justify-center text-[9px] font-black"
+                                            style={{ background: p.estado === "completada" ? "#0b315f" : i === 0 ? "#16a34a" : i === paradasR.length - 1 ? "#dc2626" : "white", borderColor: p.estado === "completada" ? "#0b315f" : i === 0 ? "#16a34a" : i === paradasR.length - 1 ? "#dc2626" : "#0b315f", color: p.estado === "completada" || i === 0 || i === paradasR.length - 1 ? "white" : "#0b315f" }}>
+                                            {p.estado === "completada" ? "✓" : i + 1}
+                                          </div>
+                                          {i < paradasR.length - 1 && <div className="w-0.5 h-8" style={{ background: "#e2e8f0" }} />}
+                                        </div>
+                                      ))}
+                                    </div>
+                                    {/* Paradas info */}
+                                    <div className="flex-1 space-y-2">
+                                      {paradasR.map((p: any, i: number) => (
+                                        <div key={p.id} className="rounded-xl border p-3 text-xs" style={{ background: "white", borderColor: p.estado === "completada" ? "#0b315f" : "#e2e8f0" }}>
+                                          <div className="flex items-start justify-between gap-2">
+                                            <div>
+                                              <p className="font-bold text-gray-900">{p.nombre}</p>
+                                              {p.direccion && <p className="text-gray-400 mt-0.5">{p.direccion}</p>}
+                                              <div className="flex gap-3 mt-1">
+                                                {p.hora_estimada && <span className="text-gray-500">🕐 {p.hora_estimada}</span>}
+                                                {p.lat && p.lng && (
+                                                  <a href={`https://www.google.com/maps?q=${p.lat},${p.lng}`} target="_blank" rel="noreferrer"
+                                                    className="text-blue-500 font-bold hover:underline">
+                                                    📍 {Number(p.lat).toFixed(4)}, {Number(p.lng).toFixed(4)}
+                                                  </a>
+                                                )}
+                                              </div>
+                                            </div>
+                                            <div className="flex-shrink-0">
+                                              <span className="font-bold px-2 py-0.5 rounded-full text-[10px]"
+                                                style={{ background: p.estado === "completada" ? "#dcfce7" : i === 0 ? "#f0fdf4" : i === paradasR.length - 1 ? "#fee2e2" : "#eef3f8", color: p.estado === "completada" ? "#166534" : i === 0 ? "#16a34a" : i === paradasR.length - 1 ? "#dc2626" : "#0b315f" }}>
+                                                {p.estado === "completada" ? "✓ Completada" : i === 0 ? "Inicio" : i === paradasR.length - 1 ? "Destino" : "Intermedia"}
+                                              </span>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+
+                          {/* ── PANEL PASAJEROS ── */}
+                          {(() => {
+                            const paxList   = pasajerosCliente[r.id] || [];
+                            const asignados = pasajerosAsig[r.id]    || [];
+                            const paradasR  = paradasMap[r.id]        || [];
+                            const paradaSel = paradaSelPas[r.id]      || null;
+                            const carg      = cargandoPas[r.id]       || false;
+                            const guard     = guardandoPas[r.id]      || false;
+                            const cl        = clientes.find(c => c.id === r.cliente_id);
+                            return (
+                              <div className="mb-5 rounded-2xl border overflow-hidden" style={{ borderColor: "#e2e8f0" }}>
+                                {/* Header */}
+                                <div className="flex items-center justify-between px-4 py-3" style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                                  <div>
+                                    <p className="font-bold text-xs text-gray-700">
+                                      👥 Lista de pasajeros / trabajadores
+                                      {paxList.length > 0 && <span className="ml-2 text-gray-400 font-normal">({paxList.length} registrados)</span>}
+                                    </p>
+                                    {cl && <p className="text-[10px] text-gray-400 mt-0.5">Cliente: <b style={{ color: "#0b315f" }}>{cl.empresa || cl.nombre}</b></p>}
+                                  </div>
+                                  <a href="/pasajeros" target="_blank" className="text-[10px] font-bold px-3 py-1.5 rounded-lg border" style={{ borderColor: "#0b315f", color: "#0b315f" }}>
+                                    + Gestionar →
+                                  </a>
+                                </div>
+
+                                <div className="p-4">
+                                  {carg ? (
+                                    <div className="text-center py-4 text-xs text-gray-400">
+                                      <div className="w-4 h-4 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin mx-auto mb-1" />
+                                      Cargando pasajeros del cliente...
+                                    </div>
+                                  ) : paxList.length === 0 ? (
+                                    <div className="text-center py-4 border-2 border-dashed rounded-xl" style={{ borderColor: "#e2e8f0" }}>
+                                      <p className="text-xs text-gray-400 mb-2">Sin pasajeros registrados para {cl?.empresa || cl?.nombre || "este cliente"}</p>
+                                      <a href="/pasajeros" target="_blank" className="text-xs font-bold px-4 py-2 rounded-xl text-white inline-block" style={{ background: "#0b315f" }}>
+                                        + Registrar pasajeros
+                                      </a>
+                                    </div>
+                                  ) : (
+                                    <>
+                                      {/* Selector de parada */}
+                                      {paradasR.length > 0 && (
+                                        <div className="mb-3">
+                                          <p className="text-[10px] font-bold uppercase text-gray-400 mb-1.5">Asignar a parada específica:</p>
+                                          <div className="flex flex-wrap gap-1.5">
+                                            {paradasR.map((p: any) => (
+                                              <button key={p.id}
+                                                onClick={() => { setParadaSelPas(prev => ({ ...prev, [r.id]: p.id })); cargarPasajerosAsignados(r.id, p.id); }}
+                                                className="text-[10px] font-bold px-2.5 py-1 rounded-lg border transition-all"
+                                                style={{ background: paradaSel === p.id ? "#0b315f" : "white", color: paradaSel === p.id ? "white" : "#475569", borderColor: paradaSel === p.id ? "#0b315f" : "#e2e8f0" }}>
+                                                {p.orden}. {p.nombre.length > 18 ? p.nombre.slice(0,18)+"…" : p.nombre}
+                                              </button>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {/* Controles */}
+                                      <div className="flex items-center gap-2 mb-2">
+                                        <button onClick={() => setPasajerosAsig(prev => ({ ...prev, [r.id]: paxList.map((p: any) => p.id) }))} className="text-[10px] font-bold px-2.5 py-1 rounded-lg border hover:bg-gray-50">☑ Todos</button>
+                                        <button onClick={() => setPasajerosAsig(prev => ({ ...prev, [r.id]: [] }))} className="text-[10px] font-bold px-2.5 py-1 rounded-lg border hover:bg-gray-50">☐ Ninguno</button>
+                                        <span className="text-[10px] text-gray-400">{asignados.length} seleccionados</span>
+                                      </div>
+
+                                      {/* Lista */}
+                                      <div className="rounded-xl border overflow-hidden" style={{ borderColor: "#e2e8f0", maxHeight: 240, overflowY: "auto" }}>
+                                        {paxList.map((pas: any) => {
+                                          const sel = asignados.includes(pas.id);
+                                          return (
+                                            <div key={pas.id}
+                                              onClick={() => setPasajerosAsig(prev => ({ ...prev, [r.id]: sel ? (prev[r.id]||[]).filter(id => id !== pas.id) : [...(prev[r.id]||[]), pas.id] }))}
+                                              className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-50 border-b transition-all"
+                                              style={{ background: sel ? "#eef3f8" : "white", borderColor: "#f1f5f9" }}>
+                                              <div className="w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0" style={{ background: sel ? "#0b315f" : "white", borderColor: sel ? "#0b315f" : "#d1d5db" }}>
+                                                {sel && <span className="text-white text-[9px] font-black">✓</span>}
+                                              </div>
+                                              <div className="w-6 h-6 rounded-lg flex items-center justify-center font-black text-[10px] text-white flex-shrink-0" style={{ background: "#0b315f" }}>{pas.nombre.charAt(0)}</div>
+                                              <div className="flex-1 min-w-0">
+                                                <p className="font-bold text-gray-800 text-[11px] truncate">{pas.nombre}</p>
+                                                <p className="text-[9px] text-gray-400 truncate">{pas.empresa || "Sin empresa"}{pas.dni ? ` · DNI ${pas.dni}` : ""}</p>
+                                              </div>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+
+                                      {/* Guardar */}
+                                      <div className="mt-3">
+                                        {paradaSel ? (
+                                          <button onClick={() => guardarPasajerosEnParada(r.id, paradaSel, asignados)} disabled={guard}
+                                            className="px-5 py-2 rounded-xl font-bold text-xs text-white disabled:opacity-50"
+                                            style={{ background: "#0b315f" }}>
+                                            {guard ? "Guardando..." : `✅ Guardar ${asignados.length} pasajeros en parada`}
+                                          </button>
+                                        ) : paradasR.length > 0 ? (
+                                          <p className="text-[10px] text-amber-600 font-bold">⚠️ Selecciona una parada arriba para guardar la asignación</p>
+                                        ) : (
+                                          <p className="text-[10px] text-gray-400">Primero crea las paradas del recorrido para asignar pasajeros</p>
+                                        )}
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })()}
+
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs border-t pt-4" style={{ borderColor: "#e2e8f0" }}>
                             <div className="space-y-1.5">
                               <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Servicio</p>
                               <p><span className="text-gray-400">Origen:</span> {(r as any).origen || "—"}</p>
                               <p><span className="text-gray-400">Destino:</span> {(r as any).destino || "—"}</p>
                               <p><span className="text-gray-400">Fecha:</span> {fmtFecha(r.fecha_servicio)}</p>
                               <p><span className="text-gray-400">Hora:</span> {r.hora_servicio?.slice(0,5) || "—"}</p>
+                              {(r as any).tipo_servicio_detalle && <p><span className="text-gray-400">Tipo:</span> <b className="text-pink-700">{(r as any).tipo_servicio_detalle === "transporte_personal" ? "👥 Transp. Personal" : (r as any).tipo_servicio_detalle}</b></p>}
                             </div>
                             <div className="space-y-1.5">
                               <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">
