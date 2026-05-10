@@ -1,235 +1,820 @@
 "use client";
-import { useState, useMemo } from "react";
+import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
-// ══════════════════════════════════════════════════════════════════════════════
-// FLOTA DE COSTOS
-// ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════
+// TIPOS
+// ══════════════════════════════════════════════════════════════════
 
-type VehCosto = {
-  nombre: string; capacidad: number;
-  comb1: string; rend1: number; pct1: number;
-  comb2?: string; rend2?: number; pct2?: number;
-  valorCompra: number; residual: number; vidaUtil: number; kmAnio: number;
-  nNeumaticos: number; costoNeumatico: number; vidaNeumatico: number;
-  mantenimientoKm: number; seguroAnual: number; soatAnual: number;
-  revisionSemestral: number; permisosAnual: number; otrosFijosMensual: number;
-  conductorDia: number;
+type ParamCosto = {
+  tipo_vehiculo:string; nombre:string; capacidad:number;
+  icono:string|null; grupo_vehiculo:string|null;
+  euronorm:string|null; usa_urea:boolean; consumo_urea_pct:number|null;
+  tipo_combustible_1:string; rendimiento_1:number; pct_uso_1:number;
+  tipo_combustible_2:string|null; rendimiento_2:number|null; pct_uso_2:number|null;
+  n_neumaticos:number; costo_neumatico:number; vida_neumatico_km:number;
+  mantenimiento_km:number; valor_compra:number; residual_pct:number;
+  vida_util_anios:number; km_anio:number;
+  seguro_anual:number; soat_anual:number; revision_semestral:number;
+  permisos_anual:number; otros_fijos_mensual:number; conductor_dia:number;
 };
-
-const FLOTA: Record<string, VehCosto> = {
-  AUTO_4:      { nombre:"Auto 4 pax Gasolina",       capacidad:4,  comb1:"Gasolina",rend1:42,  pct1:1,    valorCompra:80000,  residual:0.25,vidaUtil:5, kmAnio:45000,nNeumaticos:4, costoNeumatico:450, vidaNeumatico:40000,mantenimientoKm:0.25,seguroAnual:3000, soatAnual:300, revisionSemestral:150,permisosAnual:1000,otrosFijosMensual:250,conductorDia:120 },
-  SUV_4:       { nombre:"SUV 4 pax Gasolina",         capacidad:4,  comb1:"Gasolina",rend1:35,  pct1:1,    valorCompra:130000, residual:0.25,vidaUtil:5, kmAnio:45000,nNeumaticos:4, costoNeumatico:650, vidaNeumatico:45000,mantenimientoKm:0.35,seguroAnual:4500, soatAnual:350, revisionSemestral:150,permisosAnual:1500,otrosFijosMensual:300,conductorDia:140 },
-  SUV_6:       { nombre:"SUV 6 pax GLP",              capacidad:6,  comb1:"GLP",     rend1:28,  pct1:1,    valorCompra:136000, residual:0.24,vidaUtil:5, kmAnio:45000,nNeumaticos:4, costoNeumatico:650, vidaNeumatico:45000,mantenimientoKm:0.39,seguroAnual:4500, soatAnual:380, revisionSemestral:150,permisosAnual:1500,otrosFijosMensual:320,conductorDia:140 },
-  MINIVAN_10:  { nombre:"Minivan 10 pax Diésel",      capacidad:10, comb1:"Diésel",  rend1:27,  pct1:1,    valorCompra:190000, residual:0.20,vidaUtil:6, kmAnio:52000,nNeumaticos:4, costoNeumatico:750, vidaNeumatico:50000,mantenimientoKm:0.55,seguroAnual:7000, soatAnual:550, revisionSemestral:220,permisosAnual:2200,otrosFijosMensual:400,conductorDia:180 },
-  VAN_15:      { nombre:"Van 15 pax Diésel",          capacidad:15, comb1:"Diésel",  rend1:22,  pct1:1,    valorCompra:240000, residual:0.18,vidaUtil:7, kmAnio:55000,nNeumaticos:6, costoNeumatico:850, vidaNeumatico:55000,mantenimientoKm:0.70,seguroAnual:9000, soatAnual:700, revisionSemestral:300,permisosAnual:2800,otrosFijosMensual:500,conductorDia:220 },
-  SPRINTER_17: { nombre:"Sprinter 17 pax Diésel",     capacidad:17, comb1:"Diésel",  rend1:19,  pct1:1,    valorCompra:300000, residual:0.18,vidaUtil:8, kmAnio:60000,nNeumaticos:6, costoNeumatico:1000,vidaNeumatico:60000,mantenimientoKm:0.85,seguroAnual:11000,soatAnual:800, revisionSemestral:380,permisosAnual:3200,otrosFijosMensual:600,conductorDia:240 },
-  SPRINTER_20: { nombre:"Sprinter 20 pax Diésel",     capacidad:20, comb1:"Diésel",  rend1:17,  pct1:1,    valorCompra:360000, residual:0.18,vidaUtil:8, kmAnio:62000,nNeumaticos:6, costoNeumatico:1200,vidaNeumatico:60000,mantenimientoKm:0.95,seguroAnual:13000,soatAnual:900, revisionSemestral:380,permisosAnual:3800,otrosFijosMensual:700,conductorDia:260 },
-  CUSTER_25:   { nombre:"Custer 25 pax Diésel",       capacidad:25, comb1:"Diésel",  rend1:14,  pct1:1,    valorCompra:430000, residual:0.16,vidaUtil:8, kmAnio:63000,nNeumaticos:6, costoNeumatico:1300,vidaNeumatico:62000,mantenimientoKm:1.10,seguroAnual:15000,soatAnual:1000,revisionSemestral:450,permisosAnual:4000,otrosFijosMensual:750,conductorDia:280 },
-  MINIBUS_30:  { nombre:"Minibus 30 pax Diésel",      capacidad:30, comb1:"Diésel",  rend1:12,  pct1:1,    valorCompra:520000, residual:0.15,vidaUtil:9, kmAnio:65000,nNeumaticos:6, costoNeumatico:1500,vidaNeumatico:65000,mantenimientoKm:1.20,seguroAnual:18000,soatAnual:1200,revisionSemestral:550,permisosAnual:4800,otrosFijosMensual:850,conductorDia:300 },
-  MINIBUS_35:  { nombre:"Minibus 35 pax Diésel",      capacidad:35, comb1:"Diésel",  rend1:10.5,pct1:1,    valorCompra:600000, residual:0.15,vidaUtil:9, kmAnio:68000,nNeumaticos:8, costoNeumatico:1700,vidaNeumatico:65000,mantenimientoKm:1.35,seguroAnual:21000,soatAnual:1400,revisionSemestral:550,permisosAnual:5500,otrosFijosMensual:1000,conductorDia:320 },
-  BUS_45:      { nombre:"Bus 45 pax Diésel",          capacidad:45, comb1:"Diésel",  rend1:8.5, pct1:1,    valorCompra:850000, residual:0.12,vidaUtil:10,kmAnio:75000,nNeumaticos:10,costoNeumatico:2100,vidaNeumatico:70000,mantenimientoKm:1.80,seguroAnual:28000,soatAnual:1800,revisionSemestral:750,permisosAnual:8000,otrosFijosMensual:1250,conductorDia:380 },
-  BUS_49:      { nombre:"Bus 49 pax Diésel",          capacidad:49, comb1:"Diésel",  rend1:7.8, pct1:1,    valorCompra:600000, residual:0.12,vidaUtil:10,kmAnio:78000,nNeumaticos:10,costoNeumatico:2300,vidaNeumatico:70000,mantenimientoKm:2.00,seguroAnual:32000,soatAnual:2000,revisionSemestral:750,permisosAnual:9000,otrosFijosMensual:0,   conductorDia:250 },
-  BUS_50:      { nombre:"Bus 50 pax Diésel",          capacidad:50, comb1:"Diésel",  rend1:7.5, pct1:1,    valorCompra:650000, residual:0.12,vidaUtil:10,kmAnio:78000,nNeumaticos:10,costoNeumatico:2300,vidaNeumatico:70000,mantenimientoKm:2.00,seguroAnual:33000,soatAnual:2000,revisionSemestral:750,permisosAnual:9000,otrosFijosMensual:100,  conductorDia:260 },
-};
-
-const PRECIO_COMB: Record<string, number> = { Gasolina:18.0, Diésel:16.5, GLP:8.5, GNV:2.2 };
-const IGV=0.18, OVERHEAD=0.10, RESERVA=0.05;
-
-// Grupos de vehículos para la tabla comparativa
-const GRUPOS = [
-  { grupo:"Ligeros", color:"#6366f1", vehs:["AUTO_4","SUV_4","SUV_6"] },
-  { grupo:"Vans",    color:"#0891b2", vehs:["MINIVAN_10","VAN_15"] },
-  { grupo:"Buses",   color:"#0b315f", vehs:["SPRINTER_17","SPRINTER_20","CUSTER_25","MINIBUS_30","MINIBUS_35","BUS_45","BUS_49","BUS_50"] },
-];
 
 type Resultado = {
-  // Costos
-  costoCombustible: number; costoNeumaticos: number; costoMantenimiento: number;
-  costoDeprec: number; costoFijosKm: number; reserva: number;
-  costoVehiculo: number; costoConductor: number; costoDirectos: number;
-  costoDirectoTotal: number; overhead: number; baseCosto: number; costoKm: number;
-  // EVENTUAL — precios por viaje
-  totalMin15: number; totalEst20: number; totalAlto25: number;
-  sinIGV15: number; sinIGV20: number; sinIGV25: number;
-  precioPax20: number;
-  // FIJO — precios por día
-  diaCosto: number; diaMin: number; diaEst: number; diaAlto: number;
-  diaMinIGV: number; diaEstIGV: number; diaAltoIGV: number;
-  mesEstIGV: number; // diaEstIGV × 26
+  costoCombustible:number; costoNeumaticos:number; costoMantenimiento:number;
+  costoDeprec:number; costoFijosKm:number; costoUrea:number;
+  reserva:number; costoVehiculo:number; costoConductor:number;
+  costoDirectos:number; costoDirectoTotal:number; overhead:number;
+  baseCosto:number; costoKm:number;
+  totalMin15:number; totalEst20:number; totalAlto25:number;
+  sinIGV15:number; sinIGV20:number; sinIGV25:number; precioPax20:number;
+  diaEst:number; diaEstIGV:number; diaMinIGV:number; diaAltoIGV:number;
+  mesEstIGV:number;
 };
 
-function calcular(
-  idVeh: string, km: number, dias: number, peajes: number, otros: number,
-  pernocte: number, viaticos: number
-): Resultado | null {
-  const v = FLOTA[idVeh];
-  if (!v) return null;
+type PlaceResult = { address:string; lat:number; lng:number; placeId:string; };
 
-  // ── Costos variables por km ──
-  const pc1 = PRECIO_COMB[v.comb1] || 0;
-  const combKm = (pc1 / v.rend1) * v.pct1 + (v.comb2 && v.rend2 && v.pct2 ? ((PRECIO_COMB[v.comb2]||0)/v.rend2)*v.pct2 : 0);
-  const costoCombustible   = combKm * km;
-  const costoNeumaticos    = ((v.nNeumaticos * v.costoNeumatico) / v.vidaNeumatico) * km;
-  const costoMantenimiento = v.mantenimientoKm * km;
+type Punto = {
+  id:string;
+  tipo:"inicio"|"parada"|"destino";
+  texto:string;
+  place:PlaceResult|null;
+};
 
-  // ── Costos fijos prorrateados ──
-  const deprecKm   = (v.valorCompra * (1 - v.residual)) / (v.vidaUtil * v.kmAnio);
-  const costoDeprec = deprecKm * km;
-  const costoFijosKm = ((v.seguroAnual + v.soatAnual + v.revisionSemestral*2 + v.permisosAnual + v.otrosFijosMensual*12) / v.kmAnio) * km;
+type Segmento = { km:number; duracion:string; loading:boolean; error:string; };
 
-  // ── Subtotales ──
-  const subtotalVeh    = costoCombustible + costoNeumaticos + costoMantenimiento + costoDeprec + costoFijosKm;
-  const reserva        = subtotalVeh * RESERVA;
-  const costoVehiculo  = subtotalVeh + reserva;
-  const costoConductor = v.conductorDia * dias;
-  const costoDirectos  = peajes + otros;
-  const costoDirectoTotal = costoVehiculo + costoConductor + costoDirectos;
-  const overhead       = costoDirectoTotal * OVERHEAD;
-  const baseCostoViaje = costoDirectoTotal + overhead;
-  const costoKm        = costoDirectoTotal / Math.max(km, 1);
+type DiaPlan = {
+  id:string; numero:number;
+  puntos:Punto[];
+  segmentos:Segmento[];
+  pernocte:number; viaticos:number;
+};
 
-  // ── EVENTUAL: precio total del viaje (incluye pernocte y viáticos para multi-día) ──
-  const extraMultidia = pernocte + viaticos;
-  const baseEvt = baseCostoViaje + extraMultidia;
-  const precio  = (margen: number) => baseEvt / (1 - margen);
-  const final   = (margen: number) => precio(margen) * (1 + IGV);
+// ══════════════════════════════════════════════════════════════════
+// MOTOR DE CÁLCULO
+// ══════════════════════════════════════════════════════════════════
 
-  // ── FIJO: precio por día (el km es el km diario de la ruta) ──
-  // El costo por día = costos del vehículo por km + conductor + overhead
-  const diaCosto = baseCostoViaje; // ya calculado para 1 día (km = km diarios)
-  const diaP     = (m: number) => diaCosto / (1 - m);
-  const diaF     = (m: number) => diaP(m) * (1 + IGV);
+const IGV=0.18, OVERHEAD=0.10, RESERVA=0.05;
 
-  return {
-    costoCombustible, costoNeumaticos, costoMantenimiento,
-    costoDeprec, costoFijosKm, reserva, costoVehiculo,
-    costoConductor, costoDirectos, costoDirectoTotal, overhead,
-    baseCosto: baseCostoViaje, costoKm,
-    // EVENTUAL
-    totalMin15: final(0.15), totalEst20: final(0.20), totalAlto25: final(0.25),
-    sinIGV15: precio(0.15), sinIGV20: precio(0.20), sinIGV25: precio(0.25),
-    precioPax20: final(0.20) / (v.capacidad || 1),
-    // FIJO
-    diaCosto,
-    diaMin:    diaP(0.15), diaEst:    diaP(0.20), diaAlto:    diaP(0.25),
-    diaMinIGV: diaF(0.15), diaEstIGV: diaF(0.20), diaAltoIGV: diaF(0.25),
-    mesEstIGV: diaF(0.20) * 26,
-  };
+function calcular(p:ParamCosto, pr:Record<string,number>, km:number, dias:number, peajes:number, otros:number, pernocte:number, viaticos:number):Resultado|null {
+  if(!p||km<=0)return null;
+  const pc1=pr[p.tipo_combustible_1]||0;
+  const combKm=(pc1/p.rendimiento_1)*p.pct_uso_1+(p.tipo_combustible_2&&p.rendimiento_2&&p.pct_uso_2?((pr[p.tipo_combustible_2]||0)/p.rendimiento_2)*p.pct_uso_2:0);
+  const ureaRate=p.usa_urea&&p.tipo_combustible_1==="Diésel"?(1/p.rendimiento_1)*3.785*(p.consumo_urea_pct||0.04)*(pr["UREA"]||0):0;
+  const costoCombustible=(combKm+ureaRate)*km; const costoUrea=ureaRate*km;
+  const costoNeumaticos=((p.n_neumaticos*p.costo_neumatico)/p.vida_neumatico_km)*km;
+  const costoMantenimiento=p.mantenimiento_km*km;
+  const costoDeprec=((p.valor_compra*(1-p.residual_pct))/(p.vida_util_anios*p.km_anio))*km;
+  const costoFijosKm=((p.seguro_anual+p.soat_anual+p.revision_semestral*2+p.permisos_anual+p.otros_fijos_mensual*12)/p.km_anio)*km;
+  const sub=costoCombustible+costoNeumaticos+costoMantenimiento+costoDeprec+costoFijosKm;
+  const reserva=sub*RESERVA; const costoVehiculo=sub+reserva;
+  const costoConductor=p.conductor_dia*dias;
+  const costoDirectos=peajes+otros;
+  const costoDirectoTotal=costoVehiculo+costoConductor+costoDirectos;
+  const overhead=costoDirectoTotal*OVERHEAD;
+  const baseCosto=costoDirectoTotal+overhead+pernocte+viaticos;
+  const costoKm=costoDirectoTotal/Math.max(km,1);
+  const pF=(m:number)=>baseCosto/(1-m); const fF=(m:number)=>pF(m)*(1+IGV);
+  return{costoCombustible,costoNeumaticos,costoMantenimiento,costoDeprec,costoFijosKm,costoUrea,reserva,costoVehiculo,costoConductor,costoDirectos,costoDirectoTotal,overhead,baseCosto,costoKm,totalMin15:fF(0.15),totalEst20:fF(0.20),totalAlto25:fF(0.25),sinIGV15:pF(0.15),sinIGV20:pF(0.20),sinIGV25:pF(0.25),precioPax20:fF(0.20)/(p.capacidad||1),diaEst:pF(0.20),diaEstIGV:fF(0.20),diaMinIGV:fF(0.15),diaAltoIGV:fF(0.25),mesEstIGV:fF(0.20)*26};
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════
 // HELPERS
-// ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════
 
-const fmt  = (n: number) => `S/ ${n.toLocaleString("es-PE", { minimumFractionDigits:2, maximumFractionDigits:2 })}`;
-const fmtN = (n: number, d=0) => n.toLocaleString("es-PE", { minimumFractionDigits:d, maximumFractionDigits:d });
+const fmt  = (n:number)=>`S/ ${n.toLocaleString("es-PE",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+const fmtN = (n:number,d=0)=>n.toLocaleString("es-PE",{minimumFractionDigits:d,maximumFractionDigits:d});
+const uid  = ()=>Math.random().toString(36).slice(2,8);
+const enHorario=()=>{const l=new Date(new Date().toLocaleString("en-US",{timeZone:"America/Lima"}));return l.getDay()>=1&&l.getDay()<=5&&l.getHours()>=8&&l.getHours()<18;};
+const COMB_COLOR:Record<string,string>={Gasolina:"#f97316",Diésel:"#0b315f",GLP:"#8b5cf6",GNV:"#10b981",UREA:"#06b6d4"};
+const GRUPO_CFG:Record<string,{color:string;bg:string}>={Ligeros:{color:"#6366f1",bg:"#eef2ff"},Vans:{color:"#0891b2",bg:"#ecfeff"},Buses:{color:"#0b315f",bg:"#eef3f8"},Otros:{color:"#6b7280",bg:"#f3f4f6"}};
 
-function esHorarioOficina() {
-  const l = new Date(new Date().toLocaleString("en-US", { timeZone:"America/Lima" }));
-  return l.getDay()>=1 && l.getDay()<=5 && l.getHours()>=8 && l.getHours()<18;
+const PUNTO_VACIO = (tipo:"inicio"|"parada"|"destino"="parada"):Punto => ({id:uid(),tipo,texto:"",place:null});
+
+function minutosTotales(duraciones:string[]):string {
+  let mins=0;
+  duraciones.forEach(d=>{
+    const h=d.match(/(\d+)\s*h/);const m=d.match(/(\d+)\s*min/);
+    if(h)mins+=parseInt(h[1])*60;if(m)mins+=parseInt(m[1]);
+  });
+  if(mins===0)return"";
+  const h=Math.floor(mins/60);const m=mins%60;
+  return h>0?`${h}h ${m>0?m+"min":""}`:`${m}min`;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// PÁGINA
-// ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════
+// HOOKS: GOOGLE MAPS
+// ══════════════════════════════════════════════════════════════════
 
-export default function CotizadorPage() {
-  const router = useRouter();
+function useGoogleMaps(){
+  const[loaded,setLoaded]=useState(false);
+  useEffect(()=>{
+    if(typeof window==="undefined")return;
+    if((window as any).google?.maps?.places){setLoaded(true);return;}
+    const ex=document.getElementById("gmaps-script");
+    if(ex){ex.addEventListener("load",()=>setLoaded(true));return;}
+    const s=document.createElement("script");
+    s.id="gmaps-script";
+    s.src=`https://maps.googleapis.com/maps/api/js?key=${process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}&libraries=places&language=es&region=PE`;
+    s.async=true;s.defer=true;s.onload=()=>setLoaded(true);
+    document.head.appendChild(s);
+  },[]);
+  return loaded;
+}
 
-  // Modo
-  const [modo,       setModo]       = useState<"eventual"|"fijo">("eventual");
+// Hook para calcular distancia entre múltiples puntos consecutivos
+function useMultiSegmentos(placeIds:string[], mapsLoaded:boolean):{segmentos:Segmento[];kmTotal:number;durTotal:string} {
+  const [segmentos,setSegmentos]=useState<Segmento[]>([]);
+  const key=placeIds.filter(Boolean).join("|");
 
-  // Inputs comunes
-  const [idVeh,      setIdVeh]      = useState("BUS_49");
-  const [km,         setKm]         = useState(80);
-  const [peajes,     setPeajes]     = useState(24);
-  const [otros,      setOtros]      = useState(0);
-  const [origen,     setOrigen]     = useState("");
-  const [destino,    setDestino]    = useState("");
-  const [cliente,    setCliente]    = useState("");
+  useEffect(()=>{
+    if(!mapsLoaded)return;
+    const ids=placeIds.filter(Boolean);
+    if(ids.length<2){setSegmentos([]);return;}
 
-  // EVENTUAL
-  const [dias,       setDias]       = useState(1);
-  const [pernocte,   setPernocte]   = useState(0);
-  const [viaticos,   setViaticos]   = useState(0);
-  const [tipoServEv, setTipoServEv] = useState("solo_ida");
+    const n=ids.length-1;
+    const result:Segmento[]=Array(n).fill(null).map(()=>({km:0,duracion:"",loading:true,error:""}));
+    setSegmentos([...result]);
 
-  // FIJO
-  const [tipoServFj, setTipoServFj] = useState("transporte_personal");
+    const service=new google.maps.DistanceMatrixService();
+    let done=0;
 
-  // Envío
-  const [enviando,   setEnviando]   = useState(false);
-  const [enviado,    setEnviado]    = useState(false);
-  const [errorEnv,   setErrorEnv]   = useState("");
+    for(let i=0;i<n;i++){
+      const idx=i;
+      service.getDistanceMatrix({
+        origins:[{placeId:ids[i]}],
+        destinations:[{placeId:ids[i+1]}],
+        travelMode:google.maps.TravelMode.DRIVING,
+        unitSystem:google.maps.UnitSystem.METRIC,
+      },(resp,status)=>{
+        const el=resp?.rows[0]?.elements[0];
+        result[idx]=el?.status==="OK"
+          ?{km:Math.round(el.distance.value/1000),duracion:el.duration.text,loading:false,error:""}
+          :{km:0,duracion:"",loading:false,error:"Sin ruta"};
+        done++;
+        if(done===n)setSegmentos([...result]);
+      });
+    }
+  },[key,mapsLoaded]);
 
-  const enOficina = esHorarioOficina();
-  const veh       = FLOTA[idVeh];
+  const kmTotal=segmentos.reduce((s,g)=>s+(g?.km||0),0);
+  const durTotal=minutosTotales(segmentos.filter(s=>s&&!s.loading&&s.duracion).map(s=>s.duracion));
+  return{segmentos,kmTotal,durTotal};
+}
 
-  const resultado = useMemo(
-    () => calcular(idVeh, km, modo==="eventual"?dias:1, peajes, otros, pernocte, viaticos),
-    [idVeh, km, dias, peajes, otros, pernocte, viaticos, modo]
+// Hook para un solo segmento (retorno directo)
+function useSegmento(origenId:string, destinoId:string, mapsLoaded:boolean):Segmento {
+  const [seg,setSeg]=useState<Segmento>({km:0,duracion:"",loading:false,error:""});
+  useEffect(()=>{
+    if(!mapsLoaded||!origenId||!destinoId){setSeg({km:0,duracion:"",loading:false,error:""});return;}
+    setSeg(s=>({...s,loading:true}));
+    const service=new google.maps.DistanceMatrixService();
+    service.getDistanceMatrix({
+      origins:[{placeId:origenId}],destinations:[{placeId:destinoId}],
+      travelMode:google.maps.TravelMode.DRIVING,unitSystem:google.maps.UnitSystem.METRIC,
+    },(resp,status)=>{
+      const el=resp?.rows[0]?.elements[0];
+      setSeg(el?.status==="OK"
+        ?{km:Math.round(el.distance.value/1000),duracion:el.duration.text,loading:false,error:""}
+        :{km:0,duracion:"",loading:false,error:"Sin ruta"});
+    });
+  },[origenId,destinoId,mapsLoaded]);
+  return seg;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// COMPONENTE: PLACES INPUT
+// ══════════════════════════════════════════════════════════════════
+
+function PlacesInput({placeholder,value,onChange,onSelect,mapsLoaded,disabled=false,size="md"}:{
+  placeholder:string;value:string;
+  onChange:(v:string)=>void;onSelect:(r:PlaceResult)=>void;
+  mapsLoaded:boolean;disabled?:boolean;size?:"sm"|"md";
+}){
+  const inputRef=useRef<HTMLInputElement>(null);
+  const acRef=useRef<google.maps.places.Autocomplete|null>(null);
+  const cls=size==="sm"
+    ?"w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-[#0b315f] pr-6"
+    :"w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[#0b315f] focus:ring-2 focus:ring-[#0b315f]/20 pr-8";
+
+  useEffect(()=>{
+    if(!mapsLoaded||!inputRef.current||acRef.current)return;
+    acRef.current=new google.maps.places.Autocomplete(inputRef.current,{
+      componentRestrictions:{country:"pe"},
+      fields:["formatted_address","geometry","place_id","name"],
+      types:["geocode","establishment"],
+    });
+    acRef.current.addListener("place_changed",()=>{
+      const p=acRef.current!.getPlace();
+      if(!p.geometry?.location)return;
+      const address=p.formatted_address||p.name||"";
+      onChange(address);
+      onSelect({address,lat:p.geometry.location.lat(),lng:p.geometry.location.lng(),placeId:p.place_id||""});
+    });
+  },[mapsLoaded]);
+
+  return(
+    <div className="relative">
+      <input ref={inputRef} type="text" value={value} disabled={disabled}
+        onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+        className={cls+" bg-white"}/>
+      {value&&!disabled&&(
+        <button onClick={()=>{onChange("");onSelect({address:"",lat:0,lng:0,placeId:""});}}
+          className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-300 hover:text-gray-500 font-bold text-xs">✕</button>
+      )}
+      {!mapsLoaded&&<div className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3 h-3 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin"/>}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// COMPONENTE: BADGE DE TRAMO
+// ══════════════════════════════════════════════════════════════════
+
+function TramoInfo({seg}:{seg:Segmento}){
+  if(seg.loading) return(
+    <div className="flex items-center justify-center gap-1.5 py-1">
+      <div className="w-3 h-3 border-2 border-gray-200 border-t-blue-500 rounded-full animate-spin"/>
+      <span className="text-[10px] text-gray-400">Calculando...</span>
+    </div>
+  );
+  if(seg.error||seg.km===0) return(
+    <div className="text-center py-1"><span className="text-[10px] text-red-400">⚠ Sin ruta</span></div>
+  );
+  return(
+    <div className="flex items-center justify-center gap-1.5 py-1">
+      <div className="h-px flex-1 bg-gray-200"/>
+      <span className="text-[10px] font-black text-[#0b315f] bg-blue-50 px-2 py-0.5 rounded-full border border-blue-100">
+        📏 {seg.km} km · ⏱ {seg.duracion}
+      </span>
+      <div className="h-px flex-1 bg-gray-200"/>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// RUTA SIMPLE — Solo Ida / Ida y Retorno
+// ══════════════════════════════════════════════════════════════════
+
+function RutaSimple({tipoServ,mapsLoaded,onUpdate}:{
+  tipoServ:string; mapsLoaded:boolean;
+  onUpdate:(km:number,origen:string,destino:string)=>void;
+}){
+  const esRetorno=tipoServ==="ida_retorno"||tipoServ==="transporte_personal";
+  const [origenTxt,setOrigenTxt]=useState("");const [destinoTxt,setDestinoTxt]=useState("");
+  const [origen,setOrigen]=useState<PlaceResult|null>(null);
+  const [destino,setDestino]=useState<PlaceResult|null>(null);
+  const [kmManual,setKmManual]=useState<number|null>(null);
+
+  const seg=useSegmento(origen?.placeId||"",destino?.placeId||"",mapsLoaded);
+  const kmAuto=seg.km>0?seg.km:0;
+  const multiplicador=esRetorno?2:1;
+  const kmTotal=kmManual!==null?kmManual:kmAuto*multiplicador;
+
+  useEffect(()=>{onUpdate(kmTotal,origenTxt,destinoTxt);},[kmTotal,origenTxt,destinoTxt]);
+
+  return(
+    <div className="space-y-3">
+      {/* Origen */}
+      <div>
+        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-1">
+          🟢 Origen
+        </label>
+        <PlacesInput placeholder="Ej: Plaza Norte, Lima" value={origenTxt} mapsLoaded={mapsLoaded}
+          onChange={v=>{setOrigenTxt(v);if(!v){setOrigen(null);setKmManual(null);}}}
+          onSelect={p=>{setOrigen(p.placeId?p:null);setKmManual(null);}}/>
+      </div>
+
+      {/* Tramo */}
+      {origen?.placeId&&destino?.placeId&&<TramoInfo seg={seg}/>}
+      {origen?.placeId&&!destino?.placeId&&<div className="flex items-center gap-2 py-1"><div className="flex-1 h-px border-t-2 border-dashed border-gray-200"/></div>}
+
+      {/* Destino */}
+      <div>
+        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-1">
+          🔴 Destino final
+        </label>
+        <PlacesInput placeholder="Ej: Planta Cajamarquilla" value={destinoTxt} mapsLoaded={mapsLoaded}
+          onChange={v=>{setDestinoTxt(v);if(!v){setDestino(null);setKmManual(null);}}}
+          onSelect={p=>{setDestino(p.placeId?p:null);setKmManual(null);}}/>
+      </div>
+
+      {/* Resultado */}
+      {kmAuto>0&&(
+        <div className={`rounded-xl px-4 py-3 border ${esRetorno?"bg-blue-50 border-blue-200":"bg-green-50 border-green-200"}`}>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wide text-gray-500">
+                {esRetorno?"Ida y retorno (×2)":"Solo ida (×1)"}
+              </p>
+              <p className="font-black text-2xl text-[#0b315f] mt-0.5">
+                {kmManual!==null?kmManual:kmAuto*multiplicador} km
+              </p>
+              <p className="text-[10px] text-gray-500 mt-0.5">
+                {esRetorno?(kmAuto+" km × 2 = "+kmAuto*2+" km · ⏱ "+seg.duracion+" por tramo"):("⏱ "+seg.duracion)}
+                {kmManual!==null&&<span className="ml-1 text-amber-600 font-bold">· ✏️ ajustado</span>}
+              </p>
+            </div>
+            {esRetorno&&<span className="text-3xl">⇄</span>}
+          </div>
+        </div>
+      )}
+
+      {/* Km manual */}
+      <div>
+        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+          Ajustar km manualmente
+          {kmManual!==null&&<button onClick={()=>setKmManual(null)} className="ml-2 text-blue-500 hover:underline font-bold normal-case">↺ Usar Google Maps ({kmAuto*multiplicador} km)</button>}
+        </label>
+        <div className="flex items-center gap-2">
+          <input type="number" min={1} placeholder={String(kmAuto*multiplicador||"0")} value={kmManual??""} onChange={e=>setKmManual(e.target.value?Number(e.target.value):null)}
+            className={`flex-1 border rounded-xl px-3 py-2 text-sm font-mono font-bold outline-none text-center ${kmManual!==null?"border-amber-400 bg-amber-50 text-amber-700":"border-gray-200 text-gray-600 focus:border-[#0b315f]"}`}/>
+          <span className="text-sm text-gray-400 font-bold">km</span>
+        </div>
+      </div>
+
+      {/* Enlace Google Maps */}
+      {origen?.placeId&&destino?.placeId&&(
+        <a href={`https://www.google.com/maps/dir/?api=1&origin=place_id:${origen.placeId}&destination=place_id:${destino.placeId}&travelmode=driving`}
+          target="_blank" rel="noreferrer"
+          className="flex items-center justify-center gap-2 w-full py-2 rounded-xl border border-gray-200 text-xs font-bold text-gray-500 hover:bg-gray-50">
+          🗺️ Ver ruta en Google Maps →
+        </a>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// RUTA CON PARADAS — Disposición / Full Day / Multiparada fijo
+// ══════════════════════════════════════════════════════════════════
+
+function RutaConParadas({tipoServ,mapsLoaded,onUpdate}:{
+  tipoServ:string; mapsLoaded:boolean;
+  onUpdate:(km:number,puntos:Punto[])=>void;
+}){
+  const esFijMulti=tipoServ==="fijo_multiparada";
+  const etiqueta=esFijMulti?"paradero":"parada";
+
+  const [puntos,setPuntos]=useState<Punto[]>([
+    PUNTO_VACIO("inicio"), PUNTO_VACIO("destino"),
+  ]);
+  const [retornaPorParadas,setRetornaPorParadas]=useState(false);
+  const [retornaAlOrigen,setRetornaAlOrigen]=useState(false);
+  const [kmManual,setKmManual]=useState<number|null>(null);
+
+  // IDs de places para el cálculo de tramos de ida
+  const placeIdsIda=puntos.map(p=>p.place?.placeId||"");
+
+  // Tramos de ida
+  const {segmentos,kmTotal:kmIda,durTotal:durIda}=useMultiSegmentos(placeIdsIda,mapsLoaded);
+
+  // Retorno directo (último→primero)
+  const firstId=puntos[0]?.place?.placeId||"";
+  const lastId=puntos[puntos.length-1]?.place?.placeId||"";
+  const segRetornoDirecto=useSegmento(lastId,firstId,mapsLoaded);
+
+  // KM retorno
+  const kmRetorno=retornaAlOrigen
+    ?(retornaPorParadas?kmIda:segRetornoDirecto.km)
+    :0;
+
+  const kmCalculado=kmIda+kmRetorno;
+  const kmFinal=kmManual!==null?kmManual:kmCalculado;
+
+  useEffect(()=>{onUpdate(kmFinal,puntos);},[kmFinal,JSON.stringify(puntos)]);
+
+  const agregar=()=>{
+    setPuntos(p=>{const n=[...p];n.splice(n.length-1,0,PUNTO_VACIO("parada"));return n;});
+  };
+  const eliminar=(id:string)=>setPuntos(p=>p.filter(x=>x.id!==id));
+  const updPunto=(id:string,campo:Partial<Punto>)=>setPuntos(p=>p.map(x=>x.id===id?{...x,...campo}:x));
+
+  const puntosConParadas=puntos.length>2;
+
+  return(
+    <div className="space-y-2">
+      {puntos.map((punto,idx)=>{
+        const esInicio=punto.tipo==="inicio";
+        const esDestino=punto.tipo==="destino";
+        const esIntermedia=punto.tipo==="parada";
+        const seg=segmentos[idx];
+        const color=esInicio?"#16a34a":esDestino?"#dc2626":"#0b315f";
+        const icono=esInicio?"🟢":esDestino?"🔴":"📍";
+        const label=esInicio?"Punto de inicio":esDestino?"Destino final":`${icono} ${etiqueta.charAt(0).toUpperCase()+etiqueta.slice(1)} ${idx}`;
+
+        return(
+          <div key={punto.id}>
+            {/* Punto */}
+            <div className="rounded-xl border-2 overflow-hidden" style={{borderColor:color+"44"}}>
+              <div className="flex items-center gap-2 px-3 py-2" style={{background:color+"12"}}>
+                <span className="text-base">{icono}</span>
+                <span className="text-xs font-black flex-1" style={{color}}>{label}</span>
+                {esIntermedia&&puntos.length>2&&(
+                  <button onClick={()=>eliminar(punto.id)} className="text-gray-300 hover:text-red-500 font-bold text-sm">✕</button>
+                )}
+              </div>
+              <div className="p-2">
+                <PlacesInput size="sm"
+                  placeholder={esInicio?"Dirección de inicio...":esDestino?"Dirección de destino final...":`Dirección del ${etiqueta}...`}
+                  value={punto.texto} mapsLoaded={mapsLoaded}
+                  onChange={v=>updPunto(punto.id,{texto:v,place:v?punto.place:null})}
+                  onSelect={p=>updPunto(punto.id,{texto:p.address,place:p.placeId?p:null})}/>
+              </div>
+            </div>
+
+            {/* Tramo al siguiente */}
+            {idx<puntos.length-1&&(
+              <div className="px-4">
+                {seg?<TramoInfo seg={seg}/>:<div className="flex items-center gap-2 py-1.5"><div className="flex-1 h-px border-t-2 border-dashed border-gray-100"/></div>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Botón agregar parada */}
+      <button onClick={agregar}
+        className="w-full py-2 rounded-xl border-2 border-dashed text-xs font-bold transition-colors hover:bg-blue-50"
+        style={{borderColor:"#0b315f44",color:"#0b315f"}}>
+        + Agregar {etiqueta}
+      </button>
+
+      {/* Opciones de retorno */}
+      <div className="rounded-xl bg-gray-50 border border-gray-200 px-4 py-3 space-y-2">
+        <p className="text-[10px] font-black text-gray-500 uppercase tracking-wider">Opciones de retorno</p>
+
+        <label className="flex items-center gap-2.5 cursor-pointer">
+          <input type="checkbox" checked={retornaAlOrigen} onChange={e=>setRetornaAlOrigen(e.target.checked)}
+            className="w-4 h-4 accent-[#0b315f] rounded"/>
+          <div>
+            <p className="text-xs font-bold text-gray-700">El vehículo regresa al punto de inicio</p>
+            <p className="text-[10px] text-gray-400">Suma km del retorno al total</p>
+          </div>
+        </label>
+
+        {retornaAlOrigen&&puntosConParadas&&(
+          <div className="ml-6 space-y-1.5 border-l-2 border-gray-200 pl-3">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="radio" checked={!retornaPorParadas} onChange={()=>setRetornaPorParadas(false)}
+                className="accent-[#0b315f]"/>
+              <div>
+                <p className="text-xs font-semibold text-gray-600">Retorno directo</p>
+                <p className="text-[10px] text-gray-400">{"Destino → Origen sin paradas"+(segRetornoDirecto.km>0?" · "+segRetornoDirecto.km+" km":"")}</p>
+              </div>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="radio" checked={retornaPorParadas} onChange={()=>setRetornaPorParadas(true)}
+                className="accent-[#0b315f]"/>
+              <div>
+                <p className="text-xs font-semibold text-gray-600">Retorno por las paradas</p>
+                <p className="text-[10px] text-gray-400">Mismo recorrido en reversa · {kmIda} km</p>
+              </div>
+            </label>
+          </div>
+        )}
+
+        {retornaAlOrigen&&!puntosConParadas&&segRetornoDirecto.km>0&&(
+          <p className="text-[10px] text-blue-600 font-bold ml-6">Retorno directo: {segRetornoDirecto.km} km · {segRetornoDirecto.duracion}</p>
+        )}
+      </div>
+
+      {/* Resumen */}
+      {kmIda>0&&(
+        <div className="rounded-xl bg-[#eef3f8] border border-[#0b315f22] px-4 py-3">
+          <p className="text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Resumen de ruta</p>
+          <div className="space-y-1">
+            <div className="flex justify-between text-xs"><span className="text-gray-600">KM ida ({puntos.length-1} tramos)</span><span className="font-black text-[#0b315f]">{kmIda} km</span></div>
+            {retornaAlOrigen&&<div className="flex justify-between text-xs"><span className="text-gray-600">KM retorno {retornaPorParadas?"(por paradas)":"(directo)"}</span><span className="font-black text-[#0b315f]">{kmRetorno} km</span></div>}
+            <div className="flex justify-between text-sm border-t border-[#0b315f22] pt-1.5 mt-1.5"><span className="font-black text-[#0b315f]">Total</span><span className="font-black text-[#0b315f] text-base">{kmManual!==null?kmManual:kmCalculado} km</span></div>
+            {durIda&&<p className="text-[10px] text-gray-400">⏱ Tiempo estimado ida: {durIda}</p>}
+          </div>
+          {/* Ajuste manual */}
+          <div className="mt-3 flex items-center gap-2">
+            <input type="number" min={1} placeholder={String(kmCalculado)} value={kmManual??""} onChange={e=>setKmManual(e.target.value?Number(e.target.value):null)}
+              className={`flex-1 border rounded-lg px-2.5 py-1.5 text-xs font-mono font-bold outline-none text-center ${kmManual!==null?"border-amber-400 bg-amber-50 text-amber-700":"border-gray-200 text-gray-600 focus:border-[#0b315f]"}`}/>
+            <span className="text-xs text-gray-400">km manual</span>
+            {kmManual!==null&&<button onClick={()=>setKmManual(null)} className="text-[10px] text-blue-500 hover:underline font-bold whitespace-nowrap">↺ Auto</button>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// RUTA MULTI-DÍA — itinerario independiente por día
+// ══════════════════════════════════════════════════════════════════
+
+function DiaPlanRow({dia,mapsLoaded,onChange,onEliminar,puedeEliminar}:{
+  dia:DiaPlan; mapsLoaded:boolean;
+  onChange:(d:DiaPlan)=>void; onEliminar:()=>void; puedeEliminar:boolean;
+}){
+  const placeIds=dia.puntos.map(p=>p.place?.placeId||"");
+  const {segmentos,kmTotal,durTotal}=useMultiSegmentos(placeIds,mapsLoaded);
+
+  // Sync km y segmentos al padre
+  useEffect(()=>{onChange({...dia,segmentos,});},[kmTotal]);
+
+  const updPunto=(id:string,campo:Partial<Punto>)=>onChange({
+    ...dia,puntos:dia.puntos.map(p=>p.id===id?{...p,...campo}:p)
+  });
+  const agregar=()=>onChange({...dia,puntos:[...dia.puntos.slice(0,-1),PUNTO_VACIO("parada"),dia.puntos[dia.puntos.length-1]]});
+  const eliminarPunto=(id:string)=>onChange({...dia,puntos:dia.puntos.filter(p=>p.id!==id)});
+
+  return(
+    <div className="rounded-2xl border-2 border-[#0b315f22] overflow-hidden">
+      {/* Header del día */}
+      <div className="flex items-center justify-between px-4 py-3 bg-[#eef3f8] border-b border-[#0b315f22]">
+        <div className="flex items-center gap-2">
+          <span className="w-7 h-7 rounded-full bg-[#0b315f] text-white text-xs font-black flex items-center justify-center">{dia.numero}</span>
+          <div>
+            <p className="font-black text-[#0b315f] text-sm">Día {dia.numero}</p>
+            {kmTotal>0&&<p className="text-[10px] text-gray-500">{kmTotal} km · {durTotal}</p>}
+          </div>
+        </div>
+        {puedeEliminar&&<button onClick={onEliminar} className="text-red-400 hover:text-red-600 text-xs font-bold border border-red-200 hover:bg-red-50 px-2 py-1 rounded-lg">✕ Eliminar día</button>}
+      </div>
+
+      <div className="p-4 space-y-2">
+        {/* Puntos del día */}
+        {dia.puntos.map((punto,idx)=>{
+          const esInicio=punto.tipo==="inicio";const esDestino=punto.tipo==="destino";
+          const color=esInicio?"#16a34a":esDestino?"#dc2626":"#0b315f";
+          const icono=esInicio?"🟢":esDestino?"🔴":"📍";
+          const seg=segmentos[idx];
+
+          return(
+            <div key={punto.id}>
+              <div className="flex items-center gap-2">
+                <span className="text-base flex-shrink-0">{icono}</span>
+                <div className="flex-1">
+                  <PlacesInput size="sm"
+                    placeholder={esInicio?"Punto de inicio del día...":esDestino?"Punto de llegada (hotel, destino)...":"Parada intermedia..."}
+                    value={punto.texto} mapsLoaded={mapsLoaded}
+                    onChange={v=>updPunto(punto.id,{texto:v,place:v?punto.place:null})}
+                    onSelect={p=>updPunto(punto.id,{texto:p.address,place:p.placeId?p:null})}/>
+                </div>
+                {punto.tipo==="parada"&&dia.puntos.length>2&&(
+                  <button onClick={()=>eliminarPunto(punto.id)} className="text-gray-300 hover:text-red-400 font-bold flex-shrink-0">✕</button>
+                )}
+              </div>
+              {idx<dia.puntos.length-1&&(
+                <div className="ml-6 px-2">
+                  {seg?<TramoInfo seg={seg}/>:<div className="h-3 border-l-2 border-dashed border-gray-200 ml-1"/>}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* Agregar parada */}
+        <button onClick={agregar}
+          className="w-full py-1.5 rounded-lg border border-dashed text-xs font-bold text-[#0b315f] hover:bg-blue-50 transition-colors"
+          style={{borderColor:"#0b315f44"}}>
+          + Agregar parada
+        </button>
+
+        {/* Pernocte y viáticos */}
+        <div className="grid grid-cols-2 gap-2 mt-2">
+          {[
+            {l:"🛏 Pernocte bus S/",k:"pernocte" as const,v:dia.pernocte},
+            {l:"👤 Viáticos chofer S/",k:"viaticos" as const,v:dia.viaticos},
+          ].map(fi=>(
+            <div key={fi.k}>
+              <label className="block text-[9px] font-bold text-gray-400 uppercase mb-1">{fi.l}</label>
+              <input type="number" min={0} value={fi.v||""} placeholder="0"
+                onChange={e=>onChange({...dia,[fi.k]:Number(e.target.value)||0})}
+                className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs font-bold outline-none focus:border-[#0b315f] text-center"/>
+            </div>
+          ))}
+        </div>
+
+        {/* Resumen del día */}
+        {kmTotal>0&&(
+          <div className="rounded-lg bg-blue-50 border border-blue-200 px-3 py-2 flex justify-between items-center">
+            <span className="text-xs font-bold text-blue-700">{dia.puntos.length-1} tramo{dia.puntos.length>2?"s":""}</span>
+            <span className="font-black text-blue-700">{kmTotal} km</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RutaMultiDia({mapsLoaded,onUpdate}:{
+  mapsLoaded:boolean;
+  onUpdate:(km:number,dias:DiaPlan[])=>void;
+}){
+  const [dias,setDias]=useState<DiaPlan[]>([
+    {id:uid(),numero:1,puntos:[PUNTO_VACIO("inicio"),PUNTO_VACIO("destino")],segmentos:[],pernocte:0,viaticos:0},
+  ]);
+
+  const kmTotal=dias.reduce((s,d)=>s+d.segmentos.reduce((ss,seg)=>ss+(seg?.km||0),0),0);
+  const pernocteTotal=dias.reduce((s,d)=>s+d.pernocte,0);
+  const viaticosTotal=dias.reduce((s,d)=>s+d.viaticos,0);
+
+  useEffect(()=>{onUpdate(kmTotal,dias);},[kmTotal,JSON.stringify(dias.map(d=>({p:d.pernocte,v:d.viaticos})))]);
+
+  const agregarDia=()=>setDias(d=>[...d,{
+    id:uid(),numero:d.length+1,
+    puntos:[PUNTO_VACIO("inicio"),PUNTO_VACIO("destino")],
+    segmentos:[],pernocte:0,viaticos:0,
+  }]);
+
+  const eliminarDia=(id:string)=>setDias(d=>d.filter(x=>x.id!==id).map((x,i)=>({...x,numero:i+1})));
+  const updDia=(id:string,d:DiaPlan)=>setDias(prev=>prev.map(x=>x.id===id?d:x));
+
+  return(
+    <div className="space-y-4">
+      {dias.map(dia=>(
+        <DiaPlanRow key={dia.id} dia={dia} mapsLoaded={mapsLoaded}
+          onChange={d=>updDia(dia.id,d)}
+          onEliminar={()=>eliminarDia(dia.id)}
+          puedeEliminar={dias.length>1}/>
+      ))}
+
+      <button onClick={agregarDia}
+        className="w-full py-3 rounded-2xl border-2 border-dashed font-bold text-sm hover:bg-blue-50 transition-colors"
+        style={{borderColor:"#0b315f44",color:"#0b315f"}}>
+        + Agregar día {dias.length+1}
+      </button>
+
+      {/* Resumen total */}
+      {kmTotal>0&&(
+        <div className="rounded-2xl bg-[#0b315f] text-white p-4 space-y-2">
+          <p className="text-[10px] font-black uppercase tracking-wider opacity-60">Resumen del viaje completo</p>
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              {l:"Total días",v:`${dias.length} días`,c:"#6ee7b7"},
+              {l:"KM totales",v:`${kmTotal} km`,c:"#93c5fd"},
+              {l:"Pernocte total",v:fmt(pernocteTotal),c:"#fcd34d"},
+              {l:"Viáticos total",v:fmt(viaticosTotal),c:"#fca5a5"},
+            ].map(k=>(
+              <div key={k.l} className="bg-white/10 rounded-xl p-2.5">
+                <p className="text-[9px] font-bold uppercase opacity-60">{k.l}</p>
+                <p className="font-black text-sm mt-0.5" style={{color:k.c}}>{k.v}</p>
+              </div>
+            ))}
+          </div>
+          <div className="text-[10px] text-white/50 space-y-0.5">
+            {dias.map(d=>{
+              const km=d.segmentos.reduce((s,seg)=>s+(seg?.km||0),0);
+              const extra=d.pernocte>0?" · Pernocte "+fmt(d.pernocte):"";
+              return km>0&&<p key={d.id}>{"Día "+d.numero+": "+km+" km"+extra}</p>;
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// WRAPPER: BUILDER DE RUTA
+// ══════════════════════════════════════════════════════════════════
+
+function RutaBuilder({tipoServ,modo,mapsLoaded,onUpdate}:{
+  tipoServ:string; modo:"eventual"|"fijo"; mapsLoaded:boolean;
+  onUpdate:(km:number,meta:any)=>void;
+}){
+  const esSimple   =["solo_ida","ida_retorno","fijo_solo_ida","transporte_personal","fijo_reten"].includes(tipoServ);
+  const esConParadas=["ida_retorno_paradas","full_day","fijo_multiparada"].includes(tipoServ);
+  const esMultiDia =tipoServ==="multi_dia";
+  const esReten    =tipoServ==="fijo_reten";
+
+  if(esReten) return(
+    <div className="space-y-3">
+      <div className="rounded-xl bg-amber-50 border border-amber-200 px-4 py-3">
+        <p className="font-black text-amber-700 text-sm">🏭 Retén / Planta</p>
+        <p className="text-xs text-amber-600 mt-1">Unidad disponible en planta. Ingresa km estimados de desplazamientos internos (puede ser 0).</p>
+      </div>
+      <div>
+        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-1">Km estimados (puede ser 0)</label>
+        <input type="number" min={0} defaultValue={0} onChange={e=>onUpdate(Number(e.target.value)||0,{})}
+          className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm font-mono font-bold outline-none focus:border-[#0b315f] text-center"/>
+      </div>
+    </div>
   );
 
-  // Comparativo toda la flota
-  const comparativo = useMemo(() =>
-    Object.entries(FLOTA).map(([id, v]) => ({
-      id, v,
-      r: calcular(id, km, modo==="eventual"?dias:1, peajes, otros, pernocte, viaticos),
-    })),
-    [km, dias, peajes, otros, pernocte, viaticos, modo]
+  if(esSimple) return <RutaSimple tipoServ={tipoServ} mapsLoaded={mapsLoaded} onUpdate={(km,o,d)=>onUpdate(km,{origen:o,destino:d})}/>;
+  if(esConParadas) return <RutaConParadas tipoServ={tipoServ} mapsLoaded={mapsLoaded} onUpdate={(km,puntos)=>onUpdate(km,{puntos})}/>;
+  if(esMultiDia) return <RutaMultiDia mapsLoaded={mapsLoaded} onUpdate={(km,dias)=>onUpdate(km,{dias})}/>;
+  return null;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// PÁGINA PRINCIPAL
+// ══════════════════════════════════════════════════════════════════
+
+export default function CotizadorPage(){
+  const router=useRouter();
+  const mapsLoaded=useGoogleMaps();
+
+  const [flota,   setFlota]   =useState<ParamCosto[]>([]);
+  const [precios, setPrecios] =useState<Record<string,number>>({});
+  const [dbReady, setDbReady] =useState(false);
+
+  useEffect(()=>{
+    async function cargar(){
+      const[pR,cR]=await Promise.all([
+        supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),
+        supabase.from("precios_combustible").select("tipo,precio"),
+      ]);
+      const f=pR.data||[];const pr:Record<string,number>={};
+      (cR.data||[]).forEach((c:any)=>{pr[c.tipo]=Number(c.precio);});
+      setFlota(f);setPrecios(pr);
+      const bus=f.find((v:ParamCosto)=>v.grupo_vehiculo==="Buses")||f[0];
+      if(bus)setIdxVeh(bus.tipo_vehiculo);
+      setDbReady(true);
+    }
+    cargar();
+  },[]);
+
+  const [idxVeh,    setIdxVeh]    =useState("");
+  const [modo,      setModo]      =useState<"eventual"|"fijo">("eventual");
+  const [tipoServEv,setTipoServEv]=useState("solo_ida");
+  const [tipoServFj,setTipoServFj]=useState("transporte_personal");
+  const [peajes,    setPeajes]    =useState(24);
+  const [otros,     setOtros]     =useState(0);
+  const [dias,      setDias]      =useState(1);
+  const [cliente,   setCliente]   =useState("");
+  const [kmRuta,    setKmRuta]    =useState(0);
+  const [metaRuta,  setMetaRuta]  =useState<any>({});
+  const [pernocteExtra,setPernocteExtra]=useState(0);
+  const [viaticosExtra,setViaticosExtra]=useState(0);
+  const [enviando,  setEnviando]  =useState(false);
+  const [enviado,   setEnviado]   =useState(false);
+  const [errorEnv,  setErrorEnv]  =useState("");
+
+  const tipoServ=modo==="eventual"?tipoServEv:tipoServFj;
+  const enOf=enHorario();
+  const veh=flota.find(v=>v.tipo_vehiculo===idxVeh);
+
+  const grupos=useMemo(()=>{
+    const m:Record<string,ParamCosto[]>={};
+    flota.forEach(v=>{const g=v.grupo_vehiculo||"Otros";if(!m[g])m[g]=[];m[g].push(v);});
+    return m;
+  },[flota]);
+
+  // Pernocte y viáticos: vienen de meta si es multi-día, si no se ingresan aparte
+  const esMultiDia=tipoServ==="multi_dia";
+  const pernocteTotal=esMultiDia
+    ?(metaRuta.dias||[]).reduce((s:number,d:any)=>s+d.pernocte,0)
+    :pernocteExtra;
+  const viaticosTotal=esMultiDia
+    ?(metaRuta.dias||[]).reduce((s:number,d:any)=>s+d.viaticos,0)
+    :viaticosExtra;
+
+  const resultado=useMemo(()=>{
+    if(!veh||kmRuta<=0)return null;
+    return calcular(veh,precios,kmRuta,dias,peajes,otros,pernocteTotal,viaticosTotal);
+  },[veh,precios,kmRuta,dias,peajes,otros,pernocteTotal,viaticosTotal]);
+
+  const comparativo=useMemo(()=>
+    flota.map(v=>({v,r:kmRuta>0?calcular(v,precios,kmRuta,dias,peajes,otros,pernocteTotal,viaticosTotal):null})),
+    [flota,precios,kmRuta,dias,peajes,otros,pernocteTotal,viaticosTotal]
   );
 
-  async function enviarACotizaciones() {
-    if (!resultado) return;
-    setEnviando(true); setErrorEnv("");
+  const handleRutaUpdate=useCallback((km:number,meta:any)=>{
+    setKmRuta(km);setMetaRuta(meta);
+  },[]);
 
-    const payload: any = {
-      origen:          origen.trim() || null,
-      destino:         destino.trim() || null,
-      tipo:            modo === "fijo" ? "transporte_personal" : "eventual",
-      estado:          "pendiente",
-      modo_servicio:   modo,
-      tipo_servicio:   modo === "eventual" ? tipoServEv : tipoServFj,
-      // Precio
-      precio_cliente:  modo === "eventual" ? resultado.totalEst20 : resultado.diaEstIGV,
-      costo_estimado:  resultado.baseCosto,
-      margen_estimado: modo === "eventual"
-        ? resultado.totalEst20 - resultado.baseCosto
-        : resultado.diaEstIGV - resultado.diaCosto,
-      // Campos pricing
-      precio_cotizador:   modo === "eventual" ? resultado.totalEst20 : resultado.diaEstIGV,
-      costo_cotizador:    resultado.baseCosto,
-      margen_cotizador:   20,
-      vehiculo_cotizador: veh?.nombre || null,
-      modo_precio:        "cotizador",
-      // Campos FIJO
-      precio_dia:             modo === "fijo" ? resultado.diaEstIGV : null,
-      precio_mes_estimado:    modo === "fijo" ? resultado.mesEstIGV : null,
-      // Campos EVENTUAL
-      dias_servicio:          modo === "eventual" ? dias : 1,
-      horas_servicio:         8,
-      pernocte_costo:         pernocte,
-      observaciones: [
-        cliente ? `Cliente: ${cliente}` : null,
-        `Vehículo: ${veh?.nombre}`,
-        `KM: ${km} km`,
-        `Margen 20% | Modo: ${modo.toUpperCase()}`,
-        modo === "fijo" ? `Precio/día: ${fmt(resultado.diaEstIGV)} | Mes est.: ${fmt(resultado.mesEstIGV)}` : `Total: ${fmt(resultado.totalEst20)}`,
+  async function enviar(){
+    if(!resultado||!veh)return;
+    setEnviando(true);setErrorEnv("");
+    const{error}=await supabase.from("cotizaciones").insert({
+      origen:metaRuta.origen||null,destino:metaRuta.destino||null,
+      km:kmRuta,tipo:modo==="fijo"?"transporte_personal":"eventual",
+      estado:"pendiente",modo_servicio:modo,tipo_servicio:tipoServ,
+      precio_cliente:modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV,
+      costo_estimado:resultado.baseCosto,
+      margen_estimado:modo==="eventual"?resultado.totalEst20-resultado.baseCosto:resultado.diaEstIGV-resultado.baseCosto,
+      precio_cotizador:modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV,
+      costo_cotizador:resultado.baseCosto,margen_cotizador:20,
+      vehiculo_cotizador:veh.nombre,
+      precio_dia:modo==="fijo"?resultado.diaEstIGV:null,
+      precio_mes_estimado:modo==="fijo"?resultado.mesEstIGV:null,
+      dias_servicio:modo==="eventual"?dias:1,
+      pernocte_costo:pernocteTotal||null,modo_precio:"cotizador",
+      paradas_json:metaRuta.puntos||null,
+      observaciones:[
+        cliente?`Cliente: ${cliente}`:null,
+        `Vehículo: ${veh.nombre}`,`KM: ${kmRuta} km`,
+        pernocteTotal>0?`Pernocte: ${fmt(pernocteTotal)}`:null,
+        viaticosTotal>0?`Viáticos: ${fmt(viaticosTotal)}`:null,
+        `Modo: ${modo.toUpperCase()} · ${tipoServ}`,
       ].filter(Boolean).join(" | "),
-    };
-
-    const { error } = await supabase.from("cotizaciones").insert(payload);
+    });
     setEnviando(false);
-    if (error) { setErrorEnv(error.message); return; }
-    setEnviado(true);
-    setTimeout(() => router.push("/cotizaciones"), 1800);
+    if(error){setErrorEnv(error.message);return;}
+    setEnviado(true);setTimeout(()=>router.push("/cotizaciones"),1800);
   }
 
-  // ─── RENDER ────────────────────────────────────────────────────────────────
+  if(!dbReady)return(<div className="min-h-screen bg-[#eef3f8] flex items-center justify-center"><div className="text-center"><div className="w-12 h-12 border-4 border-gray-200 border-t-[#0b315f] rounded-full animate-spin mx-auto mb-4"/><p className="font-bold text-[#0b315f]">Cargando flota...</p></div></div>);
+  if(flota.length===0)return(<div className="min-h-screen bg-[#eef3f8] flex items-center justify-center"><div className="text-center bg-white rounded-2xl p-8 shadow-sm border max-w-md"><p className="text-3xl mb-3">🚌</p><p className="font-black text-[#0b315f] text-lg">Sin vehículos activos</p><a href="/ajustes" className="inline-block mt-4 px-5 py-2.5 rounded-xl bg-[#0b315f] text-white font-bold text-sm">→ Ajuste de Costos</a></div></div>);
 
-  return (
+  return(
     <div className="min-h-screen bg-[#eef3f8]">
       <div className="max-w-[1400px] mx-auto px-5 py-6 space-y-5">
 
@@ -237,33 +822,32 @@ export default function CotizadorPage() {
         <div className="flex items-start justify-between flex-wrap gap-4">
           <div>
             <h1 className="text-2xl font-black text-[#0b315f]">Cotizador de Tarifas</h1>
-            <p className="text-sm text-gray-400 mt-1">Estructura de costos operativos · Calcula precio real por vehículo</p>
+            <p className="text-sm text-gray-400 mt-1">{flota.length} vehículos · Google Maps · Km calculado por tipo de servicio</p>
           </div>
-          <div className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold border ${enOficina?"bg-green-50 border-green-200 text-green-700":"bg-amber-50 border-amber-200 text-amber-700"}`}>
-            <span>{enOficina?"🟢":"🟡"}</span>
-            {enOficina ? "Horario de oficina — decisión manual" : "Fuera de horario — precio máximo automático"}
+          <div className="flex gap-3 flex-wrap">
+            <a href="/ajustes" className="text-xs text-gray-400 hover:text-[#0b315f] font-bold border border-gray-200 rounded-xl px-3 py-2">⚙️ Ajustar costos</a>
+            <div className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold border ${enOf?"bg-green-50 border-green-200 text-green-700":"bg-amber-50 border-amber-200 text-amber-700"}`}>
+              {enOf?"🟢 Horario de oficina":"🟡 Fuera de horario"}
+            </div>
           </div>
         </div>
 
-        {/* ── TOGGLE MODO ── */}
+        {/* Precios activos */}
+        <div className="flex gap-2 flex-wrap">
+          {Object.entries(precios).filter(([t])=>t!=="UREA").map(([tipo,precio])=>(
+            <div key={tipo} className="px-3 py-1.5 rounded-xl border text-xs font-bold" style={{background:COMB_COLOR[tipo]+"15",borderColor:COMB_COLOR[tipo]+"44",color:COMB_COLOR[tipo]}}>
+              ⛽ {tipo}: S/ {precio.toFixed(2)}/{tipo==="GNV"?"m³":"gal"}
+            </div>
+          ))}
+          {precios["UREA"]&&<div className="px-3 py-1.5 rounded-xl border text-xs font-bold bg-cyan-50 border-cyan-300 text-cyan-700">🧪 UREA: S/ {precios["UREA"].toFixed(2)}/litro</div>}
+        </div>
+
+        {/* Modo toggle */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
           <div className="grid grid-cols-2">
-            {[
-              { id:"eventual", label:"📋 EVENTUAL", sub:"Precio total por evento", color:"#0b315f", bg:"#eef3f8",
-                desc:"Cotización / Orden de Servicio · Firma de conformidad" },
-              { id:"fijo",     label:"📅 FIJO",     sub:"Precio por día · contratos", color:"#166534", bg:"#dcfce7",
-                desc:"Contrato Mensual / Liquidación Semanal · Hoja de ruta diaria" },
-            ].map(m => (
-              <button key={m.id} onClick={() => setModo(m.id as any)}
-                className="py-4 px-6 text-left border-b-4 transition-all"
-                style={{
-                  borderColor: modo === m.id ? m.color : "transparent",
-                  background:  modo === m.id ? m.bg : "white",
-                  color:       modo === m.id ? m.color : "#9ca3af",
-                }}>
-                <p className="font-black text-lg">{m.label}</p>
-                <p className="text-sm font-bold opacity-80">{m.sub}</p>
-                <p className="text-[11px] opacity-50 mt-1">{m.desc}</p>
+            {[{id:"eventual",label:"📋 EVENTUAL",sub:"Precio total por evento",color:"#0b315f",bg:"#eef3f8",desc:"Cotización / Orden de Servicio"},{id:"fijo",label:"📅 FIJO",sub:"Precio por día · contratos",color:"#166534",bg:"#dcfce7",desc:"Contrato Mensual / Liquidación"}].map(m=>(
+              <button key={m.id} onClick={()=>setModo(m.id as any)} className="py-4 px-6 text-left border-b-4 transition-all" style={{borderColor:modo===m.id?m.color:"transparent",background:modo===m.id?m.bg:"white",color:modo===m.id?m.color:"#9ca3af"}}>
+                <p className="font-black text-lg">{m.label}</p><p className="text-sm font-bold opacity-80">{m.sub}</p><p className="text-[11px] opacity-50 mt-0.5">{m.desc}</p>
               </button>
             ))}
           </div>
@@ -271,62 +855,83 @@ export default function CotizadorPage() {
 
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
 
-          {/* ── PANEL INPUTS ── */}
+          {/* ── INPUTS ── */}
           <div className="xl:col-span-1 space-y-4">
 
-            {/* Datos del servicio */}
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 space-y-3">
-              <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider">Datos del servicio</p>
-              <input value={cliente} onChange={e => setCliente(e.target.value)} placeholder="Empresa cliente (opcional)"
+            {/* Cliente */}
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+              <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider mb-2">Datos del servicio</p>
+              <input value={cliente} onChange={e=>setCliente(e.target.value)} placeholder="Empresa cliente (opcional)"
                 className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[#0b315f]"/>
-              <div className="grid grid-cols-2 gap-2">
-                <input value={origen} onChange={e => setOrigen(e.target.value)} placeholder="Origen"
-                  className="border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[#0b315f]"/>
-                <input value={destino} onChange={e => setDestino(e.target.value)} placeholder="Destino"
-                  className="border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[#0b315f]"/>
+            </div>
+
+            {/* Tipo de servicio */}
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+              <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider mb-3">Tipo de servicio</p>
+              <div className="space-y-1.5">
+                {(modo==="eventual"?[
+                  {id:"solo_ida",          label:"➡️ Solo Ida",           sub:"KM × 1"},
+                  {id:"ida_retorno",        label:"⇄ Ida y Retorno",       sub:"KM × 2 automático"},
+                  {id:"ida_retorno_paradas",label:"📍 Con Paradas",         sub:"Suma tramos · retorno configurable"},
+                  {id:"full_day",           label:"⭐ Full Day / Tour",     sub:"Suma tramos · retorno configurable"},
+                  {id:"multi_dia",          label:"🏕️ Multi-día",           sub:"Itinerario propio por día"},
+                ]:[
+                  {id:"fijo_solo_ida",      label:"→ Solo Ida",            sub:"KM × 1"},
+                  {id:"transporte_personal",label:"⇄ Ida y Retorno",       sub:"KM × 2 automático"},
+                  {id:"fijo_multiparada",   label:"📍 Con Paraderos",       sub:"Suma tramos · retorno configurable"},
+                  {id:"fijo_reten",         label:"🏭 Retén / Planta",      sub:"KM manual (puede ser 0)"},
+                ]).map(s=>{
+                  const act=modo==="eventual"?tipoServEv===s.id:tipoServFj===s.id;
+                  const color=modo==="eventual"?"#0b315f":"#166534";const bg=modo==="eventual"?"#eef3f8":"#dcfce7";
+                  return(
+                    <button key={s.id} onClick={()=>{modo==="eventual"?setTipoServEv(s.id):setTipoServFj(s.id);setKmRuta(0);setMetaRuta({});}}
+                      className="w-full flex items-center gap-2 px-3 py-2 rounded-xl border-2 text-left transition-all"
+                      style={{background:act?bg:"white",borderColor:act?color:"#e5e7eb",color:act?color:"#6b7280"}}>
+                      <div><p className="font-bold text-sm">{s.label}</p><p className="text-[9px] opacity-60">{s.sub}</p></div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
-            {/* Tipo de servicio según modo */}
+            {/* ── BUILDER DE RUTA ── */}
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-              <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider mb-3">
-                Tipo de servicio — {modo === "eventual" ? "EVENTUAL" : "FIJO"}
-              </p>
-              {modo === "eventual" ? (
-                <div className="space-y-1.5">
-                  {[
-                    { id:"solo_ida",            label:"➡️ Solo Ida",             sub:"Sin retorno" },
-                    { id:"ida_retorno",          label:"⇄ Ida y Retorno",          sub:"Horarios cerrados" },
-                    { id:"ida_retorno_paradas",  label:"📍 Con Paradas / Horas",   sub:"Disposición flexible" },
-                    { id:"full_day",             label:"⭐ Full Day / Tour",        sub:"8-12 horas con itinerario" },
-                    { id:"multi_dia",            label:"🏕️ Multi-día",             sub:"2+ días: pernocte + viáticos" },
-                  ].map(s => (
-                    <button key={s.id} onClick={() => setTipoServEv(s.id)}
-                      className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all"
-                      style={{ background: tipoServEv===s.id?"#eef3f8":"white", borderColor: tipoServEv===s.id?"#0b315f":"#e5e7eb", color: tipoServEv===s.id?"#0b315f":"#6b7280" }}>
-                      <div>
-                        <p className="font-bold text-sm">{s.label}</p>
-                        <p className="text-[10px] opacity-60">{s.sub}</p>
-                      </div>
-                    </button>
-                  ))}
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider">📍 Ruta</p>
+                {mapsLoaded
+                  ?<span className="text-[9px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded-full border border-green-200">Google Maps activo</span>
+                  :<span className="text-[9px] text-gray-400 animate-pulse">Cargando Maps...</span>}
+              </div>
+              <RutaBuilder
+                key={tipoServ} // reset al cambiar tipo
+                tipoServ={tipoServ} modo={modo}
+                mapsLoaded={mapsLoaded}
+                onUpdate={handleRutaUpdate}/>
+            </div>
+
+            {/* Variables adicionales */}
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 space-y-4">
+              <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider">Variables</p>
+              {modo==="eventual"&&!esMultiDia&&(
+                <div>
+                  <label className="text-[10px] font-bold text-gray-400 uppercase block mb-1.5">Días de conductor</label>
+                  <div className="flex items-center gap-1">
+                    <button onClick={()=>setDias(Math.max(1,dias-1))} className="w-9 h-9 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold">-</button>
+                    <span className="flex-1 text-center font-black text-[#0b315f]">{dias}</span>
+                    <button onClick={()=>setDias(Math.min(30,dias+1))} className="w-9 h-9 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold">+</button>
+                  </div>
                 </div>
-              ) : (
-                <div className="space-y-1.5">
-                  {[
-                    { id:"fijo_solo_ida",        label:"→ Solo Ida",          sub:"Solo entrada o solo salida" },
-                    { id:"transporte_personal",  label:"⇄ Ida y Retorno",     sub:"Recojo y retorno fijos" },
-                    { id:"fijo_multiparada",     label:"📍 Con Paraderos",     sub:"Multiparada — mayor desgaste" },
-                    { id:"fijo_reten",           label:"🏭 Retén / Planta",    sub:"Unidad disponible 24h o turno" },
-                  ].map(s => (
-                    <button key={s.id} onClick={() => setTipoServFj(s.id)}
-                      className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl border-2 text-left transition-all"
-                      style={{ background: tipoServFj===s.id?"#dcfce7":"white", borderColor: tipoServFj===s.id?"#166534":"#e5e7eb", color: tipoServFj===s.id?"#166534":"#6b7280" }}>
-                      <div>
-                        <p className="font-bold text-sm">{s.label}</p>
-                        <p className="text-[10px] opacity-60">{s.sub}</p>
-                      </div>
-                    </button>
+              )}
+              <div className="grid grid-cols-2 gap-3">
+                {[{l:"Peajes S/",v:peajes,s:setPeajes},{l:"Otros S/",v:otros,s:setOtros}].map(fi=>(
+                  <div key={fi.l}><label className="text-[10px] font-bold text-gray-400 uppercase block mb-1.5">{fi.l}</label><input type="number" value={fi.v} onChange={e=>fi.s(Number(e.target.value))} min={0} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f] text-center"/></div>
+                ))}
+              </div>
+              {/* Pernocte/viáticos manuales solo si no es multi-día */}
+              {!esMultiDia&&(tipoServ==="full_day"||modo==="eventual")&&(
+                <div className="grid grid-cols-2 gap-3">
+                  {[{l:"🛏 Pernocte bus S/",v:pernocteExtra,s:setPernocteExtra},{l:"👤 Viáticos chofer S/",v:viaticosExtra,s:setViaticosExtra}].map(fi=>(
+                    <div key={fi.l}><label className="text-[10px] font-bold text-purple-600 uppercase block mb-1">{fi.l}</label><input type="number" value={fi.v||""} onChange={e=>fi.s(Number(e.target.value)||0)} min={0} placeholder="0" className="w-full border border-purple-200 rounded-xl px-3 py-2 text-sm font-bold text-purple-700 outline-none bg-white text-center"/></div>
                   ))}
                 </div>
               )}
@@ -335,378 +940,166 @@ export default function CotizadorPage() {
             {/* Vehículo */}
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
               <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider mb-3">🚌 Vehículo</p>
-              <select value={idVeh} onChange={e => setIdVeh(e.target.value)}
-                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm font-semibold text-[#0b315f] outline-none focus:border-[#0b315f]">
-                {Object.entries(FLOTA).map(([id, v]) => (
-                  <option key={id} value={id}>{v.nombre} ({v.capacidad} pax)</option>
-                ))}
-              </select>
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                {veh && [
-                  { label:"Capacidad",   val:`${veh.capacidad} pax` },
-                  { label:"Combustible", val:veh.comb1 },
-                  { label:"Rendimiento", val:`${veh.rend1} km/${veh.comb1==="GNV"?"m³":"gal"}` },
-                  { label:"Costo Cond.", val:`S/ ${veh.conductorDia}/día` },
-                ].map(i => (
-                  <div key={i.label} className="bg-[#eef3f8] rounded-lg px-2.5 py-2">
-                    <p className="text-[9px] font-bold text-gray-400 uppercase">{i.label}</p>
-                    <p className="text-xs font-black text-[#0b315f] mt-0.5">{i.val}</p>
-                  </div>
-                ))}
+              <div className="space-y-3">
+                {Object.entries(grupos).map(([grupo,vehs])=>{
+                  const gc=GRUPO_CFG[grupo]||GRUPO_CFG.Otros;
+                  return(<div key={grupo}><p className="text-[9px] font-black uppercase tracking-wider mb-1.5" style={{color:gc.color}}>{grupo}</p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {vehs.map(v=>{const act=v.tipo_vehiculo===idxVeh;return(
+                      <button key={v.tipo_vehiculo} onClick={()=>setIdxVeh(v.tipo_vehiculo)}
+                        className="flex flex-col items-center px-2 py-2 rounded-xl border-2 transition-all text-center"
+                        style={{background:act?gc.bg:"white",borderColor:act?gc.color:"#e5e7eb",color:act?gc.color:"#9ca3af"}}>
+                        <span className="text-xl">{v.icono||"🚌"}</span>
+                        <span className="text-[9px] font-bold leading-tight mt-0.5">{v.nombre}</span>
+                        {v.usa_urea&&<span className="text-[8px] text-cyan-600 font-bold">🧪</span>}
+                      </button>
+                    );})}
+                  </div></div>);
+                })}
               </div>
-            </div>
-
-            {/* Variables */}
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 space-y-4">
-              <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider">
-                Variables — {modo === "fijo" ? "km diarios de la ruta" : "km del servicio"}
-              </p>
-
-              {/* Km */}
-              <div>
-                <div className="flex justify-between mb-1.5">
-                  <label className="text-xs font-bold text-gray-500">{modo==="fijo"?"Km diarios (ida+vuelta)":"Km totales del servicio"}</label>
-                  <span className="text-xs font-black text-[#0b315f]">{km} km</span>
-                </div>
-                <input type="range" min={5} max={500} step={5} value={km} onChange={e => setKm(Number(e.target.value))}
-                  className="w-full accent-[#0b315f]"/>
-              </div>
-
-              {/* Días conductor — solo EVENTUAL */}
-              {modo === "eventual" && (
-                <div>
-                  <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block mb-1.5">
-                    Días de conductor
-                  </label>
-                  <div className="flex items-center gap-1">
-                    <button onClick={() => setDias(Math.max(1, dias-1))} className="w-9 h-9 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold text-gray-600">-</button>
-                    <span className="flex-1 text-center font-black text-[#0b315f]">{dias} día{dias>1?"s":""}</span>
-                    <button onClick={() => setDias(Math.min(30, dias+1))} className="w-9 h-9 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold text-gray-600">+</button>
-                  </div>
-                </div>
-              )}
-
-              {/* Peajes y otros */}
-              <div className="grid grid-cols-2 gap-3">
-                {[
-                  { label:"Peajes S/", val:peajes, set:setPeajes },
-                  { label:"Otros S/",  val:otros,  set:setOtros  },
-                ].map(f => (
-                  <div key={f.label}>
-                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block mb-1.5">{f.label}</label>
-                    <input type="number" value={f.val} onChange={e => f.set(Number(e.target.value))} min={0}
-                      className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f] text-center"/>
-                  </div>
-                ))}
-              </div>
-
-              {/* Multi-día: pernocte y viáticos */}
-              {modo === "eventual" && tipoServEv === "multi_dia" && (
-                <div className="rounded-xl bg-purple-50 border border-purple-200 p-3 space-y-3">
-                  <p className="text-[10px] font-black text-purple-700 uppercase tracking-wider">🏕️ Costos multi-día</p>
-                  <div className="grid grid-cols-2 gap-3">
-                    {[
-                      { label:"Pernocte bus S/",   val:pernocte, set:setPernocte },
-                      { label:"Viáticos chofer S/", val:viaticos, set:setViaticos },
-                    ].map(f => (
-                      <div key={f.label}>
-                        <label className="text-[10px] font-bold text-purple-600 uppercase block mb-1">{f.label}</label>
-                        <input type="number" value={f.val} onChange={e => f.set(Number(e.target.value))} min={0}
-                          className="w-full border border-purple-200 rounded-xl px-3 py-2 text-sm font-bold text-purple-700 outline-none focus:border-purple-400 text-center bg-white"/>
-                      </div>
-                    ))}
-                  </div>
-                  {(pernocte > 0 || viaticos > 0) && (
-                    <p className="text-[10px] text-purple-600 font-bold">
-                      Extras: {fmt(pernocte + viaticos)} → se suman al costo base
-                    </p>
-                  )}
+              {veh&&(
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  {[{l:"Capacidad",v:`${veh.capacidad} pax`},{l:"Combustible",v:veh.tipo_combustible_1},{l:"Rendimiento",v:`${veh.rendimiento_1} km/${veh.tipo_combustible_1==="GNV"?"m³":"gal"}`},{l:"Conductor",v:`S/ ${veh.conductor_dia}/día`}].map(i=>(
+                    <div key={i.l} className="bg-[#eef3f8] rounded-lg px-2.5 py-2"><p className="text-[9px] font-bold text-gray-400 uppercase">{i.l}</p><p className="text-xs font-black text-[#0b315f] mt-0.5">{i.v}</p></div>
+                  ))}
+                  {veh.usa_urea&&<div className="col-span-2 bg-cyan-50 border border-cyan-200 rounded-lg px-2.5 py-2"><p className="text-[10px] font-black text-cyan-700">🧪 UREA · {veh.euronorm}</p><p className="text-[9px] text-cyan-600">~{((veh.consumo_urea_pct||0.04)*100).toFixed(0)}% del diésel</p></div>}
                 </div>
               )}
             </div>
           </div>
 
-          {/* ── PANEL RESULTADOS ── */}
+          {/* ── RESULTADOS ── */}
           <div className="xl:col-span-2 space-y-4">
 
-            {resultado ? (
+            {kmRuta<=0?(
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-10 text-center">
+                <p className="text-4xl mb-3">📍</p>
+                <p className="font-bold text-gray-600">Ingresa la ruta para calcular</p>
+                <p className="text-sm text-gray-400 mt-1">El km se calcula automáticamente con Google Maps según el tipo de servicio</p>
+              </div>
+            ):resultado&&veh?(
               <>
-                {/* ── EVENTUAL: precio total ── */}
-                {modo === "eventual" && (
-                  <>
-                    <div className="grid grid-cols-3 gap-3">
-                      {[
-                        { label:"⛔ Mínimo (15%)",    val:resultado.totalMin15, sinIgv:resultado.sinIGV15, color:"#ef4444", bg:"#fef2f2", border:"#fecaca", margen:15 },
-                        { label:"✅ Estándar (20%)",   val:resultado.totalEst20, sinIgv:resultado.sinIGV20, color:"#16a34a", bg:"#f0fdf4", border:"#86efac", margen:20 },
-                        { label:"⭐ Premium (25%)",    val:resultado.totalAlto25, sinIgv:resultado.sinIGV25, color:"#6d28d9", bg:"#faf5ff", border:"#d8b4fe", margen:25 },
-                      ].map(k => (
-                        <div key={k.label} className="rounded-2xl p-4 border-2" style={{ background:k.bg, borderColor:k.border }}>
-                          <p className="text-[10px] font-bold uppercase text-gray-400">{k.label}</p>
-                          <p className="font-black text-xl mt-1" style={{ color:k.color }}>{fmt(k.val)}</p>
-                          <p className="text-[11px] text-gray-400 mt-1">Sin IGV: {fmt(k.sinIgv)}</p>
-                          {k.margen === 20 && (
-                            <p className="text-[10px] text-green-600 font-bold mt-1">
-                              S/ {fmtN(resultado.precioPax20)} / pax
-                            </p>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Multi-día desglose */}
-                    {tipoServEv === "multi_dia" && (pernocte > 0 || viaticos > 0) && (
-                      <div className="bg-purple-50 border border-purple-200 rounded-2xl px-5 py-3 flex items-center gap-4">
-                        <span className="text-2xl">🏕️</span>
-                        <div>
-                          <p className="font-black text-purple-700 text-sm">Incluye costos multi-día</p>
-                          <p className="text-purple-600 text-xs">
-                            Pernocte: {fmt(pernocte)} · Viáticos: {fmt(viaticos)} · Extra total: {fmt(pernocte+viaticos)}
-                          </p>
-                        </div>
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {/* ── FIJO: precio por día + mes ── */}
-                {modo === "fijo" && (
-                  <div className="space-y-3">
-                    <div className="grid grid-cols-3 gap-3">
-                      {[
-                        { label:"⛔ Día mínimo (15%)", val:resultado.diaMinIGV, dia:resultado.diaMin, color:"#ef4444", bg:"#fef2f2", border:"#fecaca" },
-                        { label:"✅ Día estándar (20%)",val:resultado.diaEstIGV, dia:resultado.diaEst, color:"#16a34a", bg:"#f0fdf4", border:"#86efac" },
-                        { label:"⭐ Día premium (25%)", val:resultado.diaAltoIGV,dia:resultado.diaAlto,color:"#6d28d9", bg:"#faf5ff", border:"#d8b4fe" },
-                      ].map(k => (
-                        <div key={k.label} className="rounded-2xl p-4 border-2" style={{ background:k.bg, borderColor:k.border }}>
-                          <p className="text-[10px] font-bold uppercase text-gray-400">{k.label}</p>
-                          <p className="font-black text-xl mt-1" style={{ color:k.color }}>{fmt(k.val)}</p>
-                          <p className="text-[11px] text-gray-400 mt-1">Sin IGV: {fmt(k.dia)}</p>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Estimado mensual destacado */}
-                    <div className="rounded-2xl border-2 border-green-300 bg-green-50 p-5 flex items-center justify-between">
-                      <div>
-                        <p className="text-[11px] font-bold text-green-600 uppercase tracking-wider">Estimado mensual (20% margen × 26 días)</p>
-                        <p className="font-black text-3xl text-green-700 mt-1">{fmt(resultado.mesEstIGV)}</p>
-                        <p className="text-xs text-green-600 mt-1">
-                          {fmt(resultado.diaEstIGV)}/día × 26 días hábiles = {fmt(resultado.mesEstIGV)}/mes
-                        </p>
-                      </div>
-                      <div className="text-4xl">📅</div>
-                    </div>
-
-                    {/* Tabla por variante */}
-                    <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
-                      <table className="w-full text-sm">
-                        <thead className="bg-gray-50 border-b">
-                          <tr>
-                            {["Variante","Precio/día (sin IGV)","Precio/día (con IGV)","Estimado/mes (×26)"].map(h => (
-                              <th key={h} className="px-4 py-3 text-left text-[11px] font-black text-gray-400 uppercase tracking-wide">{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-50">
-                          {[
-                            { label:"Mínimo 15%",  dia:resultado.diaMin, diaF:resultado.diaMinIGV, mes:resultado.diaMinIGV*26, color:"#ef4444" },
-                            { label:"Estándar 20%",dia:resultado.diaEst, diaF:resultado.diaEstIGV, mes:resultado.mesEstIGV,    color:"#16a34a" },
-                            { label:"Premium 25%", dia:resultado.diaAlto,diaF:resultado.diaAltoIGV,mes:resultado.diaAltoIGV*26,color:"#6d28d9" },
-                          ].map(row => (
-                            <tr key={row.label} className="hover:bg-gray-50">
-                              <td className="px-4 py-3 font-bold text-xs" style={{ color:row.color }}>{row.label}</td>
-                              <td className="px-4 py-3 font-mono font-bold text-gray-700">{fmt(row.dia)}</td>
-                              <td className="px-4 py-3 font-mono font-black" style={{ color:row.color }}>{fmt(row.diaF)}</td>
-                              <td className="px-4 py-3 font-mono font-black text-gray-800">{fmt(row.mes)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-
-                {/* Desglose de costos */}
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                  <div className="px-5 py-4 border-b">
-                    <h2 className="font-black text-[#0b315f] text-sm">Desglose de costos operativos</h2>
+                {/* KM badge */}
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 px-5 py-4 flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] font-black text-gray-400 uppercase tracking-wider">KM calculado</p>
+                    <p className="font-black text-3xl text-[#0b315f]">{kmRuta} km</p>
                     <p className="text-xs text-gray-400 mt-0.5">
-                      {veh?.nombre} · {km} km{modo==="eventual"?" · "+dias+" día(s)":""} · {fmt(peajes)} peajes
+                      {tipoServ==="solo_ida"||tipoServ==="fijo_solo_ida"?"Solo ida × 1":tipoServ==="ida_retorno"||tipoServ==="transporte_personal"?"Ida y retorno × 2":tipoServ==="multi_dia"?"Suma de todos los días":"Suma de tramos"}
                     </p>
                   </div>
-                  <div className="p-5">
-                    <div className="space-y-2">
-                      {[
-                        { label:`Combustible (${veh?.comb1})`,           val:resultado.costoCombustible,   pct:resultado.costoCombustible/resultado.costoDirectoTotal*100,   color:"#f97316" },
-                        { label:`Neumáticos (${veh?.nNeumaticos} unid)`, val:resultado.costoNeumaticos,    pct:resultado.costoNeumaticos/resultado.costoDirectoTotal*100,    color:"#a78bfa" },
-                        { label:"Mantenimiento preventivo",               val:resultado.costoMantenimiento, pct:resultado.costoMantenimiento/resultado.costoDirectoTotal*100, color:"#34d399" },
-                        { label:"Depreciación",                           val:resultado.costoDeprec,        pct:resultado.costoDeprec/resultado.costoDirectoTotal*100,        color:"#60a5fa" },
-                        { label:"Seguros, SOAT, revisiones, permisos",   val:resultado.costoFijosKm,       pct:resultado.costoFijosKm/resultado.costoDirectoTotal*100,       color:"#f87171" },
-                        { label:"Reserva imprevistos (5%)",              val:resultado.reserva,            pct:resultado.reserva/resultado.costoDirectoTotal*100,            color:"#94a3b8" },
-                        { label:`Conductor (${fmt(veh?.conductorDia||0)}/día)`, val:resultado.costoConductor, pct:resultado.costoConductor/resultado.costoDirectoTotal*100, color:"#fb923c" },
-                        { label:"Peajes y otros directos",               val:resultado.costoDirectos,      pct:resultado.costoDirectos/resultado.costoDirectoTotal*100,      color:"#94a3b8" },
-                      ].map(item => (
-                        <div key={item.label} className="flex items-center gap-3">
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs text-gray-500 truncate">{item.label}</p>
-                            <div className="h-1.5 rounded-full bg-gray-100 mt-1 overflow-hidden">
-                              <div className="h-full rounded-full" style={{ width:`${Math.min(item.pct,100)}%`, background:item.color }}/>
-                            </div>
-                          </div>
-                          <div className="text-right flex-shrink-0 w-24">
-                            <p className="text-xs font-bold text-[#0b315f]">{fmt(item.val)}</p>
-                            <p className="text-[9px] text-gray-300">{item.pct>0.1?`${item.pct.toFixed(1)}%`:""}</p>
-                          </div>
+                  <div className="text-right">
+                    {pernocteTotal>0&&<p className="text-xs text-purple-600 font-bold">🛏 Pernocte: {fmt(pernocteTotal)}</p>}
+                    {viaticosTotal>0&&<p className="text-xs text-purple-600 font-bold">👤 Viáticos: {fmt(viaticosTotal)}</p>}
+                  </div>
+                </div>
+
+                {/* Precios */}
+                {modo==="eventual"?(
+                  <div className="grid grid-cols-3 gap-3">
+                    {[{label:"⛔ Mínimo (15%)",val:resultado.totalMin15,sinIgv:resultado.sinIGV15,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Estándar (20%)",val:resultado.totalEst20,sinIgv:resultado.sinIGV20,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Premium (25%)",val:resultado.totalAlto25,sinIgv:resultado.sinIGV25,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
+                      <div key={k.label} className="rounded-2xl p-4 border-2" style={{background:k.bg,borderColor:k.border}}>
+                        <p className="text-[10px] font-bold uppercase text-gray-400">{k.label}</p>
+                        <p className="font-black text-xl mt-1" style={{color:k.color}}>{fmt(k.val)}</p>
+                        <p className="text-[11px] text-gray-400 mt-1">Sin IGV: {fmt(k.sinIgv)}</p>
+                        {k.label.includes("20%")&&<p className="text-[10px] text-green-600 font-bold mt-0.5">S/ {fmtN(resultado.precioPax20,0)}/pax</p>}
+                      </div>
+                    ))}
+                  </div>
+                ):(
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-3 gap-3">
+                      {[{label:"⛔ Día mín. (15%)",val:resultado.diaMinIGV,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Día est. (20%)",val:resultado.diaEstIGV,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Día prem. (25%)",val:resultado.diaAltoIGV,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
+                        <div key={k.label} className="rounded-2xl p-4 border-2" style={{background:k.bg,borderColor:k.border}}>
+                          <p className="text-[10px] font-bold uppercase text-gray-400">{k.label}</p>
+                          <p className="font-black text-xl mt-1" style={{color:k.color}}>{fmt(k.val)}</p>
                         </div>
                       ))}
                     </div>
-                    <div className="mt-4 grid grid-cols-2 gap-3">
-                      {[
-                        { label:"Costo directo total",  val:resultado.costoDirectoTotal, bold:false },
-                        { label:"Overhead admin (10%)", val:resultado.overhead,          bold:false },
-                        { label:"Base costo completo",  val:resultado.baseCosto,         bold:true  },
-                        { label:"Costo S/km",           val:`${fmtN(resultado.costoKm,2)}/km`, bold:false, texto:true },
-                      ].map(row => (
-                        <div key={row.label} className={`flex justify-between items-center px-3 py-2 rounded-xl ${row.bold?"bg-[#eef3f8]":"bg-gray-50"}`}>
-                          <span className={`text-xs ${row.bold?"font-black text-[#0b315f]":"text-gray-500 font-semibold"}`}>{row.label}</span>
-                          <span className={`text-sm ${row.bold?"font-black text-[#0b315f]":"font-bold text-gray-600"}`}>
-                            {row.texto ? `S/ ${row.val}` : fmt(row.val as number)}
-                          </span>
+                    <div className="rounded-2xl border-2 border-green-300 bg-green-50 p-5 flex items-center justify-between">
+                      <div><p className="text-[11px] font-bold text-green-600 uppercase">Estimado mensual (20% · ×26 días)</p><p className="font-black text-3xl text-green-700 mt-1">{fmt(resultado.mesEstIGV)}</p><p className="text-xs text-green-600 mt-1">{fmt(resultado.diaEstIGV)}/día × 26 = {fmt(resultado.mesEstIGV)}/mes</p></div>
+                      <div className="text-4xl">📅</div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Desglose */}
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                  <div className="px-5 py-4 border-b"><h2 className="font-black text-[#0b315f] text-sm">Desglose de costos</h2><p className="text-xs text-gray-400 mt-0.5">{veh.icono||"🚌"} {veh.nombre} · {kmRuta} km{veh.usa_urea?" · 🧪 UREA":""}</p></div>
+                  <div className="p-5 space-y-2">
+                    {[
+                      {label:`Combustible (${veh.tipo_combustible_1})`,val:resultado.costoCombustible-resultado.costoUrea,color:COMB_COLOR[veh.tipo_combustible_1]||"#666"},
+                      ...(resultado.costoUrea>0?[{label:`🧪 UREA (${((veh.consumo_urea_pct||0.04)*100).toFixed(0)}% diésel)`,val:resultado.costoUrea,color:"#06b6d4"}]:[]),
+                      {label:`Neumáticos (${veh.n_neumaticos} unid)`,val:resultado.costoNeumaticos,color:"#8b5cf6"},
+                      {label:"Mantenimiento preventivo",val:resultado.costoMantenimiento,color:"#10b981"},
+                      {label:"Depreciación",val:resultado.costoDeprec,color:"#60a5fa"},
+                      {label:"Seguros, SOAT, permisos",val:resultado.costoFijosKm,color:"#f87171"},
+                      {label:"Reserva (5%)",val:resultado.reserva,color:"#94a3b8"},
+                      {label:`Conductor (S/ ${veh.conductor_dia}/día)`,val:resultado.costoConductor,color:"#fb923c"},
+                      {label:"Peajes y otros",val:resultado.costoDirectos,color:"#94a3b8"},
+                    ].map(item=>(
+                      <div key={item.label} className="flex items-center gap-3">
+                        <div className="flex-1 min-w-0"><p className="text-xs text-gray-500 truncate">{item.label}</p><div className="h-1.5 rounded-full bg-gray-100 mt-1 overflow-hidden"><div className="h-full rounded-full" style={{width:`${Math.min(item.val/resultado.costoDirectoTotal*100,100)}%`,background:item.color}}/></div></div>
+                        <span className="text-xs font-bold text-[#0b315f] flex-shrink-0 w-24 text-right">{fmt(item.val)}</span>
+                      </div>
+                    ))}
+                    <div className="grid grid-cols-2 gap-3 mt-3">
+                      {[{l:"Costo directo",v:resultado.costoDirectoTotal,b:false},{l:"Overhead (10%)",v:resultado.overhead,b:false},{l:"Base costo completo",v:resultado.baseCosto,b:true},{l:"Costo S/km",v:`S/ ${fmtN(resultado.costoKm,2)}/km`,b:false,t:true}].map(r=>(
+                        <div key={r.l} className={`flex justify-between items-center px-3 py-2 rounded-xl ${r.b?"bg-[#eef3f8]":"bg-gray-50"}`}>
+                          <span className={`text-xs ${r.b?"font-black text-[#0b315f]":"text-gray-500 font-semibold"}`}>{r.l}</span>
+                          <span className={`text-sm ${r.b?"font-black text-[#0b315f]":"font-bold text-gray-600"}`}>{r.t?r.v:fmt(r.v as number)}</span>
                         </div>
                       ))}
                     </div>
                   </div>
                 </div>
 
-                {/* Panel enviar a cotizaciones */}
-                <div className="rounded-2xl border-2 overflow-hidden"
-                  style={{ background: enviado?"#f0fdf4":"#0b315f", borderColor: enviado?"#86efac":"#0b315f" }}>
-                  {enviado ? (
-                    <div className="p-6 text-center">
-                      <p className="text-3xl mb-2">✅</p>
-                      <p className="font-black text-green-700 text-base">Cotización creada exitosamente</p>
-                      <p className="text-green-600 text-sm mt-1">Redirigiendo a Cotizaciones...</p>
-                    </div>
-                  ) : (
+                {/* Enviar */}
+                <div className="rounded-2xl border-2 overflow-hidden" style={{background:enviado?"#f0fdf4":"#0b315f",borderColor:enviado?"#86efac":"#0b315f"}}>
+                  {enviado?(
+                    <div className="p-6 text-center"><p className="text-3xl mb-2">✅</p><p className="font-black text-green-700">Cotización creada</p><p className="text-green-600 text-sm mt-1">Redirigiendo...</p></div>
+                  ):(
                     <div className="p-5">
-                      <h3 className="font-black text-white text-base mb-1">
-                        → Enviar a Cotizaciones
-                      </h3>
-                      <p className="text-white/60 text-xs mb-4">
-                        {modo === "fijo"
-                          ? `Se creará una cotización FIJA con precio/día de ${fmt(resultado.diaEstIGV)} y estimado mensual de ${fmt(resultado.mesEstIGV)}`
-                          : `Se creará una cotización EVENTUAL con precio total de ${fmt(resultado.totalEst20)} (margen 20%)`
-                        }
-                      </p>
-
-                      {/* Resumen */}
+                      <h3 className="font-black text-white text-base mb-1">→ Enviar a Cotizaciones</h3>
+                      <p className="text-white/60 text-xs mb-4">{modo==="fijo"?`FIJO · ${fmt(resultado.diaEstIGV)}/día · mes ${fmt(resultado.mesEstIGV)}`:`EVENTUAL · total ${fmt(resultado.totalEst20)}`} · {kmRuta} km</p>
                       <div className="grid grid-cols-3 gap-3 mb-4">
-                        {(modo === "eventual" ? [
-                          { label:"Costo base",   val:fmt(resultado.baseCosto),  color:"#fca5a5" },
-                          { label:"Sin IGV",      val:fmt(resultado.sinIGV20),   color:"#fcd34d" },
-                          { label:"Precio final", val:fmt(resultado.totalEst20), color:"#6ee7b7" },
-                        ] : [
-                          { label:"Precio/día",   val:fmt(resultado.diaEstIGV), color:"#6ee7b7" },
-                          { label:"Mes est.",     val:fmt(resultado.mesEstIGV), color:"#a78bfa" },
-                          { label:"Costo/día",    val:fmt(resultado.baseCosto), color:"#fca5a5" },
-                        ]).map(k => (
-                          <div key={k.label} className="bg-white/10 rounded-xl p-3 text-center">
-                            <p className="text-white/50 text-[10px] font-bold uppercase">{k.label}</p>
-                            <p className="font-black text-sm mt-0.5" style={{ color:k.color }}>{k.val}</p>
-                          </div>
+                        {(modo==="eventual"?[{label:"Costo base",val:fmt(resultado.baseCosto),color:"#fca5a5"},{label:"Sin IGV",val:fmt(resultado.sinIGV20),color:"#fcd34d"},{label:"Total final",val:fmt(resultado.totalEst20),color:"#6ee7b7"}]:[{label:"Precio/día",val:fmt(resultado.diaEstIGV),color:"#6ee7b7"},{label:"Mes est.",val:fmt(resultado.mesEstIGV),color:"#a78bfa"},{label:"Costo/día",val:fmt(resultado.baseCosto),color:"#fca5a5"}]).map(k=>(
+                          <div key={k.label} className="bg-white/10 rounded-xl p-3 text-center"><p className="text-white/50 text-[10px] font-bold uppercase">{k.label}</p><p className="font-black text-sm mt-0.5" style={{color:k.color}}>{k.val}</p></div>
                         ))}
                       </div>
-
-                      {!origen || !destino ? (
-                        <div className="grid grid-cols-2 gap-2 mb-4">
-                          <input value={origen} onChange={e => setOrigen(e.target.value)} placeholder="Origen"
-                            className="bg-white/10 border border-white/20 rounded-xl px-3 py-2 text-sm text-white placeholder-white/25 outline-none focus:border-white/40"/>
-                          <input value={destino} onChange={e => setDestino(e.target.value)} placeholder="Destino"
-                            className="bg-white/10 border border-white/20 rounded-xl px-3 py-2 text-sm text-white placeholder-white/25 outline-none focus:border-white/40"/>
-                        </div>
-                      ) : null}
-
-                      {errorEnv && <p className="text-red-300 text-xs font-semibold bg-red-500/20 rounded-xl px-3 py-2 mb-3">⚠ {errorEnv}</p>}
-
-                      <button onClick={enviarACotizaciones} disabled={enviando}
-                        className="w-full py-3.5 rounded-xl font-black text-sm bg-white text-[#0b315f] hover:bg-gray-100 disabled:opacity-50 transition-all">
-                        {enviando ? "Creando cotización..." : `→ Crear cotización ${modo.toUpperCase()} — ${modo==="eventual"?fmt(resultado.totalEst20):fmt(resultado.diaEstIGV)+"/día"}`}
+                      {errorEnv&&<p className="text-red-300 text-xs font-semibold bg-red-500/20 rounded-xl px-3 py-2 mb-3">⚠ {errorEnv}</p>}
+                      <button onClick={enviar} disabled={enviando} className="w-full py-3.5 rounded-xl font-black text-sm bg-white text-[#0b315f] hover:bg-gray-100 disabled:opacity-50">
+                        {enviando?"Creando...": `→ Crear cotización ${modo.toUpperCase()} · ${modo==="eventual"?fmt(resultado.totalEst20):fmt(resultado.diaEstIGV)+"/día"}`}
                       </button>
                     </div>
                   )}
                 </div>
 
-                {/* Tabla comparativa toda la flota */}
+                {/* Comparativo */}
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                  <div className="px-5 py-4 border-b">
-                    <h2 className="font-black text-[#0b315f] text-sm">
-                      Comparativo toda la flota — {modo==="eventual"?"precio total":"precio por día"}
-                    </h2>
-                    <p className="text-xs text-gray-400 mt-0.5">{km} km · margen 20%</p>
-                  </div>
-                  <div className="overflow-x-auto">
-                    {GRUPOS.map(g => (
-                      <div key={g.grupo}>
-                        <div className="px-4 py-2 text-[10px] font-black uppercase tracking-wider border-b"
-                          style={{ background: g.color+"15", color: g.color }}>
-                          {g.grupo}
-                        </div>
-                        <table className="w-full text-sm">
-                          <thead>
-                            <tr className="bg-gray-50 border-b">
-                              {["Vehículo","Cap.","Costo base",
-                                modo==="eventual"?"Precio total (20%)":"Precio/día (20%)",
-                                modo==="eventual"?"S/pax":"Mes est. (×26)",
-                                "Mínimo (15%)","Estado"
-                              ].map(h => (
-                                <th key={h} className="px-3 py-2 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">{h}</th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-gray-50">
-                            {g.vehs.map(vid => {
-                              const item = comparativo.find(c => c.id === vid);
-                              if (!item?.r) return null;
-                              const r   = item.r;
-                              const act = vid === idVeh;
-                              const precPpal = modo==="eventual" ? r.totalEst20 : r.diaEstIGV;
-                              const precSec  = modo==="eventual" ? r.precioPax20 : r.mesEstIGV;
-                              const precMin  = modo==="eventual" ? r.totalMin15  : r.diaMinIGV;
-                              return (
-                                <tr key={vid} onClick={() => setIdVeh(vid)}
-                                  className={`cursor-pointer transition-colors ${act?"bg-blue-50 border-l-2 border-l-[#0b315f]":"hover:bg-gray-50"}`}>
-                                  <td className="px-3 py-2.5">
-                                    <span className={`text-xs ${act?"font-black text-[#0b315f]":"font-semibold text-gray-600"}`}>
-                                      {FLOTA[vid]?.nombre || vid}
-                                    </span>
-                                    {act && <span className="ml-1.5 text-[9px] font-black bg-[#0b315f] text-white px-1.5 py-0.5 rounded">SEL</span>}
-                                  </td>
-                                  <td className="px-3 py-2.5 text-xs font-bold text-gray-500">{FLOTA[vid]?.capacidad}p</td>
-                                  <td className="px-3 py-2.5 text-xs text-gray-500 font-mono">{fmt(r.baseCosto)}</td>
-                                  <td className="px-3 py-2.5 text-xs font-black text-[#0b315f] font-mono">{fmt(precPpal)}</td>
-                                  <td className="px-3 py-2.5 text-xs font-bold text-gray-500 font-mono">
-                                    {modo==="eventual" ? `S/ ${fmtN(precSec)}` : fmt(precSec)}
-                                  </td>
-                                  <td className="px-3 py-2.5 text-xs text-amber-600 font-mono">{fmt(precMin)}</td>
-                                  <td className="px-3 py-2.5">
-                                    <span className="text-[10px] font-black text-green-600">✓ OK</span>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                    ))}
-                  </div>
+                  <div className="px-5 py-4 border-b"><h2 className="font-black text-[#0b315f] text-sm">Comparativo flota · {kmRuta} km · margen 20%</h2></div>
+                  {Object.entries(grupos).map(([grupo,vehs])=>{
+                    const gc=GRUPO_CFG[grupo]||GRUPO_CFG.Otros;
+                    return(<div key={grupo}><div className="px-4 py-2 text-[10px] font-black uppercase tracking-wider border-b" style={{background:gc.color+"15",color:gc.color}}>{grupo}</div>
+                    <table className="w-full text-sm"><thead><tr className="bg-gray-50 border-b">{["Vehículo","Cap.",modo==="eventual"?"Total (20%)":"Día (20%)",modo==="eventual"?"S/pax":"Mes ×26","Mín 15%","UREA"].map(h=><th key={h} className="px-3 py-2 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">{h}</th>)}</tr></thead>
+                    <tbody className="divide-y divide-gray-50">
+                      {vehs.map(v=>{
+                        const item=comparativo.find(c=>c.v.tipo_vehiculo===v.tipo_vehiculo);
+                        if(!item?.r)return null;const r=item.r;const act=v.tipo_vehiculo===idxVeh;
+                        return(<tr key={v.tipo_vehiculo} onClick={()=>setIdxVeh(v.tipo_vehiculo)} className={`cursor-pointer transition-colors ${act?"bg-blue-50 border-l-2 border-l-[#0b315f]":"hover:bg-gray-50"}`}>
+                          <td className="px-3 py-2.5"><span className={`text-xs ${act?"font-black text-[#0b315f]":"font-semibold text-gray-600"}`}>{v.icono||"🚌"} {v.nombre}</span>{act&&<span className="ml-1 text-[9px] font-black bg-[#0b315f] text-white px-1.5 py-0.5 rounded">SEL</span>}</td>
+                          <td className="px-3 py-2.5 text-xs text-gray-500">{v.capacidad}p</td>
+                          <td className="px-3 py-2.5 text-xs font-black text-[#0b315f] font-mono">{fmt(modo==="eventual"?r.totalEst20:r.diaEstIGV)}</td>
+                          <td className="px-3 py-2.5 text-xs font-bold text-gray-500 font-mono">{modo==="eventual"?`S/ ${fmtN(r.precioPax20,0)}`:fmt(r.mesEstIGV)}</td>
+                          <td className="px-3 py-2.5 text-xs text-amber-600 font-mono">{fmt(modo==="eventual"?r.totalMin15:r.diaMinIGV)}</td>
+                          <td className="px-3 py-2.5 text-center">{v.usa_urea?<span className="text-[10px] text-cyan-600 font-bold">🧪</span>:<span className="text-gray-200 text-xs">—</span>}</td>
+                        </tr>);
+                      })}
+                    </tbody></table></div>);
+                  })}
                 </div>
               </>
-            ) : (
-              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-16 text-center">
-                <p className="text-gray-300 text-4xl mb-3">⚡</p>
-                <p className="text-gray-400 font-semibold">Selecciona un vehículo para calcular</p>
-              </div>
-            )}
+            ):null}
           </div>
         </div>
       </div>
