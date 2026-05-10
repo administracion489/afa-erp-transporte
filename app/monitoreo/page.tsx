@@ -5,7 +5,7 @@ import { supabase } from "@/lib/supabase";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
-mapboxgl.accessToken = "pk.eyJ1IjoiYWZhdG91cnNwZXJ1IiwiYSI6ImNtb3J6aW5qbzAwemkyc29tOGt6NDh0NWgifQ.fMNK4OX1_V6KYEUq-PKO3A";
+mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || '';
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
