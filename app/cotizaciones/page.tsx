@@ -28,6 +28,7 @@ const calcItems=(items:ItemCot[])=>{const s=items.reduce((t,it)=>t+it.dias*it.ca
 const norm=(s:string)=>s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
 const iCls=(e="")=>`w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all ${e}`;
 const driveImg=(url:string)=>{const m=url?.match(/\/d\/([a-zA-Z0-9_-]{20,})/);return m?`https://drive.google.com/thumbnail?id=${m[1]}&sz=w800`:url;};
+function extraerNombreApellido(nombre:string):string{const p=nombre.toUpperCase().trim().split(/\s+/).filter(Boolean);if(p.length===0)return nombre.toUpperCase();if(p.length<=2)return p.join(" ");if(p.length===3)return p[0]+" "+p[1];return p[0]+" "+p[2];}
 const enHorario=()=>{const l=new Date(new Date().toLocaleString("en-US",{timeZone:"America/Lima"}));return l.getDay()>=1&&l.getDay()<=5&&l.getHours()>=8&&l.getHours()<18;};
 const GRUPO_COLOR:{[k:string]:{color:string;bg:string}}={Ligeros:{color:"#6366f1",bg:"#eef2ff"},Vans:{color:"#0891b2",bg:"#ecfeff"},Buses:{color:"#0b315f",bg:"#eef3f8"},Otros:{color:"#6b7280",bg:"#f3f4f6"}};
 
@@ -91,16 +92,100 @@ function ModalAprobacion({cot,onConfirmar,onCancelar}:{cot:Cotizacion;onConfirma
   return(<div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{background:"rgba(0,0,0,0.5)"}}><div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4"><h3 className="text-base font-bold">✅ Aprobar cotización #{cot.numero_cotizacion||cot.id}</h3><div><label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">Tipo de documento *</label><select className={iCls()} value={tipo} onChange={e=>setTipo(e.target.value)}>{TIPOS_APROBACION.map(t=><option key={t}>{t}</option>)}</select></div><div><label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">N° referencia *</label><input className={iCls("font-mono")} placeholder="Número o código" value={num} onChange={e=>{setNum(e.target.value);setErr("");}} autoFocus/>{err&&<p className="text-xs text-red-600 mt-1">⚠ {err}</p>}</div><div className="flex gap-3"><button onClick={()=>num.trim()?onConfirmar(tipo,num.trim()):setErr("Obligatorio")} className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white bg-green-700">✅ Confirmar</button><button onClick={onCancelar} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600">Cancelar</button></div></div></div>);
 }
 
-function ParadasBuilder({paradas,onChange,tipo="solo_ida"}:{paradas:ParadaTP[];onChange:(p:ParadaTP[])=>void;tipo?:string}){
-  const nId=()=>Math.random().toString(36).slice(2,8);
-  const upd=(id:string,k:keyof ParadaTP,v:string)=>onChange(paradas.map(p=>p.id===id?{...p,[k]:v}:p));
-  const inicio=paradas.find(p=>p.tipo==="inicio");const fin=paradas.find(p=>p.tipo==="destino");const meds=paradas.filter(p=>p.tipo==="intermedia");
-  const addMed=()=>{const n:ParadaTP={id:nId(),tipo:"intermedia",nombre:"",direccion:"",lat:"",lng:"",hora:""};const idx=paradas.findIndex(p=>p.tipo==="destino");const a=[...paradas];a.splice(idx<0?a.length:idx,0,n);onChange(a);};
-  const inp="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#0b315f]";
-  const esTP=tipo==="transporte_personal"||tipo==="fijo_multiparada";
-  if(paradas.length===0)return(<div className="rounded-2xl border-2 border-dashed p-8 text-center" style={{borderColor:"#be185d"}}><p className="text-3xl mb-2">🚏</p><p className="font-bold text-gray-700 mb-3">{esTP?"Define los paraderos":"Define los puntos"}</p><button onClick={()=>onChange([{id:nId(),tipo:"inicio",nombre:"",direccion:"",lat:"",lng:"",hora:""},{id:nId(),tipo:"destino",nombre:"",direccion:"",lat:"",lng:"",hora:""}])} className="px-6 py-2.5 rounded-xl font-bold text-sm text-white" style={{background:"#0b315f"}}>🗺️ Definir puntos</button></div>);
-  const Card=({p,lbl,col}:{p:ParadaTP;lbl:string;col:string})=>(<div className="bg-white rounded-2xl border-2 overflow-hidden" style={{borderColor:col}}><div className="px-4 py-2.5" style={{background:col}}><span className="text-white font-black text-sm">{lbl}</span></div><div className="p-4 space-y-2"><div><label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Nombre *</label><input className={inp} value={p.nombre} onChange={e=>upd(p.id,"nombre",e.target.value)}/></div><div className="grid grid-cols-3 gap-2"><div><label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Lat</label><input className={inp+" font-mono text-xs"} value={p.lat} onChange={e=>upd(p.id,"lat",e.target.value)}/></div><div><label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Lng</label><input className={inp+" font-mono text-xs"} value={p.lng} onChange={e=>upd(p.id,"lng",e.target.value)}/></div><div><label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Hora</label><input type="time" className={inp} value={p.hora} onChange={e=>upd(p.id,"hora",e.target.value)}/></div></div></div></div>);
-  return(<div className="space-y-3">{inicio&&<Card p={inicio} lbl={esTP?"🟢 Primer Paradero":"🟢 Inicio"} col="#16a34a"/>}{meds.map((p,i)=><div key={p.id} className="bg-white rounded-2xl border-2 overflow-hidden" style={{borderColor:"#0b315f"}}><div className="px-4 py-2.5 flex items-center justify-between" style={{background:"#0b315f"}}><span className="text-white font-black text-sm">📍 {esTP?"Paradero":"Parada"} {i+1}</span><button onClick={()=>onChange(paradas.filter(x=>x.id!==p.id))} className="text-white opacity-60 hover:opacity-100 font-bold">✕</button></div><div className="p-4 space-y-2"><div className="grid grid-cols-2 gap-3"><div><label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Nombre</label><input className={inp} value={p.nombre} onChange={e=>upd(p.id,"nombre",e.target.value)}/></div><div><label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Hora</label><input type="time" className={inp} value={p.hora} onChange={e=>upd(p.id,"hora",e.target.value)}/></div></div></div></div>)}<button onClick={addMed} className="w-full py-2.5 rounded-xl border-2 border-dashed font-bold text-sm hover:bg-blue-50" style={{borderColor:"#0b315f",color:"#0b315f"}}>+ {esTP?"Paradero":"Parada intermedia"}</button>{fin&&<Card p={fin} lbl={esTP?"🔴 Último Paradero":"🔴 Destino"} col="#dc2626"/>}</div>);
+// ── CardParada: FUERA de ParadasBuilder para evitar pérdida de foco al escribir ──
+function CardParada({ p, lbl, col, onUpd }: {
+  p: ParadaTP; lbl: string; col: string;
+  onUpd: (id: string, k: keyof ParadaTP, v: string) => void;
+}) {
+  const inp = "w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#0b315f]";
+  return (
+    <div className="bg-white rounded-2xl border-2 overflow-hidden" style={{ borderColor: col }}>
+      <div className="px-4 py-2.5" style={{ background: col }}>
+        <span className="text-white font-black text-sm">{lbl}</span>
+      </div>
+      <div className="p-4 space-y-2">
+        <div>
+          <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Nombre *</label>
+          <input className={inp} value={p.nombre} onChange={e => onUpd(p.id, "nombre", e.target.value)} />
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <div>
+            <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Lat</label>
+            <input className={inp + " font-mono text-xs"} value={p.lat} onChange={e => onUpd(p.id, "lat", e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Lng</label>
+            <input className={inp + " font-mono text-xs"} value={p.lng} onChange={e => onUpd(p.id, "lng", e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Hora</label>
+            <input type="time" className={inp} value={p.hora} onChange={e => onUpd(p.id, "hora", e.target.value)} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ParadasBuilder({ paradas, onChange, tipo = "solo_ida" }: {
+  paradas: ParadaTP[]; onChange: (p: ParadaTP[]) => void; tipo?: string;
+}) {
+  const nId = () => Math.random().toString(36).slice(2, 8);
+  const upd = (id: string, k: keyof ParadaTP, v: string) =>
+    onChange(paradas.map(p => p.id === id ? { ...p, [k]: v } : p));
+  const inicio = paradas.find(p => p.tipo === "inicio");
+  const fin    = paradas.find(p => p.tipo === "destino");
+  const meds   = paradas.filter(p => p.tipo === "intermedia");
+  const addMed = () => {
+    const n: ParadaTP = { id: nId(), tipo: "intermedia", nombre: "", direccion: "", lat: "", lng: "", hora: "" };
+    const idx = paradas.findIndex(p => p.tipo === "destino");
+    const a = [...paradas]; a.splice(idx < 0 ? a.length : idx, 0, n); onChange(a);
+  };
+  const inp = "w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#0b315f]";
+  const esTP = tipo === "transporte_personal" || tipo === "fijo_multiparada";
+
+  if (paradas.length === 0) return (
+    <div className="rounded-2xl border-2 border-dashed p-8 text-center" style={{ borderColor: "#be185d" }}>
+      <p className="text-3xl mb-2">🚏</p>
+      <p className="font-bold text-gray-700 mb-3">{esTP ? "Define los paraderos" : "Define los puntos"}</p>
+      <button onClick={() => onChange([
+        { id: nId(), tipo: "inicio",  nombre: "", direccion: "", lat: "", lng: "", hora: "" },
+        { id: nId(), tipo: "destino", nombre: "", direccion: "", lat: "", lng: "", hora: "" },
+      ])} className="px-6 py-2.5 rounded-xl font-bold text-sm text-white" style={{ background: "#0b315f" }}>
+        🗺️ Definir puntos
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="space-y-3">
+      {inicio && <CardParada p={inicio} lbl={esTP ? "🟢 Primer Paradero" : "🟢 Inicio"} col="#16a34a" onUpd={upd} />}
+      {meds.map((p, i) => (
+        <div key={p.id} className="bg-white rounded-2xl border-2 overflow-hidden" style={{ borderColor: "#0b315f" }}>
+          <div className="px-4 py-2.5 flex items-center justify-between" style={{ background: "#0b315f" }}>
+            <span className="text-white font-black text-sm">📍 {esTP ? "Paradero" : "Parada"} {i + 1}</span>
+            <button onClick={() => onChange(paradas.filter(x => x.id !== p.id))} className="text-white opacity-60 hover:opacity-100 font-bold">✕</button>
+          </div>
+          <div className="p-4 space-y-2">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Nombre</label>
+                <input className={inp} value={p.nombre} onChange={e => upd(p.id, "nombre", e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Hora</label>
+                <input type="time" className={inp} value={p.hora} onChange={e => upd(p.id, "hora", e.target.value)} />
+              </div>
+            </div>
+          </div>
+        </div>
+      ))}
+      <button onClick={addMed} className="w-full py-2.5 rounded-xl border-2 border-dashed font-bold text-sm hover:bg-blue-50" style={{ borderColor: "#0b315f", color: "#0b315f" }}>
+        + {esTP ? "Paradero" : "Parada intermedia"}
+      </button>
+      {fin && <CardParada p={fin} lbl={esTP ? "🔴 Último Paradero" : "🔴 Destino"} col="#dc2626" onUpd={upd} />}
+    </div>
+  );
 }
 
 function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculo:VehiculoFlota|undefined,repr="JENNY ELYZABETH URBINA AFATA",consid:ConsidCot=DEFAULT_CONSID){
@@ -126,7 +211,12 @@ export default function CotizacionesPage(){
   const [diasCond,setDiasCond]=useState(1);const [peajesF,setPeajesF]=useState(0);const [pernocteF,setPernocteF]=useState(0);const [viaticosF,setViaticosF]=useState(0);const [reprNombre,setReprNombre]=useState("JENNY ELYZABETH URBINA AFATA");
 
   const f=(k:keyof typeof FORM0)=>(e:React.ChangeEvent<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>)=>setForm(p=>({...p,[k]:e.target.value}));
-  useEffect(()=>{supabase.auth.getUser().then(({data})=>{if(data?.user){const m=data.user.user_metadata;setReprNombre((m?.full_name||m?.name||data.user.email||"JENNY ELYZABETH URBINA AFATA").toUpperCase());}});},[]);
+  useEffect(()=>{
+    const cargarNombre=async(session:any)=>{if(!session?.user)return;const m=session.user.user_metadata;const fullName=(m?.full_name||m?.name||"").trim();if(fullName){setReprNombre(extraerNombreApellido(fullName));}};
+    const{data:{subscription}}=supabase.auth.onAuthStateChange(async(_event,session)=>{await cargarNombre(session);});
+    supabase.auth.getSession().then(({data:{session}})=>{cargarNombre(session);});
+    return()=>subscription.unsubscribe();
+  },[]);
 
   const cargar=async()=>{
     setLoading(true);
@@ -152,12 +242,13 @@ export default function CotizacionesPage(){
     const cl=clientes.find(c=>c.id===Number(form.cliente_id));if(cl?.estado==="bloqueado"){alert("Cliente bloqueado.");return;}
     if(items.some(it=>!it.descripcion.trim())){alert("Todos los items necesitan descripción");return;}
     setGuardando(true);
+    let nombreCreador=reprNombre||"";if(!nombreCreador){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreCreador=extraerNombreApellido(uRow.nombre);}}catch(e){}}
     const tarifaEnc=buscarTarifa();const kmNum=Number(form.km)||0;const esFijo=form.modo_servicio==="fijo";
     const vehParam=paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo);
     const costoCalc=vehParam?calcCostoVeh(vehParam,preciosDB,kmNum>0?kmNum:1,diasCond,peajesF,pernocteF,viaticosF):null;
     const precioDiaNum=esFijo?Number(form.precio_dia)||costoCalc?.diaEstIGV:null;
     const precioMesNum=esFijo&&precioDiaNum?precioDiaNum*26:null;
-    const payload:any={cliente_id:Number(form.cliente_id),origen:form.origen.trim(),destino:form.destino.trim(),km:kmNum,precio_cliente:esFijo?(precioDiaNum||total):total,costo_estimado:Number(form.costo_estimado||0),margen_estimado:esFijo?((precioDiaNum||0)-Number(form.costo_estimado||0)):(total-Number(form.costo_estimado||0)),estado:form.estado,numero_cotizacion:form.numero_cotizacion.trim()||null,atencion:form.atencion.trim()||null,asunto:form.asunto.trim()||null,punto_retorno:form.punto_retorno.trim()||null,fecha_servicio:form.fecha_servicio||null,hora_ida:form.hora_ida||null,hora_retorno:form.hora_retorno||null,descuento_pct:Number(form.descuento_pct||0),items_json:items,tipo_vehiculo:form.tipo_vehiculo||null,tipo_servicio:form.tipo_servicio||null,equipamiento:form.equipamiento||null,vehiculo_flota_id:form.vehiculo_flota_id?Number(form.vehiculo_flota_id):null,consideraciones_json:consid,paradas_json:paradas.length>0?paradas:null,modo_servicio:form.modo_servicio,dias_servicio:Number(form.dias_servicio)||1,horas_servicio:Number(form.horas_servicio)||8,pernocte_costo:pernocteF||null,precio_dia:precioDiaNum,precio_mes_estimado:precioMesNum,precio_tarifario:tarifaEnc?tarifaEnc.precio:null,precio_cotizador:esFijo?(costoCalc?.diaEstIGV||null):(costoCalc?.totalEst20||null),costo_cotizador:costoCalc?.baseCosto||null,margen_cotizador:20,vehiculo_cotizador:vehParam?.nombre||null,precio_sugerido:costoCalc?(esFijo?costoCalc.diaEstIGV:costoCalc.totalEst20):null,modo_precio:tarifaEnc?"tarifario":"cotizador"};
+    const payload:any={cliente_id:Number(form.cliente_id),origen:form.origen.trim(),destino:form.destino.trim(),km:kmNum,precio_cliente:esFijo?(precioDiaNum||total):total,costo_estimado:Number(form.costo_estimado||0),margen_estimado:esFijo?((precioDiaNum||0)-Number(form.costo_estimado||0)):(total-Number(form.costo_estimado||0)),estado:form.estado,numero_cotizacion:form.numero_cotizacion.trim()||null,atencion:form.atencion.trim()||null,asunto:form.asunto.trim()||null,punto_retorno:form.punto_retorno.trim()||null,fecha_servicio:form.fecha_servicio||null,hora_ida:form.hora_ida||null,hora_retorno:form.hora_retorno||null,descuento_pct:Number(form.descuento_pct||0),items_json:items,tipo_vehiculo:form.tipo_vehiculo||null,tipo_servicio:form.tipo_servicio||null,equipamiento:form.equipamiento||null,vehiculo_flota_id:form.vehiculo_flota_id?Number(form.vehiculo_flota_id):null,consideraciones_json:consid,paradas_json:paradas.length>0?paradas:null,modo_servicio:form.modo_servicio,dias_servicio:Number(form.dias_servicio)||1,horas_servicio:Number(form.horas_servicio)||8,pernocte_costo:pernocteF||null,precio_dia:precioDiaNum,precio_mes_estimado:precioMesNum,precio_tarifario:tarifaEnc?tarifaEnc.precio:null,precio_cotizador:esFijo?(costoCalc?.diaEstIGV||null):(costoCalc?.totalEst20||null),costo_cotizador:costoCalc?.baseCosto||null,margen_cotizador:20,vehiculo_cotizador:vehParam?.nombre||null,precio_sugerido:costoCalc?(esFijo?costoCalc.diaEstIGV:costoCalc.totalEst20):null,modo_precio:tarifaEnc?"tarifario":"cotizador",creado_por:nombreCreador||null};
     const{error}=editandoId?await supabase.from("cotizaciones").update(payload).eq("id",editandoId):await supabase.from("cotizaciones").insert(payload);
     if(error){alert(error.message);setGuardando(false);return;}
     if(guardarTar&&form.tipo_vehiculo&&form.tipo_servicio&&form.equipamiento&&subtotal>0){await supabase.from("tarifario").upsert({origen:form.origen.trim().toUpperCase(),destino:form.destino.trim().toUpperCase(),tipo_vehiculo:form.tipo_vehiculo,equipamiento:form.equipamiento,tipo_servicio:form.tipo_servicio,modo:form.modo_servicio,precio:esFijo?(precioDiaNum||subtotal)/1.18:subtotal,moneda:"PEN",confidencial:["full_day","multi_dia"].includes(form.tipo_servicio),incluye_guia:false,incluye_peajes:false,incluye_alimentacion:false,notas:`Cotización ${form.numero_cotizacion||""}`.trim(),activo:true},{onConflict:"origen,destino,tipo_vehiculo,equipamiento,tipo_servicio"});}
@@ -168,7 +259,13 @@ export default function CotizacionesPage(){
   const confirmarAprob=async(tipo:string,numero:string)=>{if(!modalAprob)return;await supabase.from("cotizaciones").update({estado:"aprobado",tipo_aprobacion:tipo,numero_aprobacion:numero}).eq("id",modalAprob.id);if(modalAprob.tipo_vehiculo&&modalAprob.tipo_servicio&&modalAprob.equipamiento){const esFijo=modalAprob.modo_servicio==="fijo";await supabase.from("tarifario").upsert({origen:modalAprob.origen.toUpperCase(),destino:modalAprob.destino.toUpperCase(),tipo_vehiculo:modalAprob.tipo_vehiculo,equipamiento:modalAprob.equipamiento,tipo_servicio:modalAprob.tipo_servicio,modo:modalAprob.modo_servicio||"eventual",precio:esFijo?(Number(modalAprob.precio_dia||0)/1.18):Math.round(Number(modalAprob.precio_cliente)/1.18*100)/100,moneda:"PEN",confidencial:false,incluye_guia:false,incluye_peajes:false,incluye_alimentacion:false,notas:`Aprobada #${modalAprob.numero_cotizacion||modalAprob.id}`,activo:true},{onConflict:"origen,destino,tipo_vehiculo,equipamiento,tipo_servicio"});}setModalAprob(null);cargar();};
   const convertirAReserva=async(cot:Cotizacion)=>{if(cot.estado!=="aprobado"){alert("Solo cotizaciones aprobadas");return;}const{data:existe}=await supabase.from("reservas").select("id").eq("cotizacion_id",cot.id).maybeSingle();if(existe){alert("Ya fue convertida en reserva");return;}const ps=cot.paradas_json||[];const pI=ps.find(p=>p.tipo==="inicio");const pD=ps.find(p=>p.tipo==="destino");const{data:r,error}=await supabase.from("reservas").insert({cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:pI?.nombre||cot.origen,destino:pD?.nombre||cot.destino,precio_cliente:cot.precio_cliente,costo_proveedor:0,fecha_servicio:cot.fecha_servicio||new Date().toISOString().split("T")[0],hora_servicio:pI?.hora||cot.hora_ida||"06:00",estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:cot.paradas_json||null}).select().single();if(error){alert(error.message);return;}if(ps.length>0&&r){await supabase.from("paradas").insert([...ps.filter(p=>p.tipo==="inicio"),...ps.filter(p=>p.tipo==="intermedia"),...ps.filter(p=>p.tipo==="destino")].map((p,i)=>({reserva_id:r.id,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));}alert(`✅ Reserva creada${ps.length>0?` con ${ps.length} paradas`:""}`);cargar();};
   const editarCot=(c:Cotizacion)=>{setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:c.estado||"pendiente",numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
-  const abrirPDF=(cot:Cotizacion)=>{const cl=clientes.find(c=>c.id===cot.cliente_id);const veh=flota.find(v=>v.id===cot.vehiculo_flota_id);const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];generarPDF(cot,cl,its,veh,reprNombre,cot.consideraciones_json||consid);};
+  const abrirPDF=async(cot:Cotizacion)=>{
+    const cl=clientes.find(c=>c.id===cot.cliente_id);const veh=flota.find(v=>v.id===cot.vehiculo_flota_id);
+    const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];
+    let nombreFinal=(cot as any).creado_por||"";
+    if(!nombreFinal){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreFinal=extraerNombreApellido(uRow.nombre);}}catch(e){}}
+    generarPDF(cot,cl,its,veh,nombreFinal||"JENNY ELYZABETH URBINA AFATA",cot.consideraciones_json||consid);
+  };
 
   const totC=cotizas.length;const pend=cotizas.filter(c=>c.estado==="pendiente").length;const env=cotizas.filter(c=>c.estado==="enviado").length;const apr=cotizas.filter(c=>c.estado==="aprobado").length;const tasa=totC>0?Math.round(apr/totC*100):0;const pendDesc=cotizas.filter(c=>c.descuento_solicitado&&!c.descuento_autorizado).length;
   const nomCl=(id:number|null)=>{const c=clientes.find(cl=>cl.id===id);return c?(c.nombre+(c.empresa&&c.empresa!==c.nombre?` (${c.empresa})`:"")):"Sin cliente";};
@@ -194,7 +291,6 @@ export default function CotizacionesPage(){
           <section className="bg-white rounded-2xl border shadow-sm p-6 space-y-5">
             <div className="flex items-center gap-3"><div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-lg" style={{background:"#0b315f"}}>{editandoId?"✏️":"📄"}</div><div><h2 className="text-lg font-bold">{editandoId?"Editar":"Nueva cotización"}</h2><p className="text-xs text-gray-400">{paramsDB.length} vehículos desde Supabase · Precio calculado en tiempo real</p></div></div>
 
-            {/* Modo */}
             <div className="grid grid-cols-2 gap-3">
               {[{id:"eventual",label:"📋 EVENTUAL",sub:"Precio total por evento",color:"#0b315f",bg:"#eef3f8"},{id:"fijo",label:"📅 FIJO",sub:"Precio por día · Contrato mensual",color:"#166534",bg:"#dcfce7"}].map(m=>(
                 <button key={m.id} onClick={()=>setForm(p=>({...p,modo_servicio:m.id as ModoServ,tipo_servicio:m.id==="eventual"?"solo_ida":"transporte_personal"}))} className="flex flex-col items-start px-4 py-3 rounded-xl border-2 transition-all text-left" style={{background:form.modo_servicio===m.id?m.bg:"white",borderColor:form.modo_servicio===m.id?m.color:"#e5e7eb",color:form.modo_servicio===m.id?m.color:"#9ca3af"}}>
@@ -203,7 +299,6 @@ export default function CotizacionesPage(){
               ))}
             </div>
 
-            {/* Identificación */}
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Identificación</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -215,28 +310,22 @@ export default function CotizacionesPage(){
               </div>
             </div>
 
-            {/* Tipo de servicio */}
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Tipo de servicio</p>
               {Object.entries(servsList.reduce((acc,s)=>{(acc[s.cat]||(acc[s.cat]=[])).push(s);return acc;},{} as Record<string,typeof servsList>)).map(([cat,servs])=>(
                 <div key={cat} className="mb-3"><p className="text-[10px] font-black text-gray-400 uppercase tracking-wider mb-1.5">{cat}</p>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2">{servs.map(s=>{const act=form.tipo_servicio===s.id;const color=esFijoForm?"#166534":"#0b315f";const bg=esFijoForm?"#dcfce7":"#eef3f8";return(<button key={s.id} onClick={()=>setForm(p=>({...p,tipo_servicio:s.id}))} className="flex items-center gap-1.5 px-3 py-2 rounded-xl border-2 transition-all text-left" style={{background:act?bg:"white",borderColor:act?color:"#e5e7eb",color:act?color:"#9ca3af"}}><span className="font-bold text-sm">{s.label}</span></button>);})}</div></div>
               ))}
-
-              {/* TIPO DE MOVILIDAD */}
               <p className="text-[10px] font-black text-gray-400 uppercase tracking-wider mt-3 mb-1.5">Tipo de movilidad</p>
               <div className="grid grid-cols-2 gap-2 mb-3">
                 {[{val:"full_equipo",label:"⭐ Full Equipo",sub:"AC, TV, USB, GPS",color:"#0b315f",bg:"#eef3f8"},{val:"basico",label:"📦 Básico",sub:"Estándar — cumple ley",color:"#4b5563",bg:"#f3f4f6"}].map(e=>{const act=form.equipamiento===e.val;return(<button key={e.val} onClick={()=>setForm(p=>({...p,equipamiento:e.val}))} className="flex items-center gap-2 px-3 py-2 rounded-xl border-2 transition-all" style={{background:act?e.bg:"white",borderColor:act?e.color:"#e5e7eb",color:act?e.color:"#9ca3af"}}><div><p className="font-bold text-xs">{e.label}</p><p className="text-[10px] opacity-70">{e.sub}</p></div></button>);})}
               </div>
-
-              {/* Vehículos de Supabase */}
               <p className="text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Vehículo ({paramsDB.length} disponibles)</p>
               <div className="space-y-2">
                 {Object.entries(gruposVeh).map(([grupo,vehs])=>{const gc=GRUPO_COLOR[grupo]||GRUPO_COLOR.Otros;return(<div key={grupo}><p className="text-[9px] font-black uppercase tracking-wider mb-1" style={{color:gc.color}}>{grupo}</p><div className="grid grid-cols-3 md:grid-cols-5 gap-1.5">{vehs.map(v=>{const act=form.tipo_vehiculo===v.tipo_vehiculo;return(<button key={v.tipo_vehiculo} onClick={()=>setForm(p=>({...p,tipo_vehiculo:v.tipo_vehiculo}))} className="flex flex-col items-center px-1 py-2 rounded-xl border-2 transition-all text-center" style={{background:act?gc.bg:"white",borderColor:act?gc.color:"#e5e7eb",color:act?gc.color:"#9ca3af"}}><span className="text-base">{v.icono||"🚌"}</span><span className="text-[8px] font-bold leading-tight">{v.nombre}</span>{v.usa_urea&&<span className="text-[7px] text-cyan-600 font-bold">🧪</span>}</button>);})}</div></div>);})}
               </div>
             </div>
 
-            {/* Unidad de flota */}
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Unidad de flota <span className="normal-case font-normal text-blue-500">→ fotos en PDF</span></p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -245,7 +334,6 @@ export default function CotizacionesPage(){
               </div>
             </div>
 
-            {/* Ruta */}
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Ruta del servicio</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -258,7 +346,6 @@ export default function CotizacionesPage(){
               </div>
             </div>
 
-            {/* Parámetros costing */}
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Parámetros de costing</p>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -271,10 +358,8 @@ export default function CotizacionesPage(){
               {esFijoForm&&<div className="mt-3 rounded-xl bg-green-50 border border-green-200 p-4 grid grid-cols-2 gap-4 items-end"><Campo label="Precio/día confirmado S/ (con IGV)"><input type="number" min={0} className={iCls("font-mono font-bold")} placeholder="0.00" value={form.precio_dia} onChange={f("precio_dia")}/></Campo>{form.precio_dia&&Number(form.precio_dia)>0&&<div className="rounded-xl bg-green-100 border border-green-300 px-4 py-3"><p className="text-[10px] font-bold text-green-700 uppercase">Estimado mensual (×26)</p><p className="font-black text-xl text-green-700">{fmtS(Number(form.precio_dia)*26)}</p></div>}</div>}
             </div>
 
-            {/* Calculador en vivo */}
             {form.tipo_vehiculo&&<SugerenciaEnVivo origen={form.origen} destino={form.destino} tipoVehId={form.tipo_vehiculo} tipoServ={form.tipo_servicio} equip={form.equipamiento} km={kmNum} dias={diasCond} peajes={peajesF} pernocte={pernocteF} viaticos={viaticosF} modoServ={form.modo_servicio} tarifas={tarifas} paramsDB={paramsDB} preciosDB={preciosDB} onAplicar={aplicarPrecio}/>}
 
-            {/* Items */}
             <div>
               <div className="flex items-center justify-between border-b pb-1 mb-3"><p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Items</p><button onClick={addItem} className="text-xs font-bold text-[#0b315f] hover:underline">+ Agregar</button></div>
               <div className="space-y-2">
@@ -283,7 +368,6 @@ export default function CotizacionesPage(){
               <div className="flex justify-end mt-4"><div className="w-72 space-y-1.5 bg-gray-50 rounded-xl p-4"><div className="flex justify-between text-sm"><span className="text-gray-500">Subtotal (sin IGV)</span><span className="font-bold">{fmtS(subtotal)}</span></div><div className="flex justify-between text-sm"><span className="text-gray-500">IGV 18%</span><span className="font-bold">{fmtS(igv)}</span></div><div className="flex justify-between text-base border-t pt-2" style={{borderColor:"#0b315f"}}><span className="font-black">{esFijoForm?"Total/día":"Total neto"}</span><span className="font-black" style={{color:"#0b315f"}}>{fmtS(total)}</span></div>{esFijoForm&&<div className="flex justify-between text-sm"><span className="text-gray-400">Mes est. (×26)</span><span className="font-black text-green-600">{fmtS(total*26)}</span></div>}{form.costo_estimado&&Number(form.costo_estimado)>0&&<div className="flex justify-between text-xs"><span className="text-gray-400">Margen</span><span className={`font-bold ${total-Number(form.costo_estimado)>=0?"text-green-600":"text-red-500"}`}>{fmtS(total-Number(form.costo_estimado))}</span></div>}</div></div>
             </div>
 
-            {/* Consideraciones */}
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Consideraciones <span className="normal-case font-normal text-blue-500">→ aparecen en el PDF</span></p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -298,7 +382,6 @@ export default function CotizacionesPage(){
               </div>
             </div>
 
-            {/* Paradas */}
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">{esFijoForm?"🚏 Paraderos":"📍 Puntos del recorrido"}</p>
               <ParadasBuilder paradas={paradas} onChange={setParadas} tipo={form.tipo_servicio}/>

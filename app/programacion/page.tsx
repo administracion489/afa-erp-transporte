@@ -2,8 +2,8 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
-
-// ─── TIPOS ────────────────────────────────────────────────────────────────────
+import ModalManifiesto from "@/components/programacion/ModalManifiesto";
+import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
 
 type ParadaTP = {
   id: string; tipo: "inicio" | "intermedia" | "destino";
@@ -32,9 +32,19 @@ type Reserva = {
   vehiculo_tercero_id: number | null;
   paradas_json: any[] | null;
   tipo_servicio_detalle: string | null;
+  sincronizado_app?: boolean;
+  fecha_sincronizacion?: string | null;
 };
 
-// ─── CONSTANTES ───────────────────────────────────────────────────────────────
+type Ocupacion = {
+  reserva_id: number;
+  capacidad: number | null;
+  total_pasajeros: number;
+  abordados: number;
+  pendientes: number;
+  sobrecupo: boolean;
+  ocupacion_pct: number | null;
+};
 
 const ESTADO_CFG: Record<EstadoReserva, { label: string; bg: string; color: string; dot: string }> = {
   pendiente:  { label: "Pendiente",  bg: "#fef9c3", color: "#854d0e", dot: "#eab308" },
@@ -46,10 +56,10 @@ const ESTADO_CFG: Record<EstadoReserva, { label: string; bg: string; color: stri
 };
 
 const FLUJO_ESTADO: Record<EstadoReserva, string> = {
-  pendiente:  "Sin asignación",
+  pendiente:  "Sin asignacion",
   programada: "Asignado",
-  confirmada: "Cliente confirmó",
-  en_curso:   "En ejecución",
+  confirmada: "Cliente confirmo",
+  en_curso:   "En ejecucion",
   finalizada: "Completado",
   cancelada:  "Cancelado",
 };
@@ -64,20 +74,28 @@ const FORM_VACIO = {
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
-function fmtSoles(n: number) {
-  return `S/ ${n.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+function esEventual(r: Reserva): boolean {
+  return r.tipo_servicio_detalle !== "transporte_personal";
 }
+
+function fmtSoles(n: number) {
+  return "S/ " + n.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 function fmtFecha(f: string | null) {
-  if (!f) return "—";
+  if (!f) return "-";
   return new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
+
 function diasPara(f: string | null): number | null {
   if (!f) return null;
   return Math.ceil((new Date(f + "T00:00:00").getTime() - Date.now()) / 86400000);
 }
+
 function inputCls(extra = "") {
-  return `w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all ${extra}`;
+  return "w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all " + extra;
 }
+
 function Campo({ label, span, children }: { label: string; span?: number; children: React.ReactNode }) {
   return (
     <div className={span === 2 ? "md:col-span-2" : span === 3 ? "md:col-span-3" : ""}>
@@ -87,9 +105,8 @@ function Campo({ label, span, children }: { label: string; span?: number; childr
   );
 }
 
-// Verificar si empresa tercerizada tiene docs obligatorios vencidos
 function riesgoEmpresa(docs: DocumentoTercero[], empresaId: number): "alto" | "ok" {
-  const OBLIGATORIOS = ["SOAT", "Revisión Técnica (CITV)", "Habilitación SUTRAN", "Permiso Operación MTC"];
+  const OBLIGATORIOS = ["SOAT", "Revision Tecnica (CITV)", "Habilitacion SUTRAN", "Permiso Operacion MTC"];
   const docsEmp = docs.filter(d => d.empresa_id === empresaId);
   const vencidos = docsEmp.filter(d => OBLIGATORIOS.includes(d.tipo) && diasPara(d.fecha_vencimiento || null) !== null && diasPara(d.fecha_vencimiento || null)! < 0);
   return vencidos.length > 0 ? "alto" : "ok";
@@ -106,6 +123,7 @@ export default function ReservasPage() {
   const [condTercero,  setCondTercero]  = useState<ConductorTercero[]>([]);
   const [docsTercero,  setDocsTercero]  = useState<DocumentoTercero[]>([]);
   const [reservas,     setReservas]     = useState<Reserva[]>([]);
+  const [ocupacionMap, setOcupacionMap] = useState<Record<number, Ocupacion>>({});
   const [loading,      setLoading]      = useState(false);
   const [guardando,    setGuardando]    = useState(false);
   const [paradasMap,   setParadasMap]   = useState<Record<number, any[]>>({});
@@ -121,11 +139,20 @@ export default function ReservasPage() {
   const [busqueda,     setBusqueda]     = useState("");
   const [filtroEstado, setFiltroEstado] = useState("todos");
   const [filtroTipo,   setFiltroTipo]   = useState("todos");
+  const [filtroServicio, setFiltroServicio] = useState<"todos" | "fijo" | "eventual">("todos");
   const [form, setForm] = useState(FORM_VACIO);
+  const [modalReservaId, setModalReservaId] = useState<number | null>(null);
 
   const f = (k: keyof typeof FORM_VACIO) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
       setForm(p => ({ ...p, [k]: e.target.value }));
+
+  const cargarOcupaciones = async () => {
+    const { data } = await supabase.from("reservas_ocupacion").select("*");
+    const map: Record<number, Ocupacion> = {};
+    (data || []).forEach((o: any) => { map[o.reserva_id] = o; });
+    setOcupacionMap(map);
+  };
 
   const cargarPasajerosAsignados = async (reservaId: number, paradaId?: number) => {
     const paradas = paradasMap[reservaId] || [];
@@ -144,19 +171,20 @@ export default function ReservasPage() {
     await supabase.from("pasajeros_parada").delete().eq("parada_id", paradaId);
     if (seleccionados.length > 0) {
       await supabase.from("pasajeros_parada").insert(
-        seleccionados.map(pid => ({ parada_id: paradaId, pasajero_id: pid, estado: "esperando" }))
+        seleccionados.map(pid => ({ parada_id: paradaId, pasajero_id: pid, estado_abordaje: "Pendiente" }))
       );
     }
     setGuardandoPas(prev => ({ ...prev, [reservaId]: false }));
     await cargarPasajerosAsignados(reservaId, paradaId);
-    alert(`✅ ${seleccionados.length} pasajeros asignados`);
+    await cargarOcupaciones();
+    alert(seleccionados.length + " pasajeros asignados");
   };
 
   const crearParadasDesdeJSON = async (reservaId: number, paradasJSON: any[]) => {
     if (!paradasJSON || paradasJSON.length === 0) return;
     const { data: ex } = await supabase.from("paradas").select("id").eq("reserva_id", reservaId);
     if (ex && ex.length > 0) {
-      if (!confirm("Ya tiene paradas. ¿Reemplazarlas?")) return;
+      if (!confirm("Ya tiene paradas. Reemplazarlas?")) return;
       await supabase.from("paradas").delete().eq("reserva_id", reservaId);
     }
     const todas = [...paradasJSON.filter((p: any) => p.tipo === "inicio"), ...paradasJSON.filter((p: any) => p.tipo === "intermedia"), ...paradasJSON.filter((p: any) => p.tipo === "destino")];
@@ -167,7 +195,23 @@ export default function ReservasPage() {
     })));
     const { data: nuevas } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
     setParadasMap(prev => ({ ...prev, [reservaId]: nuevas || [] }));
-    alert(`✅ ${todas.length} paradas creadas correctamente`);
+    alert(todas.length + " paradas creadas correctamente");
+  };
+
+  const cargarParadasReserva = async (reservaId: number) => {
+    setCargandoPar(prev => ({ ...prev, [reservaId]: true }));
+    const { data } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
+    setParadasMap(prev => ({ ...prev, [reservaId]: data || [] }));
+    setCargandoPar(prev => ({ ...prev, [reservaId]: false }));
+  };
+
+  const cargarPasajerosCliente = async (reservaId: number, clienteId: number | null) => {
+    if (!clienteId) { setPasajerosCliente(prev => ({ ...prev, [reservaId]: [] })); return; }
+    setCargandoPas(prev => ({ ...prev, [reservaId]: true }));
+    const { data } = await supabase.from("pasajeros").select("*").eq("cliente_id", clienteId).order("nombre");
+    setPasajerosCliente(prev => ({ ...prev, [reservaId]: data || [] }));
+    setCargandoPas(prev => ({ ...prev, [reservaId]: false }));
+    await cargarPasajerosAsignados(reservaId);
   };
 
   const cargarDatos = async () => {
@@ -190,47 +234,41 @@ export default function ReservasPage() {
     setCondTercero(ctRes.data  || []);
     setDocsTercero(dtRes.data  || []);
     setReservas(rRes.data      || []);
+    await cargarOcupaciones();
     setLoading(false);
   };
 
   useEffect(() => { cargarDatos(); }, []);
 
-  // ── Helpers de nombre ─────────────────────────────────────────────────────
-
   const nombreCliente    = (id: number | null) => { const c = clientes.find(c => c.id === id); return c ? (c.empresa || c.nombre) : "Sin cliente"; };
-  const nombreVehiculo   = (id: number | null) => vehiculos.find(v => v.id === id)?.placa || "—";
-  const nombreConductor  = (id: number | null) => conductores.find(c => c.id === id)?.nombre || "—";
-  const nombreEmpTer     = (id: number | null) => empresasTer.find(e => e.id === id)?.razon_social || "—";
-  const nombreVehTercero = (id: number | null) => vehTercero.find(v => v.id === id)?.placa || "—";
+  const nombreVehiculo   = (id: number | null) => vehiculos.find(v => v.id === id)?.placa || "-";
+  const nombreConductor  = (id: number | null) => conductores.find(c => c.id === id)?.nombre || "-";
+  const nombreEmpTer     = (id: number | null) => empresasTer.find(e => e.id === id)?.razon_social || "-";
+  const nombreVehTercero = (id: number | null) => vehTercero.find(v => v.id === id)?.placa || "-";
 
-  // ── Filtros asignación ─────────────────────────────────────────────────────
+  const vehiculosAptos         = vehiculos.filter(v => v.estado === "disponible" && (v.estado_operativo === "apto" || !v.estado_operativo));
+  const conductoresDisponibles = conductores.filter(c => c.estado !== "no_disponible" && (!c.vencimiento_licencia || new Date(c.vencimiento_licencia) >= new Date()));
 
-  const vehiculosAptos        = vehiculos.filter(v => v.estado === "disponible" && (v.estado_operativo === "apto" || !v.estado_operativo));
-  const conductoresDisponibles= conductores.filter(c => c.estado !== "no_disponible" && (!c.vencimiento_licencia || new Date(c.vencimiento_licencia) >= new Date()));
-
-  // Empresa seleccionada en el form
-  const empSelId      = form.empresa_tercerizada_id ? Number(form.empresa_tercerizada_id) : null;
-  const vehEmpSel     = empSelId ? vehTercero.filter(v => v.empresa_id === empSelId && v.estado === "disponible") : [];
-  const condEmpSel    = empSelId ? condTercero.filter(c => c.empresa_id === empSelId) : [];
-  const riesgoEmpSel  = empSelId ? riesgoEmpresa(docsTercero, empSelId) : "ok";
-
-  // ── CRUD ──────────────────────────────────────────────────────────────────
+  const empSelId     = form.empresa_tercerizada_id ? Number(form.empresa_tercerizada_id) : null;
+  const vehEmpSel    = empSelId ? vehTercero.filter(v => v.empresa_id === empSelId && v.estado === "disponible") : [];
+  const condEmpSel   = empSelId ? condTercero.filter(c => c.empresa_id === empSelId) : [];
+  const riesgoEmpSel = empSelId ? riesgoEmpresa(docsTercero, empSelId) : "ok";
 
   const limpiar = () => { setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); };
 
   const editarReserva = (r: Reserva) => {
     setForm({
-      fecha_servicio:        r.fecha_servicio          || "",
-      hora_servicio:         r.hora_servicio?.slice(0,5) || "",
-      tipo_asignacion:       r.tipo_asignacion          || "propio",
-      estado:                r.estado                   || "pendiente",
-      vehiculo_id:           r.vehiculo_id              ? String(r.vehiculo_id)              : "",
-      conductor_id:          r.conductor_id             ? String(r.conductor_id)             : "",
-      empresa_tercerizada_id:r.empresa_tercerizada_id   ? String(r.empresa_tercerizada_id)   : "",
-      vehiculo_tercero_id:   r.vehiculo_tercero_id      ? String(r.vehiculo_tercero_id)      : "",
-      conductor_tercero_id:  "",
-      costo_proveedor:       r.costo_proveedor          ? String(r.costo_proveedor)          : "",
-      observaciones:         r.observaciones            || "",
+      fecha_servicio:         r.fecha_servicio            || "",
+      hora_servicio:          r.hora_servicio?.slice(0,5) || "",
+      tipo_asignacion:        r.tipo_asignacion            || "propio",
+      estado:                 r.estado                    || "pendiente",
+      vehiculo_id:            r.vehiculo_id               ? String(r.vehiculo_id)               : "",
+      conductor_id:           r.conductor_id              ? String(r.conductor_id)              : "",
+      empresa_tercerizada_id: r.empresa_tercerizada_id    ? String(r.empresa_tercerizada_id)    : "",
+      vehiculo_tercero_id:    r.vehiculo_tercero_id       ? String(r.vehiculo_tercero_id)       : "",
+      conductor_tercero_id:   "",
+      costo_proveedor:        r.costo_proveedor           ? String(r.costo_proveedor)           : "",
+      observaciones:          r.observaciones             || "",
     });
     setEditandoId(r.id); setMostrarForm(true);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
@@ -240,15 +278,13 @@ export default function ReservasPage() {
     if (!editandoId) return;
     if (!form.fecha_servicio || !form.hora_servicio) { alert("Ingresa fecha y hora"); return; }
     if (form.tipo_asignacion === "propio" && (!form.vehiculo_id || !form.conductor_id)) {
-      alert("Selecciona vehículo y conductor propios"); return;
+      alert("Selecciona vehiculo y conductor propios"); return;
     }
     if (form.tipo_asignacion === "tercerizado" && !form.empresa_tercerizada_id) {
       alert("Selecciona la empresa tercerizada"); return;
     }
-
-    // Alerta si la empresa tiene docs vencidos
     if (form.tipo_asignacion === "tercerizado" && riesgoEmpSel === "alto") {
-      const ok = confirm("⚠️ ALERTA: Esta empresa tiene documentos OBLIGATORIOS vencidos. Asignarla puede exponerte a multas y perjudicar al cliente. ¿Continuar de todas formas?");
+      const ok = confirm("ALERTA: Esta empresa tiene documentos OBLIGATORIOS vencidos. Continuar de todas formas?");
       if (!ok) return;
     }
 
@@ -269,10 +305,8 @@ export default function ReservasPage() {
       tipo:                   form.tipo_asignacion === "propio" ? "propia" : "tercerizada",
       tipo_asignacion:        form.tipo_asignacion,
       estado:                 nuevoEstado,
-      // Flota propia
       vehiculo_id:            form.tipo_asignacion === "propio" ? Number(form.vehiculo_id) : null,
       conductor_id:           form.tipo_asignacion === "propio" ? Number(form.conductor_id) : null,
-      // Tercerizado
       empresa_tercerizada_id: form.tipo_asignacion === "tercerizado" ? Number(form.empresa_tercerizada_id) : null,
       vehiculo_tercero_id:    form.tipo_asignacion === "tercerizado" && form.vehiculo_tercero_id ? Number(form.vehiculo_tercero_id) : null,
       costo_proveedor:        costo,
@@ -284,7 +318,7 @@ export default function ReservasPage() {
   };
 
   const eliminarReserva = async (id: number) => {
-    if (!confirm("¿Eliminar esta reserva?")) return;
+    if (!confirm("Eliminar esta reserva?")) return;
     await supabase.from("reservas").delete().eq("id", id);
     cargarDatos();
   };
@@ -294,7 +328,10 @@ export default function ReservasPage() {
     setReservas(prev => prev.map(r => r.id === id ? { ...r, estado } : r));
   };
 
-  // ── KPIs ──────────────────────────────────────────────────────────────────
+  const capacidadDe = (r: Reserva): number | null => {
+    if (r.tipo === "tercerizada") return vehTercero.find(v => v.id === r.vehiculo_tercero_id)?.capacidad ?? null;
+    return vehiculos.find(v => v.id === r.vehiculo_id)?.capacidad_pasajeros ?? null;
+  };
 
   const hoy          = new Date().toISOString().split("T")[0];
   const totalRes     = reservas.length;
@@ -302,39 +339,56 @@ export default function ReservasPage() {
   const programadas  = reservas.filter(r => r.estado === "programada").length;
   const confirmadas  = reservas.filter(r => r.estado === "confirmada").length;
   const enCurso      = reservas.filter(r => r.estado === "en_curso").length;
-  const tercerizadas = reservas.filter(r => r.tipo === "tercerizada").length;
   const hoyCount     = reservas.filter(r => r.fecha_servicio === hoy).length;
   const ventas       = reservas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
   const costos       = reservas.reduce((s, r) => s + Number(r.costo_proveedor || 0), 0);
   const margenTotal  = reservas.reduce((s, r) => s + Number(r.margen || 0), 0);
-
-  // ── Filtrado ──────────────────────────────────────────────────────────────
+  const conSobrecupo = Object.values(ocupacionMap).filter(o => o.sobrecupo).length;
+  const sincronizadas = reservas.filter(r => r.sincronizado_app).length;
 
   const filtradas = useMemo(() => reservas.filter(r => {
     const q   = busqueda.toLowerCase();
-    const txt = `${r.id} ${nombreCliente(r.cliente_id)} ${r.origen || ""} ${r.destino || ""}`.toLowerCase();
+    const txt = (r.id + " " + nombreCliente(r.cliente_id) + " " + ((r as any).origen || "") + " " + ((r as any).destino || "")).toLowerCase();
     return txt.includes(q) &&
       (filtroEstado === "todos" || r.estado === filtroEstado) &&
-      (filtroTipo   === "todos" || r.tipo   === filtroTipo);
-  }), [reservas, busqueda, filtroEstado, filtroTipo, clientes]);
+      (filtroTipo === "todos" || r.tipo === filtroTipo) &&
+      (filtroServicio === "todos" || (filtroServicio === "fijo" ? !esEventual(r) : esEventual(r)));
+  }), [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, clientes]);
 
-  // ─── RENDER ───────────────────────────────────────────────────────────────
+  const reservaModal = modalReservaId ? reservas.find(r => r.id === modalReservaId) : null;
 
   return (
     <main className="p-6 space-y-5 max-w-7xl mx-auto">
+
+      {reservaModal && (
+        <ModalManifiesto
+          reservaId={reservaModal.id}
+          clienteId={reservaModal.cliente_id}
+          capacidad={capacidadDe(reservaModal)}
+          sincronizadoApp={!!reservaModal.sincronizado_app}
+          fechaSincronizacion={reservaModal.fecha_sincronizacion || null}
+          onClose={() => setModalReservaId(null)}
+          onChange={async () => {
+            await cargarOcupaciones();
+            const { data } = await supabase.from("reservas").select("sincronizado_app, fecha_sincronizacion").eq("id", reservaModal.id).single();
+            if (data) setReservas(prev => prev.map(r => r.id === reservaModal.id ? { ...r, ...data } : r));
+          }}
+        />
+      )}
 
       {/* ENCABEZADO */}
       <div className="flex items-start justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Reservas</h1>
           <p className="text-gray-400 text-sm mt-1">
-            Programación de servicios · flota propia o empresa tercerizada
-            {hoyCount > 0 && <span className="ml-2 font-bold text-[#0b315f]">· 🚌 {hoyCount} servicio{hoyCount > 1 ? "s" : ""} hoy</span>}
+            Programacion de servicios · flota propia o empresa tercerizada
+            {hoyCount > 0 && <span className="ml-2 font-bold text-[#0b315f]">· {hoyCount} servicio(s) hoy</span>}
+            {conSobrecupo > 0 && <span className="ml-2 font-bold text-red-600">· {conSobrecupo} con sobrecupo</span>}
           </p>
         </div>
         {editandoId && (
           <button onClick={limpiar} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
-            ✕ Cancelar edición
+            Cancelar edicion
           </button>
         )}
       </div>
@@ -349,15 +403,14 @@ export default function ReservasPage() {
             return (
               <React.Fragment key={est}>
                 <div className="flex flex-col items-center">
-                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold"
-                    style={{ background: cfg.bg, color: cfg.color }}>
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold" style={{ background: cfg.bg, color: cfg.color }}>
                     <div className="w-2 h-2 rounded-full" style={{ background: cfg.dot }} />
                     {cfg.label}
                     {count > 0 && <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-black text-white" style={{ background: cfg.dot }}>{count}</span>}
                   </div>
                   <p className="text-[9px] text-gray-400 mt-1 text-center max-w-[80px]">{desc}</p>
                 </div>
-                {i < arr.length - 1 && <span className="text-gray-300 text-lg mb-4">→</span>}
+                {i < arr.length - 1 && <span className="text-gray-300 text-lg mb-4">-</span>}
               </React.Fragment>
             );
           })}
@@ -367,13 +420,13 @@ export default function ReservasPage() {
       {/* KPIs */}
       <section className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
         {[
-          { label: "Total",        valor: totalRes,    color: "#0b315f", bg: "#eef3f8" },
-          { label: "Pendientes",   valor: pendientes,  color: "#854d0e", bg: "#fef9c3" },
-          { label: "Programadas",  valor: programadas, color: "#0369a1", bg: "#e0f2fe" },
-          { label: "Confirmadas",  valor: confirmadas, color: "#166534", bg: "#dcfce7" },
-          { label: "En curso",     valor: enCurso,     color: "#1d4ed8", bg: "#dbeafe" },
-          { label: "Tercerizadas", valor: tercerizadas,color: "#6d28d9", bg: "#ede9fe" },
-          { label: "Hoy",          valor: hoyCount,    color: "#0f766e", bg: "#f0fdfa" },
+          { label: "Total",         valor: totalRes,     color: "#0b315f", bg: "#eef3f8" },
+          { label: "Pendientes",    valor: pendientes,   color: "#854d0e", bg: "#fef9c3" },
+          { label: "Programadas",   valor: programadas,  color: "#0369a1", bg: "#e0f2fe" },
+          { label: "Confirmadas",   valor: confirmadas,  color: "#166534", bg: "#dcfce7" },
+          { label: "En curso",      valor: enCurso,      color: "#1d4ed8", bg: "#dbeafe" },
+          { label: "Sincronizadas", valor: sincronizadas,color: "#0f766e", bg: "#f0fdfa" },
+          { label: "Sobrecupo",     valor: conSobrecupo, color: "#991b1b", bg: "#fee2e2" },
         ].map(k => (
           <div key={k.label} className="rounded-xl p-3 border" style={{ background: k.bg, borderColor: k.color + "22" }}>
             <p className="text-[10px] font-bold uppercase tracking-wide" style={{ color: k.color + "99" }}>{k.label}</p>
@@ -396,25 +449,23 @@ export default function ReservasPage() {
         ))}
       </section>
 
-      {/* FORMULARIO PROGRAMACIÓN */}
+      {/* FORMULARIO PROGRAMACION */}
       {mostrarForm && editandoId && (
         <section className="bg-white rounded-2xl border shadow-sm p-6 space-y-5">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-lg" style={{ background: "#0b315f" }}>🗓️</div>
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-lg" style={{ background: "#0b315f" }}>P</div>
             <div>
               <h2 className="text-lg font-bold text-gray-900">Programar reserva #{editandoId}</h2>
               <p className="text-xs text-gray-400">
-                {(() => { const r = reservas.find(r => r.id === editandoId); return r ? `${(r as any).origen || ""} → ${(r as any).destino || ""} · ${fmtSoles(Number(r.precio_cliente || 0))}` : ""; })()}
+                {(() => { const r = reservas.find(r => r.id === editandoId); return r ? ((r as any).origen || "") + " -> " + ((r as any).destino || "") + " · " + fmtSoles(Number(r.precio_cliente || 0)) : ""; })()}
               </p>
             </div>
           </div>
 
-          {/* Nota */}
           <div className="rounded-xl px-4 py-3 text-xs" style={{ background: "#e0f2fe", color: "#0369a1" }}>
-            💡 Al asignar recursos el estado pasará automáticamente a <b>Programada</b>. Para <b>tercerizado</b> el sistema verificará que la empresa no tenga documentos vencidos.
+            Al asignar recursos el estado pasara automaticamente a Programada. Para tercerizado el sistema verificara que la empresa no tenga documentos vencidos.
           </div>
 
-          {/* Fecha / hora / tipo */}
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Datos del servicio</p>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -424,11 +475,10 @@ export default function ReservasPage() {
               <Campo label="Hora *">
                 <input type="time" className={inputCls()} value={form.hora_servicio} onChange={f("hora_servicio")} />
               </Campo>
-              <Campo label="Tipo de asignación">
-                <select className={inputCls()} value={form.tipo_asignacion}
-                  onChange={e => setForm(p => ({ ...p, tipo_asignacion: e.target.value, vehiculo_id: "", conductor_id: "", empresa_tercerizada_id: "", vehiculo_tercero_id: "", conductor_tercero_id: "", costo_proveedor: "" }))}>
-                  <option value="propio">🚌 Flota propia</option>
-                  <option value="tercerizado">🤝 Empresa tercerizada</option>
+              <Campo label="Tipo de asignacion">
+                <select className={inputCls()} value={form.tipo_asignacion} onChange={e => setForm(p => ({ ...p, tipo_asignacion: e.target.value, vehiculo_id: "", conductor_id: "", empresa_tercerizada_id: "", vehiculo_tercero_id: "", conductor_tercero_id: "", costo_proveedor: "" }))}>
+                  <option value="propio">Flota propia</option>
+                  <option value="tercerizado">Empresa tercerizada</option>
                 </select>
               </Campo>
               <Campo label="Estado">
@@ -444,29 +494,26 @@ export default function ReservasPage() {
             </div>
           </div>
 
-          {/* Asignación */}
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">
-              {form.tipo_asignacion === "propio" ? "Asignación de flota propia" : "Empresa tercerizada"}
+              {form.tipo_asignacion === "propio" ? "Asignacion de flota propia" : "Empresa tercerizada"}
             </p>
 
             {form.tipo_asignacion === "propio" ? (
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <Campo label={`Vehículo (${vehiculosAptos.length} aptos) *`}>
+                <Campo label={"Vehiculo (" + vehiculosAptos.length + " aptos) *"}>
                   <select className={inputCls()} value={form.vehiculo_id} onChange={f("vehiculo_id")}>
-                    <option value="">Seleccionar vehículo</option>
+                    <option value="">Seleccionar vehiculo</option>
                     {vehiculosAptos.map(v => (
-                      <option key={v.id} value={v.id}>
-                        {v.placa} · {v.categoria}{v.capacidad_pasajeros ? ` · ${v.capacidad_pasajeros} pax` : ""}
-                      </option>
+                      <option key={v.id} value={v.id}>{v.placa} · {v.categoria}{v.capacidad_pasajeros ? " · " + v.capacidad_pasajeros + " pax" : ""}</option>
                     ))}
                   </select>
                 </Campo>
-                <Campo label={`Conductor (${conductoresDisponibles.length} disponibles) *`}>
+                <Campo label={"Conductor (" + conductoresDisponibles.length + " disponibles) *"}>
                   <select className={inputCls()} value={form.conductor_id} onChange={f("conductor_id")}>
                     <option value="">Seleccionar conductor</option>
                     {conductoresDisponibles.map(c => (
-                      <option key={c.id} value={c.id}>{c.nombre}{c.licencia ? ` · ${c.licencia}` : ""}</option>
+                      <option key={c.id} value={c.id}>{c.nombre}{c.licencia ? " · " + c.licencia : ""}</option>
                     ))}
                   </select>
                 </Campo>
@@ -476,64 +523,50 @@ export default function ReservasPage() {
               </div>
             ) : (
               <div className="space-y-4">
-                {/* Selector empresa */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <Campo label="Empresa tercerizada *" span={2}>
                     <select className={inputCls()} value={form.empresa_tercerizada_id} onChange={f("empresa_tercerizada_id")}>
                       <option value="">Seleccionar empresa</option>
                       {empresasTer.filter(e => e.estado === "activo").map(e => (
                         <option key={e.id} value={e.id}>
-                          {riesgoEmpresa(docsTercero, e.id) === "alto" ? "🚨 " : ""}
-                          {e.razon_social}{e.ruc ? ` · RUC ${e.ruc}` : ""}
+                          {riesgoEmpresa(docsTercero, e.id) === "alto" ? "ALERTA " : ""}
+                          {e.razon_social}{e.ruc ? " · RUC " + e.ruc : ""}
                         </option>
                       ))}
                     </select>
                   </Campo>
                   <Campo label="Costo S/ *">
-                    <input type="number" min="0" className={inputCls()} placeholder="0.00"
-                      value={form.costo_proveedor} onChange={f("costo_proveedor")} />
+                    <input type="number" min="0" className={inputCls()} placeholder="0.00" value={form.costo_proveedor} onChange={f("costo_proveedor")} />
                     {form.costo_proveedor && (() => {
                       const r = reservas.find(r => r.id === editandoId);
                       const margen = Number(r?.precio_cliente || 0) - Number(form.costo_proveedor);
-                      return (
-                        <p className="text-[10px] mt-1 font-bold" style={{ color: margen >= 0 ? "#166534" : "#dc2626" }}>
-                          Margen: {fmtSoles(margen)}
-                        </p>
-                      );
+                      return <p className="text-[10px] mt-1 font-bold" style={{ color: margen >= 0 ? "#166534" : "#dc2626" }}>Margen: {fmtSoles(margen)}</p>;
                     })()}
                   </Campo>
                 </div>
 
-                {/* Alerta riesgo empresa */}
                 {empSelId && riesgoEmpSel === "alto" && (
                   <div className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-800">
-                    🚨 <b>ATENCIÓN:</b> Esta empresa tiene documentos obligatorios vencidos. Al asignarla expones al cliente y a AFA a multas. Revisar módulo de Tercerizadas antes de confirmar.
+                    ATENCION: Esta empresa tiene documentos obligatorios vencidos. Revisar modulo de Tercerizadas antes de confirmar.
                   </div>
                 )}
 
-                {/* Vehículo y conductor del tercero */}
                 {empSelId && (
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <Campo label={`Vehículo del tercero (${vehEmpSel.length} disponibles)`}>
+                    <Campo label={"Vehiculo del tercero (" + vehEmpSel.length + " disponibles)"}>
                       <select className={inputCls()} value={form.vehiculo_tercero_id} onChange={f("vehiculo_tercero_id")}>
                         <option value="">Sin especificar</option>
                         {vehEmpSel.map(v => (
-                          <option key={v.id} value={v.id}>
-                            {v.placa} · {v.categoria}{v.capacidad ? ` · ${v.capacidad} pax` : ""}
-                          </option>
+                          <option key={v.id} value={v.id}>{v.placa} · {v.categoria}{v.capacidad ? " · " + v.capacidad + " pax" : ""}</option>
                         ))}
                       </select>
                     </Campo>
-                    <Campo label={`Conductor del tercero (${condEmpSel.length})`}>
+                    <Campo label={"Conductor del tercero (" + condEmpSel.length + ")"}>
                       <select className={inputCls()} value={form.conductor_tercero_id} onChange={f("conductor_tercero_id")}>
                         <option value="">Sin especificar</option>
                         {condEmpSel.map(c => {
                           const licOk = !c.vencimiento_licencia || diasPara(c.vencimiento_licencia)! >= 0;
-                          return (
-                            <option key={c.id} value={c.id}>
-                              {!licOk ? "⚠️ " : ""}{c.nombre}{c.licencia ? ` · ${c.licencia}` : ""}
-                            </option>
-                          );
+                          return <option key={c.id} value={c.id}>{!licOk ? "VENC. " : ""}{c.nombre}{c.licencia ? " · " + c.licencia : ""}</option>;
                         })}
                       </select>
                     </Campo>
@@ -543,7 +576,6 @@ export default function ReservasPage() {
                   </div>
                 )}
 
-                {/* Info empresa seleccionada */}
                 {empSelId && (() => {
                   const emp = empresasTer.find(e => e.id === empSelId);
                   if (!emp) return null;
@@ -551,7 +583,7 @@ export default function ReservasPage() {
                     <div className="rounded-xl px-4 py-3 text-xs bg-gray-50 flex gap-6 flex-wrap">
                       <div><span className="text-gray-400">Empresa:</span> <b>{emp.razon_social}</b></div>
                       {emp.telefono && <div><span className="text-gray-400">Tel:</span> {emp.telefono}</div>}
-                      <div><span className="text-gray-400">Flota disponible:</span> <b>{vehEmpSel.length} vehículos</b></div>
+                      <div><span className="text-gray-400">Flota disponible:</span> <b>{vehEmpSel.length} vehiculos</b></div>
                       <div><span className="text-gray-400">Conductores:</span> <b>{condEmpSel.length}</b></div>
                     </div>
                   );
@@ -561,10 +593,8 @@ export default function ReservasPage() {
           </div>
 
           <div className="flex gap-3">
-            <button onClick={guardarReserva} disabled={guardando}
-              className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60"
-              style={{ background: "#0b315f" }}>
-              {guardando ? "Guardando..." : "Guardar programación"}
+            <button onClick={guardarReserva} disabled={guardando} className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60" style={{ background: "#0b315f" }}>
+              {guardando ? "Guardando..." : "Guardar programacion"}
             </button>
             <button onClick={limpiar} className="px-6 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">Cancelar</button>
           </div>
@@ -575,9 +605,7 @@ export default function ReservasPage() {
       <section className="flex flex-col md:flex-row gap-3 flex-wrap">
         <div className="relative flex-1 min-w-[180px]">
           <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">🔍</span>
-          <input className="w-full border rounded-xl pl-9 pr-4 py-2.5 text-sm focus:outline-none"
-            placeholder="Buscar por cliente, ruta o ID..."
-            value={busqueda} onChange={e => setBusqueda(e.target.value)} />
+          <input className="w-full border rounded-xl pl-9 pr-4 py-2.5 text-sm focus:outline-none" placeholder="Buscar por cliente, ruta o ID..." value={busqueda} onChange={e => setBusqueda(e.target.value)} />
         </div>
         <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)}>
           <option value="todos">Todos los estados</option>
@@ -585,9 +613,28 @@ export default function ReservasPage() {
         </select>
         <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroTipo} onChange={e => setFiltroTipo(e.target.value)}>
           <option value="todos">Todos los tipos</option>
-          <option value="propia">🚌 Propia</option>
-          <option value="tercerizada">🤝 Tercerizada</option>
+          <option value="propia">Propia</option>
+          <option value="tercerizada">Tercerizada</option>
         </select>
+
+        {/* NUEVO FILTRO: Fijos / Eventuales */}
+        <div className="flex gap-1 rounded-xl p-1" style={{ background: "#f1f5f9" }}>
+          {(["todos", "fijo", "eventual"] as const).map(t => (
+            <button
+              key={t}
+              onClick={() => setFiltroServicio(t)}
+              className="px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+              style={{
+                background: filtroServicio === t ? "white" : "transparent",
+                color: filtroServicio === t ? "#0b315f" : "#9ca3af",
+                boxShadow: filtroServicio === t ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+              }}
+            >
+              {t === "todos" ? "Todos" : t === "fijo" ? "Fijos" : "Eventuales"}
+            </button>
+          ))}
+        </div>
+
         <div className="flex items-center px-4 py-2.5 bg-gray-50 border rounded-xl text-sm text-gray-400">
           {filtradas.length} resultado{filtradas.length !== 1 ? "s" : ""}
         </div>
@@ -600,21 +647,23 @@ export default function ReservasPage() {
             <thead>
               <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
                 <th className="p-3 w-8"></th>
-                {["ID", "Cliente", "Ruta", "Fecha", "Asignación", "Recurso", "Precio", "Margen", "Estado", "Acciones"].map(h => (
+                {["ID", "Cliente", "Ruta", "Fecha", "Asignacion", "Recurso", "Ocupacion", "Sync", "Precio", "Estado", "Acciones"].map(h => (
                   <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={11} className="p-10 text-center text-gray-400">
+                <tr><td colSpan={12} className="p-10 text-center text-gray-400">
                   <div className="flex items-center justify-center gap-2">
-                    <div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />Cargando...
+                    <div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />
+                    Cargando...
                   </div>
                 </td></tr>
               ) : filtradas.length === 0 ? (
-                <tr><td colSpan={11} className="p-10 text-center text-gray-400">
-                  <p className="text-3xl mb-2">🎫</p><p className="font-medium">No hay reservas</p>
+                <tr><td colSpan={12} className="p-10 text-center text-gray-400">
+                  <p className="text-3xl mb-2">🎫</p>
+                  <p className="font-medium">No hay reservas</p>
                 </td></tr>
               ) : filtradas.map(r => {
                 const estCfg    = ESTADO_CFG[r.estado] || ESTADO_CFG.pendiente;
@@ -624,26 +673,41 @@ export default function ReservasPage() {
                 const esHoy     = r.fecha_servicio === hoy;
                 const esTer     = r.tipo === "tercerizada";
                 const riesgo    = esTer && r.empresa_tercerizada_id ? riesgoEmpresa(docsTercero, r.empresa_tercerizada_id) : "ok";
+                const ocup      = ocupacionMap[r.id];
+                const cap       = capacidadDe(r);
+                const totalPax  = ocup?.total_pasajeros || 0;
+                const sobrecupo = ocup?.sobrecupo || false;
+                const pctOcup   = ocup?.ocupacion_pct;
+                const esFijo    = !esEventual(r);
+
+                let ocupBg = "#f8fafc", ocupColor = "#475569";
+                if (sobrecupo) { ocupBg = "#fee2e2"; ocupColor = "#991b1b"; }
+                else if (cap !== null && totalPax > 0 && totalPax >= cap * 0.9) { ocupBg = "#fef3c7"; ocupColor = "#92400e"; }
+                else if (cap !== null && totalPax > 0) { ocupBg = "#dcfce7"; ocupColor = "#166534"; }
 
                 return (
                   <React.Fragment key={r.id}>
-                    <tr className={`border-t transition-colors cursor-pointer ${editandoId === r.id ? "bg-blue-50" : "hover:bg-gray-50"}`}
-                      style={{ borderColor: "#f1f5f9" }}
+                    <tr
+                      className={"border-t transition-colors cursor-pointer " + (editandoId === r.id ? "bg-blue-50" : sobrecupo ? "bg-red-50/40" : "hover:bg-gray-50")}
+                      style={{ borderColor: "#f1f5f9", boxShadow: sobrecupo ? "inset 3px 0 0 #dc2626" : undefined }}
                       onClick={() => {
-                          const nId = expandido ? null : r.id;
-                          setExpandidoId(nId);
-                          if (nId) {
-                            cargarParadasReserva(nId);
-                            cargarPasajerosCliente(nId, r.cliente_id);
-                          }
-                        }}>
-
-                      <td className="p-3 text-gray-300 text-xs">{expandido ? "▼" : "▶"}</td>
+                        const nId = expandido ? null : r.id;
+                        setExpandidoId(nId);
+                        if (nId) { cargarParadasReserva(nId); cargarPasajerosCliente(nId, r.cliente_id); }
+                      }}
+                    >
+                      <td className="p-3 text-gray-300 text-xs">{expandido ? "v" : ">"}</td>
 
                       <td className="p-3">
                         <span className="font-black font-mono text-[#0b315f]">#{r.id}</span>
                         {esHoy && <div className="text-[9px] font-bold text-orange-500">HOY</div>}
-                        {riesgo === "alto" && <div className="text-[9px] font-bold text-red-600">🚨 DOC VENC.</div>}
+                        {riesgo === "alto" && <div className="text-[9px] font-bold text-red-600">DOC VENC.</div>}
+                        {sobrecupo && <div className="text-[9px] font-bold text-red-600">SOBRECUPO</div>}
+                        <div className="mt-0.5">
+                          <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: esFijo ? "#eef3f8" : "#ede9fe", color: esFijo ? "#0b315f" : "#6d28d9" }}>
+                            {esFijo ? "Fijo" : "Eventual"}
+                          </span>
+                        </div>
                       </td>
 
                       <td className="p-3 font-bold text-gray-800 max-w-[120px]">
@@ -651,21 +715,20 @@ export default function ReservasPage() {
                       </td>
 
                       <td className="p-3 text-gray-600 max-w-[160px]">
-                        <div className="truncate text-xs">{(r as any).origen || "—"} → {(r as any).destino || "—"}</div>
+                        <div className="truncate text-xs">{(r as any).origen || "-"} - {(r as any).destino || "-"}</div>
                       </td>
 
                       <td className="p-3 text-xs">
                         <div className="text-gray-700 font-medium">{fmtFecha(r.fecha_servicio)}</div>
-                        <div className="text-gray-400">{r.hora_servicio?.slice(0,5) || "—"}</div>
+                        <div className="text-gray-400">{r.hora_servicio?.slice(0,5) || "-"}</div>
                         {dias !== null && dias >= 0 && dias <= 3 && !esHoy && (
                           <div className="text-[9px] font-bold text-amber-600">En {dias}d</div>
                         )}
                       </td>
 
                       <td className="p-3">
-                        <span className="text-xs font-bold px-2 py-0.5 rounded-lg"
-                          style={esTer ? { background: "#ede9fe", color: "#6d28d9" } : { background: "#dbeafe", color: "#1d4ed8" }}>
-                          {esTer ? "🤝 Tercerizado" : "🚌 Propio"}
+                        <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={esTer ? { background: "#ede9fe", color: "#6d28d9" } : { background: "#dbeafe", color: "#1d4ed8" }}>
+                          {esTer ? "Tercerizado" : "Propio"}
                         </span>
                       </td>
 
@@ -683,39 +746,61 @@ export default function ReservasPage() {
                         )}
                       </td>
 
-                      <td className="p-3 font-bold text-gray-800 text-xs">{fmtSoles(Number(r.precio_cliente || 0))}</td>
-
-                      <td className="p-3 font-bold text-xs" style={{ color: margen >= 0 ? "#166534" : "#991b1b" }}>
-                        {fmtSoles(margen)}
+                      <td className="p-3" onClick={e => e.stopPropagation()}>
+                        <button
+                          onClick={() => setModalReservaId(r.id)}
+                          className="group flex flex-col items-start gap-0.5 px-2.5 py-1.5 rounded-lg cursor-pointer transition-transform hover:scale-105"
+                          style={{ background: ocupBg }}
+                        >
+                          <span className="font-black text-xs leading-tight" style={{ color: ocupColor }}>
+                            {totalPax}{cap !== null ? "/" + cap : ""}
+                            {sobrecupo ? " (!)" : ""}
+                          </span>
+                          <span className="text-[9px] font-bold uppercase tracking-wide opacity-70" style={{ color: ocupColor }}>
+                            {pctOcup !== null && pctOcup !== undefined ? pctOcup + "%" : "Ver pax"}
+                          </span>
+                        </button>
                       </td>
 
+                      <td className="p-3 text-center">
+                        {r.sincronizado_app ? (
+                          <div className="inline-flex flex-col items-center" title={r.fecha_sincronizacion ? "Sincronizado: " + new Date(r.fecha_sincronizacion).toLocaleString("es-PE") : ""}>
+                            <span className="text-base">S</span>
+                            <span className="text-[8px] font-bold text-green-700 uppercase tracking-wide">Sync</span>
+                          </div>
+                        ) : (
+                          <div className="inline-flex flex-col items-center opacity-60">
+                            <span className="text-base">II</span>
+                            <span className="text-[8px] font-bold text-gray-500 uppercase tracking-wide">Pend.</span>
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="p-3 font-bold text-gray-800 text-xs">{fmtSoles(Number(r.precio_cliente || 0))}</td>
+
                       <td className="p-3" onClick={e => e.stopPropagation()}>
-                        <select value={r.estado}
+                        <select
+                          value={r.estado}
                           onChange={e => cambiarEstadoRapido(r.id, e.target.value as EstadoReserva)}
                           className="text-xs font-bold px-2 py-1 rounded-lg border-0 cursor-pointer"
-                          style={{ background: estCfg.bg, color: estCfg.color }}>
+                          style={{ background: estCfg.bg, color: estCfg.color }}
+                        >
                           {Object.entries(ESTADO_CFG).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                         </select>
                       </td>
 
                       <td className="p-3" onClick={e => e.stopPropagation()}>
                         <div className="flex gap-1.5">
-                          <button onClick={() => editarReserva(r)}
-                            className="px-2.5 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">
-                            🗓️ Programar
-                          </button>
-                          <button onClick={() => eliminarReserva(r.id)}
-                            className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50">✕</button>
+                          <button onClick={() => setModalReservaId(r.id)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white" style={{ background: "#0b315f" }} title="Manifiesto y paradas">M</button>
+                          <button onClick={() => editarReserva(r)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">P</button>
+                          <button onClick={() => eliminarReserva(r.id)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50">X</button>
                         </div>
                       </td>
                     </tr>
 
-                    {/* FILA EXPANDIDA */}
                     {expandido && (
                       <tr style={{ background: "#f8fafc" }} className="border-t">
-                        <td colSpan={11} className="px-6 py-5">
-
-                          {/* Paradas del recorrido */}
+                        <td colSpan={12} className="px-6 py-5">
                           {(() => {
                             const paradasR = paradasMap[r.id] || [];
                             const tieneJSON = r.paradas_json && r.paradas_json.length > 0;
@@ -723,181 +808,34 @@ export default function ReservasPage() {
                               <div className="mb-5">
                                 <div className="flex items-center justify-between mb-3">
                                   <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">
-                                    🚏 Paradas del recorrido ({cargandoPar[r.id] ? "..." : paradasR.length})
+                                    Paradas del recorrido ({cargandoPar[r.id] ? "..." : paradasR.length})
                                   </p>
                                   <div className="flex gap-2">
                                     {tieneJSON && paradasR.length === 0 && (
-                                      <button onClick={() => crearParadasDesdeJSON(r.id, r.paradas_json!)}
-                                        className="text-xs font-bold px-3 py-1.5 rounded-lg text-white"
-                                        style={{ background: "#be185d" }}>
-                                        🚏 Crear desde cotización ({r.paradas_json!.length} paradas)
+                                      <button onClick={() => crearParadasDesdeJSON(r.id, r.paradas_json!)} className="text-xs font-bold px-3 py-1.5 rounded-lg text-white" style={{ background: "#be185d" }}>
+                                        Crear desde cotizacion ({r.paradas_json!.length} paradas)
                                       </button>
                                     )}
-                                    <a href="/pasajeros" target="_blank"
-                                      className="text-xs font-bold px-3 py-1.5 rounded-lg border hover:bg-blue-50"
-                                      style={{ borderColor: "#0b315f", color: "#0b315f" }}>
-                                      👥 Asignar pasajeros →
-                                    </a>
+                                    <button onClick={() => setModalReservaId(r.id)} className="text-xs font-bold px-3 py-1.5 rounded-lg border hover:bg-blue-50" style={{ borderColor: "#0b315f", color: "#0b315f" }}>
+                                      Manifiesto completo
+                                    </button>
                                   </div>
                                 </div>
 
                                 {paradasR.length === 0 ? (
                                   <div className="rounded-xl border-2 border-dashed p-4 text-center text-xs text-gray-400">
                                     {tieneJSON
-                                      ? <span>📋 Tiene <b>{r.paradas_json!.length} paradas</b> en la cotización. Haz clic en "<b>Crear desde cotización</b>" para generarlas.</span>
-                                      : "Sin paradas configuradas. Agrégalas desde Pasajeros → Asignar a paradas."}
+                                      ? <span>Tiene {r.paradas_json!.length} paradas en la cotizacion. Haz clic en Crear desde cotizacion.</span>
+                                      : "Sin paradas configuradas. Agregalas desde Pasajeros o el modal de manifiesto."}
                                   </div>
                                 ) : (
-                                  <div className="flex items-start gap-3">
-                                    {/* Timeline dots */}
-                                    <div className="flex flex-col items-center pt-1.5">
-                                      {paradasR.map((p: any, i: number) => (
-                                        <div key={p.id} className="flex flex-col items-center">
-                                          <div className="w-5 h-5 rounded-full border-2 flex items-center justify-center text-[9px] font-black"
-                                            style={{ background: p.estado === "completada" ? "#0b315f" : i === 0 ? "#16a34a" : i === paradasR.length - 1 ? "#dc2626" : "white", borderColor: p.estado === "completada" ? "#0b315f" : i === 0 ? "#16a34a" : i === paradasR.length - 1 ? "#dc2626" : "#0b315f", color: p.estado === "completada" || i === 0 || i === paradasR.length - 1 ? "white" : "#0b315f" }}>
-                                            {p.estado === "completada" ? "✓" : i + 1}
-                                          </div>
-                                          {i < paradasR.length - 1 && <div className="w-0.5 h-8" style={{ background: "#e2e8f0" }} />}
-                                        </div>
-                                      ))}
-                                    </div>
-                                    {/* Paradas info */}
-                                    <div className="flex-1 space-y-2">
-                                      {paradasR.map((p: any, i: number) => (
-                                        <div key={p.id} className="rounded-xl border p-3 text-xs" style={{ background: "white", borderColor: p.estado === "completada" ? "#0b315f" : "#e2e8f0" }}>
-                                          <div className="flex items-start justify-between gap-2">
-                                            <div>
-                                              <p className="font-bold text-gray-900">{p.nombre}</p>
-                                              {p.direccion && <p className="text-gray-400 mt-0.5">{p.direccion}</p>}
-                                              <div className="flex gap-3 mt-1">
-                                                {p.hora_estimada && <span className="text-gray-500">🕐 {p.hora_estimada}</span>}
-                                                {p.lat && p.lng && (
-                                                  <a href={`https://www.google.com/maps?q=${p.lat},${p.lng}`} target="_blank" rel="noreferrer"
-                                                    className="text-blue-500 font-bold hover:underline">
-                                                    📍 {Number(p.lat).toFixed(4)}, {Number(p.lng).toFixed(4)}
-                                                  </a>
-                                                )}
-                                              </div>
-                                            </div>
-                                            <div className="flex-shrink-0">
-                                              <span className="font-bold px-2 py-0.5 rounded-full text-[10px]"
-                                                style={{ background: p.estado === "completada" ? "#dcfce7" : i === 0 ? "#f0fdf4" : i === paradasR.length - 1 ? "#fee2e2" : "#eef3f8", color: p.estado === "completada" ? "#166534" : i === 0 ? "#16a34a" : i === paradasR.length - 1 ? "#dc2626" : "#0b315f" }}>
-                                                {p.estado === "completada" ? "✓ Completada" : i === 0 ? "Inicio" : i === paradasR.length - 1 ? "Destino" : "Intermedia"}
-                                              </span>
-                                            </div>
-                                          </div>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
+                                  <TimelineParadasEditable
+                                    reservaId={r.id}
+                                    paradas={paradasMap[r.id] || []}
+                                    onChange={() => cargarParadasReserva(r.id)}
+                                    compacto={true}
+                                  />
                                 )}
-                              </div>
-                            );
-                          })()}
-
-                          {/* ── PANEL PASAJEROS ── */}
-                          {(() => {
-                            const paxList   = pasajerosCliente[r.id] || [];
-                            const asignados = pasajerosAsig[r.id]    || [];
-                            const paradasR  = paradasMap[r.id]        || [];
-                            const paradaSel = paradaSelPas[r.id]      || null;
-                            const carg      = cargandoPas[r.id]       || false;
-                            const guard     = guardandoPas[r.id]      || false;
-                            const cl        = clientes.find(c => c.id === r.cliente_id);
-                            return (
-                              <div className="mb-5 rounded-2xl border overflow-hidden" style={{ borderColor: "#e2e8f0" }}>
-                                {/* Header */}
-                                <div className="flex items-center justify-between px-4 py-3" style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                                  <div>
-                                    <p className="font-bold text-xs text-gray-700">
-                                      👥 Lista de pasajeros / trabajadores
-                                      {paxList.length > 0 && <span className="ml-2 text-gray-400 font-normal">({paxList.length} registrados)</span>}
-                                    </p>
-                                    {cl && <p className="text-[10px] text-gray-400 mt-0.5">Cliente: <b style={{ color: "#0b315f" }}>{cl.empresa || cl.nombre}</b></p>}
-                                  </div>
-                                  <a href="/pasajeros" target="_blank" className="text-[10px] font-bold px-3 py-1.5 rounded-lg border" style={{ borderColor: "#0b315f", color: "#0b315f" }}>
-                                    + Gestionar →
-                                  </a>
-                                </div>
-
-                                <div className="p-4">
-                                  {carg ? (
-                                    <div className="text-center py-4 text-xs text-gray-400">
-                                      <div className="w-4 h-4 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin mx-auto mb-1" />
-                                      Cargando pasajeros del cliente...
-                                    </div>
-                                  ) : paxList.length === 0 ? (
-                                    <div className="text-center py-4 border-2 border-dashed rounded-xl" style={{ borderColor: "#e2e8f0" }}>
-                                      <p className="text-xs text-gray-400 mb-2">Sin pasajeros registrados para {cl?.empresa || cl?.nombre || "este cliente"}</p>
-                                      <a href="/pasajeros" target="_blank" className="text-xs font-bold px-4 py-2 rounded-xl text-white inline-block" style={{ background: "#0b315f" }}>
-                                        + Registrar pasajeros
-                                      </a>
-                                    </div>
-                                  ) : (
-                                    <>
-                                      {/* Selector de parada */}
-                                      {paradasR.length > 0 && (
-                                        <div className="mb-3">
-                                          <p className="text-[10px] font-bold uppercase text-gray-400 mb-1.5">Asignar a parada específica:</p>
-                                          <div className="flex flex-wrap gap-1.5">
-                                            {paradasR.map((p: any) => (
-                                              <button key={p.id}
-                                                onClick={() => { setParadaSelPas(prev => ({ ...prev, [r.id]: p.id })); cargarPasajerosAsignados(r.id, p.id); }}
-                                                className="text-[10px] font-bold px-2.5 py-1 rounded-lg border transition-all"
-                                                style={{ background: paradaSel === p.id ? "#0b315f" : "white", color: paradaSel === p.id ? "white" : "#475569", borderColor: paradaSel === p.id ? "#0b315f" : "#e2e8f0" }}>
-                                                {p.orden}. {p.nombre.length > 18 ? p.nombre.slice(0,18)+"…" : p.nombre}
-                                              </button>
-                                            ))}
-                                          </div>
-                                        </div>
-                                      )}
-
-                                      {/* Controles */}
-                                      <div className="flex items-center gap-2 mb-2">
-                                        <button onClick={() => setPasajerosAsig(prev => ({ ...prev, [r.id]: paxList.map((p: any) => p.id) }))} className="text-[10px] font-bold px-2.5 py-1 rounded-lg border hover:bg-gray-50">☑ Todos</button>
-                                        <button onClick={() => setPasajerosAsig(prev => ({ ...prev, [r.id]: [] }))} className="text-[10px] font-bold px-2.5 py-1 rounded-lg border hover:bg-gray-50">☐ Ninguno</button>
-                                        <span className="text-[10px] text-gray-400">{asignados.length} seleccionados</span>
-                                      </div>
-
-                                      {/* Lista */}
-                                      <div className="rounded-xl border overflow-hidden" style={{ borderColor: "#e2e8f0", maxHeight: 240, overflowY: "auto" }}>
-                                        {paxList.map((pas: any) => {
-                                          const sel = asignados.includes(pas.id);
-                                          return (
-                                            <div key={pas.id}
-                                              onClick={() => setPasajerosAsig(prev => ({ ...prev, [r.id]: sel ? (prev[r.id]||[]).filter(id => id !== pas.id) : [...(prev[r.id]||[]), pas.id] }))}
-                                              className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-50 border-b transition-all"
-                                              style={{ background: sel ? "#eef3f8" : "white", borderColor: "#f1f5f9" }}>
-                                              <div className="w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0" style={{ background: sel ? "#0b315f" : "white", borderColor: sel ? "#0b315f" : "#d1d5db" }}>
-                                                {sel && <span className="text-white text-[9px] font-black">✓</span>}
-                                              </div>
-                                              <div className="w-6 h-6 rounded-lg flex items-center justify-center font-black text-[10px] text-white flex-shrink-0" style={{ background: "#0b315f" }}>{pas.nombre.charAt(0)}</div>
-                                              <div className="flex-1 min-w-0">
-                                                <p className="font-bold text-gray-800 text-[11px] truncate">{pas.nombre}</p>
-                                                <p className="text-[9px] text-gray-400 truncate">{pas.empresa || "Sin empresa"}{pas.dni ? ` · DNI ${pas.dni}` : ""}</p>
-                                              </div>
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-
-                                      {/* Guardar */}
-                                      <div className="mt-3">
-                                        {paradaSel ? (
-                                          <button onClick={() => guardarPasajerosEnParada(r.id, paradaSel, asignados)} disabled={guard}
-                                            className="px-5 py-2 rounded-xl font-bold text-xs text-white disabled:opacity-50"
-                                            style={{ background: "#0b315f" }}>
-                                            {guard ? "Guardando..." : `✅ Guardar ${asignados.length} pasajeros en parada`}
-                                          </button>
-                                        ) : paradasR.length > 0 ? (
-                                          <p className="text-[10px] text-amber-600 font-bold">⚠️ Selecciona una parada arriba para guardar la asignación</p>
-                                        ) : (
-                                          <p className="text-[10px] text-gray-400">Primero crea las paradas del recorrido para asignar pasajeros</p>
-                                        )}
-                                      </div>
-                                    </>
-                                  )}
-                                </div>
                               </div>
                             );
                           })()}
@@ -905,11 +843,16 @@ export default function ReservasPage() {
                           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs border-t pt-4" style={{ borderColor: "#e2e8f0" }}>
                             <div className="space-y-1.5">
                               <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Servicio</p>
-                              <p><span className="text-gray-400">Origen:</span> {(r as any).origen || "—"}</p>
-                              <p><span className="text-gray-400">Destino:</span> {(r as any).destino || "—"}</p>
+                              <p><span className="text-gray-400">Origen:</span> {(r as any).origen || "-"}</p>
+                              <p><span className="text-gray-400">Destino:</span> {(r as any).destino || "-"}</p>
                               <p><span className="text-gray-400">Fecha:</span> {fmtFecha(r.fecha_servicio)}</p>
-                              <p><span className="text-gray-400">Hora:</span> {r.hora_servicio?.slice(0,5) || "—"}</p>
-                              {(r as any).tipo_servicio_detalle && <p><span className="text-gray-400">Tipo:</span> <b className="text-pink-700">{(r as any).tipo_servicio_detalle === "transporte_personal" ? "👥 Transp. Personal" : (r as any).tipo_servicio_detalle}</b></p>}
+                              <p><span className="text-gray-400">Hora:</span> {r.hora_servicio?.slice(0,5) || "-"}</p>
+                              <p>
+                                <span className="text-gray-400">Tipo servicio: </span>
+                                <span className="font-bold" style={{ color: !esEventual(r) ? "#0b315f" : "#6d28d9" }}>
+                                  {!esEventual(r) ? "Fijo" : "Eventual"}
+                                </span>
+                              </p>
                             </div>
                             <div className="space-y-1.5">
                               <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">
@@ -917,34 +860,45 @@ export default function ReservasPage() {
                               </p>
                               {esTer ? (
                                 <>
-                                  <p>🤝 <b>{nombreEmpTer(r.empresa_tercerizada_id)}</b></p>
-                                  {r.vehiculo_tercero_id && <p>🚌 {nombreVehTercero(r.vehiculo_tercero_id)}</p>}
-                                  {riesgo === "alto" && <p className="text-red-600 font-bold">🚨 Documentos vencidos</p>}
+                                  <p>{nombreEmpTer(r.empresa_tercerizada_id)}</p>
+                                  {r.vehiculo_tercero_id && <p>{nombreVehTercero(r.vehiculo_tercero_id)}</p>}
+                                  {riesgo === "alto" && <p className="text-red-600 font-bold">Documentos vencidos</p>}
                                 </>
                               ) : (
                                 <>
-                                  <p>🚌 <b>{nombreVehiculo(r.vehiculo_id)}</b></p>
-                                  <p>👤 {nombreConductor(r.conductor_id)}</p>
-                                  {conductores.find(c => c.id === r.conductor_id)?.telefono && (
-                                    <p className="text-gray-400">📱 {conductores.find(c => c.id === r.conductor_id)?.telefono}</p>
-                                  )}
+                                  <p>{nombreVehiculo(r.vehiculo_id)}</p>
+                                  <p>{nombreConductor(r.conductor_id)}</p>
                                 </>
                               )}
+                              {cap !== null && <p><span className="text-gray-400">Capacidad:</span> <b>{cap} pax</b></p>}
                             </div>
                             <div className="space-y-1.5">
-                              <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Financiero</p>
-                              <div className="flex justify-between"><span className="text-gray-400">Precio cliente</span><b>{fmtSoles(Number(r.precio_cliente || 0))}</b></div>
-                              <div className="flex justify-between"><span className="text-gray-400">Costo</span><span className="font-bold text-red-600">{fmtSoles(Number(r.costo_proveedor || 0))}</span></div>
-                              <div className="flex justify-between border-t pt-1" style={{ borderColor: "#e5e7eb" }}>
-                                <b className="text-gray-600">Margen</b>
+                              <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Manifiesto</p>
+                              <p><span className="text-gray-400">Total:</span> <b>{totalPax}</b> pasajero(s)</p>
+                              <p><span className="text-gray-400">Abordados:</span> <b className="text-green-700">{ocup?.abordados || 0}</b></p>
+                              <p><span className="text-gray-400">Pendientes:</span> <b className="text-yellow-700">{ocup?.pendientes || 0}</b></p>
+                              {sobrecupo && <p className="text-red-600 font-bold">Excede capacidad</p>}
+                              <button onClick={() => setModalReservaId(r.id)} className="mt-1 text-[10px] font-bold px-2 py-1 rounded-lg text-white" style={{ background: "#0b315f" }}>
+                                Abrir manifiesto
+                              </button>
+                            </div>
+                            <div className="space-y-1.5">
+                              <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Financiero / Sync</p>
+                              <div className="flex justify-between"><span className="text-gray-400">Precio</span><b>{fmtSoles(Number(r.precio_cliente || 0))}</b></div>
+                              <div className="flex justify-between"><span className="text-gray-400">Margen</span>
                                 <span className="font-black" style={{ color: margen >= 0 ? "#166534" : "#991b1b" }}>{fmtSoles(margen)}</span>
                               </div>
-                            </div>
-                            <div className="space-y-1.5">
-                              <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Notas</p>
-                              {r.cotizacion_id && <p className="text-gray-500">📄 Cotización #{r.cotizacion_id}</p>}
-                              {r.observaciones ? <p className="text-gray-600 italic">"{r.observaciones}"</p> : <p className="text-gray-300">Sin observaciones</p>}
-                              <p className="text-gray-300 text-[10px]">Creada: {new Date(r.created_at).toLocaleDateString("es-PE")}</p>
+                              <div className="flex justify-between border-t pt-1" style={{ borderColor: "#e5e7eb" }}>
+                                <span className="text-gray-400">App Pasajero</span>
+                                <b className={r.sincronizado_app ? "text-green-700" : "text-gray-400"}>
+                                  {r.sincronizado_app ? "Sincronizado" : "Sin enviar"}
+                                </b>
+                              </div>
+                              {r.fecha_sincronizacion && (
+                                <p className="text-[10px] text-gray-400">
+                                  {new Date(r.fecha_sincronizacion).toLocaleString("es-PE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                                </p>
+                              )}
                             </div>
                           </div>
                         </td>

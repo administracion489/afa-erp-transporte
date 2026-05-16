@@ -139,7 +139,6 @@ const Ic = {
       <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
     </svg>
   ),
-  // ── NUEVOS ──────────────────────────────────────────────────────────────
   Settings: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
       <circle cx="12" cy="12" r="3"/>
@@ -173,6 +172,13 @@ const Ic = {
   PanelOpen: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
       <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/><path d="M14 9l3 3-3 3"/>
+    </svg>
+  ),
+  // ── Multas ──────────────────────────────────────────────────────────────
+  Fine: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
+      <line x1="12" y1="11" x2="12" y2="11.01"/><line x1="12" y1="14" x2="12" y2="17"/>
     </svg>
   ),
 };
@@ -211,6 +217,8 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       { href: "/programacion", label: "Programación", sub: "Core del sistema",      icon: Ic.CalendarRange, modulo: "programacion" },
       { href: "/seguimiento",  label: "Seguimiento",  sub: "Estado en tiempo real", icon: Ic.Search,        modulo: "seguimiento"  },
       { href: "/monitoreo",    label: "Monitoreo",    sub: "Mapa y unidades",       icon: Ic.Radio,         modulo: "monitoreo"    },
+      { href: "/pasajeros",    label: "Pasajeros",    sub: "Base de pasajeros",     icon: Ic.Users,         modulo: "pasajeros"    },
+      { href: "/multas",       label: "Multas",       sub: "Infracciones",          icon: Ic.Fine,          modulo: "multas"       },
       { href: "/incidencias",  label: "Incidencias",  sub: "Eventos y alertas",     icon: Ic.AlertTriangle, modulo: "incidencias"  },
     ],
   },
@@ -271,6 +279,9 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
 
 const menu = menuGrupos.flatMap((g) => g.items);
 
+// Grupos que arrancan abiertos por defecto
+const GRUPOS_ABIERTOS_DEFAULT = ["Principal", "Comercial", "Operaciones", "Flota"];
+
 // ─── Logo ───────────────────────────────────────────────────────────────────
 function LogoAFA({ collapsed }: { collapsed: boolean }) {
   if (collapsed) {
@@ -307,7 +318,9 @@ function GrupoMenu({
   const grupoActivo = itemsVisibles.some(
     (item) => pathname === item.href || pathname.startsWith(`${item.href}/`)
   );
-  const [abierto, setAbierto] = useState(grupoActivo || grupo === "Principal");
+
+  // Comercial, Operaciones y Flota arrancan abiertas; el resto colapsadas
+  const [abierto, setAbierto] = useState(grupoActivo || GRUPOS_ABIERTOS_DEFAULT.includes(grupo));
 
   useEffect(() => {
     if (grupoActivo) setAbierto(true);
@@ -338,7 +351,6 @@ function GrupoMenu({
                 strokeWidth={activo ? 2.5 : 1.8}
                 className={activo ? "text-white" : "text-white/50 group-hover:text-white transition-colors"}
               />
-              {/* Tooltip */}
               <span className="
                 pointer-events-none absolute left-full ml-3 z-50
                 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap
@@ -508,7 +520,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="es">
       <body>
-        {/* ── LOGIN ─────────────────────────────────────────────────────── */}
         {esLogin ? (
           <div className="min-h-screen flex items-center justify-center bg-[#eef3f8] px-4">
             <div className="w-full max-w-md bg-white p-8 rounded-2xl shadow-xl">
@@ -530,7 +541,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         ) : (
           <div className="min-h-screen flex bg-[#eef3f8]">
 
-            {/* ── SIDEBAR ───────────────────────────────────────────────── */}
             <aside
               className={`
                 relative flex flex-col flex-shrink-0
@@ -540,7 +550,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 ${collapsed ? "w-[64px]" : "w-[210px]"}
               `}
             >
-              {/* Botón toggle */}
               <button
                 onClick={() => setCollapsed((v) => !v)}
                 className="
@@ -557,7 +566,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 }
               </button>
 
-              {/* Logo */}
               <div className={`
                 flex items-center border-b border-white/8
                 transition-all duration-300
@@ -566,7 +574,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <LogoAFA collapsed={collapsed} />
               </div>
 
-              {/* Badge ERP */}
               {!collapsed && (
                 <div className="px-3 py-2 border-b border-white/5">
                   <div className="flex items-center gap-2 bg-white/5 rounded-lg px-2.5 py-1.5">
@@ -579,7 +586,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 </div>
               )}
 
-              {/* Navegación */}
               <nav
                 className={`flex-1 overflow-y-auto overflow-x-hidden py-2 ${collapsed ? "px-1.5" : "px-2"}`}
                 style={{ scrollbarWidth: "none" }}
@@ -596,7 +602,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 ))}
               </nav>
 
-              {/* Footer usuario */}
               <div className={`
                 border-t border-white/8 bg-black/15 transition-all duration-300
                 ${collapsed ? "p-2" : "p-3"}
@@ -640,7 +645,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               </div>
             </aside>
 
-            {/* ── CONTENIDO ─────────────────────────────────────────────── */}
             <main className="flex-1 overflow-y-auto p-6">{children}</main>
           </div>
         )}

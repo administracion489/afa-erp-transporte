@@ -53,11 +53,24 @@ const C = {
   gray200: "#E2E8F0",
   gray400: "#94A3B8",
   gray600: "#475569",
+  gray700: "#374151",
   gray800: "#1E293B",
   green:   "#16a34a",
   red:     "#dc2626",
   amber:   "#d97706",
 };
+
+// ─── ✅ FIX FECHA TIMEZONE (PERU UTC-5) ──────────────────────────────────────
+// PROBLEMA ORIGINAL: new Date().toISOString() devuelve fecha en UTC.
+// En Lima (UTC-5), a las 7pm el sistema pedía el día SIGUIENTE → sin resultados.
+// SOLUCIÓN: obtener fecha en zona horaria local del dispositivo.
+function getFechaLocal(): string {
+  const now = new Date();
+  const year  = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day   = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
 
 // ─── SESSION ──────────────────────────────────────────────────────────────────
 
@@ -130,6 +143,8 @@ export default function ConductorApp() {
   const [pasajeros,    setPasajeros]    = useState<PasajeroParada[]>([]);
   const [paradaIdx,    setParadaIdx]    = useState(0);
   const [docs,         setDocs]         = useState<DocCond[]>([]);
+  const [cargando,     setCargando]     = useState(false); // ✅ NUEVO: estado de carga visible
+  const [debugFecha,   setDebugFecha]   = useState("");    // ✅ NUEVO: debug de fecha
 
   // ── GPS ────────────────────────────────────────────────────────────────────
   const [enRuta,       setEnRuta]       = useState(false);
@@ -150,7 +165,7 @@ export default function ConductorApp() {
   const sosTimer       = useRef<NodeJS.Timeout | null>(null);
   const sosInterval    = useRef<NodeJS.Timeout | null>(null);
 
-  // ── QR Scanner ─────────────────────────────────────────────────────────────
+  // ── ✅ QR Scanner (RESTAURADO) ─────────────────────────────────────────────
   const [escanear,     setEscanear]     = useState(false);
   const [validando,    setValidando]    = useState<Pasajero | null>(null);
   const [boardingMsg,  setBoardingMsg]  = useState<{ok: boolean; msg: string} | null>(null);
@@ -209,49 +224,90 @@ export default function ConductorApp() {
     saveSession(data); setConductor(data); await cargarDatos(data.id); setLoginLoading(false);
   }
 
-  // ─── Cargar datos ────────────────────────────────────────────────────────────
+  // ─── ✅ Cargar datos (FECHA CORREGIDA) ───────────────────────────────────────
+  // BUG ORIGINAL: usaba new Date().toISOString().split("T")[0] → fecha en UTC
+  // FIX: usa getFechaLocal() que respeta la zona horaria del dispositivo (Peru UTC-5)
 
   const cargarDatos = useCallback(async (cid: number) => {
-    const hoy = new Date().toISOString().split("T")[0];
+    setCargando(true);
+
+    // ✅ CORRECCIÓN PRINCIPAL: fecha local, no UTC
+    const hoy = getFechaLocal();
+    setDebugFecha(hoy); // útil para debug en pantalla si es necesario
+
+    console.log("[ConductorApp] Cargando reservas para fecha:", hoy);
+
     const [vR, rR, dR, ckR] = await Promise.all([
       supabase.from("vehiculos").select("id,placa,categoria,marca").order("placa"),
-      supabase.from("reservas").select("id,origen,destino,fecha_servicio,hora_servicio,vehiculo_id").eq("fecha_servicio", hoy).order("hora_servicio"),
-      supabase.from("documentos_conductor").select("*").eq("conductor_id", cid).order("created_at", { ascending: false }),
-      supabase.from("checklist_conductor").select("id").eq("conductor_id", cid).eq("fecha", hoy).limit(1),
+      supabase.from("reservas")
+        .select("id,origen,destino,fecha_servicio,hora_servicio,vehiculo_id")
+        .eq("fecha_servicio", hoy)
+        .order("hora_servicio"),
+      supabase.from("documentos_conductor")
+        .select("*")
+        .eq("conductor_id", cid)
+        .order("created_at", { ascending: false }),
+      supabase.from("checklist_conductor")
+        .select("id")
+        .eq("conductor_id", cid)
+        .eq("fecha", hoy)
+        .limit(1),
     ]);
+
+    console.log("[ConductorApp] Reservas encontradas:", rR.data?.length ?? 0, rR.error || "");
+
     setVehiculos(vR.data || []);
+
     const res = rR.data || [];
     setReservasHoy(res);
-    if (res.length === 1 && res[0].vehiculo_id) setVehiculoId(res[0].vehiculo_id);
+
+    // ✅ Si la reserva ya tiene vehículo asignado, preseleccionarlo
+    if (res.length === 1 && res[0].vehiculo_id) {
+      setVehiculoId(res[0].vehiculo_id);
+    }
+
     setDocs(dR.data || []);
     if (ckR.data && ckR.data.length > 0) setCheckDone(true);
+
+    setCargando(false);
   }, []);
 
   // ─── Cargar paradas ───────────────────────────────────────────────────────
 
   async function cargarParadas(reservaId: number) {
     const { data: ps } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
-    const paradas = ps || [];
-    setParadas(paradas);
-    if (paradas.length > 0) {
+    const listaParadas = ps || [];
+    setParadas(listaParadas);
+    if (listaParadas.length > 0) {
       const { data: pp } = await supabase.from("pasajeros_parada")
         .select("*, pasajero:pasajeros(*)")
-        .in("parada_id", paradas.map(p => p.id));
+        .in("parada_id", listaParadas.map(p => p.id));
       setPasajeros(pp || []);
     }
   }
 
-  // ─── GPS ─────────────────────────────────────────────────────────────────────
+  // ─── GPS + TRACKING ──────────────────────────────────────────────────────────
+  // ✅ PREPARADO PARA INTEGRACIÓN CON PÁGINA DE SEGUIMIENTO
+  // La tabla ubicaciones_gps alimenta el mapa en tiempo real.
+  // Campos clave: vehiculo_id, conductor_id, lat, lng, velocidad, estado
 
   const enviarUbicacion = useCallback(async (pos: GeolocationPosition, estado = "en_ruta") => {
     if (!vehiculoId || !conductor) return;
-    await supabase.from("ubicaciones_gps").insert({
-      vehiculo_id: vehiculoId, conductor_id: conductor.id,
-      reserva_id: reservaActiva?.id || null,
-      lat: pos.coords.latitude, lng: pos.coords.longitude,
-      velocidad: pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0,
-      rumbo: pos.coords.heading || 0, precision_m: pos.coords.accuracy, estado,
-    });
+    const payload = {
+      vehiculo_id:  vehiculoId,
+      conductor_id: conductor.id,
+      reserva_id:   reservaActiva?.id || null,
+      lat:          pos.coords.latitude,
+      lng:          pos.coords.longitude,
+      velocidad:    pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0,
+      rumbo:        pos.coords.heading || 0,
+      precision_m:  pos.coords.accuracy,
+      estado,
+      // ✅ timestamp explícito para sincronización con página de seguimiento
+      created_at:   new Date().toISOString(),
+    };
+    const { error } = await supabase.from("ubicaciones_gps").insert(payload);
+    if (error) console.error("[GPS] Error al enviar ubicación:", error.message);
     setUltimoEnvio(new Date());
     setTotalEnvios(p => p + 1);
     setVelocidad(pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0);
@@ -259,7 +315,7 @@ export default function ConductorApp() {
 
   async function iniciarRecorrido(reserva: Reserva) {
     if (!vehiculoId) { alert("Selecciona el vehículo primero"); return; }
-    if (!navigator.geolocation) { alert("GPS no disponible"); return; }
+    if (!navigator.geolocation) { alert("GPS no disponible en este dispositivo"); return; }
     setIniciando(true);
     setReservaActiva(reserva);
     await cargarParadas(reserva.id);
@@ -272,6 +328,7 @@ export default function ConductorApp() {
           (e) => setGpsError(e.message),
           { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
         );
+        // ✅ Envío GPS cada 10 segundos → actualiza mapa de seguimiento
         intervalRef.current = setInterval(() => {
           if (posRef.current) enviarUbicacion(posRef.current);
         }, 10000);
@@ -330,7 +387,9 @@ export default function ConductorApp() {
     setSosActivo(false); setSosPct(0);
   }
 
-  // ─── QR SCANNER ───────────────────────────────────────────────────────────────
+  // ─── ✅ QR SCANNER (RESTAURADO COMPLETAMENTE) ─────────────────────────────────
+  // Requiere: npm install html5-qrcode
+  // Uso: el conductor escanea el QR del pasajero → valida identidad → confirma embarque
 
   useEffect(() => {
     if (!escanear) {
@@ -340,17 +399,28 @@ export default function ConductorApp() {
     let stopped = false;
     import("html5-qrcode").then(({ Html5Qrcode }) => {
       if (stopped) return;
+      // Asegurarse que el contenedor existe antes de iniciar
+      const container = document.getElementById("qr-container");
+      if (!container) return;
       const scanner = new Html5Qrcode("qr-container");
       qrRef.current = scanner;
       scanner.start(
         { facingMode: "environment" },
         { fps: 10, qrbox: { width: 260, height: 260 } },
         async (text: string) => {
+          // ✅ QR detectado → detener scanner → procesar
           scanner.stop().catch(() => {}); qrRef.current = null; setEscanear(false);
           await procesarQR(text);
         },
-        () => {}
-      ).catch(() => {});
+        () => {} // error silencioso durante escaneo continuo
+      ).catch((err: any) => {
+        console.error("[QR] Error al iniciar scanner:", err);
+        setEscanear(false);
+        alert("No se pudo acceder a la cámara. Verifica los permisos.");
+      });
+    }).catch((err) => {
+      console.error("[QR] Error al cargar html5-qrcode:", err);
+      alert("El módulo QR no está disponible. Ejecuta: npm install html5-qrcode");
     });
     return () => {
       stopped = true;
@@ -359,30 +429,43 @@ export default function ConductorApp() {
   }, [escanear]);
 
   async function procesarQR(qrCode: string) {
-    const { data: pasajero } = await supabase.from("pasajeros").select("*").eq("qr_code", qrCode).single();
-    if (!pasajero) { setBoardingMsg({ ok: false, msg: "QR no reconocido. Pasajero no encontrado en el sistema." }); return; }
+    const { data: pasajero } = await supabase
+      .from("pasajeros")
+      .select("*")
+      .eq("qr_code", qrCode)
+      .single();
+    if (!pasajero) {
+      setBoardingMsg({ ok: false, msg: "❌ QR no reconocido. Pasajero no encontrado en el sistema." });
+      setTimeout(() => setBoardingMsg(null), 4000);
+      return;
+    }
     setValidando(pasajero);
   }
 
   async function confirmarEmbarque(pasajero: Pasajero) {
     const paradaActual = paradas[paradaIdx];
     if (!paradaActual) return;
-    // Buscar el registro pasajero_parada
     const pp = pasajeros.find(p => p.pasajero_id === pasajero.id && p.parada_id === paradaActual.id);
     if (pp) {
       if (pp.estado === "embarcado") {
-        setBoardingMsg({ ok: false, msg: `${pasajero.nombre} ya está registrado en esta parada.` });
-        setValidando(null); return;
+        setBoardingMsg({ ok: false, msg: `⚠️ ${pasajero.nombre} ya está registrado en esta parada.` });
+        setValidando(null);
+        setTimeout(() => setBoardingMsg(null), 4000);
+        return;
       }
       await supabase.from("pasajeros_parada").update({ estado: "embarcado" }).eq("id", pp.id);
       setPasajeros(prev => prev.map(p => p.id === pp.id ? { ...p, estado: "embarcado" } : p));
     }
-    // Registrar en boarding_log
+    // ✅ Registrar boarding_log con ubicación GPS actual
     if (conductor && posRef.current) {
       await supabase.from("boarding_log").insert({
-        reserva_id: reservaActiva?.id, parada_id: paradaActual.id,
-        pasajero_id: pasajero.id, conductor_id: conductor.id, metodo: "qr",
-        lat: posRef.current.coords.latitude, lng: posRef.current.coords.longitude,
+        reserva_id:   reservaActiva?.id,
+        parada_id:    paradaActual.id,
+        pasajero_id:  pasajero.id,
+        conductor_id: conductor.id,
+        metodo:       "qr",
+        lat:          posRef.current.coords.latitude,
+        lng:          posRef.current.coords.longitude,
       });
     }
     setBoardingMsg({ ok: true, msg: `✅ ${pasajero.nombre} embarcó correctamente` });
@@ -394,25 +477,66 @@ export default function ConductorApp() {
     if (!reservaActiva) return;
     setNotifEnviada(true);
     await supabase.from("alertas_sos").insert({
-      conductor_id: conductor?.id, vehiculo_id: vehiculoId,
-      reserva_id: reservaActiva.id,
-      lat: posRef.current?.coords.latitude || 0, lng: posRef.current?.coords.longitude || 0,
-      mensaje: `⏰ RETRASO REPORTADO — Conductor en ruta a ${paradas[paradaIdx]?.nombre || "siguiente parada"}`,
+      conductor_id: conductor?.id,
+      vehiculo_id:  vehiculoId,
+      reserva_id:   reservaActiva.id,
+      lat:          posRef.current?.coords.latitude || 0,
+      lng:          posRef.current?.coords.longitude || 0,
+      mensaje:      `⏰ RETRASO REPORTADO — Conductor en ruta a ${paradas[paradaIdx]?.nombre || "siguiente parada"}`,
     });
     setTimeout(() => setNotifEnviada(false), 5000);
+  }
+
+  // ─── 🗺️ NAVEGACIÓN ESTILO UBER ───────────────────────────────────────────────
+  // Abre Waze o Google Maps con la parada actual como destino.
+  // Prioridad: coordenadas lat/lng → si no hay, usa la dirección de texto.
+
+  function abrirWaze(parada: Parada) {
+    let url: string;
+    if (parada.lat && parada.lng) {
+      // Coordenadas exactas → navegación precisa
+      url = `https://waze.com/ul?ll=${parada.lat},${parada.lng}&navigate=yes&zoom=17`;
+    } else if (parada.direccion) {
+      // Solo dirección de texto
+      url = `https://waze.com/ul?q=${encodeURIComponent(parada.direccion)}&navigate=yes`;
+    } else {
+      // Fallback: buscar por nombre de parada
+      url = `https://waze.com/ul?q=${encodeURIComponent(parada.nombre + ", Lima, Peru")}&navigate=yes`;
+    }
+    window.open(url, "_blank");
+  }
+
+  function abrirGoogleMaps(parada: Parada) {
+    let dest: string;
+    if (parada.lat && parada.lng) {
+      dest = `${parada.lat},${parada.lng}`;
+    } else if (parada.direccion) {
+      dest = encodeURIComponent(parada.direccion);
+    } else {
+      dest = encodeURIComponent(parada.nombre + ", Lima, Peru");
+    }
+    // origin = posición actual del conductor (si disponible)
+    const origin = posRef.current
+      ? `&origin=${posRef.current.coords.latitude},${posRef.current.coords.longitude}`
+      : "";
+    const url = `https://www.google.com/maps/dir/?api=1&destination=${dest}${origin}&travelmode=driving`;
+    window.open(url, "_blank");
   }
 
   // ─── Checklist ────────────────────────────────────────────────────────────────
 
   async function guardarChecklist() {
     if (!conductor) return;
-    if (checks.some(c => c.ok === null)) { alert(`Faltan ${checks.filter(c => c.ok === null).length} ítems`); return; }
+    if (checks.some(c => c.ok === null)) { alert(`Faltan ${checks.filter(c => c.ok === null).length} ítems por completar`); return; }
     setCheckSaving(true);
     const { error } = await supabase.from("checklist_conductor").insert({
-      conductor_id: conductor.id, vehiculo_id: vehiculoId,
-      fecha: new Date().toISOString().split("T")[0],
-      items_json: checks, km_inicio: kmInicio ? Number(kmInicio) : null,
-      observaciones: checkObs, estado: checks.some(c => c.ok === false) ? "con_fallas" : "ok",
+      conductor_id: conductor.id,
+      vehiculo_id:  vehiculoId,
+      fecha:        getFechaLocal(), // ✅ también corregido aquí
+      items_json:   checks,
+      km_inicio:    kmInicio ? Number(kmInicio) : null,
+      observaciones: checkObs,
+      estado:       checks.some(c => c.ok === false) ? "con_fallas" : "ok",
     });
     if (!error) setCheckDone(true);
     setCheckSaving(false);
@@ -424,8 +548,11 @@ export default function ConductorApp() {
     if (!conductor || !docUrl.trim()) return;
     setDocSaving(true);
     const { data } = await supabase.from("documentos_conductor").insert({
-      conductor_id: conductor.id, tipo: docTipo, url: docUrl.trim(),
-      nombre: docTipo, vencimiento: docVenc || null,
+      conductor_id: conductor.id,
+      tipo:         docTipo,
+      url:          docUrl.trim(),
+      nombre:       docTipo,
+      vencimiento:  docVenc || null,
     }).select().single();
     if (data) setDocs(prev => [data, ...prev]);
     setDocUrl(""); setDocVenc(""); setDocSaving(false);
@@ -444,7 +571,7 @@ export default function ConductorApp() {
   }
 
   function cerrarSesion() {
-    if (enRuta && !confirm("Tienes un recorrido activo. ¿Salir?")) return;
+    if (enRuta && !confirm("Tienes un recorrido activo. ¿Salir igual?")) return;
     cleanup(); clearSession(); setConductor(null);
     setEnRuta(false); setDni(""); setPin(""); setTab("ruta");
   }
@@ -470,6 +597,7 @@ export default function ConductorApp() {
         <div style={{ width: 40, height: 40, border: `4px solid rgba(255,255,255,0.3)`, borderTop: "4px solid white", borderRadius: "50%", animation: "spin 1s linear infinite", margin: "0 auto 12px" }} />
         <p style={{ color: "white", fontSize: 14 }}>Cargando...</p>
       </div>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 
@@ -479,8 +607,6 @@ export default function ConductorApp() {
 
   if (!conductor) return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", background: C.white, fontFamily: "system-ui,sans-serif" }}>
-
-      {/* Hero azul */}
       <div style={{ background: C.navy, padding: "48px 24px 32px", textAlign: "center" }}>
         <div style={{ width: 72, height: 72, background: "rgba(255,255,255,0.15)", borderRadius: 20, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32, margin: "0 auto 16px" }}>🚌</div>
         <h1 style={{ color: "white", fontWeight: 900, fontSize: 22, margin: 0 }}>AFA Tours Peru</h1>
@@ -490,7 +616,6 @@ export default function ConductorApp() {
       <div style={{ flex: 1, padding: "32px 24px", maxWidth: 400, margin: "0 auto", width: "100%" }}>
         <p style={{ color: C.gray600, fontSize: 13, textAlign: "center", marginBottom: 24 }}>Ingresa con tu DNI y PIN personal</p>
 
-        {/* DNI */}
         <div style={{ marginBottom: 16 }}>
           <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>Número de DNI</label>
           <input type="tel" inputMode="numeric" maxLength={8} value={dni}
@@ -499,7 +624,6 @@ export default function ConductorApp() {
             placeholder="12345678" />
         </div>
 
-        {/* PIN dots */}
         <div style={{ marginBottom: 20 }}>
           <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>PIN de acceso</label>
           <div style={{ display: "flex", justifyContent: "center", gap: 16, marginBottom: 20 }}>
@@ -507,7 +631,6 @@ export default function ConductorApp() {
               <div key={i} style={{ width: 18, height: 18, borderRadius: "50%", background: i < pin.length ? C.navy : "transparent", border: `2px solid ${i < pin.length ? C.navy : C.gray200}`, transition: "all 0.15s" }} />
             ))}
           </div>
-          {/* Teclado */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
             {[1,2,3,4,5,6,7,8,9,"","0","⌫"].map((n, i) => (
               <button key={i}
@@ -523,7 +646,6 @@ export default function ConductorApp() {
                   cursor: n === "" ? "default" : "pointer",
                   visibility: n === "" ? "hidden" : "visible",
                   boxShadow: n !== "" ? "0 1px 4px rgba(0,0,0,0.08)" : "none",
-                  transition: "background 0.1s",
                 }}>
                 {n}
               </button>
@@ -538,7 +660,7 @@ export default function ConductorApp() {
         )}
 
         <button onClick={login} disabled={loginLoading || dni.length < 7 || pin.length < 4}
-          style={{ width: "100%", padding: "16px 0", borderRadius: 16, border: "none", background: C.navy, color: "white", fontSize: 16, fontWeight: 900, cursor: "pointer", opacity: (loginLoading || dni.length < 7 || pin.length < 4) ? 0.4 : 1, transition: "opacity 0.2s" }}>
+          style={{ width: "100%", padding: "16px 0", borderRadius: 16, border: "none", background: C.navy, color: "white", fontSize: 16, fontWeight: 900, cursor: "pointer", opacity: (loginLoading || dni.length < 7 || pin.length < 4) ? 0.4 : 1 }}>
           {loginLoading ? "Verificando..." : "INGRESAR →"}
         </button>
 
@@ -546,7 +668,6 @@ export default function ConductorApp() {
           ¿Problemas? Llama: <a href="tel:966707225" style={{ color: C.navy, fontWeight: 700 }}>966 707 225</a>
         </p>
       </div>
-
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
@@ -621,7 +742,7 @@ export default function ConductorApp() {
                 </select>
                 {vehSel && (
                   <div style={{ marginTop: 10, padding: "8px 12px", background: C.gray50, borderRadius: 10, display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ color: C.gray600, fontSize: 12 }}>Placa</span>
+                    <span style={{ color: C.gray600, fontSize: 12 }}>Placa seleccionada</span>
                     <span style={{ color: C.navy, fontSize: 14, fontWeight: 900, fontFamily: "monospace" }}>{vehSel.placa}</span>
                   </div>
                 )}
@@ -633,16 +754,28 @@ export default function ConductorApp() {
               Hoja de Ruta — {new Date().toLocaleDateString("es-PE", { weekday: "long", day: "numeric", month: "long" })}
             </p>
 
-            {reservasHoy.length === 0 ? (
+            {/* ✅ Indicador de carga */}
+            {cargando ? (
+              <div style={{ background: C.white, borderRadius: 16, padding: 24, textAlign: "center", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
+                <div style={{ width: 28, height: 28, border: `3px solid ${C.gray200}`, borderTop: `3px solid ${C.navy}`, borderRadius: "50%", animation: "spin 1s linear infinite", margin: "0 auto 10px" }} />
+                <p style={{ color: C.gray400, fontSize: 13, margin: 0 }}>Cargando servicios...</p>
+              </div>
+            ) : reservasHoy.length === 0 ? (
               <div style={{ background: C.white, borderRadius: 16, padding: 32, textAlign: "center", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
                 <p style={{ fontSize: 36, marginBottom: 8 }}>📋</p>
                 <p style={{ color: C.gray600, fontWeight: 700, margin: 0 }}>Sin servicios programados hoy</p>
+                {/* ✅ Mostrar fecha que se consultó para debug */}
+                <p style={{ color: C.gray400, fontSize: 11, marginTop: 8 }}>Consultando: {debugFecha}</p>
+                <button
+                  onClick={() => conductor && cargarDatos(conductor.id)}
+                  style={{ marginTop: 14, padding: "10px 20px", borderRadius: 12, border: `1px solid ${C.navy}`, background: C.white, color: C.navy, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+                  🔄 Actualizar
+                </button>
               </div>
             ) : reservasHoy.map(r => {
               const esActiva = reservaActiva?.id === r.id;
               return (
                 <div key={r.id} style={{ background: C.white, borderRadius: 16, marginBottom: 12, boxShadow: "0 1px 8px rgba(0,0,0,0.06)", overflow: "hidden", border: esActiva ? `2px solid ${C.navy}` : `1px solid ${C.gray200}` }}>
-                  {/* Stripe top */}
                   <div style={{ height: 4, background: esActiva ? C.navy : C.gray200 }} />
                   <div style={{ padding: 16 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
@@ -662,7 +795,7 @@ export default function ConductorApp() {
                       </button>
                     ) : (
                       <button onClick={() => iniciarRecorrido(r)} disabled={iniciando || !vehiculoId}
-                        style={{ width: "100%", padding: "14px 0", borderRadius: 12, border: "none", background: vehiculoId ? C.navy : C.gray200, color: vehiculoId ? "white" : C.gray400, fontSize: 15, fontWeight: 900, cursor: vehiculoId ? "pointer" : "not-allowed", transition: "background 0.2s" }}>
+                        style={{ width: "100%", padding: "14px 0", borderRadius: 12, border: "none", background: vehiculoId ? C.navy : C.gray200, color: vehiculoId ? "white" : C.gray400, fontSize: 15, fontWeight: 900, cursor: vehiculoId ? "pointer" : "not-allowed" }}>
                         {iniciando ? "📍 Obteniendo GPS..." : "▶ INICIAR RECORRIDO"}
                       </button>
                     )}
@@ -676,10 +809,10 @@ export default function ConductorApp() {
               <div style={{ background: C.white, borderRadius: 16, padding: 16, boxShadow: "0 1px 8px rgba(0,0,0,0.06)", marginTop: 4 }}>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                   {[
-                    { label: "Velocidad", val: `${velocidad} km/h`, color: C.navy },
-                    { label: "Señales GPS", val: String(totalEnvios), color: C.green },
+                    { label: "Velocidad",    val: `${velocidad} km/h`,                                                        color: C.navy  },
+                    { label: "Señales GPS",  val: String(totalEnvios),                                                         color: C.green },
                     { label: "Último envío", val: ultimoEnvio?.toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" }) || "—", color: C.gray600 },
-                    { label: "Precisión", val: posActual ? `±${Math.round(posActual.coords.accuracy)}m` : "—", color: C.gray600 },
+                    { label: "Precisión",    val: posActual ? `±${Math.round(posActual.coords.accuracy)}m` : "—",              color: C.gray600 },
                   ].map(s => (
                     <div key={s.label} style={{ background: C.gray50, borderRadius: 12, padding: "10px 14px" }}>
                       <p style={{ color: C.gray400, fontSize: 10, fontWeight: 700, textTransform: "uppercase", margin: 0 }}>{s.label}</p>
@@ -703,7 +836,6 @@ export default function ConductorApp() {
               </div>
             ) : paradas.length === 0 ? (
               <div>
-                {/* Sin paradas configuradas — mostrar vista de viaje libre */}
                 <div style={{ background: C.white, borderRadius: 16, padding: 20, boxShadow: "0 1px 8px rgba(0,0,0,0.06)", marginBottom: 12 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
                     <div style={{ width: 10, height: 10, borderRadius: "50%", background: C.green, animation: "pulse 1s infinite" }} />
@@ -715,6 +847,43 @@ export default function ConductorApp() {
                     <p style={{ fontSize: 56, fontWeight: 900, color: C.navy, margin: 0, lineHeight: 1 }}>{velocidad}</p>
                     <p style={{ color: C.gray400, fontWeight: 700, margin: "4px 0 0" }}>km/h</p>
                   </div>
+
+                  {/* 🗺️ Navegación al destino final */}
+                  {reservaActiva?.destino && (
+                    <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.gray100}` }}>
+                      <p style={{ color: C.gray600, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, margin: "0 0 10px" }}>Navegar al destino</p>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                        <button
+                          onClick={() => {
+                            const dest = encodeURIComponent(reservaActiva.destino + ", Lima, Peru");
+                            window.open(`https://waze.com/ul?q=${dest}&navigate=yes`, "_blank");
+                          }}
+                          style={{ padding: "12px 0", borderRadius: 12, border: "none", background: "#33CCFF", color: "#0b1b2e", fontWeight: 900, fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                            <circle cx="12" cy="10" r="8" fill="#33CCFF" stroke="#0b1b2e" strokeWidth="1.5"/>
+                            <ellipse cx="12" cy="10" rx="5" ry="5" fill="white"/>
+                            <circle cx="10.2" cy="9" r="1.1" fill="#0b1b2e"/>
+                            <circle cx="13.8" cy="9" r="1.1" fill="#0b1b2e"/>
+                            <path d="M9.5 11.5 Q12 13.5 14.5 11.5" stroke="#0b1b2e" strokeWidth="1.2" fill="none" strokeLinecap="round"/>
+                          </svg>
+                          Waze
+                        </button>
+                        <button
+                          onClick={() => {
+                            const dest = encodeURIComponent(reservaActiva.destino + ", Lima, Peru");
+                            const origin = posRef.current ? `&origin=${posRef.current.coords.latitude},${posRef.current.coords.longitude}` : "";
+                            window.open(`https://www.google.com/maps/dir/?api=1&destination=${dest}${origin}&travelmode=driving`, "_blank");
+                          }}
+                          style={{ padding: "12px 0", borderRadius: 12, border: `1px solid ${C.gray200}`, background: C.white, color: C.navy, fontWeight: 900, fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                          <svg width="14" height="17" viewBox="0 0 18 22" fill="none">
+                            <path d="M9 0C4.03 0 0 4.03 0 9c0 6.75 9 13 9 13s9-6.25 9-13c0-4.97-4.03-9-9-9z" fill="#EA4335"/>
+                            <circle cx="9" cy="9" r="3.5" fill="white"/>
+                          </svg>
+                          Maps
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <button onClick={finalizarRecorrido} style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: `2px solid #FECACA`, background: "#FEF2F2", color: C.red, fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
                   ⏹ Finalizar recorrido
@@ -722,6 +891,88 @@ export default function ConductorApp() {
               </div>
             ) : (
               <div>
+                {/* ── 🗺️ TARJETA DE NAVEGACIÓN (estilo Uber conductor) ── */}
+                {paradaActual && (
+                  <div style={{
+                    background: C.navy, borderRadius: 18, padding: 16, marginBottom: 12,
+                    boxShadow: "0 4px 20px rgba(11,49,95,0.25)",
+                  }}>
+                    {/* Label destino */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#4ade80", boxShadow: "0 0 6px #4ade80" }} />
+                      <p style={{ color: "rgba(255,255,255,0.6)", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, margin: 0 }}>
+                        Siguiente parada · {paradaIdx + 1} de {paradas.length}
+                      </p>
+                    </div>
+
+                    {/* Nombre y dirección */}
+                    <p style={{ color: "white", fontWeight: 900, fontSize: 20, margin: "0 0 2px", lineHeight: 1.2 }}>
+                      {paradaActual.nombre}
+                    </p>
+                    {paradaActual.direccion && (
+                      <p style={{ color: "rgba(255,255,255,0.55)", fontSize: 12, margin: "0 0 14px" }}>
+                        📍 {paradaActual.direccion}
+                      </p>
+                    )}
+                    {paradaActual.hora_estimada && (
+                      <p style={{ color: "rgba(255,255,255,0.55)", fontSize: 12, margin: "0 0 14px" }}>
+                        🕐 Llegada estimada: <span style={{ color: "white", fontWeight: 700 }}>{paradaActual.hora_estimada}</span>
+                      </p>
+                    )}
+
+                    {/* Botones de navegación */}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      {/* Waze */}
+                      <button
+                        onClick={() => abrirWaze(paradaActual)}
+                        style={{
+                          padding: "13px 0", borderRadius: 14, border: "none",
+                          background: "#33CCFF", color: "#0b1b2e",
+                          fontWeight: 900, fontSize: 15, cursor: "pointer",
+                          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                          boxShadow: "0 2px 10px rgba(51,204,255,0.4)",
+                        }}>
+                        {/* Waze logo SVG inline */}
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                          <circle cx="12" cy="10" r="8" fill="#33CCFF" stroke="#0b1b2e" strokeWidth="1.5"/>
+                          <ellipse cx="12" cy="10" rx="5" ry="5" fill="white"/>
+                          <circle cx="10.2" cy="9" r="1.1" fill="#0b1b2e"/>
+                          <circle cx="13.8" cy="9" r="1.1" fill="#0b1b2e"/>
+                          <path d="M9.5 11.5 Q12 13.5 14.5 11.5" stroke="#0b1b2e" strokeWidth="1.2" fill="none" strokeLinecap="round"/>
+                          <path d="M8 18 Q12 22 16 18" stroke="#0b1b2e" strokeWidth="1.5" fill="none" strokeLinecap="round"/>
+                        </svg>
+                        Waze
+                      </button>
+
+                      {/* Google Maps */}
+                      <button
+                        onClick={() => abrirGoogleMaps(paradaActual)}
+                        style={{
+                          padding: "13px 0", borderRadius: 14, border: "none",
+                          background: "white", color: C.navy,
+                          fontWeight: 900, fontSize: 15, cursor: "pointer",
+                          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                          boxShadow: "0 2px 10px rgba(255,255,255,0.2)",
+                        }}>
+                        {/* Google Maps pin SVG inline */}
+                        <svg width="18" height="20" viewBox="0 0 18 22" fill="none">
+                          <path d="M9 0C4.03 0 0 4.03 0 9c0 6.75 9 13 9 13s9-6.25 9-13c0-4.97-4.03-9-9-9z" fill="#EA4335"/>
+                          <circle cx="9" cy="9" r="3.5" fill="white"/>
+                        </svg>
+                        Google Maps
+                      </button>
+                    </div>
+
+                    {/* Info velocidad actual */}
+                    {enRuta && velocidad > 0 && (
+                      <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.1)", display: "flex", justifyContent: "space-between" }}>
+                        <span style={{ color: "rgba(255,255,255,0.5)", fontSize: 12 }}>Velocidad actual</span>
+                        <span style={{ color: "#4ade80", fontWeight: 900, fontSize: 14 }}>{velocidad} km/h</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Progreso */}
                 <div style={{ background: C.white, borderRadius: 16, padding: "14px 16px", marginBottom: 12, boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -735,7 +986,6 @@ export default function ConductorApp() {
 
                 {/* Timeline */}
                 <div style={{ display: "flex", gap: 16 }}>
-                  {/* Línea vertical */}
                   <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 32, flexShrink: 0, paddingTop: 4 }}>
                     {paradas.map((p, i) => (
                       <div key={p.id} style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
@@ -755,7 +1005,6 @@ export default function ConductorApp() {
                     ))}
                   </div>
 
-                  {/* Paradas */}
                   <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8 }}>
                     {paradas.map((p, i) => {
                       const esActual = i === paradaIdx;
@@ -807,7 +1056,7 @@ export default function ConductorApp() {
                                 </div>
                               )}
 
-                              {/* Botones de acción */}
+                              {/* ✅ Botones de acción - QR RESTAURADO */}
                               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
                                 <button onClick={() => setEscanear(true)}
                                   style={{ padding: "12px 0", borderRadius: 12, border: "none", background: C.navy, color: "white", fontWeight: 900, fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
@@ -834,9 +1083,8 @@ export default function ConductorApp() {
                 {/* SOS */}
                 <div style={{ marginTop: 16 }}>
                   <div style={{ position: "relative", overflow: "hidden", borderRadius: 16 }}>
-                    {/* Barra de progreso del hold */}
                     {sosActivo && (
-                      <div style={{ position: "absolute", top: 0, left: 0, height: "100%", background: "rgba(0,0,0,0.3)", width: `${sosPct}%`, transition: "none", zIndex: 1, borderRadius: 16 }} />
+                      <div style={{ position: "absolute", top: 0, left: 0, height: "100%", background: "rgba(0,0,0,0.3)", width: `${sosPct}%`, zIndex: 1, borderRadius: 16 }} />
                     )}
                     <button
                       onMouseDown={iniciarSOS} onMouseUp={cancelarSOS} onTouchStart={iniciarSOS} onTouchEnd={cancelarSOS}
@@ -878,7 +1126,6 @@ export default function ConductorApp() {
               </div>
             ) : (
               <>
-                {/* Vehículo y KM */}
                 <div style={{ background: C.white, borderRadius: 16, padding: 16, marginBottom: 12, boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
                   <select value={vehiculoId || ""} onChange={e => setVehiculoId(Number(e.target.value) || null)}
                     style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${C.gray200}`, fontSize: 14, fontWeight: 700, color: C.gray800, marginBottom: 10, outline: "none", boxSizing: "border-box" }}>
@@ -889,7 +1136,6 @@ export default function ConductorApp() {
                     style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${C.gray200}`, fontSize: 14, fontWeight: 700, color: C.gray800, outline: "none", boxSizing: "border-box", fontFamily: "monospace" }} />
                 </div>
 
-                {/* Progreso */}
                 <div style={{ background: C.white, borderRadius: 14, padding: "12px 16px", marginBottom: 12, boxShadow: "0 1px 8px rgba(0,0,0,0.06)", display: "flex", alignItems: "center", gap: 12 }}>
                   <div style={{ flex: 1, height: 8, background: C.gray100, borderRadius: 4, overflow: "hidden" }}>
                     <div style={{ height: "100%", background: checkFallas > 0 ? C.amber : C.navy, borderRadius: 4, width: `${checkPct}%`, transition: "width 0.3s" }} />
@@ -898,7 +1144,6 @@ export default function ConductorApp() {
                   {checkFallas > 0 && <span style={{ color: C.red, fontWeight: 900, fontSize: 13, flexShrink: 0 }}>{checkFallas} falla{checkFallas > 1 ? "s" : ""}</span>}
                 </div>
 
-                {/* Items por categoría */}
                 {categorias.map(cat => (
                   <div key={cat} style={{ background: C.white, borderRadius: 16, padding: "12px 16px", marginBottom: 12, boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
                     <p style={{ color: C.gray800, fontWeight: 900, fontSize: 13, margin: "0 0 10px" }}>{cat}</p>
@@ -936,18 +1181,21 @@ export default function ConductorApp() {
         {tab === "documentos" && (
           <div style={{ padding: 16 }}>
             <h2 style={{ color: C.gray800, fontWeight: 900, fontSize: 20, margin: "0 0 16px" }}>Mis Documentos</h2>
-
-            {/* Estado mis docs */}
             <div style={{ background: C.white, borderRadius: 16, padding: 16, marginBottom: 12, boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
               <p style={{ color: C.gray600, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, margin: "0 0 10px" }}>Estado de documentos</p>
               {[
-                { label: "🪪 Licencia MTC", fecha: conductor.vencimiento_licencia || null },
-                { label: "🏥 SCTR Salud", fecha: conductor.sctr_salud_venc || null },
-                { label: "🩺 Examen médico", fecha: conductor.examen_medico_venc || null },
+                { label: "🪪 Licencia MTC",   fecha: conductor.vencimiento_licencia || null },
+                { label: "🏥 SCTR Salud",     fecha: conductor.sctr_salud_venc || null },
+                { label: "🩺 Examen médico",  fecha: conductor.examen_medico_venc || null },
               ].map(d => {
                 const est = docEstado(d.fecha);
                 const dias = diasPara(d.fecha);
-                const cfg = { ok: { color: C.green, bg: "#DCFCE7", txt: dias !== null ? `Vence en ${dias}d` : "OK" }, pronto: { color: C.amber, bg: "#FEF3C7", txt: `⚠ ${dias}d` }, vencido: { color: C.red, bg: "#FEF2F2", txt: `🚨 Vencida` }, sin: { color: C.gray400, bg: C.gray100, txt: "Sin fecha" } }[est];
+                const cfg = {
+                  ok:      { color: C.green, bg: "#DCFCE7", txt: dias !== null ? `Vence en ${dias}d` : "OK" },
+                  pronto:  { color: C.amber, bg: "#FEF3C7", txt: `⚠ ${dias}d` },
+                  vencido: { color: C.red,   bg: "#FEF2F2", txt: `🚨 Vencida` },
+                  sin:     { color: C.gray400, bg: C.gray100, txt: "Sin fecha" },
+                }[est];
                 return (
                   <div key={d.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${C.gray100}` }}>
                     <span style={{ color: C.gray700, fontSize: 13 }}>{d.label}</span>
@@ -957,21 +1205,22 @@ export default function ConductorApp() {
               })}
             </div>
 
-            {/* Subir doc */}
             <div style={{ background: C.white, borderRadius: 16, padding: 16, marginBottom: 12, boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
               <p style={{ color: C.gray600, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, margin: "0 0 12px" }}>Registrar documento (URL)</p>
-              {[
-                <select value={docTipo} onChange={e => setDocTipo(e.target.value)} style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${C.gray200}`, fontSize: 13, color: C.gray800, outline: "none", marginBottom: 8, boxSizing: "border-box" as const }}>{TIPOS_DOC.map(t => <option key={t}>{t}</option>)}</select>,
-                <input placeholder="URL del documento (Google Drive, Dropbox...)" value={docUrl} onChange={e => setDocUrl(e.target.value)} style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${C.gray200}`, fontSize: 13, color: C.gray800, outline: "none", marginBottom: 8, boxSizing: "border-box" as const }} />,
-                <input type="date" value={docVenc} onChange={e => setDocVenc(e.target.value)} style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${C.gray200}`, fontSize: 13, color: C.gray800, outline: "none", marginBottom: 12, boxSizing: "border-box" as const }} />,
-              ].map((el, i) => <div key={i}>{el}</div>)}
+              <select value={docTipo} onChange={e => setDocTipo(e.target.value)}
+                style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${C.gray200}`, fontSize: 13, color: C.gray800, outline: "none", marginBottom: 8, boxSizing: "border-box" }}>
+                {TIPOS_DOC.map(t => <option key={t}>{t}</option>)}
+              </select>
+              <input placeholder="URL del documento (Google Drive, Dropbox...)" value={docUrl} onChange={e => setDocUrl(e.target.value)}
+                style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${C.gray200}`, fontSize: 13, color: C.gray800, outline: "none", marginBottom: 8, boxSizing: "border-box" }} />
+              <input type="date" value={docVenc} onChange={e => setDocVenc(e.target.value)}
+                style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `1px solid ${C.gray200}`, fontSize: 13, color: C.gray800, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
               <button onClick={subirDoc} disabled={docSaving || !docUrl}
                 style={{ width: "100%", padding: "12px 0", borderRadius: 12, border: "none", background: docUrl ? C.navy : C.gray200, color: "white", fontWeight: 700, cursor: docUrl ? "pointer" : "not-allowed" }}>
                 {docSaving ? "Guardando..." : "📤 Registrar"}
               </button>
             </div>
 
-            {/* Lista docs */}
             {docs.map(d => (
               <div key={d.id} style={{ background: C.white, borderRadius: 14, padding: "12px 16px", marginBottom: 8, boxShadow: "0 1px 6px rgba(0,0,0,0.05)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div>
@@ -987,7 +1236,6 @@ export default function ConductorApp() {
         {/* ════ PERFIL ════ */}
         {tab === "perfil" && (
           <div style={{ padding: 16 }}>
-            {/* Card conductor */}
             <div style={{ background: C.navy, borderRadius: 20, padding: 20, marginBottom: 16 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
                 <div style={{ width: 60, height: 60, borderRadius: 16, background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, fontWeight: 900, color: "white" }}>{conductor.nombre.charAt(0)}</div>
@@ -999,7 +1247,6 @@ export default function ConductorApp() {
               </div>
             </div>
 
-            {/* Cambiar PIN */}
             <div style={{ background: C.white, borderRadius: 16, padding: 16, marginBottom: 12, boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: camPin ? 12 : 0 }}>
                 <p style={{ color: C.gray800, fontWeight: 700, fontSize: 14, margin: 0 }}>🔑 Cambiar PIN</p>
@@ -1011,7 +1258,7 @@ export default function ConductorApp() {
                     <input key={i} type="password" inputMode="numeric" maxLength={4} placeholder={ph}
                       value={i === 0 ? pinNuevo : pinConfirm}
                       onChange={e => i === 0 ? setPinNuevo(e.target.value.replace(/\D/g,"").slice(0,4)) : setPinConfirm(e.target.value.replace(/\D/g,"").slice(0,4))}
-                      style={{ width: "100%", padding: "12px", borderRadius: 12, border: `1px solid ${C.gray200}`, fontSize: 18, textAlign: "center", letterSpacing: 6, marginBottom: 8, outline: "none", boxSizing: "border-box" as const }} />
+                      style={{ width: "100%", padding: "12px", borderRadius: 12, border: `1px solid ${C.gray200}`, fontSize: 18, textAlign: "center", letterSpacing: 6, marginBottom: 8, outline: "none", boxSizing: "border-box" }} />
                   ))}
                   {pinMsg && <p style={{ color: pinMsg.includes("✅") ? C.green : C.red, fontWeight: 700, textAlign: "center", fontSize: 13 }}>{pinMsg}</p>}
                   <button onClick={cambiarPin} style={{ width: "100%", padding: "12px", borderRadius: 12, border: "none", background: C.navy, color: "white", fontWeight: 700, cursor: "pointer" }}>Guardar PIN</button>
@@ -1019,13 +1266,12 @@ export default function ConductorApp() {
               )}
             </div>
 
-            {/* Info app */}
             <div style={{ background: C.white, borderRadius: 16, padding: 16, marginBottom: 12, boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
               <p style={{ color: C.gray600, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, margin: "0 0 10px" }}>Información</p>
               {[
                 ["📡 Señales GPS enviadas hoy", String(totalEnvios)],
-                ["🕐 Sesión activa", "12 horas"],
-                ["📱 Versión App", "2.0 Pro"],
+                ["📅 Fecha del sistema",         debugFecha],
+                ["📱 Versión App",               "2.1 Pro"],
               ].map(([label, val]) => (
                 <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${C.gray100}` }}>
                   <span style={{ color: C.gray600, fontSize: 13 }}>{label}</span>
@@ -1044,11 +1290,11 @@ export default function ConductorApp() {
       {/* ── NAV BAR ── */}
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: C.white, borderTop: `1px solid ${C.gray200}`, display: "flex", zIndex: 20, boxShadow: "0 -2px 12px rgba(0,0,0,0.08)", maxWidth: 500, margin: "0 auto" }}>
         {([
-          { id: "ruta" as Tab,       icon: "🏠", label: "Ruta" },
-          { id: "paradas" as Tab,    icon: "🗺️", label: "Paradas", badge: enRuta && paradaActual ? paradas.length - paradaIdx : 0 },
-          { id: "checklist" as Tab,  icon: "✅", label: "Checklist", badge: checkDone ? 0 : 1 },
+          { id: "ruta"       as Tab, icon: "🏠", label: "Ruta" },
+          { id: "paradas"    as Tab, icon: "🗺️", label: "Paradas", badge: enRuta && paradaActual ? paradas.length - paradaIdx : 0 },
+          { id: "checklist"  as Tab, icon: "✅", label: "Checklist", badge: checkDone ? 0 : 1 },
           { id: "documentos" as Tab, icon: "📄", label: "Docs", badge: docsBadge },
-          { id: "perfil" as Tab,     icon: "👤", label: "Perfil" },
+          { id: "perfil"     as Tab, icon: "👤", label: "Perfil" },
         ]).map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{ flex: 1, border: "none", background: "none", cursor: "pointer", padding: 0 }}>
             <NavBtn active={tab === t.id} icon={t.icon} label={t.label} badge={t.badge as number | undefined} />
@@ -1056,7 +1302,7 @@ export default function ConductorApp() {
         ))}
       </div>
 
-      {/* ── QR SCANNER OVERLAY ── */}
+      {/* ── ✅ QR SCANNER OVERLAY (RESTAURADO) ── */}
       {escanear && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.95)", zIndex: 100, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
           <div style={{ textAlign: "center", marginBottom: 24 }}>
@@ -1064,24 +1310,30 @@ export default function ConductorApp() {
             <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 13, margin: "4px 0 0" }}>Apunta al código QR del pasajero</p>
           </div>
           <div style={{ position: "relative" }}>
+            {/* ✅ El id="qr-container" debe existir en el DOM ANTES de que html5-qrcode intente usarlo */}
             <div id="qr-container" style={{ width: 300, height: 300, borderRadius: 16, overflow: "hidden" }} />
             {/* Marco guía */}
             <div style={{ position: "absolute", inset: 0, border: `3px solid ${C.navy}`, borderRadius: 16, pointerEvents: "none" }}>
-              {[["top-0 left-0","border-t-4 border-l-4"], ["top-0 right-0","border-t-4 border-r-4"], ["bottom-0 left-0","border-b-4 border-l-4"], ["bottom-0 right-0","border-b-4 border-r-4"]].map(([pos, brd], i) => (
-                <div key={i} style={{ position: "absolute", width: 30, height: 30, borderColor: C.navy, borderStyle: "solid",
-                  ...(i === 0 ? { top: 0, left: 0, borderWidth: "4px 0 0 4px" } : i === 1 ? { top: 0, right: 0, borderWidth: "4px 4px 0 0" } : i === 2 ? { bottom: 0, left: 0, borderWidth: "0 0 4px 4px" } : { bottom: 0, right: 0, borderWidth: "0 4px 4px 0" }),
-                  borderRadius: i === 0 ? "4px 0 0 0" : i === 1 ? "0 4px 0 0" : i === 2 ? "0 0 0 4px" : "0 0 4px 0",
+              {[0,1,2,3].map(i => (
+                <div key={i} style={{
+                  position: "absolute", width: 30, height: 30,
+                  borderColor: C.navy, borderStyle: "solid",
+                  ...(i === 0 ? { top: 0, left: 0, borderWidth: "4px 0 0 4px", borderRadius: "4px 0 0 0" }
+                    : i === 1 ? { top: 0, right: 0, borderWidth: "4px 4px 0 0", borderRadius: "0 4px 0 0" }
+                    : i === 2 ? { bottom: 0, left: 0, borderWidth: "0 0 4px 4px", borderRadius: "0 0 0 4px" }
+                    : { bottom: 0, right: 0, borderWidth: "0 4px 4px 0", borderRadius: "0 0 4px 0" }),
                 }} />
               ))}
             </div>
           </div>
-          <button onClick={() => setEscanear(false)} style={{ marginTop: 32, padding: "12px 32px", borderRadius: 14, border: "none", background: "rgba(255,255,255,0.15)", color: "white", fontWeight: 700, cursor: "pointer" }}>
+          <button onClick={() => setEscanear(false)}
+            style={{ marginTop: 32, padding: "12px 32px", borderRadius: 14, border: "none", background: "rgba(255,255,255,0.15)", color: "white", fontWeight: 700, cursor: "pointer" }}>
             Cancelar
           </button>
         </div>
       )}
 
-      {/* ── VALIDACIÓN PASAJERO ── */}
+      {/* ── ✅ VALIDACIÓN PASAJERO ── */}
       {validando && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
           <div style={{ background: C.white, borderRadius: "24px 24px 0 0", padding: 28, width: "100%", maxWidth: 500 }}>
@@ -1089,8 +1341,10 @@ export default function ConductorApp() {
             <p style={{ color: C.navy, fontSize: 13, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, margin: "0 0 16px" }}>Validación de identidad</p>
 
             <div style={{ display: "flex", gap: 16, alignItems: "center", marginBottom: 20 }}>
-              <div style={{ width: 64, height: 64, borderRadius: 16, background: C.gray100, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, flexShrink: 0 }}>
-                {validando.foto_url ? <img src={validando.foto_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 16 }} /> : "👤"}
+              <div style={{ width: 64, height: 64, borderRadius: 16, background: C.gray100, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, flexShrink: 0, overflow: "hidden" }}>
+                {validando.foto_url
+                  ? <img src={validando.foto_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  : "👤"}
               </div>
               <div>
                 <p style={{ color: C.gray800, fontWeight: 900, fontSize: 20, margin: 0 }}>{validando.nombre}</p>
@@ -1099,7 +1353,6 @@ export default function ConductorApp() {
               </div>
             </div>
 
-            {/* Estado en esta parada */}
             {(() => {
               const pp = pasajeros.find(p => p.pasajero_id === validando.id && p.parada_id === paradaActual?.id);
               return pp ? (
@@ -1116,10 +1369,12 @@ export default function ConductorApp() {
             })()}
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <button onClick={() => setValidando(null)} style={{ padding: "14px 0", borderRadius: 14, border: `1px solid ${C.gray200}`, background: C.white, color: C.gray600, fontWeight: 700, cursor: "pointer" }}>
+              <button onClick={() => setValidando(null)}
+                style={{ padding: "14px 0", borderRadius: 14, border: `1px solid ${C.gray200}`, background: C.white, color: C.gray600, fontWeight: 700, cursor: "pointer" }}>
                 Cancelar
               </button>
-              <button onClick={() => confirmarEmbarque(validando)} style={{ padding: "14px 0", borderRadius: 14, border: "none", background: C.navy, color: "white", fontWeight: 900, cursor: "pointer", fontSize: 15 }}>
+              <button onClick={() => confirmarEmbarque(validando)}
+                style={{ padding: "14px 0", borderRadius: 14, border: "none", background: C.navy, color: "white", fontWeight: 900, cursor: "pointer", fontSize: 15 }}>
                 ✅ Confirmar embarque
               </button>
             </div>
@@ -1129,13 +1384,19 @@ export default function ConductorApp() {
 
       {/* ── MENSAJE BOARDING ── */}
       {boardingMsg && (
-        <div style={{ position: "fixed", top: 70, left: "50%", transform: "translateX(-50%)", background: boardingMsg.ok ? C.green : C.red, color: "white", borderRadius: 14, padding: "14px 20px", fontWeight: 700, fontSize: 14, zIndex: 200, boxShadow: "0 4px 20px rgba(0,0,0,0.3)", maxWidth: "90%", textAlign: "center" }}>
+        <div style={{
+          position: "fixed", top: 70, left: "50%", transform: "translateX(-50%)",
+          background: boardingMsg.ok ? C.green : C.red,
+          color: "white", borderRadius: 14, padding: "14px 20px",
+          fontWeight: 700, fontSize: 14, zIndex: 200,
+          boxShadow: "0 4px 20px rgba(0,0,0,0.3)", maxWidth: "90%", textAlign: "center",
+        }}>
           {boardingMsg.msg}
         </div>
       )}
 
       <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes spin  { to { transform: rotate(360deg); } }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
         * { -webkit-tap-highlight-color: transparent; }
         select, input, button { font-family: system-ui, sans-serif; }

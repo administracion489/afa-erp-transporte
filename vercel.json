@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/notificaciones/recordatorio",
+      "schedule": "0 13 * * *"
+    }
+  ]
+}
