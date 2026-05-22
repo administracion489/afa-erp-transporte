@@ -446,7 +446,6 @@ export default function ClientesPage() {
       distrito:        form.distrito.trim()        || undefined,
       ciudad:          form.ciudad.trim()          || undefined,
       notas:           form.notas.trim()           || undefined,
-      servicios_interes: form.servicios_interes.length ? form.servicios_interes.join(",") : undefined,
       empresa:         form.tipo === "b2b" ? form.empresa.trim()        || undefined : undefined,
       ruc:             form.tipo === "b2b" ? form.ruc.trim()            || undefined : undefined,
       tipo_empresa:    form.tipo === "b2b" ? form.tipo_empresa.trim()   || undefined : undefined,
@@ -567,6 +566,9 @@ export default function ClientesPage() {
   const [aprobando,     setAprobando]     = useState<number | null>(null);
   const [rechazarModal, setRechazarModal] = useState<Solicitud | null>(null);
   const [notaRechazo,   setNotaRechazo]   = useState("");
+  const [editSol,       setEditSol]       = useState<Solicitud | null>(null);
+  const [editSolForm,   setEditSolForm]   = useState<Partial<Solicitud>>({});
+  const [guardandoSol,  setGuardandoSol]  = useState(false);
 
   const cargarSolicitudes = async () => {
     setLoadingSol(true);
@@ -587,13 +589,78 @@ export default function ClientesPage() {
     filtroSolEst === "todos" || s.estado === filtroSolEst
   );
 
+  const abrirEditSol = (sol: Solicitud) => {
+    setEditSol(sol);
+    setEditSolForm({
+      razon_social: sol.razon_social, nombre_comercial: sol.nombre_comercial,
+      tipo_doc: sol.tipo_doc, num_doc: sol.num_doc,
+      tipo_empresa: sol.tipo_empresa, rubro: sol.rubro,
+      direccion: sol.direccion, distrito: sol.distrito,
+      provincia: sol.provincia, departamento: sol.departamento,
+      email_facturacion: sol.email_facturacion, web: sol.web,
+      condicion_pago: sol.condicion_pago, moneda: sol.moneda,
+      tipo_comprobante: sol.tipo_comprobante, volumen_compra: sol.volumen_compra,
+      como_nos_conocio: sol.como_nos_conocio, observaciones: sol.observaciones,
+      nota_interna: sol.nota_interna,
+    });
+  };
+
+  const guardarEdicionSolicitud = async () => {
+    if (!editSol) return;
+    setGuardandoSol(true);
+    const { error } = await supabase.from("solicitudes_cliente")
+      .update(editSolForm).eq("id", editSol.id);
+    if (error) { toast(error.message, "error"); setGuardandoSol(false); return; }
+    toast("Solicitud actualizada ✓", "ok");
+    setEditSol(null);
+    setGuardandoSol(false);
+    cargarSolicitudes();
+  };
+
   const aprobarSolicitud = async (sol: Solicitud) => {
     setAprobando(sol.id);
-    const { data, error } = await supabase.rpc("aprobar_solicitud", {
-      p_solicitud_id: sol.id,
-      p_revisado_por: "erp_user",
-    });
-    if (error) { toast(error.message, "error"); setAprobando(null); return; }
+
+    const clientePayload = {
+      nombre: sol.razon_social, tipo: "b2b" as TipoCliente, estado: "activo" as EstadoCliente,
+      empresa:          sol.razon_social || undefined,
+      ruc:              sol.tipo_doc === "RUC" ? sol.num_doc : undefined,
+      email_facturacion: sol.email_facturacion || undefined,
+      direccion:        sol.direccion || undefined,
+      distrito:         sol.distrito  || undefined,
+      tipo_empresa:     sol.tipo_empresa     || undefined,
+      rubro:            sol.rubro            || undefined,
+      nombre_comercial: sol.nombre_comercial || undefined,
+      condicion_pago:   sol.condicion_pago   || undefined,
+      moneda:           sol.moneda           || undefined,
+      tipo_comprobante: sol.tipo_comprobante || undefined,
+      volumen_compra:   sol.volumen_compra   || undefined,
+      como_nos_conocio: sol.como_nos_conocio || undefined,
+    };
+
+    const { data: nuevoCliente, error: errCliente } = await supabase
+      .from("clientes").insert(clientePayload).select("id").single();
+    if (errCliente) { toast(errCliente.message, "error"); setAprobando(null); return; }
+
+    const contactosInsert = [
+      ...(sol.contactos_administrativos || []).filter(c => c.nombre).map((c, i) => ({
+        cliente_id: nuevoCliente.id, tipo: "administrativo", principal: i === 0,
+        nombre: c.nombre || "", apellido: c.apellido || undefined,
+        cargo: c.cargo || undefined, telefono: c.telefono || undefined, email: c.email || undefined,
+      })),
+      ...(sol.contactos_operativos || []).filter(c => c.nombre).map((c, i) => ({
+        cliente_id: nuevoCliente.id, tipo: "operativo", principal: i === 0,
+        nombre: c.nombre || "", apellido: c.apellido || undefined,
+        cargo: c.cargo || undefined, telefono: c.telefono || undefined, email: c.email || undefined,
+      })),
+    ];
+    if (contactosInsert.length) await supabase.from("contactos").insert(contactosInsert);
+
+    const { error: errSol } = await supabase.from("solicitudes_cliente").update({
+      estado: "aprobada", cliente_id: nuevoCliente.id,
+      revisado_por: "erp_user", revisado_at: new Date().toISOString(),
+    }).eq("id", sol.id);
+    if (errSol) { toast(errSol.message, "error"); setAprobando(null); return; }
+
     toast(`"${sol.razon_social}" aprobado y dado de alta como cliente ✓`, "ok");
     setAprobando(null);
     cargarSolicitudes(); cargarClientes();
@@ -649,6 +716,48 @@ export default function ClientesPage() {
         <ConfirmModal title="¿Eliminar cliente?" danger
           msg={`Se eliminará permanentemente "${toDelete.nombre}" y todos sus contactos.`}
           confirmLabel="Eliminar" onOk={eliminarCliente} onCancel={() => setToDelete(null)} />
+      )}
+
+      {editSol && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.5)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ background: "white", borderRadius: 20, padding: 28, maxWidth: 640, width: "100%", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 64px rgba(0,0,0,.22)", animation: "scaleIn .18s ease" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+              <h3 style={{ fontWeight: 800, fontSize: 17, color: "#0f172a", margin: 0 }}>Editar solicitud</h3>
+              <button onClick={() => setEditSol(null)} style={{ background: "transparent", border: "none", fontSize: 18, cursor: "pointer", color: "#94a3b8" }}>✕</button>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              {([
+                ["razon_social","Razón social",2],["nombre_comercial","Nombre comercial",1],
+                ["tipo_doc","Tipo doc",1],["num_doc","Número doc",1],
+                ["tipo_empresa","Tipo empresa",1],["rubro","Rubro",1],
+                ["email_facturacion","Email facturación",2],["web","Web",1],
+                ["direccion","Dirección",2],["distrito","Distrito",1],
+                ["provincia","Provincia",1],["departamento","Departamento",1],
+                ["condicion_pago","Condición pago",1],["moneda","Moneda",1],
+                ["tipo_comprobante","Tipo comprobante",1],["volumen_compra","Volumen compra",1],
+                ["como_nos_conocio","¿Cómo nos conoció?",2],
+                ["observaciones","Observaciones",2],["nota_interna","Nota interna",2],
+              ] as [keyof Solicitud, string, number][]).map(([key, label, span]) => (
+                <div key={key} style={{ gridColumn: `span ${span}` }}>
+                  <label style={{ display: "block", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em", color: "#6b7280", marginBottom: 4 }}>{label}</label>
+                  {(key === "observaciones" || key === "nota_interna") ? (
+                    <textarea value={(editSolForm[key] as string) || ""} onChange={e => setEditSolForm(p => ({ ...p, [key]: e.target.value }))}
+                      style={{ ...inp(), resize: "none", height: 64 } as React.CSSProperties} />
+                  ) : (
+                    <input value={(editSolForm[key] as string) || ""} onChange={e => setEditSolForm(p => ({ ...p, [key]: e.target.value }))} style={inp()} />
+                  )}
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 20, paddingTop: 16, borderTop: "1px solid #f1f5f9" }}>
+              <button onClick={() => setEditSol(null)} style={{ padding: "9px 22px", borderRadius: 10, border: "1px solid #e5e7eb", background: "white", fontSize: 13, fontWeight: 600, cursor: "pointer", color: "#374151" }}>Cancelar</button>
+              <button onClick={guardarEdicionSolicitud} disabled={guardandoSol}
+                style={{ padding: "9px 22px", borderRadius: 10, border: "none", background: guardandoSol ? "#94a3b8" : "#0b315f", color: "white", fontSize: 13, fontWeight: 700, cursor: guardandoSol ? "not-allowed" : "pointer" }}>
+                {guardandoSol ? "Guardando..." : "Guardar cambios"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {rechazarModal && (
@@ -1217,6 +1326,12 @@ export default function ClientesPage() {
                           style={{ padding: "7px 14px", borderRadius: 9, border: "1px solid #e5e7eb", background: "white", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#374151" }}>
                           {expd ? "Ocultar ▲" : "Ver detalle ▼"}
                         </button>
+                        {(sol.estado === "pendiente" || sol.estado === "en_revision") && (
+                          <button onClick={() => abrirEditSol(sol)}
+                            style={{ padding: "7px 14px", borderRadius: 9, border: "1px solid #e5e7eb", background: "white", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#374151" }}>
+                            ✏️ Editar
+                          </button>
+                        )}
                         {sol.estado === "pendiente" && (
                           <button onClick={() => marcarEnRevision(sol)}
                             style={{ padding: "7px 14px", borderRadius: 9, border: "1px solid #bfdbfe", background: "#eff6ff", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#1d4ed8" }}>
