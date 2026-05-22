@@ -1,432 +1,1300 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 
-type TipoCliente  = "b2b" | "b2c";
-type EstadoCliente = "activo" | "inactivo" | "bloqueado";
+/* ══════════════════════════════════════════════
+   TYPES
+══════════════════════════════════════════════ */
+type TipoCliente    = "b2b" | "b2c";
+type EstadoCliente  = "activo" | "inactivo" | "bloqueado";
+type EstadoSolicitud = "pendiente" | "en_revision" | "aprobada" | "rechazada";
+type Tab            = "clientes" | "solicitudes";
+type SortDir        = "asc" | "desc";
+type Toast          = { id: number; msg: string; type: "ok" | "error" | "info" };
+
+type Contacto = {
+  id?: number;
+  cliente_id?: number;
+  tipo: "administrativo" | "operativo";
+  nombre: string;
+  apellido?: string;
+  cargo?: string;
+  telefono?: string;
+  email?: string;
+  principal?: boolean;
+};
 
 type Cliente = {
-  id: number; nombre: string; tipo: TipoCliente;
-  empresa?: string; ruc?: string; dni?: string;
-  telefono?: string; email?: string; estado: EstadoCliente;
-  direccion?: string; ciudad?: string; notas?: string;
-  operativo_nombre?: string; operativo_celular?: string; operativo_email?: string;
-  administrativo_nombre?: string; administrativo_celular?: string; administrativo_email?: string;
+  id: number;
+  nombre: string;
+  tipo: TipoCliente;
+  empresa?: string;
+  ruc?: string;
+  dni?: string;
+  telefono?: string;
+  email?: string;
+  email_facturacion?: string;
+  estado: EstadoCliente;
+  direccion?: string;
+  distrito?: string;
+  provincia?: string;
+  departamento?: string;
+  ciudad?: string;
+  notas?: string;
+  tipo_empresa?: string;
+  rubro?: string;
+  nombre_comercial?: string;
+  condicion_pago?: string;
+  moneda?: string;
+  tipo_comprobante?: string;
+  volumen_compra?: string;
+  como_nos_conocio?: string;
+  servicios_interes?: string;
+  contactos?: Contacto[];
   created_at?: string;
 };
 
-const ESTADO_CONFIG: Record<EstadoCliente, { label: string; bg: string; color: string }> = {
+type SolContacto = { nombre?: string; apellido?: string; cargo?: string; telefono?: string; email?: string };
+
+type Solicitud = {
+  id: number;
+  tipo_doc?: string;
+  num_doc?: string;
+  razon_social: string;
+  nombre_comercial?: string;
+  tipo_empresa?: string;
+  rubro?: string;
+  web?: string;
+  direccion?: string;
+  distrito?: string;
+  provincia?: string;
+  departamento?: string;
+  email_facturacion?: string;
+  contactos_administrativos?: SolContacto[];
+  contactos_operativos?: SolContacto[];
+  tipo_cliente?: string;
+  condicion_pago?: string;
+  moneda?: string;
+  tipo_comprobante?: string;
+  volumen_compra?: string;
+  servicios_interes?: string;
+  como_nos_conocio?: string;
+  observaciones?: string;
+  estado: EstadoSolicitud;
+  nota_interna?: string;
+  cliente_id?: number;
+  revisado_por?: string;
+  revisado_at?: string;
+  created_at?: string;
+};
+
+type FormContacto = { nombre: string; apellido: string; cargo: string; telefono: string; email: string };
+
+/* ══════════════════════════════════════════════
+   CONSTANTS
+══════════════════════════════════════════════ */
+const SERVICIOS = ["Transporte de personal", "Transporte turístico", "Alquiler de vehículos", "Otros"];
+
+const ESTADO_CLIENTE: Record<EstadoCliente, { label: string; bg: string; color: string }> = {
   activo:    { label: "Activo",    bg: "#dcfce7", color: "#166534" },
   inactivo:  { label: "Inactivo",  bg: "#f3f4f6", color: "#4b5563" },
   bloqueado: { label: "Bloqueado", bg: "#fee2e2", color: "#991b1b" },
 };
 
+const ESTADO_SOL: Record<EstadoSolicitud, { label: string; bg: string; color: string; icon: string }> = {
+  pendiente:   { label: "Pendiente",   bg: "#fef9ec", color: "#92400e", icon: "⏳" },
+  en_revision: { label: "En revisión", bg: "#eff6ff", color: "#1d4ed8", icon: "🔍" },
+  aprobada:    { label: "Aprobada",    bg: "#dcfce7", color: "#166534", icon: "✓" },
+  rechazada:   { label: "Rechazada",   bg: "#fee2e2", color: "#991b1b", icon: "✕" },
+};
+
+const BLANK_CONTACTO: FormContacto = { nombre: "", apellido: "", cargo: "", telefono: "", email: "" };
+
 const FORM_VACIO = {
   nombre: "", tipo: "b2b" as TipoCliente, empresa: "", ruc: "", dni: "",
-  telefono: "", email: "", estado: "activo" as EstadoCliente,
-  direccion: "", ciudad: "", notas: "",
-  operativo_nombre: "", operativo_celular: "", operativo_email: "",
-  administrativo_nombre: "", administrativo_celular: "", administrativo_email: "",
+  telefono: "", email: "", email_facturacion: "", estado: "activo" as EstadoCliente,
+  direccion: "", distrito: "", ciudad: "", notas: "",
+  tipo_empresa: "", rubro: "", nombre_comercial: "",
+  condicion_pago: "", moneda: "", tipo_comprobante: "", volumen_compra: "",
+  como_nos_conocio: "",
+  servicios_interes: [] as string[],
+  contactos_admin: [{ ...BLANK_CONTACTO }] as FormContacto[],
+  contactos_op:    [{ ...BLANK_CONTACTO }] as FormContacto[],
 };
 
-const iniciales = (n: string) => n.split(" ").slice(0, 2).map(p => p[0]).join("").toUpperCase();
-const avatarColor = (n: string) => {
+/* ══════════════════════════════════════════════
+   UTILITIES
+══════════════════════════════════════════════ */
+const iniciales  = (n: string) => n.split(" ").slice(0, 2).map(p => p[0] || "").join("").toUpperCase();
+const avatarBg   = (n: string) => {
   const cols = ["#0b315f","#1262bd","#0f6e56","#854F0B","#6b21a8","#b91c1c","#0369a1"];
-  return cols[n.charCodeAt(0) % cols.length];
+  return cols[(n.charCodeAt(0) || 0) % cols.length];
 };
+const fmtDate  = (s?: string) => s ? new Date(s).toLocaleDateString("es-PE", { day: "2-digit", month: "short", year: "numeric" }) : "—";
+const fmtTime  = (s?: string) => s ? new Date(s).toLocaleString("es-PE",  { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+const parseSvc = (s?: string) => s ? s.split(",").map(x => x.trim()).filter(Boolean) : [];
 
-function Campo({ label, span, children }: { label: string; span?: number; children: React.ReactNode }) {
+/* ══════════════════════════════════════════════
+   SHARED COMPONENTS
+══════════════════════════════════════════════ */
+
+function ToastStack({ toasts, remove }: { toasts: Toast[]; remove: (id: number) => void }) {
+  const pal: Record<Toast["type"], { bg: string; border: string; color: string; icon: string }> = {
+    ok:    { bg: "#f0fdf4", border: "#bbf7d0", color: "#166534", icon: "✓" },
+    error: { bg: "#fef2f2", border: "#fecaca", color: "#991b1b", icon: "✕" },
+    info:  { bg: "#eff6ff", border: "#bfdbfe", color: "#1d4ed8", icon: "·" },
+  };
   return (
-    <div className={`space-y-1 ${span === 2 ? "md:col-span-2" : span === 3 ? "md:col-span-3" : ""}`}>
-      <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{label}</label>
-      {children}
+    <div style={{ position: "fixed", top: 20, right: 20, zIndex: 9999, display: "flex", flexDirection: "column", gap: 8, pointerEvents: "none" }}>
+      {toasts.map(t => {
+        const p = pal[t.type];
+        return (
+          <div key={t.id} onClick={() => remove(t.id)} style={{
+            display: "flex", alignItems: "center", gap: 10, padding: "11px 16px",
+            borderRadius: 12, pointerEvents: "auto", cursor: "pointer",
+            minWidth: 240, maxWidth: 380, background: p.bg,
+            border: `1px solid ${p.border}`, color: p.color,
+            fontSize: 13, fontWeight: 500,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.10)", animation: "toastIn .22s ease",
+          }}>
+            <span style={{ fontWeight: 800, fontSize: 15 }}>{p.icon}</span>
+            <span style={{ flex: 1 }}>{t.msg}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-const inputCls = "w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/30 focus:border-[#0b315f] transition-all";
+function ConfirmModal({ title, msg, confirmLabel = "Confirmar", danger = false, onOk, onCancel, children }: {
+  title: string; msg: string; confirmLabel?: string; danger?: boolean;
+  onOk: () => void; onCancel: () => void; children?: React.ReactNode;
+}) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", zIndex: 9000,
+      display: "flex", alignItems: "center", justifyContent: "center", animation: "fadeIn .15s ease" }}>
+      <div style={{ background: "white", borderRadius: 18, padding: "28px 30px", maxWidth: 420, width: "90%",
+        boxShadow: "0 24px 64px rgba(0,0,0,.22)", animation: "scaleIn .18s ease" }}>
+        <h3 style={{ fontWeight: 800, fontSize: 17, color: "#0f172a", margin: "0 0 8px" }}>{title}</h3>
+        <p style={{ fontSize: 14, color: "#64748b", margin: "0 0 16px", lineHeight: 1.6 }}>{msg}</p>
+        {children}
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 20 }}>
+          <button onClick={onCancel} style={{ padding: "9px 22px", borderRadius: 10, border: "1px solid #e5e7eb", background: "white", fontSize: 13, fontWeight: 600, cursor: "pointer", color: "#374151" }}>Cancelar</button>
+          <button onClick={onOk}    style={{ padding: "9px 22px", borderRadius: 10, border: "none", background: danger ? "#dc2626" : "#0b315f", color: "white", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
+function SvcTag({ label }: { label: string }) {
+  const map: Record<string, [string, string]> = {
+    "Transporte de personal": ["#eff6ff","#1d4ed8"],
+    "Transporte turístico":   ["#f0fdf4","#166534"],
+    "Alquiler de vehículos":  ["#fef9ec","#92400e"],
+    "Otros":                  ["#f5f3ff","#6d28d9"],
+  };
+  const [bg, color] = map[label] || ["#f3f4f6","#374151"];
+  return <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 9px", borderRadius: 20, background: bg, color, whiteSpace: "nowrap" }}>{label}</span>;
+}
+
+function Skeleton() {
+  return <>{[72,55,68,60].map((w,i) => (
+    <tr key={i}><td colSpan={8} style={{ padding: "14px 20px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ width: 38, height: 38, borderRadius: 11, background: "#f1f5f9", flexShrink: 0 }}/>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ height: 12, width: w, borderRadius: 6, background: "#f1f5f9" }}/>
+          <div style={{ height: 10, width: w * 0.6, borderRadius: 6, background: "#f8fafc" }}/>
+        </div>
+      </div>
+    </td></tr>
+  ))}</>;
+}
+
+const SecLabel = ({ children }: { children: React.ReactNode }) => (
+  <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em",
+    color: "#94a3b8", borderBottom: "1px solid #f1f5f9", paddingBottom: 6, marginBottom: 14, marginTop: 0 }}>
+    {children}
+  </p>
+);
+
+function Field({ label, span, error, hint, children }: {
+  label: string; span?: number; error?: string; hint?: string; children: React.ReactNode;
+}) {
+  return (
+    <div style={{ gridColumn: span ? `span ${span}` : undefined }}>
+      <label style={{ display: "block", fontSize: 11, fontWeight: 700, textTransform: "uppercase",
+        letterSpacing: ".04em", color: error ? "#ef4444" : "#6b7280", marginBottom: 4 }}>
+        {label}
+      </label>
+      {children}
+      {hint  && <p style={{ fontSize: 11, color: "#94a3b8", marginTop: 3 }}>{hint}</p>}
+      {error && <p style={{ fontSize: 11, color: "#ef4444", marginTop: 3 }}>⚠ {error}</p>}
+    </div>
+  );
+}
+
+const inp = (error?: boolean): React.CSSProperties => ({
+  width: "100%", boxSizing: "border-box", border: `1.5px solid ${error ? "#fca5a5" : "#e5e7eb"}`,
+  borderRadius: 10, padding: "9px 12px", fontSize: 13, outline: "none", fontFamily: "inherit",
+  background: error ? "#fef9f9" : "white", transition: "border-color .15s",
+});
+
+/* ── Contact card (dynamic, reusable) ── */
+function ContactCard({ contacto, index, tipo, onChange, onRemove, canRemove }: {
+  contacto: FormContacto; index: number; tipo: string;
+  onChange: (k: keyof FormContacto, v: string) => void;
+  onRemove: () => void; canRemove: boolean;
+}) {
+  const lbl = tipo === "admin" ? "Administrativo" : "Operativo";
+  return (
+    <div style={{ background: "#f8fafc", border: "1.5px solid #e5e7eb", borderRadius: 12, padding: "14px 16px", marginBottom: 10, animation: "slideDown .2s ease" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em", color: tipo === "admin" ? "#1262bd" : "#0f6e56" }}>
+          {lbl} #{index + 1}
+        </span>
+        {canRemove && (
+          <button type="button" onClick={onRemove} style={{ display: "flex", alignItems: "center", gap: 4, background: "transparent", border: "1px solid #e5e7eb", color: "#94a3b8", fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, cursor: "pointer", fontFamily: "inherit" }}>
+            ✕ Quitar
+          </button>
+        )}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+        <Field label="Nombre *">
+          <input style={inp(!contacto.nombre.trim() && false)} placeholder="Nombre(s)" value={contacto.nombre} onChange={e => onChange("nombre", e.target.value)} />
+        </Field>
+        <Field label="Apellidos">
+          <input style={inp()} placeholder="Apellidos" value={contacto.apellido} onChange={e => onChange("apellido", e.target.value)} />
+        </Field>
+        <Field label="Cargo / Área">
+          <input style={inp()} placeholder="Ej: Gerente Administrativo" value={contacto.cargo} onChange={e => onChange("cargo", e.target.value)} />
+        </Field>
+        <Field label="Celular">
+          <input style={inp()} placeholder="+51 9XX XXX XXX" value={contacto.telefono} onChange={e => onChange("telefono", e.target.value)} />
+        </Field>
+      </div>
+      <Field label="Correo electrónico">
+        <input type="email" style={inp()} placeholder="correo@empresa.com" value={contacto.email} onChange={e => onChange("email", e.target.value)} />
+      </Field>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════
+   MAIN PAGE
+══════════════════════════════════════════════ */
 export default function ClientesPage() {
+  /* ── Global state ── */
+  const [tab,          setTab]          = useState<Tab>("clientes");
+  const [toasts,       setToasts]       = useState<Toast[]>([]);
+  const toastRef = useRef(0);
+
+  const toast = useCallback((msg: string, type: Toast["type"] = "ok") => {
+    const id = ++toastRef.current;
+    setToasts(p => [...p, { id, msg, type }]);
+    setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 4000);
+  }, []);
+  const removeToast = (id: number) => setToasts(p => p.filter(t => t.id !== id));
+
+  /* ── ESC ── */
+  const limpiarClienteRef  = useRef<() => void>(() => {});
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") limpiarClienteRef.current(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+
+  /* ══════════════════════════════════════════
+     TAB: CLIENTES
+  ══════════════════════════════════════════ */
   const [clientes,     setClientes]     = useState<Cliente[]>([]);
-  const [loading,      setLoading]      = useState(false);
+  const [loadingCli,   setLoadingCli]   = useState(false);
   const [guardando,    setGuardando]    = useState(false);
   const [busqueda,     setBusqueda]     = useState("");
+  const [busqActiva,   setBusqActiva]   = useState("");
   const [filtroEstado, setFiltroEstado] = useState("todos");
   const [filtroTipo,   setFiltroTipo]   = useState("todos");
-  const [form,         setForm]         = useState(FORM_VACIO);
-  const [editandoId,   setEditandoId]   = useState<number | null>(null);
-  const [mostrarForm,  setMostrarForm]  = useState(false);
+  const [filtroSvc,    setFiltroSvc]    = useState("todos");
+  const [sortDir,      setSortDir]      = useState<SortDir>("asc");
   const [expandidoId,  setExpandidoId]  = useState<number | null>(null);
+  const [mostrarForm,  setMostrarForm]  = useState(false);
+  const [editandoId,   setEditandoId]   = useState<number | null>(null);
+  const [form,         setForm]         = useState(FORM_VACIO);
+  const [errors,       setErrors]       = useState<Record<string, string>>({});
+  const [toDelete,     setToDelete]     = useState<{ id: number; nombre: string } | null>(null);
+  const formRef = useRef<HTMLDivElement>(null);
+  const debRef  = useRef<ReturnType<typeof setTimeout>>();
 
-  const cargarClientes = async () => {
-    setLoading(true);
-    const { data, error } = await supabase.from("clientes").select("*").order("nombre").limit(1000);
-    if (error) alert(error.message);
-    else setClientes((data || []) as Cliente[]);
-    setLoading(false);
+  limpiarClienteRef.current = () => {
+    setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); setErrors({});
   };
 
+  /* Debounced search */
+  useEffect(() => {
+    clearTimeout(debRef.current);
+    debRef.current = setTimeout(() => setBusqActiva(busqueda), 280);
+    return () => clearTimeout(debRef.current);
+  }, [busqueda]);
+
+  const cargarClientes = async () => {
+    setLoadingCli(true);
+    const { data, error } = await supabase
+      .from("clientes")
+      .select("*, contactos(*)")
+      .order("nombre")
+      .limit(2000);
+    if (error) toast(error.message, "error");
+    else setClientes((data || []) as Cliente[]);
+    setLoadingCli(false);
+  };
   useEffect(() => { cargarClientes(); }, []);
 
-  const f = (key: keyof typeof FORM_VACIO) =>
-    (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
+  /* Form helpers */
+  const f = (key: string) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
       setForm(prev => ({ ...prev, [key]: e.target.value }));
+      setErrors(prev => { const n = { ...prev }; delete n[key]; return n; });
+    };
 
-  const limpiar = () => { setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); };
+  const toggleSvc = (s: string) =>
+    setForm(prev => ({
+      ...prev,
+      servicios_interes: prev.servicios_interes.includes(s)
+        ? prev.servicios_interes.filter(x => x !== s)
+        : [...prev.servicios_interes, s],
+    }));
+
+  /* Contacts CRUD */
+  const addContacto = (tipo: "admin" | "op") =>
+    setForm(prev => ({
+      ...prev,
+      [`contactos_${tipo}`]: [...prev[`contactos_${tipo}`], { ...BLANK_CONTACTO }],
+    }));
+
+  const removeContacto = (tipo: "admin" | "op", idx: number) =>
+    setForm(prev => ({
+      ...prev,
+      [`contactos_${tipo}`]: prev[`contactos_${tipo}`].filter((_: FormContacto, i: number) => i !== idx),
+    }));
+
+  const updateContacto = (tipo: "admin" | "op", idx: number, key: keyof FormContacto, val: string) =>
+    setForm(prev => {
+      const arr = [...prev[`contactos_${tipo}`]];
+      arr[idx] = { ...arr[idx], [key]: val };
+      return { ...prev, [`contactos_${tipo}`]: arr };
+    });
+
+  const limpiarCliente = () => limpiarClienteRef.current();
 
   const abrirNuevo = () => {
-    setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(true);
-    setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
+    setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(true); setErrors({});
+    setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   };
 
   const editarCliente = (c: Cliente) => {
+    const adminContacts = (c.contactos || []).filter(x => x.tipo === "administrativo");
+    const opContacts    = (c.contactos || []).filter(x => x.tipo === "operativo");
     setForm({
       nombre: c.nombre || "", tipo: c.tipo || "b2b", empresa: c.empresa || "",
       ruc: c.ruc || "", dni: c.dni || "", telefono: c.telefono || "",
-      email: c.email || "", estado: c.estado || "activo",
-      direccion: c.direccion || "", ciudad: c.ciudad || "", notas: c.notas || "",
-      operativo_nombre: c.operativo_nombre || "", operativo_celular: c.operativo_celular || "",
-      operativo_email: c.operativo_email || "", administrativo_nombre: c.administrativo_nombre || "",
-      administrativo_celular: c.administrativo_celular || "", administrativo_email: c.administrativo_email || "",
+      email: c.email || "", email_facturacion: c.email_facturacion || "",
+      estado: c.estado || "activo", direccion: c.direccion || "",
+      distrito: c.distrito || "", ciudad: c.ciudad || "", notas: c.notas || "",
+      tipo_empresa: c.tipo_empresa || "", rubro: c.rubro || "",
+      nombre_comercial: c.nombre_comercial || "",
+      condicion_pago: c.condicion_pago || "", moneda: c.moneda || "",
+      tipo_comprobante: c.tipo_comprobante || "", volumen_compra: c.volumen_compra || "",
+      como_nos_conocio: c.como_nos_conocio || "",
+      servicios_interes: parseSvc(c.servicios_interes),
+      contactos_admin: adminContacts.length
+        ? adminContacts.map(x => ({ nombre: x.nombre || "", apellido: x.apellido || "", cargo: x.cargo || "", telefono: x.telefono || "", email: x.email || "" }))
+        : [{ ...BLANK_CONTACTO }],
+      contactos_op: opContacts.length
+        ? opContacts.map(x => ({ nombre: x.nombre || "", apellido: x.apellido || "", cargo: x.cargo || "", telefono: x.telefono || "", email: x.email || "" }))
+        : [{ ...BLANK_CONTACTO }],
     });
-    setEditandoId(c.id); setMostrarForm(true);
-    setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
+    setEditandoId(c.id); setMostrarForm(true); setErrors({});
+    setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   };
 
+  /* Validation */
+  const validate = () => {
+    const e: Record<string, string> = {};
+    if (!form.nombre.trim())  e.nombre  = "Obligatorio";
+    if (form.tipo === "b2b" && !form.empresa.trim()) e.empresa = "Razón social obligatoria";
+    if (form.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) e.email = "Email inválido";
+    if (form.ruc.trim() && form.ruc.length !== 11) e.ruc = "RUC debe tener 11 dígitos";
+    if (form.dni.trim() && form.dni.length !== 8)  e.dni = "DNI debe tener 8 dígitos";
+    setErrors(e);
+    if (Object.keys(e).length) toast("Revisa los campos marcados", "error");
+    return Object.keys(e).length === 0;
+  };
+
+  /* Save client */
   const guardarCliente = async () => {
-    if (!form.nombre.trim()) { alert("El nombre es obligatorio"); return; }
-    if (form.tipo === "b2b" && !form.empresa?.trim()) { alert("Para B2B, la razón social es obligatoria"); return; }
+    if (!validate()) return;
     setGuardando(true);
+
     const payload: Partial<Cliente> = {
       nombre: form.nombre.trim(), tipo: form.tipo, estado: form.estado,
-      telefono: form.telefono.trim() || undefined, email: form.email.trim() || undefined,
-      direccion: form.direccion.trim() || undefined, ciudad: form.ciudad.trim() || undefined,
-      notas: form.notas.trim() || undefined,
-      empresa: form.tipo === "b2b" ? form.empresa.trim() || undefined : undefined,
-      ruc:     form.tipo === "b2b" ? form.ruc.trim()     || undefined : undefined,
-      dni:     form.tipo === "b2c" ? form.dni.trim()     || undefined : undefined,
-      operativo_nombre:       form.tipo === "b2b" ? form.operativo_nombre.trim()       || undefined : undefined,
-      operativo_celular:      form.tipo === "b2b" ? form.operativo_celular.trim()      || undefined : undefined,
-      operativo_email:        form.tipo === "b2b" ? form.operativo_email.trim()        || undefined : undefined,
-      administrativo_nombre:  form.tipo === "b2b" ? form.administrativo_nombre.trim()  || undefined : undefined,
-      administrativo_celular: form.tipo === "b2b" ? form.administrativo_celular.trim() || undefined : undefined,
-      administrativo_email:   form.tipo === "b2b" ? form.administrativo_email.trim()   || undefined : undefined,
+      telefono:        form.telefono.trim()        || undefined,
+      email:           form.email.trim()           || undefined,
+      email_facturacion: form.email_facturacion.trim() || undefined,
+      direccion:       form.direccion.trim()       || undefined,
+      distrito:        form.distrito.trim()        || undefined,
+      ciudad:          form.ciudad.trim()          || undefined,
+      notas:           form.notas.trim()           || undefined,
+      servicios_interes: form.servicios_interes.length ? form.servicios_interes.join(",") : undefined,
+      empresa:         form.tipo === "b2b" ? form.empresa.trim()        || undefined : undefined,
+      ruc:             form.tipo === "b2b" ? form.ruc.trim()            || undefined : undefined,
+      tipo_empresa:    form.tipo === "b2b" ? form.tipo_empresa.trim()   || undefined : undefined,
+      rubro:           form.tipo === "b2b" ? form.rubro.trim()          || undefined : undefined,
+      nombre_comercial:form.tipo === "b2b" ? form.nombre_comercial.trim()|| undefined : undefined,
+      condicion_pago:  form.tipo === "b2b" ? form.condicion_pago.trim() || undefined : undefined,
+      moneda:          form.tipo === "b2b" ? form.moneda.trim()         || undefined : undefined,
+      tipo_comprobante:form.tipo === "b2b" ? form.tipo_comprobante.trim()|| undefined : undefined,
+      volumen_compra:  form.tipo === "b2b" ? form.volumen_compra.trim() || undefined : undefined,
+      como_nos_conocio:form.como_nos_conocio.trim()|| undefined,
+      dni:             form.tipo === "b2c" ? form.dni.trim()            || undefined : undefined,
     };
-    const { error } = editandoId
-      ? await supabase.from("clientes").update(payload).eq("id", editandoId)
-      : await supabase.from("clientes").insert(payload);
-    if (error) { alert(error.message); setGuardando(false); return; }
-    limpiar(); cargarClientes(); setGuardando(false);
+
+    let clienteId = editandoId;
+
+    if (editandoId) {
+      const { error } = await supabase.from("clientes").update(payload).eq("id", editandoId);
+      if (error) { toast(error.message, "error"); setGuardando(false); return; }
+    } else {
+      const { data, error } = await supabase.from("clientes").insert(payload).select("id").single();
+      if (error) { toast(error.message, "error"); setGuardando(false); return; }
+      clienteId = data.id;
+    }
+
+    /* Sync contacts */
+    if (clienteId) {
+      if (editandoId) await supabase.from("contactos").delete().eq("cliente_id", editandoId);
+      const toInsert = [
+        ...form.contactos_admin.filter((c: FormContacto) => c.nombre.trim()).map((c: FormContacto, i: number) => ({
+          cliente_id: clienteId, tipo: "administrativo", principal: i === 0,
+          nombre: c.nombre.trim(), apellido: c.apellido.trim() || undefined,
+          cargo: c.cargo.trim() || undefined, telefono: c.telefono.trim() || undefined,
+          email: c.email.trim() || undefined,
+        })),
+        ...form.contactos_op.filter((c: FormContacto) => c.nombre.trim()).map((c: FormContacto, i: number) => ({
+          cliente_id: clienteId, tipo: "operativo", principal: i === 0,
+          nombre: c.nombre.trim(), apellido: c.apellido.trim() || undefined,
+          cargo: c.cargo.trim() || undefined, telefono: c.telefono.trim() || undefined,
+          email: c.email.trim() || undefined,
+        })),
+      ];
+      if (toInsert.length) await supabase.from("contactos").insert(toInsert);
+    }
+
+    toast(editandoId ? "Cliente actualizado ✓" : "Cliente creado ✓", "ok");
+    limpiarCliente(); cargarClientes(); setGuardando(false);
   };
 
+  /* Status & delete */
   const cambiarEstado = async (id: number, estado: EstadoCliente) => {
-    await supabase.from("clientes").update({ estado }).eq("id", id);
+    const { error } = await supabase.from("clientes").update({ estado }).eq("id", id);
+    if (error) { toast(error.message, "error"); return; }
     setClientes(prev => prev.map(c => c.id === id ? { ...c, estado } : c));
+    toast(`Estado → "${ESTADO_CLIENTE[estado].label}"`, "info");
   };
 
-  const eliminarCliente = async (id: number, nombre: string) => {
-    if (!confirm(`¿Eliminar "${nombre}"?`)) return;
-    const { error } = await supabase.from("clientes").delete().eq("id", id);
-    if (error) return alert(error.message);
-    cargarClientes();
+  const eliminarCliente = async () => {
+    if (!toDelete) return;
+    await supabase.from("contactos").delete().eq("cliente_id", toDelete.id);
+    const { error } = await supabase.from("clientes").delete().eq("id", toDelete.id);
+    if (error) toast(error.message, "error");
+    else { toast(`"${toDelete.nombre}" eliminado`, "ok"); cargarClientes(); }
+    setToDelete(null);
   };
 
+  const copiar = (text: string, label: string) =>
+    navigator.clipboard.writeText(text).then(() => toast(`${label} copiado`, "info"));
+
+  const exportCSV = () => {
+    const hdr = ["ID","Nombre","Empresa","Tipo","RUC","DNI","Email","Teléfono","Estado","Ciudad","Servicios","Alta"];
+    const rows = filtrados.map(c => [
+      c.id, c.nombre, c.empresa||"", c.tipo, c.ruc||"", c.dni||"",
+      c.email||"", c.telefono||"", c.estado, c.ciudad||"",
+      c.servicios_interes||"", fmtDate(c.created_at),
+    ]);
+    const csv = [hdr, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+    const a = Object.assign(document.createElement("a"), {
+      href: URL.createObjectURL(new Blob(["\uFEFF"+csv], { type: "text/csv;charset=utf-8;" })),
+      download: "clientes_afa.csv",
+    });
+    a.click(); URL.revokeObjectURL(a.href);
+    toast("CSV exportado ✓");
+  };
+
+  /* Stats & filter */
   const total      = clientes.length;
-  const b2b        = clientes.filter(c => c.tipo === "b2b").length;
-  const b2c        = clientes.filter(c => c.tipo === "b2c").length;
+  const b2bCount   = clientes.filter(c => c.tipo === "b2b").length;
+  const b2cCount   = clientes.filter(c => c.tipo === "b2c").length;
   const activos    = clientes.filter(c => c.estado === "activo").length;
   const bloqueados = clientes.filter(c => c.estado === "bloqueado").length;
 
-  const filtrados = clientes.filter(c => {
-    const q = busqueda.toLowerCase();
-    const coincide = c.nombre.toLowerCase().includes(q) ||
-      (c.empresa || "").toLowerCase().includes(q) ||
-      (c.ruc || "").includes(q) || (c.dni || "").includes(q);
-    return coincide &&
-      (filtroEstado === "todos" || c.estado === filtroEstado) &&
-      (filtroTipo   === "todos" || c.tipo   === filtroTipo);
-  });
+  const filtrados = clientes
+    .filter(c => {
+      const q = busqActiva.toLowerCase();
+      const hit = !q ||
+        c.nombre.toLowerCase().includes(q) ||
+        (c.empresa||"").toLowerCase().includes(q) ||
+        (c.ruc||"").includes(q) || (c.dni||"").includes(q) ||
+        (c.email||"").toLowerCase().includes(q) || (c.ciudad||"").toLowerCase().includes(q);
+      return hit &&
+        (filtroEstado === "todos" || c.estado === filtroEstado) &&
+        (filtroTipo   === "todos" || c.tipo   === filtroTipo) &&
+        (filtroSvc    === "todos" || parseSvc(c.servicios_interes).includes(filtroSvc));
+    })
+    .sort((a, b) => {
+      const va = ((a.empresa || a.nombre)).toLowerCase();
+      const vb = ((b.empresa || b.nombre)).toLowerCase();
+      return sortDir === "asc" ? va.localeCompare(vb,"es") : vb.localeCompare(va,"es");
+    });
 
+  /* ══════════════════════════════════════════
+     TAB: SOLICITUDES
+  ══════════════════════════════════════════ */
+  const [solicitudes,   setSolicitudes]   = useState<Solicitud[]>([]);
+  const [loadingSol,    setLoadingSol]    = useState(false);
+  const [filtroSolEst,  setFiltroSolEst]  = useState<EstadoSolicitud | "todos">("pendiente");
+  const [expandSolId,   setExpandSolId]   = useState<number | null>(null);
+  const [aprobando,     setAprobando]     = useState<number | null>(null);
+  const [rechazarModal, setRechazarModal] = useState<Solicitud | null>(null);
+  const [notaRechazo,   setNotaRechazo]   = useState("");
+
+  const cargarSolicitudes = async () => {
+    setLoadingSol(true);
+    const { data, error } = await supabase
+      .from("solicitudes_cliente")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(500);
+    if (error) toast(error.message, "error");
+    else setSolicitudes((data || []) as Solicitud[]);
+    setLoadingSol(false);
+  };
+  useEffect(() => { if (tab === "solicitudes") cargarSolicitudes(); }, [tab]);
+
+  const pendienteCount = solicitudes.filter(s => s.estado === "pendiente").length;
+
+  const solFiltradas = solicitudes.filter(s =>
+    filtroSolEst === "todos" || s.estado === filtroSolEst
+  );
+
+  const aprobarSolicitud = async (sol: Solicitud) => {
+    setAprobando(sol.id);
+    const { data, error } = await supabase.rpc("aprobar_solicitud", {
+      p_solicitud_id: sol.id,
+      p_revisado_por: "erp_user",
+    });
+    if (error) { toast(error.message, "error"); setAprobando(null); return; }
+    toast(`"${sol.razon_social}" aprobado y dado de alta como cliente ✓`, "ok");
+    setAprobando(null);
+    cargarSolicitudes(); cargarClientes();
+  };
+
+  const marcarEnRevision = async (sol: Solicitud) => {
+    const { error } = await supabase.from("solicitudes_cliente")
+      .update({ estado: "en_revision" }).eq("id", sol.id);
+    if (error) { toast(error.message, "error"); return; }
+    setSolicitudes(prev => prev.map(s => s.id === sol.id ? { ...s, estado: "en_revision" } : s));
+    toast("Solicitud marcada en revisión", "info");
+  };
+
+  const rechazarSolicitud = async () => {
+    if (!rechazarModal) return;
+    const { error } = await supabase.from("solicitudes_cliente").update({
+      estado: "rechazada",
+      nota_interna: notaRechazo.trim() || undefined,
+      revisado_por: "erp_user",
+      revisado_at: new Date().toISOString(),
+    }).eq("id", rechazarModal.id);
+    if (error) { toast(error.message, "error"); return; }
+    toast(`Solicitud de "${rechazarModal.razon_social}" rechazada`, "info");
+    setRechazarModal(null); setNotaRechazo("");
+    cargarSolicitudes();
+  };
+
+  /* ══════════════════════════════════════════
+     RENDER
+  ══════════════════════════════════════════ */
   return (
-    <main className="p-6 space-y-6 max-w-7xl mx-auto">
+    <>
+      <style>{`
+        @keyframes toastIn  { from{opacity:0;transform:translateX(16px)} to{opacity:1;transform:translateX(0)} }
+        @keyframes fadeIn   { from{opacity:0} to{opacity:1} }
+        @keyframes scaleIn  { from{opacity:0;transform:scale(.94)} to{opacity:1;transform:scale(1)} }
+        @keyframes slideDown { from{opacity:0;transform:translateY(-8px)} to{opacity:1;transform:translateY(0)} }
+        .row-hover:hover { background:#f8fafc !important; }
+        .copy-cell:hover { text-decoration:underline; cursor:pointer; }
+        .act-btn:hover   { background:#f8fafc !important; }
+        .del-btn:hover   { background:#fef2f2 !important; }
+        .sol-card:hover  { border-color:#0b315f !important; }
+        input:focus,select:focus,textarea:focus {
+          border-color:#0b315f !important;
+          box-shadow:0 0 0 3px rgba(11,49,95,.10) !important;
+          outline:none;
+        }
+      `}</style>
 
-      {/* ENCABEZADO */}
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Clientes</h1>
-          <p className="text-gray-400 mt-1 text-sm">Base comercial AFA Transportes · B2B y B2C</p>
-        </div>
-        <button onClick={mostrarForm ? limpiar : abrirNuevo}
-          className="px-5 py-2.5 rounded-xl font-bold text-sm text-white hover:opacity-90"
-          style={{ background: mostrarForm ? "#6b7280" : "#0b315f" }}>
-          {mostrarForm ? "✕ Cancelar" : "+ Nuevo cliente"}
-        </button>
-      </div>
+      <ToastStack toasts={toasts} remove={removeToast} />
 
-      {/* KPIs */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        {[
-          { label: "Total",      valor: total,      color: "#0b315f", bg: "#eef3f8" },
-          { label: "B2B",        valor: b2b,        color: "#1262bd", bg: "#eff6ff" },
-          { label: "B2C",        valor: b2c,        color: "#0f6e56", bg: "#f0fdf4" },
-          { label: "Activos",    valor: activos,    color: "#166534", bg: "#dcfce7" },
-          { label: "Bloqueados", valor: bloqueados, color: "#991b1b", bg: "#fee2e2" },
-        ].map(k => (
-          <div key={k.label} className="rounded-xl p-4 border" style={{ background: k.bg, borderColor: k.color + "22" }}>
-            <p className="text-xs font-medium" style={{ color: k.color + "99" }}>{k.label}</p>
-            <p className="text-3xl font-black mt-0.5" style={{ color: k.color }}>{k.valor}</p>
-          </div>
-        ))}
-      </section>
-
-      {/* FORMULARIO */}
-      {mostrarForm && (
-        <section className="bg-white rounded-2xl border shadow-sm p-6 space-y-6">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold" style={{ background: "#0b315f" }}>
-              {editandoId ? "✏️" : "+"}
-            </div>
-            <div>
-              <h2 className="text-lg font-bold text-gray-900">{editandoId ? "Editar cliente" : "Nuevo cliente"}</h2>
-              <p className="text-xs text-gray-400">Los campos con * son obligatorios</p>
-            </div>
-          </div>
-
-          {/* B2B / B2C */}
-          <div className="flex gap-3">
-            {(["b2b", "b2c"] as TipoCliente[]).map(t => (
-              <button key={t} onClick={() => setForm(prev => ({ ...prev, tipo: t }))}
-                className="flex-1 py-3 rounded-xl font-bold text-sm border-2 transition-all"
-                style={{ borderColor: form.tipo === t ? "#0b315f" : "#e5e7eb", background: form.tipo === t ? "#0b315f" : "white", color: form.tipo === t ? "white" : "#6b7280" }}>
-                {t === "b2b" ? "🏢 B2B — Empresa" : "👤 B2C — Persona natural"}
-              </button>
-            ))}
-          </div>
-
-          {/* Datos principales */}
-          <div className="space-y-3">
-            <p className="text-[11px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1">Datos principales</p>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {form.tipo === "b2b" ? (
-                <>
-                  <Campo label="Razón social *" span={2}><input className={inputCls} placeholder="Ej: GLOBAL BUS S.A.C." value={form.empresa} onChange={f("empresa")} /></Campo>
-                  <Campo label="RUC"><input className={inputCls} placeholder="20XXXXXXXXX" maxLength={11} value={form.ruc} onChange={f("ruc")} /></Campo>
-                  <Campo label="Nombre de contacto *" span={2}><input className={inputCls} placeholder="Nombre completo" value={form.nombre} onChange={f("nombre")} /></Campo>
-                  <Campo label="Estado"><select className={inputCls} value={form.estado} onChange={f("estado")}><option value="activo">Activo</option><option value="inactivo">Inactivo</option><option value="bloqueado">Bloqueado</option></select></Campo>
-                  <Campo label="Teléfono"><input className={inputCls} value={form.telefono} onChange={f("telefono")} /></Campo>
-                  <Campo label="Email" span={2}><input type="email" className={inputCls} value={form.email} onChange={f("email")} /></Campo>
-                </>
-              ) : (
-                <>
-                  <Campo label="Nombre completo *" span={2}><input className={inputCls} value={form.nombre} onChange={f("nombre")} /></Campo>
-                  <Campo label="DNI"><input className={inputCls} maxLength={8} value={form.dni} onChange={f("dni")} /></Campo>
-                  <Campo label="Teléfono"><input className={inputCls} value={form.telefono} onChange={f("telefono")} /></Campo>
-                  <Campo label="Email" span={2}><input type="email" className={inputCls} value={form.email} onChange={f("email")} /></Campo>
-                  <Campo label="Estado"><select className={inputCls} value={form.estado} onChange={f("estado")}><option value="activo">Activo</option><option value="inactivo">Inactivo</option><option value="bloqueado">Bloqueado</option></select></Campo>
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Contactos B2B */}
-          {form.tipo === "b2b" && (
-            <>
-              <div className="space-y-3">
-                <p className="text-[11px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1">Contacto operativo</p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <Campo label="Nombre"><input className={inputCls} value={form.operativo_nombre} onChange={f("operativo_nombre")} /></Campo>
-                  <Campo label="Celular"><input className={inputCls} value={form.operativo_celular} onChange={f("operativo_celular")} /></Campo>
-                  <Campo label="Email"><input type="email" className={inputCls} value={form.operativo_email} onChange={f("operativo_email")} /></Campo>
-                </div>
-              </div>
-              <div className="space-y-3">
-                <p className="text-[11px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1">Contacto administrativo</p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <Campo label="Nombre"><input className={inputCls} value={form.administrativo_nombre} onChange={f("administrativo_nombre")} /></Campo>
-                  <Campo label="Celular"><input className={inputCls} value={form.administrativo_celular} onChange={f("administrativo_celular")} /></Campo>
-                  <Campo label="Email"><input type="email" className={inputCls} value={form.administrativo_email} onChange={f("administrativo_email")} /></Campo>
-                </div>
-              </div>
-            </>
-          )}
-
-          {/* Ubicación */}
-          <div className="space-y-3">
-            <p className="text-[11px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1">Ubicación y notas</p>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Campo label="Dirección" span={2}><input className={inputCls} value={form.direccion} onChange={f("direccion")} /></Campo>
-              <Campo label="Ciudad"><input className={inputCls} value={form.ciudad} onChange={f("ciudad")} /></Campo>
-              <Campo label="Notas internas" span={3}>
-                <textarea className={inputCls + " resize-none"} rows={2} value={form.notas} onChange={f("notas")} />
-              </Campo>
-            </div>
-          </div>
-
-          <div className="flex gap-3 pt-2">
-            <button onClick={guardarCliente} disabled={guardando}
-              className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60" style={{ background: "#0b315f" }}>
-              {guardando ? "Guardando..." : editandoId ? "Actualizar cliente" : "Guardar cliente"}
-            </button>
-            <button onClick={limpiar} className="px-6 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">Cancelar</button>
-          </div>
-        </section>
+      {toDelete && (
+        <ConfirmModal title="¿Eliminar cliente?" danger
+          msg={`Se eliminará permanentemente "${toDelete.nombre}" y todos sus contactos.`}
+          confirmLabel="Eliminar" onOk={eliminarCliente} onCancel={() => setToDelete(null)} />
       )}
 
-      {/* FILTROS */}
-      <section className="flex flex-col md:flex-row gap-3">
-        <div className="relative flex-1">
-          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">🔍</span>
-          <input className="w-full border rounded-xl pl-9 pr-4 py-2.5 text-sm focus:outline-none"
-            placeholder="Buscar por nombre, empresa, RUC o DNI..."
-            value={busqueda} onChange={e => setBusqueda(e.target.value)} />
-        </div>
-        <select className="border rounded-xl px-4 py-2.5 text-sm min-w-[140px]" value={filtroTipo} onChange={e => setFiltroTipo(e.target.value)}>
-          <option value="todos">Todos los tipos</option>
-          <option value="b2b">B2B — Empresa</option>
-          <option value="b2c">B2C — Persona</option>
-        </select>
-        <select className="border rounded-xl px-4 py-2.5 text-sm min-w-[150px]" value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)}>
-          <option value="todos">Todos los estados</option>
-          <option value="activo">Activos</option>
-          <option value="inactivo">Inactivos</option>
-          <option value="bloqueado">Bloqueados</option>
-        </select>
-        <div className="flex items-center px-4 py-2.5 bg-gray-50 border rounded-xl text-sm text-gray-400">
-          {filtrados.length} resultado{filtrados.length !== 1 ? "s" : ""}
-        </div>
-      </section>
+      {rechazarModal && (
+        <ConfirmModal title="Rechazar solicitud" danger={false} confirmLabel="Rechazar solicitud"
+          msg={`Estás rechazando la solicitud de "${rechazarModal.razon_social}". Puedes agregar un motivo:`}
+          onOk={rechazarSolicitud} onCancel={() => { setRechazarModal(null); setNotaRechazo(""); }}>
+          <textarea value={notaRechazo} onChange={e => setNotaRechazo(e.target.value)}
+            placeholder="Motivo del rechazo (opcional)..."
+            style={{ ...inp(), height: 80, resize: "none", marginTop: 4 } as React.CSSProperties} />
+        </ConfirmModal>
+      )}
 
-      {/* TABLA */}
-      <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                <th className="p-4 w-8"></th>
-                {["Cliente", "Tipo", "Identificación", "Contacto", "Estado", "Acciones"].map(h => (
-                  <th key={h} className="p-4 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>
+      <main style={{ padding: "28px 24px", maxWidth: 1320, margin: "0 auto", fontFamily: "system-ui,-apple-system,sans-serif", color: "#0f172a" }}>
+
+        {/* ── HEADER ── */}
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 24 }}>
+          <div>
+            <h1 style={{ fontSize: 30, fontWeight: 900, margin: 0, letterSpacing: "-.5px" }}>Clientes</h1>
+            <p style={{ fontSize: 13, color: "#94a3b8", margin: "3px 0 0" }}>AFA Transportes · Gestión comercial B2B y B2C</p>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {tab === "clientes" && <>
+              <button onClick={cargarClientes} title="Actualizar" style={{ padding: "10px 14px", borderRadius: 10, border: "1px solid #e5e7eb", background: "white", cursor: "pointer", fontSize: 15, color: "#64748b" }}>↻</button>
+              <button onClick={exportCSV} style={{ padding: "10px 18px", borderRadius: 10, border: "1px solid #e5e7eb", background: "white", cursor: "pointer", fontSize: 12, fontWeight: 700, color: "#374151" }}>↓ Exportar CSV</button>
+              <button onClick={mostrarForm ? limpiarCliente : abrirNuevo}
+                style={{ padding: "10px 22px", borderRadius: 10, border: "none", background: mostrarForm ? "#64748b" : "#0b315f", color: "white", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>
+                {mostrarForm ? "✕ Cancelar" : "+ Nuevo cliente"}
+              </button>
+            </>}
+            {tab === "solicitudes" && (
+              <button onClick={cargarSolicitudes} style={{ padding: "10px 14px", borderRadius: 10, border: "1px solid #e5e7eb", background: "white", cursor: "pointer", fontSize: 15, color: "#64748b" }}>↻</button>
+            )}
+          </div>
+        </div>
+
+        {/* ── KPIs (solo en clientes) ── */}
+        {tab === "clientes" && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 12, marginBottom: 24 }}>
+            {[
+              { label: "Total",      v: total,      color: "#0b315f", bg: "#eef3f8", sub: "clientes" },
+              { label: "B2B",        v: b2bCount,   color: "#1262bd", bg: "#eff6ff", sub: "empresas" },
+              { label: "B2C",        v: b2cCount,   color: "#0f6e56", bg: "#f0fdf4", sub: "personas" },
+              { label: "Activos",    v: activos,    color: "#166534", bg: "#dcfce7", sub: total ? `${Math.round(activos/total*100)}%` : "0%" },
+              { label: "Bloqueados", v: bloqueados, color: "#991b1b", bg: "#fee2e2", sub: "con restricción" },
+            ].map(k => (
+              <div key={k.label} style={{ background: k.bg, border: `1px solid ${k.color}22`, borderRadius: 14, padding: "16px 18px" }}>
+                <p style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: `${k.color}aa`, margin: "0 0 4px" }}>{k.label}</p>
+                <p style={{ fontSize: 32, fontWeight: 900, color: k.color, margin: "0 0 2px", lineHeight: 1 }}>{k.v}</p>
+                <p style={{ fontSize: 11, color: `${k.color}88`, margin: 0 }}>{k.sub}</p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── TABS ── */}
+        <div style={{ display: "flex", gap: 4, marginBottom: 24, background: "#f8fafc", borderRadius: 12, padding: 4, width: "fit-content" }}>
+          {([
+            { key: "clientes",     label: "Clientes",    count: total },
+            { key: "solicitudes",  label: "Solicitudes", count: pendienteCount },
+          ] as { key: Tab; label: string; count: number }[]).map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)}
+              style={{ padding: "8px 20px", borderRadius: 9, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, transition: "all .15s",
+                background: tab === t.key ? "white" : "transparent",
+                color: tab === t.key ? "#0b315f" : "#64748b",
+                boxShadow: tab === t.key ? "0 1px 4px rgba(0,0,0,.08)" : "none",
+                display: "flex", alignItems: "center", gap: 8 }}>
+              {t.label}
+              {t.key === "solicitudes" && t.count > 0 && (
+                <span style={{ background: "#ef4444", color: "white", borderRadius: 10, fontSize: 11, fontWeight: 700, padding: "1px 7px", minWidth: 20, textAlign: "center" }}>{t.count}</span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        {/* ════════════════════════════════════
+            CLIENTES TAB
+        ════════════════════════════════════ */}
+        {tab === "clientes" && (<>
+
+          {/* ── FORM ── */}
+          {mostrarForm && (
+            <div ref={formRef} style={{ background: "white", borderRadius: 20, border: "1px solid #e5e7eb", boxShadow: "0 4px 28px rgba(0,0,0,.07)", padding: 28, marginBottom: 24, animation: "slideDown .22s ease" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 24 }}>
+                <div style={{ width: 44, height: 44, borderRadius: 13, background: "#0b315f", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>{editandoId ? "✏️" : "➕"}</div>
+                <div>
+                  <h2 style={{ fontWeight: 800, fontSize: 17, margin: 0 }}>{editandoId ? "Editar cliente" : "Nuevo cliente"}</h2>
+                  <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>* obligatorios · ESC para cerrar</p>
+                </div>
+              </div>
+
+              {/* B2B / B2C */}
+              <div style={{ display: "flex", gap: 10, marginBottom: 24 }}>
+                {(["b2b","b2c"] as TipoCliente[]).map(t => (
+                  <button key={t} type="button" onClick={() => { setForm(p => ({ ...p, tipo: t })); setErrors({}); }}
+                    style={{ flex: 1, padding: 12, borderRadius: 12, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit", transition: "all .15s",
+                      border: `2px solid ${form.tipo === t ? "#0b315f" : "#e5e7eb"}`,
+                      background: form.tipo === t ? "#0b315f" : "white",
+                      color: form.tipo === t ? "white" : "#9ca3af" }}>
+                    {t === "b2b" ? "🏢 B2B — Empresa" : "👤 B2C — Persona natural"}
+                  </button>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr><td colSpan={7} className="p-10 text-center text-gray-400">
-                  <div className="flex items-center justify-center gap-2">
-                    <div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />
-                    Cargando clientes...
-                  </div>
-                </td></tr>
-              ) : filtrados.length === 0 ? (
-                <tr><td colSpan={7} className="p-10 text-center text-gray-400">
-                  <p className="text-3xl mb-2">👥</p>
-                  <p className="font-medium">No se encontraron clientes</p>
-                  <p className="text-xs mt-1">{busqueda || filtroEstado !== "todos" || filtroTipo !== "todos" ? "Prueba con otros filtros" : "Agrega el primer cliente"}</p>
-                </td></tr>
-              ) : (
-                filtrados.map(c => {
-                  const est = ESTADO_CONFIG[c.estado] || ESTADO_CONFIG.inactivo;
-                  const expandido = expandidoId === c.id;
-                  const nombreMostrado = c.tipo === "b2b" ? (c.empresa || c.nombre) : c.nombre;
-                  return (
-                    // ✅ KEY en el Fragment, no en el <tr>
-                    <React.Fragment key={c.id}>
-                      <tr className="border-t hover:bg-gray-50 cursor-pointer" style={{ borderColor: "#f1f5f9" }}
-                        onClick={() => setExpandidoId(expandido ? null : c.id)}>
-                        <td className="p-4 text-gray-300 text-xs">{expandido ? "▼" : "▶"}</td>
-                        <td className="p-4">
-                          <div className="flex items-center gap-3">
-                            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-xs font-black flex-shrink-0"
-                              style={{ background: avatarColor(nombreMostrado) }}>
-                              {iniciales(nombreMostrado)}
-                            </div>
-                            <div>
-                              <p className="font-bold text-gray-900">{nombreMostrado}</p>
-                              {c.tipo === "b2b" && c.nombre !== c.empresa && (
-                                <p className="text-xs text-gray-400">{c.nombre}</p>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="p-4">
-                          <span className="text-xs font-bold px-2.5 py-1 rounded-lg"
-                            style={c.tipo === "b2b" ? { background: "#eff6ff", color: "#1d4ed8" } : { background: "#f0fdf4", color: "#166534" }}>
-                            {c.tipo === "b2b" ? "🏢 B2B" : "👤 B2C"}
-                          </span>
-                        </td>
-                        <td className="p-4 font-mono text-xs text-gray-500">
-                          {c.tipo === "b2b" ? (c.ruc ? `RUC: ${c.ruc}` : "—") : (c.dni ? `DNI: ${c.dni}` : "—")}
-                        </td>
-                        <td className="p-4 text-gray-600 text-xs">
-                          <div>{c.telefono || "—"}</div>
-                          {c.email && <div className="text-gray-400">{c.email}</div>}
-                        </td>
-                        <td className="p-4" onClick={e => e.stopPropagation()}>
-                          <select value={c.estado} onChange={e => cambiarEstado(c.id, e.target.value as EstadoCliente)}
-                            className="text-xs font-bold px-2 py-1 rounded-lg border-0 cursor-pointer"
-                            style={{ background: est.bg, color: est.color }}>
-                            <option value="activo">Activo</option>
-                            <option value="inactivo">Inactivo</option>
-                            <option value="bloqueado">Bloqueado</option>
-                          </select>
-                        </td>
-                        <td className="p-4" onClick={e => e.stopPropagation()}>
-                          <div className="flex items-center justify-end gap-2">
-                            <button onClick={() => editarCliente(c)} className="px-3 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">Editar</button>
-                            <button onClick={() => eliminarCliente(c.id, nombreMostrado)} className="px-3 py-1.5 rounded-lg text-xs font-bold text-red-600 border border-red-100 hover:bg-red-50">Eliminar</button>
-                          </div>
-                        </td>
-                      </tr>
+              </div>
 
-                      {/* FILA EXPANDIDA */}
-                      {expandido && (
-                        <tr style={{ background: "#f8fafc", borderColor: "#f1f5f9" }} className="border-t border-b">
-                          <td colSpan={7} className="px-6 py-4">
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                              <div className="space-y-1.5">
-                                <p className="font-bold text-gray-500 uppercase tracking-wide text-[10px]">Datos generales</p>
-                                {c.direccion && <p className="text-gray-600">📍 {c.direccion}{c.ciudad ? `, ${c.ciudad}` : ""}</p>}
-                                {c.email     && <p className="text-gray-600">✉️ {c.email}</p>}
-                                {c.telefono  && <p className="text-gray-600">📞 {c.telefono}</p>}
-                                {c.notas     && <p className="text-gray-400 italic mt-1">"{c.notas}"</p>}
-                                {!c.direccion && !c.email && !c.telefono && !c.notas && <p className="text-gray-300">Sin información adicional</p>}
+              {/* Datos principales */}
+              <div style={{ marginBottom: 22 }}>
+                <SecLabel>Datos principales</SecLabel>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+                  {form.tipo === "b2b" ? (<>
+                    <Field label="Razón social *" span={2} error={errors.empresa}>
+                      <input style={inp(!!errors.empresa)} placeholder="Ej: GLOBAL BUS S.A.C." value={form.empresa} onChange={f("empresa")} />
+                    </Field>
+                    <Field label="RUC" error={errors.ruc}>
+                      <input style={inp(!!errors.ruc)} placeholder="20XXXXXXXXX" maxLength={11} value={form.ruc} onChange={f("ruc")} />
+                    </Field>
+                    <Field label="Nombre de contacto *" span={2} error={errors.nombre}>
+                      <input style={inp(!!errors.nombre)} placeholder="Nombre y apellidos" value={form.nombre} onChange={f("nombre")} />
+                    </Field>
+                    <Field label="Estado">
+                      <select style={inp()} value={form.estado} onChange={f("estado")}>
+                        <option value="activo">Activo</option><option value="inactivo">Inactivo</option><option value="bloqueado">Bloqueado</option>
+                      </select>
+                    </Field>
+                    <Field label="Tipo de empresa">
+                      <select style={inp()} value={form.tipo_empresa} onChange={f("tipo_empresa")}>
+                        <option value="">Seleccione...</option>
+                        {["S.A.C.","S.A.","S.R.L.","E.I.R.L.","Persona Natural","ONG","Otro"].map(o => <option key={o}>{o}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Rubro / Sector">
+                      <select style={inp()} value={form.rubro} onChange={f("rubro")}>
+                        <option value="">Seleccione...</option>
+                        {["Comercio","Construcción","Educación","Gastronomía","Industria","Minería","Salud","Servicios","Tecnología","Transporte","Otro"].map(o => <option key={o}>{o}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Nombre comercial">
+                      <input style={inp()} placeholder="Si difiere de la razón social" value={form.nombre_comercial} onChange={f("nombre_comercial")} />
+                    </Field>
+                    <Field label="Teléfono">
+                      <input style={inp()} placeholder="+51 9XX XXX XXX" value={form.telefono} onChange={f("telefono")} />
+                    </Field>
+                    <Field label="Email" error={errors.email}>
+                      <input type="email" style={inp(!!errors.email)} placeholder="correo@empresa.com" value={form.email} onChange={f("email")} />
+                    </Field>
+                    <Field label="Email facturación" hint="Recibe comprobantes SUNAT">
+                      <input type="email" style={inp()} placeholder="facturacion@empresa.com" value={form.email_facturacion} onChange={f("email_facturacion")} />
+                    </Field>
+                  </>) : (<>
+                    <Field label="Nombre completo *" span={2} error={errors.nombre}>
+                      <input style={inp(!!errors.nombre)} placeholder="Nombre y apellidos" value={form.nombre} onChange={f("nombre")} />
+                    </Field>
+                    <Field label="DNI" error={errors.dni}>
+                      <input style={inp(!!errors.dni)} maxLength={8} placeholder="12345678" value={form.dni} onChange={f("dni")} />
+                    </Field>
+                    <Field label="Teléfono">
+                      <input style={inp()} placeholder="+51 9XX XXX XXX" value={form.telefono} onChange={f("telefono")} />
+                    </Field>
+                    <Field label="Email" span={2} error={errors.email}>
+                      <input type="email" style={inp(!!errors.email)} placeholder="correo@persona.com" value={form.email} onChange={f("email")} />
+                    </Field>
+                    <Field label="Estado">
+                      <select style={inp()} value={form.estado} onChange={f("estado")}>
+                        <option value="activo">Activo</option><option value="inactivo">Inactivo</option><option value="bloqueado">Bloqueado</option>
+                      </select>
+                    </Field>
+                  </>)}
+                </div>
+              </div>
+
+              {/* Contacts B2B */}
+              {form.tipo === "b2b" && (<>
+                {/* ADMINISTRATIVOS */}
+                <div style={{ marginBottom: 20 }}>
+                  <SecLabel>Contactos administrativos</SecLabel>
+                  {form.contactos_admin.map((c: FormContacto, i: number) => (
+                    <ContactCard key={i} contacto={c} index={i} tipo="admin"
+                      onChange={(k, v) => updateContacto("admin", i, k, v)}
+                      onRemove={() => removeContacto("admin", i)}
+                      canRemove={form.contactos_admin.length > 1} />
+                  ))}
+                  <button type="button" onClick={() => addContacto("admin")}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 7, width: "100%", padding: "9px", border: "1.5px dashed #1262bd", borderRadius: 10, background: "transparent", color: "#1262bd", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                    + Agregar contacto administrativo
+                  </button>
+                </div>
+
+                {/* OPERATIVOS */}
+                <div style={{ marginBottom: 20 }}>
+                  <SecLabel>Contactos operativos</SecLabel>
+                  {form.contactos_op.map((c: FormContacto, i: number) => (
+                    <ContactCard key={i} contacto={c} index={i} tipo="op"
+                      onChange={(k, v) => updateContacto("op", i, k, v)}
+                      onRemove={() => removeContacto("op", i)}
+                      canRemove={form.contactos_op.length > 1} />
+                  ))}
+                  <button type="button" onClick={() => addContacto("op")}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 7, width: "100%", padding: "9px", border: "1.5px dashed #0f6e56", borderRadius: 10, background: "transparent", color: "#0f6e56", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                    + Agregar contacto operativo
+                  </button>
+                </div>
+              </>)}
+
+              {/* Servicios */}
+              <div style={{ marginBottom: 20 }}>
+                <SecLabel>Servicios de interés</SecLabel>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {SERVICIOS.map(s => {
+                    const on = form.servicios_interes.includes(s);
+                    return (
+                      <button key={s} type="button" onClick={() => toggleSvc(s)}
+                        style={{ padding: "7px 16px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", transition: "all .15s",
+                          border: `1.5px solid ${on ? "#0b315f" : "#e5e7eb"}`,
+                          background: on ? "#0b315f" : "white", color: on ? "white" : "#6b7280" }}>
+                        {on && "✓ "}{s}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Comercial (B2B) */}
+              {form.tipo === "b2b" && (
+                <div style={{ marginBottom: 20 }}>
+                  <SecLabel>Condiciones comerciales</SecLabel>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+                    <Field label="Condición de pago">
+                      <select style={inp()} value={form.condicion_pago} onChange={f("condicion_pago")}>
+                        <option value="">Seleccione...</option>
+                        {["Contado","Crédito 15d","Crédito 30d","Crédito 45d","Crédito 60d","Crédito 90d"].map(o => <option key={o}>{o}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Moneda">
+                      <select style={inp()} value={form.moneda} onChange={f("moneda")}>
+                        <option value="">Seleccione...</option>
+                        <option>Soles (PEN)</option><option>Dólares (USD)</option><option>Euros (EUR)</option>
+                      </select>
+                    </Field>
+                    <Field label="Tipo de comprobante">
+                      <select style={inp()} value={form.tipo_comprobante} onChange={f("tipo_comprobante")}>
+                        <option value="">Seleccione...</option>
+                        <option>Factura electrónica</option><option>Boleta electrónica</option><option>Ambas</option>
+                      </select>
+                    </Field>
+                    <Field label="Volumen estimado / mes">
+                      <select style={inp()} value={form.volumen_compra} onChange={f("volumen_compra")}>
+                        <option value="">Seleccione...</option>
+                        {["Menos de S/ 5,000","S/ 5,000 – 20,000","S/ 20,000 – 50,000","Más de S/ 50,000"].map(o => <option key={o}>{o}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="¿Cómo nos conoció?">
+                      <select style={inp()} value={form.como_nos_conocio} onChange={f("como_nos_conocio")}>
+                        <option value="">Seleccione...</option>
+                        {["Recomendación","Redes sociales","Google","Feria","Visita vendedor","Correo","Otro"].map(o => <option key={o}>{o}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                </div>
+              )}
+
+              {/* Ubicación */}
+              <div style={{ marginBottom: 24 }}>
+                <SecLabel>Ubicación y notas</SecLabel>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+                  <Field label="Dirección" span={2}>
+                    <input style={inp()} placeholder="Av., calle, número..." value={form.direccion} onChange={f("direccion")} />
+                  </Field>
+                  <Field label="Distrito / Ciudad">
+                    <input style={inp()} placeholder="Ej: Miraflores" value={form.distrito} onChange={f("distrito")} />
+                  </Field>
+                  <Field label="Notas internas" span={3}>
+                    <textarea style={{ ...inp(), resize: "none", height: 72 } as React.CSSProperties} placeholder="Observaciones, condiciones especiales..." value={form.notas} onChange={f("notas")} />
+                  </Field>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 10, paddingTop: 16, borderTop: "1px solid #f1f5f9" }}>
+                <button onClick={guardarCliente} disabled={guardando}
+                  style={{ padding: "11px 30px", borderRadius: 11, border: "none", background: guardando ? "#94a3b8" : "#0b315f", color: "white", fontSize: 13, fontWeight: 700, cursor: guardando ? "not-allowed" : "pointer" }}>
+                  {guardando ? "Guardando..." : editandoId ? "Actualizar cliente" : "Guardar cliente"}
+                </button>
+                <button onClick={limpiarCliente} style={{ padding: "11px 22px", borderRadius: 11, border: "1px solid #e5e7eb", background: "white", fontSize: 13, fontWeight: 600, cursor: "pointer", color: "#64748b" }}>Cancelar</button>
+              </div>
+            </div>
+          )}
+
+          {/* ── FILTERS ── */}
+          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+            <div style={{ position: "relative", flex: 1, minWidth: 220 }}>
+              <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "#94a3b8" }}>🔍</span>
+              <input style={{ width: "100%", boxSizing: "border-box", padding: "10px 12px 10px 38px", border: "1px solid #e5e7eb", borderRadius: 11, fontSize: 13, outline: "none" }}
+                placeholder="Buscar por nombre, empresa, RUC, DNI, email..." value={busqueda} onChange={e => setBusqueda(e.target.value)} />
+            </div>
+            {[
+              { val: filtroTipo,   set: setFiltroTipo,   opts: [["todos","Todos los tipos"],["b2b","🏢 B2B"],["b2c","👤 B2C"]] },
+              { val: filtroEstado, set: setFiltroEstado, opts: [["todos","Todos los estados"],["activo","Activos"],["inactivo","Inactivos"],["bloqueado","Bloqueados"]] },
+              { val: filtroSvc,    set: setFiltroSvc,    opts: [["todos","Todos los servicios"],...SERVICIOS.map(s=>[s,s])] },
+            ].map((filter, i) => (
+              <select key={i} value={filter.val} onChange={e => filter.set(e.target.value)}
+                style={{ padding: "10px 14px", border: "1px solid #e5e7eb", borderRadius: 11, fontSize: 13, minWidth: 160, cursor: "pointer" }}>
+                {filter.opts.map(([v,l]) => <option key={v} value={v}>{l}</option>)}
+              </select>
+            ))}
+            <button onClick={() => setSortDir(d => d === "asc" ? "desc" : "asc")}
+              style={{ padding: "10px 14px", border: "1px solid #e5e7eb", borderRadius: 11, fontSize: 12, fontWeight: 700, cursor: "pointer", background: "white", color: "#374151" }}>
+              A→Z {sortDir === "asc" ? "↑" : "↓"}
+            </button>
+            <div style={{ padding: "10px 16px", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 11, fontSize: 12, color: "#64748b", display: "flex", alignItems: "center" }}>
+              {filtrados.length} resultado{filtrados.length !== 1 ? "s" : ""}
+            </div>
+          </div>
+
+          {/* ── TABLE ── */}
+          <div style={{ background: "white", borderRadius: 20, border: "1px solid #e5e7eb", boxShadow: "0 2px 12px rgba(0,0,0,.04)", overflow: "hidden" }}>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                    <th style={{ width: 36, padding: "12px 8px 12px 18px" }} />
+                    {["Cliente","Tipo","Identificación","Contacto principal","Servicios","Estado","Acciones"].map(h => (
+                      <th key={h} style={{ padding: "12px 14px", textAlign: "left", fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: ".06em", whiteSpace: "nowrap" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {loadingCli ? <Skeleton /> : filtrados.length === 0 ? (
+                    <tr><td colSpan={8} style={{ padding: "64px 20px", textAlign: "center", color: "#94a3b8" }}>
+                      <div style={{ fontSize: 38, marginBottom: 12 }}>👥</div>
+                      <p style={{ fontWeight: 700, fontSize: 15, color: "#475569", margin: "0 0 6px" }}>Sin resultados</p>
+                      <p style={{ fontSize: 13, margin: 0 }}>{busqueda ? "Prueba con otros filtros" : "Agrega el primer cliente"}</p>
+                    </td></tr>
+                  ) : filtrados.map(c => {
+                    const est     = ESTADO_CLIENTE[c.estado] || ESTADO_CLIENTE.inactivo;
+                    const expd    = expandidoId === c.id;
+                    const display = c.tipo === "b2b" ? (c.empresa || c.nombre) : c.nombre;
+                    const svcs    = parseSvc(c.servicios_interes);
+                    const adminPrincipal = (c.contactos || []).find(x => x.tipo === "administrativo" && x.principal) || (c.contactos || []).find(x => x.tipo === "administrativo");
+                    const opPrincipal    = (c.contactos || []).find(x => x.tipo === "operativo" && x.principal)    || (c.contactos || []).find(x => x.tipo === "operativo");
+                    const adminCount  = (c.contactos || []).filter(x => x.tipo === "administrativo").length;
+                    const opCount     = (c.contactos || []).filter(x => x.tipo === "operativo").length;
+
+                    return (
+                      <React.Fragment key={c.id}>
+                        <tr className="row-hover" style={{ borderTop: "1px solid #f1f5f9", cursor: "pointer" }}
+                          onClick={() => setExpandidoId(expd ? null : c.id)}>
+                          <td style={{ padding: "14px 8px 14px 18px", color: "#cbd5e1", fontSize: 11 }}>{expd ? "▼" : "▶"}</td>
+                          <td style={{ padding: "14px" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                              <div style={{ width: 38, height: 38, borderRadius: 11, background: avatarBg(display), display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontSize: 12, fontWeight: 800, flexShrink: 0 }}>{iniciales(display)}</div>
+                              <div>
+                                <p style={{ fontWeight: 700, color: "#0f172a", margin: 0, fontSize: 13 }}>{display}</p>
+                                {c.tipo === "b2b" && c.nombre && c.nombre !== c.empresa && <p style={{ fontSize: 11, color: "#94a3b8", margin: 0 }}>Cto: {c.nombre}</p>}
+                                {c.distrito && <p style={{ fontSize: 11, color: "#cbd5e1", margin: 0 }}>📍 {c.distrito}</p>}
                               </div>
-                              {c.tipo === "b2b" && (
-                                <div className="space-y-1.5">
-                                  <p className="font-bold text-[#0b315f] uppercase tracking-wide text-[10px]">Contacto operativo</p>
-                                  {c.operativo_nombre  && <p className="text-gray-700 font-medium">{c.operativo_nombre}</p>}
-                                  {c.operativo_celular && <p className="text-gray-600">📱 {c.operativo_celular}</p>}
-                                  {c.operativo_email   && <p className="text-gray-600">✉️ {c.operativo_email}</p>}
-                                  {!c.operativo_nombre && !c.operativo_celular && !c.operativo_email && <p className="text-gray-300">No registrado</p>}
-                                </div>
-                              )}
-                              {c.tipo === "b2b" && (
-                                <div className="space-y-1.5">
-                                  <p className="font-bold text-[#0b315f] uppercase tracking-wide text-[10px]">Contacto administrativo</p>
-                                  {c.administrativo_nombre  && <p className="text-gray-700 font-medium">{c.administrativo_nombre}</p>}
-                                  {c.administrativo_celular && <p className="text-gray-600">📱 {c.administrativo_celular}</p>}
-                                  {c.administrativo_email   && <p className="text-gray-600">✉️ {c.administrativo_email}</p>}
-                                  {!c.administrativo_nombre && !c.administrativo_celular && !c.administrativo_email && <p className="text-gray-300">No registrado</p>}
-                                </div>
-                              )}
+                            </div>
+                          </td>
+                          <td style={{ padding: "14px" }}>
+                            <span style={{ fontSize: 11, fontWeight: 700, padding: "4px 10px", borderRadius: 8, ...(c.tipo==="b2b" ? {background:"#eff6ff",color:"#1d4ed8"} : {background:"#f0fdf4",color:"#166534"}) }}>
+                              {c.tipo === "b2b" ? "🏢 B2B" : "👤 B2C"}
+                            </span>
+                          </td>
+                          <td style={{ padding: "14px", fontFamily: "monospace", fontSize: 12, color: "#64748b" }}>
+                            {c.tipo==="b2b" ? (c.ruc ? `RUC: ${c.ruc}` : "—") : (c.dni ? `DNI: ${c.dni}` : "—")}
+                          </td>
+                          <td style={{ padding: "14px" }} onClick={e => e.stopPropagation()}>
+                            {adminPrincipal && (
+                              <div style={{ fontSize: 12 }}>
+                                <span style={{ fontWeight: 600, color: "#1262bd", display: "block" }}>{adminPrincipal.nombre} {adminPrincipal.apellido || ""}</span>
+                                {adminPrincipal.telefono && <span className="copy-cell" onClick={() => copiar(adminPrincipal.telefono!, "Teléfono")} style={{ color: "#64748b", display: "block" }}>📞 {adminPrincipal.telefono}</span>}
+                              </div>
+                            )}
+                            {!adminPrincipal && c.telefono && <span className="copy-cell" onClick={() => copiar(c.telefono!, "Teléfono")} style={{ fontSize: 12, color: "#64748b" }}>📞 {c.telefono}</span>}
+                            {!adminPrincipal && !c.telefono && <span style={{ color: "#e2e8f0" }}>—</span>}
+                          </td>
+                          <td style={{ padding: "14px" }}>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, maxWidth: 200 }}>
+                              {svcs.length ? svcs.map(s => <SvcTag key={s} label={s}/>) : <span style={{ color: "#e2e8f0", fontSize: 11 }}>—</span>}
+                            </div>
+                          </td>
+                          <td style={{ padding: "14px" }} onClick={e => e.stopPropagation()}>
+                            <select value={c.estado} onChange={e => cambiarEstado(c.id, e.target.value as EstadoCliente)}
+                              style={{ fontSize: 11, fontWeight: 700, padding: "5px 10px", borderRadius: 8, border: "none", cursor: "pointer", background: est.bg, color: est.color, outline: "none" }}>
+                              <option value="activo">Activo</option><option value="inactivo">Inactivo</option><option value="bloqueado">Bloqueado</option>
+                            </select>
+                          </td>
+                          <td style={{ padding: "14px" }} onClick={e => e.stopPropagation()}>
+                            <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                              <button className="act-btn" onClick={() => editarCliente(c)} style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid #e5e7eb", background: "white", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#374151" }}>Editar</button>
+                              <button className="del-btn" onClick={() => setToDelete({ id: c.id, nombre: display })} style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid #fecaca", background: "white", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#dc2626" }}>Eliminar</button>
                             </div>
                           </td>
                         </tr>
-                      )}
-                    </React.Fragment>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-        {filtrados.length > 0 && (
-          <div className="px-4 py-3 text-xs text-gray-400 border-t flex justify-between" style={{ borderColor: "#f1f5f9" }}>
-            <span>{filtrados.length} de {total} clientes · {b2b} empresas · {b2c} personas</span>
-            <span>AFA ERP · Base comercial</span>
+
+                        {expd && (
+                          <tr style={{ background: "#f8fafc", borderTop: "1px solid #f1f5f9", borderBottom: "1px solid #f1f5f9" }}>
+                            <td colSpan={8} style={{ padding: "20px 24px", animation: "slideDown .18s ease" }}>
+                              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 20 }}>
+                                <div>
+                                  <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#94a3b8", marginBottom: 10 }}>Datos generales</p>
+                                  <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: "#475569" }}>
+                                    {c.direccion && <span>📍 {c.direccion}{c.distrito ? `, ${c.distrito}` : ""}</span>}
+                                    {c.email     && <span className="copy-cell" onClick={() => copiar(c.email!, "Email")}>✉️ {c.email}</span>}
+                                    {c.email_facturacion && <span style={{ color: "#94a3b8" }}>🧾 {c.email_facturacion}</span>}
+                                    {c.condicion_pago   && <span>💳 {c.condicion_pago} · {c.moneda || "PEN"}</span>}
+                                    {c.created_at && <span style={{ color: "#94a3b8", fontSize: 11 }}>📅 Alta: {fmtDate(c.created_at)}</span>}
+                                    {c.notas && <span style={{ fontStyle: "italic", color: "#94a3b8" }}>"{c.notas}"</span>}
+                                  </div>
+                                </div>
+
+                                {/* Contactos administrativos */}
+                                {adminCount > 0 && (
+                                  <div>
+                                    <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#1262bd", marginBottom: 10 }}>
+                                      Contactos administrativos ({adminCount})
+                                    </p>
+                                    {(c.contactos||[]).filter(x=>x.tipo==="administrativo").map((ct,i) => (
+                                      <div key={i} style={{ marginBottom: 10, paddingBottom: 10, borderBottom: i < adminCount-1 ? "1px solid #f1f5f9" : "none" }}>
+                                        <span style={{ fontWeight: 600, fontSize: 12, color: "#0f172a" }}>{ct.nombre} {ct.apellido||""}</span>
+                                        {ct.principal && <span style={{ fontSize: 10, background: "#eff6ff", color: "#1262bd", padding: "1px 6px", borderRadius: 10, marginLeft: 6, fontWeight: 700 }}>Principal</span>}
+                                        {ct.cargo    && <p style={{ fontSize: 11, color: "#94a3b8", margin: "2px 0 0" }}>{ct.cargo}</p>}
+                                        {ct.telefono && <p className="copy-cell" onClick={() => copiar(ct.telefono!, "Celular")} style={{ fontSize: 12, color: "#475569", margin: "2px 0 0" }}>📱 {ct.telefono}</p>}
+                                        {ct.email    && <p className="copy-cell" onClick={() => copiar(ct.email!, "Email")} style={{ fontSize: 12, color: "#475569", margin: "2px 0 0" }}>✉️ {ct.email}</p>}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {/* Contactos operativos */}
+                                {opCount > 0 && (
+                                  <div>
+                                    <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#0f6e56", marginBottom: 10 }}>
+                                      Contactos operativos ({opCount})
+                                    </p>
+                                    {(c.contactos||[]).filter(x=>x.tipo==="operativo").map((ct,i) => (
+                                      <div key={i} style={{ marginBottom: 10, paddingBottom: 10, borderBottom: i < opCount-1 ? "1px solid #f1f5f9" : "none" }}>
+                                        <span style={{ fontWeight: 600, fontSize: 12, color: "#0f172a" }}>{ct.nombre} {ct.apellido||""}</span>
+                                        {ct.principal && <span style={{ fontSize: 10, background: "#f0fdf4", color: "#0f6e56", padding: "1px 6px", borderRadius: 10, marginLeft: 6, fontWeight: 700 }}>Principal</span>}
+                                        {ct.cargo    && <p style={{ fontSize: 11, color: "#94a3b8", margin: "2px 0 0" }}>{ct.cargo}</p>}
+                                        {ct.telefono && <p className="copy-cell" onClick={() => copiar(ct.telefono!, "Celular")} style={{ fontSize: 12, color: "#475569", margin: "2px 0 0" }}>📱 {ct.telefono}</p>}
+                                        {ct.email    && <p className="copy-cell" onClick={() => copiar(ct.email!, "Email")} style={{ fontSize: 12, color: "#475569", margin: "2px 0 0" }}>✉️ {ct.email}</p>}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {svcs.length > 0 && (
+                                  <div>
+                                    <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#94a3b8", marginBottom: 10 }}>Servicios de interés</p>
+                                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{svcs.map(s=><SvcTag key={s} label={s}/>)}</div>
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {filtrados.length > 0 && (
+              <div style={{ padding: "12px 22px", fontSize: 11, color: "#94a3b8", borderTop: "1px solid #f1f5f9", display: "flex", justifyContent: "space-between" }}>
+                <span>{filtrados.length} de {total} clientes · {b2bCount} empresas · {b2cCount} personas</span>
+                <span>AFA Transportes · ERP Comercial</span>
+              </div>
+            )}
           </div>
-        )}
-      </section>
-    </main>
+        </>)}
+
+        {/* ════════════════════════════════════
+            SOLICITUDES TAB
+        ════════════════════════════════════ */}
+        {tab === "solicitudes" && (<>
+
+          {/* Filters */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
+            {(["todos","pendiente","en_revision","aprobada","rechazada"] as const).map(est => {
+              const cfg = est === "todos" ? { label: "Todas", bg: "#f1f5f9", color: "#475569", icon: "·" } : ESTADO_SOL[est];
+              const cnt = est === "todos" ? solicitudes.length : solicitudes.filter(s => s.estado === est).length;
+              return (
+                <button key={est} onClick={() => setFiltroSolEst(est)}
+                  style={{ padding: "8px 16px", borderRadius: 20, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", transition: "all .15s",
+                    border: `1.5px solid ${filtroSolEst === est ? (est === "todos" ? "#64748b" : cfg.color) : "#e5e7eb"}`,
+                    background: filtroSolEst === est ? (est === "todos" ? "#f1f5f9" : cfg.bg) : "white",
+                    color: filtroSolEst === est ? (est === "todos" ? "#475569" : cfg.color) : "#94a3b8" }}>
+                  {cfg.icon} {cfg.label} ({cnt})
+                </button>
+              );
+            })}
+            <div style={{ flex: 1 }} />
+            <span style={{ fontSize: 12, color: "#94a3b8" }}>{solFiltradas.length} solicitud{solFiltradas.length !== 1 ? "es" : ""}</span>
+          </div>
+
+          {/* Cards */}
+          {loadingSol ? (
+            <div style={{ padding: 40, textAlign: "center", color: "#94a3b8" }}>
+              <div style={{ width: 28, height: 28, border: "3px solid #e5e7eb", borderTopColor: "#0b315f", borderRadius: "50%", margin: "0 auto 12px", animation: "spin 1s linear infinite" }} />
+              Cargando solicitudes...
+            </div>
+          ) : solFiltradas.length === 0 ? (
+            <div style={{ padding: "60px 20px", textAlign: "center", color: "#94a3b8" }}>
+              <div style={{ fontSize: 38, marginBottom: 12 }}>📋</div>
+              <p style={{ fontWeight: 700, fontSize: 15, color: "#475569", margin: "0 0 6px" }}>Sin solicitudes</p>
+              <p style={{ fontSize: 13, margin: 0 }}>Las solicitudes del formulario aparecerán aquí</p>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {solFiltradas.map(sol => {
+                const estCfg = ESTADO_SOL[sol.estado];
+                const expd   = expandSolId === sol.id;
+                const svcs   = parseSvc(sol.servicios_interes);
+                const admins = sol.contactos_administrativos || [];
+                const ops    = sol.contactos_operativos || [];
+
+                return (
+                  <div key={sol.id} className="sol-card"
+                    style={{ background: "white", border: "1px solid #e5e7eb", borderRadius: 16, overflow: "hidden", transition: "border-color .15s" }}>
+
+                    {/* Card header */}
+                    <div style={{ padding: "18px 22px", display: "flex", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+                      {/* Avatar */}
+                      <div style={{ width: 44, height: 44, borderRadius: 12, background: avatarBg(sol.razon_social), display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontSize: 14, fontWeight: 800, flexShrink: 0 }}>
+                        {iniciales(sol.razon_social)}
+                      </div>
+
+                      {/* Info */}
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 4 }}>
+                          <p style={{ fontWeight: 800, fontSize: 15, color: "#0f172a", margin: 0 }}>{sol.razon_social}</p>
+                          <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 9px", borderRadius: 20, background: estCfg.bg, color: estCfg.color }}>
+                            {estCfg.icon} {estCfg.label}
+                          </span>
+                          {sol.tipo_doc && sol.num_doc && (
+                            <span style={{ fontSize: 11, fontFamily: "monospace", color: "#64748b", background: "#f8fafc", padding: "3px 9px", borderRadius: 8 }}>
+                              {sol.tipo_doc}: {sol.num_doc}
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, fontSize: 12, color: "#64748b" }}>
+                          {sol.tipo_empresa  && <span>🏢 {sol.tipo_empresa}</span>}
+                          {sol.rubro         && <span>· {sol.rubro}</span>}
+                          {sol.distrito      && <span>📍 {sol.distrito}, {sol.departamento || ""}</span>}
+                          {sol.condicion_pago && <span>💳 {sol.condicion_pago}</span>}
+                          {sol.como_nos_conocio && <span>· vía {sol.como_nos_conocio}</span>}
+                          <span style={{ color: "#94a3b8" }}>🕐 {fmtTime(sol.created_at)}</span>
+                        </div>
+                        {svcs.length > 0 && (
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 8 }}>
+                            {svcs.map(s => <SvcTag key={s} label={s}/>)}
+                          </div>
+                        )}
+                        {sol.nota_interna && (
+                          <div style={{ marginTop: 8, fontSize: 12, color: "#991b1b", background: "#fef2f2", padding: "6px 10px", borderRadius: 8 }}>
+                            Nota: {sol.nota_interna}
+                          </div>
+                        )}
+                        {sol.estado === "aprobada" && sol.cliente_id && (
+                          <div style={{ marginTop: 8, fontSize: 12, color: "#166534", background: "#f0fdf4", padding: "6px 10px", borderRadius: 8 }}>
+                            ✓ Cliente creado · ID #{sol.cliente_id} · Aprobado {fmtDate(sol.revisado_at)}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Actions */}
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+                        <button onClick={() => setExpandSolId(expd ? null : sol.id)}
+                          style={{ padding: "7px 14px", borderRadius: 9, border: "1px solid #e5e7eb", background: "white", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#374151" }}>
+                          {expd ? "Ocultar ▲" : "Ver detalle ▼"}
+                        </button>
+                        {sol.estado === "pendiente" && (
+                          <button onClick={() => marcarEnRevision(sol)}
+                            style={{ padding: "7px 14px", borderRadius: 9, border: "1px solid #bfdbfe", background: "#eff6ff", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#1d4ed8" }}>
+                            🔍 Revisar
+                          </button>
+                        )}
+                        {(sol.estado === "pendiente" || sol.estado === "en_revision") && (<>
+                          <button onClick={() => aprobarSolicitud(sol)} disabled={aprobando === sol.id}
+                            style={{ padding: "7px 18px", borderRadius: 9, border: "none", background: aprobando === sol.id ? "#94a3b8" : "#0b315f", color: "white", fontSize: 12, fontWeight: 700, cursor: aprobando === sol.id ? "not-allowed" : "pointer" }}>
+                            {aprobando === sol.id ? "..." : "✓ Aprobar"}
+                          </button>
+                          <button onClick={() => { setRechazarModal(sol); setNotaRechazo(""); }}
+                            style={{ padding: "7px 14px", borderRadius: 9, border: "1px solid #fecaca", background: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#dc2626" }}>
+                            ✕ Rechazar
+                          </button>
+                        </>)}
+                      </div>
+                    </div>
+
+                    {/* Expanded detail */}
+                    {expd && (
+                      <div style={{ borderTop: "1px solid #f1f5f9", padding: "18px 22px", background: "#f8fafc", animation: "slideDown .18s ease" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 20 }}>
+
+                          {/* Empresa */}
+                          <div>
+                            <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#94a3b8", marginBottom: 10 }}>Empresa / Datos</p>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: "#475569" }}>
+                              {sol.email_facturacion && <span>🧾 {sol.email_facturacion}</span>}
+                              {sol.direccion && <span>📍 {sol.direccion}, {sol.distrito}</span>}
+                              {sol.moneda && <span>💱 {sol.moneda} · {sol.tipo_comprobante || ""}</span>}
+                              {sol.volumen_compra && <span>📦 {sol.volumen_compra}</span>}
+                              {sol.web && <span>🌐 {sol.web}</span>}
+                              {sol.observaciones && <span style={{ fontStyle: "italic", color: "#94a3b8" }}>"{sol.observaciones}"</span>}
+                            </div>
+                          </div>
+
+                          {/* Contactos administrativos */}
+                          {admins.length > 0 && (
+                            <div>
+                              <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#1262bd", marginBottom: 10 }}>Contactos admin ({admins.length})</p>
+                              {admins.map((ct, i) => (
+                                <div key={i} style={{ marginBottom: 8, paddingBottom: 8, borderBottom: i < admins.length-1 ? "1px solid #f1f5f9" : "none" }}>
+                                  <p style={{ fontWeight: 600, fontSize: 12, color: "#0f172a", margin: 0 }}>{ct.nombre} {ct.apellido||""}</p>
+                                  {ct.cargo    && <p style={{ fontSize: 11, color: "#94a3b8", margin: "2px 0 0" }}>{ct.cargo}</p>}
+                                  {ct.telefono && <p className="copy-cell" onClick={() => copiar(ct.telefono!, "Celular")} style={{ fontSize: 12, color: "#475569", margin: "2px 0 0" }}>📱 {ct.telefono}</p>}
+                                  {ct.email    && <p className="copy-cell" onClick={() => copiar(ct.email!, "Email")} style={{ fontSize: 12, color: "#475569", margin: "2px 0 0" }}>✉️ {ct.email}</p>}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Contactos operativos */}
+                          {ops.length > 0 && (
+                            <div>
+                              <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#0f6e56", marginBottom: 10 }}>Contactos operativos ({ops.length})</p>
+                              {ops.map((ct, i) => (
+                                <div key={i} style={{ marginBottom: 8, paddingBottom: 8, borderBottom: i < ops.length-1 ? "1px solid #f1f5f9" : "none" }}>
+                                  <p style={{ fontWeight: 600, fontSize: 12, color: "#0f172a", margin: 0 }}>{ct.nombre} {ct.apellido||""}</p>
+                                  {ct.cargo    && <p style={{ fontSize: 11, color: "#94a3b8", margin: "2px 0 0" }}>{ct.cargo}</p>}
+                                  {ct.telefono && <p className="copy-cell" onClick={() => copiar(ct.telefono!, "Celular")} style={{ fontSize: 12, color: "#475569", margin: "2px 0 0" }}>📱 {ct.telefono}</p>}
+                                  {ct.email    && <p className="copy-cell" onClick={() => copiar(ct.email!, "Email")} style={{ fontSize: 12, color: "#475569", margin: "2px 0 0" }}>✉️ {ct.email}</p>}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>)}
+
+      </main>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </>
   );
 }

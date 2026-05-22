@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"C:/Users/trans/afa-erp-transporte\" diff -- app/pasajero/page.tsx)"
+    ]
+  }
+}

@@ -6,11 +6,16 @@ export function middleware(request: NextRequest) {
 
   const isLogin = pathname === "/login";
 
+  const isPublica =
+    pathname === "/conductor" || pathname.startsWith("/conductor/") ||
+    pathname === "/lector"    || pathname.startsWith("/lector/") ||
+    pathname === "/pasajero"  || pathname.startsWith("/pasajero/");
+
   const hasSession = request.cookies
     .getAll()
     .some((cookie) => cookie.name.includes("sb-"));
 
-  if (!hasSession && !isLogin) {
+  if (!hasSession && !isLogin && !isPublica) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 

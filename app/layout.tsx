@@ -1,9 +1,24 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactElement } from "react";
+import { Manrope, JetBrains_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabase";
 import "./globals.css";
+
+const manrope = Manrope({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700", "800"],
+  variable: "--font-sans",
+  display: "swap",
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  weight: ["500", "600", "700"],
+  variable: "--font-mono",
+  display: "swap",
+});
 
 // ─── Iconos SVG inline (sin dependencias externas) ─────────────────────────
 type IconProps = { size?: number; strokeWidth?: number; className?: string };
@@ -184,7 +199,7 @@ const Ic = {
 };
 
 // ─── Tipos ─────────────────────────────────────────────────────────────────
-type IconComponent = (props: IconProps) => JSX.Element;
+type IconComponent = (props: IconProps) => ReactElement;
 type MenuItem = {
   href: string;
   label: string;
@@ -450,7 +465,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const router = useRouter();
 
   const esLogin = pathname === "/login";
-  const esPublica = ["/conductor"].some(
+  const esPublica = ["/conductor", "/lector", "/pasajero"].some(
     (r) => pathname === r || pathname.startsWith(r + "/")
   );
 
@@ -518,7 +533,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   }
 
   return (
-    <html lang="es">
+    <html lang="es" className={`${manrope.variable} ${jetbrainsMono.variable}`}>
       <body>
         {esLogin ? (
           <div className="min-h-screen flex items-center justify-center bg-[#eef3f8] px-4">

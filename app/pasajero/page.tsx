@@ -31,6 +31,7 @@ type Vehiculo  = { id: number; placa: string; categoria: string | null };
 type Conductor = { id: number; nombre: string; telefono: string | null };
 type Tab       = "ruta" | "qr" | "perfil";
 type EstadoBus = "no_iniciado" | "en_camino" | "retrasado" | "finalizado" | "sin_señal";
+type GpsPermiso = "unknown" | "granted" | "denied" | "unavailable";
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -54,10 +55,15 @@ function fmtETA(m:number): string { if(m<=0) return "¡Llegando!"; if(m<60) retu
 function fmtDist(m:number): string { return m>=1000?`${(m/1000).toFixed(1)} km`:`${Math.round(m)} m`; }
 function ini(n:string): string { return n.split(" ").slice(0,2).map(w=>w[0]).join("").toUpperCase(); }
 
-// ─── CSS (idéntico al HTML de referencia) ────────────────────────────────────
+// Detectar si es iOS
+function esIOS(): boolean {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform==="MacIntel" && navigator.maxTouchPoints>1);
+}
+
+// ─── CSS ─────────────────────────────────────────────────────────────────────
 
 const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700;9..40,800&family=DM+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=DM+Mono:wght@400;500&display=swap');
 @import url('https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.31.0/dist/tabler-icons.min.css');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
 :root{
@@ -68,12 +74,11 @@ const CSS = `
   --green:#16A34A;--gl:#DCFCE7;--gm:#86EFAC;
   --amber:#D97706;--al:#FEF3C7;
   --red:#DC2626;--rl:#FEF2F2;
-  --f:'DM Sans',system-ui,sans-serif;--m:'DM Mono',monospace;
+  --f:'Inter',system-ui,sans-serif;--m:'DM Mono',monospace;
   --rsm:10px;--rmd:14px;--rlg:20px;--rxl:24px;
 }
 .afa-backdrop{position:fixed;inset:0;z-index:9998;background:var(--g50);}
 .afa-app{position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;max-width:420px;height:100vh;height:100dvh;z-index:9999;background:var(--g50);display:flex;flex-direction:column;overflow:hidden;font-family:var(--f);}
-/* HEADER */
 .afa-hdr{background:var(--navy);padding:14px 18px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:30;border-bottom:1px solid rgba(255,255,255,.06);}
 .afa-hdr-l{display:flex;align-items:center;gap:10px;}
 .afa-av{width:38px;height:38px;border-radius:12px;background:var(--navy-soft);border:1.5px solid rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff;letter-spacing:-.5px;overflow:hidden;}
@@ -83,24 +88,52 @@ const CSS = `
 .afa-hdr-btn{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);border-radius:10px;width:36px;height:36px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.8);cursor:pointer;font-size:18px;transition:background .15s;}
 .afa-hdr-btn:hover{background:rgba(255,255,255,.14);}
 .afa-boarded-pill{font-size:11px;font-weight:800;padding:4px 10px;border-radius:20px;color:var(--green);background:var(--gl);}
-/* ALERT */
 .afa-alert{margin:8px 14px 0;background:var(--green);border-radius:var(--rmd);padding:12px 14px;display:flex;align-items:center;gap:10px;animation:afa-slideDown .35s cubic-bezier(.34,1.56,.64,1);border:1px solid rgba(255,255,255,.15);box-shadow:0 4px 20px rgba(22,163,74,.35);}
 .afa-alert-title{color:#fff;font-weight:700;font-size:14px;}
 .afa-alert-sub{color:rgba(255,255,255,.8);font-size:12px;margin-top:2px;}
 .afa-alert-btn{background:rgba(255,255,255,.2);border:none;border-radius:8px;padding:5px 10px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--f);flex-shrink:0;}
-/* CONTENT */
+
+/* ── BANNER GPS DESACTIVADO ── */
+.afa-gps-banner{margin:8px 14px 0;background:#FEF3C7;border:1px solid #FDE68A;border-radius:var(--rmd);padding:12px 14px;display:flex;align-items:center;gap:10px;animation:afa-slideDown .35s ease;}
+.afa-gps-banner-ico{font-size:22px;flex-shrink:0;}
+.afa-gps-banner-txt{flex:1;}
+.afa-gps-banner-title{color:#92400E;font-weight:700;font-size:13px;}
+.afa-gps-banner-sub{color:#B45309;font-size:11px;margin-top:2px;}
+.afa-gps-banner-btn{background:#D97706;border:none;border-radius:8px;padding:6px 12px;color:#fff;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--f);flex-shrink:0;white-space:nowrap;}
+
+/* ── MODAL REPORTE ── */
+.afa-reporte-opt{width:100%;padding:12px 16px;border-radius:12px;border:1.5px solid var(--g200);background:#fff;color:var(--g800);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--f);text-align:left;display:flex;align-items:center;gap:10px;transition:all .15s;}
+.afa-reporte-opt:hover{border-color:var(--navy);background:var(--sky-light);}
+.afa-reporte-opt.sel{border-color:var(--navy);background:var(--sky-light);color:var(--navy);}
+.afa-reporte-opt-ico{font-size:18px;flex-shrink:0;}
+.afa-modal-overlay{position:fixed;inset:0;z-index:10000;background:rgba(11,31,58,.7);display:flex;align-items:flex-end;justify-content:center;animation:afa-fadeIn .2s ease;}
+.afa-modal-gps{background:#fff;border-radius:24px 24px 0 0;width:100%;max-width:420px;padding:0 0 32px;box-shadow:0 -8px 40px rgba(0,0,0,.25);}
+.afa-modal-handle{width:40px;height:4px;background:var(--g200);border-radius:2px;margin:14px auto 20px;}
+.afa-modal-header{padding:0 24px 20px;text-align:center;}
+.afa-modal-ico{width:64px;height:64px;background:var(--al);border-radius:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:30px;}
+.afa-modal-title{font-weight:800;font-size:18px;color:var(--navy);margin-bottom:8px;letter-spacing:-.3px;}
+.afa-modal-desc{font-size:13px;color:var(--g500);line-height:1.6;}
+.afa-modal-steps{padding:0 24px;margin-bottom:20px;}
+.afa-modal-step{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--g100);}
+.afa-modal-step:last-child{border-bottom:none;}
+.afa-modal-step-num{width:28px;height:28px;border-radius:50%;background:var(--navy);color:#fff;font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px;}
+.afa-modal-step-txt{font-size:13px;color:var(--g600);line-height:1.5;}
+.afa-modal-step-txt b{color:var(--navy);}
+.afa-modal-btns{padding:0 24px;display:flex;flex-direction:column;gap:10px;}
+.afa-modal-btn-primary{width:100%;padding:14px 0;border-radius:14px;border:none;background:var(--navy);color:#fff;font-size:15px;font-weight:700;font-family:var(--f);cursor:pointer;}
+.afa-modal-btn-secondary{width:100%;padding:12px 0;border-radius:14px;border:1.5px solid var(--g200);background:#fff;color:var(--g600);font-size:14px;font-weight:600;font-family:var(--f);cursor:pointer;}
+
 .afa-content{flex:1;overflow-y:auto;overflow-x:hidden;padding-bottom:70px;-webkit-overflow-scrolling:touch;}
 .afa-panel{animation:afa-fadeIn .2s ease;}
-/* MAP */
 .afa-map{position:relative;height:310px;background:#EAE6DF;overflow:hidden;}
-.afa-map-badge{position:absolute;top:14px;left:14px;background:#fff;border-radius:var(--rsm);padding:6px 11px;display:flex;align-items:center;gap:6px;box-shadow:0 2px 12px rgba(0,0,0,.12);border:1px solid var(--g200);z-index:10;}
+.afa-map-badge{position:absolute;top:14px;left:14px;background:#fff;border-radius:var(--rsm);padding:6px 11px;display:flex;align-items:center;gap:6px;box-shadow:0 2px 12px rgba(0,0,0,.12);border:1px solid var(--g200);z-index:10;max-width:calc(100% - 70px);}
 .afa-dot{width:7px;height:7px;border-radius:50%;animation:afa-pulseDot 1.8s ease-in-out infinite;flex-shrink:0;}
 .afa-dot-g{background:var(--green);} .afa-dot-a{background:var(--amber);} .afa-dot-r{background:var(--red);}
-.afa-badge-txt{font-size:12px;font-weight:600;color:var(--g800);}
+.afa-badge-txt{font-size:12px;font-weight:600;color:var(--g800);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
 .afa-center-btn{position:absolute;bottom:14px;right:14px;width:40px;height:40px;border-radius:12px;background:#fff;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.14);display:flex;align-items:center;justify-content:center;color:var(--g600);font-size:20px;border:1px solid var(--g200);transition:background .15s;z-index:10;}
 .afa-center-btn:hover{background:var(--g50);}
 .afa-map-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;z-index:5;}
-/* ETA CARD */
 .afa-eta{margin:-28px 14px 0;position:relative;z-index:10;background:#fff;border-radius:var(--rxl);padding:20px;box-shadow:0 8px 32px rgba(11,31,58,.12),0 1px 4px rgba(11,31,58,.06);border:1px solid var(--g200);}
 .afa-eta-hdr{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px;}
 .afa-eta-lbl{font-size:10px;font-weight:700;color:var(--g400);text-transform:uppercase;letter-spacing:1.2px;margin-bottom:5px;}
@@ -108,38 +141,31 @@ const CSS = `
 .afa-eta-time.amber{color:var(--amber);} .afa-eta-time.red{color:var(--red);}
 .afa-eta-dist{font-size:12px;color:var(--g400);margin-top:5px;font-weight:500;}
 .afa-eta-icon{width:52px;height:52px;border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:26px;flex-shrink:0;}
-/* PROGRESS */
 .afa-prog-wrap{margin-bottom:16px;}
 .afa-prog-track{height:5px;background:var(--g100);border-radius:3px;overflow:hidden;margin-bottom:5px;}
 .afa-prog-fill{height:100%;border-radius:3px;background:linear-gradient(90deg,var(--green),#22C55E);transition:width 1.5s ease;}
 .afa-prog-fill.amber{background:var(--amber);}
 .afa-prog-labels{display:flex;justify-content:space-between;}
 .afa-prog-lbl{font-size:10px;color:var(--g400);font-weight:500;}
-/* STATS */
 .afa-stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;}
 .afa-stat{background:var(--g50);border-radius:var(--rmd);padding:10px 13px;border:1px solid var(--g100);}
 .afa-stat-lbl{font-size:10px;font-weight:700;color:var(--g400);text-transform:uppercase;letter-spacing:.8px;}
 .afa-stat-val{font-size:15px;font-weight:700;color:var(--navy);margin-top:4px;font-family:var(--m);}
 .afa-stat-val.name{font-family:var(--f);font-size:13px;}
 .afa-stat-val.green{color:var(--green);} .afa-stat-val.amber{color:var(--amber);}
-/* STOP ROW */
 .afa-srow{background:var(--sky-light);border-radius:var(--rmd);padding:12px 14px;display:flex;align-items:center;gap:12px;margin-bottom:14px;border:1px solid var(--sky-mid);}
 .afa-srow-icon{width:38px;height:38px;border-radius:12px;background:var(--navy);display:flex;align-items:center;justify-content:center;color:#fff;font-size:17px;flex-shrink:0;}
 .afa-srow-name{font-weight:700;font-size:14px;color:var(--navy);}
 .afa-srow-eta{font-size:12px;color:var(--sky);margin-top:2px;font-weight:600;}
 .afa-srow-addr{font-size:11px;color:var(--g400);margin-top:2px;}
-/* NAV BTNS */
 .afa-nav-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
 .afa-nav-lbl{font-size:10px;font-weight:700;color:var(--g400);text-transform:uppercase;letter-spacing:1px;margin:0 0 10px;}
 .afa-waze{padding:13px 0;border-radius:var(--rmd);border:none;background:#33CCFF;color:#082035;font-weight:800;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;font-family:var(--f);box-shadow:0 3px 10px rgba(51,204,255,.35);transition:transform .1s;}
 .afa-waze:active{transform:scale(.97);}
 .afa-maps{padding:13px 0;border-radius:var(--rmd);border:1.5px solid var(--g200);background:var(--g50);color:var(--navy);font-weight:800;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;font-family:var(--f);transition:transform .1s;}
 .afa-maps:active{transform:scale(.97);}
-/* WAITING */
 .afa-waiting{background:var(--g50);border-radius:12px;padding:14px 16px;border:1px solid var(--g100);margin-bottom:14px;}
-/* SECTION LABEL */
 .afa-sec-lbl{font-size:10px;font-weight:700;color:var(--g400);text-transform:uppercase;letter-spacing:1.2px;margin:20px 14px 10px;}
-/* STOPS LIST */
 .afa-stops{margin:0 14px;background:#fff;border-radius:var(--rlg);border:1px solid var(--g200);overflow:hidden;}
 .afa-si{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--g100);}
 .afa-si:last-child{border-bottom:none;}
@@ -151,9 +177,7 @@ const CSS = `
 .afa-si-hr{font-size:11px;color:var(--g400);margin-top:2px;}
 .afa-badge-mine{font-size:10px;font-weight:800;padding:2px 8px;border-radius:20px;background:var(--sky-mid);color:#1D4ED8;flex-shrink:0;}
 .afa-badge-done{font-size:10px;font-weight:800;padding:2px 8px;border-radius:20px;background:var(--gl);color:var(--green);flex-shrink:0;}
-/* CALL */
 .afa-call{display:flex;align-items:center;justify-content:center;gap:8px;margin:12px 14px 0;padding:13px 0;border-radius:var(--rmd);background:#fff;border:1.5px solid var(--g200);color:var(--navy);font-weight:600;font-size:14px;text-decoration:none;font-family:var(--f);}
-/* QR */
 .afa-qr-card{margin:14px 14px 0;background:#fff;border-radius:var(--rxl);overflow:hidden;border:1px solid var(--g200);box-shadow:0 4px 24px rgba(11,31,58,.1);}
 .afa-qr-hdr{background:var(--navy);padding:22px 24px;display:flex;flex-direction:column;align-items:center;border-bottom:1px solid rgba(255,255,255,.06);}
 .afa-qr-brand{color:rgba(255,255,255,.5);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:2px;}
@@ -182,13 +206,11 @@ const CSS = `
 .afa-pill-sub-w{font-size:12px;margin-top:2px;color:#92400E;}
 .afa-qr-nav{padding:20px 24px 24px;border-top:1px solid var(--g100);}
 .afa-qr-nav-lbl{font-size:10px;font-weight:700;color:var(--g400);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;}
-/* INSTRUCTIONS */
 .afa-instr{margin:14px 14px 0;background:#fff;border-radius:var(--rlg);padding:18px 20px;border:1px solid var(--g200);}
 .afa-instr-title{font-size:14px;font-weight:700;color:var(--navy);margin-bottom:14px;}
 .afa-instr-step{display:flex;gap:12px;margin-bottom:10px;}
 .afa-instr-num{width:24px;height:24px;border-radius:50%;background:var(--navy);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
 .afa-instr-txt{font-size:13px;color:var(--g500);line-height:1.5;padding-top:2px;}
-/* PROFILE */
 .afa-prof-hero{background:var(--navy);margin:14px 14px 0;border-radius:var(--rxl);padding:22px 20px;display:flex;align-items:center;gap:16px;border:1px solid rgba(255,255,255,.06);}
 .afa-prof-av-wrap{position:relative;width:72px;height:72px;flex-shrink:0;}
 .afa-prof-av{width:72px;height:72px;border-radius:20px;background:var(--navy-soft);border:2px solid rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:800;color:#fff;overflow:hidden;}
@@ -221,7 +243,6 @@ const CSS = `
 .afa-contact-arr{margin-left:auto;color:var(--g300);font-size:16px;}
 .afa-logout{margin:12px 14px 0;width:calc(100% - 28px);padding:13px 0;border-radius:var(--rmd);border:1.5px solid #FECACA;background:var(--rl);color:var(--red);font-size:14px;font-weight:700;cursor:pointer;font-family:var(--f);display:flex;align-items:center;justify-content:center;gap:7px;transition:opacity .15s;}
 .afa-logout:hover{opacity:.85;}
-/* BOTTOM NAV */
 .afa-nav{position:absolute;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--g200);display:flex;z-index:20;box-shadow:0 -4px 20px rgba(0,0,0,.07);}
 .afa-tab{flex:1;border:none;background:none;cursor:pointer;padding:10px 0 8px;display:flex;flex-direction:column;align-items:center;gap:3px;position:relative;font-family:var(--f);}
 .afa-tab.active::after{content:'';position:absolute;top:0;left:25%;right:25%;height:2.5px;background:var(--navy);border-radius:0 0 3px 3px;}
@@ -230,7 +251,6 @@ const CSS = `
 .afa-tab-lbl{font-size:10px;font-weight:600;color:var(--g400);letter-spacing:.2px;}
 .afa-tab.active .afa-tab-lbl{color:var(--navy);}
 .afa-tab-badge{position:absolute;top:-2px;right:-5px;width:8px;height:8px;border-radius:50%;background:var(--red);border:1.5px solid #fff;}
-/* LOGIN */
 .afa-login{position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;max-width:420px;height:100vh;height:100dvh;overflow-y:auto;z-index:9999;display:flex;flex-direction:column;background:#fff;font-family:var(--f);}
 .afa-login-top{background:var(--navy);padding:56px 24px 44px;text-align:center;}
 .afa-login-ico{width:72px;height:72px;background:rgba(255,255,255,.1);border-radius:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;border:1.5px solid rgba(255,255,255,.12);font-size:32px;}
@@ -247,151 +267,147 @@ const CSS = `
 .afa-feat-row{display:flex;gap:10px;margin-bottom:8px;align-items:flex-start;}
 .afa-feat-ico{font-size:15px;flex-shrink:0;}
 .afa-feat-txt{color:var(--g500);font-size:13px;margin:0;line-height:1.5;}
-/* SPINNER */
 .afa-spin{width:30px;height:30px;border:3px solid var(--g200);border-top:3px solid var(--navy);border-radius:50%;animation:afa-spin 1s linear infinite;margin:0 auto 8px;}
-/* KEYFRAMES */
 @keyframes afa-spin{to{transform:rotate(360deg)}}
 @keyframes afa-pulseDot{0%,100%{opacity:1}50%{opacity:.4}}
 @keyframes afa-slideDown{from{transform:translateY(-16px);opacity:0}to{transform:translateY(0);opacity:1}}
 @keyframes afa-fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 @media(max-width:420px){.afa-app{max-width:100%;}}
+
+/* Marcador bus */
+.afa-bus-mk{width:40px;height:40px;background:#0B1F3A;border-radius:50%;border:2.5px solid white;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 12px rgba(0,0,0,.4);cursor:pointer;}
+/* Marcador parada */
+.afa-stop-mk{width:32px;height:32px;background:#3B82F6;border-radius:50%;border:2.5px solid white;display:flex;align-items:center;justify-content:center;color:white;box-shadow:0 2px 8px rgba(59,130,246,.5);position:relative;}
+.afa-pulse{position:absolute;inset:-6px;border-radius:50%;border:2px solid #3B82F6;opacity:0;animation:afa-pulseRing 2s ease-out infinite;}
+/* Marcador pasajero (punto azul estilo Google Maps) */
+.afa-me-mk{width:18px;height:18px;background:#3B82F6;border-radius:50%;border:3px solid white;box-shadow:0 0 0 4px rgba(59,130,246,.25),0 2px 8px rgba(0,0,0,.3);}
+@keyframes afa-pulseRing{0%{transform:scale(1);opacity:.6}100%{transform:scale(2.2);opacity:0}}
+
+/* ── MODAL PARADAS ── */
+.afa-para-sheet{background:#fff;border-radius:24px 24px 0 0;width:100%;max-width:420px;box-shadow:0 -8px 40px rgba(0,0,0,.25);display:flex;flex-direction:column;max-height:92dvh;}
+.afa-para-hdr{padding:0 20px 14px;flex-shrink:0;}
+.afa-para-hdr-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+.afa-para-hdr-title{font-weight:800;font-size:17px;color:var(--navy);letter-spacing:-.3px;}
+.afa-para-cnt-badge{font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;background:var(--g100);color:var(--g600);}
+.afa-para-summary{display:grid;grid-template-columns:1fr 1fr 1fr;background:var(--g50);border-radius:12px;padding:12px;border:1px solid var(--g100);}
+.afa-para-sum-col{display:flex;flex-direction:column;gap:3px;}
+.afa-para-sum-col.mid{border-left:1px solid var(--g200);border-right:1px solid var(--g200);padding:0 10px;}
+.afa-para-sum-col.last{padding-left:10px;}
+.afa-para-sum-lbl{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.9px;color:var(--g400);}
+.afa-para-sum-val{font-size:12px;font-weight:800;color:var(--navy);line-height:1.3;}
+.afa-para-sum-time{font-size:11px;color:var(--g500);}
+.afa-para-scroll{flex:1;overflow-y:auto;padding:8px 20px 32px;-webkit-overflow-scrolling:touch;}
+.afa-para-row{display:flex;}
+.afa-para-spine{display:flex;flex-direction:column;align-items:center;width:34px;flex-shrink:0;}
+.afa-para-node{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;z-index:2;}
+.afa-para-node.p-done{background:var(--navy);border:2.5px solid var(--navy);}
+.afa-para-node.p-cur{background:var(--navy);border:2.5px solid var(--navy);}
+.afa-para-node.p-fut{background:#fff;border:2.5px solid var(--g300);}
+.afa-para-seg{width:2.5px;flex:1;min-height:8px;}
+.afa-para-seg.s-done{background:var(--navy);}
+.afa-para-seg.s-fut{background:var(--g200);}
+.afa-para-content{flex:1;padding:2px 0 12px 10px;}
+.afa-para-inner{border-radius:12px;padding:9px 12px;}
+.afa-para-inner.p-cur{background:var(--sky-light);border:1.5px solid var(--sky-mid);}
+.afa-para-rhead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;}
+.afa-para-name{font-size:13px;font-weight:700;line-height:1.3;}
+.afa-para-name.p-done{color:var(--g400);}
+.afa-para-name.p-cur{color:var(--navy);font-size:14px;}
+.afa-para-name.p-fut{color:var(--g700);}
+.afa-para-addr{font-size:11px;color:var(--g400);margin-top:2px;}
+.afa-para-tval{font-size:12px;font-weight:600;color:var(--g400);white-space:nowrap;margin-top:2px;}
+.afa-para-tval.p-cur{font-size:14px;font-weight:800;color:var(--navy);}
+.afa-para-tags{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap;}
+.afa-para-tag-m{font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;background:var(--navy);color:#fff;display:flex;align-items:center;gap:4px;}
+.afa-para-tag-e{font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;background:var(--al);color:var(--amber);display:flex;align-items:center;gap:4px;}
 `;
 
-// ─── MAPA DECORATIVO REALISTA (siempre visible como base, como Uber) ──────────
+// ─── MODAL GPS ─────────────────────────────────────────────────────────────────
+
+function ModalActivarGPS({ onReintentar, onCerrar }: { onReintentar: () => void; onCerrar: () => void }) {
+  const ios = esIOS();
+  const pasosIOS = [
+    "Abre Configuración en tu iPhone",
+    "Toca Privacidad y seguridad → Localización",
+    "Asegúrate que la localización esté Activada",
+    "Busca Safari y ponlo en Al usar la app",
+    "Vuelve aquí y toca Reintentar",
+  ];
+  const pasosAndroid = [
+    "Desliza desde arriba y toca el ícono de Ubicación para activarla",
+    "O ve a Ajustes → Ubicación → activa GPS",
+    "En el navegador, busca el ícono 🔒 en la barra de dirección",
+    "Toca Permisos → Ubicación → Permitir",
+    "Vuelve aquí y toca Reintentar",
+  ];
+  const pasos = ios ? pasosIOS : pasosAndroid;
+
+  return (
+    <div className="afa-modal-overlay" onClick={onCerrar}>
+      <div className="afa-modal-gps" onClick={e => e.stopPropagation()}>
+        <div className="afa-modal-handle" />
+        <div className="afa-modal-header">
+          <div className="afa-modal-ico">📍</div>
+          <div className="afa-modal-title">Activa tu ubicación</div>
+          <div className="afa-modal-desc">
+            {ios
+              ? "Necesitamos tu ubicación para mostrarte en el mapa. Sigue estos pasos en tu iPhone:"
+              : "Necesitamos tu ubicación para mostrarte en el mapa. Sigue estos pasos en tu Android:"}
+          </div>
+        </div>
+        <div className="afa-modal-steps">
+          {pasos.map((txt, i) => (
+            <div key={i} className="afa-modal-step">
+              <div className="afa-modal-step-num">{i + 1}</div>
+              <div className="afa-modal-step-txt">{txt}</div>
+            </div>
+          ))}
+        </div>
+        <div className="afa-modal-btns">
+          <button className="afa-modal-btn-primary" onClick={onReintentar}>
+            📍 Reintentar activar GPS
+          </button>
+          <button className="afa-modal-btn-secondary" onClick={onCerrar}>
+            Continuar sin ubicación
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MAP DECORATIVO (fallback cuando Mapbox no carga) ───────────────────────
 
 function MapaCiudad({ showBus = true, showStop = true }: { showBus?: boolean; showStop?: boolean }) {
   return (
-    <svg
-      viewBox="0 0 420 310"
-      xmlns="http://www.w3.org/2000/svg"
+    <svg viewBox="0 0 420 310" xmlns="http://www.w3.org/2000/svg"
       style={{ position:"absolute", inset:0, width:"100%", height:"100%" }}
-      preserveAspectRatio="xMidYMid slice"
-    >
-      {/* Fondo tierra */}
+      preserveAspectRatio="xMidYMid slice">
       <rect width="420" height="310" fill="#EAE6DF" />
-
-      {/* Zonas de agua / parque */}
       <rect x="0" y="255" width="420" height="55" fill="#C8DFF0" opacity="0.6" />
       <rect x="310" y="60" width="90" height="80" rx="4" fill="#C5DFB0" opacity="0.7" />
-      <rect x="170" y="170" width="55" height="45" rx="3" fill="#C5DFB0" opacity="0.6" />
-
-      {/* ── AVENIDAS PRINCIPALES (anchas, crema) ── */}
-      {/* Av horizontal principal */}
       <rect x="0" y="118" width="420" height="18" fill="#F5F1EB" />
-      <line x1="0" y1="127" x2="420" y2="127" stroke="#D4C9B8" strokeWidth="0.8" strokeDasharray="8,6" />
-      {/* Av horizontal secundaria */}
       <rect x="0" y="195" width="420" height="14" fill="#F5F1EB" />
-      <line x1="0" y1="202" x2="420" y2="202" stroke="#D4C9B8" strokeWidth="0.8" strokeDasharray="8,6" />
-      {/* Av horizontal baja */}
-      <rect x="0" y="248" width="420" height="10" fill="#F5F1EB" />
-
-      {/* Av vertical 1 */}
-      <rect x="72" y="0" width="18" height="310" fill="#F5F1EB" />
-      <line x1="81" y1="0" x2="81" y2="310" stroke="#D4C9B8" strokeWidth="0.8" strokeDasharray="8,6" />
-      {/* Av vertical 2 */}
+      <rect x="72"  y="0" width="18" height="310" fill="#F5F1EB" />
       <rect x="188" y="0" width="18" height="310" fill="#F5F1EB" />
-      <line x1="197" y1="0" x2="197" y2="310" stroke="#D4C9B8" strokeWidth="0.8" strokeDasharray="8,6" />
-      {/* Av vertical 3 */}
       <rect x="308" y="0" width="14" height="310" fill="#F5F1EB" />
-
-      {/* ── CALLES SECUNDARIAS (delgadas) ── */}
       <line x1="0" y1="68"  x2="420" y2="68"  stroke="#E8E2D9" strokeWidth="6" />
       <line x1="0" y1="158" x2="420" y2="158" stroke="#E8E2D9" strokeWidth="5" />
-      <line x1="0" y1="228" x2="420" y2="228" stroke="#E8E2D9" strokeWidth="5" />
-
-      <line x1="140" y1="0"  x2="140" y2="310" stroke="#E8E2D9" strokeWidth="6" />
-      <line x1="255" y1="0"  x2="255" y2="310" stroke="#E8E2D9" strokeWidth="5" />
-      <line x1="365" y1="0"  x2="365" y2="310" stroke="#E8E2D9" strokeWidth="5" />
-      <line x1="36"  y1="0"  x2="36"  y2="310" stroke="#E8E2D9" strokeWidth="5" />
-
-      {/* ── MANZANAS (bloques grises cálidos) ── */}
-      {/* Fila 1 */}
-      <rect x="38"  y="2"   width="32" height="64" rx="3" fill="#DDD8D1" />
-      <rect x="92"  y="2"   width="44" height="64" rx="3" fill="#DDD8D1" />
-      <rect x="142" y="2"   width="44" height="64" rx="3" fill="#DDD8D1" />
-      <rect x="208" y="2"   width="44" height="64" rx="3" fill="#DDD8D1" />
-      <rect x="257" y="2"   width="48" height="64" rx="3" fill="#DDD8D1" />
-      <rect x="322" y="2"   width="40" height="64" rx="3" fill="#C5DFB0" /> {/* parque */}
-
-      {/* Fila 2 */}
-      <rect x="2"   y="70"  width="68" height="46" rx="3" fill="#DDD8D1" />
-      <rect x="92"  y="70"  width="44" height="46" rx="3" fill="#DDD8D1" />
-      <rect x="142" y="70"  width="44" height="46" rx="3" fill="#DDD8D1" />
-      <rect x="208" y="70"  width="44" height="46" rx="3" fill="#DDD8D1" />
-      <rect x="257" y="70"  width="48" height="46" rx="3" fill="#DDD8D1" />
-      <rect x="322" y="70"  width="40" height="46" rx="3" fill="#C5DFB0" />
-
-      {/* Fila 3 */}
-      <rect x="2"   y="138" width="68" height="55" rx="3" fill="#DDD8D1" />
-      <rect x="92"  y="138" width="44" height="55" rx="3" fill="#DDD8D1" />
-      <rect x="142" y="138" width="44" height="30" rx="3" fill="#DDD8D1" />
-      <rect x="172" y="172" width="12" height="21" rx="2" fill="#C5DFB0" />
-      <rect x="208" y="138" width="44" height="55" rx="3" fill="#DDD8D1" />
-      <rect x="257" y="138" width="48" height="55" rx="3" fill="#DDD8D1" />
-      <rect x="322" y="138" width="40" height="55" rx="3" fill="#DDD8D1" />
-
-      {/* Fila 4 */}
-      <rect x="2"   y="210" width="68" height="36" rx="3" fill="#DDD8D1" />
-      <rect x="92"  y="210" width="44" height="36" rx="3" fill="#DDD8D1" />
-      <rect x="142" y="210" width="44" height="36" rx="3" fill="#DDD8D1" />
-      <rect x="208" y="210" width="44" height="36" rx="3" fill="#DDD8D1" />
-      <rect x="257" y="210" width="48" height="36" rx="3" fill="#DDD8D1" />
-      <rect x="322" y="210" width="40" height="36" rx="3" fill="#DDD8D1" />
-
-      {/* ── ETIQUETAS DE CALLES (tenues) ── */}
-      <text x="10"  y="116" fontSize="7" fill="#B0A898" fontFamily="sans-serif">Av. Arequipa</text>
-      <text x="10"  y="193" fontSize="7" fill="#B0A898" fontFamily="sans-serif">Av. Javier Prado</text>
-      <text x="75"  y="112" fontSize="7" fill="#B0A898" fontFamily="sans-serif" transform="rotate(-90,75,100)">Av. La Marina</text>
-      <text x="192" y="112" fontSize="7" fill="#B0A898" fontFamily="sans-serif" transform="rotate(-90,192,98)">Av. Brasil</text>
-
-      {/* ── RUTA DEL BUS (línea azul punteada) ── */}
-      <defs>
-        <marker id="arrow-map" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-          <path d="M0,0.5 L5,3 L0,5.5 Z" fill="#3B82F6" opacity="0.9"/>
-        </marker>
-      </defs>
-      <polyline
-        points="30,285 30,248 81,248 81,136 197,136 197,127 315,127 315,68 380,68"
-        fill="none"
-        stroke="#3B82F6"
-        strokeWidth="3"
-        strokeDasharray="7,5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        opacity="0.75"
-        markerEnd="url(#arrow-map)"
-      />
-
-      {/* ── PARADA (anillo + punto azul) ── */}
+      <line x1="140" y1="0" x2="140" y2="310" stroke="#E8E2D9" strokeWidth="6" />
+      <line x1="255" y1="0" x2="255" y2="310" stroke="#E8E2D9" strokeWidth="5" />
+      <text x="10" y="116" fontSize="7" fill="#B0A898" fontFamily="sans-serif">Av. Arequipa</text>
+      <text x="10" y="193" fontSize="7" fill="#B0A898" fontFamily="sans-serif">Av. Javier Prado</text>
+      <polyline points="30,285 30,248 81,248 81,136 197,136 197,127 315,127 315,68 380,68"
+        fill="none" stroke="#3B82F6" strokeWidth="3" strokeDasharray="7,5"
+        strokeLinecap="round" strokeLinejoin="round" opacity="0.75" />
       {showStop && (
         <>
           <circle cx="315" cy="68" r="14" fill="white" stroke="#3B82F6" strokeWidth="2.5" opacity="0.95" />
-          <circle cx="315" cy="68" r="5"  fill="#3B82F6" />
-          {/* Ripple animado */}
-          <circle cx="315" cy="68" r="14" fill="none" stroke="#3B82F6" strokeWidth="1.5" opacity="0">
-            <animate attributeName="r"       from="14" to="26" dur="2s" repeatCount="indefinite" />
-            <animate attributeName="opacity" from="0.5" to="0" dur="2s" repeatCount="indefinite" />
-          </circle>
+          <circle cx="315" cy="68" r="5" fill="#3B82F6" />
         </>
       )}
-
-      {/* ── BUS MARKER ── */}
       {showBus && (
-        <>
-          <circle cx="30" cy="275" r="18" fill="#0B1F3A" stroke="white" strokeWidth="2.5">
-            <animateTransform attributeName="transform" type="translate" values="0,0;0,-4;0,0" dur="2.5s" repeatCount="indefinite" />
-          </circle>
-          {/* icono bus SVG dentro del círculo */}
-          <g transform="translate(30,275)" style={{ pointerEvents:"none" }}>
-            <animateTransform attributeName="transform" type="translate" values="30,275;30,271;30,275" dur="2.5s" repeatCount="indefinite" />
-            <rect x="-9" y="-7" width="18" height="12" rx="2.5" fill="white" />
-            <rect x="-7" y="-5" width="6" height="4" rx="1" fill="#0B1F3A" />
-            <rect x="1"  y="-5" width="6" height="4" rx="1" fill="#0B1F3A" />
-            <circle cx="-5" cy="5.5" r="2"   fill="white" />
-            <circle cx="5"  cy="5.5" r="2"   fill="white" />
-            <rect x="-9" y="3" width="18" height="2" rx="0" fill="white" />
-          </g>
-        </>
+        <circle cx="30" cy="275" r="18" fill="#0B1F3A" stroke="white" strokeWidth="2.5" />
       )}
     </svg>
   );
@@ -401,33 +417,53 @@ function MapaCiudad({ showBus = true, showStop = true }: { showBus?: boolean; sh
 
 export default function AppPasajero() {
 
-  const [initing,       setIniting]       = useState(true);
-  const [pasajero,      setPasajero]      = useState<Pasajero | null>(null);
-  const [tab,           setTab]           = useState<Tab>("ruta");
-  const [dniInput,      setDniInput]      = useState("");
-  const [loginErr,      setLoginErr]      = useState("");
-  const [loginLoad,     setLoginLoad]     = useState(false);
-  const [miParada,      setMiParada]      = useState<(Parada & { reserva: Reserva }) | null>(null);
-  const [vehiculo,      setVehiculo]      = useState<Vehiculo | null>(null);
-  const [conductor,     setConductor]     = useState<Conductor | null>(null);
-  const [busPosicion,   setBusPosicion]   = useState<UbicacionBus | null>(null);
-  const [etaMin,        setEtaMin]        = useState<number | null>(null);
-  const [distM,         setDistM]         = useState<number | null>(null);
-  const [estadoBus,     setEstadoBus]     = useState<EstadoBus>("no_iniciado");
-  const [miEstado,      setMiEstado]      = useState("esperando");
-  const [rutaParadas,   setRutaParadas]   = useState<Parada[]>([]);
-  const [alerta5min,    setAlerta5min]    = useState(false);
-  const [alertaDismiss, setAlertaDismiss] = useState(false);
-  const [copiado,       setCopiado]       = useState(false);
-  const [uploading,     setUploading]     = useState(false);
-  const [fotoErr,       setFotoErr]       = useState("");
+  const [initing,        setIniting]        = useState(true);
+  const [pasajero,       setPasajero]       = useState<Pasajero | null>(null);
+  const [tab,            setTab]            = useState<Tab>("ruta");
+  const [dniInput,       setDniInput]       = useState("");
+  const [pinInput,       setPinInput]       = useState("");
+  const [loginErr,       setLoginErr]       = useState("");
+  const [loginLoad,      setLoginLoad]      = useState(false);
+  const [miParada,       setMiParada]       = useState<(Parada & { reserva: Reserva }) | null>(null);
+  const [vehiculo,       setVehiculo]       = useState<Vehiculo | null>(null);
+  const [conductor,      setConductor]      = useState<Conductor | null>(null);
+  const [busPosicion,    setBusPosicion]    = useState<UbicacionBus | null>(null);
+  const [etaMin,         setEtaMin]         = useState<number | null>(null);
+  const [distM,          setDistM]          = useState<number | null>(null);
+  const [estadoBus,      setEstadoBus]      = useState<EstadoBus>("no_iniciado");
+  const [miEstado,       setMiEstado]       = useState("esperando");
+  const [rutaParadas,    setRutaParadas]    = useState<Parada[]>([]);
+  const [alerta5min,     setAlerta5min]     = useState(false);
+  const [alertaDismiss,  setAlertaDismiss]  = useState(false);
+  const [agoMin,         setAgoMin]         = useState<number>(0); // minutos desde última señal del bus
+  const [copiado,        setCopiado]        = useState(false);
+  const [uploading,      setUploading]      = useState(false);
+  const [fotoErr,        setFotoErr]        = useState("");
+
+  // ── GPS PROPIO DEL PASAJERO ─────────────────────────────────────────────────
+  const [gpsPermiso,     setGpsPermiso]     = useState<GpsPermiso>("unknown");
+  const [gpsPropio,      setGpsPropio]      = useState<{ lat: number; lng: number } | null>(null);
+  const [mostrarModalGPS, setMostrarModalGPS] = useState(false);
+
+  // ── REPORTE AL OPERADOR ─────────────────────────────────────────────────────
+  const [mostrarReporte,  setMostrarReporte]  = useState(false);
+  const [reporteMensaje,  setReporteMensaje]  = useState("");
+  const [reporteTipo,     setReporteTipo]     = useState("");
+  const [reporteEnviando, setReporteEnviando] = useState(false);
+  const [reporteEnviado,  setReporteEnviado]  = useState(false);
+
+  // ── MODAL NAVEGACIÓN ────────────────────────────────────────────────────────
+  const [mostrarNavModal,    setMostrarNavModal]    = useState(false);
+  const [mostrarParadasModal, setMostrarParadasModal] = useState(false);
+
   const alertaRef    = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mapContainer = useRef<HTMLDivElement>(null);
   const map          = useRef<mapboxgl.Map | null>(null);
   const busMarker    = useRef<mapboxgl.Marker | null>(null);
   const paradaMk     = useRef<mapboxgl.Marker | null>(null);
-  const [mapListo,   setMapListo]         = useState(false);
+  const meMk         = useRef<mapboxgl.Marker | null>(null);  // marcador pasajero
+  const [mapListo,   setMapListo]           = useState(false);
 
   useEffect(() => {
     const saved = loadSession();
@@ -435,51 +471,117 @@ export default function AppPasajero() {
     setIniting(false);
   }, []);
 
+  // ── SOLICITAR GPS DEL DISPOSITIVO ──────────────────────────────────────────
+  // Se dispara automáticamente al loguearse. El navegador muestra la alerta nativa del OS.
+
+  const solicitarGPS = useCallback(() => {
+    if (!navigator.geolocation) {
+      setGpsPermiso("unavailable");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setGpsPermiso("granted");
+        setGpsPropio({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setMostrarModalGPS(false);
+        // Seguir actualizando posición
+        navigator.geolocation.watchPosition(
+          (p) => setGpsPropio({ lat: p.coords.latitude, lng: p.coords.longitude }),
+          () => {},
+          { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
+        );
+      },
+      (err) => {
+        if (err.code === GeolocationPositionError.PERMISSION_DENIED) {
+          setGpsPermiso("denied");
+          setMostrarModalGPS(true); // Mostrar modal con instrucciones
+        } else {
+          setGpsPermiso("unavailable");
+        }
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  }, []);
+
+  // Pedir GPS cuando el pasajero se loguea
+  useEffect(() => {
+    if (!pasajero) return;
+    // Pequeño delay para que el mapa cargue primero
+    const t = setTimeout(() => solicitarGPS(), 1500);
+    return () => clearTimeout(t);
+  }, [pasajero, solicitarGPS]);
+
   // Mapbox init
   useEffect(() => {
     if (!mapContainer.current || map.current || !pasajero) return;
-    map.current = new mapboxgl.Map({ container: mapContainer.current, style: "mapbox://styles/mapbox/light-v11", center: [-77.0428,-12.0464], zoom: 13 });
-    map.current.addControl(new mapboxgl.NavigationControl({ showCompass:false }), "top-right");
+    map.current = new mapboxgl.Map({
+      container: mapContainer.current,
+      style: "mapbox://styles/mapbox/light-v11",
+      center: [-77.0428, -12.0464],
+      zoom: 13,
+    });
+    map.current.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right");
     map.current.on("load", () => setMapListo(true));
     return () => { map.current?.remove(); map.current = null; };
   }, [pasajero]);
+
+  // ── MARCADOR UBICACIÓN PROPIA (punto azul) ──────────────────────────────────
+  useEffect(() => {
+    if (!mapListo || !map.current || !gpsPropio) return;
+    const lngLat: [number, number] = [gpsPropio.lng, gpsPropio.lat];
+    if (meMk.current) {
+      meMk.current.setLngLat(lngLat);
+    } else {
+      const el = document.createElement("div");
+      el.className = "afa-me-mk";
+      el.title = "Tu ubicación";
+      meMk.current = new mapboxgl.Marker({ element: el })
+        .setLngLat(lngLat)
+        .addTo(map.current!);
+    }
+  }, [gpsPropio, mapListo]);
 
   // Bus marker + ETA
   useEffect(() => {
     if (!mapListo || !map.current || !busPosicion) return;
     if (busMarker.current) {
       busMarker.current.setLngLat([Number(busPosicion.lng), Number(busPosicion.lat)]);
+      // Semitransparente si sin señal
+      const el = busMarker.current.getElement();
+      if (el) el.style.opacity = estadoBus === "sin_señal" ? "0.45" : "1";
     } else {
       const el = document.createElement("div");
       el.className = "afa-bus-mk";
+      el.style.opacity = estadoBus === "sin_señal" ? "0.45" : "1";
       el.innerHTML = `<i class="ti ti-bus" style="font-size:22px;color:white;"></i>`;
       busMarker.current = new mapboxgl.Marker({ element: el })
         .setLngLat([Number(busPosicion.lng), Number(busPosicion.lat)])
-        .setPopup(new mapboxgl.Popup({ offset:30 }).setHTML(
+        .setPopup(new mapboxgl.Popup({ offset: 30 }).setHTML(
           `<div style="font-family:'DM Sans',sans-serif;padding:4px">
-            <p style="font-weight:800;color:#0B1F3A;margin:0 0 4px">${vehiculo?.placa||"Bus AFA"}</p>
+            <p style="font-weight:800;color:#0B1F3A;margin:0 0 4px">${vehiculo?.placa || "Bus AFA"}</p>
             <p style="color:#555;font-size:12px;margin:0">🚀 ${busPosicion.velocidad} km/h</p>
-            ${conductor?`<p style="color:#555;font-size:12px;margin:4px 0 0">👤 ${conductor.nombre}</p>`:""}
-          </div>`))
-        .addTo(map.current!);
+            ${conductor ? `<p style="color:#555;font-size:12px;margin:4px 0 0">👤 ${conductor.nombre}</p>` : ""}
+          </div>`
+        )).addTo(map.current!);
     }
     if (miParada?.lat && miParada?.lng) {
       const d   = dist(Number(busPosicion.lat), Number(busPosicion.lng), Number(miParada.lat), Number(miParada.lng));
       const eta = calcETA(d, busPosicion.velocidad);
       setDistM(d); setEtaMin(eta);
-      if (eta<=5 && !alertaRef.current && miEstado!=="embarcado") {
-        alertaRef.current=true; setAlerta5min(true); setAlertaDismiss(false);
-        if ("vibrate" in navigator) navigator.vibrate([300,100,300]);
+      if (eta <= 5 && !alertaRef.current && miEstado !== "embarcado") {
+        alertaRef.current = true; setAlerta5min(true); setAlertaDismiss(false);
+        if ("vibrate" in navigator) navigator.vibrate([300, 100, 300]);
       }
-      const ago = (Date.now()-new Date(busPosicion.timestamp).getTime())/60000;
-      if      (ago>5)                          setEstadoBus("sin_señal");
-      else if (busPosicion.estado==="finalizado") setEstadoBus("finalizado");
-      else if (busPosicion.velocidad<3)        setEstadoBus("retrasado");
-      else                                     setEstadoBus("en_camino");
+      const ago = (Date.now() - new Date(busPosicion.timestamp).getTime()) / 60000;
+      setAgoMin(Math.round(ago));
+      if      (ago > 5)                            setEstadoBus("sin_señal");
+      else if (busPosicion.estado === "finalizado") setEstadoBus("finalizado");
+      else if (busPosicion.velocidad < 3)           setEstadoBus("retrasado");
+      else                                          setEstadoBus("en_camino");
       const b = new mapboxgl.LngLatBounds();
       b.extend([Number(busPosicion.lng), Number(busPosicion.lat)]);
       b.extend([Number(miParada.lng), Number(miParada.lat)]);
-      map.current?.fitBounds(b, { padding:80, maxZoom:15, duration:1500 });
+      map.current?.fitBounds(b, { padding: 80, maxZoom: 15, duration: 1500 });
     }
   }, [busPosicion, mapListo, miParada, vehiculo, conductor, miEstado]);
 
@@ -488,44 +590,39 @@ export default function AppPasajero() {
     if (!mapListo || !map.current || !miParada?.lat || paradaMk.current) return;
     const el = document.createElement("div");
     el.className = "afa-stop-mk";
-    const pulse = document.createElement("div");
-    pulse.className = "afa-pulse";
-    el.appendChild(pulse);
-    const ico = document.createElement("i");
-    ico.className = "ti ti-map-pin-filled";
-    ico.style.fontSize = "17px";
-    el.appendChild(ico);
+    const pulse = document.createElement("div"); pulse.className = "afa-pulse"; el.appendChild(pulse);
+    const ico = document.createElement("i"); ico.className = "ti ti-map-pin-filled"; ico.style.fontSize = "17px"; el.appendChild(ico);
     paradaMk.current = new mapboxgl.Marker({ element: el })
       .setLngLat([Number(miParada.lng), Number(miParada.lat)])
-      .setPopup(new mapboxgl.Popup({ offset:30 }).setHTML(
+      .setPopup(new mapboxgl.Popup({ offset: 30 }).setHTML(
         `<div style="font-family:'DM Sans',sans-serif;padding:4px">
           <p style="font-weight:800;color:#0B1F3A;margin:0 0 4px">Tu paradero</p>
           <p style="color:#555;font-size:12px;margin:0">${miParada.nombre}</p>
-          ${miParada.hora_estimada?`<p style="color:#555;font-size:11px;margin:4px 0 0">🕐 ${miParada.hora_estimada}</p>`:""}
-        </div>`))
-      .addTo(map.current!);
-    map.current.flyTo({ center:[Number(miParada.lng), Number(miParada.lat)], zoom:14, duration:1500 });
+          ${miParada.hora_estimada ? `<p style="color:#555;font-size:11px;margin:4px 0 0">🕐 ${miParada.hora_estimada}</p>` : ""}
+        </div>`
+      )).addTo(map.current!);
+    map.current.flyTo({ center: [Number(miParada.lng), Number(miParada.lat)], zoom: 14, duration: 1500 });
   }, [miParada, mapListo]);
 
   // Línea ruta
   useEffect(() => {
-    if (!mapListo || !map.current || rutaParadas.length<2) return;
-    const coords = rutaParadas.filter(p=>p.lat&&p.lng).map(p=>[Number(p.lng),Number(p.lat)]);
-    if (coords.length<2) return;
+    if (!mapListo || !map.current || rutaParadas.length < 2) return;
+    const coords = rutaParadas.filter(p => p.lat && p.lng).map(p => [Number(p.lng), Number(p.lat)]);
+    if (coords.length < 2) return;
     if (map.current.getSource("ruta")) {
-      (map.current.getSource("ruta") as mapboxgl.GeoJSONSource).setData({ type:"Feature", properties:{}, geometry:{type:"LineString",coordinates:coords} });
+      (map.current.getSource("ruta") as mapboxgl.GeoJSONSource).setData({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: coords } });
     } else {
-      map.current.addSource("ruta", { type:"geojson", data:{type:"Feature",properties:{},geometry:{type:"LineString",coordinates:coords}} });
-      map.current.addLayer({ id:"ruta-line", type:"line", source:"ruta", layout:{"line-join":"round","line-cap":"round"}, paint:{"line-color":"#3B82F6","line-width":3,"line-dasharray":[2,2],"line-opacity":0.7} });
+      map.current.addSource("ruta", { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: coords } } });
+      map.current.addLayer({ id: "ruta-line", type: "line", source: "ruta", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#3B82F6", "line-width": 3, "line-dasharray": [2, 2], "line-opacity": 0.7 } });
     }
   }, [rutaParadas, mapListo]);
 
-  // Realtime GPS
+  // Realtime GPS bus
   useEffect(() => {
     if (!miParada?.reserva?.vehiculo_id) return;
     const vid = miParada.reserva.vehiculo_id;
     const ch = supabase.channel(`bus-pax-${vid}`)
-      .on("postgres_changes", { event:"INSERT", schema:"public", table:"ubicaciones_gps", filter:`vehiculo_id=eq.${vid}` }, p => setBusPosicion(p.new as UbicacionBus))
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "ubicaciones_gps", filter: `vehiculo_id=eq.${vid}` }, p => setBusPosicion(p.new as UbicacionBus))
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, [miParada]);
@@ -533,10 +630,14 @@ export default function AppPasajero() {
   // ── FUNCIONES ───────────────────────────────────────────────────────────────
 
   async function login() {
-    if (dniInput.length<7) { setLoginErr("Ingresa tu DNI completo"); return; }
+    if (dniInput.length < 7) { setLoginErr("Ingresa tu DNI completo"); return; }
+    if (pinInput.length < 4) { setLoginErr("Ingresa tu PIN de 4 dígitos"); return; }
     setLoginErr(""); setLoginLoad(true);
     const { data } = await supabase.from("pasajeros").select("*").eq("dni", dniInput.trim()).single();
     if (!data) { setLoginErr("DNI no registrado. Contacta a tu empresa o a AFA Tours."); setLoginLoad(false); return; }
+    // Validar PIN — si no tiene PIN asignado, usar últimos 4 dígitos del DNI como default
+    const pinEsperado = data.pin_acceso || dniInput.trim().slice(-4);
+    if (pinInput !== pinEsperado) { setLoginErr("PIN incorrecto. Intenta con los últimos 4 dígitos de tu DNI."); setLoginLoad(false); return; }
     saveSession(data); setPasajero(data); await cargarMiRuta(data.id); setLoginLoad(false);
   }
 
@@ -544,25 +645,25 @@ export default function AppPasajero() {
     const hoy = getFechaLocal();
     const { data: pp } = await supabase.from("pasajeros_parada").select(`*, parada:paradas(*, reserva:reservas(*))`).eq("pasajero_id", pid);
     if (!pp?.length) return;
-    const hoyPP = pp.filter((x: any) => x.parada?.reserva?.fecha_servicio===hoy);
-    let miPP: any = hoyPP.length>0 ? hoyPP[0] : pp.filter((x:any)=>x.parada?.reserva?.fecha_servicio>=hoy).sort((a:any,b:any)=>new Date(a.parada?.reserva?.fecha_servicio||0).getTime()-new Date(b.parada?.reserva?.fecha_servicio||0).getTime())[0] || pp[0];
+    const hoyPP = pp.filter((x: any) => x.parada?.reserva?.fecha_servicio === hoy);
+    let miPP: any = hoyPP.length > 0 ? hoyPP[0] : pp.filter((x: any) => x.parada?.reserva?.fecha_servicio >= hoy).sort((a: any, b: any) => new Date(a.parada?.reserva?.fecha_servicio || 0).getTime() - new Date(b.parada?.reserva?.fecha_servicio || 0).getTime())[0] || pp[0];
     if (!miPP?.parada) return;
-    setMiParada(miPP.parada); setMiEstado(miPP.estado||"esperando");
+    setMiParada(miPP.parada); setMiEstado(miPP.estado || "esperando");
     const rId = miPP.parada?.reserva_id;
     if (!rId) return;
-    const { data: ps } = await supabase.from("paradas").select("*").eq("reserva_id",rId).order("orden");
-    setRutaParadas(ps||[]);
+    const { data: ps } = await supabase.from("paradas").select("*").eq("reserva_id", rId).order("orden");
+    setRutaParadas(ps || []);
     const vId = miPP.parada?.reserva?.vehiculo_id;
     if (vId) {
       const [vR, uR] = await Promise.all([
-        supabase.from("vehiculos").select("id,placa,categoria").eq("id",vId).single(),
-        supabase.from("ubicaciones_gps").select("*").eq("vehiculo_id",vId).order("created_at",{ascending:false}).limit(1),
+        supabase.from("vehiculos").select("id,placa,categoria").eq("id", vId).single(),
+        supabase.from("ubicaciones_gps").select("*").eq("vehiculo_id", vId).order("created_at", { ascending: false }).limit(1),
       ]);
       if (vR.data) setVehiculo(vR.data);
       if (uR.data?.[0]) setBusPosicion(uR.data[0]);
-      const { data: uGPS } = await supabase.from("ubicaciones_gps").select("conductor_id").eq("vehiculo_id",vId).order("created_at",{ascending:false}).limit(1);
+      const { data: uGPS } = await supabase.from("ubicaciones_gps").select("conductor_id").eq("vehiculo_id", vId).order("created_at", { ascending: false }).limit(1);
       if (uGPS?.[0]?.conductor_id) {
-        const { data: cond } = await supabase.from("conductores").select("id,nombre,telefono").eq("id",uGPS[0].conductor_id).single();
+        const { data: cond } = await supabase.from("conductores").select("id,nombre,telefono").eq("id", uGPS[0].conductor_id).single();
         if (cond) setConductor(cond);
       }
     }
@@ -570,101 +671,134 @@ export default function AppPasajero() {
 
   function abrirWaze() {
     if (!miParada) return;
-    window.open(miParada.lat&&miParada.lng
+    window.open(miParada.lat && miParada.lng
       ? `https://waze.com/ul?ll=${miParada.lat},${miParada.lng}&navigate=yes&zoom=17`
-      : `https://waze.com/ul?q=${encodeURIComponent((miParada.direccion||miParada.nombre)+", Lima, Peru")}&navigate=yes`,"_blank");
+      : `https://waze.com/ul?q=${encodeURIComponent((miParada.direccion || miParada.nombre) + ", Lima, Peru")}&navigate=yes`, "_blank");
   }
   function abrirMaps() {
     if (!miParada) return;
-    const dest = miParada.lat&&miParada.lng ? `${miParada.lat},${miParada.lng}` : encodeURIComponent((miParada.direccion||miParada.nombre)+", Lima, Peru");
-    window.open(`https://www.google.com/maps/dir/?api=1&destination=${dest}&travelmode=walking`,"_blank");
+    const dest = miParada.lat && miParada.lng ? `${miParada.lat},${miParada.lng}` : encodeURIComponent((miParada.direccion || miParada.nombre) + ", Lima, Peru");
+    // Si tenemos la ubicación propia, usarla como origen
+    const origin = gpsPropio ? `&origin=${gpsPropio.lat},${gpsPropio.lng}` : "";
+    window.open(`https://www.google.com/maps/dir/?api=1&destination=${dest}${origin}&travelmode=walking`, "_blank");
   }
   function centrarMapa() {
     if (!map.current) return;
-    if (busPosicion&&miParada?.lat&&miParada?.lng) {
-      const b = new mapboxgl.LngLatBounds();
-      b.extend([Number(busPosicion.lng),Number(busPosicion.lat)]);
-      b.extend([Number(miParada.lng),Number(miParada.lat)]);
-      map.current.fitBounds(b,{padding:80,maxZoom:15,duration:1000});
-    } else if (miParada?.lat&&miParada?.lng) {
-      map.current.flyTo({center:[Number(miParada.lng),Number(miParada.lat)],zoom:15,duration:1000});
-    }
+    const b = new mapboxgl.LngLatBounds();
+    let hasPoints = false;
+    if (busPosicion) { b.extend([Number(busPosicion.lng), Number(busPosicion.lat)]); hasPoints = true; }
+    if (miParada?.lat && miParada?.lng) { b.extend([Number(miParada.lng), Number(miParada.lat)]); hasPoints = true; }
+    if (gpsPropio) { b.extend([gpsPropio.lng, gpsPropio.lat]); hasPoints = true; }
+    if (hasPoints) map.current.fitBounds(b, { padding: 80, maxZoom: 15, duration: 1000 });
   }
   async function compartir() {
-    const txt = `🚌 Seguimiento en tiempo real · AFA Tours\n📍 Mi paradero: ${miParada?.nombre||""}\n🕐 Hora estimada: ${miParada?.hora_estimada||"—"}\n\n${window.location.href}`;
-    try { if (navigator.share) await navigator.share({title:"Mi bus AFA Tours",text:txt}); else { await navigator.clipboard.writeText(txt); setCopiado(true); setTimeout(()=>setCopiado(false),3000); } } catch { /* noop */ }
+    const txt = `🚌 Seguimiento AFA Tours\n📍 Paradero: ${miParada?.nombre || ""}\n🕐 Hora: ${miParada?.hora_estimada || "—"}\n\n${window.location.href}`;
+    try {
+      if (navigator.share) await navigator.share({ title: "Mi bus AFA Tours", text: txt });
+      else { await navigator.clipboard.writeText(txt); setCopiado(true); setTimeout(() => setCopiado(false), 3000); }
+    } catch { /* noop */ }
   }
   async function uploadFoto(file: File) {
     if (!pasajero) return;
-    setFotoErr("");
-    setUploading(true);
+    setFotoErr(""); setUploading(true);
     try {
-      // Redimensionar imagen en canvas antes de subir (máx 800px, calidad 0.85)
       const bitmap = await createImageBitmap(file);
-      const MAX = 800;
-      const ratio = Math.min(MAX / bitmap.width, MAX / bitmap.height, 1);
-      const w = Math.round(bitmap.width * ratio);
-      const h = Math.round(bitmap.height * ratio);
-      const canvas = document.createElement("canvas");
-      canvas.width = w; canvas.height = h;
-      const ctx = canvas.getContext("2d")!;
-      ctx.drawImage(bitmap, 0, 0, w, h);
-      const blob = await new Promise<Blob>((res) => canvas.toBlob(b => res(b!), "image/jpeg", 0.85));
-
+      const MAX = 800, ratio = Math.min(MAX / bitmap.width, MAX / bitmap.height, 1);
+      const w = Math.round(bitmap.width * ratio), h = Math.round(bitmap.height * ratio);
+      const canvas = document.createElement("canvas"); canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext("2d")!; ctx.drawImage(bitmap, 0, 0, w, h);
+      const blob = await new Promise<Blob>(res => canvas.toBlob(b => res(b!), "image/jpeg", 0.85));
       const path = `${pasajero.id}/foto_${Date.now()}.jpg`;
-
-      // Subir a Supabase Storage bucket "pasajeros-fotos"
-      const { error: upErr } = await supabase.storage
-        .from("pasajeros-fotos")
-        .upload(path, blob, { upsert: true, contentType: "image/jpeg" });
+      const { error: upErr } = await supabase.storage.from("pasajeros-fotos").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
       if (upErr) throw upErr;
-
-      const { data: { publicUrl } } = supabase.storage
-        .from("pasajeros-fotos")
-        .getPublicUrl(path);
-
-      // Actualizar tabla pasajeros
-      const { error: dbErr } = await supabase
-        .from("pasajeros")
-        .update({ foto_url: publicUrl })
-        .eq("id", pasajero.id);
+      const { data: { publicUrl } } = supabase.storage.from("pasajeros-fotos").getPublicUrl(path);
+      const { error: dbErr } = await supabase.from("pasajeros").update({ foto_url: publicUrl }).eq("id", pasajero.id);
       if (dbErr) throw dbErr;
-
-      // Actualizar estado local + sesión
-      const updated = { ...pasajero, foto_url: publicUrl };
-      setPasajero(updated);
-      saveSession(updated);
+      const updated = { ...pasajero, foto_url: publicUrl }; setPasajero(updated); saveSession(updated);
     } catch (e: any) {
-      setFotoErr(e?.message || "Error al subir la foto. Intenta nuevamente.");
-    } finally {
-      setUploading(false);
-    }
+      setFotoErr(e?.message || "Error al subir la foto.");
+    } finally { setUploading(false); }
+  }
+  async function enviarReporte() {
+    if (!pasajero || !miParada) return;
+    const texto = reporteMensaje.trim() || reporteTipo;
+    if (!texto) return;
+    setReporteEnviando(true);
+    await supabase.from("mensajes_pasajero").insert({
+      pasajero_id: pasajero.id,
+      reserva_id:  miParada.reserva_id,
+      parada_id:   miParada.id,
+      tipo:        reporteTipo || "novedad",
+      mensaje:     texto,
+    });
+    setReporteEnviando(false);
+    setReporteEnviado(true);
+    setReporteMensaje("");
+    setReporteTipo("");
+    setTimeout(() => {
+      setReporteEnviado(false);
+      setMostrarReporte(false);
+    }, 2500);
   }
 
   function salir() {
-    clearSession(); setPasajero(null); setMiParada(null); setBusPosicion(null); setRutaParadas([]); setVehiculo(null); setConductor(null);
-    alertaRef.current=false; setAlerta5min(false); setTab("ruta");
+    clearSession(); setPasajero(null); setMiParada(null); setBusPosicion(null); setRutaParadas([]);
+    setVehiculo(null); setConductor(null); setGpsPropio(null); setGpsPermiso("unknown");
+    setDniInput(""); setPinInput("");
+    alertaRef.current = false; setAlerta5min(false); setTab("ruta");
   }
 
   // Derivados
-  const cfgMap: Record<EstadoBus,{dot:string;txt:string;iconCls:string;iconBg:string;iconColor:string}> = {
-    no_iniciado: {dot:"afa-dot",        txt:"Esperando inicio",    iconCls:"ti-clock",         iconBg:"var(--g100)",       iconColor:"#0B1F3A"},
-    en_camino:   {dot:"afa-dot afa-dot-g", txt:"En camino",          iconCls:"ti-bus",           iconBg:"var(--gl)",         iconColor:"#16A34A"},
-    retrasado:   {dot:"afa-dot afa-dot-a", txt:"Retrasado",          iconCls:"ti-clock-hour-4",  iconBg:"var(--al)",         iconColor:"#D97706"},
-    finalizado:  {dot:"afa-dot",        txt:"Servicio finalizado", iconCls:"ti-circle-check",  iconBg:"var(--g100)",       iconColor:"#0B1F3A"},
-    sin_señal:   {dot:"afa-dot afa-dot-r", txt:"Sin señal GPS",      iconCls:"ti-wifi-off",      iconBg:"var(--rl)",         iconColor:"#DC2626"},
+  const cfgMap: Record<EstadoBus, { dot: string; txt: string; iconCls: string; iconBg: string; iconColor: string }> = {
+    no_iniciado: { dot: "afa-dot",           txt: "Bus aún no inicia",        iconCls: "ti-clock",        iconBg: "var(--g100)", iconColor: "#0B1F3A" },
+    en_camino:   { dot: "afa-dot afa-dot-g", txt: "Bus en camino",            iconCls: "ti-bus",          iconBg: "var(--gl)",   iconColor: "#16A34A" },
+    retrasado:   { dot: "afa-dot afa-dot-a", txt: "Bus detenido · tráfico",   iconCls: "ti-clock-hour-4", iconBg: "var(--al)",   iconColor: "#D97706" },
+    finalizado:  { dot: "afa-dot",           txt: "Servicio finalizado",       iconCls: "ti-circle-check", iconBg: "var(--g100)", iconColor: "#0B1F3A" },
+    sin_señal:   { dot: "afa-dot afa-dot-r", txt: `Bus sin cobertura · hace ${agoMin} min`, iconCls: "ti-wifi-off", iconBg: "var(--rl)", iconColor: "#DC2626" },
   };
-  const cfg        = cfgMap[estadoBus];
-  const busActivo  = busPosicion && estadoBus!=="finalizado";
-  const etaExtra   = estadoBus==="retrasado"?" amber": estadoBus==="sin_señal"?" red":"";
-  const pct        = distM!==null ? Math.max(0,Math.min(100,100-(distM/5000)*100)) : 0;
+  const cfg       = cfgMap[estadoBus];
+  const busActivo = busPosicion && estadoBus !== "finalizado" && estadoBus !== "sin_señal";
+  const etaExtra  = estadoBus === "retrasado" ? " amber" : estadoBus === "sin_señal" ? " red" : "";
+  const pct       = distM !== null ? Math.max(0, Math.min(100, 100 - (distM / 5000) * 100)) : 0;
+
+  const NavBtns = () => (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+      <button
+        style={{
+          padding: "13px 0", borderRadius: "var(--rmd)",
+          border: "none", background: "var(--navy)", color: "#fff",
+          fontWeight: 800, fontSize: 14, cursor: "pointer",
+          fontFamily: "var(--f)", display: "flex", alignItems: "center",
+          justifyContent: "center", gap: 7,
+          boxShadow: "0 4px 16px rgba(11,31,58,.25)", transition: "transform .1s",
+        }}
+        onClick={() => setMostrarNavModal(true)}
+      >
+        <i className="ti ti-navigation" style={{ fontSize: 18 }} />
+        Llegar al paradero
+      </button>
+      <button
+        style={{
+          padding: "13px 0", borderRadius: "var(--rmd)",
+          border: "1.5px solid var(--g200)", background: "#fff", color: "var(--navy)",
+          fontWeight: 700, fontSize: 14, cursor: "pointer",
+          fontFamily: "var(--f)", display: "flex", alignItems: "center",
+          justifyContent: "center", gap: 7, transition: "transform .1s",
+        }}
+        onClick={() => setMostrarParadasModal(true)}
+      >
+        <i className="ti ti-map-pins" style={{ fontSize: 18 }} />
+        Ver paradas
+      </button>
+    </div>
+  );
 
   // ── LOADING ─────────────────────────────────────────────────────────────────
   if (initing) return (
     <>
       <style>{CSS}</style>
       <div className="afa-backdrop" />
-      <div style={{position:'fixed',top:0,left:'50%',transform:'translateX(-50%)',width:'100%',maxWidth:420,height:'100vh',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center',background:'#0B1F3A'}}>
+      <div style={{ position: "fixed", top: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 420, height: "100vh", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", background: "#0B1F3A" }}>
         <div className="afa-spin" />
       </div>
     </>
@@ -675,32 +809,120 @@ export default function AppPasajero() {
     <>
       <style>{CSS}</style>
       <div className="afa-backdrop" />
-      <div className="afa-login">
-        <div className="afa-login-top">
-          <div className="afa-login-ico"><i className="ti ti-bus" style={{color:"white",fontSize:32}} /></div>
-          <h1 className="afa-login-title">AFA Tours Peru</h1>
-          <p className="afa-login-sub">Seguimiento de Ruta · Portal del Pasajero</p>
+      <div className="afa-login" style={{ background:"linear-gradient(160deg,#0B1F3A 0%,#1a3a6b 100%)", display:"flex", flexDirection:"column" }}>
+
+        {/* Círculos decorativos fijos */}
+        <div style={{ position:"fixed", top:-60, right:-60, width:200, height:200, borderRadius:"50%", background:"rgba(255,255,255,0.04)", pointerEvents:"none", zIndex:0 }} />
+        <div style={{ position:"fixed", top:140, left:-50, width:160, height:160, borderRadius:"50%", background:"rgba(255,255,255,0.03)", pointerEvents:"none", zIndex:0 }} />
+
+        {/* LOGO + PILL — siempre visible sobre azul */}
+        <div style={{ textAlign:"center", padding:"64px 24px 28px", position:"relative", zIndex:1 }}>
+          <div style={{
+            width:180, height:72, borderRadius:14,
+            background:"white", margin:"0 auto 18px",
+            display:"flex", alignItems:"center", justifyContent:"center",
+            boxShadow:"0 8px 40px rgba(0,0,0,0.4)",
+            overflow:"hidden", padding:10,
+          }}>
+            <img
+              src="https://qakhcezrmpksxgiwzmvd.supabase.co/storage/v1/object/public/assets/logoafacotizacion.jpg"
+              alt="AFA Tours Peru"
+              style={{ width:"100%", height:"100%", objectFit:"contain" }}
+              onError={e => {
+                (e.target as HTMLImageElement).style.display = "none";
+                const p = (e.target as HTMLImageElement).parentElement!;
+                p.innerHTML = '<i class="ti ti-bus" style="font-size:36px;color:#0B1F3A;"></i>';
+              }}
+            />
+          </div>
+          <div style={{ display:"inline-flex", alignItems:"center", gap:6, background:"rgba(255,255,255,0.12)", border:"1px solid rgba(255,255,255,0.2)", borderRadius:100, padding:"6px 16px" }}>
+            <div style={{ width:7, height:7, borderRadius:"50%", background:"#4ade80", boxShadow:"0 0 6px #4ade80" }} />
+            <span style={{ color:"rgba(255,255,255,0.9)", fontSize:12, fontWeight:700, letterSpacing:"0.5px" }}>App Pasajero</span>
+          </div>
         </div>
-        <div className="afa-login-body">
-          <p className="afa-login-desc">Ingresa tu DNI para ver tu bus en tiempo real y tu código de embarque</p>
+
+        {/* CARD BLANCA — sube desde abajo */}
+        <div style={{
+          background:"white", borderRadius:"28px 28px 0 0",
+          flex:1, overflowY:"auto",
+          boxShadow:"0 -8px 40px rgba(0,0,0,0.2)",
+          padding:"28px 24px 40px",
+          position:"relative", zIndex:1,
+        }}>
+          <p style={{ textAlign:"center", color:"#64748B", fontSize:14, marginBottom:22, lineHeight:1.5 }}>
+            Ingresa tu DNI y PIN para acceder a tu información de viaje
+          </p>
+
+          {/* DNI */}
           <label className="afa-login-lbl">Número de DNI</label>
-          <input type="tel" inputMode="numeric" maxLength={8} value={dniInput}
-            onChange={e=>{setDniInput(e.target.value.replace(/\D/g,"").slice(0,8));setLoginErr("");}}
-            onKeyDown={e=>e.key==="Enter"&&login()} placeholder="12345678"
-            className="afa-login-input" style={{border:`2px solid ${dniInput.length>=7?"#0B1F3A":"#E2E8F0"}`}} />
-          {loginErr && <div className="afa-login-err">⚠️ {loginErr}</div>}
-          <button onClick={login} disabled={loginLoad||dniInput.length<7} className="afa-login-btn"
-            style={{background:dniInput.length>=7?"#0B1F3A":"#E2E8F0",cursor:dniInput.length>=7?"pointer":"not-allowed"}}>
-            {loginLoad?"Buscando…":"Ver mi ruta →"}
-          </button>
-          <div className="afa-features">
-            <p className="afa-feat-title">¿Qué puedo hacer aquí?</p>
-            {[["🗺️","Ver el bus en tiempo real y el tiempo de llegada a tu paradero"],["🎫","Mostrar tu código QR para abordar el servicio"],["📍","Navegar a tu paradero con Waze o Google Maps"],["🔔","Recibir alerta cuando el bus esté a menos de 5 minutos"]].map(([ico,txt])=>(
-              <div key={txt} className="afa-feat-row"><span className="afa-feat-ico">{ico}</span><p className="afa-feat-txt">{txt}</p></div>
+          <input
+            type="tel" inputMode="numeric" maxLength={8} value={dniInput}
+            onChange={e => { setDniInput(e.target.value.replace(/\D/g,"").slice(0,8)); setLoginErr(""); }}
+            onKeyDown={e => e.key==="Enter" && login()}
+            placeholder="Ej: 12345678"
+            className="afa-login-input"
+            style={{ border:`2px solid ${dniInput.length>=7?"#0B1F3A":"#E2E8F0"}`, marginBottom:20 }}
+          />
+
+          {/* PIN */}
+          <label className="afa-login-lbl">PIN de 4 dígitos</label>
+          <p style={{ fontSize:11, color:"#94A3B8", marginBottom:14, marginTop:-4 }}>
+            Por defecto: últimos 4 dígitos de tu DNI
+          </p>
+
+          {/* Puntos */}
+          <div style={{ display:"flex", justifyContent:"center", gap:16, marginBottom:18 }}>
+            {[0,1,2,3].map(i => (
+              <div key={i} style={{
+                width:16, height:16, borderRadius:"50%",
+                background:i<pinInput.length?"#0B1F3A":"transparent",
+                border:`2px solid ${i<pinInput.length?"#0B1F3A":"#E2E8F0"}`,
+                transition:"all 0.15s",
+              }} />
             ))}
           </div>
-          <p style={{textAlign:"center",color:"#94A3B8",fontSize:12,marginTop:24}}>
-            ¿Problemas? <a href="tel:966707225" style={{color:"#0B1F3A",fontWeight:700}}>966 707 225</a>
+
+          {/* Teclado */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10, marginBottom:20 }}>
+            {[1,2,3,4,5,6,7,8,9,"","0","⌫"].map((n,i) => (
+              <button key={i}
+                onClick={() => {
+                  if (n==="⌫") setPinInput(p=>p.slice(0,-1));
+                  else if (n!=="" && pinInput.length<4) setPinInput(p=>p+n);
+                  setLoginErr("");
+                }}
+                style={{
+                  padding:"16px 0", borderRadius:14,
+                  border:`1px solid ${n===""?"transparent":"#E2E8F0"}`,
+                  fontSize:20, fontWeight:900,
+                  background:n===""?"transparent":"white",
+                  color:n==="⌫"?"#94A3B8":"#1E293B",
+                  cursor:n===""?"default":"pointer",
+                  visibility:n===""?"hidden":"visible",
+                  boxShadow:n!==""?"0 1px 4px rgba(0,0,0,0.08)":"none",
+                  fontFamily:"var(--f)",
+                }}>
+                {n}
+              </button>
+            ))}
+          </div>
+
+          {loginErr && <div className="afa-login-err">⚠ {loginErr}</div>}
+
+          <button onClick={login}
+            disabled={loginLoad||dniInput.length<7||pinInput.length<4}
+            className="afa-login-btn"
+            style={{
+              background:(dniInput.length>=7&&pinInput.length===4)?"linear-gradient(135deg,#0B1F3A 0%,#1a3a6b 100%)":"#E2E8F0",
+              cursor:(dniInput.length>=7&&pinInput.length===4)?"pointer":"not-allowed",
+              boxShadow:(dniInput.length>=7&&pinInput.length===4)?"0 4px 16px rgba(11,31,58,0.35)":"none",
+              transition:"all 0.2s",
+            }}>
+            {loginLoad?"Verificando…":"Ver mi ruta →"}
+          </button>
+
+          <p style={{ textAlign:"center", color:"#94A3B8", fontSize:12, marginTop:16 }}>
+            ¿Problemas? <a href="tel:966707225" style={{ color:"#0B1F3A", fontWeight:700 }}>966 707 225</a>
           </p>
         </div>
       </div>
@@ -708,46 +930,267 @@ export default function AppPasajero() {
   );
 
   // ── APP ──────────────────────────────────────────────────────────────────────
-
-  /* Botones de navegación reutilizables */
-  const NavBtns = () => (
-    <>
-      <div className="afa-nav-lbl">Cómo llegar a mi paradero</div>
-      <div className="afa-nav-grid">
-        <button className="afa-waze" onClick={abrirWaze}>
-          <svg width="18" height="18" viewBox="0 0 36 36"><ellipse cx="18" cy="16" rx="9" ry="9" fill="rgba(255,255,255,.4)"/><circle cx="14.5" cy="14.5" r="2" fill="#082035"/><circle cx="21.5" cy="14.5" r="2" fill="#082035"/><path d="M14 19 Q18 23 22 19" stroke="#082035" strokeWidth="1.8" fill="none" strokeLinecap="round"/></svg>
-          Waze
-        </button>
-        <button className="afa-maps" onClick={abrirMaps}>
-          <svg width="13" height="17" viewBox="0 0 20 26"><path d="M10 0C4.48 0 0 4.48 0 10c0 7.5 10 16 10 16s10-8.5 10-16C20 4.48 15.52 0 10 0z" fill="#EA4335"/><circle cx="10" cy="10" r="4" fill="white"/></svg>
-          Google Maps
-        </button>
-      </div>
-    </>
-  );
-
   return (
     <>
       <style>{CSS}</style>
       <div className="afa-backdrop" />
+
+      {/* ── MODAL GPS DESACTIVADO ── */}
+      {mostrarModalGPS && (
+        <ModalActivarGPS
+          onReintentar={() => { setMostrarModalGPS(false); solicitarGPS(); }}
+          onCerrar={() => setMostrarModalGPS(false)}
+        />
+      )}
+
+      {/* ── MODAL ELEGIR APP DE NAVEGACIÓN ── */}
+      {mostrarNavModal && (
+        <div className="afa-modal-overlay" onClick={() => setMostrarNavModal(false)}>
+          <div className="afa-modal-gps" onClick={e => e.stopPropagation()}>
+            <div className="afa-modal-handle" />
+            <div className="afa-modal-header">
+              <div className="afa-modal-ico" style={{ background: "#EFF6FF" }}>🧭</div>
+              <div className="afa-modal-title">¿Cómo quieres llegar?</div>
+              <div className="afa-modal-desc">
+                Elige tu app de navegación para llegar a{" "}
+                <strong>{miParada?.nombre || "tu paradero"}</strong>
+              </div>
+            </div>
+            <div className="afa-modal-btns">
+              <button
+                className="afa-waze"
+                style={{ width: "100%", padding: "16px 0", fontSize: 16, borderRadius: 14 }}
+                onClick={() => { abrirWaze(); setMostrarNavModal(false); }}
+              >
+                <svg width="20" height="20" viewBox="0 0 36 36">
+                  <ellipse cx="18" cy="16" rx="9" ry="9" fill="rgba(255,255,255,.4)"/>
+                  <circle cx="14.5" cy="14.5" r="2" fill="#082035"/>
+                  <circle cx="21.5" cy="14.5" r="2" fill="#082035"/>
+                  <path d="M14 19 Q18 23 22 19" stroke="#082035" strokeWidth="1.8" fill="none" strokeLinecap="round"/>
+                </svg>
+                Waze
+              </button>
+              <button
+                className="afa-maps"
+                style={{ width: "100%", padding: "16px 0", fontSize: 16, borderRadius: 14 }}
+                onClick={() => { abrirMaps(); setMostrarNavModal(false); }}
+              >
+                <svg width="14" height="18" viewBox="0 0 20 26">
+                  <path d="M10 0C4.48 0 0 4.48 0 10c0 7.5 10 16 10 16s10-8.5 10-16C20 4.48 15.52 0 10 0z" fill="#EA4335"/>
+                  <circle cx="10" cy="10" r="4" fill="white"/>
+                </svg>
+                Google Maps
+              </button>
+              <button className="afa-modal-btn-secondary" onClick={() => setMostrarNavModal(false)}>
+                Cancelar
+              </button>
+            </div>
+            <div style={{ height: 8 }} />
+          </div>
+        </div>
+      )}
+
+      {/* ── MODAL PARADAS DEL RECORRIDO ── */}
+      {mostrarParadasModal && rutaParadas.length > 0 && (() => {
+        const miIdx       = rutaParadas.findIndex(p => p.id === miParada?.id);
+        const primerP     = rutaParadas[0];
+        const ultimaP     = rutaParadas[rutaParadas.length - 1];
+        const miOrden     = miIdx + 1;
+        return (
+          <div className="afa-modal-overlay" onClick={() => setMostrarParadasModal(false)}>
+            <div className="afa-para-sheet" onClick={e => e.stopPropagation()}>
+              <div className="afa-modal-handle" />
+
+              {/* Header */}
+              <div className="afa-para-hdr">
+                <div className="afa-para-hdr-top">
+                  <button
+                    onClick={() => setMostrarParadasModal(false)}
+                    style={{
+                      width: 34, height: 34, borderRadius: "50%",
+                      border: "1.5px solid var(--g200)", background: "#fff",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      cursor: "pointer", color: "var(--g600)", flexShrink: 0,
+                    }}
+                  >
+                    <i className="ti ti-x" style={{ fontSize: 17 }} />
+                  </button>
+                  <div className="afa-para-hdr-title">
+                    {miOrden > 0 ? `#${miOrden} · ` : ""}Paradas del recorrido
+                  </div>
+                  <span className="afa-para-cnt-badge">{rutaParadas.length} paradas</span>
+                </div>
+
+                {/* Summary strip */}
+                <div className="afa-para-summary">
+                  <div className="afa-para-sum-col">
+                    <span className="afa-para-sum-lbl">Origen</span>
+                    <span className="afa-para-sum-val">{primerP.nombre.split(" ").slice(0, 2).join(" ")}</span>
+                    <span className="afa-para-sum-time">{primerP.hora_estimada || miParada?.reserva?.hora_servicio || "—"}</span>
+                  </div>
+                  <div className="afa-para-sum-col mid">
+                    <span className="afa-para-sum-lbl">Tu parada</span>
+                    <span className="afa-para-sum-val">{miOrden > 0 ? `#${miOrden}` : "—"}</span>
+                    <span className="afa-para-sum-time">{miParada?.hora_estimada || "—"}</span>
+                  </div>
+                  <div className="afa-para-sum-col last">
+                    <span className="afa-para-sum-lbl">Destino</span>
+                    <span className="afa-para-sum-val">{ultimaP.nombre.split(" ").slice(0, 2).join(" ")}</span>
+                    <span className="afa-para-sum-time">{ultimaP.hora_estimada || "—"}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Timeline scrollable */}
+              <div className="afa-para-scroll">
+                {rutaParadas.map((p, i) => {
+                  const esMia   = p.id === miParada?.id;
+                  const isDone  = p.estado === "completada";
+                  const isFut   = !isDone && !esMia;
+                  const state   = isDone ? "p-done" : esMia ? "p-cur" : "p-fut";
+                  const segNext = i < rutaParadas.length - 1;
+                  const segDone = rutaParadas[i + 1]?.estado === "completada" || (rutaParadas[i + 1]?.id === miParada?.id ? false : !isDone ? false : true);
+                  const lineClass = isDone ? "s-done" : "s-fut";
+                  return (
+                    <div key={p.id} className="afa-para-row">
+                      {/* Spine: node + connecting line */}
+                      <div className="afa-para-spine">
+                        <div className={`afa-para-node ${state}`}>
+                          {isDone && <i className="ti ti-check" style={{ fontSize: 14, color: "#fff" }} />}
+                          {esMia && <i className="ti ti-map-pin-filled" style={{ fontSize: 14, color: "#fff" }} />}
+                        </div>
+                        {segNext && <div className={`afa-para-seg ${lineClass}`} />}
+                      </div>
+
+                      {/* Content */}
+                      <div className="afa-para-content">
+                        <div className={`afa-para-inner${esMia ? " p-cur" : ""}`}>
+                          <div className="afa-para-rhead">
+                            <div style={{ flex: 1 }}>
+                              <div className={`afa-para-name ${state}`}>{p.nombre}</div>
+                              {p.direccion && <div className="afa-para-addr">{p.direccion}</div>}
+                              {esMia && (
+                                <div className="afa-para-tags">
+                                  <span className="afa-para-tag-m">
+                                    <i className="ti ti-arrow-left" style={{ fontSize: 10 }} /> Tu paradero
+                                  </span>
+                                  {etaMin !== null && etaMin > 0 && (
+                                    <span className="afa-para-tag-e">
+                                      <i className="ti ti-clock" style={{ fontSize: 10 }} /> En {fmtETA(etaMin)}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                            {p.hora_estimada && (
+                              <span className={`afa-para-tval${esMia ? " p-cur" : ""}`}>{p.hora_estimada}</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── MODAL REPORTE AL OPERADOR ── */}
+      {mostrarReporte && (
+        <div className="afa-modal-overlay" onClick={() => !reporteEnviando && setMostrarReporte(false)}>
+          <div className="afa-modal-gps" onClick={e => e.stopPropagation()}>
+            <div className="afa-modal-handle" />
+
+            {reporteEnviado ? (
+              <div style={{ padding: "20px 24px 32px", textAlign: "center" }}>
+                <div style={{ fontSize: 56, marginBottom: 16 }}>✅</div>
+                <p style={{ color: "#0B1F3A", fontWeight: 800, fontSize: 18, margin: "0 0 8px" }}>Mensaje enviado</p>
+                <p style={{ color: "#64748B", fontSize: 13 }}>El operador fue notificado y te ayudará a la brevedad</p>
+              </div>
+            ) : (
+              <>
+                <div className="afa-modal-header" style={{ paddingBottom: 16 }}>
+                  <div className="afa-modal-ico" style={{ background: "#EFF6FF" }}>💬</div>
+                  <div className="afa-modal-title">Reportar al operador</div>
+                  <div className="afa-modal-desc">
+                    Selecciona el motivo o escribe tu mensaje. El operador lo recibirá al instante.
+                  </div>
+                </div>
+
+                <div style={{ padding: "0 24px", marginBottom: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+                  {[
+                    { tipo: "tardanza",    ico: "⏰", txt: "Llegaré tarde a mi paradero" },
+                    { tipo: "cancelacion", ico: "❌", txt: "No podré tomar el servicio hoy" },
+                    { tipo: "incidencia",  ico: "🚨", txt: "El bus ya pasó sin recogerme" },
+                    { tipo: "otro",        ico: "✏", txt: "Otro motivo..." },
+                  ].map(op => (
+                    <button
+                      key={op.tipo}
+                      className={`afa-reporte-opt${reporteTipo === op.tipo ? " sel" : ""}`}
+                      onClick={() => { setReporteTipo(op.tipo); if (op.tipo !== "otro") setReporteMensaje(""); }}>
+                      <span className="afa-reporte-opt-ico">{op.ico}</span>
+                      {op.txt}
+                      {reporteTipo === op.tipo && <i className="ti ti-check" style={{ marginLeft: "auto", color: "#0B1F3A" }} />}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Campo libre si selecciona "Otro" o quiere agregar detalle */}
+                {(reporteTipo === "otro" || reporteTipo) && (
+                  <div style={{ padding: "0 24px", marginBottom: 16 }}>
+                    <textarea
+                      rows={3}
+                      placeholder={reporteTipo === "otro" ? "Describe tu situación..." : "Agregar detalle (opcional)..."}
+                      value={reporteMensaje}
+                      onChange={e => setReporteMensaje(e.target.value)}
+                      style={{
+                        width: "100%", padding: "12px 14px", borderRadius: 12,
+                        border: "1.5px solid #E2E8F0", fontSize: 13, fontFamily: "var(--f)",
+                        resize: "none", outline: "none", color: "#1E293B",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  </div>
+                )}
+
+                <div className="afa-modal-btns">
+                  <button
+                    className="afa-modal-btn-primary"
+                    disabled={reporteEnviando || (!reporteTipo && !reporteMensaje.trim())}
+                    style={{ opacity: (!reporteTipo && !reporteMensaje.trim()) ? 0.4 : 1 }}
+                    onClick={enviarReporte}>
+                    {reporteEnviando ? "Enviando..." : "📨 Enviar al operador"}
+                  </button>
+                  <button className="afa-modal-btn-secondary" onClick={() => setMostrarReporte(false)}>
+                    Cancelar
+                  </button>
+                </div>
+                <div style={{ height: 8 }} />
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="afa-app">
 
         {/* ── HEADER ── */}
         <header className="afa-hdr">
           <div className="afa-hdr-l">
             <div className="afa-av">
-              {pasajero.foto_url
-                ? <img src={pasajero.foto_url} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} />
-                : ini(pasajero.nombre)}
-            </div>            <div>
-              <div className="afa-hdr-name">{pasajero.nombre.split(" ").slice(0,2).join(" ")}</div>
-              <div className="afa-hdr-co">{pasajero.empresa||"AFA Tours Peru"}</div>
+              {pasajero.foto_url ? <img src={pasajero.foto_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : ini(pasajero.nombre)}
+            </div>
+            <div>
+              <div className="afa-hdr-name">{pasajero.nombre.split(" ").slice(0, 2).join(" ")}</div>
+              <div className="afa-hdr-co">{pasajero.empresa || "AFA Tours Peru"}</div>
             </div>
           </div>
           <div className="afa-hdr-r">
-            {miEstado==="embarcado" && <span className="afa-boarded-pill">✓ A bordo</span>}
+            {miEstado === "embarcado" && <span className="afa-boarded-pill">✓ A bordo</span>}
             <button className="afa-hdr-btn" onClick={compartir} title="Compartir">
-              <i className={copiado?"ti ti-check":"ti ti-share-3"} />
+              <i className={copiado ? "ti ti-check" : "ti ti-share-3"} />
             </button>
             <button className="afa-hdr-btn" onClick={salir} title="Salir">
               <i className="ti ti-door-exit" />
@@ -756,14 +1199,28 @@ export default function AppPasajero() {
         </header>
 
         {/* ── ALERTA ≤5 min ── */}
-        {alerta5min && !alertaDismiss && miEstado!=="embarcado" && (
+        {alerta5min && !alertaDismiss && miEstado !== "embarcado" && (
           <div className="afa-alert">
-            <i className="ti ti-alert-triangle" style={{color:"white",fontSize:22,flexShrink:0}} />
-            <div style={{flex:1}}>
+            <i className="ti ti-alert-triangle" style={{ color: "white", fontSize: 22, flexShrink: 0 }} />
+            <div style={{ flex: 1 }}>
               <div className="afa-alert-title">¡Tu bus está llegando!</div>
-              <div className="afa-alert-sub">Dirígete a tu paradero — {etaMin!==null?fmtETA(etaMin):"< 5 min"}</div>
+              <div className="afa-alert-sub">Dirígete a tu paradero — {etaMin !== null ? fmtETA(etaMin) : "< 5 min"}</div>
             </div>
-            <button className="afa-alert-btn" onClick={()=>setAlertaDismiss(true)}>OK</button>
+            <button className="afa-alert-btn" onClick={() => setAlertaDismiss(true)}>OK</button>
+          </div>
+        )}
+
+        {/* ── BANNER GPS PROPIO DESACTIVADO ── */}
+        {gpsPermiso === "denied" && !mostrarModalGPS && (
+          <div className="afa-gps-banner">
+            <span className="afa-gps-banner-ico">📍</span>
+            <div className="afa-gps-banner-txt">
+              <div className="afa-gps-banner-title">GPS desactivado</div>
+              <div className="afa-gps-banner-sub">Actívalo para ver tu posición y calcular distancia al paradero</div>
+            </div>
+            <button className="afa-gps-banner-btn" onClick={() => setMostrarModalGPS(true)}>
+              Activar
+            </button>
           </div>
         )}
 
@@ -771,87 +1228,99 @@ export default function AppPasajero() {
         <div className="afa-content">
 
           {/* ══════════ TAB RUTA ══════════ */}
-          {tab==="ruta" && (
+          {tab === "ruta" && (
             <div className="afa-panel">
-
-              {/* MAPA — decorativo siempre visible como base, Mapbox encima si carga */}
               <div className="afa-map">
+                <MapaCiudad showBus={!busPosicion} showStop={!!miParada} />
+                <div ref={mapContainer} style={{ position: "absolute", inset: 0, opacity: mapListo ? 1 : 0, transition: "opacity 0.8s ease" }} />
 
-                {/* ── BASE: mapa ciudad siempre visible (como Uber) ── */}
-                <MapaCiudad
-                  showBus={!busPosicion}
-                  showStop={!!miParada}
-                />
-
-                {/* ── MAPBOX: se monta encima y hace fade-in cuando carga ── */}
-                <div
-                  ref={mapContainer}
-                  style={{
-                    position:"absolute", inset:0,
-                    opacity: mapListo ? 1 : 0,
-                    transition: "opacity 0.8s ease",
-                  }}
-                />
-
-                {/* ── OVERLAY: sin ruta asignada ── */}
                 {!miParada && (
-                  <div className="afa-map-overlay" style={{ background:"rgba(234,230,223,0.82)" }}>
-                    <div style={{ textAlign:"center" }}>
-                      <div style={{ width:56, height:56, borderRadius:16, background:"white", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 12px", boxShadow:"0 4px 16px rgba(0,0,0,0.12)" }}>
-                        <i className="ti ti-map-off" style={{ fontSize:26, color:"#94A3B8" }} />
+                  <div className="afa-map-overlay" style={{ background: "rgba(234,230,223,0.82)" }}>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ width: 56, height: 56, borderRadius: 16, background: "white", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px", boxShadow: "0 4px 16px rgba(0,0,0,0.12)" }}>
+                        <i className="ti ti-map-off" style={{ fontSize: 26, color: "#94A3B8" }} />
                       </div>
-                      <p style={{ color:"#0B1F3A", fontWeight:700, fontSize:15, margin:0 }}>Sin ruta asignada hoy</p>
-                      <p style={{ color:"#94A3B8", fontSize:12, margin:"6px 0 0" }}>Tu empresa aún no registró tu paradero</p>
+                      <p style={{ color: "#0B1F3A", fontWeight: 700, fontSize: 15, margin: 0 }}>Sin ruta asignada hoy</p>
+                      <p style={{ color: "#94A3B8", fontSize: 12, margin: "6px 0 0" }}>Tu empresa aún no registró tu paradero</p>
                     </div>
                   </div>
                 )}
 
-                {/* Badge GPS */}
+                {/* ── BADGE ESTADO BUS ── */}
                 {busPosicion && (
-                  <div className="afa-map-badge">
+                  <div className="afa-map-badge" style={{
+                    borderColor: estadoBus === "sin_señal" ? "#FECACA"
+                      : estadoBus === "retrasado" ? "#FDE68A"
+                      : estadoBus === "en_camino" ? "#86EFAC"
+                      : "#E2E8F0",
+                  }}>
                     <div className={cfg.dot} />
-                    <span className="afa-badge-txt">{cfg.txt}{estadoBus==="en_camino"?` · ${busPosicion.velocidad} km/h`:""}</span>
+                    <span className="afa-badge-txt">{cfg.txt}</span>
                   </div>
                 )}
-
-                {/* Sin GPS aún: badge de espera */}
                 {miParada && !busPosicion && (
                   <div className="afa-map-badge">
-                    <div className="afa-dot" style={{ background:"#94A3B8" }} />
-                    <span className="afa-badge-txt">Esperando inicio del recorrido</span>
+                    <div className="afa-dot" style={{ background: "#94A3B8" }} />
+                    <span className="afa-badge-txt">Bus aún no inicia · {miParada.reserva?.hora_servicio || "—"}</span>
                   </div>
                 )}
 
-                {/* Botón centrar */}
                 <button className="afa-center-btn" onClick={centrarMapa} title="Centrar mapa">
                   <i className="ti ti-focus-2" />
                 </button>
               </div>
 
+              {/* ── BARRA DE CONTEXTO: bus sin cobertura ── */}
+              {estadoBus === "sin_señal" && busPosicion && (
+                <div style={{
+                  margin: "0 14px 0", padding: "10px 14px",
+                  background: "#FEF2F2", border: "1px solid #FECACA",
+                  borderRadius: "0 0 14px 14px",
+                  display: "flex", alignItems: "center", gap: 10,
+                }}>
+                  <i className="ti ti-wifi-off" style={{ color: "#DC2626", fontSize: 18, flexShrink: 0 }} />
+                  <div style={{ flex: 1 }}>
+                    <p style={{ color: "#991B1B", fontWeight: 700, fontSize: 12, margin: 0 }}>
+                      El bus perdió cobertura hace {agoMin} min
+                    </p>
+                    <p style={{ color: "#DC2626", fontSize: 11, margin: "2px 0 0" }}>
+                      Mostrando última posición conocida
+                    </p>
+                  </div>
+                  <button onClick={centrarMapa} style={{
+                    background: "none", border: "1px solid #FECACA", borderRadius: 8,
+                    padding: "4px 10px", color: "#DC2626", fontSize: 11, fontWeight: 700,
+                    cursor: "pointer", fontFamily: "var(--f)", flexShrink: 0,
+                  }}>
+                    Ver posición
+                  </button>
+                </div>
+              )}
+
               {/* ETA CARD */}
               {miParada && (
                 <div className="afa-eta">
-                  {busActivo && etaMin!==null ? (
+                  {busActivo && etaMin !== null ? (
                     <>
                       <div className="afa-eta-hdr">
                         <div>
                           <div className="afa-eta-lbl">Tiempo de llegada a tu paradero</div>
                           <div className={`afa-eta-time${etaExtra}`}>{fmtETA(etaMin)}</div>
-                          {distM!==null && (
+                          {distM !== null && (
                             <div className="afa-eta-dist">
-                              <i className="ti ti-ruler-2" style={{fontSize:13,verticalAlign:-2}} />{" "}
+                              <i className="ti ti-ruler-2" style={{ fontSize: 13, verticalAlign: -2 }} />{" "}
                               El bus está a <strong>{fmtDist(distM)}</strong> de tu paradero
                             </div>
                           )}
                         </div>
-                        <div className="afa-eta-icon" style={{background:cfg.iconBg}}>
-                          <i className={`ti ${cfg.iconCls}`} style={{fontSize:26,color:cfg.iconColor}} />
+                        <div className="afa-eta-icon" style={{ background: cfg.iconBg }}>
+                          <i className={`ti ${cfg.iconCls}`} style={{ fontSize: 26, color: cfg.iconColor }} />
                         </div>
                       </div>
-                      {distM!==null && (
+                      {distM !== null && (
                         <div className="afa-prog-wrap">
                           <div className="afa-prog-track">
-                            <div className={`afa-prog-fill${estadoBus==="retrasado"?" amber":""}`} style={{width:`${pct}%`}} />
+                            <div className={`afa-prog-fill${estadoBus === "retrasado" ? " amber" : ""}`} style={{ width: `${pct}%` }} />
                           </div>
                           <div className="afa-prog-labels">
                             <span className="afa-prog-lbl">Lejos</span>
@@ -860,43 +1329,57 @@ export default function AppPasajero() {
                         </div>
                       )}
                     </>
+                  ) : estadoBus === "sin_señal" ? (
+                    <div className="afa-waiting" style={{ background: "#FEF2F2", borderColor: "#FECACA" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <i className="ti ti-wifi-off" style={{ color: "#DC2626", fontSize: 22, flexShrink: 0 }} />
+                        <div>
+                          <p style={{ color: "#991B1B", fontWeight: 700, fontSize: 15, margin: 0 }}>Bus sin cobertura</p>
+                          <p style={{ color: "#DC2626", fontSize: 12, margin: "3px 0 0" }}>
+                            Última señal hace {agoMin} min · La posición en el mapa puede no ser exacta
+                          </p>
+                        </div>
+                      </div>
+                    </div>
                   ) : (
                     <div className="afa-waiting">
-                      <p style={{color:"#0B1F3A",fontWeight:700,fontSize:15,margin:0}}>🕐 Esperando inicio del recorrido</p>
-                      <p style={{color:"#94A3B8",fontSize:12,margin:"4px 0 0"}}>El conductor aún no ha iniciado la ruta</p>
+                      <p style={{ color: "#0B1F3A", fontWeight: 700, fontSize: 15, margin: 0 }}>
+                        🕐 Bus aún no inicia el recorrido
+                      </p>
+                      <p style={{ color: "#94A3B8", fontSize: 12, margin: "4px 0 0" }}>
+                        Hora programada: {miParada.reserva?.hora_servicio || "—"} · Te notificaremos cuando salga
+                      </p>
                     </div>
                   )}
 
-                  {/* Stats */}
                   <div className="afa-stats">
                     <div className="afa-stat">
-                      <div className="afa-stat-lbl"><i className="ti ti-bus-stop" style={{fontSize:12,verticalAlign:-1}} /> Placa</div>
-                      <div className="afa-stat-val">{vehiculo?.placa||"—"}</div>
+                      <div className="afa-stat-lbl"><i className="ti ti-bus-stop" style={{ fontSize: 12, verticalAlign: -1 }} /> Placa</div>
+                      <div className="afa-stat-val">{vehiculo?.placa || "—"}</div>
                     </div>
                     <div className="afa-stat">
-                      <div className="afa-stat-lbl"><i className="ti ti-user" style={{fontSize:12,verticalAlign:-1}} /> Conductor</div>
-                      <div className="afa-stat-val name">{conductor?.nombre?.split(" ").slice(0,2).join(" ")||"—"}</div>
+                      <div className="afa-stat-lbl"><i className="ti ti-user" style={{ fontSize: 12, verticalAlign: -1 }} /> Conductor</div>
+                      <div className="afa-stat-val name">{conductor?.nombre?.split(" ").slice(0, 2).join(" ") || "—"}</div>
                     </div>
                     {busPosicion && (
                       <div className="afa-stat">
-                        <div className="afa-stat-lbl"><i className="ti ti-gauge" style={{fontSize:12,verticalAlign:-1}} /> Velocidad</div>
+                        <div className="afa-stat-lbl"><i className="ti ti-gauge" style={{ fontSize: 12, verticalAlign: -1 }} /> Velocidad</div>
                         <div className="afa-stat-val">{busPosicion.velocidad} km/h</div>
                       </div>
                     )}
                     <div className="afa-stat">
-                      <div className="afa-stat-lbl"><i className="ti ti-ticket" style={{fontSize:12,verticalAlign:-1}} /> Mi estado</div>
-                      <div className={`afa-stat-val name ${miEstado==="embarcado"?"green":"amber"}`}>
-                        {miEstado==="embarcado"?"✅ A bordo":"⏳ Esperando"}
+                      <div className="afa-stat-lbl"><i className="ti ti-ticket" style={{ fontSize: 12, verticalAlign: -1 }} /> Mi estado</div>
+                      <div className={`afa-stat-val name ${miEstado === "embarcado" ? "green" : "amber"}`}>
+                        {miEstado === "embarcado" ? "✅ A bordo" : "⏳ Esperando"}
                       </div>
                     </div>
                   </div>
 
-                  {/* Mi paradero */}
                   <div className="afa-srow">
-                    <div className="afa-srow-icon"><i className="ti ti-map-pin" style={{fontSize:17}} /></div>
-                    <div style={{flex:1}}>
+                    <div className="afa-srow-icon"><i className="ti ti-map-pin" style={{ fontSize: 17 }} /></div>
+                    <div style={{ flex: 1 }}>
                       <div className="afa-srow-name">{miParada.nombre}</div>
-                      {miParada.hora_estimada && <div className="afa-srow-eta"><i className="ti ti-clock" style={{fontSize:12,verticalAlign:-1}} /> Hora estimada: {miParada.hora_estimada}</div>}
+                      {miParada.hora_estimada && <div className="afa-srow-eta"><i className="ti ti-clock" style={{ fontSize: 12, verticalAlign: -1 }} /> Hora estimada: {miParada.hora_estimada}</div>}
                       {miParada.direccion && <div className="afa-srow-addr">{miParada.direccion}</div>}
                     </div>
                   </div>
@@ -905,47 +1388,38 @@ export default function AppPasajero() {
                 </div>
               )}
 
-              {/* LISTA PARADAS */}
-              {rutaParadas.length>1 && (
-                <>
-                  <div className="afa-sec-lbl">Paradas del recorrido ({rutaParadas.length})</div>
-                  <div className="afa-stops">
-                    {rutaParadas.map((p,i)=>{
-                      const esMia = p.id===miParada?.id;
-                      const done  = p.estado==="completada";
-                      return (
-                        <div key={p.id} className={`afa-si${esMia?" mine":""}${done?" done":""}`}>
-                          <div className={`afa-si-num${done?" done":esMia?" active":""}`}>
-                            {done ? <i className="ti ti-check" style={{fontSize:12}} /> : i+1}
-                          </div>
-                          <div style={{flex:1}}>
-                            <div className={`afa-si-name${esMia?" active":""}`}>
-                              {p.nombre}
-                              {esMia && <span style={{color:"#1D4ED8",fontSize:11,fontWeight:700,marginLeft:8}}>← Tu parada</span>}
-                            </div>
-                            {p.hora_estimada && <div className="afa-si-hr">🕐 {p.hora_estimada}</div>}
-                          </div>
-                          {done && <span className="afa-badge-done">Completada</span>}
-                          {!done && esMia && <span className="afa-badge-mine">Aquí</span>}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </>
-              )}
+              {/* ── CONTACTO Y REPORTE ── */}
+              <div style={{ margin: "12px 14px 0", display: "flex", flexDirection: "column", gap: 8 }}>
 
-              {conductor?.telefono && (
-                <a href={`tel:${conductor.telefono}`} className="afa-call">
-                  <i className="ti ti-phone-call" style={{fontSize:17,color:"#3B82F6"}} />
-                  Llamar al conductor · {conductor.telefono}
+                {/* Central AFA — único número visible al pasajero */}
+                <a href="tel:966707225" className="afa-call">
+                  <i className="ti ti-phone-call" style={{ fontSize: 17, color: "#3B82F6" }} />
+                  Central · 966 707 225
                 </a>
-              )}
-              <div style={{height:16}} />
+
+                {/* Botón reportar novedad */}
+                {miParada && (
+                  <button
+                    onClick={() => setMostrarReporte(true)}
+                    style={{
+                      width: "100%", padding: "13px 0", borderRadius: "var(--rmd)",
+                      border: "1.5px solid #E2E8F0", background: "#F8FAFC",
+                      color: "#0B1F3A", fontWeight: 600, fontSize: 14,
+                      cursor: "pointer", fontFamily: "var(--f)",
+                      display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                    }}>
+                    <i className="ti ti-message-circle" style={{ fontSize: 17, color: "#64748B" }} />
+                    Enviar mensaje
+                  </button>
+                )}
+              </div>
+
+              <div style={{ height: 16 }} />
             </div>
           )}
 
           {/* ══════════ TAB QR ══════════ */}
-          {tab==="qr" && (
+          {tab === "qr" && (
             <div className="afa-panel">
               <div className="afa-qr-card">
                 <div className="afa-qr-hdr">
@@ -956,160 +1430,137 @@ export default function AppPasajero() {
                   {pasajero.qr_code ? (
                     <>
                       <div className="afa-qr-frame">
-                        <img src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(pasajero.qr_code)}&bgcolor=ffffff&color=0B1F3A&qzone=2&margin=0`} alt="QR de embarque" style={{display:"block",width:220,height:220}} />
+                        <img src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(pasajero.qr_code)}&bgcolor=ffffff&color=0B1F3A&qzone=2&margin=0`} alt="QR" style={{ display: "block", width: 220, height: 220 }} />
                       </div>
                       <div className="afa-qr-hint">Muestra este código al conductor</div>
-                      <div className="afa-qr-code">{pasajero.qr_code.slice(0,16).toUpperCase()}</div>
+                      <div className="afa-qr-code">{pasajero.qr_code.slice(0, 16).toUpperCase()}</div>
                     </>
                   ) : (
-                    <div style={{padding:32,textAlign:"center"}}>
-                      <p style={{fontSize:36,margin:"0 0 8px"}}>⏳</p>
-                      <p style={{color:"#0B1F3A",fontWeight:700,fontSize:15}}>QR en proceso</p>
-                      <p style={{color:"#94A3B8",fontSize:13}}>Tu código será asignado pronto</p>
+                    <div style={{ padding: 32, textAlign: "center" }}>
+                      <p style={{ fontSize: 36, margin: "0 0 8px" }}>⏳</p>
+                      <p style={{ color: "#0B1F3A", fontWeight: 700, fontSize: 15 }}>QR en proceso</p>
                     </div>
                   )}
-
                   <div className="afa-qr-div" />
-
                   <div className="afa-qr-pax">
                     <div className="afa-qr-pav">
-                      {pasajero.foto_url ? <img src={pasajero.foto_url} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} /> : ini(pasajero.nombre)}
+                      {pasajero.foto_url ? <img src={pasajero.foto_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : ini(pasajero.nombre)}
                     </div>
                     <div>
                       <div className="afa-qr-pname">{pasajero.nombre}</div>
-                      {pasajero.empresa && <div className="afa-qr-pco"><i className="ti ti-building" style={{fontSize:13,verticalAlign:-2}} /> {pasajero.empresa}</div>}
+                      {pasajero.empresa && <div className="afa-qr-pco"><i className="ti ti-building" style={{ fontSize: 13, verticalAlign: -2 }} /> {pasajero.empresa}</div>}
                       {pasajero.dni && <div className="afa-qr-pdni">DNI: {pasajero.dni}</div>}
                     </div>
                   </div>
-
                   {miParada?.reserva && (
                     <div className="afa-qr-route">
                       <div className="afa-qr-rlbl">Ruta asignada</div>
                       <div className="afa-qr-rline">{miParada.reserva.origen} → {miParada.reserva.destino}</div>
-                      <div className="afa-qr-rrow">
-                        <span className="afa-qr-rkey"><i className="ti ti-map-pin" style={{fontSize:13,verticalAlign:-2}} /> Paradero</span>
-                        <span className="afa-qr-rval">{miParada.nombre}</span>
-                      </div>
-                      {miParada.hora_estimada && (
-                        <div className="afa-qr-rrow">
-                          <span className="afa-qr-rkey"><i className="ti ti-clock" style={{fontSize:13,verticalAlign:-2}} /> Hora</span>
-                          <span className="afa-qr-rval">{miParada.hora_estimada}</span>
-                        </div>
-                      )}
-                      {miParada.reserva.fecha_servicio && (
-                        <div className="afa-qr-rrow" style={{marginBottom:0}}>
-                          <span className="afa-qr-rkey"><i className="ti ti-calendar" style={{fontSize:13,verticalAlign:-2}} /> Fecha</span>
-                          <span className="afa-qr-rval">{new Date(miParada.reserva.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{weekday:"long",day:"numeric",month:"long"})}</span>
-                        </div>
-                      )}
+                      <div className="afa-qr-rrow"><span className="afa-qr-rkey">📍 Paradero</span><span className="afa-qr-rval">{miParada.nombre}</span></div>
+                      {miParada.hora_estimada && <div className="afa-qr-rrow"><span className="afa-qr-rkey">🕐 Hora</span><span className="afa-qr-rval">{miParada.hora_estimada}</span></div>}
                     </div>
                   )}
-
-                  <div className={miEstado==="embarcado"?"afa-pill-b":"afa-pill-w"}>
-                    <i className={`ti ${miEstado==="embarcado"?"ti-circle-check":"ti-clock-hour-4"}`} style={{fontSize:20,color:miEstado==="embarcado"?"#16A34A":"#D97706",flexShrink:0}} />
+                  <div className={miEstado === "embarcado" ? "afa-pill-b" : "afa-pill-w"}>
+                    <i className={`ti ${miEstado === "embarcado" ? "ti-circle-check" : "ti-clock-hour-4"}`} style={{ fontSize: 20, color: miEstado === "embarcado" ? "#16A34A" : "#D97706", flexShrink: 0 }} />
                     <div>
-                      <div className={miEstado==="embarcado"?"afa-pill-title-b":"afa-pill-title-w"}>
-                        {miEstado==="embarcado"?"Embarque confirmado":"Esperando embarque"}
-                      </div>
-                      <div className={miEstado==="embarcado"?"afa-pill-sub-b":"afa-pill-sub-w"}>
-                        {miEstado==="embarcado"?"El conductor escaneó tu QR exitosamente":"Muestra este QR cuando el bus llegue"}
-                      </div>
+                      <div className={miEstado === "embarcado" ? "afa-pill-title-b" : "afa-pill-title-w"}>{miEstado === "embarcado" ? "Embarque confirmado" : "Esperando embarque"}</div>
+                      <div className={miEstado === "embarcado" ? "afa-pill-sub-b" : "afa-pill-sub-w"}>{miEstado === "embarcado" ? "El conductor escaneó tu QR" : "Muestra este QR cuando llegue el bus"}</div>
                     </div>
                   </div>
                 </div>
-
                 {miParada && (
                   <div className="afa-qr-nav">
-                    <div className="afa-qr-nav-lbl">Navegar a mi paradero</div>
-                    <div className="afa-nav-grid">
-                      <button className="afa-waze" onClick={abrirWaze}>
-                        <svg width="16" height="16" viewBox="0 0 36 36"><ellipse cx="18" cy="16" rx="9" ry="9" fill="rgba(255,255,255,.4)"/><circle cx="14.5" cy="14.5" r="2" fill="#082035"/><circle cx="21.5" cy="14.5" r="2" fill="#082035"/><path d="M14 19 Q18 23 22 19" stroke="#082035" strokeWidth="1.8" fill="none" strokeLinecap="round"/></svg>
-                        Waze
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <button
+                        style={{
+                          padding: "13px 0", borderRadius: "var(--rmd)",
+                          border: "none", background: "var(--navy)", color: "#fff",
+                          fontWeight: 800, fontSize: 14, cursor: "pointer",
+                          fontFamily: "var(--f)", display: "flex", alignItems: "center",
+                          justifyContent: "center", gap: 7,
+                          boxShadow: "0 4px 16px rgba(11,31,58,.25)",
+                        }}
+                        onClick={() => setMostrarNavModal(true)}
+                      >
+                        <i className="ti ti-navigation" style={{ fontSize: 18 }} />
+                        Llegar
                       </button>
-                      <button className="afa-maps" onClick={abrirMaps}>
-                        <svg width="12" height="16" viewBox="0 0 20 26"><path d="M10 0C4.48 0 0 4.48 0 10c0 7.5 10 16 10 16s10-8.5 10-16C20 4.48 15.52 0 10 0z" fill="#EA4335"/><circle cx="10" cy="10" r="4" fill="white"/></svg>
-                        Maps
+                      <button
+                        style={{
+                          padding: "13px 0", borderRadius: "var(--rmd)",
+                          border: "1.5px solid var(--g200)", background: "#fff", color: "var(--navy)",
+                          fontWeight: 700, fontSize: 14, cursor: "pointer",
+                          fontFamily: "var(--f)", display: "flex", alignItems: "center",
+                          justifyContent: "center", gap: 7,
+                        }}
+                        onClick={() => setMostrarParadasModal(true)}
+                      >
+                        <i className="ti ti-map-pins" style={{ fontSize: 18 }} />
+                        Ver paradas
                       </button>
                     </div>
                   </div>
                 )}
               </div>
-
-              <div className="afa-instr">
-                <div className="afa-instr-title">¿Cómo usar mi código QR?</div>
-                {["Espera tu bus en el paradero asignado a la hora indicada.","Cuando llegue el bus, muestra esta pantalla al conductor.","El conductor escanea tu código para confirmar el embarque.","Recibirás confirmación aquí y en la tab «Mi Ruta»."].map((txt,i)=>(
-                  <div key={i} className="afa-instr-step">
-                    <div className="afa-instr-num">{i+1}</div>
-                    <div className="afa-instr-txt">{txt}</div>
-                  </div>
-                ))}
-              </div>
-              <div style={{height:16}} />
+              <div style={{ height: 16 }} />
             </div>
           )}
 
           {/* ══════════ TAB PERFIL ══════════ */}
-          {tab==="perfil" && (
+          {tab === "perfil" && (
             <div className="afa-panel">
-
-              {/* Input oculto: abre cámara o galería según el dispositivo */}
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                style={{ display:"none" }}
-                onChange={e => { const f = e.target.files?.[0]; if (f) uploadFoto(f); e.target.value=""; }}
-              />
-
+              <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }}
+                onChange={e => { const f = e.target.files?.[0]; if (f) uploadFoto(f); e.target.value = ""; }} />
               <div className="afa-prof-hero">
-                {/* Avatar con botón cámara superpuesto */}
                 <div className="afa-prof-av-wrap">
                   <div className="afa-prof-av">
-                    {pasajero.foto_url
-                      ? <img src={`${pasajero.foto_url}?t=${Date.now()}`} alt={pasajero.nombre} />
-                      : ini(pasajero.nombre)}
-                    {uploading && (
-                      <div className="afa-foto-loading">
-                        <div className="afa-foto-spin" />
-                      </div>
-                    )}
+                    {pasajero.foto_url ? <img src={`${pasajero.foto_url}?t=${Date.now()}`} alt={pasajero.nombre} /> : ini(pasajero.nombre)}
+                    {uploading && <div className="afa-foto-loading"><div className="afa-foto-spin" /></div>}
                   </div>
-                  {!uploading && (
-                    <button
-                      className="afa-foto-btn"
-                      onClick={() => fileInputRef.current?.click()}
-                      title="Cambiar foto"
-                    >
-                      <i className="ti ti-camera" />
-                    </button>
-                  )}
+                  {!uploading && <button className="afa-foto-btn" onClick={() => fileInputRef.current?.click()}><i className="ti ti-camera" /></button>}
                 </div>
-
                 <div>
                   <div className="afa-prof-name">{pasajero.nombre}</div>
                   {pasajero.empresa && <div className="afa-prof-co">{pasajero.empresa}</div>}
                   {pasajero.dni && <div className="afa-prof-dni">DNI: {pasajero.dni}</div>}
-                  <div className="afa-foto-hint">
-                    <i className="ti ti-camera" style={{fontSize:11,verticalAlign:-1}} /> Toca el avatar para cambiar foto
-                  </div>
+                  <div className="afa-foto-hint"><i className="ti ti-camera" style={{ fontSize: 11, verticalAlign: -1 }} /> Toca el avatar para cambiar foto</div>
                 </div>
               </div>
+              {fotoErr && <div className="afa-foto-err">⚠️ {fotoErr}</div>}
 
-              {/* Error de subida */}
-              {fotoErr && (
-                <div className="afa-foto-err">⚠️ {fotoErr}</div>
-              )}
+              {/* Estado GPS propio en perfil */}
+              <div className="afa-info-card" style={{ marginTop: 12 }}>
+                <div className="afa-info-lbl">Mi ubicación GPS</div>
+                <div className="afa-info-row">
+                  <span className="afa-info-key">Estado</span>
+                  <span className="afa-info-val" style={{ color: gpsPermiso === "granted" ? "#16A34A" : gpsPermiso === "denied" ? "#DC2626" : "#D97706" }}>
+                    {gpsPermiso === "granted" ? "✅ Activo" : gpsPermiso === "denied" ? "❌ Denegado" : "⏳ No solicitado"}
+                  </span>
+                </div>
+                {gpsPropio && (
+                  <div className="afa-info-row">
+                    <span className="afa-info-key">Posición</span>
+                    <span className="afa-info-val" style={{ fontFamily: "monospace", fontSize: 11 }}>{gpsPropio.lat.toFixed(5)}, {gpsPropio.lng.toFixed(5)}</span>
+                  </div>
+                )}
+                {gpsPermiso !== "granted" && (
+                  <div style={{ paddingTop: 10 }}>
+                    <button onClick={solicitarGPS} style={{ width: "100%", padding: "10px", borderRadius: 12, border: "none", background: "#0B1F3A", color: "white", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "var(--f)" }}>
+                      📍 Activar mi GPS
+                    </button>
+                  </div>
+                )}
+              </div>
 
               {miParada && (
                 <div className="afa-info-card">
                   <div className="afa-info-lbl">Mi servicio de hoy</div>
                   {[
-                    ["📍 Paradero",      miParada.nombre],
-                    ["🕐 Hora estimada", miParada.hora_estimada||"—"],
-                    ["🚌 Placa del bus", vehiculo?.placa||"—"],
-                    ["👤 Conductor",     conductor?.nombre||"—"],
-                    ["📅 Fecha",         miParada.reserva?.fecha_servicio?new Date(miParada.reserva.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long"}):"—"],
-                  ].map(([k,v])=>(
+                    ["📍 Paradero", miParada.nombre],
+                    ["🕐 Hora estimada", miParada.hora_estimada || "—"],
+                    ["🚌 Placa del bus", vehiculo?.placa || "—"],
+                    ["👤 Conductor", conductor?.nombre || "—"],
+                  ].map(([k, v]) => (
                     <div key={k} className="afa-info-row">
                       <span className="afa-info-key">{k}</span>
                       <span className="afa-info-val">{v}</span>
@@ -1117,40 +1568,36 @@ export default function AppPasajero() {
                   ))}
                 </div>
               )}
-
               <div className="afa-contact-card">
                 <div className="afa-contact-hdr">Contacto AFA Tours Peru</div>
                 {[
-                  {ico:"ti-phone",          cls:"blue",  lbl:"Central",  val:"(01) 345 3707",              href:"tel:013453707"},
-                  {ico:"ti-brand-whatsapp", cls:"green", lbl:"WhatsApp", val:"966 707 225",                href:"https://wa.me/51966707225"},
-                  {ico:"ti-mail",           cls:"blue",  lbl:"Email",    val:"transporte@afatoursperu.com",href:"mailto:transporte@afatoursperu.com"},
-                ].map(item=>(
+                  { ico: "ti-phone", cls: "blue", lbl: "Central", val: "(01) 345 3707", href: "tel:013453707" },
+                  { ico: "ti-brand-whatsapp", cls: "green", lbl: "WhatsApp", val: "966 707 225", href: "https://wa.me/51966707225" },
+                  { ico: "ti-mail", cls: "blue", lbl: "Email", val: "transporte@afatoursperu.com", href: "mailto:transporte@afatoursperu.com" },
+                ].map(item => (
                   <a key={item.lbl} href={item.href} className="afa-contact-item">
                     <div className={`afa-contact-icon ${item.cls}`}><i className={`ti ${item.ico}`} /></div>
-                    <div>
-                      <div className="afa-contact-type">{item.lbl}</div>
-                      <div className="afa-contact-val">{item.val}</div>
-                    </div>
+                    <div><div className="afa-contact-type">{item.lbl}</div><div className="afa-contact-val">{item.val}</div></div>
                     <i className="ti ti-chevron-right afa-contact-arr" />
                   </a>
                 ))}
               </div>
-
               <button className="afa-logout" onClick={salir}>
-                <i className="ti ti-door-exit" style={{fontSize:17}} /> Cerrar sesión
+                <i className="ti ti-door-exit" style={{ fontSize: 17 }} /> Cerrar sesión
               </button>
-              <div style={{height:16}} />
+              <div style={{ height: 16 }} />
             </div>
           )}
         </div>
 
         {/* ── BOTTOM NAV ── */}
         <nav className="afa-nav">
-          {([ {id:"ruta" as Tab, ico:"ti-map-2",      lbl:"Mi Ruta",  badge:alerta5min&&!alertaDismiss&&miEstado!=="embarcado"},
-               {id:"qr"   as Tab, ico:"ti-qrcode",     lbl:"Mi QR",    badge:false},
-               {id:"perfil" as Tab, ico:"ti-user-circle",lbl:"Perfil",  badge:false},
-          ]).map(t=>(
-            <button key={t.id} className={`afa-tab${tab===t.id?" active":""}`} onClick={()=>setTab(t.id)}>
+          {([
+            { id: "ruta" as Tab,    ico: "ti-map-2",       lbl: "Mi Ruta",  badge: alerta5min && !alertaDismiss && miEstado !== "embarcado" },
+            { id: "qr" as Tab,      ico: "ti-qrcode",      lbl: "Pase",     badge: false },
+            { id: "perfil" as Tab,  ico: "ti-user-circle", lbl: "Perfil",   badge: gpsPermiso === "denied" },
+          ]).map(t => (
+            <button key={t.id} className={`afa-tab${tab === t.id ? " active" : ""}`} onClick={() => setTab(t.id)}>
               <div className="afa-tab-icon">
                 <i className={`ti ${t.ico}`} />
                 {t.badge && <div className="afa-tab-badge" />}
@@ -1159,7 +1606,6 @@ export default function AppPasajero() {
             </button>
           ))}
         </nav>
-
       </div>
     </>
   );

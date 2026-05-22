@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import Link from "next/link";
 import ModalGps from "@/components/seguimiento/ModalGps";
+import PanelMensajesPasajeros from "@/components/seguimiento/PanelMensajesPasajeros";
 import { supabase } from "@/lib/supabase";
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -67,7 +68,6 @@ const CHECKLIST_ITEMS = [
   { id: "ruta",        label: "Itinerario impreso entregado al conductor" },
 ];
 
-// Categorías rápidas para gastos en servicio
 const CATS_GASTO = [
   { valor: "peajes",              label: "🛣️ Peaje"       },
   { valor: "viaticos",            label: "🍽️ Viático"     },
@@ -136,10 +136,12 @@ const Ic = {
   ExternalLink:(p:IP)=><svg width={p.size??16} height={p.size??16} viewBox="0 0 24 24" fill="none" stroke={p.color??"currentColor"} strokeWidth={p.strokeWidth??2} strokeLinecap="round" strokeLinejoin="round" className={p.className}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>,
   List:       (p:IP)=><svg width={p.size??16} height={p.size??16} viewBox="0 0 24 24" fill="none" stroke={p.color??"currentColor"} strokeWidth={p.strokeWidth??2} strokeLinecap="round" strokeLinejoin="round" className={p.className}><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>,
   Refresh:    (p:IP)=><svg width={p.size??16} height={p.size??16} viewBox="0 0 24 24" fill="none" stroke={p.color??"currentColor"} strokeWidth={p.strokeWidth??2} strokeLinecap="round" strokeLinejoin="round" className={p.className}><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>,
+  FileText:   (p:IP)=><svg width={p.size??16} height={p.size??16} viewBox="0 0 24 24" fill="none" stroke={p.color??"currentColor"} strokeWidth={p.strokeWidth??2} strokeLinecap="round" strokeLinejoin="round" className={p.className}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>,
+  Calendar:   (p:IP)=><svg width={p.size??16} height={p.size??16} viewBox="0 0 24 24" fill="none" stroke={p.color??"currentColor"} strokeWidth={p.strokeWidth??2} strokeLinecap="round" strokeLinejoin="round" className={p.className}><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// MODAL GASTOS — ✅ CORREGIDO: guarda en tabla `gastos` (sincronizado con módulo Gastos)
+// MODAL GASTOS
 // ══════════════════════════════════════════════════════════════════════════════
 
 function ModalGastos({ reservaId, vehiculoId, cliente, onClose, onSaved }: {
@@ -155,10 +157,7 @@ function ModalGastos({ reservaId, vehiculoId, cliente, onClose, onSaved }: {
 
   const cargar = useCallback(async () => {
     setCargando(true);
-    const { data } = await supabase.from("gastos")
-      .select("id,descripcion,monto,categoria")
-      .eq("reserva_id", reservaId)
-      .order("created_at");
+    const { data } = await supabase.from("gastos").select("id,descripcion,monto,categoria").eq("reserva_id", reservaId).order("created_at");
     setGastos(data || []);
     setCargando(false);
   }, [reservaId]);
@@ -171,25 +170,18 @@ function ModalGastos({ reservaId, vehiculoId, cliente, onClose, onSaved }: {
     if (!nuevoConcepto || !nuevoMonto) return;
     setGuardando(true);
     const { error } = await supabase.from("gastos").insert({
-      reserva_id:  reservaId,
-      vehiculo_id: vehiculoId,
-      fecha:       new Date().toISOString().split("T")[0],
-      categoria:   nuevoCategoria,
-      tipo_gasto:  "operativo",
-      descripcion: nuevoConcepto.trim(),
-      monto:       parseFloat(nuevoMonto),
-      metodo_pago: "efectivo",
-      estado:      "pagado",
+      reserva_id: reservaId, vehiculo_id: vehiculoId,
+      fecha: new Date().toISOString().split("T")[0], categoria: nuevoCategoria,
+      tipo_gasto: "operativo", descripcion: nuevoConcepto.trim(),
+      monto: parseFloat(nuevoMonto), metodo_pago: "efectivo", estado: "pagado",
     });
     if (error) { alert("Error: " + error.message); setGuardando(false); return; }
     setNuevoConcepto(""); setNuevoMonto("");
-    await cargar();
-    setGuardando(false);
+    await cargar(); setGuardando(false);
   };
 
   const eliminar = async (id: number) => {
-    await supabase.from("gastos").delete().eq("id", id);
-    await cargar();
+    await supabase.from("gastos").delete().eq("id", id); await cargar();
   };
 
   const cerrar = () => { onSaved(); onClose(); };
@@ -200,48 +192,37 @@ function ModalGastos({ reservaId, vehiculoId, cliente, onClose, onSaved }: {
         <div className="flex items-center justify-between p-5 border-b border-gray-100">
           <div>
             <h3 className="font-black text-[#0b315f] text-base">Control de Gastos</h3>
-            <p className="text-xs text-gray-400 mt-0.5">Reserva #{reservaId} · {cliente} · se sincronizan con módulo Gastos</p>
+            <p className="text-xs text-gray-400 mt-0.5">Reserva #{reservaId} · {cliente}</p>
           </div>
-          <button onClick={cerrar} className="w-8 h-8 rounded-lg bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors">
-            <Ic.X size={14} />
-          </button>
+          <button onClick={cerrar} className="w-8 h-8 rounded-lg bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"><Ic.X size={14} /></button>
         </div>
-
         <div className="p-5 space-y-4">
           <div className="space-y-2 max-h-48 overflow-y-auto">
-            {cargando ? (
-              <p className="text-center text-gray-400 text-sm py-4">Cargando...</p>
-            ) : gastos.length === 0 ? (
-              <p className="text-center text-gray-400 text-sm py-4">Sin gastos registrados</p>
-            ) : gastos.map(g => (
-              <div key={g.id} className="flex items-center justify-between bg-gray-50 rounded-xl px-4 py-2.5 group">
-                <div className="flex items-center gap-2.5 flex-1 min-w-0">
-                  <span className="text-sm">{CATS_GASTO.find(c => c.valor === g.categoria)?.label.split(" ")[0] || "💸"}</span>
-                  <span className="text-[13px] font-semibold text-gray-700 truncate">{g.descripcion}</span>
+            {cargando ? <p className="text-center text-gray-400 text-sm py-4">Cargando...</p>
+              : gastos.length === 0 ? <p className="text-center text-gray-400 text-sm py-4">Sin gastos registrados</p>
+              : gastos.map(g => (
+                <div key={g.id} className="flex items-center justify-between bg-gray-50 rounded-xl px-4 py-2.5 group">
+                  <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                    <span className="text-sm">{CATS_GASTO.find(c => c.valor === g.categoria)?.label.split(" ")[0] || "💸"}</span>
+                    <span className="text-[13px] font-semibold text-gray-700 truncate">{g.descripcion}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-black text-[#0b315f] text-[13px]">S/ {Number(g.monto).toFixed(2)}</span>
+                    <button onClick={() => eliminar(g.id)} className="opacity-0 group-hover:opacity-100 text-red-500 transition-opacity"><Ic.X size={12} /></button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="font-black text-[#0b315f] text-[13px]">S/ {Number(g.monto).toFixed(2)}</span>
-                  <button onClick={() => eliminar(g.id)} className="opacity-0 group-hover:opacity-100 text-red-500 transition-opacity">
-                    <Ic.X size={12} />
-                  </button>
-                </div>
-              </div>
-            ))}
+              ))}
           </div>
-
           <div className="flex items-center justify-between bg-[#0b315f] rounded-xl px-4 py-3">
             <span className="text-white/70 text-sm font-semibold">Total gastado</span>
             <span className="text-white font-black text-lg">S/ {total.toFixed(2)}</span>
           </div>
-
           <div className="border border-gray-100 rounded-xl p-3 space-y-2">
             <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Agregar gasto</p>
-            {/* Selector de categoría */}
             <div className="grid grid-cols-3 gap-1">
               {CATS_GASTO.map(c => (
                 <button key={c.valor} onClick={() => setNuevoCategoria(c.valor)}
-                  className={`text-[10px] font-bold px-2 py-1.5 rounded-lg transition-colors text-left
-                    ${nuevoCategoria === c.valor ? "bg-[#0b315f] text-white" : "bg-gray-50 text-gray-600 hover:bg-gray-100"}`}>
+                  className={`text-[10px] font-bold px-2 py-1.5 rounded-lg transition-colors text-left ${nuevoCategoria === c.valor ? "bg-[#0b315f] text-white" : "bg-gray-50 text-gray-600 hover:bg-gray-100"}`}>
                   {c.label}
                 </button>
               ))}
@@ -253,17 +234,13 @@ function ModalGastos({ reservaId, vehiculoId, cliente, onClose, onSaved }: {
                 placeholder="Monto S/" value={nuevoMonto} onChange={e => setNuevoMonto(e.target.value)} />
               <button onClick={agregar} disabled={guardando || !nuevoConcepto || !nuevoMonto}
                 className="bg-[#0b315f] text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-[#1262bd] transition-colors flex items-center gap-1.5 disabled:opacity-50">
-                <Ic.Plus size={14} color="white" />
-                {guardando ? "..." : "Agregar"}
+                <Ic.Plus size={14} color="white" />{guardando ? "..." : "Agregar"}
               </button>
             </div>
           </div>
         </div>
-
         <div className="px-5 pb-5">
-          <button onClick={cerrar} className="w-full bg-[#0b315f] text-white py-3 rounded-xl font-bold text-sm hover:bg-[#1262bd] transition-colors">
-            Listo
-          </button>
+          <button onClick={cerrar} className="w-full bg-[#0b315f] text-white py-3 rounded-xl font-bold text-sm hover:bg-[#1262bd] transition-colors">Listo</button>
         </div>
       </div>
     </div>
@@ -305,7 +282,8 @@ function ModalReemplazo({ reservaId, placaOriginal, onClose, onSaved }: { reserv
           </div>
           <div>
             <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1.5">Placa unidad de reemplazo</label>
-            <input className="w-full border border-gray-200 rounded-xl px-4 py-3 font-black text-[#0b315f] text-lg tracking-widest text-center uppercase outline-none focus:border-[#0b315f] transition-colors" placeholder="EJM-000" value={placaNueva} onChange={e => setPlacaNueva(e.target.value.toUpperCase())} />
+            <input className="w-full border border-gray-200 rounded-xl px-4 py-3 font-black text-[#0b315f] text-lg tracking-widest text-center uppercase outline-none focus:border-[#0b315f] transition-colors"
+              placeholder="EJM-000" value={placaNueva} onChange={e => setPlacaNueva(e.target.value.toUpperCase())} />
           </div>
           <div>
             <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1.5">Motivo del reemplazo</label>
@@ -339,8 +317,7 @@ function ModalChecklist({ reservaId, cliente, onClose, onSaved }: { reservaId: n
       const { data } = await supabase.from("checklist_salida").select("*").eq("reserva_id", reservaId);
       const map: Record<string, boolean> = {};
       ((data as ChecklistRow[]) || []).forEach(row => { map[row.item_id] = row.completado; });
-      setChecked(map);
-      setCargando(false);
+      setChecked(map); setCargando(false);
     })();
   }, [reservaId]);
 
@@ -350,10 +327,7 @@ function ModalChecklist({ reservaId, cliente, onClose, onSaved }: { reservaId: n
 
   const guardar = async () => {
     setGuardando(true);
-    const rows = CHECKLIST_ITEMS.map(it => ({
-      reserva_id: reservaId, item_id: it.id, completado: !!checked[it.id],
-      fecha_check: checked[it.id] ? new Date().toISOString() : null,
-    }));
+    const rows = CHECKLIST_ITEMS.map(it => ({ reserva_id: reservaId, item_id: it.id, completado: !!checked[it.id], fecha_check: checked[it.id] ? new Date().toISOString() : null }));
     const { error } = await supabase.from("checklist_salida").upsert(rows, { onConflict: "reserva_id,item_id" });
     setGuardando(false);
     if (error) { alert("Error: " + error.message); return; }
@@ -402,7 +376,7 @@ function ModalChecklist({ reservaId, cliente, onClose, onSaved }: { reservaId: n
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// TARJETA FIJA — ✅ Ahora incluye Gastos + Checklist (igual que Eventual)
+// TARJETA FIJA
 // ══════════════════════════════════════════════════════════════════════════════
 
 function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () => void; onGps: (s: ServicioView) => void }) {
@@ -420,7 +394,6 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
   const asistencia = s.pasajeros_total_real > 0 ? Math.round((s.pasajeros_abordados/s.pasajeros_total_real)*100) : 0;
   const cap        = s.pasajeros_total_real || (r as any).pasajeros_total || 0;
 
-  // Cargar total gastos de la tabla `gastos`
   useEffect(() => {
     (async () => {
       const { data } = await supabase.from("gastos").select("monto").eq("reserva_id", r.id);
@@ -446,10 +419,15 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
     onRefresh();
   };
 
+  const recargarGastos = async () => {
+    const { data } = await supabase.from("gastos").select("monto").eq("reserva_id", r.id);
+    setTotalGastos((data || []).reduce((s: number, g: any) => s + Number(g.monto), 0));
+  };
+
   return (
     <>
       {modalReemplazo && <ModalReemplazo reservaId={r.id} placaOriginal={s.vehiculo_placa} onClose={() => setModalReemplazo(false)} onSaved={onRefresh} />}
-      {modalGastos    && <ModalGastos reservaId={r.id} vehiculoId={r.vehiculo_id} cliente={s.cliente_nombre} onClose={() => setModalGastos(false)} onSaved={() => { onRefresh(); supabase.from("gastos").select("monto").eq("reserva_id", r.id).then(({data}) => setTotalGastos((data||[]).reduce((s:number,g:any)=>s+Number(g.monto),0))); }} />}
+      {modalGastos    && <ModalGastos reservaId={r.id} vehiculoId={r.vehiculo_id} cliente={s.cliente_nombre} onClose={() => setModalGastos(false)} onSaved={() => { onRefresh(); recargarGastos(); }} />}
       {modalChecklist && <ModalChecklist reservaId={r.id} cliente={s.cliente_nombre} onClose={() => setModalChecklist(false)} onSaved={onRefresh} />}
 
       <div className={`bg-white rounded-2xl shadow-sm border transition-all duration-200 ${s.estado_visual === "alerta" ? "border-red-200 shadow-red-50" : "border-gray-100 hover:border-gray-200"}`}>
@@ -487,10 +465,8 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
 
           <div className="grid grid-cols-3 gap-2 mb-3">
             <div className={`rounded-xl p-2.5 text-center ${r.checkin_realizado ? "bg-green-50" : s.estado_visual === "alerta" ? "bg-red-50" : "bg-gray-50"}`}>
-              <div className={`text-[10px] font-bold uppercase tracking-wide mb-1 ${r.checkin_realizado ? "text-green-600" : "text-red-500"}`}>Check-in</div>
-              <div className={`font-black text-sm ${r.checkin_realizado ? "text-green-700" : "text-red-600"}`}>
-                {r.checkin_realizado ? (r.hora_real_inicio?.slice(0,5) || "✓") : "No iniciado"}
-              </div>
+              <div className={`text-[10px] font-bold uppercase tracking-wide mb-1 ${r.checkin_realizado ? "text-green-600" : "text-red-500"}`}>CHECK-IN</div>
+              <div className={`font-black text-sm ${r.checkin_realizado ? "text-green-700" : "text-red-600"}`}>{r.checkin_realizado ? (r.hora_real_inicio?.slice(0,5) || "✓") : "No iniciado"}</div>
             </div>
             <div className="bg-gray-50 rounded-xl p-2.5 text-center">
               <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">Pasajeros</div>
@@ -526,7 +502,6 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
             </div>
           )}
 
-          {/* ✅ Badges de estado (igual que Eventual) */}
           <div className="flex items-center gap-1.5 mb-3 flex-wrap">
             <button onClick={() => supabase.from("reservas").update({ viaticos_entregados: !r.viaticos_entregados }).eq("id", r.id).then(onRefresh)}
               className={`text-[10px] font-bold px-2 py-1 rounded-lg transition-colors ${r.viaticos_entregados ? "bg-green-50 text-green-700" : "bg-red-50 text-red-600"}`}>
@@ -537,9 +512,7 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
               {r.documentos_ok ? "✓" : "!"} Documentos
             </button>
             {totalGastos > 0 && (
-              <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-blue-50 text-blue-700">
-                S/ {totalGastos.toFixed(2)} gastos
-              </span>
+              <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-blue-50 text-blue-700">S/ {totalGastos.toFixed(2)} gastos</span>
             )}
           </div>
 
@@ -547,25 +520,30 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
             {!r.checkin_realizado && r.estado !== "finalizada" && r.estado !== "cancelada" && (
               <button onClick={hacerCheckin} disabled={guardandoCheckin}
                 className="flex-1 flex items-center justify-center gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs font-bold py-2 rounded-xl transition-colors disabled:opacity-50">
-                <Ic.Check size={13} color="white" />
-                {guardandoCheckin ? "..." : "Hacer Check-in"}
+                <Ic.Check size={13} color="white" />{guardandoCheckin ? "..." : "Hacer Check-in"}
               </button>
             )}
-            {/* ✅ GPS → abre modal */}
+            {/* GPS */}
             <button onClick={() => onGps(s)}
               className="flex items-center gap-1.5 bg-[#EFF6FF] hover:bg-[#DBEAFE] text-[#1d4ed8] text-xs font-bold px-3 py-2 rounded-xl transition-colors">
-              <Ic.Map size={13} color="#1d4ed8" /> GPS
+              <Ic.Map size={13} color="#1d4ed8" /> GPS en vivo
             </button>
-            {/* ✅ Gastos (sincronizado con módulo Gastos) */}
+            {/* Manifiesto de pasajeros */}
+            <Link href={`/programacion?reserva=${r.id}`}
+              className="flex items-center gap-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
+              <Ic.FileText size={13} /> Manifiesto
+            </Link>
+            {/* Gastos */}
             <button onClick={() => setModalGastos(true)}
               className="flex items-center gap-1.5 bg-gray-50 hover:bg-gray-100 text-gray-600 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
-              <Ic.DollarSign size={13} /> Gastos {totalGastos > 0 && `(S/${totalGastos.toFixed(0)})`}
+              <Ic.DollarSign size={13} /> Gastos{totalGastos > 0 ? ` · S/${totalGastos.toFixed(0)}` : ""}
             </button>
-            {/* ✅ Checklist */}
+            {/* Checklist */}
             <button onClick={() => setModalChecklist(true)}
               className="flex items-center gap-1.5 bg-gray-50 hover:bg-gray-100 text-gray-600 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
-              <Ic.Check size={13} /> Checklist
+              <Ic.Check size={13} /> Checklist salida
             </button>
+            {/* Reemplazo */}
             <button onClick={() => setModalReemplazo(true)}
               className="flex items-center gap-1.5 bg-gray-50 hover:bg-gray-100 text-gray-500 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
               <Ic.Swap size={13} /> Reemplazo
@@ -632,10 +610,10 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
 // ══════════════════════════════════════════════════════════════════════════════
 
 function TarjetaEventual({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () => void; onGps: (s: ServicioView) => void }) {
-  const [expandida,    setExpandida]    = useState(false);
-  const [modalGastos,  setModalGastos]  = useState(false);
-  const [modalChecklist,setModalChecklist]=useState(false);
-  const [totalGastos,  setTotalGastos]  = useState(0);
+  const [expandida,     setExpandida]     = useState(false);
+  const [modalGastos,   setModalGastos]   = useState(false);
+  const [modalChecklist,setModalChecklist]= useState(false);
+  const [totalGastos,   setTotalGastos]   = useState(0);
   const r      = s.reserva;
   const estado = ESTADO_VIS[s.estado_visual];
 
@@ -652,9 +630,14 @@ function TarjetaEventual({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: 
     onRefresh();
   };
 
+  const recargarGastos = async () => {
+    const { data } = await supabase.from("gastos").select("monto").eq("reserva_id", r.id);
+    setTotalGastos((data||[]).reduce((s:number,g:any)=>s+Number(g.monto),0));
+  };
+
   return (
     <>
-      {modalGastos    && <ModalGastos reservaId={r.id} vehiculoId={r.vehiculo_id} cliente={s.cliente_nombre} onClose={()=>setModalGastos(false)} onSaved={()=>{ onRefresh(); supabase.from("gastos").select("monto").eq("reserva_id",r.id).then(({data})=>setTotalGastos((data||[]).reduce((s:number,g:any)=>s+Number(g.monto),0))); }} />}
+      {modalGastos    && <ModalGastos reservaId={r.id} vehiculoId={r.vehiculo_id} cliente={s.cliente_nombre} onClose={()=>setModalGastos(false)} onSaved={()=>{ onRefresh(); recargarGastos(); }} />}
       {modalChecklist && <ModalChecklist reservaId={r.id} cliente={s.cliente_nombre} onClose={()=>setModalChecklist(false)} onSaved={onRefresh} />}
 
       <div className={`bg-white rounded-2xl shadow-sm border transition-all duration-200 ${s.estado_visual==="alerta"?"border-red-200":s.seguro_vence_hoy?"border-amber-200":"border-gray-100 hover:border-gray-200"}`}>
@@ -728,16 +711,23 @@ function TarjetaEventual({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: 
           </div>
 
           <div className="flex gap-2 flex-wrap">
-            {/* ✅ GPS → abre modal */}
+            {/* GPS */}
             <button onClick={() => onGps(s)}
               className="flex items-center gap-1.5 bg-[#EFF6FF] hover:bg-[#DBEAFE] text-[#1d4ed8] text-xs font-bold px-3 py-2 rounded-xl transition-colors">
-              <Ic.Map size={13} color="#1d4ed8"/> GPS
+              <Ic.Map size={13} color="#1d4ed8"/> GPS en vivo
             </button>
+            {/* Manifiesto de pasajeros */}
+            <Link href={`/programacion?reserva=${r.id}`}
+              className="flex items-center gap-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
+              <Ic.FileText size={13} /> Manifiesto
+            </Link>
+            {/* Gastos */}
             <button onClick={()=>setModalGastos(true)} className="flex items-center gap-1.5 bg-gray-50 hover:bg-gray-100 text-gray-600 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
-              <Ic.DollarSign size={13}/> Gastos {totalGastos>0&&`(S/${totalGastos.toFixed(0)})`}
+              <Ic.DollarSign size={13}/> Gastos{totalGastos>0?` · S/${totalGastos.toFixed(0)}`:""}
             </button>
+            {/* Checklist */}
             <button onClick={()=>setModalChecklist(true)} className="flex items-center gap-1.5 bg-gray-50 hover:bg-gray-100 text-gray-600 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
-              <Ic.Check size={13}/> Checklist
+              <Ic.Check size={13}/> Checklist salida
             </button>
             {s.conductor_tel && (
               <a href={`tel:${s.conductor_tel}`} className="flex items-center gap-1.5 bg-gray-50 hover:bg-gray-100 text-gray-500 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
@@ -771,7 +761,7 @@ function TarjetaEventual({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: 
               </div>
             )}
             <div>
-              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2">Hoja de servicio</p>
+              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2">Conformidad del servicio</p>
               <button className="w-full flex items-center justify-center gap-2 border-2 border-dashed border-gray-200 rounded-xl py-3 text-gray-400 text-xs hover:border-[#0b315f] hover:text-[#0b315f] transition-colors">
                 <Ic.Camera size={15}/>
                 {r.conformidad_firmada?"✓ Conformidad registrada":"Adjuntar foto de conformidad firmada"}
@@ -854,25 +844,25 @@ export default function SeguimientoPage() {
 
   const servicios: ServicioView[] = useMemo(()=>{
     return reservas.map(r=>{
-      const cliente     = clientes.find(c=>c.id===r.cliente_id);
+      const cliente        = clientes.find(c=>c.id===r.cliente_id);
       const cliente_nombre = cliente?.empresa||cliente?.nombre||"Sin cliente";
-      const esTer       = r.tipo==="tercerizada";
+      const esTer          = r.tipo==="tercerizada";
       const vehiculo_placa = esTer?(vehsTer.find(v=>v.id===r.vehiculo_tercero_id)?.placa||"—"):(vehiculos.find(v=>v.id===r.vehiculo_id)?.placa||"—");
-      const empresa     = esTer ? empresas.find(e=>e.id===r.empresa_tercerizada_id) : null;
-      const conductor   = !esTer ? conductores.find(c=>c.id===r.conductor_id) : null;
+      const empresa        = esTer ? empresas.find(e=>e.id===r.empresa_tercerizada_id) : null;
+      const conductor      = !esTer ? conductores.find(c=>c.id===r.conductor_id) : null;
       const conductor_nombre = esTer?(empresa?.razon_social||"Tercero"):(conductor?.nombre||"—");
       const conductor_tel    = esTer?(empresa?.telefono||""):(conductor?.telefono||"");
-      const paradasR    = paradas.filter(p=>p.reserva_id===r.id);
-      const paradaIdsR  = paradasR.map(p=>p.id);
+      const paradasR         = paradas.filter(p=>p.reserva_id===r.id);
+      const paradaIdsR       = paradasR.map(p=>p.id);
       const pasajeros_total_real = pasajPar.filter(pp=>paradaIdsR.includes(pp.parada_id)).length;
-      const capacidad   = !esTer ? Number(vehiculos.find(v=>v.id===r.vehiculo_id)?.capacidad_pasajeros||0) : 0;
       const seguro_vence_hoy = esTer ? riesgoEmpresaDocs(docsTer,r.empresa_tercerizada_id) : seguroVehiculoVenceHoy(docsVeh,r.vehiculo_id);
       return {
         reserva: r, cliente_nombre, vehiculo_placa, conductor_nombre, conductor_tel,
         es_eventual: esEventual(r), estado_visual: calcularEstadoVisual(r),
         paradas: paradasR, paradas_total: paradasR.length,
         paradas_completadas: paradasR.filter(p=>p.estado==="completada").length,
-        pasajeros_total: pasajeros_total_real||capacidad, pasajeros_abordados: Number(r.pasajeros_abordados||0),
+        pasajeros_total: pasajeros_total_real||(vehiculos.find(v=>v.id===r.vehiculo_id)?.capacidad_pasajeros||0),
+        pasajeros_abordados: Number(r.pasajeros_abordados||0),
         pasajeros_total_real, seguro_vence_hoy,
       };
     });
@@ -903,7 +893,7 @@ export default function SeguimientoPage() {
     <div className="min-h-screen bg-[#eef3f8]">
       <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
 
-        {/* ENCABEZADO */}
+        {/* ── ENCABEZADO ── */}
         <div className="flex items-start justify-between flex-wrap gap-3">
           <div>
             <h1 className="text-2xl font-black text-[#0b315f] leading-none">Seguimiento Operativo</h1>
@@ -911,19 +901,22 @@ export default function SeguimientoPage() {
               {new Date(fechaFiltro+"T00:00:00").toLocaleDateString("es-PE",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <input type="date" value={fechaFiltro} onChange={e=>setFechaFiltro(e.target.value)}
               className="border border-gray-200 rounded-xl px-3 py-2 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f]" />
             <button onClick={cargar} className="w-10 h-10 rounded-xl bg-white border border-gray-200 hover:border-[#0b315f] flex items-center justify-center transition-colors" title="Refrescar">
               <Ic.Refresh size={15} color="#0b315f"/>
             </button>
+            {/* ── MENSAJES PASAJEROS ── */}
+            <PanelMensajesPasajeros />
+            {/* ── MAPA GLOBAL ── */}
             <Link href="/monitoreo" className="flex items-center gap-2 bg-[#0b315f] text-white px-4 py-2.5 rounded-xl text-sm font-bold hover:bg-[#1262bd] transition-colors shadow-sm">
               <Ic.Map size={15} color="white"/> Ver Mapa Global <Ic.ExternalLink size={13} color="white"/>
             </Link>
           </div>
         </div>
 
-        {/* KPIs */}
+        {/* ── KPIs ── */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
           {[
             { label:"Fijos del día",      value:totalFijos,      color:"#0b315f",bg:"#EFF6FF",icon:<Ic.Bus size={16} color="#0b315f"/>    },
@@ -953,7 +946,7 @@ export default function SeguimientoPage() {
           </div>
         )}
 
-        {/* FILTROS */}
+        {/* ── FILTROS ── */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
           <div className="flex flex-col md:flex-row gap-3">
             <div className="relative flex-1">
@@ -980,7 +973,7 @@ export default function SeguimientoPage() {
           </div>
         </div>
 
-        {/* CONTENIDO */}
+        {/* ── CONTENIDO ── */}
         {loading ? (
           <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-12 text-center">
             <div className="w-8 h-8 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin mx-auto mb-3"/>
@@ -1032,7 +1025,7 @@ export default function SeguimientoPage() {
               </div>
             )}
 
-            {/* TABLA RESUMEN */}
+            {/* ── TABLA RESUMEN ── */}
             {servicios.length>0 && (
               <section>
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
@@ -1071,16 +1064,21 @@ export default function SeguimientoPage() {
                               </td>
                               <td className="px-4 py-3 text-xs text-gray-500 font-mono">{s.reserva.hora_servicio?.slice(0,5)||"—"}</td>
                               <td className="px-4 py-3">
-                                <div className="flex items-center gap-1.5">
-                                  {/* ✅ GPS → abre modal */}
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  {/* GPS en vivo */}
                                   <button onClick={() => setGpsModal(s)}
-                                    className="flex items-center gap-1 bg-[#EFF6FF] hover:bg-[#DBEAFE] text-[#1d4ed8] text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors">
-                                    <Ic.Map size={11} color="#1d4ed8"/> GPS
+                                    className="flex items-center gap-1 bg-[#EFF6FF] hover:bg-[#DBEAFE] text-[#1d4ed8] text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap">
+                                    <Ic.Map size={11} color="#1d4ed8"/> GPS en vivo
                                   </button>
-                                  {/* ✅ CORREGIDO: Editar → /programacion (no /reservas que no existe) */}
+                                  {/* Manifiesto de pasajeros */}
+                                  <Link href={`/programacion?reserva=${s.reserva.id}`}
+                                    className="flex items-center gap-1 bg-purple-50 hover:bg-purple-100 text-purple-700 text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap">
+                                    <Ic.FileText size={11}/> Manifiesto
+                                  </Link>
+                                  {/* Editar en Programación */}
                                   <Link href="/programacion"
-                                    className="flex items-center gap-1 bg-gray-50 hover:bg-gray-100 text-gray-500 text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors">
-                                    <Ic.ExternalLink size={11}/> Editar
+                                    className="flex items-center gap-1 bg-gray-50 hover:bg-gray-100 text-gray-500 text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap">
+                                    <Ic.Calendar size={11}/> Programación
                                   </Link>
                                 </div>
                               </td>
@@ -1107,13 +1105,10 @@ export default function SeguimientoPage() {
           conductorTel={gpsModal.conductor_tel}
           clienteNombre={gpsModal.cliente_nombre}
           paradas={gpsModal.paradas.map(p => ({
-            id: p.id,
-            nombre: p.nombre,
-            lat: (p as any).lat ?? null,
-            lng: (p as any).lng ?? null,
+            id: p.id, nombre: p.nombre,
+            lat: (p as any).lat ?? null, lng: (p as any).lng ?? null,
             hora_estimada: p.hora_estimada ?? null,
-            estado: p.estado,
-            orden: p.orden,
+            estado: p.estado, orden: p.orden,
           }))}
           onClose={() => setGpsModal(null)}
         />

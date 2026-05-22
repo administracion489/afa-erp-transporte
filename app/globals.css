@@ -1,7 +1,96 @@
 @import "tailwindcss";
 
+:root {
+  /* ─── Brand ──────────────────────────────────────────────── */
+  --c-navy:        #0b315f;
+  --c-navy-deep:   #071f3d;
+  --c-navy-tint:   #EEF2F8;
+  --c-blue:        #2563eb;
+
+  /* ─── Neutrals ───────────────────────────────────────────── */
+  --c-ink:         #0E1320;
+  --c-ink-2:       #1a2233;
+  --c-mute:        #6B7280;
+  --c-mute-2:      #9AA1AC;
+  --c-line:        #E7E5DD;
+  --c-line-2:      #EFEEE6;
+
+  /* ─── Surfaces ───────────────────────────────────────────── */
+  --c-paper:       #FAF8F2;
+  --c-surface:     #FFFFFF;
+  --c-soft:        #F4F2EA;
+
+  /* ─── Status ─────────────────────────────────────────────── */
+  --c-success:       #16a34a;
+  --c-success-tint:  #E8F5E9;
+  --c-warn:          #B45309;
+  --c-warn-tint:     #FDF3D7;
+  --c-danger:        #B91C1C;
+  --c-danger-tint:   #FCEBEA;
+
+  /* ─── Accent (CTAs urgentes conductor) ───────────────────── */
+  --c-coral:         #E26B47;
+  --c-coral-tint:    #FCEEE6;
+
+  /* ─── Typography fallbacks ───────────────────────────────── */
+  --font-sans-fallback: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono-fallback: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+:root[data-theme="dark"] {
+  --c-navy:        #5b8def;
+  --c-navy-deep:   #3b5d9e;
+  --c-navy-tint:   rgba(91, 141, 239, 0.14);
+  --c-blue:        #7aa9ff;
+
+  --c-ink:         #F4F6FB;
+  --c-ink-2:       #DDE3EF;
+  --c-mute:        rgba(255, 255, 255, 0.58);
+  --c-mute-2:      rgba(255, 255, 255, 0.35);
+  --c-line:        rgba(255, 255, 255, 0.08);
+  --c-line-2:      rgba(255, 255, 255, 0.05);
+
+  --c-paper:       #0B0F1A;
+  --c-surface:     #141B2D;
+  --c-soft:        #1A2238;
+
+  --c-success:       #34d399;
+  --c-success-tint:  rgba(52, 211, 153, 0.15);
+  --c-warn:          #fbbf24;
+  --c-warn-tint:     rgba(251, 191, 36, 0.15);
+  --c-danger:        #f87171;
+  --c-danger-tint:   rgba(248, 113, 113, 0.18);
+
+  --c-coral:         #fb7c5b;
+  --c-coral-tint:    rgba(251, 124, 91, 0.18);
+}
+
 body {
   margin: 0;
   background: #f1f5f9;
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), var(--font-sans-fallback);
+}
+
+/* ─── Animations compartidas (README) ──────────────────────── */
+@keyframes statusPulse {
+  0%   { transform: scale(1);   opacity: 0.6; }
+  100% { transform: scale(2.4); opacity: 0;   }
+}
+@keyframes scanLine {
+  0%, 100% { top: 18%; }
+  50%      { top: 82%; }
+}
+@keyframes successPop {
+  0%   { transform: scale(0.4); opacity: 0; }
+  60%  { transform: scale(1.1); opacity: 1; }
+  100% { transform: scale(1);   opacity: 1; }
+}
+@keyframes sheetIn {
+  from { transform: translateY(-30px); opacity: 0; }
+  to   { transform: translateY(0);     opacity: 1; }
+}
+@keyframes numIn {
+  0%   { transform: translateY(20px); opacity: 0; }
+  70%  { transform: translateY(-3px); opacity: 1; }
+  100% { transform: translateY(0);    opacity: 1; }
 }
