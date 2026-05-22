@@ -465,7 +465,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const router = useRouter();
 
   const esLogin = pathname === "/login";
-  const esPublica = ["/conductor", "/lector", "/pasajero"].some(
+  const esPublica = ["/conductor", "/lector", "/pasajero", "/registro"].some(
     (r) => pathname === r || pathname.startsWith(r + "/")
   );
 
