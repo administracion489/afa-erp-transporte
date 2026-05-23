@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git -C \"C:/Users/trans/afa-erp-transporte\" diff -- app/pasajero/page.tsx)"
+      "Bash(git -C \"C:/Users/trans/afa-erp-transporte\" diff -- app/pasajero/page.tsx)",
+      "Bash(findstr /i \"cliente\")",
+      "Bash(grep -E \"\\\\.\\(tsx|ts\\)$\")",
+      "Bash(Get-ChildItem -Recurse \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\\\\ajustes\" -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object FullName)",
+      "Bash(npx tsc *)"
     ]
   }
 }

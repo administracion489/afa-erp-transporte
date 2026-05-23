@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">AFA ERP Transporte</string>
+    <string name="title_activity_main">AFA ERP Transporte</string>
+    <string name="package_name">com.transportesafa.erp</string>
+    <string name="custom_url_scheme">com.transportesafa.erp</string>
+</resources>

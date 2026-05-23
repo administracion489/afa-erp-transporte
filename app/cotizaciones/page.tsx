@@ -8,7 +8,9 @@ type ModoServ="eventual"|"fijo";
 type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;descuento_pct:number;};
 type ConsidCot={incluye:string[];no_incluye:string[];generales:string[];};
 type Cliente={id:number;nombre:string;empresa?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
-type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;};
+type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;};
+type EmpresaPerfilPDF={nombre:string|null;razon_social:string|null;ruc:string|null;logo_url:string|null;telefono:string|null;email:string|null;direccion:string|null;color_primario:string|null;};
+type CotPlantillaConfig={id:string;color_primario:string;color_secundario:string;color_acento:string;titulo_documento:string;subtitulo:string|null;mensaje_cierre:string|null;mostrar_logo:boolean;mostrar_fotos_vehiculo:boolean;mostrar_itinerario:boolean;mostrar_precio_pax:boolean;mostrar_cuentas_bancarias:boolean;mostrar_firma:boolean;condiciones_incluye:string[]|null;condiciones_no_incluye:string[]|null;condiciones_generales:string[]|null;banco_1_nombre:string|null;banco_1_cuenta:string|null;banco_1_cci:string|null;banco_2_nombre:string|null;banco_2_cuenta:string|null;banco_2_cci:string|null;banco_3_nombre:string|null;banco_3_cuenta:string|null;banco_3_cci:string|null;usar_bancos_propios:boolean;idioma:string;};
 type ParadaTP={id:string;tipo:"inicio"|"intermedia"|"destino";nombre:string;direccion:string;lat:string;lng:string;hora:string;};
 type Tarifa={id:number;origen:string;destino:string;tipo_vehiculo:string;equipamiento:string;tipo_servicio:string;modo:string;precio:number;moneda:string;confidencial:boolean;incluye_guia:boolean;incluye_peajes:boolean;incluye_alimentacion:boolean;notas:string|null;};
 type VehiculoFlota={id:number;placa:string;categoria:string|null;marca:string|null;modelo:string|null;anio:number|null;capacidad_pasajeros:number|null;equipamiento:string|null;foto_externa_url:string|null;foto_interna_url:string|null;descripcion_unidad:string|null;};
@@ -90,6 +92,52 @@ function PanelDecision({c,onAct}:{c:Cotizacion;onAct:()=>void}){
 function ModalAprobacion({cot,onConfirmar,onCancelar}:{cot:Cotizacion;onConfirmar:(tipo:string,numero:string)=>void;onCancelar:()=>void}){
   const [tipo,setTipo]=useState("Operación bancaria");const [num,setNum]=useState("");const [err,setErr]=useState("");
   return(<div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{background:"rgba(0,0,0,0.5)"}}><div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4"><h3 className="text-base font-bold">✅ Aprobar cotización #{cot.numero_cotizacion||cot.id}</h3><div><label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">Tipo de documento *</label><select className={iCls()} value={tipo} onChange={e=>setTipo(e.target.value)}>{TIPOS_APROBACION.map(t=><option key={t}>{t}</option>)}</select></div><div><label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">N° referencia *</label><input className={iCls("font-mono")} placeholder="Número o código" value={num} onChange={e=>{setNum(e.target.value);setErr("");}} autoFocus/>{err&&<p className="text-xs text-red-600 mt-1">⚠ {err}</p>}</div><div className="flex gap-3"><button onClick={()=>num.trim()?onConfirmar(tipo,num.trim()):setErr("Obligatorio")} className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white bg-green-700">✅ Confirmar</button><button onClick={onCancelar} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600">Cancelar</button></div></div></div>);
+}
+
+const PLANTILLAS_INFO=[
+  {id:"corporativo",   icon:"🏢",nombre:"Clásico Corporativo",desc:"Formal y sobria",badge:"PRINCIPAL",color:"#0b315f",bg:"#eef3f8"},
+  {id:"moderno_fotos", icon:"📸",nombre:"Moderno con Fotos",  desc:"Impacto visual",  badge:null,       color:"#1a1a2e",bg:"#f0f4ff"},
+  {id:"turistico",     icon:"🌄",nombre:"Turístico",           desc:"Tours y full day", badge:null,       color:"#b45309",bg:"#fffbeb"},
+  {id:"ejecutivo",     icon:"⭐",nombre:"Ejecutivo Premium",  desc:"VIP · ES + EN",   badge:null,       color:"#1a1a1a",bg:"#fafafa"},
+];
+
+function ModalPlantilla({cot,plantillaActual,onElegir,onGenerar,onCancelar}:{cot:Cotizacion;plantillaActual:string;onElegir:(id:string)=>void;onGenerar:()=>void;onCancelar:()=>void;}){
+  return(
+    <div style={{position:"fixed",inset:0,zIndex:60,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",background:"rgba(0,0,0,0.55)"}}>
+      <div style={{background:"white",borderRadius:24,boxShadow:"0 24px 60px rgba(0,0,0,0.2)",width:"100%",maxWidth:520,padding:28}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+          <div><p style={{fontWeight:900,fontSize:17,color:"#1e293b",margin:0}}>📄 Elegir plantilla PDF</p><p style={{color:"#94a3b8",fontSize:12,margin:"3px 0 0"}}>Cotización #{cot.numero_cotizacion||cot.id}</p></div>
+          <button onClick={onCancelar} style={{background:"#f1f5f9",border:"none",borderRadius:10,width:32,height:32,cursor:"pointer",fontSize:16,color:"#64748b"}}>✕</button>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:20}}>
+          {PLANTILLAS_INFO.map(p=>{
+            const sel=plantillaActual===p.id;
+            return(
+              <button key={p.id} onClick={()=>onElegir(p.id)} style={{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:6,padding:"14px 16px",borderRadius:16,border:`2px solid ${sel?p.color:"#e2e8f0"}`,background:sel?p.bg:"white",cursor:"pointer",textAlign:"left",transition:"all 0.15s",boxShadow:sel?"0 0 0 3px "+p.color+"22":"none"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,width:"100%"}}>
+                  <span style={{fontSize:22}}>{p.icon}</span>
+                  <div style={{flex:1}}>
+                    <p style={{fontWeight:900,fontSize:13,color:sel?p.color:"#1e293b",margin:0}}>{p.nombre}</p>
+                    <p style={{color:"#94a3b8",fontSize:11,margin:"1px 0 0"}}>{p.desc}</p>
+                  </div>
+                  {p.badge&&<span style={{fontSize:9,fontWeight:900,background:p.color,color:"white",padding:"2px 7px",borderRadius:20,flexShrink:0}}>{p.badge}</span>}
+                </div>
+                {sel&&<span style={{fontSize:10,fontWeight:800,color:p.color}}>✓ Seleccionada</span>}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{display:"flex",gap:10}}>
+          <button onClick={onGenerar} style={{flex:1,padding:"12px",borderRadius:14,border:"none",background:"#0b315f",color:"white",fontWeight:900,fontSize:14,cursor:"pointer"}}>
+            📄 Generar PDF
+          </button>
+          <button onClick={onCancelar} style={{padding:"12px 20px",borderRadius:14,border:"1px solid #e2e8f0",background:"white",color:"#64748b",fontWeight:700,fontSize:14,cursor:"pointer"}}>
+            Cancelar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ── CardParada: FUERA de ParadasBuilder para evitar pérdida de foco al escribir ──
@@ -188,7 +236,203 @@ function ParadasBuilder({ paradas, onChange, tipo = "solo_ida" }: {
   );
 }
 
-function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculo:VehiculoFlota|undefined,repr="JENNY ELYZABETH URBINA AFATA",consid:ConsidCot=DEFAULT_CONSID){
+function generarPDFModerno(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculo:VehiculoFlota|undefined,repr:string,consid:ConsidCot,cfg:CotPlantillaConfig|null,empresa:EmpresaPerfilPDF|null){
+  const{subtotal,igv,total}=calcItems(items);
+  const nomCl=cliente?.tipo==="b2b"?(cliente.empresa||cliente.nombre):cliente?.nombre||"—";
+  const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");
+  const cp=cfg?.color_primario||"#1a1a2e"; const cs=cfg?.color_secundario||"#2f8ee9";
+  const logoUrl=empresa?.logo_url||"/logoafacotizacion.jpg";
+  const empNombre=empresa?.nombre||"AFA Tours Peru S.A.C.";
+  const empRuc=empresa?.ruc||"20602117091"; const empTel=empresa?.telefono||"966 707 225"; const empEmail=empresa?.email||"transporte@afatoursperu.com";
+  const esFull=(vehiculo?.equipamiento||cot.equipamiento||"full_equipo")==="full_equipo";
+  const descUnidad=vehiculo?.descripcion_unidad||(esFull?`Bus con capacidad para ${vehiculo?.capacidad_pasajeros||"—"} pasajeros, con A/C, sistema de audio, asientos reclinables, bodega y GPS.`:`Bus con capacidad para ${vehiculo?.capacidad_pasajeros||"—"} pasajeros, estándar, bodega y GPS.`);
+  const fotosHtml=vehiculo&&(vehiculo.foto_externa_url||vehiculo.foto_interna_url)?`<div style="display:grid;grid-template-columns:${vehiculo.foto_externa_url&&vehiculo.foto_interna_url?"1fr 1fr":"1fr"};gap:12px;margin:16px 0;">${vehiculo.foto_externa_url?`<div style="border-radius:12px;overflow:hidden;height:200px;"><img src="${driveImg(vehiculo.foto_externa_url)}" style="width:100%;height:100%;object-fit:cover;"/></div>`:""}${vehiculo.foto_interna_url?`<div style="border-radius:12px;overflow:hidden;height:200px;"><img src="${driveImg(vehiculo.foto_interna_url)}" style="width:100%;height:100%;object-fit:cover;"/></div>`:""}</div>`:"";
+  const filasItems=items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return`<tr><td style="padding:10px 12px;border-bottom:1px solid #f0f0f0;">${i+1}. ${it.descripcion}</td><td style="padding:10px 12px;text-align:center;border-bottom:1px solid #f0f0f0;">${it.dias}d × ${it.cantidad}</td><td style="padding:10px 12px;text-align:right;border-bottom:1px solid #f0f0f0;font-weight:700;color:${cp};">S/ ${tf.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;}).join("");
+  const inc=(cfg?.condiciones_incluye||consid.incluye).map(i=>`<li style="margin:4px 0;font-size:10px;color:#333;">${i}</li>`).join("");
+  const noInc=(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<li style="margin:4px 0;font-size:10px;color:#333;">${i}</li>`).join("");
+  const win=window.open("","_blank");if(!win)return;
+  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización N° ${nCot}</title>
+  <style>@page{size:A4;margin:0}*{box-sizing:border-box}body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:11px;color:#1a1a1a;margin:0}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style>
+  </head><body>
+  <div style="background:${cp};padding:32px 40px 24px;display:flex;align-items:center;justify-content:space-between;">
+    <img src="${logoUrl}" style="height:52px;object-fit:contain;filter:brightness(0) invert(1);"/>
+    <div style="text-align:right;color:white;"><p style="font-size:22px;font-weight:900;margin:0;">${cfg?.titulo_documento||"PROPUESTA DE SERVICIO"}</p><p style="font-size:13px;opacity:0.7;margin:4px 0 0;">N° ${nCot} · ${new Date().toLocaleDateString("es-PE")}</p></div>
+  </div>
+  <div style="padding:28px 40px;background:white;">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
+      <div style="background:#f8fafc;border-radius:12px;padding:16px;"><p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 8px;letter-spacing:.8px;">Cliente</p>
+        <p style="font-weight:800;font-size:14px;margin:0;">${nomCl}</p><p style="color:#64748b;font-size:10px;margin:3px 0 0;">${cliente?.ruc?"RUC: "+cliente.ruc:cliente?.dni?"DNI: "+cliente.dni:""}${cot.atencion?" · "+cot.atencion:""}</p></div>
+      <div style="background:#f8fafc;border-radius:12px;padding:16px;"><p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 8px;letter-spacing:.8px;">Servicio</p>
+        <p style="font-weight:800;font-size:14px;margin:0;">${cot.origen} → ${cot.destino}</p><p style="color:#64748b;font-size:10px;margin:3px 0 0;">${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"Fecha a coordinar"}${cot.hora_ida?" · "+cot.hora_ida:""}</p></div>
+    </div>
+    ${fotosHtml}
+    <div style="background:#f8fafc;border-radius:12px;padding:16px;margin-bottom:20px;">
+      <p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 12px;letter-spacing:.8px;">Descripción de la unidad</p>
+      <p style="color:#475569;font-size:11px;margin:0;">${descUnidad}</p>
+    </div>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+      <thead><tr style="background:${cp};"><th style="padding:10px 12px;text-align:left;color:white;font-size:10px;font-weight:700;border-radius:8px 0 0 0;">Descripción</th><th style="padding:10px 12px;text-align:center;color:white;font-size:10px;font-weight:700;">Cant.</th><th style="padding:10px 12px;text-align:right;color:white;font-size:10px;font-weight:700;border-radius:0 8px 0 0;">Total</th></tr></thead>
+      <tbody>${filasItems}</tbody>
+    </table>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:24px;">
+      <div style="background:#f8fafc;border-radius:12px;padding:16px;min-width:220px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px;"><span style="color:#64748b;">Subtotal (sin IGV)</span><span style="font-weight:700;">S/ ${subtotal.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:10px;font-size:11px;"><span style="color:#64748b;">IGV 18%</span><span style="font-weight:700;">S/ ${igv.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>
+        <div style="display:flex;justify-content:space-between;border-top:2px solid ${cp};padding-top:10px;"><span style="font-weight:900;font-size:14px;color:${cp};">TOTAL</span><span style="font-weight:900;font-size:14px;color:${cp};">S/ ${total.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px;">
+      <div><p style="font-weight:900;font-size:10px;color:#166534;text-transform:uppercase;margin:0 0 8px;">✅ Incluye</p><ul style="margin:0;padding-left:16px;">${inc}</ul></div>
+      <div><p style="font-weight:900;font-size:10px;color:#991b1b;text-transform:uppercase;margin:0 0 8px;">❌ No incluye</p><ul style="margin:0;padding-left:16px;">${noInc}</ul></div>
+    </div>
+    ${cfg?.mensaje_cierre?`<p style="text-align:center;color:#64748b;font-style:italic;font-size:11px;margin-bottom:24px;">${cfg.mensaje_cierre}</p>`:""}
+    <div style="background:${cp};border-radius:12px;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;margin-top:16px;">
+      <p style="color:white;font-weight:700;font-size:10px;margin:0;">${empNombre} · RUC ${empRuc}</p>
+      <p style="color:rgba(255,255,255,0.7);font-size:10px;margin:0;">📞 ${empTel} · ✉️ ${empEmail}</p>
+    </div>
+  </div>
+  <script>window.onload=()=>window.print();</script></body></html>`);
+  win.document.close();
+}
+
+function generarPDFTuristico(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculo:VehiculoFlota|undefined,repr:string,consid:ConsidCot,cfg:CotPlantillaConfig|null,empresa:EmpresaPerfilPDF|null){
+  const{subtotal,igv,total}=calcItems(items);
+  const nomCl=cliente?.tipo==="b2b"?(cliente.empresa||cliente.nombre):cliente?.nombre||"—";
+  const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");
+  const cp=cfg?.color_primario||"#b45309"; const cs=cfg?.color_secundario||"#d97706";
+  const logoUrl=empresa?.logo_url||"/logoafacotizacion.jpg";
+  const empNombre=empresa?.nombre||"AFA Tours Peru S.A.C."; const empTel=empresa?.telefono||"966 707 225"; const empEmail=empresa?.email||"transporte@afatoursperu.com";
+  const esFull=(vehiculo?.equipamiento||cot.equipamiento||"full_equipo")==="full_equipo";
+  const descUnidad=vehiculo?.descripcion_unidad||(esFull?`Bus con capacidad para ${vehiculo?.capacidad_pasajeros||"—"} pasajeros, con A/C, sistema de audio, asientos reclinables, bodega y GPS.`:`Bus con capacidad para ${vehiculo?.capacidad_pasajeros||"—"} pasajeros, estándar, bodega y GPS.`);
+  const fotosHtml=vehiculo&&(vehiculo.foto_externa_url||vehiculo.foto_interna_url)?`<div style="display:grid;grid-template-columns:${vehiculo.foto_externa_url&&vehiculo.foto_interna_url?"1fr 1fr":"1fr"};gap:10px;margin:14px 0;">${vehiculo.foto_externa_url?`<div style="border-radius:10px;overflow:hidden;height:180px;"><img src="${driveImg(vehiculo.foto_externa_url)}" style="width:100%;height:100%;object-fit:cover;"/></div>`:""}${vehiculo.foto_interna_url?`<div style="border-radius:10px;overflow:hidden;height:180px;"><img src="${driveImg(vehiculo.foto_interna_url)}" style="width:100%;height:100%;object-fit:cover;"/></div>`:""}</div>`:"";
+  const filasItems=items.map((it)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return`<tr><td style="padding:8px 12px;border-bottom:1px solid #fde68a;">${it.descripcion}<br/><span style="font-size:9px;color:#92400e;">${it.dias} día(s) × ${it.cantidad} unidad(es)</span></td><td style="padding:8px 12px;text-align:right;border-bottom:1px solid #fde68a;font-weight:800;color:${cp};">S/ ${tf.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;}).join("");
+  const paradas=cot.paradas_json||[];const paradasHtml=paradas.length>0?`<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:14px;margin-bottom:16px;"><p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 10px;">🗺️ Itinerario de paradas</p>${paradas.map((p,i)=>`<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;"><div style="width:24px;height:24px;border-radius:50%;background:${cp};color:white;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;flex-shrink:0;">${i+1}</div><div><p style="font-weight:700;font-size:11px;margin:0;">${p.nombre||p.tipo}</p>${p.hora?`<p style="font-size:10px;color:#92400e;margin:1px 0 0;">🕐 ${p.hora}</p>`:""}</div></div>`).join("")}</div>`:""  ;
+  const win=window.open("","_blank");if(!win)return;
+  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización Turística N° ${nCot}</title>
+  <style>@page{size:A4;margin:0}*{box-sizing:border-box}body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:11px;color:#1a1a1a;margin:0}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style>
+  </head><body>
+  <div style="background:linear-gradient(135deg,${cp} 0%,${cs} 100%);padding:36px 40px 28px;position:relative;overflow:hidden;">
+    <div style="position:absolute;top:-20px;right:-20px;width:160px;height:160px;border-radius:50%;background:rgba(255,255,255,0.08);"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;position:relative;">
+      <img src="${logoUrl}" style="height:48px;object-fit:contain;filter:brightness(0) invert(1);"/>
+      <div style="text-align:right;color:white;"><p style="font-size:20px;font-weight:900;margin:0;">${cfg?.titulo_documento||"COTIZACIÓN TURÍSTICA"}</p><p style="font-size:12px;opacity:0.75;margin:4px 0 0;">N° ${nCot} · Válida 30 días</p></div>
+    </div>
+    <div style="margin-top:24px;background:rgba(255,255,255,0.15);border-radius:12px;padding:14px 18px;color:white;display:grid;grid-template-columns:1fr 1fr;">
+      <div><p style="font-size:10px;opacity:0.7;margin:0 0 2px;">CLIENTE</p><p style="font-weight:900;font-size:14px;margin:0;">${nomCl}</p></div>
+      <div style="text-align:right;"><p style="font-size:10px;opacity:0.7;margin:0 0 2px;">FECHA</p><p style="font-weight:700;font-size:12px;margin:0;">${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"A COORDINAR"}</p></div>
+    </div>
+  </div>
+  <div style="padding:24px 40px;">
+    <div style="background:#fff7ed;border-left:4px solid ${cp};border-radius:0 10px 10px 0;padding:14px 18px;margin-bottom:18px;">
+      <p style="font-weight:900;color:${cp};font-size:13px;margin:0 0 4px;">📍 ${cot.origen} → ${cot.destino}</p>
+      <p style="color:#92400e;font-size:11px;margin:0;">${cot.hora_ida?"Salida: "+cot.hora_ida:""}${cot.km?" · "+cot.km+" km":""}</p>
+    </div>
+    ${fotosHtml}
+    ${paradasHtml}
+    <table style="width:100%;border-collapse:collapse;margin-bottom:18px;">
+      <thead><tr style="background:${cp};"><th style="padding:9px 12px;text-align:left;color:white;font-size:10px;font-weight:700;">Descripción del servicio</th><th style="padding:9px 12px;text-align:right;color:white;font-size:10px;font-weight:700;">Importe</th></tr></thead>
+      <tbody style="background:#fffbeb;">${filasItems}</tbody>
+    </table>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:20px;">
+      <div style="background:#fff7ed;border:2px solid ${cs};border-radius:12px;padding:14px 20px;min-width:200px;">
+        <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px;"><span style="color:#92400e;">Subtotal</span><span style="font-weight:700;">S/ ${subtotal.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:10px;"><span style="color:#92400e;">IGV 18%</span><span style="font-weight:700;">S/ ${igv.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>
+        <div style="display:flex;justify-content:space-between;border-top:2px solid ${cp};padding-top:8px;"><span style="font-weight:900;font-size:15px;color:${cp};">TOTAL</span><span style="font-weight:900;font-size:15px;color:${cp};">S/ ${total.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:18px;">
+      <div style="background:#f0fdf4;border-radius:10px;padding:12px;"><p style="font-weight:900;font-size:10px;color:#166534;margin:0 0 6px;">✅ INCLUYE</p>${(cfg?.condiciones_incluye||consid.incluye).map(i=>`<p style="font-size:10px;color:#166534;margin:2px 0;">• ${i}</p>`).join("")}</div>
+      <div style="background:#fff5f5;border-radius:10px;padding:12px;"><p style="font-weight:900;font-size:10px;color:#991b1b;margin:0 0 6px;">❌ NO INCLUYE</p>${(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<p style="font-size:10px;color:#991b1b;margin:2px 0;">• ${i}</p>`).join("")}</div>
+    </div>
+    ${cfg?.mensaje_cierre?`<p style="text-align:center;color:${cp};font-weight:700;font-size:12px;margin:16px 0;padding:12px;background:#fff7ed;border-radius:10px;">${cfg.mensaje_cierre}</p>`:""}
+    <div style="background:linear-gradient(90deg,${cp},${cs});border-radius:10px;padding:12px 18px;display:flex;justify-content:space-between;align-items:center;margin-top:12px;">
+      <p style="color:white;font-weight:700;font-size:10px;margin:0;">${empNombre}</p>
+      <p style="color:rgba(255,255,255,0.8);font-size:10px;margin:0;">📞 ${empTel} · ✉️ ${empEmail}</p>
+    </div>
+  </div>
+  <script>window.onload=()=>window.print();</script></body></html>`);
+  win.document.close();
+}
+
+function generarPDFEjecutivo(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculo:VehiculoFlota|undefined,repr:string,consid:ConsidCot,cfg:CotPlantillaConfig|null,empresa:EmpresaPerfilPDF|null){
+  const{subtotal,igv,total}=calcItems(items);
+  const nomCl=cliente?.tipo==="b2b"?(cliente.empresa||cliente.nombre):cliente?.nombre||"—";
+  const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");
+  const cp=cfg?.color_primario||"#1a1a1a"; const acento=cfg?.color_acento||"#C8A24B";
+  const logoUrl=empresa?.logo_url||"/logoafacotizacion.jpg";
+  const empNombre=empresa?.nombre||"AFA Tours Peru S.A.C."; const empRuc=empresa?.ruc||"20602117091"; const empTel=empresa?.telefono||"966 707 225"; const empEmail=empresa?.email||"transporte@afatoursperu.com";
+  const esFull=(vehiculo?.equipamiento||cot.equipamiento||"full_equipo")==="full_equipo";
+  const descUnidad=vehiculo?.descripcion_unidad||(esFull?`Bus con capacidad para ${vehiculo?.capacidad_pasajeros||"—"} pasajeros, con A/C, sistema de audio, asientos reclinables, bodega y GPS.`:`Bus con capacidad para ${vehiculo?.capacidad_pasajeros||"—"} pasajeros, estándar, bodega y GPS.`);
+  const fotosHtml=vehiculo&&(vehiculo.foto_externa_url||vehiculo.foto_interna_url)?`<div style="display:grid;grid-template-columns:${vehiculo.foto_externa_url&&vehiculo.foto_interna_url?"1fr 1fr":"1fr"};gap:12px;margin:16px 0;">${vehiculo.foto_externa_url?`<div style="border-radius:8px;overflow:hidden;height:190px;border:1px solid #e5e7eb;"><img src="${driveImg(vehiculo.foto_externa_url)}" style="width:100%;height:100%;object-fit:cover;"/></div>`:""}${vehiculo.foto_interna_url?`<div style="border-radius:8px;overflow:hidden;height:190px;border:1px solid #e5e7eb;"><img src="${driveImg(vehiculo.foto_interna_url)}" style="width:100%;height:100%;object-fit:cover;"/></div>`:""}</div>`:"";
+  const filasItems=items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return`<tr><td style="padding:10px 14px;border-bottom:1px solid #f0f0f0;font-size:10.5px;">${it.descripcion}</td><td style="padding:10px 14px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:10px;color:#6b7280;">${it.dias}d × ${it.cantidad}</td><td style="padding:10px 14px;text-align:right;border-bottom:1px solid #f0f0f0;font-weight:800;color:${cp};">S/ ${tf.toLocaleString("es-PE",{minimumFractionDigits:2})}</td><td style="padding:10px 14px;text-align:center;border-bottom:1px solid #f0f0f0;color:#6b7280;font-style:italic;font-size:9.5px;">USD ${(tf/3.7).toFixed(2)}</td></tr>`;}).join("");
+  const win=window.open("","_blank");if(!win)return;
+  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Service Quotation N° ${nCot}</title>
+  <style>@page{size:A4;margin:18mm 15mm}*{box-sizing:border-box}body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:11px;color:#1a1a1a;margin:0;line-height:1.5}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style>
+  </head><body>
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;padding-bottom:16px;border-bottom:3px solid ${acento};margin-bottom:20px;">
+    <img src="${logoUrl}" style="height:52px;object-fit:contain;"/>
+    <div style="text-align:right;">
+      <p style="font-size:20px;font-weight:900;color:${cp};margin:0;">${cfg?.titulo_documento||"SERVICE QUOTATION / COTIZACIÓN"}</p>
+      <p style="color:#6b7280;font-size:11px;margin:4px 0 0;">N° ${nCot} · ${new Date().toLocaleDateString("es-PE")} · Valid 30 days / Válida 30 días</p>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
+    <div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;">
+      <p style="font-size:9px;font-weight:900;text-transform:uppercase;color:${acento};letter-spacing:1px;margin:0 0 8px;">CLIENT / CLIENTE</p>
+      <p style="font-weight:800;font-size:14px;margin:0;">${nomCl}</p>
+      ${cliente?.ruc?`<p style="color:#6b7280;font-size:10px;margin:3px 0 0;">RUC: ${cliente.ruc}</p>`:""}
+      ${cot.atencion?`<p style="color:#6b7280;font-size:10px;margin:2px 0 0;">Attn: ${cot.atencion}</p>`:""}
+    </div>
+    <div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;">
+      <p style="font-size:9px;font-weight:900;text-transform:uppercase;color:${acento};letter-spacing:1px;margin:0 0 8px;">${empNombre}</p>
+      <p style="color:#6b7280;font-size:10px;margin:2px 0;">RUC: ${empRuc}</p>
+      <p style="color:#6b7280;font-size:10px;margin:2px 0;">Repr: ${repr}</p>
+      <p style="color:#6b7280;font-size:10px;margin:2px 0;">📞 ${empTel} · ✉️ ${empEmail}</p>
+    </div>
+  </div>
+  <div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;margin-bottom:20px;">
+    <p style="font-size:9px;font-weight:900;text-transform:uppercase;color:${acento};letter-spacing:1px;margin:0 0 8px;">SERVICE DETAILS / DETALLE DEL SERVICIO</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+      <div><p style="font-size:9px;color:#6b7280;margin:0;">Origin / Origen</p><p style="font-weight:700;font-size:11px;margin:2px 0 0;">${cot.origen}</p></div>
+      <div><p style="font-size:9px;color:#6b7280;margin:0;">Destination / Destino</p><p style="font-weight:700;font-size:11px;margin:2px 0 0;">${cot.destino}</p></div>
+      <div><p style="font-size:9px;color:#6b7280;margin:0;">Date / Fecha</p><p style="font-weight:700;font-size:11px;margin:2px 0 0;">${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"2-digit",month:"2-digit",year:"numeric"}):"—"}</p></div>
+    </div>
+  </div>
+  ${fotosHtml}
+  <div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;margin-bottom:20px;">
+    <p style="font-size:9px;font-weight:900;text-transform:uppercase;color:${acento};letter-spacing:1px;margin:0 0 8px;">UNIT / UNIDAD</p>
+    <p style="font-size:11px;color:#475569;margin:0;">${descUnidad}</p>
+  </div>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+    <thead><tr style="border-bottom:2px solid ${acento};"><th style="padding:9px 14px;text-align:left;font-size:9px;font-weight:900;text-transform:uppercase;color:${cp};letter-spacing:.5px;">Description</th><th style="padding:9px 14px;text-align:center;font-size:9px;font-weight:900;text-transform:uppercase;color:${cp};letter-spacing:.5px;">Qty</th><th style="padding:9px 14px;text-align:right;font-size:9px;font-weight:900;text-transform:uppercase;color:${cp};letter-spacing:.5px;">Amount PEN</th><th style="padding:9px 14px;text-align:right;font-size:9px;font-weight:900;text-transform:uppercase;color:#9ca3af;letter-spacing:.5px;">USD ~</th></tr></thead>
+    <tbody>${filasItems}</tbody>
+  </table>
+  <div style="display:flex;justify-content:flex-end;margin-bottom:24px;">
+    <div style="min-width:240px;">
+      <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:11px;"><span style="color:#6b7280;">Subtotal (excl. tax)</span><span style="font-weight:700;">S/ ${subtotal.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>
+      <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:11px;"><span style="color:#6b7280;">IGV/Tax 18%</span><span style="font-weight:700;">S/ ${igv.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>
+      <div style="display:flex;justify-content:space-between;padding:10px 0;border-top:2px solid ${acento};margin-top:4px;"><span style="font-weight:900;font-size:15px;">TOTAL</span><span style="font-weight:900;font-size:15px;color:${cp};">S/ ${total.toLocaleString("es-PE",{minimumFractionDigits:2})}</span></div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px;">
+    <div><p style="font-size:9px;font-weight:900;color:#166534;text-transform:uppercase;letter-spacing:.5px;margin:0 0 6px;">Includes / Incluye</p>${(cfg?.condiciones_incluye||consid.incluye).map(i=>`<p style="font-size:10px;color:#166534;margin:3px 0;">✓ ${i}</p>`).join("")}</div>
+    <div><p style="font-size:9px;font-weight:900;color:#991b1b;text-transform:uppercase;letter-spacing:.5px;margin:0 0 6px;">Not included / No incluye</p>${(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<p style="font-size:10px;color:#991b1b;margin:3px 0;">✗ ${i}</p>`).join("")}</div>
+  </div>
+  ${cfg?.mensaje_cierre?`<p style="text-align:center;color:#6b7280;font-style:italic;font-size:11px;margin-bottom:20px;border-top:1px solid #e5e7eb;padding-top:14px;">${cfg.mensaje_cierre}</p>`:""}
+  <div style="border-top:3px solid ${acento};padding-top:10px;display:flex;justify-content:space-between;align-items:center;">
+    <p style="color:#6b7280;font-size:9px;margin:0;">${empNombre} · RUC ${empRuc} · ${empresa?.direccion||""}</p>
+    <p style="color:#6b7280;font-size:9px;margin:0;">📞 ${empTel} · ✉️ ${empEmail}</p>
+  </div>
+  <script>window.onload=()=>window.print();</script></body></html>`);
+  win.document.close();
+}
+
+function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculo:VehiculoFlota|undefined,repr="JENNY ELYZABETH URBINA AFATA",consid:ConsidCot=DEFAULT_CONSID,plantilla="corporativo",cfg:CotPlantillaConfig|null=null,empresa:EmpresaPerfilPDF|null=null){
+  if(plantilla==="moderno_fotos"){generarPDFModerno(cot,cliente,items,vehiculo,repr,consid,cfg,empresa);return;}
+  if(plantilla==="turistico"){generarPDFTuristico(cot,cliente,items,vehiculo,repr,consid,cfg,empresa);return;}
+  if(plantilla==="ejecutivo"){generarPDFEjecutivo(cot,cliente,items,vehiculo,repr,consid,cfg,empresa);return;}
+  // ── plantilla corporativo (original intacta, solo empresa_perfil si existe) ──
+  const empNombre=empresa?.nombre||"AFA Tours Peru S.A.C."; const empRuc=empresa?.ruc||"20602117091"; const empEmail=empresa?.email||"transporte@afatoursperu.com"; const empTel=empresa?.telefono||"(01) 3453707 – 966 707 225"; const empDir=empresa?.direccion||"Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima";
   const{subtotal,igv,total}=calcItems(items);const desc=items.reduce((s,it)=>s+it.dias*it.cantidad*it.precio_unit*(it.descuento_pct/100),0);
   const nomCl=cliente?.tipo==="b2b"?(cliente.empresa||cliente.nombre):cliente?.nombre||"—";
   const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");const anio=new Date().getFullYear();
@@ -200,7 +444,7 @@ function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],veh
   const notaFijo=cot.modo_servicio==="fijo"?`<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:8px 12px;margin-top:8px;font-size:10.5px;"><b style="color:#166534;">📅 Servicio Fijo</b> — Precio/día: <b>${fmtS(Number(cot.precio_dia||0))}</b> · Mes est. (×26): <b>${fmtS(Number(cot.precio_mes_estimado||0))}</b></div>`:"";
   const css=`@page{size:A4;margin:18mm 15mm}*{box-sizing:border-box}body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:11px;color:#1a1a1a;margin:0;line-height:1.4}.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;border-bottom:3px solid #0b315f;padding-bottom:10px}.logo{height:60px}.titulo{text-align:right}.titulo h1{font-size:18px;font-weight:900;color:#0b315f;margin:0}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}.box{border:1px solid #ccc;border-radius:4px;padding:8px 10px}.box-title{font-weight:900;font-size:10px;color:#0b315f;text-transform:uppercase;border-bottom:1px solid #e5e7eb;padding-bottom:4px;margin-bottom:6px}.box-row{margin:3px 0;font-size:10.5px}table{width:100%;border-collapse:collapse;margin:10px 0;font-size:10.5px}thead{background:#0b315f;color:white}thead th{padding:6px;text-align:center;font-weight:700;font-size:10px;border:1px solid #0b315f}tbody tr:nth-child(even){background:#f8fafc}.totales td{padding:4px 10px}.totales .label{text-align:right;color:#555;font-weight:600}.totales .valor{text-align:right;font-weight:700}.totales .total-neto{font-size:13px;font-weight:900;color:#0b315f}.totales .sep{border-top:2px solid #0b315f}.cuentas{margin-top:12px;border-top:2px solid #0b315f;padding-top:10px}.cuentas h3{font-size:11px;font-weight:900;color:#0b315f;margin:0 0 6px}.cuentas-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}.cuenta-box{border:1px solid #ddd;border-radius:4px;padding:6px 8px}.cuenta-box .banco{font-weight:900;font-size:10px;color:#0b315f;margin-bottom:3px}.cuenta-box p{margin:1px 0;font-size:9.5px}.page-break{page-break-before:always}.anexo h3{font-size:10.5px;font-weight:900;margin:8px 0 4px;text-transform:uppercase}.anexo li{font-size:10.5px;color:#333;line-height:1.6}.footer-doc{margin-top:14px;border-top:2px solid #0b315f;padding-top:6px;text-align:center;font-size:9px;color:#0b315f}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}`;
   const win=window.open("","_blank");if(!win)return;
-  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización N° ${nCot}</title><style>${css}</style></head><body><div class="header"><img src="/logoafacotizacion.jpg" alt="AFA TOURS PERU" class="logo"/><div class="titulo"><h1>COTIZACIÓN N° ${nCot} - ${anio}</h1><p><b>FECHA:</b> ${fechaDoc}</p><p style="font-style:italic;color:#666;font-size:10px;">Válida por 30 días</p></div></div><div class="grid2"><div class="box"><div class="box-title">Datos del cliente</div><div class="box-row"><b>CLIENTE:</b> ${nomCl}</div><div class="box-row"><b>${cliente?.ruc?"RUC":"DNI"}:</b> ${cliente?.ruc||cliente?.dni||"—"}</div><div class="box-row"><b>DIRECCIÓN:</b> ${cliente?.direccion||"—"}</div><div class="box-row"><b>CELULAR:</b> ${cliente?.telefono||"—"}</div><div class="box-row"><b>ATENCIÓN:</b> ${cot.atencion||cliente?.operativo_nombre||"—"}</div></div><div class="box"><div class="box-title">AFA Tours Peru S.A.C.</div><div class="box-row"><b>RUC:</b> 20602117091</div><div class="box-row"><b>REPR:</b> ${repr}</div><div class="box-row"><b>EMAIL:</b> transporte@afatoursperu.com</div><div class="box-row"><b>TELF:</b> (01) 3453707 – 966 707 225</div></div></div><div class="box" style="margin-bottom:10px;"><div class="box-title">Detalle del servicio</div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;"><div class="box-row"><b>ORIGEN:</b> ${cot.origen||"—"}</div><div class="box-row"><b>DESTINO:</b> ${cot.destino||"—"}</div><div class="box-row"><b>RETORNO:</b> ${cot.punto_retorno||cot.origen||"—"}</div></div>${cot.asunto?`<div class="box-row" style="margin-top:4px;"><b>ASUNTO:</b> ${cot.asunto}</div>`:""}<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px;"><div class="box-row"><b>FECHA:</b> ${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"_____________"}</div><div class="box-row"><b>HORARIO:</b> Salida: <b>${cot.hora_ida||"_____"}</b> | Retorno: <b>${cot.hora_retorno||"_____"}</b></div></div>${notaFijo}</div><table><thead><tr><th style="width:40px;">ITEM</th><th style="text-align:left;">DESCRIPCIÓN</th><th style="width:45px;">DÍAS</th><th style="width:55px;">CANT.</th><th style="width:110px;">P. UNIT S/ sin IGV</th><th style="width:55px;">% DSCTO.</th><th style="width:110px;">TOTAL S/</th></tr></thead><tbody>${filasItems}<tr><td colspan="4" style="border:1px solid #ccc;padding:6px 8px;font-size:9.5px;color:#555;font-style:italic;"><b>INCLUYE:</b> Traslado, conductor, combustible y peajes de ruta.</td><td colspan="3" style="border:1px solid #ccc;padding:0;vertical-align:top;"><table class="totales"><tr><td class="label">SUBTOTAL</td><td class="valor">S/ ${subtotal.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>${desc>0?`<tr><td class="label">DESCUENTO</td><td class="valor" style="color:#dc2626;">- S/ ${desc.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`:""}<tr><td class="label">IGV (18%)</td><td class="valor">S/ ${igv.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr><tr class="sep"><td class="label total-neto">TOTAL NETO</td><td class="valor total-neto">S/ ${total.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr></table></td></tr></tbody></table><div class="cuentas"><h3>Nuestras cuentas bancarias</h3><div class="cuentas-grid"><div class="cuenta-box"><div class="banco">BCP — Soles</div><p>Cta: 191-2644342-0-24</p><p>CCI: 00219100264434202450</p></div><div class="cuenta-box"><div class="banco">BCP — Dólares</div><p>Cta: 191-7394169-1-83</p><p>CCI: 00219100739416918351</p></div><div class="cuenta-box"><div class="banco">Banco de la Nación</div><p>Cta: 00-091-069571</p><p>CCI: 01809100009106957197</p></div></div></div><div class="footer-doc">📍 Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima &nbsp;|&nbsp; 📞 (01) 3453707 &nbsp;·&nbsp; 📱 966 707 225 &nbsp;|&nbsp; ✉️ transporte@afatoursperu.com</div><div class="page-break"></div><div class="header"><img src="/logoafacotizacion.jpg" class="logo"/><div class="titulo"><h1>COTIZACIÓN N° ${nCot} - ${anio}</h1><p style="font-size:12px;font-weight:700;color:#6b7280;">Descripción de la unidad y condiciones</p></div></div><div class="box" style="margin-bottom:10px;"><div class="box-title">Características de la unidad</div><div class="box-row">${descUnidad}</div></div>${fotosHtml}<div class="anexo"><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;"><div><h3 style="color:#166534;border-bottom:2px solid #16a34a;padding-bottom:3px;">✅ Servicio incluye</h3><ul>${consid.incluye.map(i=>`<li>${i}</li>`).join("")}</ul></div><div><h3 style="color:#991b1b;border-bottom:2px solid #dc2626;padding-bottom:3px;">❌ No incluye</h3><ul>${consid.no_incluye.map(i=>`<li>${i}</li>`).join("")}</ul></div></div><h3 style="color:#0b315f;border-bottom:2px solid #0b315f;padding-bottom:3px;">📋 Consideraciones generales</h3><ul>${consid.generales.map(i=>`<li>${i}</li>`).join("")}</ul></div><div class="footer-doc" style="margin-top:24px;">📍 Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima &nbsp;|&nbsp; 📞 (01) 3453707 &nbsp;·&nbsp; 📱 966 707 225 &nbsp;|&nbsp; ✉️ transporte@afatoursperu.com</div><script>window.onload=()=>window.print();</script></body></html>`);
+  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización N° ${nCot}</title><style>${css}</style></head><body><div class="header"><img src="${empresa?.logo_url||"/logoafacotizacion.jpg"}" alt="${empNombre}" class="logo"/><div class="titulo"><h1>COTIZACIÓN N° ${nCot} - ${anio}</h1><p><b>FECHA:</b> ${fechaDoc}</p><p style="font-style:italic;color:#666;font-size:10px;">Válida por 30 días</p></div></div><div class="grid2"><div class="box"><div class="box-title">Datos del cliente</div><div class="box-row"><b>CLIENTE:</b> ${nomCl}</div><div class="box-row"><b>${cliente?.ruc?"RUC":"DNI"}:</b> ${cliente?.ruc||cliente?.dni||"—"}</div><div class="box-row"><b>DIRECCIÓN:</b> ${cliente?.direccion||"—"}</div><div class="box-row"><b>CELULAR:</b> ${cliente?.telefono||"—"}</div><div class="box-row"><b>ATENCIÓN:</b> ${cot.atencion||cliente?.operativo_nombre||"—"}</div></div><div class="box"><div class="box-title">${empNombre}</div><div class="box-row"><b>RUC:</b> ${empRuc}</div><div class="box-row"><b>REPR:</b> ${repr}</div><div class="box-row"><b>EMAIL:</b> ${empEmail}</div><div class="box-row"><b>TELF:</b> ${empTel}</div></div></div><div class="box" style="margin-bottom:10px;"><div class="box-title">Detalle del servicio</div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;"><div class="box-row"><b>ORIGEN:</b> ${cot.origen||"—"}</div><div class="box-row"><b>DESTINO:</b> ${cot.destino||"—"}</div><div class="box-row"><b>RETORNO:</b> ${cot.punto_retorno||cot.origen||"—"}</div></div>${cot.asunto?`<div class="box-row" style="margin-top:4px;"><b>ASUNTO:</b> ${cot.asunto}</div>`:""}<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px;"><div class="box-row"><b>FECHA:</b> ${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"_____________"}</div><div class="box-row"><b>HORARIO:</b> Salida: <b>${cot.hora_ida||"_____"}</b> | Retorno: <b>${cot.hora_retorno||"_____"}</b></div></div>${notaFijo}</div><table><thead><tr><th style="width:40px;">ITEM</th><th style="text-align:left;">DESCRIPCIÓN</th><th style="width:45px;">DÍAS</th><th style="width:55px;">CANT.</th><th style="width:110px;">P. UNIT S/ sin IGV</th><th style="width:55px;">% DSCTO.</th><th style="width:110px;">TOTAL S/</th></tr></thead><tbody>${filasItems}<tr><td colspan="4" style="border:1px solid #ccc;padding:6px 8px;font-size:9.5px;color:#555;font-style:italic;"><b>INCLUYE:</b> Traslado, conductor, combustible y peajes de ruta.</td><td colspan="3" style="border:1px solid #ccc;padding:0;vertical-align:top;"><table class="totales"><tr><td class="label">SUBTOTAL</td><td class="valor">S/ ${subtotal.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>${desc>0?`<tr><td class="label">DESCUENTO</td><td class="valor" style="color:#dc2626;">- S/ ${desc.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`:""}<tr><td class="label">IGV (18%)</td><td class="valor">S/ ${igv.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr><tr class="sep"><td class="label total-neto">TOTAL NETO</td><td class="valor total-neto">S/ ${total.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr></table></td></tr></tbody></table><div class="cuentas"><h3>Nuestras cuentas bancarias</h3><div class="cuentas-grid"><div class="cuenta-box"><div class="banco">BCP — Soles</div><p>Cta: 191-2644342-0-24</p><p>CCI: 00219100264434202450</p></div><div class="cuenta-box"><div class="banco">BCP — Dólares</div><p>Cta: 191-7394169-1-83</p><p>CCI: 00219100739416918351</p></div><div class="cuenta-box"><div class="banco">Banco de la Nación</div><p>Cta: 00-091-069571</p><p>CCI: 01809100009106957197</p></div></div></div><div class="footer-doc">📍 ${empDir} &nbsp;|&nbsp; 📞 ${empTel} &nbsp;|&nbsp; ✉️ ${empEmail}</div><div class="page-break"></div><div class="header"><img src="${empresa?.logo_url||"/logoafacotizacion.jpg"}" class="logo"/><div class="titulo"><h1>COTIZACIÓN N° ${nCot} - ${anio}</h1><p style="font-size:12px;font-weight:700;color:#6b7280;">Descripción de la unidad y condiciones</p></div></div><div class="box" style="margin-bottom:10px;"><div class="box-title">Características de la unidad</div><div class="box-row">${descUnidad}</div></div>${fotosHtml}<div class="anexo"><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;"><div><h3 style="color:#166534;border-bottom:2px solid #16a34a;padding-bottom:3px;">✅ Servicio incluye</h3><ul>${consid.incluye.map(i=>`<li>${i}</li>`).join("")}</ul></div><div><h3 style="color:#991b1b;border-bottom:2px solid #dc2626;padding-bottom:3px;">❌ No incluye</h3><ul>${consid.no_incluye.map(i=>`<li>${i}</li>`).join("")}</ul></div></div><h3 style="color:#0b315f;border-bottom:2px solid #0b315f;padding-bottom:3px;">📋 Consideraciones generales</h3><ul>${consid.generales.map(i=>`<li>${i}</li>`).join("")}</ul></div><div class="footer-doc" style="margin-top:24px;">📍 Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima &nbsp;|&nbsp; 📞 (01) 3453707 &nbsp;·&nbsp; 📱 966 707 225 &nbsp;|&nbsp; ✉️ transporte@afatoursperu.com</div><script>window.onload=()=>window.print();</script></body></html>`);
   win.document.close();
 }
 
@@ -209,6 +453,7 @@ export default function CotizacionesPage(){
   const [loading,setLoading]=useState(false);const [guardando,setGuardando]=useState(false);const [mostrarForm,setMostrarForm]=useState(false);const [editandoId,setEditandoId]=useState<number|null>(null);const [busqueda,setBusqueda]=useState("");const [filtroEst,setFiltroEst]=useState("todos");const [filtroModo,setFiltroModo]=useState("todos");
   const [form,setForm]=useState(FORM0);const [items,setItems]=useState<ItemCot[]>([{...ITEM_VACIO}]);const [modalAprob,setModalAprob]=useState<Cotizacion|null>(null);const [guardarTar,setGuardarTar]=useState(true);const [paradas,setParadas]=useState<ParadaTP[]>([]);const [consid,setConsid]=useState<ConsidCot>(DEFAULT_CONSID);const [panelId,setPanelId]=useState<number|null>(null);
   const [diasCond,setDiasCond]=useState(1);const [peajesF,setPeajesF]=useState(0);const [pernocteF,setPernocteF]=useState(0);const [viaticosF,setViaticosF]=useState(0);const [reprNombre,setReprNombre]=useState("JENNY ELYZABETH URBINA AFATA");
+  const [modalPlantilla,setModalPlantilla]=useState<Cotizacion|null>(null);const [plantillaElegida,setPlantillaElegida]=useState("corporativo");
 
   const f=(k:keyof typeof FORM0)=>(e:React.ChangeEvent<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>)=>setForm(p=>({...p,[k]:e.target.value}));
   useEffect(()=>{
@@ -259,12 +504,15 @@ export default function CotizacionesPage(){
   const confirmarAprob=async(tipo:string,numero:string)=>{if(!modalAprob)return;await supabase.from("cotizaciones").update({estado:"aprobado",tipo_aprobacion:tipo,numero_aprobacion:numero}).eq("id",modalAprob.id);if(modalAprob.tipo_vehiculo&&modalAprob.tipo_servicio&&modalAprob.equipamiento){const esFijo=modalAprob.modo_servicio==="fijo";await supabase.from("tarifario").upsert({origen:modalAprob.origen.toUpperCase(),destino:modalAprob.destino.toUpperCase(),tipo_vehiculo:modalAprob.tipo_vehiculo,equipamiento:modalAprob.equipamiento,tipo_servicio:modalAprob.tipo_servicio,modo:modalAprob.modo_servicio||"eventual",precio:esFijo?(Number(modalAprob.precio_dia||0)/1.18):Math.round(Number(modalAprob.precio_cliente)/1.18*100)/100,moneda:"PEN",confidencial:false,incluye_guia:false,incluye_peajes:false,incluye_alimentacion:false,notas:`Aprobada #${modalAprob.numero_cotizacion||modalAprob.id}`,activo:true},{onConflict:"origen,destino,tipo_vehiculo,equipamiento,tipo_servicio"});}setModalAprob(null);cargar();};
   const convertirAReserva=async(cot:Cotizacion)=>{if(cot.estado!=="aprobado"){alert("Solo cotizaciones aprobadas");return;}const{data:existe}=await supabase.from("reservas").select("id").eq("cotizacion_id",cot.id).maybeSingle();if(existe){alert("Ya fue convertida en reserva");return;}const ps=cot.paradas_json||[];const pI=ps.find(p=>p.tipo==="inicio");const pD=ps.find(p=>p.tipo==="destino");const{data:r,error}=await supabase.from("reservas").insert({cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:pI?.nombre||cot.origen,destino:pD?.nombre||cot.destino,precio_cliente:cot.precio_cliente,costo_proveedor:0,fecha_servicio:cot.fecha_servicio||new Date().toISOString().split("T")[0],hora_servicio:pI?.hora||cot.hora_ida||"06:00",estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:cot.paradas_json||null}).select().single();if(error){alert(error.message);return;}if(ps.length>0&&r){await supabase.from("paradas").insert([...ps.filter(p=>p.tipo==="inicio"),...ps.filter(p=>p.tipo==="intermedia"),...ps.filter(p=>p.tipo==="destino")].map((p,i)=>({reserva_id:r.id,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));}alert(`✅ Reserva creada${ps.length>0?` con ${ps.length} paradas`:""}`);cargar();};
   const editarCot=(c:Cotizacion)=>{setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:c.estado||"pendiente",numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
-  const abrirPDF=async(cot:Cotizacion)=>{
+  const abrirPDF=async(cot:Cotizacion,plantilla:string=plantillaElegida)=>{
     const cl=clientes.find(c=>c.id===cot.cliente_id);const veh=flota.find(v=>v.id===cot.vehiculo_flota_id);
     const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];
     let nombreFinal=(cot as any).creado_por||"";
     if(!nombreFinal){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreFinal=extraerNombreApellido(uRow.nombre);}}catch(e){}}
-    generarPDF(cot,cl,its,veh,nombreFinal||"JENNY ELYZABETH URBINA AFATA",cot.consideraciones_json||consid);
+    const[{data:empData},{data:cfgData}]=await Promise.all([supabase.from("empresa_perfil").select("nombre,razon_social,ruc,logo_url,telefono,email,direccion,color_primario").eq("id",1).maybeSingle(),supabase.from("cotizacion_plantillas").select("*").eq("id",plantilla).maybeSingle()]);
+    if(plantilla!=="corporativo")await supabase.from("cotizaciones").update({plantilla_pdf:plantilla}).eq("id",cot.id);
+    setModalPlantilla(null);
+    generarPDF(cot,cl,its,veh,nombreFinal||"JENNY ELYZABETH URBINA AFATA",cot.consideraciones_json||consid,plantilla,cfgData as CotPlantillaConfig|null,empData as EmpresaPerfilPDF|null);
   };
 
   const totC=cotizas.length;const pend=cotizas.filter(c=>c.estado==="pendiente").length;const env=cotizas.filter(c=>c.estado==="enviado").length;const apr=cotizas.filter(c=>c.estado==="aprobado").length;const tasa=totC>0?Math.round(apr/totC*100):0;const pendDesc=cotizas.filter(c=>c.descuento_solicitado&&!c.descuento_autorizado).length;
@@ -275,6 +523,7 @@ export default function CotizacionesPage(){
   return(
     <>
       {modalAprob&&<ModalAprobacion cot={modalAprob} onConfirmar={confirmarAprob} onCancelar={()=>setModalAprob(null)}/>}
+      {modalPlantilla&&<ModalPlantilla cot={modalPlantilla} plantillaActual={plantillaElegida} onElegir={setPlantillaElegida} onGenerar={()=>abrirPDF(modalPlantilla,plantillaElegida)} onCancelar={()=>setModalPlantilla(null)}/>}
       <main className="p-6 space-y-5 max-w-7xl mx-auto">
         <div className="flex items-start justify-between flex-wrap gap-3">
           <div><h1 className="text-3xl font-bold text-gray-900">Cotizaciones</h1><p className="text-sm text-gray-400 mt-1">EVENTUAL · FIJO · {paramsDB.length} vehículos desde Supabase{pendDesc>0&&<span className="ml-2 text-orange-600 font-bold bg-orange-50 px-2 py-0.5 rounded-full text-xs">🙋 {pendDesc} descuento{pendDesc>1?"s":""} pendiente{pendDesc>1?"s":""}</span>}</p></div>
@@ -419,7 +668,7 @@ export default function CotizacionesPage(){
                       <td className="p-3 font-bold text-gray-800">{fmtS(Number(c.precio_cliente||0))}{esFijo&&<p className="text-[10px] text-gray-400 font-normal">/día</p>}{esFijo&&c.precio_mes_estimado&&<p className="text-[10px] text-green-600 font-bold">~{fmtS(c.precio_mes_estimado)}/mes</p>}</td>
                       <td className="p-3 font-bold" style={{color:margen>=0?"#166534":"#991b1b"}}>{fmtS(margen)}</td>
                       <td className="p-3" onClick={e=>e.stopPropagation()}><select value={c.estado} onChange={e=>cambiarEstado(c,e.target.value as EstadoCot)} className="text-xs font-bold px-2 py-1 rounded-lg border-0 cursor-pointer" style={{background:est.bg,color:est.color}}><option value="pendiente">Pendiente</option><option value="enviado">Enviado</option><option value="aprobado">Aprobado</option><option value="rechazado">Rechazado</option></select></td>
-                      <td className="p-3"><div className="flex gap-1 flex-wrap"><button onClick={()=>editarCot(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">✏️</button><button onClick={()=>abrirPDF(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border" style={{background:"#eef3f8",color:"#0b315f"}}>📄 PDF</button><button onClick={()=>convertirAReserva(c)} disabled={c.estado!=="aprobado"} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-30" style={{background:"#dcfce7",color:"#166534"}}>→Res</button></div></td>
+                      <td className="p-3"><div className="flex gap-1 flex-wrap"><button onClick={()=>editarCot(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">✏️</button><button onClick={()=>{setModalPlantilla(c);setPlantillaElegida(c.plantilla_pdf||"corporativo");}} className="px-2 py-1.5 rounded-lg text-xs font-bold border" style={{background:"#eef3f8",color:"#0b315f"}}>📄 PDF</button><button onClick={()=>convertirAReserva(c)} disabled={c.estado!=="aprobado"} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-30" style={{background:"#dcfce7",color:"#166534"}}>→Res</button></div></td>
                     </tr>
                     {panelId===c.id&&<tr><td colSpan={10} className="px-4 pb-3 pt-0"><PanelDecision c={c} onAct={cargar}/></td></tr>}
                   </React.Fragment>);

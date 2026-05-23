@@ -219,8 +219,9 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
   {
     grupo: "Comercial",
     items: [
-      { href: "/cotizaciones", label: "Cotizaciones", sub: "Precios y rutas",      icon: Ic.FileText,   modulo: "cotizaciones" },
-      { href: "/cotizador",    label: "Cotizador",    sub: "Estructura de costos", icon: Ic.Calculator, modulo: "cotizaciones" },
+      { href: "/cotizaciones",           label: "Cotizaciones",  sub: "Precios y rutas",        icon: Ic.FileText,   modulo: "cotizaciones" },
+      { href: "/cotizador",              label: "Cotizador",     sub: "Estructura de costos",   icon: Ic.Calculator, modulo: "cotizaciones" },
+      { href: "/cotizaciones/plantillas",label: "Plantillas PDF",sub: "Diseño de cotizaciones", icon: Ic.FileText,   modulo: "cotizaciones" },
       { href: "/tarifario",    label: "Tarifas",      sub: "Tarifarios",           icon: Ic.DollarSign, modulo: "tarifas"      },
       { href: "/clientes",     label: "Clientes",     sub: "Base comercial",       icon: Ic.Users,      modulo: "clientes"     },
     ],
@@ -284,10 +285,12 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
     ],
   },
   {
-    grupo: "Sistema",
+    grupo: "Configuración",
     items: [
-      { href: "/usuarios", label: "Usuarios",        sub: "Permisos",          icon: Ic.Lock,     modulo: "usuarios" },
-      { href: "/ajustes",  label: "Ajuste de Costos",sub: "Flota y combustible",icon: Ic.Settings, modulo: "ajustes"  },
+      { href: "/configuracion/perfil",   label: "Perfil Empresa", sub: "Datos · Logo",        icon: Ic.Building, modulo: "configuracion" },
+      { href: "/configuracion/costos",   label: "Costos",         sub: "Flota y combustible",  icon: Ic.Settings, modulo: "ajustes"       },
+      { href: "/configuracion/usuarios", label: "Usuarios",       sub: "Permisos de acceso",   icon: Ic.Lock,     modulo: "usuarios"      },
+      { href: "/configuracion/sistema",  label: "Sistema",        sub: "Parámetros generales", icon: Ic.Wrench,   modulo: "configuracion" },
     ],
   },
 ];

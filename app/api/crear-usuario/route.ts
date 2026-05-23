@@ -31,6 +31,8 @@ const MODULOS = [
   "seguros",
   "reportes",
   "usuarios",
+  "ajustes",
+  "configuracion",
 ];
 
 export async function POST(request: Request) {
