@@ -7,9 +7,10 @@ export function middleware(request: NextRequest) {
   const isLogin = pathname === "/login";
 
   const isPublica =
-    pathname === "/conductor" || pathname.startsWith("/conductor/") ||
-    pathname === "/lector"    || pathname.startsWith("/lector/") ||
-    pathname === "/pasajero"  || pathname.startsWith("/pasajero/");
+    pathname === "/conductor"  || pathname.startsWith("/conductor/") ||
+    pathname === "/lector"     || pathname.startsWith("/lector/") ||
+    pathname === "/pasajero"   || pathname.startsWith("/pasajero/") ||
+    pathname === "/privacidad" || pathname.startsWith("/privacidad/");
 
   const hasSession = request.cookies
     .getAll()
