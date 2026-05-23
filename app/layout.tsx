@@ -290,7 +290,8 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       { href: "/configuracion/perfil",   label: "Perfil Empresa", sub: "Datos · Logo",        icon: Ic.Building, modulo: "configuracion" },
       { href: "/configuracion/costos",   label: "Costos",         sub: "Flota y combustible",  icon: Ic.Settings, modulo: "ajustes"       },
       { href: "/configuracion/usuarios", label: "Usuarios",       sub: "Permisos de acceso",   icon: Ic.Lock,     modulo: "usuarios"      },
-      { href: "/configuracion/sistema",  label: "Sistema",        sub: "Parámetros generales", icon: Ic.Wrench,   modulo: "configuracion" },
+      { href: "/configuracion/sistema",  label: "Sistema",        sub: "Parámetros generales", icon: Ic.Wrench,    modulo: "configuracion" },
+      { href: "/configuracion/legal",   label: "Páginas Legales",sub: "Privacidad · Términos",icon: Ic.FileText, modulo: "configuracion" },
     ],
   },
 ];
@@ -468,7 +469,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const router = useRouter();
 
   const esLogin = pathname === "/login";
-  const esPublica = ["/conductor", "/lector", "/pasajero", "/registro"].some(
+  const esPublica = ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad"].some(
     (r) => pathname === r || pathname.startsWith(r + "/")
   );
 
