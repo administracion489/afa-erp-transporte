@@ -766,122 +766,143 @@ export default function ConductorApp() {
   // ═══════════════════════════════════════════════════════════════════════════
 
   if (!conductor) return (
-    <div style={{ minHeight: "100vh", background: "var(--c-paper)", fontFamily: FONT_SANS, display: "flex", flexDirection: "column", alignItems: "center" }}>
-      <div style={{ width: "100%", maxWidth: 420, padding: "56px 24px 32px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 28 }}>
-          <CondorMark size={56} color="var(--c-navy)" />
-          <Chip color="var(--c-navy)" bg="var(--c-navy-tint)" sw>CONDUCTORES</Chip>
-        </div>
+    <div style={{
+      minHeight: "100svh", background: "var(--c-paper)", fontFamily: FONT_SANS,
+      display: "flex", flexDirection: "column", alignItems: "center",
+      boxSizing: "border-box", overflowX: "hidden",
+    }}>
+      <div style={{
+        width: "100%", maxWidth: 480, padding: "48px 20px 24px",
+        boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "center",
+      }}>
+        {/* ── Logo AFA Conductores ── */}
+        <img
+          src="/logoafaconductores.png"
+          alt="AFA Conductores"
+          style={{ width: "min(220px, 55vw)", display: "block", marginBottom: 28 }}
+        />
         <h1 style={{
-          fontFamily: FONT_SANS, fontSize: 30, fontWeight: 800, letterSpacing: -1.2,
-          color: "var(--c-ink)", margin: "0 0 8px",
+          fontFamily: FONT_SANS, fontSize: "clamp(20px, 5vw, 26px)", fontWeight: 800, letterSpacing: -0.8,
+          color: "var(--c-ink)", margin: "0 0 6px", textAlign: "center",
         }}>
           Buen día, conductor.
         </h1>
-        <p style={{ color: "var(--c-mute)", fontSize: 14, fontWeight: 500, margin: 0 }}>
-          Ingresá con tu DNI y PIN personal para abrir tu jornada.
+        <p style={{ color: "var(--c-mute)", fontSize: "clamp(13px, 3.5vw, 15px)", fontWeight: 500, margin: 0, textAlign: "center" }}>
+          Ingresa con tu DNI y PIN personal para abrir tu jornada.
         </p>
       </div>
 
+      {/* ── Card ── */}
       <div style={{
-        width: "100%", maxWidth: 420, margin: "0 24px",
-        background: "var(--c-surface)", border: "1px solid var(--c-line)",
-        borderRadius: 22, padding: 20, boxShadow: "0 4px 14px rgba(0,0,0,0.05)",
+        width: "100%", maxWidth: 480, boxSizing: "border-box",
+        padding: "0 16px 32px",
       }}>
-        <Eyebrow>Documento de identidad</Eyebrow>
         <div style={{
-          display: "flex", alignItems: "baseline", gap: 12, marginTop: 8,
-          borderBottom: `1.5px solid ${dni.length >= 7 ? "var(--c-navy)" : "var(--c-line)"}`,
-          paddingBottom: 8,
+          background: "var(--c-surface)", border: "1px solid var(--c-line)",
+          borderRadius: 22, padding: "20px 20px 24px",
+          boxShadow: "0 4px 14px rgba(0,0,0,0.05)", boxSizing: "border-box",
         }}>
-          <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 16, color: "var(--c-mute)" }}>PE</span>
-          <input
-            type="tel" inputMode="numeric" maxLength={8} value={dni}
-            onChange={e => { setDni(e.target.value.replace(/\D/g, "").slice(0, 8)); setLoginErr(""); }}
-            placeholder="12345678"
-            style={{
-              flex: 1, border: "none", outline: "none", background: "transparent",
-              fontFamily: FONT_MONO, fontSize: 28, fontWeight: 800, letterSpacing: 4,
-              color: "var(--c-ink)",
-            }}
-          />
-          <Chip color="var(--c-mute)" bg="var(--c-soft)">8 dígitos</Chip>
-        </div>
+          {/* DNI */}
+          <Eyebrow>Documento de identidad</Eyebrow>
+          <div style={{
+            display: "flex", alignItems: "baseline", gap: 10, marginTop: 8,
+            borderBottom: `1.5px solid ${dni.length >= 7 ? "var(--c-navy)" : "var(--c-line)"}`,
+            paddingBottom: 8,
+          }}>
+            <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 15, color: "var(--c-mute)", flexShrink: 0 }}>PE</span>
+            <input
+              type="tel" inputMode="numeric" maxLength={8} value={dni}
+              onChange={e => { setDni(e.target.value.replace(/\D/g, "").slice(0, 8)); setLoginErr(""); }}
+              placeholder="12345678"
+              style={{
+                flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent",
+                fontFamily: FONT_MONO, fontSize: "clamp(22px, 6vw, 28px)", fontWeight: 800, letterSpacing: 4,
+                color: "var(--c-ink)",
+              }}
+            />
+            <span style={{
+              fontSize: 11, fontWeight: 600, color: "var(--c-mute)",
+              background: "var(--c-soft)", borderRadius: 6, padding: "2px 7px", flexShrink: 0,
+            }}>
+              8 díg.
+            </span>
+          </div>
 
-        <div style={{ marginTop: 22 }}>
-          <Eyebrow>PIN de acceso</Eyebrow>
-          <div style={{ display: "flex", justifyContent: "center", gap: 14, marginTop: 14, marginBottom: 18 }}>
-            {[0, 1, 2, 3].map(i => (
-              <div
-                key={i}
-                style={{
+          {/* PIN */}
+          <div style={{ marginTop: 22 }}>
+            <Eyebrow>PIN de acceso</Eyebrow>
+            <div style={{ display: "flex", justifyContent: "center", gap: 14, marginTop: 14, marginBottom: 18 }}>
+              {[0, 1, 2, 3].map(i => (
+                <div key={i} style={{
                   width: 16, height: 16, borderRadius: 16,
                   background: i < pin.length ? "var(--c-navy)" : "transparent",
                   border: `2px solid ${i < pin.length ? "var(--c-navy)" : "var(--c-line)"}`,
                   transition: "all 0.15s",
-                }}
-              />
-            ))}
+                }} />
+              ))}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+              {[1, 2, 3, 4, 5, 6, 7, 8, 9, "", "0", "DEL"].map((n, i) => (
+                <button
+                  key={i}
+                  onClick={() => {
+                    if (n === "DEL") setPin(p => p.slice(0, -1));
+                    else if (n !== "" && pin.length < 4) setPin(p => p + n);
+                    setLoginErr("");
+                  }}
+                  style={{
+                    padding: "clamp(12px, 4vw, 17px) 0",
+                    borderRadius: 14, border: "1px solid var(--c-line)",
+                    fontFamily: n === "DEL" ? FONT_SANS : FONT_MONO,
+                    fontSize: n === "DEL" ? 13 : "clamp(18px, 5vw, 22px)", fontWeight: 700,
+                    background: n === "" ? "transparent" : "var(--c-surface)",
+                    color: n === "DEL" ? "var(--c-mute)" : "var(--c-ink)",
+                    cursor: n === "" ? "default" : "pointer",
+                    visibility: n === "" ? "hidden" : "visible",
+                    boxShadow: n !== "" ? "0 1px 2px rgba(0,0,0,0.03)" : "none",
+                    touchAction: "manipulation",
+                  }}
+                >
+                  {n === "DEL" ? "←" : n}
+                </button>
+              ))}
+            </div>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-            {[1, 2, 3, 4, 5, 6, 7, 8, 9, "", "0", "DEL"].map((n, i) => (
-              <button
-                key={i}
-                onClick={() => {
-                  if (n === "DEL") setPin(p => p.slice(0, -1));
-                  else if (n !== "" && pin.length < 4) setPin(p => p + n);
-                  setLoginErr("");
-                }}
-                style={{
-                  padding: "16px 0", borderRadius: 14, border: "1px solid var(--c-line)",
-                  fontFamily: n === "DEL" ? FONT_SANS : FONT_MONO,
-                  fontSize: n === "DEL" ? 13 : 22, fontWeight: 700,
-                  background: n === "" ? "transparent" : "var(--c-surface)",
-                  color: n === "DEL" ? "var(--c-mute)" : "var(--c-ink)",
-                  cursor: n === "" ? "default" : "pointer",
-                  visibility: n === "" ? "hidden" : "visible",
-                  boxShadow: n !== "" ? "0 1px 2px rgba(0,0,0,0.03)" : "none",
-                }}
-              >
-                {n === "DEL" ? "←" : n}
-              </button>
-            ))}
+
+          {/* Error */}
+          {loginErr && (
+            <div style={{
+              marginTop: 14,
+              background: "var(--c-danger-tint)", border: "1px solid var(--c-danger)",
+              borderRadius: 12, padding: "10px 14px",
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <IconCircleAlert size={16} color="var(--c-danger)" />
+              <span style={{ color: "var(--c-danger)", fontSize: 13, fontWeight: 600 }}>{loginErr}</span>
+            </div>
+          )}
+
+          {/* Botón */}
+          <div style={{ marginTop: 18 }}>
+            <PrimaryBtn
+              onClick={login}
+              disabled={loginLoading || dni.length < 7 || pin.length < 4}
+              icon={<IconArrowRight size={18} color="#fff" />}
+              size="lg"
+            >
+              {loginLoading ? "Verificando…" : "Ingresar"}
+            </PrimaryBtn>
           </div>
         </div>
 
-        {loginErr && (
-          <div style={{
-            marginTop: 14,
-            background: "var(--c-danger-tint)", border: "1px solid var(--c-danger)",
-            borderRadius: 12, padding: "10px 14px",
-            display: "flex", alignItems: "center", gap: 8,
-          }}>
-            <IconCircleAlert size={16} color="var(--c-danger)" />
-            <span style={{ color: "var(--c-danger)", fontSize: 13, fontWeight: 600 }}>{loginErr}</span>
-          </div>
-        )}
-
-        <div style={{ marginTop: 18 }}>
-          <PrimaryBtn
-            onClick={login}
-            disabled={loginLoading || dni.length < 7 || pin.length < 4}
-            icon={<IconArrowRight size={18} color="#fff" />}
-            size="lg"
-          >
-            {loginLoading ? "Verificando…" : "Ingresar"}
-          </PrimaryBtn>
-        </div>
+        {/* Soporte */}
+        <p style={{ margin: "20px 0 0", color: "var(--c-mute)", fontSize: 12, textAlign: "center", fontFamily: FONT_SANS }}>
+          ¿Problemas para entrar? Llama a soporte ·{" "}
+          <a href="tel:966707225" style={{ color: "var(--c-navy)", fontWeight: 700, textDecoration: "none" }}>
+            966 707 225
+          </a>
+        </p>
       </div>
-
-      <p style={{
-        margin: "26px auto 32px", color: "var(--c-mute)", fontSize: 12, textAlign: "center",
-        fontFamily: FONT_SANS,
-      }}>
-        ¿Problemas para entrar? Llama a soporte ·{" "}
-        <a href="tel:966707225" style={{ color: "var(--c-navy)", fontWeight: 700, textDecoration: "none" }}>
-          966 707 225
-        </a>
-      </p>
     </div>
   );
 
