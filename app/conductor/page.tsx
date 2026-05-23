@@ -23,6 +23,7 @@ type Conductor = {
   pin_acceso: string | null; activo_app: boolean; licencia?: string | null;
   vencimiento_licencia?: string | null; categoria_licencia?: string | null;
   sctr_salud_venc?: string | null; examen_medico_venc?: string | null;
+  _tabla?: "conductores" | "conductores_tercero";
 };
 type Vehiculo  = { id: number; placa: string; categoria: string | null; marca?: string | null; };
 type Reserva   = { id: number; origen: string; destino: string; fecha_servicio: string | null; hora_servicio?: string | null; vehiculo_id?: number | null; };
@@ -293,13 +294,30 @@ export default function ConductorApp() {
     if (dni.length < 7) { setLoginErr("Ingresa tu DNI"); return; }
     if (pin.length < 4) { setLoginErr("PIN de 4 dígitos"); return; }
     setLoginErr(""); setLoginLoading(true);
+
+    // Buscar primero en conductores propios
     const { data } = await supabase.from("conductores")
       .select("id,nombre,dni,telefono,pin_acceso,activo_app,licencia,vencimiento_licencia,categoria_licencia,sctr_salud_venc,examen_medico_venc")
       .eq("dni", dni.trim()).single();
-    if (!data) { setLoginErr("DNI no encontrado"); setLoginLoading(false); return; }
-    if (!data.activo_app) { setLoginErr("Acceso no activado. Llama a central."); setLoginLoading(false); return; }
-    if (data.pin_acceso !== pin) { setLoginErr("PIN incorrecto"); setLoginLoading(false); return; }
-    saveSession(data); setConductor(data); await cargarDatos(data.id); setLoginLoading(false);
+
+    if (data) {
+      if (!data.activo_app) { setLoginErr("Acceso no activado. Llama a central."); setLoginLoading(false); return; }
+      if (data.pin_acceso !== pin) { setLoginErr("PIN incorrecto"); setLoginLoading(false); return; }
+      const c = { ...data, _tabla: "conductores" as const };
+      saveSession(c); setConductor(c); await cargarDatos(c.id); setLoginLoading(false);
+      return;
+    }
+
+    // Si no se encontró, buscar en conductores de terceros
+    const { data: data2 } = await supabase.from("conductores_tercero")
+      .select("id,nombre,dni,telefono,pin_acceso,activo_app,licencia,vencimiento_licencia,categoria_licencia")
+      .eq("dni", dni.trim()).single();
+
+    if (!data2) { setLoginErr("DNI no encontrado"); setLoginLoading(false); return; }
+    if (!data2.activo_app) { setLoginErr("Acceso no activado. Llama a central."); setLoginLoading(false); return; }
+    if (data2.pin_acceso !== pin) { setLoginErr("PIN incorrecto"); setLoginLoading(false); return; }
+    const c2 = { ...data2, _tabla: "conductores_tercero" as const };
+    saveSession(c2); setConductor(c2); await cargarDatos(c2.id); setLoginLoading(false);
   }
 
   // ─── Cargar datos ───────────────────────────────────────────────────────────
@@ -695,7 +713,8 @@ export default function ConductorApp() {
   async function cambiarPin() {
     if (pinNuevo.length < 4 || pinNuevo !== pinConfirm) { setPinMsg("PINs no coinciden"); return; }
     if (!conductor) return;
-    await supabase.from("conductores").update({ pin_acceso: pinNuevo }).eq("id", conductor.id);
+    const tabla = conductor._tabla || "conductores";
+    await supabase.from(tabla).update({ pin_acceso: pinNuevo }).eq("id", conductor.id);
     const upd = { ...conductor, pin_acceso: pinNuevo };
     saveSession(upd); setConductor(upd);
     setPinMsg("PIN cambiado"); setPinNuevo(""); setPinConfirm("");

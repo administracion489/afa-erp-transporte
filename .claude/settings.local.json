@@ -6,7 +6,11 @@
       "Bash(grep -E \"\\\\.\\(tsx|ts\\)$\")",
       "Bash(Get-ChildItem -Recurse \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\\\\ajustes\" -ErrorAction SilentlyContinue)",
       "Bash(Select-Object FullName)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(git add *)",
+      "Bash(git restore *)",
+      "Bash(git commit *)",
+      "Bash(git push *)"
     ]
   }
 }

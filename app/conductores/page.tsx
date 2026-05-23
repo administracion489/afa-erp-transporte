@@ -21,6 +21,7 @@ type Conductor = {
   vida_ley: boolean | null; vida_ley_venc: string | null;
   foto_url: string | null; estado: string;
   observaciones: string | null; created_at: string;
+  pin_acceso?: string | null; activo_app?: boolean | null;
 };
 
 // ─── CONSTANTES ───────────────────────────────────────────────────────────────
@@ -67,6 +68,7 @@ const FORM_VACIO = {
   examen_medico_venc: "", psicosometrico_venc: "", antecedentes_venc: "",
   vida_ley: false, vida_ley_venc: "",
   foto_url: "", estado: "activo", observaciones: "",
+  pin_acceso: "", activo_app: false,
 };
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -214,6 +216,8 @@ export default function ConductoresPage() {
       vida_ley_venc: form.vida_ley ? (form.vida_ley_venc || null) : null,
       foto_url: form.foto_url.trim() || null, estado: form.estado,
       observaciones: form.observaciones.trim() || null,
+      pin_acceso: form.pin_acceso.trim() || null,
+      activo_app: form.activo_app,
     };
     const { error } = editandoId
       ? await supabase.from("conductores").update(payload).eq("id", editandoId)
@@ -238,6 +242,7 @@ export default function ConductoresPage() {
       antecedentes_venc: c.antecedentes_venc || "",
       vida_ley: c.vida_ley || false, vida_ley_venc: c.vida_ley_venc || "",
       foto_url: c.foto_url || "", estado: c.estado || "activo", observaciones: c.observaciones || "",
+      pin_acceso: c.pin_acceso || "", activo_app: c.activo_app || false,
     });
     setEditandoId(c.id); setMostrarForm(true);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
@@ -447,6 +452,25 @@ export default function ConductoresPage() {
                 </label>
                 {form.vida_ley && <input type="date" className={inputCls()} placeholder="Vencimiento póliza" value={form.vida_ley_venc} onChange={f("vida_ley_venc")} />}
                 <p className="text-[10px] text-gray-400 mt-0.5">Obligatorio desde 4 años de antigüedad (D.L. 688)</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Acceso app conductor */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Acceso app conductor</p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <Campo label="PIN de acceso (4 dígitos)">
+                <input className={inputCls("font-mono")} type="text" inputMode="numeric" maxLength={4}
+                  placeholder="Ej: 1234" value={form.pin_acceso} onChange={f("pin_acceso")} />
+                <p className="text-[10px] text-gray-400 mt-0.5">Déjalo vacío para no modificar el PIN actual</p>
+              </Campo>
+              <div className="flex items-center gap-3 pt-5">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" className="w-4 h-4 accent-[#0b315f]" checked={form.activo_app}
+                    onChange={e => setForm(p => ({ ...p, activo_app: e.target.checked }))} />
+                  <span className="text-sm font-semibold text-gray-700">Activo en app conductor</span>
+                </label>
               </div>
             </div>
           </div>
