@@ -139,6 +139,21 @@ export default function FacturacionPage() {
   const [filtroMes,   setFiltroMes]   = useState("todos");
   const [form, setForm]               = useState(FORM_VACIO);
   const [items, setItems]             = useState<ItemFactura[]>([{ ...ITEM_VACIO }]);
+  const [pendDespacho, setPendDespacho] = useState(0);
+  useEffect(() => {
+    // Reservas de Despachador sin factura asociada
+    supabase.from("reservas").select("id", { count: "exact", head: true })
+      .eq("origen_despacho", true)
+      .then(async (res: any) => {
+        const count = (res.count as number) || 0;
+        if (!count) { setPendDespacho(0); return; }
+        const res2 = await supabase
+          .from("facturas").select("id", { count: "exact", head: true })
+          .not("reserva_id", "is", null);
+        const facturadas = (res2.count as number) || 0;
+        setPendDespacho(Math.max(0, count - facturadas));
+      });
+  }, []);
 
   const f = (k: keyof typeof FORM_VACIO) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -352,6 +367,22 @@ export default function FacturacionPage() {
           {mostrarForm ? "✕ Cancelar" : "+ Nuevo comprobante"}
         </button>
       </div>
+
+      {/* ALERTA DESPACHADOR */}
+      {pendDespacho > 0 && (
+        <div className="rounded-2xl border-2 border-purple-300 bg-purple-50 p-4 flex items-center gap-3">
+          <span className="text-2xl">⚡</span>
+          <div>
+            <p className="text-xs font-black uppercase tracking-widest text-purple-800">Servicios de Despachador pendientes de facturar</p>
+            <p className="text-xs text-purple-700 mt-0.5">
+              <b>{pendDespacho}</b> servicio{pendDespacho > 1 ? "s" : ""} generado{pendDespacho > 1 ? "s" : ""} por Despachador sin comprobante — revisa en Programación y emite la factura correspondiente.
+            </p>
+          </div>
+          <a href="/despachador" className="ml-auto px-3 py-1.5 rounded-xl text-xs font-bold bg-purple-100 text-purple-700 hover:bg-purple-200 whitespace-nowrap">
+            Ver despachador →
+          </a>
+        </div>
+      )}
 
       {/* ALERTAS */}
       {(vencidas > 0 || detPendientes > 0) && (

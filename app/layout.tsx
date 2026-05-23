@@ -119,6 +119,11 @@ const Ic = {
       <path d="M20.42 4.58a5.4 5.4 0 0 0-7.65 0l-.77.78-.77-.78a5.4 5.4 0 0 0-7.65 0C1.46 6.7 1.33 10.28 4 13l8 8 8-8c2.67-2.72 2.54-6.3.42-8.42z"/>
     </svg>
   ),
+  Zap: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+    </svg>
+  ),
   Receipt: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
       <path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1-2-1z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="12" y2="17"/>
@@ -229,6 +234,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
   {
     grupo: "Operaciones",
     items: [
+      { href: "/despachador",  label: "Despachador",  sub: "Servicios urgentes",    icon: Ic.Zap,           modulo: "despachador"  },
       { href: "/calendario",   label: "Calendario",   sub: "Servicios del día",     icon: Ic.Calendar,      modulo: "dashboard"    },
       { href: "/programacion", label: "Programación", sub: "Core del sistema",      icon: Ic.CalendarRange, modulo: "programacion" },
       { href: "/seguimiento",  label: "Seguimiento",  sub: "Estado en tiempo real", icon: Ic.Search,        modulo: "seguimiento"  },
