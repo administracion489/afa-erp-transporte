@@ -842,7 +842,7 @@ export default function ConductorApp() {
 
           {/* PIN */}
           <div style={{ marginTop: 22 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
               <Eyebrow>PIN de acceso</Eyebrow>
               <span style={{
                 fontSize: 11, fontWeight: 600, color: "var(--c-mute)",
@@ -851,46 +851,35 @@ export default function ConductorApp() {
                 4 díg.
               </span>
             </div>
-
-            {/* Input nativo oculto — activa el teclado del dispositivo */}
-            <input
-              ref={pinInputRef}
-              type="tel"
-              inputMode="numeric"
-              maxLength={4}
-              value={pin}
-              autoComplete="one-time-code"
-              onChange={e => {
-                const val = e.target.value.replace(/\D/g, "").slice(0, 4);
-                setPin(val);
-                setLoginErr("");
-                if (val.length === 4) setTimeout(() => login(), 120);
-              }}
-              style={{
-                position: "absolute", opacity: 0, pointerEvents: "none",
-                width: 1, height: 1, border: "none", padding: 0,
-              }}
-            />
-
-            {/* Dots — tap para abrir teclado nativo */}
-            <button
-              type="button"
-              onClick={() => pinInputRef.current?.focus()}
-              style={{
-                width: "100%", background: "transparent", border: "none",
-                padding: "20px 0 6px", cursor: "pointer",
-                display: "flex", justifyContent: "center", gap: 16,
-              }}
-            >
-              {[0, 1, 2, 3].map(i => (
-                <div key={i} style={{
-                  width: 15, height: 15, borderRadius: "50%",
-                  background: i < pin.length ? "var(--c-navy)" : "transparent",
-                  border: `2px solid ${i < pin.length ? "var(--c-navy)" : "var(--c-line)"}`,
-                  transition: "background 0.15s, border-color 0.15s",
-                }} />
-              ))}
-            </button>
+            <div style={{
+              padding: "6px 4px 12px",
+              borderBottom: `1.5px solid ${pin.length === 4 ? "var(--c-navy)" : "var(--c-line)"}`,
+              marginBottom: 18,
+              transition: "border-color 0.2s",
+            }}>
+              <input
+                ref={pinInputRef}
+                type="password"
+                inputMode="numeric"
+                maxLength={4}
+                value={pin}
+                autoComplete="one-time-code"
+                placeholder="••••"
+                onChange={e => {
+                  const val = e.target.value.replace(/\D/g, "").slice(0, 4);
+                  setPin(val);
+                  setLoginErr("");
+                  if (val.length === 4) setTimeout(() => login(), 120);
+                }}
+                onKeyDown={e => e.key === "Enter" && login()}
+                style={{
+                  fontFamily: FONT_MONO, fontSize: 32, fontWeight: 700,
+                  color: "var(--c-ink)", letterSpacing: 10,
+                  width: "100%", border: "none", outline: "none",
+                  background: "transparent",
+                }}
+              />
+            </div>
           </div>
 
           {/* Error */}
