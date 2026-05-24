@@ -67,7 +67,7 @@ const FORM_VACIO = {
   sctr_salud_venc: "", sctr_pension_venc: "",
   examen_medico_venc: "", psicosometrico_venc: "", antecedentes_venc: "",
   vida_ley: false, vida_ley_venc: "",
-  foto_url: "", estado: "activo", observaciones: "",
+  foto_url: "", estado: "disponible", observaciones: "",
   pin_acceso: "", activo_app: false,
 };
 
@@ -241,7 +241,7 @@ export default function ConductoresPage() {
       examen_medico_venc: c.examen_medico_venc || "", psicosometrico_venc: c.psicosometrico_venc || "",
       antecedentes_venc: c.antecedentes_venc || "",
       vida_ley: c.vida_ley || false, vida_ley_venc: c.vida_ley_venc || "",
-      foto_url: c.foto_url || "", estado: c.estado || "activo", observaciones: c.observaciones || "",
+      foto_url: c.foto_url || "", estado: c.estado || "disponible", observaciones: c.observaciones || "",
       pin_acceso: c.pin_acceso || "", activo_app: c.activo_app || false,
     });
     setEditandoId(c.id); setMostrarForm(true);
