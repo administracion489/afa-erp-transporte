@@ -1,4 +1,4 @@
-package com.transportesafa.erp;
+package com.transportesafa.conductor;
 
 import com.getcapacitor.BridgeActivity;
 

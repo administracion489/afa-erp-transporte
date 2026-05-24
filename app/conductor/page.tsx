@@ -204,6 +204,7 @@ export default function ConductorApp() {
   const [iniciando,          setIniciando]          = useState(false);
   const [inicioViaje,        setInicioViaje]        = useState<Date | null>(null);
   const [restaurandoServicio,setRestaurandoServicio] = useState(false);
+  const pinInputRef      = useRef<HTMLInputElement | null>(null);
   const watchIdRef       = useRef<number | null>(null);
   const intervalRef      = useRef<NodeJS.Timeout | null>(null);
   const posRef           = useRef<GeolocationPosition | null>(null);
@@ -818,7 +819,12 @@ export default function ConductorApp() {
             <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 15, color: "var(--c-mute)", flexShrink: 0 }}>PE</span>
             <input
               type="tel" inputMode="numeric" maxLength={8} value={dni}
-              onChange={e => { setDni(e.target.value.replace(/\D/g, "").slice(0, 8)); setLoginErr(""); }}
+              onChange={e => {
+                const val = e.target.value.replace(/\D/g, "").slice(0, 8);
+                setDni(val);
+                setLoginErr("");
+                if (val.length === 8) setTimeout(() => pinInputRef.current?.focus(), 80);
+              }}
               placeholder="12345678"
               style={{
                 flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent",
@@ -836,43 +842,55 @@ export default function ConductorApp() {
 
           {/* PIN */}
           <div style={{ marginTop: 22 }}>
-            <Eyebrow>PIN de acceso</Eyebrow>
-            <div style={{ display: "flex", justifyContent: "center", gap: 14, marginTop: 14, marginBottom: 18 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <Eyebrow>PIN de acceso</Eyebrow>
+              <span style={{
+                fontSize: 11, fontWeight: 600, color: "var(--c-mute)",
+                background: "var(--c-soft)", borderRadius: 6, padding: "2px 7px",
+              }}>
+                4 díg.
+              </span>
+            </div>
+
+            {/* Input nativo oculto — activa el teclado del dispositivo */}
+            <input
+              ref={pinInputRef}
+              type="tel"
+              inputMode="numeric"
+              maxLength={4}
+              value={pin}
+              autoComplete="one-time-code"
+              onChange={e => {
+                const val = e.target.value.replace(/\D/g, "").slice(0, 4);
+                setPin(val);
+                setLoginErr("");
+                if (val.length === 4) setTimeout(() => login(), 120);
+              }}
+              style={{
+                position: "absolute", opacity: 0, pointerEvents: "none",
+                width: 1, height: 1, border: "none", padding: 0,
+              }}
+            />
+
+            {/* Dots — tap para abrir teclado nativo */}
+            <button
+              type="button"
+              onClick={() => pinInputRef.current?.focus()}
+              style={{
+                width: "100%", background: "transparent", border: "none",
+                padding: "20px 0 6px", cursor: "pointer",
+                display: "flex", justifyContent: "center", gap: 16,
+              }}
+            >
               {[0, 1, 2, 3].map(i => (
                 <div key={i} style={{
-                  width: 16, height: 16, borderRadius: 16,
+                  width: 15, height: 15, borderRadius: "50%",
                   background: i < pin.length ? "var(--c-navy)" : "transparent",
                   border: `2px solid ${i < pin.length ? "var(--c-navy)" : "var(--c-line)"}`,
-                  transition: "all 0.15s",
+                  transition: "background 0.15s, border-color 0.15s",
                 }} />
               ))}
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-              {[1, 2, 3, 4, 5, 6, 7, 8, 9, "", "0", "DEL"].map((n, i) => (
-                <button
-                  key={i}
-                  onClick={() => {
-                    if (n === "DEL") setPin(p => p.slice(0, -1));
-                    else if (n !== "" && pin.length < 4) setPin(p => p + n);
-                    setLoginErr("");
-                  }}
-                  style={{
-                    padding: "clamp(12px, 4vw, 17px) 0",
-                    borderRadius: 14, border: "1px solid var(--c-line)",
-                    fontFamily: n === "DEL" ? FONT_SANS : FONT_MONO,
-                    fontSize: n === "DEL" ? 13 : "clamp(18px, 5vw, 22px)", fontWeight: 700,
-                    background: n === "" ? "transparent" : "var(--c-surface)",
-                    color: n === "DEL" ? "var(--c-mute)" : "var(--c-ink)",
-                    cursor: n === "" ? "default" : "pointer",
-                    visibility: n === "" ? "hidden" : "visible",
-                    boxShadow: n !== "" ? "0 1px 2px rgba(0,0,0,0.03)" : "none",
-                    touchAction: "manipulation",
-                  }}
-                >
-                  {n === "DEL" ? "←" : n}
-                </button>
-              ))}
-            </div>
+            </button>
           </div>
 
           {/* Error */}
@@ -901,8 +919,62 @@ export default function ConductorApp() {
           </div>
         </div>
 
+        {/* ── Beneficios ── */}
+        <div style={{ marginTop: 28 }}>
+          <p style={{
+            margin: "0 0 14px", textAlign: "center",
+            fontSize: 10, fontWeight: 700, letterSpacing: 1.4,
+            textTransform: "uppercase", color: "var(--c-mute)",
+          }}>
+            Tu jornada en una app
+          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+            {[
+              {
+                icon: <IconRoute size={22} color="var(--c-navy)" />,
+                titulo: "Ruta en vivo",
+                sub: "GPS y paradas",
+              },
+              {
+                icon: <IconScan size={22} color="var(--c-navy)" />,
+                titulo: "Escanear QR",
+                sub: "Embarque rápido",
+              },
+              {
+                icon: <IconShield size={22} color="var(--c-navy)" />,
+                titulo: "Pre-viaje",
+                sub: "Checklist seguro",
+              },
+            ].map(b => (
+              <div key={b.titulo} style={{
+                background: "var(--c-surface)", border: "1px solid var(--c-line)",
+                borderRadius: 16, padding: "14px 10px 12px",
+                display: "flex", flexDirection: "column", alignItems: "center",
+                gap: 8, textAlign: "center",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
+              }}>
+                <div style={{
+                  width: 44, height: 44, borderRadius: 13,
+                  background: "var(--c-navy-tint)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  {b.icon}
+                </div>
+                <div>
+                  <p style={{ margin: 0, fontSize: 12, fontWeight: 800, color: "var(--c-ink)", lineHeight: 1.2 }}>
+                    {b.titulo}
+                  </p>
+                  <p style={{ margin: "3px 0 0", fontSize: 11, color: "var(--c-mute)", fontWeight: 500 }}>
+                    {b.sub}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
         {/* Soporte */}
-        <p style={{ margin: "20px 0 0", color: "var(--c-mute)", fontSize: 12, textAlign: "center", fontFamily: FONT_SANS }}>
+        <p style={{ margin: "24px 0 32px", color: "var(--c-mute)", fontSize: 12, textAlign: "center", fontFamily: FONT_SANS }}>
           ¿Problemas para entrar? Llama a soporte ·{" "}
           <a href="tel:966707225" style={{ color: "var(--c-navy)", fontWeight: 700, textDecoration: "none" }}>
             966 707 225

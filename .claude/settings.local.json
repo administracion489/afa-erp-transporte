@@ -18,7 +18,15 @@
       "Bash(powershell -Command \"Select-String -Path 'app/conductor/page.tsx' -Pattern 'ubicaciones_gps|insert|payload' -Context 3,3 | Select-Object -First 80\")",
       "Bash(ls -la \"C:\\\\Users\\\\trans\\\\Downloads\\\\App onboarding \\(2\\)\\\\\")",
       "PowerShell(head -50)",
-      "Bash(npx cap *)"
+      "Bash(npx cap *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\trans\" -Recurse -Filter \"*.jks\" -ErrorAction SilentlyContinue)",
+      "Bash(find /mnt/c/Users/trans -name \"*.jks\" 2>/dev/null)",
+      "PowerShell(Get-Item \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\android\\\\app\\\\release\\\\app-release.aab\" | Select-Object FullName, @{N=\"Tamaño MB\";E={[math]::Round\\($_.Length/1MB, 1\\)}}, LastWriteTime)",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\android\" -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -match \"signing|key|properties\" } | Select-Object FullName)",
+      "PowerShell(Get-Command java -ErrorAction SilentlyContinue)",
+      "PowerShell($env:JAVA_HOME)",
+      "PowerShell($env:ANDROID_HOME)",
+      "PowerShell($env:JAVA_HOME = \"D:\\\\APLICACIONES ANDROID\\\\jbr\"; $env:PATH = \"D:\\\\APLICACIONES ANDROID\\\\jbr\\\\bin;\" + $env:PATH; Set-Location \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\android\"; .\\\\gradlew bundleRelease 2>&1)"
     ]
   }
 }
