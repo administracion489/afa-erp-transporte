@@ -10,7 +10,14 @@
       "Bash(git add *)",
       "Bash(git restore *)",
       "Bash(git commit *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\" -Depth 0 -Directory)",
+      "Bash(Select-Object Name)",
+      "Bash(powershell -Command \"Get-ChildItem -Path app -Filter '*.tsx' -Recurse | Select-String -Pattern '\\\\.from\\\\\\(' -List | Select-Object Path, MatchInfo | Format-Table -AutoSize\")",
+      "Bash(powershell -Command \"Select-String -Path 'app/conductor/page.tsx', 'app/monitoreo/page.tsx' -Pattern '\\\\.from\\\\\\(|insert|UPDATE|SELECT' -Context 0,2 | head -100\")",
+      "Bash(powershell -Command \"Select-String -Path 'app/conductor/page.tsx' -Pattern 'ubicaciones_gps|insert|payload' -Context 3,3 | Select-Object -First 80\")",
+      "Bash(ls -la \"C:\\\\Users\\\\trans\\\\Downloads\\\\App onboarding \\(2\\)\\\\\")",
+      "PowerShell(head -50)"
     ]
   }
 }

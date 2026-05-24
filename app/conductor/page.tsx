@@ -381,34 +381,24 @@ export default function ConductorApp() {
     }
   }
 
-  // ─── Reiniciar GPS tras restaurar servicio desde localStorage ───────────────
+  // ─── Restaurar servicio desde localStorage (el GPS ya corre desde login) ────
   useEffect(() => {
     if (!restaurandoServicio) return;
     setRestaurandoServicio(false);
-    if (!navigator.geolocation) return;
-    if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    watchIdRef.current = navigator.geolocation.watchPosition(
-      (pos) => { posRef.current = pos; setPosActual(pos); },
-      (e)   => setGpsError(e.message),
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
-    );
-    intervalRef.current = setInterval(() => {
-      if (posRef.current) enviarUbicacion(posRef.current);
-    }, 10000);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // GPS watchPosition ya está activo desde el useEffect de login — no reiniciar
   }, [restaurandoServicio]);
 
   // ─── GPS + TRACKING ──────────────────────────────────────────────────────────
 
   // Usa refs → nunca tiene closures obsoletos aunque el intervalo se cree antes del render
-  const enviarUbicacion = useCallback(async (pos: GeolocationPosition, estado = "en_ruta") => {
+  const enviarUbicacion = useCallback(async (pos: GeolocationPosition, estado = "") => {
     const vid  = vehiculoIdRef.current;
     const cond = conductorRef.current;
     const res  = reservaActivaRef.current;
-    if (!vid || !cond) return;
+    if (!cond) return;                        // sólo necesitamos el conductor
+    const estadoFinal = estado || (vid ? "en_ruta" : "disponible");
     const payload = {
-      vehiculo_id:  vid,
+      vehiculo_id:  vid || null,              // null hasta que seleccione vehículo
       conductor_id: cond.id,
       reserva_id:   res?.id || null,
       lat:          pos.coords.latitude,
@@ -416,7 +406,7 @@ export default function ConductorApp() {
       velocidad:    pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0,
       rumbo:        pos.coords.heading || 0,
       precision_m:  pos.coords.accuracy,
-      estado,
+      estado:       estadoFinal,
       created_at:   new Date().toISOString(),
     };
     const { error } = await supabase.from("ubicaciones_gps").insert(payload);
@@ -426,6 +416,30 @@ export default function ConductorApp() {
     setVelocidad(pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ─── GPS desde login: activo en todo momento mientras el conductor esté logueado ─
+  useEffect(() => {
+    if (!conductor) return;
+    if (!navigator.geolocation) { setGpsError("GPS no disponible en este dispositivo"); return; }
+    // Limpiar instancias previas por si acaso
+    if (watchIdRef.current !== null) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
+    if (intervalRef.current)         { clearInterval(intervalRef.current); intervalRef.current = null; }
+    // Arrancar watchPosition continuo
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (pos) => { posRef.current = pos; setPosActual(pos); },
+      (e)   => setGpsError(e.message),
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+    );
+    // Enviar ubicación cada 15 s (sin vehículo → 🧑 persona; con vehículo → 🚌 bus)
+    intervalRef.current = setInterval(() => {
+      if (posRef.current) enviarUbicacion(posRef.current);
+    }, 15000);
+    return () => {
+      if (watchIdRef.current !== null) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
+      if (intervalRef.current)         { clearInterval(intervalRef.current); intervalRef.current = null; }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conductor?.id]);
 
   async function iniciarRecorrido(reserva: Reserva) {
     if (!vehiculoId) { alert("Selecciona el vehículo primero"); return; }
@@ -440,14 +454,7 @@ export default function ConductorApp() {
         const ahora = new Date();
         setInicioViaje(ahora);
         saveServicio({ reservaId: reserva.id, vehiculoId: vehiculoId!, paradaIdx: 0, inicioViaje: ahora.toISOString() });
-        watchIdRef.current = navigator.geolocation.watchPosition(
-          (p) => { posRef.current = p; setPosActual(p); },
-          (e) => setGpsError(e.message),
-          { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
-        );
-        intervalRef.current = setInterval(() => {
-          if (posRef.current) enviarUbicacion(posRef.current);
-        }, 10000);
+        // GPS watchPosition ya está activo desde el login — no reiniciar
       },
       (e) => { setIniciando(false); alert(`GPS: ${e.message}`); },
       { enableHighAccuracy: true, timeout: 15000 }
@@ -455,9 +462,8 @@ export default function ConductorApp() {
   }
 
   function finalizarRecorridoConfirmado() {
-    if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
-    if (intervalRef.current) clearInterval(intervalRef.current);
     if (posRef.current) enviarUbicacion(posRef.current, "finalizado");
+    // GPS continúa activo en background desde el login
     clearServicio();   // eliminar servicio guardado al finalizar correctamente
     setEnRuta(false); setReservaActiva(null); setParadas([]); setPasajeros([]);
     setParadaIdx(0); setVelocidad(0); setTotalEnvios(0); setTab("ruta");

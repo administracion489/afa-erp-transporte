@@ -1,11 +1,11 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.transportesafa.erp',
-  appName: 'AFA ERP Transporte',
+  appId: 'com.transportesafa.pasajero',
+  appName: 'AFA Pasajeros',
   webDir: 'out',
   server: {
-    url: 'https://transportesafa.com',
+    url: 'https://transportesafa.com/pasajero',
     cleartext: false,
   },
 };

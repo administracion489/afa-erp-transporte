@@ -1,10 +1,10 @@
 apply plugin: 'com.android.application'
 
 android {
-    namespace = "com.transportesafa.erp"
+    namespace = "com.transportesafa.pasajero"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.transportesafa.erp"
+        applicationId "com.transportesafa.pasajero"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1

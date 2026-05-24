@@ -8,7 +8,7 @@ import "mapbox-gl/dist/mapbox-gl.css";
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || '';
 
 type UbicacionGPS = {
-  id: number; vehiculo_id: number; conductor_id: number | null;
+  id: number; vehiculo_id: number | null; conductor_id: number | null;
   lat: number; lng: number; velocidad: number; rumbo: number;
   estado: string; timestamp: string;
 };
@@ -46,7 +46,7 @@ function esVehiculoEventual(vehiculoId: number, reservasHoy: ReservaHoy[]): bool
 export default function MonitoreoPage() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map          = useRef<mapboxgl.Map | null>(null);
-  const markers      = useRef<Record<number, mapboxgl.Marker>>({});
+  const markers      = useRef<Record<string, mapboxgl.Marker>>({});
 
   const [ubicaciones,  setUbicaciones]  = useState<UbicacionGPS[]>([]);
   const [vehiculos,    setVehiculos]    = useState<Vehiculo[]>([]);
@@ -81,10 +81,13 @@ export default function MonitoreoPage() {
       .order("timestamp", { ascending: false })
       .limit(500);
     if (!data) return;
-    const latest: Record<number, UbicacionGPS> = {};
+    // Clave: conductor_id preferido (estable aunque cambie de vehículo), fallback vehiculo_id
+    const latest: Record<string, UbicacionGPS> = {};
     data.forEach(u => {
-      if (!latest[u.vehiculo_id] || new Date(u.timestamp) > new Date(latest[u.vehiculo_id].timestamp)) {
-        latest[u.vehiculo_id] = u;
+      const key = u.conductor_id != null ? `c${u.conductor_id}` : u.vehiculo_id != null ? `v${u.vehiculo_id}` : null;
+      if (!key) return;
+      if (!latest[key] || new Date(u.timestamp) > new Date(latest[key].timestamp)) {
+        latest[key] = u;
       }
     });
     setUbicaciones(Object.values(latest));
@@ -159,24 +162,39 @@ export default function MonitoreoPage() {
   useEffect(() => {
     if (!mapListo || !map.current) return;
     ubicaciones.forEach(u => {
-      const veh  = vehiculos.find(v => v.id === u.vehiculo_id);
-      const cond = conductores.find(c => c.id === u.conductor_id);
-      const min  = minutosDesde(u.timestamp);
-      const color = estadoColor(min);
-      const esSOS = u.estado === "sos";
+      const veh      = vehiculos.find(v => v.id === u.vehiculo_id);
+      const cond     = conductores.find(c => c.id === u.conductor_id);
+      const min      = minutosDesde(u.timestamp);
+      const color    = estadoColor(min);
+      const esSOS    = u.estado === "sos";
+      const sinVeh   = u.vehiculo_id == null;
+      // Clave estable: conductor_id si existe, sino vehiculo_id
+      const key = u.conductor_id != null ? `c${u.conductor_id}` : `v${u.vehiculo_id}`;
+
+      // Crear elemento del marcador
       const el = document.createElement("div");
-      el.style.cssText = "position:relative;width:" + (esSOS ? "52px" : "44px") + ";height:" + (esSOS ? "52px" : "44px") + ";border-radius:50%;background:" + (esSOS ? "#dc2626" : color) + ";border:3px solid " + (esSOS ? "#fca5a5" : "white") + ";box-shadow:0 2px 10px rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:18px;";
-      el.innerHTML = esSOS ? "S" : "B";
-      const popup = new mapboxgl.Popup({ offset: 25, closeButton: true })
-        .setHTML("<div style='font-family:sans-serif;min-width:180px;padding:4px'><div style='font-weight:900;font-size:14px;color:#0b315f;margin-bottom:4px'>" + (veh?.placa || "#" + u.vehiculo_id) + (esSOS ? " SOS" : "") + "</div><div style='font-size:12px;color:#374151;margin-bottom:4px'>" + (cond?.nombre || "-") + "</div><div style='font-size:12px;color:#374151;margin-bottom:4px'>" + (u.velocidad || 0) + " km/h</div><div style='font-size:11px;font-weight:700;color:" + color + ";'>" + estadoLabel(min) + "</div>" + (cond?.telefono ? "<a href='tel:" + cond.telefono + "' style='display:block;margin-top:8px;background:#0b315f;color:white;text-align:center;padding:6px;border-radius:8px;font-size:11px;text-decoration:none;'>" + cond.telefono + "</a>" : "") + "</div>");
-      if (markers.current[u.vehiculo_id]) {
-        markers.current[u.vehiculo_id].setLngLat([Number(u.lng), Number(u.lat)]);
+      if (sinVeh) {
+        // Conductor sin vehículo → ícono persona
+        el.style.cssText = "width:36px;height:36px;border-radius:50%;background:" + color + ";border:2px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:18px;";
+        el.innerHTML = "🧑";
       } else {
+        el.style.cssText = "position:relative;width:" + (esSOS ? "52px" : "44px") + ";height:" + (esSOS ? "52px" : "44px") + ";border-radius:50%;background:" + (esSOS ? "#dc2626" : color) + ";border:3px solid " + (esSOS ? "#fca5a5" : "white") + ";box-shadow:0 2px 10px rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:18px;";
+        el.innerHTML = esSOS ? "S" : "B";
+      }
+
+      const popupHtml = sinVeh
+        ? "<div style='font-family:sans-serif;min-width:160px;padding:4px'><div style='font-weight:900;font-size:14px;color:#0b315f;margin-bottom:4px'>" + (cond?.nombre || "Conductor") + "</div><div style='font-size:11px;color:#9ca3af;margin-bottom:4px'>Sin vehículo asignado</div><div style='font-size:11px;font-weight:700;color:" + color + ";'>" + estadoLabel(min) + "</div>" + (cond?.telefono ? "<a href='tel:" + cond.telefono + "' style='display:block;margin-top:8px;background:#0b315f;color:white;text-align:center;padding:6px;border-radius:8px;font-size:11px;text-decoration:none;'>" + cond.telefono + "</a>" : "") + "</div>"
+        : "<div style='font-family:sans-serif;min-width:180px;padding:4px'><div style='font-weight:900;font-size:14px;color:#0b315f;margin-bottom:4px'>" + (veh?.placa || "#" + u.vehiculo_id) + (esSOS ? " ⚠ SOS" : "") + "</div><div style='font-size:12px;color:#374151;margin-bottom:4px'>" + (cond?.nombre || "-") + "</div><div style='font-size:12px;color:#374151;margin-bottom:4px'>" + (u.velocidad || 0) + " km/h</div><div style='font-size:11px;font-weight:700;color:" + color + ";'>" + estadoLabel(min) + "</div>" + (cond?.telefono ? "<a href='tel:" + cond.telefono + "' style='display:block;margin-top:8px;background:#0b315f;color:white;text-align:center;padding:6px;border-radius:8px;font-size:11px;text-decoration:none;'>" + cond.telefono + "</a>" : "") + "</div>";
+
+      if (markers.current[key]) {
+        markers.current[key].setLngLat([Number(u.lng), Number(u.lat)]);
+      } else {
+        const popup = new mapboxgl.Popup({ offset: 25, closeButton: true }).setHTML(popupHtml);
         const marker = new mapboxgl.Marker({ element: el })
           .setLngLat([Number(u.lng), Number(u.lat)])
           .setPopup(popup)
           .addTo(map.current!);
-        markers.current[u.vehiculo_id] = marker;
+        markers.current[key] = marker;
       }
     });
   }, [ubicaciones, vehiculos, conductores, mapListo]);
@@ -199,7 +217,8 @@ export default function MonitoreoPage() {
     if (!u || !map.current) return;
     setSelVehiculo(vid);
     map.current.flyTo({ center: [Number(u.lng), Number(u.lat)], zoom: 15, duration: 1200 });
-    markers.current[vid]?.togglePopup();
+    const key = u.conductor_id != null ? `c${u.conductor_id}` : `v${vid}`;
+    markers.current[key]?.togglePopup();
   };
 
   const atenderSOS = async (id: number) => {
