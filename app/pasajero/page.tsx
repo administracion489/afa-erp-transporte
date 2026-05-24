@@ -844,42 +844,42 @@ export default function AppPasajero() {
       {/* ── MODAL ELEGIR APP DE NAVEGACIÓN ── */}
       {mostrarNavModal && (
         <div className="afa-modal-overlay" onClick={() => setMostrarNavModal(false)}>
-          <div className="afa-modal-gps" onClick={e => e.stopPropagation()}>
+          <div className="afa-modal-sheet" onClick={e => e.stopPropagation()}>
             <div className="afa-modal-handle" />
-            <div className="afa-modal-header">
-              <div className="afa-modal-ico" style={{ background: "#EFF6FF" }}>🧭</div>
+            <div style={{ padding: "0 24px 8px", textAlign: "center" }}>
+              <div style={{ width: 52, height: 52, borderRadius: 16, background: "var(--navy-tint)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}>
+                <IconNav sz={24} c="var(--navy)" />
+              </div>
               <div className="afa-modal-title">¿Cómo quieres llegar?</div>
               <div className="afa-modal-desc">
-                Elige tu app de navegación para llegar a{" "}
-                <strong>{miParada?.nombre || "tu paradero"}</strong>
+                Elige tu app para llegar a <strong style={{ color: "var(--ink)" }}>{miParada?.nombre || "tu paradero"}</strong>
               </div>
             </div>
-            <div className="afa-modal-btns">
+            <div className="afa-modal-btns" style={{ marginTop: 16 }}>
               <button
-                className="afa-waze"
-                style={{ width: "100%", padding: "16px 0", fontSize: 16, borderRadius: 14 }}
                 onClick={() => { abrirWaze(); setMostrarNavModal(false); }}
+                style={{ width: "100%", padding: "15px 20px", borderRadius: 14, border: "none", background: "#33CCFF", color: "#082035", fontFamily: "var(--f)", fontWeight: 800, fontSize: 15, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}
               >
-                <svg width="20" height="20" viewBox="0 0 36 36">
-                  <ellipse cx="18" cy="16" rx="9" ry="9" fill="rgba(255,255,255,.4)"/>
+                <svg width="22" height="22" viewBox="0 0 36 36" style={{ flexShrink: 0 }}>
+                  <circle cx="18" cy="18" r="18" fill="#33CCFF"/>
+                  <ellipse cx="18" cy="16" rx="8" ry="8" fill="white"/>
                   <circle cx="14.5" cy="14.5" r="2" fill="#082035"/>
                   <circle cx="21.5" cy="14.5" r="2" fill="#082035"/>
                   <path d="M14 19 Q18 23 22 19" stroke="#082035" strokeWidth="1.8" fill="none" strokeLinecap="round"/>
                 </svg>
-                Waze
+                Abrir en Waze
               </button>
               <button
-                className="afa-maps"
-                style={{ width: "100%", padding: "16px 0", fontSize: 16, borderRadius: 14 }}
                 onClick={() => { abrirMaps(); setMostrarNavModal(false); }}
+                style={{ width: "100%", padding: "15px 20px", borderRadius: 14, border: "none", background: "var(--surface)", color: "var(--ink)", fontFamily: "var(--f)", fontWeight: 800, fontSize: 15, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, boxShadow: "inset 0 0 0 1.5px var(--line)" }}
               >
-                <svg width="14" height="18" viewBox="0 0 20 26">
-                  <path d="M10 0C4.48 0 0 4.48 0 10c0 7.5 10 16 10 16s10-8.5 10-16C20 4.48 15.52 0 10 0z" fill="#EA4335"/>
-                  <circle cx="10" cy="10" r="4" fill="white"/>
+                <svg width="18" height="18" viewBox="0 0 24 24" style={{ flexShrink: 0 }}>
+                  <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" fill="#EA4335"/>
+                  <circle cx="12" cy="9" r="2.5" fill="white"/>
                 </svg>
-                Google Maps
+                Abrir en Google Maps
               </button>
-              <button className="afa-modal-btn-secondary" onClick={() => setMostrarNavModal(false)}>
+              <button className="afa-modal-btn-s" onClick={() => setMostrarNavModal(false)}>
                 Cancelar
               </button>
             </div>
