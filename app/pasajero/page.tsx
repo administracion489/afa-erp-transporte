@@ -756,21 +756,19 @@ export default function AppPasajero() {
             {/* DNI */}
             <Eyebrow>Documento de identidad</Eyebrow>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 4px 10px", borderBottom: `1.5px solid ${dniInput.length >= 7 ? "var(--navy)" : "var(--line)"}`, marginTop: 10, marginBottom: 16 }}>
-              <span style={{ fontFamily: "var(--m)", fontSize: 13, color: "var(--mute2)", fontWeight: 600 }}>PE</span>
+              <span style={{ fontFamily: "var(--m)", fontSize: 13, color: "var(--mute2)", fontWeight: 600, flexShrink: 0 }}>PE</span>
               <input
                 type="tel" inputMode="numeric" maxLength={8} value={dniInput}
                 onChange={e => { setDniInput(e.target.value.replace(/\D/g, "").slice(0, 8)); setLoginErr(""); }}
                 onKeyDown={e => e.key === "Enter" && login()}
                 placeholder="12345678"
-                style={{ fontFamily: "var(--m)", fontSize: 28, fontWeight: 700, color: "var(--ink)", letterSpacing: 4, flex: 1, border: "none", outline: "none", background: "transparent" }}
+                style={{ fontFamily: "var(--m)", fontSize: 26, fontWeight: 700, color: "var(--ink)", letterSpacing: 3, flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent" }}
               />
-              <Chip color="var(--navy)" bg="var(--navy-tint)">8 dígitos</Chip>
             </div>
 
             {/* PIN */}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ marginBottom: 10 }}>
               <Eyebrow>PIN de acceso</Eyebrow>
-              <span style={{ fontSize: 10, color: "var(--mute2)", fontWeight: 500 }}>Por defecto: últimos 4 del DNI</span>
             </div>
             <div style={{ padding: "8px 4px 12px", borderBottom: `1.5px solid ${pinInput.length === 4 ? "var(--navy)" : "var(--line)"}`, marginBottom: 18 }}>
               <input
@@ -1324,20 +1322,20 @@ export default function AppPasajero() {
 
                 {/* Pass fields grid */}
                 <div style={{ padding: "14px 20px 18px" }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 16, rowGap: 14 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 12, rowGap: 14 }}>
                     {[
                       { label: "Pasajero", value: pasajero.nombre, mono: false },
                       { label: "Empresa", value: pasajero.empresa || "—", mono: false },
                       { label: "DNI", value: pasajero.dni || "—", mono: true },
                       { label: "Fecha", value: getFechaLocal(), mono: false },
                       { label: "Paradero", value: miParada?.nombre || "—", mono: false },
-                      { label: "Hora · paradero", value: miParada?.hora_estimada || "—", mono: true },
+                      { label: "Hora", value: miParada?.hora_estimada || "—", mono: true },
                       { label: "Origen", value: (miParada?.reserva as any)?.origen || "—", mono: false },
                       { label: "Destino", value: (miParada?.reserva as any)?.destino || "—", mono: false },
                     ].map((f, i) => (
-                      <div key={i}>
+                      <div key={i} style={{ minWidth: 0 }}>
                         <Eyebrow>{f.label}</Eyebrow>
-                        <p style={{ margin: "4px 0 0", fontFamily: f.mono ? "var(--m)" : "var(--f)", fontWeight: 700, fontSize: 14, color: "var(--ink)", letterSpacing: f.mono ? 0.3 : -0.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.value}</p>
+                        <p style={{ margin: "4px 0 0", fontFamily: f.mono ? "var(--m)" : "var(--f)", fontWeight: 700, fontSize: 13, color: "var(--ink)", letterSpacing: f.mono ? 0.3 : -0.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.value}</p>
                       </div>
                     ))}
                     {/* Bus row */}
