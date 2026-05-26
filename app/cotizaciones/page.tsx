@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 
 type ParamCosto={tipo_vehiculo:string;nombre:string;capacidad:number;activo:boolean;icono:string|null;grupo_vehiculo:string|null;euronorm:string|null;usa_urea:boolean;consumo_urea_pct:number|null;tipo_combustible_1:string;rendimiento_1:number;pct_uso_1:number;tipo_combustible_2:string|null;rendimiento_2:number|null;pct_uso_2:number|null;n_neumaticos:number;costo_neumatico:number;vida_neumatico_km:number;mantenimiento_km:number;valor_compra:number;residual_pct:number;vida_util_anios:number;km_anio:number;seguro_anual:number;soat_anual:number;revision_semestral:number;permisos_anual:number;otros_fijos_mensual:number;conductor_dia:number;};
@@ -448,6 +448,56 @@ function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],veh
   win.document.close();
 }
 
+type PlaceResultCot={address:string;lat:number;lng:number;placeId:string;};
+
+function useGoogleMapsCot(){
+  const[loaded,setLoaded]=useState(false);
+  useEffect(()=>{
+    if(typeof window==="undefined")return;
+    if((window as any).google?.maps?.places){setLoaded(true);return;}
+    const ex=document.getElementById("gmaps-script");
+    if(ex){const h=()=>setLoaded(true);ex.addEventListener("load",h);return()=>ex.removeEventListener("load",h);}
+    const s=document.createElement("script");
+    s.id="gmaps-script";
+    s.src=`https://maps.googleapis.com/maps/api/js?key=${process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}&libraries=places&language=es&region=PE`;
+    s.async=true;s.defer=true;s.onload=()=>setLoaded(true);
+    document.head.appendChild(s);
+  },[]);
+  return loaded;
+}
+
+function PlacesInputCot({placeholder,value,onChange,onSelect,mapsLoaded}:{
+  placeholder:string;value:string;
+  onChange:(v:string)=>void;onSelect:(r:PlaceResultCot)=>void;
+  mapsLoaded:boolean;
+}){
+  const inputRef=useRef<HTMLInputElement>(null);
+  const acRef=useRef<any>(null);
+  const cls="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all pr-8";
+  useEffect(()=>{
+    if(!mapsLoaded||!inputRef.current||acRef.current)return;
+    acRef.current=new (window as any).google.maps.places.Autocomplete(inputRef.current,{
+      componentRestrictions:{country:"pe"},
+      fields:["formatted_address","geometry","place_id","name"],
+      types:["geocode","establishment"],
+    });
+    acRef.current.addListener("place_changed",()=>{
+      const p=acRef.current.getPlace();
+      if(!p.geometry?.location)return;
+      const address=p.formatted_address||p.name||"";
+      onChange(address);
+      onSelect({address,lat:p.geometry.location.lat(),lng:p.geometry.location.lng(),placeId:p.place_id||""});
+    });
+  },[mapsLoaded]);
+  return(
+    <div className="relative">
+      <input ref={inputRef} type="text" value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} className={cls+" bg-white"}/>
+      {value&&<button type="button" onClick={()=>{onChange("");onSelect({address:"",lat:0,lng:0,placeId:""});}} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-300 hover:text-gray-500 font-bold text-xs">✕</button>}
+      {!mapsLoaded&&<div className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3 h-3 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin"/>}
+    </div>
+  );
+}
+
 export default function CotizacionesPage(){
   const [clientes,setClientes]=useState<Cliente[]>([]);const [cotizas,setCotizas]=useState<Cotizacion[]>([]);const [tarifas,setTarifas]=useState<Tarifa[]>([]);const [flota,setFlota]=useState<VehiculoFlota[]>([]);const [paramsDB,setParamsDB]=useState<ParamCosto[]>([]);const [preciosDB,setPreciosDB]=useState<Record<string,number>>({});
   const [loading,setLoading]=useState(false);const [guardando,setGuardando]=useState(false);const [mostrarForm,setMostrarForm]=useState(false);const [editandoId,setEditandoId]=useState<number|null>(null);const [busqueda,setBusqueda]=useState("");const [filtroEst,setFiltroEst]=useState("todos");const [filtroModo,setFiltroModo]=useState("todos");
@@ -456,6 +506,23 @@ export default function CotizacionesPage(){
   const [modalPlantilla,setModalPlantilla]=useState<Cotizacion|null>(null);const [plantillaElegida,setPlantillaElegida]=useState("corporativo");
   const [pendDespacho,setPendDespacho]=useState(0);
   useEffect(()=>{supabase.from("reservas").select("id",{count:"exact",head:true}).eq("origen_despacho",true).is("cotizacion_id",null).then((res: any)=>setPendDespacho((res.count as number)||0));},[]);
+  const mapsLoaded=useGoogleMapsCot();
+  const [origenPlace,setOrigenPlace]=useState<{placeId:string}|null>(null);
+  const [destinoPlace,setDestinoPlace]=useState<{placeId:string}|null>(null);
+  const [kmBase,setKmBase]=useState<number>(0);
+  useEffect(()=>{
+    if(!mapsLoaded||!origenPlace?.placeId||!destinoPlace?.placeId)return;
+    const svc=new (window as any).google.maps.DistanceMatrixService();
+    svc.getDistanceMatrix({origins:[{placeId:origenPlace.placeId}],destinations:[{placeId:destinoPlace.placeId}],travelMode:(window as any).google.maps.TravelMode.DRIVING,unitSystem:(window as any).google.maps.UnitSystem.METRIC},(resp:any)=>{
+      const el=resp?.rows[0]?.elements[0];
+      if(el?.status==="OK")setKmBase(Math.round(el.distance.value/1000));
+    });
+  },[mapsLoaded,origenPlace?.placeId,destinoPlace?.placeId]);
+  useEffect(()=>{
+    if(kmBase<=0)return;
+    const mult=(form.tipo_servicio==="ida_retorno"||form.tipo_servicio==="transporte_personal")?2:1;
+    setForm(p=>({...p,km:String(kmBase*mult)}));
+  },[kmBase,form.tipo_servicio]);
 
   const f=(k:keyof typeof FORM0)=>(e:React.ChangeEvent<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>)=>setForm(p=>({...p,[k]:e.target.value}));
   useEffect(()=>{
@@ -478,7 +545,7 @@ export default function CotizacionesPage(){
   const updItem=(i:number,k:keyof ItemCot,v:string|number)=>setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:Number.isNaN(Number(v))?v:Number(v)}:it));
   const addItem=()=>setItems(p=>[...p,{...ITEM_VACIO}]);const delItem=(i:number)=>setItems(p=>p.filter((_,idx)=>idx!==i));
   const{subtotal,igv,total}=calcItems(items);
-  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid(DEFAULT_CONSID);setParadas([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);};
+  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid(DEFAULT_CONSID);setParadas([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setKmBase(0);};
 
   const selVeh=(id:string)=>{setForm(p=>({...p,vehiculo_flota_id:id}));if(!id)return;const v=flota.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_flota_id:id,equipamiento:v.equipamiento||"full_equipo"}));if(items[0]&&!items[0].descripcion&&v.placa)setItems(prev=>{const n=[...prev];n[0]={...n[0],descripcion:`Servicio de transporte — ${v.placa} ${v.categoria||""} ${v.marca||""} (${v.capacidad_pasajeros||"—"} pax)`};return n;});};
   const aplicarPrecio=(sinIGV:number,fuente:string,costoBase?:number)=>{const esFijo=form.modo_servicio==="fijo";const conIGV=sinIGV*(1+IGV);setItems(prev=>{const n=[...prev];n[0]={...n[0],precio_unit:Math.round(sinIGV*100)/100,descripcion:n[0].descripcion||`${esFijo?"Transporte fijo":"Servicio"} — ${form.origen}→${form.destino}`};return n;});if(costoBase)setForm(p=>({...p,costo_estimado:String(Math.round(costoBase*100)/100)}));if(esFijo)setForm(p=>({...p,precio_dia:String(Math.round(conIGV*100)/100)}));};
@@ -505,7 +572,7 @@ export default function CotizacionesPage(){
   const cambiarEstado=async(cot:Cotizacion,nEst:EstadoCot)=>{if(nEst==="aprobado"&&cot.estado!=="aprobado"){setModalAprob(cot);return;}await supabase.from("cotizaciones").update({estado:nEst}).eq("id",cot.id);cargar();};
   const confirmarAprob=async(tipo:string,numero:string)=>{if(!modalAprob)return;await supabase.from("cotizaciones").update({estado:"aprobado",tipo_aprobacion:tipo,numero_aprobacion:numero}).eq("id",modalAprob.id);if(modalAprob.tipo_vehiculo&&modalAprob.tipo_servicio&&modalAprob.equipamiento){const esFijo=modalAprob.modo_servicio==="fijo";await supabase.from("tarifario").upsert({origen:modalAprob.origen.toUpperCase(),destino:modalAprob.destino.toUpperCase(),tipo_vehiculo:modalAprob.tipo_vehiculo,equipamiento:modalAprob.equipamiento,tipo_servicio:modalAprob.tipo_servicio,modo:modalAprob.modo_servicio||"eventual",precio:esFijo?(Number(modalAprob.precio_dia||0)/1.18):Math.round(Number(modalAprob.precio_cliente)/1.18*100)/100,moneda:"PEN",confidencial:false,incluye_guia:false,incluye_peajes:false,incluye_alimentacion:false,notas:`Aprobada #${modalAprob.numero_cotizacion||modalAprob.id}`,activo:true},{onConflict:"origen,destino,tipo_vehiculo,equipamiento,tipo_servicio"});}setModalAprob(null);cargar();};
   const convertirAReserva=async(cot:Cotizacion)=>{if(cot.estado!=="aprobado"){alert("Solo cotizaciones aprobadas");return;}const{data:existe}=await supabase.from("reservas").select("id").eq("cotizacion_id",cot.id).maybeSingle();if(existe){alert("Ya fue convertida en reserva");return;}const ps=cot.paradas_json||[];const pI=ps.find(p=>p.tipo==="inicio");const pD=ps.find(p=>p.tipo==="destino");const{data:r,error}=await supabase.from("reservas").insert({cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:pI?.nombre||cot.origen,destino:pD?.nombre||cot.destino,precio_cliente:cot.precio_cliente,costo_proveedor:0,fecha_servicio:cot.fecha_servicio||new Date().toISOString().split("T")[0],hora_servicio:pI?.hora||cot.hora_ida||"06:00",estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:cot.paradas_json||null}).select().single();if(error){alert(error.message);return;}if(ps.length>0&&r){await supabase.from("paradas").insert([...ps.filter(p=>p.tipo==="inicio"),...ps.filter(p=>p.tipo==="intermedia"),...ps.filter(p=>p.tipo==="destino")].map((p,i)=>({reserva_id:r.id,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));}alert(`✅ Reserva creada${ps.length>0?` con ${ps.length} paradas`:""}`);cargar();};
-  const editarCot=(c:Cotizacion)=>{setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:c.estado||"pendiente",numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
+  const editarCot=(c:Cotizacion)=>{setOrigenPlace(null);setDestinoPlace(null);setKmBase(0);setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:c.estado||"pendiente",numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
   const abrirPDF=async(cot:Cotizacion,plantilla:string=plantillaElegida)=>{
     const cl=clientes.find(c=>c.id===cot.cliente_id);const veh=flota.find(v=>v.id===cot.vehiculo_flota_id);
     const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];
@@ -586,11 +653,26 @@ export default function CotizacionesPage(){
             </div>
 
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Ruta del servicio</p>
+              <div className="flex items-center justify-between border-b pb-1 mb-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Ruta del servicio</p>
+                {mapsLoaded?<span className="text-[9px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded-full border border-green-200">Google Maps activo</span>:<span className="text-[9px] text-gray-400 animate-pulse">Cargando Maps...</span>}
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <Campo label="Punto de recojo" req><input className={iCls()} placeholder="Av. República de Panamá 3623" value={form.origen} onChange={f("origen")}/></Campo>
-                <Campo label="Punto de destino" req><input className={iCls()} placeholder="Planta Cajamarquilla" value={form.destino} onChange={f("destino")}/></Campo>
-                <Campo label="Punto de retorno"><input className={iCls()} placeholder="Igual al origen" value={form.punto_retorno} onChange={f("punto_retorno")}/></Campo>
+                <Campo label="Punto de origen" req>
+                  <PlacesInputCot placeholder="Av. República de Panamá 3623" value={form.origen} mapsLoaded={mapsLoaded}
+                    onChange={v=>{setForm(p=>({...p,origen:v}));setOrigenPlace(null);setKmBase(0);}}
+                    onSelect={p=>{setOrigenPlace(p.placeId?{placeId:p.placeId}:null);if(p.address)setForm(prev=>({...prev,origen:p.address}));}}/>
+                </Campo>
+                <Campo label="Punto de destino" req>
+                  <PlacesInputCot placeholder="Planta Cajamarquilla" value={form.destino} mapsLoaded={mapsLoaded}
+                    onChange={v=>{setForm(p=>({...p,destino:v}));setDestinoPlace(null);setKmBase(0);}}
+                    onSelect={p=>{setDestinoPlace(p.placeId?{placeId:p.placeId}:null);if(p.address)setForm(prev=>({...prev,destino:p.address}));}}/>
+                </Campo>
+                <Campo label="Punto de retorno">
+                  <PlacesInputCot placeholder="Igual al origen" value={form.punto_retorno} mapsLoaded={mapsLoaded}
+                    onChange={v=>setForm(p=>({...p,punto_retorno:v}))}
+                    onSelect={p=>{if(p.placeId)setForm(prev=>({...prev,punto_retorno:p.address}));}}/>
+                </Campo>
                 <Campo label="Fecha de servicio"><input type="date" className={iCls()} value={form.fecha_servicio} onChange={f("fecha_servicio")}/></Campo>
                 <Campo label="Hora de ida"><input type="time" className={iCls()} value={form.hora_ida} onChange={f("hora_ida")}/></Campo>
                 <Campo label="Hora de retorno"><input type="time" className={iCls()} value={form.hora_retorno} onChange={f("hora_retorno")}/></Campo>
@@ -600,7 +682,7 @@ export default function CotizacionesPage(){
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Parámetros de costing</p>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <Campo label={esFijoForm?"Km diarios":"Km del servicio"} req><input type="number" min={0} className={iCls("font-mono")} placeholder="0" value={form.km} onChange={f("km")}/></Campo>
+                <Campo label={esFijoForm?"Km diarios":"Km del servicio"} req hint={kmBase>0?"📍 Calculado con Google Maps":undefined}><input type="number" min={0} className={iCls("font-mono"+(kmBase>0?" border-green-300 bg-green-50":""))} placeholder="0" value={form.km} onChange={e=>{setForm(p=>({...p,km:e.target.value}));setKmBase(0);}}/></Campo>
                 <Campo label="Días de conductor"><div className="flex items-center gap-1"><button onClick={()=>setDiasCond(Math.max(1,diasCond-1))} className="w-9 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold">-</button><span className="flex-1 text-center font-black text-[#0b315f]">{diasCond}</span><button onClick={()=>setDiasCond(Math.min(30,diasCond+1))} className="w-9 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold">+</button></div></Campo>
                 <Campo label="Peajes S/"><input type="number" min={0} className={iCls()} placeholder="0" value={peajesF||""} onChange={e=>setPeajesF(Number(e.target.value))}/></Campo>
                 <Campo label="Costo interno S/"><input type="number" min={0} className={iCls()} placeholder="0" value={form.costo_estimado} onChange={f("costo_estimado")}/></Campo>
