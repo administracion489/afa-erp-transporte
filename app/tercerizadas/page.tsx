@@ -18,6 +18,7 @@ type VehiculoTercero = {
   id: number; empresa_id: number; placa: string;
   categoria: string | null; marca: string | null; modelo: string | null;
   capacidad: number | null; estado: string;
+  foto_externa_url: string | null; foto_interna_url: string | null;
 };
 
 type ConductorTercero = {
@@ -109,7 +110,7 @@ const FORM_EMP = {
   venc_autorizacion: "", venc_habilitacion: "",
   estado: "activo", observaciones: "",
 };
-const FORM_VEH = { placa: "", categoria: "BUS", marca: "", modelo: "", capacidad: "", estado: "disponible" };
+const FORM_VEH = { placa: "", categoria: "BUS", marca: "", modelo: "", capacidad: "", estado: "disponible", foto_externa_url: "", foto_interna_url: "" };
 const FORM_COND = { nombre: "", dni: "", licencia: "", categoria_licencia: "A-IIb", vencimiento_licencia: "", telefono: "", estado: "disponible", pin_acceso: "", activo_app: false };
 const FORM_DOC = { vehiculo_id: "", tipo: "SOAT", numero: "", fecha_vencimiento: "", entidad_emisora: "", archivo_url: "", observaciones: "" };
 
@@ -136,6 +137,7 @@ export default function EmpresasTercerizadasPage() {
   const [formVeh,  setFormVeh]  = useState(FORM_VEH);
   const [formCond, setFormCond] = useState(FORM_COND);
   const [formDoc,  setFormDoc]  = useState(FORM_DOC);
+  const [subiendoFoto, setSubiendoFoto] = useState<"externa"|"interna"|null>(null);
 
   const fe = (k: keyof typeof FORM_EMP) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -234,6 +236,35 @@ export default function EmpresasTercerizadasPage() {
 
   // ── CRUD Vehículo tercero ─────────────────────────────────────────────────
 
+  const comprimirImagen = (file: File, maxW = 1200, maxH = 800, quality = 0.80): Promise<Blob> =>
+    new Promise((resolve, reject) => {
+      const img = new Image();
+      const objUrl = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(objUrl);
+        let { width, height } = img;
+        const ratio = Math.min(1, maxW / width, maxH / height);
+        width = Math.round(width * ratio);
+        height = Math.round(height * ratio);
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d")!.drawImage(img, 0, 0, width, height);
+        canvas.toBlob(b => b ? resolve(b) : reject(new Error("canvas vacío")), "image/jpeg", quality);
+      };
+      img.onerror = reject;
+      img.src = objUrl;
+    });
+
+  const subirFotoVeh = async (file: File, tipo: "externa" | "interna"): Promise<string | null> => {
+    const blob = await comprimirImagen(file).catch(e => { alert("Error al comprimir: " + e.message); return null; });
+    if (!blob) return null;
+    const path = `vehiculo-tercero/${empresaSel}_${Date.now()}_${tipo}.jpg`;
+    const { error } = await supabase.storage.from("vehiculos-fotos").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
+    if (error) { alert("Error al subir foto: " + error.message); return null; }
+    const { data } = supabase.storage.from("vehiculos-fotos").getPublicUrl(path);
+    return data.publicUrl;
+  };
+
   const guardarVehiculo = async () => {
     if (!formVeh.placa.trim() || !empresaSel) { alert("Placa obligatoria"); return; }
     setGuardando(true);
@@ -245,6 +276,8 @@ export default function EmpresasTercerizadasPage() {
       modelo: formVeh.modelo.trim() || null,
       capacidad: formVeh.capacidad ? Number(formVeh.capacidad) : null,
       estado: formVeh.estado,
+      foto_externa_url: formVeh.foto_externa_url.trim() || null,
+      foto_interna_url: formVeh.foto_interna_url.trim() || null,
     };
     const { error } = editVehId
       ? await supabase.from("vehiculos_tercero").update(payload).eq("id", editVehId)
@@ -578,6 +611,50 @@ export default function EmpresasTercerizadasPage() {
                             <option value="inactivo">Inactivo</option>
                           </select>
                         </Campo>
+                        <Campo label="Foto exterior">
+                          <div className="space-y-1.5">
+                            {formVeh.foto_externa_url && (
+                              <div className="relative">
+                                <img src={formVeh.foto_externa_url} alt="Foto exterior" className="w-full h-24 object-cover rounded-xl border" />
+                                <button type="button" onClick={() => setFormVeh(p => ({ ...p, foto_externa_url: "" }))}
+                                  className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white text-[10px] flex items-center justify-center hover:bg-black/80">✕</button>
+                              </div>
+                            )}
+                            <label className={`flex items-center gap-2 cursor-pointer w-full border border-dashed border-gray-300 rounded-xl px-3 py-2 text-xs text-gray-500 hover:border-[#0b315f] hover:text-[#0b315f] transition-all ${subiendoFoto === "externa" ? "opacity-60 pointer-events-none" : ""}`}>
+                              <span>{subiendoFoto === "externa" ? "⏳ Subiendo..." : "📷 Subir foto exterior"}</span>
+                              <input type="file" accept="image/*" className="hidden" disabled={subiendoFoto !== null}
+                                onChange={async e => {
+                                  const f = e.target.files?.[0]; if (!f) return;
+                                  setSubiendoFoto("externa");
+                                  const url = await subirFotoVeh(f, "externa");
+                                  if (url) setFormVeh(p => ({ ...p, foto_externa_url: url }));
+                                  setSubiendoFoto(null); e.target.value = "";
+                                }} />
+                            </label>
+                          </div>
+                        </Campo>
+                        <Campo label="Foto interior">
+                          <div className="space-y-1.5">
+                            {formVeh.foto_interna_url && (
+                              <div className="relative">
+                                <img src={formVeh.foto_interna_url} alt="Foto interior" className="w-full h-24 object-cover rounded-xl border" />
+                                <button type="button" onClick={() => setFormVeh(p => ({ ...p, foto_interna_url: "" }))}
+                                  className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white text-[10px] flex items-center justify-center hover:bg-black/80">✕</button>
+                              </div>
+                            )}
+                            <label className={`flex items-center gap-2 cursor-pointer w-full border border-dashed border-gray-300 rounded-xl px-3 py-2 text-xs text-gray-500 hover:border-[#0b315f] hover:text-[#0b315f] transition-all ${subiendoFoto === "interna" ? "opacity-60 pointer-events-none" : ""}`}>
+                              <span>{subiendoFoto === "interna" ? "⏳ Subiendo..." : "🪑 Subir foto interior"}</span>
+                              <input type="file" accept="image/*" className="hidden" disabled={subiendoFoto !== null}
+                                onChange={async e => {
+                                  const f = e.target.files?.[0]; if (!f) return;
+                                  setSubiendoFoto("interna");
+                                  const url = await subirFotoVeh(f, "interna");
+                                  if (url) setFormVeh(p => ({ ...p, foto_interna_url: url }));
+                                  setSubiendoFoto(null); e.target.value = "";
+                                }} />
+                            </label>
+                          </div>
+                        </Campo>
                       </div>
                       <div className="flex gap-2">
                         <button onClick={guardarVehiculo} disabled={guardando}
@@ -594,21 +671,38 @@ export default function EmpresasTercerizadasPage() {
                   ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       {vehEmpresa.map(v => (
-                        <div key={v.id} className="flex items-center gap-3 rounded-xl border px-4 py-3">
-                          <span className="text-2xl">🚌</span>
-                          <div className="flex-1">
-                            <p className="font-black font-mono text-gray-900">{v.placa}</p>
-                            <p className="text-xs text-gray-400">{v.categoria} · {v.marca} {v.modelo}{v.capacidad ? ` · ${v.capacidad} pax` : ""}</p>
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-bold px-2 py-0.5 rounded-lg"
-                              style={{ background: v.estado === "disponible" ? "#dcfce7" : "#f3f4f6", color: v.estado === "disponible" ? "#166534" : "#4b5563" }}>
-                              {v.estado}
-                            </span>
-                            <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado }); setEditVehId(v.id); setMostrarFormVeh(true); }}
-                              className="text-xs font-bold text-gray-500 hover:text-gray-800">✏️</button>
-                            <button onClick={async () => { if (!confirm("¿Eliminar?")) return; await supabase.from("vehiculos_tercero").delete().eq("id", v.id); cargarTodo(); }}
-                              className="text-xs font-bold text-red-400 hover:text-red-600">✕</button>
+                        <div key={v.id} className="rounded-xl border overflow-hidden">
+                          {(v.foto_externa_url || v.foto_interna_url) && (
+                            <div className="grid grid-cols-2 gap-0.5 bg-gray-100">
+                              {v.foto_externa_url
+                                ? <img src={v.foto_externa_url} alt="Exterior" className="w-full h-28 object-cover" />
+                                : <div className="h-28 bg-gray-100 flex items-center justify-center text-xs text-gray-400">Sin foto ext.</div>}
+                              {v.foto_interna_url
+                                ? <img src={v.foto_interna_url} alt="Interior" className="w-full h-28 object-cover" />
+                                : <div className="h-28 bg-gray-100 flex items-center justify-center text-xs text-gray-400">Sin foto int.</div>}
+                            </div>
+                          )}
+                          <div className="flex items-center gap-3 px-4 py-3">
+                            {!v.foto_externa_url && !v.foto_interna_url && <span className="text-2xl">🚌</span>}
+                            <div className="flex-1">
+                              <p className="font-black font-mono text-gray-900">{v.placa}</p>
+                              <p className="text-xs text-gray-400">{v.categoria} · {v.marca} {v.modelo}{v.capacidad ? ` · ${v.capacidad} pax` : ""}</p>
+                              {(v.foto_externa_url || v.foto_interna_url) && (
+                                <p className="text-[10px] text-green-600 font-bold mt-0.5">
+                                  📸 {[v.foto_externa_url && "ext.", v.foto_interna_url && "int."].filter(Boolean).join(" · ")}
+                                </p>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-bold px-2 py-0.5 rounded-lg"
+                                style={{ background: v.estado === "disponible" ? "#dcfce7" : "#f3f4f6", color: v.estado === "disponible" ? "#166534" : "#4b5563" }}>
+                                {v.estado}
+                              </span>
+                              <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}
+                                className="text-xs font-bold text-gray-500 hover:text-gray-800">✏️</button>
+                              <button onClick={async () => { if (!confirm("¿Eliminar?")) return; await supabase.from("vehiculos_tercero").delete().eq("id", v.id); cargarTodo(); }}
+                                className="text-xs font-bold text-red-400 hover:text-red-600">✕</button>
+                            </div>
                           </div>
                         </div>
                       ))}
