@@ -27,7 +27,17 @@
       "PowerShell($env:JAVA_HOME)",
       "PowerShell($env:ANDROID_HOME)",
       "PowerShell($env:JAVA_HOME = \"D:\\\\APLICACIONES ANDROID\\\\jbr\"; $env:PATH = \"D:\\\\APLICACIONES ANDROID\\\\jbr\\\\bin;\" + $env:PATH; Set-Location \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\android\"; .\\\\gradlew bundleRelease 2>&1)",
-      "PowerShell($content = [System.IO.File]::ReadAllBytes\\(\"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\android\\\\app\\\\release\\\\app-release.aab\"\\); $text = [System.Text.Encoding]::ASCII.GetString\\($content\\); $idx = $text.IndexOf\\(\"com.transportesafa\"\\); if \\($idx -ge 0\\) { $text.Substring\\($idx, 40\\) } else { \"No encontrado\" })"
+      "PowerShell($content = [System.IO.File]::ReadAllBytes\\(\"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\android\\\\app\\\\release\\\\app-release.aab\"\\); $text = [System.Text.Encoding]::ASCII.GetString\\($content\\); $idx = $text.IndexOf\\(\"com.transportesafa\"\\); if \\($idx -ge 0\\) { $text.Substring\\($idx, 40\\) } else { \"No encontrado\" })",
+      "Bash(powershell -Command \"\\(Get-Content 'app\\\\cliente\\\\page.tsx' -Raw | Measure-Object -Line\\).Lines\")",
+      "Bash(npx next *)",
+      "Bash(npm run *)",
+      "Bash(set NODE_OPTIONS=--max-old-space-size=8192)",
+      "Bash(powershell -Command \"\\(Get-Content 'C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\\\\cliente\\\\page.tsx'\\) -replace 'normEstado\\\\\\(servicioActivo\\\\.estado\\\\\\)', 'efectivoEstado\\(servicioActivo\\)' | Set-Content 'C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\\\\cliente\\\\page.tsx' -Encoding utf8\")",
+      "Bash(node -e \"require\\('iconv-lite'\\); console.log\\('ok'\\)\")",
+      "Bash(node -e ' *)",
+      "Bash(find \"C:/Users/trans\" -name \"README.md\" -path \"*dashboard*\" 2>/dev/null | head -20)",
+      "Bash(Get-ChildItem \"C:\\\\Users\\\\trans\\\\Downloads\\\\App onboarding \\(5\\)\\\\design_handoff_dashboard_erp\" -Recurse)",
+      "Bash(Select-Object FullName, Extension)"
     ]
   }
 }

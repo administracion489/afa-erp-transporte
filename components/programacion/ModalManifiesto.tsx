@@ -41,6 +41,10 @@ type Props = {
   capacidad: number | null;
   sincronizadoApp: boolean;
   fechaSincronizacion: string | null;
+  origen?: string | null;
+  destino?: string | null;
+  puntoRetorno?: string | null;
+  paradasJson?: any[] | null;
   onClose: () => void;
   onChange?: () => void;
 };
@@ -54,8 +58,31 @@ const ESTADO_PAX: Record<string, { bg: string; color: string }> = {
 
 type Tab = "pasajeros" | "paradas";
 
+async function geocodearDireccion(
+  direccion: string,
+  apiKey: string,
+): Promise<{ lat: number; lng: number; formatted_address?: string } | null> {
+  try {
+    const url =
+      "https://maps.googleapis.com/maps/api/geocode/json?address=" +
+      encodeURIComponent(direccion) +
+      "&region=PE&language=es&key=" +
+      apiKey;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data.status === "OK" && data.results[0]) {
+      const loc = data.results[0].geometry.location;
+      return { lat: loc.lat, lng: loc.lng, formatted_address: data.results[0].formatted_address };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export default function ModalManifiesto(props: Props) {
-  const { reservaId, clienteId, capacidad, sincronizadoApp, fechaSincronizacion, onClose, onChange } = props;
+  const { reservaId, clienteId, capacidad, sincronizadoApp, fechaSincronizacion,
+    origen, destino, puntoRetorno, paradasJson, onClose, onChange } = props;
 
   const [tab, setTab] = useState<Tab>("pasajeros");
   const [pasajeros, setPasajeros] = useState<PasajeroManifiesto[]>([]);
@@ -67,6 +94,107 @@ export default function ModalManifiesto(props: Props) {
   const [sincronizando, setSincronizando] = useState(false);
   const [mensaje, setMensaje] = useState<{ tipo: "ok" | "err" | "warn"; texto: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const autoCreacionRef = useRef(false);
+
+  const autoCrearParadasIniciales = async (): Promise<number> => {
+    // Prioridad 1: paradas_json de la cotización (ya trae coordenadas de Google Maps)
+    if (paradasJson && paradasJson.length >= 2) {
+      const ordenadas = [
+        ...paradasJson.filter((p: any) => p.tipo === "inicio"),
+        ...paradasJson.filter((p: any) => p.tipo === "intermedia"),
+        ...paradasJson.filter((p: any) => p.tipo === "destino"),
+      ];
+      if (ordenadas.length === 0) return 0;
+
+      const filas = ordenadas.map((p: any, i: number) => ({
+        reserva_id: reservaId,
+        orden: i + 1,
+        nombre: p.nombre || (i === 0 ? "Origen" : i === ordenadas.length - 1 ? "Destino" : "Parada " + i),
+        direccion: p.direccion || null,
+        lat: p.lat !== undefined && p.lat !== "" ? Number(p.lat) : null,
+        lng: p.lng !== undefined && p.lng !== "" ? Number(p.lng) : null,
+        hora_estimada: p.hora || null,
+        estado: "pendiente",
+      }));
+
+      const { error } = await supabase.from("paradas").insert(filas);
+      if (!error) {
+        const conCoords = filas.filter((f) => f.lat !== null).length;
+        setMensaje({
+          tipo: conCoords === filas.length ? "ok" : "warn",
+          texto:
+            filas.length +
+            " parada(s) generadas automáticamente desde la cotización" +
+            (conCoords < filas.length
+              ? " (" + conCoords + "/" + filas.length + " con coordenadas GPS)"
+              : " · coordenadas GPS incluidas"),
+        });
+        return filas.length;
+      }
+      return 0;
+    }
+
+    // Prioridad 2: geocodificar origen / destino / punto de retorno con Google Maps
+    const puntosTexto: Array<{ nombre: string; texto: string }> = [];
+    if (origen) puntosTexto.push({ nombre: "Origen", texto: origen });
+    if (destino) puntosTexto.push({ nombre: "Destino", texto: destino });
+    if (puntoRetorno) puntosTexto.push({ nombre: "Retorno", texto: puntoRetorno });
+
+    if (puntosTexto.length < 2) return 0;
+
+    const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || "";
+    if (!apiKey) {
+      const filas = puntosTexto.map((p, i) => ({
+        reserva_id: reservaId,
+        orden: i + 1,
+        nombre: p.nombre,
+        direccion: p.texto,
+        lat: null,
+        lng: null,
+        estado: "pendiente",
+      }));
+      const { error } = await supabase.from("paradas").insert(filas);
+      if (!error) {
+        setMensaje({ tipo: "warn", texto: filas.length + " parada(s) generadas sin coordenadas GPS (falta NEXT_PUBLIC_GOOGLE_MAPS_API_KEY)" });
+        return filas.length;
+      }
+      return 0;
+    }
+
+    setMensaje({ tipo: "warn", texto: "Geocodificando paradas con Google Maps..." });
+
+    const filas: any[] = [];
+    for (let i = 0; i < puntosTexto.length; i++) {
+      const punto = puntosTexto[i];
+      const coords = await geocodearDireccion(punto.texto, apiKey);
+      filas.push({
+        reserva_id: reservaId,
+        orden: i + 1,
+        nombre: punto.nombre,
+        direccion: coords?.formatted_address || punto.texto,
+        lat: coords?.lat ?? null,
+        lng: coords?.lng ?? null,
+        estado: "pendiente",
+      });
+    }
+
+    const { error } = await supabase.from("paradas").insert(filas);
+    if (!error) {
+      const conCoords = filas.filter((f) => f.lat !== null).length;
+      setMensaje({
+        tipo: conCoords === filas.length ? "ok" : "warn",
+        texto:
+          filas.length +
+          " parada(s) generadas · " +
+          conCoords +
+          "/" +
+          filas.length +
+          " con coordenadas GPS de Google Maps",
+      });
+      return filas.length;
+    }
+    return 0;
+  };
 
   const cargar = async () => {
     setLoading(true);
@@ -76,7 +204,25 @@ export default function ModalManifiesto(props: Props) {
       .select("id, reserva_id, orden, nombre, direccion, hora_estimada, lat, lng, estado, notas, place_id")
       .eq("reserva_id", reservaId)
       .order("orden");
-    const par = (parResp.data || []) as ParadaEditable[];
+    let par = (parResp.data || []) as ParadaEditable[];
+
+    // Auto-generar paradas solo en la primera carga si no hay ninguna
+    if (!autoCreacionRef.current) {
+      autoCreacionRef.current = true;
+      if (par.length === 0) {
+        const generadas = await autoCrearParadasIniciales();
+        if (generadas > 0) {
+          const parResp2 = await supabase
+            .from("paradas")
+            .select("id, reserva_id, orden, nombre, direccion, hora_estimada, lat, lng, estado, notas, place_id")
+            .eq("reserva_id", reservaId)
+            .order("orden");
+          par = (parResp2.data || []) as ParadaEditable[];
+          setTab("paradas");
+        }
+      }
+    }
+
     setParadas(par);
 
     const paradaIds = par.map((p) => p.id);

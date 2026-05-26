@@ -201,6 +201,44 @@ const Ic = {
       <line x1="12" y1="11" x2="12" y2="11.01"/><line x1="12" y1="14" x2="12" y2="17"/>
     </svg>
   ),
+  // ── Nuevos para el dashboard redesign ────────────────────────────────
+  TrendingUp: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>
+    </svg>
+  ),
+  Download: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+  ),
+  Bell: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M18 16v-5a6 6 0 0 0-12 0v5l-2 2v1h16v-1l-2-2z"/><path d="M10 20a2 2 0 0 0 4 0"/>
+    </svg>
+  ),
+  MoreH: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <circle cx="5" cy="12" r="1.3" fill="currentColor" stroke="none"/>
+      <circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/>
+      <circle cx="19" cy="12" r="1.3" fill="currentColor" stroke="none"/>
+    </svg>
+  ),
+  ArrowRight: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+    </svg>
+  ),
+  Plus: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+  ),
+  Filter: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+    </svg>
+  ),
 };
 
 // ─── Tipos ─────────────────────────────────────────────────────────────────
@@ -475,7 +513,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const router = useRouter();
 
   const esLogin = pathname === "/login";
-  const esPublica = ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad"].some(
+  const esPublica = ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad", "/cliente"].some(
     (r) => pathname === r || pathname.startsWith(r + "/")
   );
 

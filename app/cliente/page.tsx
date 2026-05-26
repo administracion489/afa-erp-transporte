@@ -1,53 +1,122 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
-import mapboxgl from "mapbox-gl";
-import "mapbox-gl/dist/mapbox-gl.css";
+import ModalGps from "@/components/seguimiento/ModalGps";
 
-mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
-
-// ─── TIPOS ────────────────────────────────────────────────────────────────────
+// ─── TIPOS ────────────────────────────────────────────────────────────────
 type Cliente        = { id: number; nombre: string; empresa: string | null; ruc: string | null; email: string | null; telefono: string | null; };
 type Reserva        = { id: number; origen: string; destino: string; fecha_servicio: string | null; hora_servicio: string | null; estado: string; precio_cliente: number; vehiculo_id: number | null; conductor_id: number | null; cotizacion_id: number | null; created_at: string; };
 type Parada         = { id: number; reserva_id: number; orden: number; nombre: string; direccion: string | null; lat: number | null; lng: number | null; hora_estimada: string | null; estado: string; };
 type Boarding       = { id: number; pasajero_id: number; parada_id: number; timestamp: string; metodo: string; pasajero?: { nombre: string; dni: string | null; empresa: string | null; }; };
-type PasajeroParada = { id: number; parada_id: number; pasajero_id: number; estado: string; pasajero?: { nombre: string; dni: string | null; }; };
-type GPS            = { lat: number; lng: number; velocidad: number; timestamp: string; };
+type PasajeroParada = { id: number; parada_id: number; pasajero_id: number; estado: string; pasajero?: { nombre: string; dni: string | null; edad: number | null; }; };
+type GPS            = { lat: number; lng: number; velocidad: number; timestamp: string; estado?: string; };
 type EmpresaPerfil  = { nombre: string | null; logo_url: string | null; color_primario: string | null; telefono: string | null; email: string | null; slogan: string | null; };
-type Tab = "dashboard" | "activos" | "historial" | "reporte";
+type ConductorInfo  = { nombre: string; numero_licencia: string | null; telefono: string | null; };
+type VehiculoInfo   = { placa: string; };
+type Tab = "dashboard" | "activos" | "historial" | "reporte" | "facturacion" | "documentos" | "cuenta";
+type CuentaSeccion = "empresa" | "usuarios" | "notificaciones" | "facturacion_cfg" | "integraciones" | "seguridad" | "preferencias";
+type Factura = { id: number; reserva_id: number | null; tipo_comprobante: string; serie: string | null; numero: string | null; fecha_emision: string | null; fecha_vencimiento: string | null; total: number; estado: string; pdf_url: string | null; };
+type PortalUsuario = { id: number; cliente_id: number; nombre: string; dni: string; cargo: string | null; rol: "admin" | "visor"; email: string | null; codigo_acceso: string; activo: boolean; created_at: string; modulos_permitidos: string[] | null; };
 
-// ─── PALETA ────────────────────────────────────────────────────────────────────
+const MODULOS_CTRL = [
+  { id: "activos",     label: "En vivo · GPS" },
+  { id: "historial",   label: "Historial de servicios" },
+  { id: "reporte",     label: "Reportes de embarque" },
+  { id: "facturacion", label: "Facturación" },
+  { id: "documentos",  label: "Documentos" },
+  { id: "cuenta",      label: "Cuenta y configuración" },
+];
+type Documento = { id: number; nombre: string; tipo: string; categoria: string; tamano: string; fecha: string; url: string | null; };
+type Notif = { id: number; tipo: "warning" | "info" | "success"; titulo: string; desc: string; fecha: string; };
+
+const MOCK_DOCS: Documento[] = [
+  { id: 1, nombre: "Contrato Marco de Transporte 2025", tipo: "PDF",  categoria: "Contratos",   tamano: "1.2 MB", fecha: "2025-01-15", url: null },
+  { id: 2, nombre: "Cotización Serv. Enero 2025",       tipo: "PDF",  categoria: "Cotizaciones", tamano: "340 KB", fecha: "2025-01-08", url: null },
+  { id: 3, nombre: "Adenda N°1 – Ampliación Rutas",     tipo: "PDF",  categoria: "Contratos",   tamano: "210 KB", fecha: "2025-03-20", url: null },
+];
+
+// ─── PALETA (design tokens v3) ────────────────────────────────────────────
 const C = {
-  navy: "#0b315f", navyDark: "#07203f", navyLight: "#1a4a7a",
-  white: "#FFFFFF", gray50: "#F8FAFC", gray100: "#F1F5F9",
-  gray200: "#E2E8F0", gray400: "#94A3B8", gray600: "#475569", gray800: "#1E293B",
-  green: "#16a34a", red: "#dc2626", amber: "#d97706", blue: "#1d4ed8",
+  // Surfaces warm off-white
+  bg:         "#F6F4EE",
+  paper:      "#FAF9F4",
+  surface:    "#FFFFFF",
+  surfaceAlt: "#F1EFE8",
+  // Ink
+  ink:        "#0A0E1A",
+  ink2:       "#1F2433",
+  mute:       "#6B6F7C",
+  mute2:      "#9AA0AC",
+  // Hairlines
+  line:       "#E6E2D6",
+  line2:      "#D5D1C5",
+  // Brand
+  navy:       "#0b315f",
+  navyDeep:   "#071f3d",
+  navyTint:   "#EAEFF6",
+  navyTint2:  "#D5DDEA",
+  // Semantic
+  success:    "#15803d",
+  successTint:"#E3F1E6",
+  warn:       "#A65B0A",
+  warnTint:   "#FBEFD5",
+  danger:     "#B91C1C",
+  dangerTint: "#FCE5E2",
+  info:       "#1d4ed8",
+  infoTint:   "#E1E9FB",
+  // Backward-compat aliases
+  white:      "#FFFFFF",
+  gray50:     "#F6F4EE",
+  gray100:    "#F1EFE8",
+  gray200:    "#E6E2D6",
+  gray400:    "#9AA0AC",
+  gray600:    "#6B6F7C",
+  gray800:    "#1F2433",
+  green:      "#15803d",
+  red:        "#B91C1C",
+  amber:      "#A65B0A",
+  blue:       "#1d4ed8",
+  navyDark:   "#071f3d",
+  navyLight:  "#1a4a7a",
+  // Fonts
+  fontSans:   '"Manrope", -apple-system, system-ui, sans-serif',
+  fontMono:   '"JetBrains Mono", ui-monospace, monospace',
 };
 
 const ESTADO: Record<string, { bg: string; c: string; label: string; dot: string }> = {
-  pendiente:  { bg: "#fef9c3", c: "#854d0e", label: "Pendiente",  dot: "#f59e0b" },
-  completado: { bg: "#dcfce7", c: "#166534", label: "Completado", dot: "#16a34a" },
-  realizado:  { bg: "#dcfce7", c: "#166534", label: "Realizado",  dot: "#16a34a" },
-  cancelado:  { bg: "#fee2e2", c: "#991b1b", label: "Cancelado",  dot: "#dc2626" },
-  confirmado: { bg: "#dbeafe", c: "#1d4ed8", label: "Confirmado", dot: "#3b82f6" },
-  en_curso:   { bg: "#d1fae5", c: "#065f46", label: "En curso",   dot: "#10b981" },
+  pendiente:  { bg: "#FBEFD5", c: "#A65B0A", label: "Pendiente",  dot: "#D97706" },
+  completado: { bg: "#EFEFEC", c: "#1F2433", label: "Completado", dot: "#6B6F7C" },
+  realizado:  { bg: "#EFEFEC", c: "#1F2433", label: "Realizado",  dot: "#6B6F7C" },
+  cancelado:  { bg: "#FCE5E2", c: "#B91C1C", label: "Cancelado",  dot: "#B91C1C" },
+  confirmado: { bg: "#E1E9FB", c: "#1d4ed8", label: "Confirmado", dot: "#3b82f6" },
+  en_curso:   { bg: "#E3F1E6", c: "#15803d", label: "En ruta",    dot: "#15803d" },
 };
 
-// ─── SESSION ──────────────────────────────────────────────────────────────────
-const SK = "afa_cliente_portal_v1";
-function saveSession(c: Cliente) { localStorage.setItem(SK, JSON.stringify({ c, exp: Date.now() + 8 * 3600000 })); }
-function loadSession(): Cliente | null { try { const r = localStorage.getItem(SK); if (!r) return null; const { c, exp } = JSON.parse(r); if (Date.now() > exp) { localStorage.removeItem(SK); return null; } return c; } catch { return null; } }
+// ─── SESSION ──────────────────────────────────────────────────────────────
+const SK = "afa_cliente_portal_v2";
+function saveSession(c: Cliente, u: PortalUsuario | null) { localStorage.setItem(SK, JSON.stringify({ c, u, exp: Date.now() + 8 * 3600000 })); }
+function loadSession(): { c: Cliente; u: PortalUsuario | null } | null { try { const r = localStorage.getItem(SK); if (!r) return null; const { c, u, exp } = JSON.parse(r); if (Date.now() > exp) { localStorage.removeItem(SK); return null; } return { c, u: u || null }; } catch { return null; } }
 function clearSession() { localStorage.removeItem(SK); }
 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
-const fmtFecha    = (f: string | null) => f ? new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" }) : "—";
-const fmtFechaLrg = (f: string | null) => f ? new Date(f + "T00:00:00").toLocaleDateString("es-PE", { weekday: "short", day: "2-digit", month: "short" }) : "—";
+// ─── HELPERS ──────────────────────────────────────────────────────────────
+const fmtFecha    = (f: string | null) => f ? new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" }) : "–";
+const fmtFechaLrg = (f: string | null) => f ? new Date(f + "T00:00:00").toLocaleDateString("es-PE", { weekday: "short", day: "2-digit", month: "short" }) : "–";
 const fmtTs       = (ts: string) => new Date(ts).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" });
 const fmtSoles    = (n: number) => `S/ ${Number(n || 0).toLocaleString("es-PE", { minimumFractionDigits: 2 })}`;
 
+const ESTADO_NORM: Record<string, string> = {
+  confirmada: "confirmado",
+  cancelada:  "cancelado",
+  completada: "completado",
+  realizada:  "realizado",
+  finalizada: "realizado",
+  en_ruta:    "en_curso",
+};
+function normEstado(e: string) { return ESTADO_NORM[e] || e; }
+
 function Badge({ estado }: { estado: string }) {
-  const e = ESTADO[estado] || { bg: "#f3f4f6", c: "#374151", label: estado, dot: "#9ca3af" };
+  const e = ESTADO[normEstado(estado)] || { bg: "#f3f4f6", c: "#374151", label: estado, dot: "#9ca3af" };
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: e.bg, color: e.c, whiteSpace: "nowrap" as const }}>
       <span style={{ width: 5, height: 5, borderRadius: "50%", background: e.dot, display: "inline-block" }} />
@@ -56,7 +125,23 @@ function Badge({ estado }: { estado: string }) {
   );
 }
 
-// ─── MAIN ─────────────────────────────────────────────────────────────────────
+// ─── Fecha Peru UTC-5 (no usar toISOString para "hoy") ────────────────────
+function getHoyPeru() {
+  // Siempre UTC-5 fijo, independiente del timezone del navegador/servidor
+  return new Date(Date.now() - 5 * 3600000).toISOString().split("T")[0];
+}
+
+// ─── FAQ ──────────────────────────────────────────────────────────────────
+const FAQ_ITEMS = [
+  { q: "¿Por qué no veo mi bus en el mapa?", a: "El GPS del conductor debe estar activo. Si el servicio está programado para hoy y el conductor no ha iniciado el viaje, la señal aún no estará disponible. Espera unos minutos o contáctanos." },
+  { q: "¿Con qué frecuencia se actualiza el GPS?", a: "La posición del vehículo se actualiza en tiempo real cada 10 segundos cuando el conductor tiene activa la app y señal de datos." },
+  { q: "¿Cómo descargo el manifiesto oficial?", a: "En la pestaña 'Reporte', selecciona el servicio y presiona 'Manifiesto MTC'. El documento sigue el formato R.D. 1946-2009-MTC-15 exigido por SUTRAN." },
+  { q: "¿Puedo programar un nuevo servicio desde aquí?", a: "Para programar un nuevo servicio, comunícate con nuestro equipo al 966707225 o escríbenos por WhatsApp." },
+  { q: "¿Qué significa cada estado del servicio?", a: "Pendiente: aún no confirmado. Confirmado: aprobado y asignado. En curso: el bus está en ruta hoy. Completado/Realizado: servicio finalizado. Cancelado: servicio anulado." },
+  { q: "¿Qué hago si un pasajero no aparece en la lista?", a: "Comunícate con tu coordinador para que actualice la lista de pasajeros en el sistema antes del servicio." },
+];
+
+// ─── MAIN ─────────────────────────────────────────────────────────────────
 export default function ClientePortal() {
   const [cliente,        setCliente]        = useState<Cliente | null>(null);
   const [empresa,        setEmpresa]        = useState<EmpresaPerfil | null>(null);
@@ -64,9 +149,13 @@ export default function ClientePortal() {
   const [tab,            setTab]            = useState<Tab>("dashboard");
 
   // Login
-  const [rucInput,  setRucInput]  = useState("");
-  const [loginErr,  setLoginErr]  = useState("");
-  const [loginLoad, setLoginLoad] = useState(false);
+  const [rucInput,      setRucInput]      = useState("");
+  const [dniInput,      setDniInput]      = useState("");
+  const [passwordInput, setPasswordInput] = useState("");
+  const [showPassword,  setShowPassword]  = useState(false);
+  const [loginErr,      setLoginErr]      = useState("");
+  const [loginLoad,     setLoginLoad]     = useState(false);
+  const [portalUsuario, setPortalUsuario] = useState<PortalUsuario | null>(null);
 
   // Datos
   const [reservas,       setReservas]       = useState<Reserva[]>([]);
@@ -77,71 +166,335 @@ export default function ClientePortal() {
   const [vehiculoActivo, setVehiculoActivo] = useState<number | null>(null);
   const [loading,        setLoading]        = useState(false);
   const [reservaSel,     setReservaSel]     = useState<Reserva | null>(null);
+  const [conductorInfo,  setConductorInfo]  = useState<ConductorInfo | null>(null);
+  const [vehiculoInfo,   setVehiculoInfo]   = useState<VehiculoInfo | null>(null);
+
+  // Facturación
+  const [facturas,          setFacturas]          = useState<Factura[]>([]);
+  const [loadingFact,       setLoadingFact]       = useState(false);
+  const [filtroFactEstado,  setFiltroFactEstado]  = useState("todos");
+  const [filtroFactDesde,   setFiltroFactDesde]   = useState("");
+  const [filtroFactHasta,   setFiltroFactHasta]   = useState("");
+
+  // Colaboradores / Cuenta
+  const [colabs,            setColabs]            = useState<PortalUsuario[]>([]);
+  const [loadingColabs,     setLoadingColabs]     = useState(false);
+  const [modalColab,        setModalColab]        = useState(false);
+  const [editColab,         setEditColab]         = useState<PortalUsuario | null>(null);
+  const [newColabNombre,    setNewColabNombre]     = useState("");
+  const [newColabDni,       setNewColabDni]        = useState("");
+  const [newColabEmail,     setNewColabEmail]      = useState("");
+  const [newColabCargo,     setNewColabCargo]      = useState("");
+  const [newColabRol,       setNewColabRol]        = useState<"admin"|"visor">("visor");
+  const [newColabPass,      setNewColabPass]       = useState("");
+  const [newColabPermisos,  setNewColabPermisos]   = useState<string[]>(MODULOS_CTRL.map(m => m.id).filter(id => id !== "facturacion"));
+  const [colabErr,          setColabErr]           = useState("");
+  const [colabLoad,         setColabLoad]          = useState(false);
+
+  // Cuenta / Configuración
+  const [cuentaSeccion,     setCuentaSeccion]     = useState<CuentaSeccion>("empresa");
+  const [busqueda,          setBusqueda]          = useState("");
+  const [editandoEmpresa,   setEditandoEmpresa]   = useState(false);
+  const [empSector,         setEmpSector]         = useState("Logística y distribución");
+  const [empDireccion,      setEmpDireccion]      = useState("Lima, Perú");
+  const [empFlota,          setEmpFlota]          = useState("20–35 pasajeros / servicio promedio");
+  const [notifPrefs,        setNotifPrefs]        = useState([
+    { id: "ruta",      titulo: "Servicio inicia ruta",              desc: "Cuando el conductor activa el GPS",           canales: ["EMAIL","PUSH","SMS","WHATSAPP"], activo: true  },
+    { id: "parada",    titulo: "Embarque iniciado en parada",       desc: "Notificación al llegar a cada parada",        canales: ["EMAIL","PUSH","SMS","WHATSAPP"], activo: true  },
+    { id: "estado",    titulo: "Cambios de estado",                 desc: "Confirmado, cancelado, etc.",                 canales: ["EMAIL","PUSH","SMS","WHATSAPP"], activo: true  },
+    { id: "trafico",   titulo: "Alertas de tráfico o demora >10 min",desc: "Cuando la ETA cambia significativamente",   canales: ["EMAIL","PUSH","SMS","WHATSAPP"], activo: true  },
+    { id: "noshow",    titulo: "Predicciones de no-show",           desc: "Alerta 24h antes con alta probabilidad",      canales: ["EMAIL","PUSH"],                 activo: false },
+    { id: "resumen",   titulo: "Resumen ejecutivo semanal · viernes 5pm", desc: "PDF con KPIs, top rutas y ahorros",    canales: ["EMAIL"],                        activo: true  },
+  ]);
 
   // Filtros historial
-  const [filtroEstado,  setFiltroEstado]  = useState("todos");
+  const [filtroEstado,   setFiltroEstado]   = useState("todos");
   const [filtroBusqueda, setFiltroBusqueda] = useState("");
+  const [reservaStats,   setReservaStats]   = useState<Record<number, { embarcados: number; esperados: number }>>({});
+  const [loadingStats,   setLoadingStats]   = useState(false);
 
-  // Mapa
-  const mapContainer = useRef<HTMLDivElement>(null);
-  const map          = useRef<mapboxgl.Map | null>(null);
-  const busMarker    = useRef<mapboxgl.Marker | null>(null);
-  const [mapListo,   setMapListo] = useState(false);
+  // Modales
+  const [gpsModalOpen, setGpsModalOpen] = useState(false);
+  const [gpsModalRes,  setGpsModalRes]  = useState<Reserva | null>(null);
+  const [modalFaq,     setModalFaq]     = useState(false);
+  const [faqOpen,      setFaqOpen]      = useState<number | null>(null);
 
-  // ── Init ─────────────────────────────────────────────────────────────────
+  // ─── Init ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     supabase.from("empresa_perfil").select("nombre,logo_url,color_primario,telefono,email,slogan").eq("id", 1).maybeSingle()
       .then(({ data }) => { if (data) setEmpresa(data as EmpresaPerfil); });
     const saved = loadSession();
-    if (saved) { setCliente(saved); cargarDatos(saved.id); }
+    if (saved) { setCliente(saved.c); setPortalUsuario(saved.u); cargarDatos(saved.c.id); }
     setIniting(false);
   }, []);
 
-  // ── Login ─────────────────────────────────────────────────────────────────
+  // ─── Login ────────────────────────────────────────────────────────────────
   async function login() {
-    if (!rucInput.trim()) { setLoginErr("Ingresa tu RUC o nombre de empresa"); return; }
+    if (!rucInput.trim())      { setLoginErr("Ingresa el RUC de tu empresa"); return; }
+    if (!dniInput.trim())      { setLoginErr("Ingresa tu DNI"); return; }
+    if (!passwordInput.trim()) { setLoginErr("Ingresa tu contraseña"); return; }
     setLoginErr(""); setLoginLoad(true);
     const q = rucInput.trim();
-    const { data } = await supabase.from("clientes").select("*")
-      .or(`ruc.eq.${q},nombre.ilike.%${q}%,empresa.ilike.%${q}%`).limit(1).single();
-    if (!data) { setLoginErr("No se encontró ningún cliente con ese RUC o nombre."); setLoginLoad(false); return; }
-    saveSession(data); setCliente(data); await cargarDatos(data.id); setLoginLoad(false);
+    const { data: clienteData } = await supabase.from("clientes").select("*")
+      .or(`ruc.eq.${q},empresa.ilike.%${q}%`).limit(1).single();
+    if (!clienteData) { setLoginErr("No se encontró ningún cliente con ese RUC."); setLoginLoad(false); return; }
+    // Buscar usuario en portal_usuarios
+    const { data: usuariosData } = await supabase.from("portal_usuarios")
+      .select("*").eq("cliente_id", (clienteData as any).id).eq("activo", true);
+    const usuarios = (usuariosData || []) as PortalUsuario[];
+    if (usuarios.length === 0) {
+      // Sin usuarios configurados: fallback al código de acceso de la empresa (legacy)
+      const codigoEmpresa = (clienteData as any).codigo_acceso;
+      if (codigoEmpresa && codigoEmpresa !== passwordInput.trim()) {
+        setLoginErr("Sin usuarios configurados. Contacta a AFA Transportes."); setLoginLoad(false); return;
+      }
+      const tempUser: PortalUsuario = { id: 0, cliente_id: (clienteData as any).id, nombre: (clienteData as any).nombre, dni: dniInput.trim(), cargo: null, rol: "admin", email: (clienteData as any).email, codigo_acceso: "", activo: true, created_at: "" };
+      saveSession(clienteData as Cliente, tempUser);
+      setCliente(clienteData as Cliente); setPortalUsuario(tempUser);
+      await cargarDatos((clienteData as any).id); setLoginLoad(false); return;
+    }
+    const usuario = usuarios.find(u => u.dni === dniInput.trim());
+    if (!usuario) { setLoginErr("DNI no registrado para este cliente."); setLoginLoad(false); return; }
+    if (usuario.codigo_acceso !== passwordInput.trim()) {
+      setLoginErr("Contraseña incorrecta."); setLoginLoad(false); return;
+    }
+    saveSession(clienteData as Cliente, usuario);
+    setCliente(clienteData as Cliente); setPortalUsuario(usuario);
+    await cargarDatos((clienteData as any).id); setLoginLoad(false);
   }
 
-  // ── Cargar datos ──────────────────────────────────────────────────────────
+  // ─── Cargar datos ─────────────────────────────────────────────────────────
   const cargarDatos = useCallback(async (cid: number) => {
     setLoading(true);
     const { data: res } = await supabase.from("reservas").select("*").eq("cliente_id", cid).order("fecha_servicio", { ascending: false });
     const rList = (res || []) as Reserva[];
     setReservas(rList);
-    const hoy = new Date().toISOString().split("T")[0];
-    const activo = rList.find(r => r.fecha_servicio === hoy && r.estado !== "cancelado");
+    const hoy = getHoyPeru();
+    const activo = rList.find(r => r.fecha_servicio?.startsWith(hoy) && !["cancelado","cancelada"].includes(r.estado));
     if (activo?.vehiculo_id) {
       setVehiculoActivo(activo.vehiculo_id);
-      const { data: gps } = await supabase.from("ubicaciones_gps").select("*").eq("vehiculo_id", activo.vehiculo_id).order("timestamp", { ascending: false }).limit(1);
-      if (gps?.[0]) setGpsActual(gps[0]);
+      supabase.from("ubicaciones_gps").select("*").eq("vehiculo_id", activo.vehiculo_id).order("timestamp", { ascending: false }).limit(1)
+        .then(({ data: gps }) => { if (gps?.[0]) setGpsActual(gps[0]); });
+    }
+    if (activo?.conductor_id) {
+      supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", activo.conductor_id).maybeSingle()
+        .then(({ data }) => { if (data) setConductorInfo(data as ConductorInfo); });
+    }
+    if (activo?.vehiculo_id) {
+      supabase.from("vehiculos").select("placa").eq("id", activo.vehiculo_id).maybeSingle()
+        .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); });
     }
     setLoading(false);
+    if (activo) {
+      supabase.from("paradas").select("*").eq("reserva_id", activo.id).order("orden")
+        .then(({ data }) => { if (data?.length) setParadas(prev => ({ ...prev, [activo.id]: data })); });
+    }
+    setLoadingFact(true);
+    supabase.from("facturas").select("id,reserva_id,tipo_comprobante,serie,numero,fecha_emision,fecha_vencimiento,total,estado,pdf_url")
+      .eq("cliente_id", cid).order("fecha_emision", { ascending: false })
+      .then(({ data }) => { setFacturas((data || []) as Factura[]); setLoadingFact(false); });
   }, []);
 
-  // ── Cargar detalles ───────────────────────────────────────────────────────
+  // ─── Cargar detalles (paradas + boarding + pasajeros + conductor + vehiculo) 
   const cargarDetalle = useCallback(async (r: Reserva) => {
-    setReservaSel(r); setTab("reporte");
-    if (paradas[r.id]) return;
-    const [pRes, bRes] = await Promise.all([
-      supabase.from("paradas").select("*").eq("reserva_id", r.id).order("orden"),
-      supabase.from("boarding_log").select("*, pasajero:pasajeros(nombre,dni,empresa)").eq("reserva_id", r.id).order("timestamp"),
-    ]);
-    setParadas(prev => ({ ...prev, [r.id]: pRes.data || [] }));
-    setBoarding(prev => ({ ...prev, [r.id]: bRes.data || [] }));
-    const ps = pRes.data || [];
-    if (ps.length > 0) {
-      const { data: pp } = await supabase.from("pasajeros_parada").select("*, pasajero:pasajeros(nombre,dni)").in("parada_id", ps.map((p: any) => p.id));
-      setPPList(prev => ({ ...prev, [r.id]: pp || [] }));
+    setReservaSel(r);
+    setTab("reporte");
+    setConductorInfo(null);
+    setVehiculoInfo(null);
+
+    const tasks: Promise<any>[] = [];
+
+    if (!paradas[r.id]) {
+      tasks.push(
+        Promise.all([
+          supabase.from("paradas").select("*").eq("reserva_id", r.id).order("orden"),
+          supabase.from("boarding_log").select("*, pasajero:pasajeros(nombre,dni,empresa)").eq("reserva_id", r.id).order("timestamp"),
+        ]).then(async ([pRes, bRes]) => {
+          setParadas(prev => ({ ...prev, [r.id]: pRes.data || [] }));
+          setBoarding(prev => ({ ...prev, [r.id]: bRes.data || [] }));
+          const ps = pRes.data || [];
+          if (ps.length > 0) {
+            const { data: pp } = await supabase.from("pasajeros_parada").select("*, pasajero:pasajeros(nombre,dni,edad)").in("parada_id", ps.map((p: any) => p.id));
+            setPPList(prev => ({ ...prev, [r.id]: pp || [] }));
+          }
+        })
+      );
     }
+
+    if (r.conductor_id) {
+      tasks.push(
+        supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", r.conductor_id).maybeSingle()
+          .then(({ data }) => { if (data) setConductorInfo(data as ConductorInfo); })
+      );
+    }
+
+    if (r.vehiculo_id) {
+      tasks.push(
+        supabase.from("vehiculos").select("placa").eq("id", r.vehiculo_id).maybeSingle()
+          .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
+      );
+    }
+
+    await Promise.all(tasks);
   }, [paradas]);
 
-  // ── Realtime GPS ──────────────────────────────────────────────────────────
+  // ─── Abrir modal GPS ──────────────────────────────────────────────────────
+  const abrirGps = useCallback(async (r: Reserva) => {
+    setGpsModalRes(r);
+    setConductorInfo(null);
+    setVehiculoInfo(null);
+
+    const tasks: Promise<any>[] = [];
+
+    if (!paradas[r.id]) {
+      tasks.push(
+        supabase.from("paradas").select("*").eq("reserva_id", r.id).order("orden")
+          .then(({ data }) => { setParadas(prev => ({ ...prev, [r.id]: data || [] })); })
+      );
+    }
+
+    if (r.conductor_id) {
+      tasks.push(
+        supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", r.conductor_id).maybeSingle()
+          .then(({ data }) => { if (data) setConductorInfo(data as ConductorInfo); })
+      );
+    }
+
+    if (r.vehiculo_id) {
+      tasks.push(
+        supabase.from("vehiculos").select("placa").eq("id", r.vehiculo_id).maybeSingle()
+          .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
+      );
+    }
+
+    await Promise.all(tasks);
+    setGpsModalOpen(true);
+  }, [paradas]);
+
+  // ─── Portal Usuarios CRUD ─────────────────────────────────────────────────
+  const cargarColabs = useCallback(async (clienteId: number) => {
+    setLoadingColabs(true);
+    const { data } = await supabase.from("portal_usuarios").select("*").eq("cliente_id", clienteId).order("created_at");
+    setColabs((data || []) as PortalUsuario[]);
+    setLoadingColabs(false);
+  }, []);
+
+  function resetColabForm() {
+    setNewColabNombre(""); setNewColabDni(""); setNewColabEmail(""); setNewColabCargo("");
+    setNewColabRol("visor"); setNewColabPass(""); setColabErr(""); setEditColab(null);
+    setNewColabPermisos(MODULOS_CTRL.map(m => m.id).filter(id => id !== "facturacion"));
+  }
+
+  function abrirEditarColab(c: PortalUsuario) {
+    setEditColab(c); setNewColabNombre(c.nombre); setNewColabDni(c.dni);
+    setNewColabEmail(c.email || ""); setNewColabCargo(c.cargo || ""); setNewColabRol(c.rol);
+    setNewColabPass(""); setColabErr(""); setModalColab(true);
+    setNewColabPermisos(c.modulos_permitidos || MODULOS_CTRL.map(m => m.id));
+  }
+
+  async function guardarColab(clienteId: number) {
+    if (!newColabNombre.trim() || !newColabDni.trim()) { setColabErr("Nombre y DNI son obligatorios"); return; }
+    if (!editColab && !newColabPass.trim()) { setColabErr("La contraseña es obligatoria para nuevos usuarios"); return; }
+    setColabErr(""); setColabLoad(true);
+    const todosPermisos = MODULOS_CTRL.every(m => newColabPermisos.includes(m.id));
+    const modulosGuardar = (newColabRol === "admin" && todosPermisos) ? null : newColabPermisos;
+    if (editColab) {
+      const updates: any = { nombre: newColabNombre.trim(), dni: newColabDni.trim(), cargo: newColabCargo.trim() || null, rol: newColabRol, email: newColabEmail.trim() || null, modulos_permitidos: modulosGuardar };
+      if (newColabPass.trim()) updates.codigo_acceso = newColabPass.trim();
+      const { error } = await supabase.from("portal_usuarios").update(updates).eq("id", editColab.id);
+      if (error) { setColabErr("Error al actualizar: " + error.message); setColabLoad(false); return; }
+    } else {
+      const { error } = await supabase.from("portal_usuarios").insert({ cliente_id: clienteId, nombre: newColabNombre.trim(), dni: newColabDni.trim(), cargo: newColabCargo.trim() || null, rol: newColabRol, email: newColabEmail.trim() || null, codigo_acceso: newColabPass.trim(), activo: true, modulos_permitidos: modulosGuardar });
+      if (error) { setColabErr("Error: " + (error.message.includes("unique") ? "Ya existe un usuario con ese DNI" : error.message)); setColabLoad(false); return; }
+    }
+    await cargarColabs(clienteId);
+    setModalColab(false); resetColabForm(); setColabLoad(false);
+  }
+
+  async function toggleColabActivo(id: number, activo: boolean) {
+    await supabase.from("portal_usuarios").update({ activo: !activo }).eq("id", id);
+    setColabs(prev => prev.map(c => c.id === id ? { ...c, activo: !activo } : c));
+  }
+
+  async function eliminarColab(id: number, nombre: string, clienteId: number) {
+    if (!window.confirm(`¿Eliminar definitivamente al usuario "${nombre}"? Esta acción no se puede deshacer.`)) return;
+    await supabase.from("portal_usuarios").delete().eq("id", id);
+    await cargarColabs(clienteId);
+  }
+
+  // ─── Cargar stats de pasajeros para historial ─────────────────────────────
+  const cargarHistorialStats = useCallback(async (reservaIds: number[]) => {
+    if (reservaIds.length === 0) return;
+    setLoadingStats(true);
+    const [{ data: boardingData }, { data: paradasData }] = await Promise.all([
+      supabase.from("boarding_log").select("reserva_id").in("reserva_id", reservaIds),
+      supabase.from("paradas").select("id, reserva_id").in("reserva_id", reservaIds),
+    ]);
+    const paradaMap: Record<number, number> = {};
+    const paradaIds: number[] = [];
+    (paradasData || []).forEach((p: any) => { paradaMap[p.id] = p.reserva_id; paradaIds.push(p.id); });
+    let ppData: any[] = [];
+    if (paradaIds.length > 0) {
+      const { data } = await supabase.from("pasajeros_parada").select("parada_id").in("parada_id", paradaIds);
+      ppData = data || [];
+    }
+    const stats: Record<number, { embarcados: number; esperados: number }> = {};
+    reservaIds.forEach(id => { stats[id] = { embarcados: 0, esperados: 0 }; });
+    (boardingData || []).forEach((b: any) => { if (stats[b.reserva_id]) stats[b.reserva_id].embarcados++; });
+    ppData.forEach((pp: any) => { const rid = paradaMap[pp.parada_id]; if (rid && stats[rid]) stats[rid].esperados++; });
+    setReservaStats(stats);
+    setLoadingStats(false);
+  }, []);
+
+  // ─── Cargar colabs cuando se abre la sección de usuarios ──────────────────
+  useEffect(() => {
+    if (cuentaSeccion === "usuarios" && cliente && colabs.length === 0 && !loadingColabs) {
+      cargarColabs(cliente.id);
+    }
+  }, [cuentaSeccion, cliente, cargarColabs]);
+
+  // ─── Cargar stats historial cuando se abre la pestaña ─────────────────────
+  useEffect(() => {
+    if (tab === "historial" && reservas.length > 0 && Object.keys(reservaStats).length === 0 && !loadingStats) {
+      cargarHistorialStats(reservas.map(r => r.id));
+    }
+  }, [tab, reservas, reservaStats, loadingStats, cargarHistorialStats]);
+
+  // ─── Redirección si el tab actual no está permitido ───────────────────────
+  useEffect(() => {
+    if (portalUsuario?.modulos_permitidos && tab !== "dashboard" && !portalUsuario.modulos_permitidos.includes(tab)) {
+      setTab("dashboard");
+    }
+  }, [portalUsuario, tab]);
+
+  // ─── Helper de permiso ────────────────────────────────────────────────────
+  const tienePermiso = (modulo: string) => {
+    if (modulo === "dashboard") return true;
+    if (!portalUsuario?.modulos_permitidos) return true;
+    return portalUsuario.modulos_permitidos.includes(modulo);
+  };
+  // Usuarios sin acceso a "facturacion" no ven montos ni precios en ninguna vista
+  const puedeVerMontos = tienePermiso("facturacion");
+
+  // ─── Auto-refresh reservas cada 30s cuando hay servicio hoy ───────────────
+  useEffect(() => {
+    if (!cliente) return;
+    const hoy = getHoyPeru();
+    const tieneServicioHoy = reservas.some(r => r.fecha_servicio?.startsWith(hoy) && !["cancelado","cancelada"].includes(r.estado));
+    if (!tieneServicioHoy) return;
+    const iv = setInterval(() => { cargarDatos(cliente.id); }, 30000);
+    return () => clearInterval(iv);
+  }, [cliente, reservas, cargarDatos]);
+
+  // ─── Refrescar al volver a la pestaña del navegador ───────────────────────
+  useEffect(() => {
+    if (!cliente) return;
+    const onVisible = () => { if (document.visibilityState === "visible") cargarDatos(cliente.id); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [cliente, cargarDatos]);
+
+  // ─── Realtime GPS ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (!vehiculoActivo) return;
     const ch = supabase.channel(`cliente-gps-${vehiculoActivo}`)
@@ -151,46 +504,90 @@ export default function ClientePortal() {
     return () => { supabase.removeChannel(ch); };
   }, [vehiculoActivo]);
 
-  // ── Mapa ──────────────────────────────────────────────────────────────────
+  // ─── Realtime reservas (cambios de estado en tiempo real) ─────────────────
   useEffect(() => {
-    if (!mapContainer.current || map.current || !cliente || tab !== "activos") return;
-    map.current = new mapboxgl.Map({ container: mapContainer.current, style: "mapbox://styles/mapbox/light-v11", center: [-77.0428, -12.0464], zoom: 12 });
-    map.current.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right");
-    map.current.on("load", () => setMapListo(true));
-    return () => { map.current?.remove(); map.current = null; setMapListo(false); };
-  }, [tab, cliente]);
+    if (!cliente) return;
+    const ch = supabase.channel(`cliente-reservas-${cliente.id}`)
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "reservas", filter: `cliente_id=eq.${cliente.id}` },
+        (payload: any) => {
+          const updated = payload.new as Reserva;
+          setReservas(prev => prev.map(r => r.id === updated.id ? { ...r, ...updated } : r));
+          // Si el servicio activo ahora tiene conductor/vehículo, cargarlos
+          const hoy = getHoyPeru();
+          if (updated.fecha_servicio?.startsWith(hoy) && !["cancelado","cancelada"].includes(updated.estado)) {
+            if (updated.conductor_id) {
+              supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", updated.conductor_id).maybeSingle()
+                .then(({ data }) => { if (data) setConductorInfo(data as ConductorInfo); });
+            }
+            if (updated.vehiculo_id) {
+              setVehiculoActivo(updated.vehiculo_id);
+              supabase.from("vehiculos").select("placa").eq("id", updated.vehiculo_id).maybeSingle()
+                .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); });
+            }
+          }
+        })
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [cliente]);
 
-  useEffect(() => {
-    if (!mapListo || !map.current || !gpsActual) return;
-    const el = document.createElement("div");
-    el.style.cssText = `width:52px;height:52px;border-radius:50%;background:${C.navy};border:3px solid white;display:flex;align-items:center;justify-content:center;font-size:24px;box-shadow:0 4px 20px rgba(11,49,95,0.5);cursor:pointer;`;
-    el.innerHTML = "🚌";
-    if (busMarker.current) busMarker.current.setLngLat([Number(gpsActual.lng), Number(gpsActual.lat)]);
-    else { busMarker.current = new mapboxgl.Marker({ element: el }).setLngLat([Number(gpsActual.lng), Number(gpsActual.lat)]).addTo(map.current!); }
-    map.current.flyTo({ center: [Number(gpsActual.lng), Number(gpsActual.lat)], zoom: 14, duration: 1500 });
-  }, [gpsActual, mapListo]);
+  // ─── KPIs ─────────────────────────────────────────────────────────────────
+  const hoy          = getHoyPeru();
+  const esteM        = hoy.slice(0, 7);
+  const serviciosMes   = reservas.filter(r => r.fecha_servicio?.startsWith(esteM)).length;
+  const serviciosTotal = reservas.length;
+  const gastosTotal    = reservas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
+  const completados    = reservas.filter(r => ["completado","realizado","finalizada"].includes(normEstado(r.estado))).length;
+  const puntualidad    = serviciosTotal > 0 ? Math.round((completados / serviciosTotal) * 100) : 0;
+  const pasajerosTotal = Object.values(boarding).flat().length;
+  const esCancelado    = (e: string) => e === "cancelado" || e === "cancelada";
+  const esFinalizado   = (e: string) => e === "completado" || e === "realizado" || e === "finalizada";
+  const esHoy          = (f: string | null) => !!f && f.startsWith(hoy);
+  const esFuturo       = (f: string | null) => !!f && f.slice(0,10) > hoy;
 
-  // ── KPIs ──────────────────────────────────────────────────────────────────
-  const hoy   = new Date().toISOString().split("T")[0];
-  const esteM = new Date().toISOString().slice(0, 7);
-  const serviciosMes    = reservas.filter(r => r.fecha_servicio?.startsWith(esteM)).length;
-  const serviciosTotal  = reservas.length;
-  const gastosTotal     = reservas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
-  const completados     = reservas.filter(r => r.estado === "completado" || r.estado === "realizado").length;
-  const puntualidad     = serviciosTotal > 0 ? Math.round((completados / serviciosTotal) * 100) : 0;
-  const pasajerosTotal  = Object.values(boarding).flat().length;
-  const servicioActivo  = reservas.find(r => r.fecha_servicio === hoy && r.estado !== "cancelado");
-  const proximosSvcs    = reservas.filter(r => r.fecha_servicio && r.fecha_servicio > hoy && r.estado !== "cancelado").slice(0, 5).reverse();
+  // Deriva el estado efectivo: si el GPS de hoy está activo para este vehículo → "en_curso"
+  // aunque reservas.estado no lo haya actualizado (el conductor app no escribe en reservas)
+  const efectivoEstado = (r: Reserva): string => {
+    const base = normEstado(r.estado);
+    if (esHoy(r.fecha_servicio) && !esCancelado(r.estado) && !esFinalizado(r.estado) && base !== "en_curso") {
+      const gpsDeHoy = gpsActual && gpsActual.timestamp?.slice(0, 10) === hoy;
+      const mismoVehiculo = r.vehiculo_id && r.vehiculo_id === vehiculoActivo;
+      if (gpsDeHoy && mismoVehiculo) return "en_curso";
+      if (gpsActual?.estado === "en_ruta" && mismoVehiculo) return "en_curso";
+    }
+    return base;
+  };
+  const porPagar       = facturas.filter(f => f.estado === "emitida" || f.estado === "enviada").reduce((s, f) => s + Number(f.total || 0), 0);
+  const totalPagado    = facturas.filter(f => f.estado === "cobrada").reduce((s, f) => s + Number(f.total || 0), 0);
+  const totalVencido   = facturas.filter(f => f.estado === "vencida").reduce((s, f) => s + Number(f.total || 0), 0);
+  const notifs: Notif[] = [
+    ...facturas.filter(f => f.estado === "vencida").slice(0,2).map(f => ({ id: f.id, tipo: "warning" as const, titulo: "Factura vencida", desc: `${f.serie || ""}-${f.numero || f.id} por ${fmtSoles(f.total)}`, fecha: f.fecha_vencimiento || "" })),
+    ...reservas.filter(r => esFuturo(r.fecha_servicio) && (r.estado === "confirmado" || r.estado === "confirmada")).slice(0,2).map(r => ({ id: r.id + 1000, tipo: "success" as const, titulo: "Servicio confirmado", desc: `${r.origen} → ${r.destino} · ${fmtFecha(r.fecha_servicio)}`, fecha: r.created_at })),
+    { id: 9999, tipo: "info" as const, titulo: "Nuevo documento disponible", desc: "Cotización actualizada en Documentos", fecha: hoy },
+  ];
+  const servicioHoy    = reservas.find(r => esHoy(r.fecha_servicio)); // cualquier estado
+  const servicioActivo = reservas.find(r => esHoy(r.fecha_servicio) && !esCancelado(r.estado));
+  const proximosSvcs   = reservas.filter(r => esFuturo(r.fecha_servicio) && !esCancelado(r.estado)).slice(0, 5).reverse();
+  const activosCount   = reservas.filter(r => esHoy(r.fecha_servicio) && !esCancelado(r.estado)).length;
+  const prevM          = (() => { const d = new Date(hoy + "T00:00:00"); d.setMonth(d.getMonth() - 1); return d.toISOString().slice(0, 7); })();
+  const serviciosPrevMes = reservas.filter(r => r.fecha_servicio?.startsWith(prevM)).length;
+  const deltaServicios   = serviciosMes - serviciosPrevMes;
+  const gastoMes         = reservas.filter(r => r.fecha_servicio?.startsWith(esteM)).reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
+  const saludoHora       = (() => { try { const h = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Lima" })).getHours(); return h < 12 ? "Buen día" : h < 19 ? "Buenas tardes" : "Buenas noches"; } catch { return "Hola"; } })();
+  const topRutas         = (() => {
+    const m = new Map<string, { total: number; comp: number }>();
+    reservas.forEach(r => { const k = `${r.origen} → ${r.destino}`; if (!m.has(k)) m.set(k, { total: 0, comp: 0 }); const e = m.get(k)!; e.total++; if (esFinalizado(r.estado)) e.comp++; });
+    return [...m.entries()].map(([ruta, d]) => ({ ruta, sla: d.total > 0 ? Math.round((d.comp / d.total) * 100) : 100, servicios: d.total })).sort((a, b) => b.servicios - a.servicios).slice(0, 4);
+  })();
 
-  // ── Historial filtrado ────────────────────────────────────────────────────
+  // ─── Historial filtrado ───────────────────────────────────────────────────
   const reservasFiltradas = reservas.filter(r => {
-    const cumpleEstado  = filtroEstado === "todos" || r.estado === filtroEstado;
+    const cumpleEstado   = filtroEstado === "todos" || efectivoEstado(r) === filtroEstado;
     const cumpleBusqueda = !filtroBusqueda || r.origen.toLowerCase().includes(filtroBusqueda.toLowerCase()) || r.destino.toLowerCase().includes(filtroBusqueda.toLowerCase()) || fmtFecha(r.fecha_servicio).includes(filtroBusqueda);
     return cumpleEstado && cumpleBusqueda;
   });
 
-  // ── PDF ───────────────────────────────────────────────────────────────────
-  function generarPDF(r: Reserva) {
+  // ─── Reporte de embarque PDF ──────────────────────────────────────────────
+  function generarReportePDF(r: Reserva) {
     const ps = paradas[r.id] || [];
     const bl = boarding[r.id] || [];
     const pp = ppList[r.id] || [];
@@ -198,81 +595,102 @@ export default function ClientePortal() {
     const pct = totalEsp > 0 ? Math.round((totalEmb / totalEsp) * 100) : 0;
     const noEmb = pp.filter(p => !bl.find(b => b.pasajero_id === p.pasajero_id));
     const empNombre = empresa?.nombre || "AFA Tours Peru S.A.C.";
-    const empTel = empresa?.telefono || "966 707 225";
-    const empEmail = empresa?.email || "transporte@afatoursperu.com";
+    const empTel    = empresa?.telefono || "966 707 225";
+    const empEmail  = empresa?.email || "transporte@afatoursperu.com";
+    const pdfLogo   = window.location.origin + "/logoafacotizacion-removebg-preview.png";
+    const firmaUrl  = window.location.origin + "/firmaJLCA.PNG";
 
     const filas = ps.map(p => {
-      const bP = bl.filter(b => b.parada_id === p.id);
+      const bP  = bl.filter(b => b.parada_id === p.id);
       const ppP = pp.filter(x => x.parada_id === p.id);
       return `
-        <tr style="background:#eef3f8"><td colspan="4" style="padding:8px 12px;font-weight:900;color:#0b315f;font-size:11px;border:1px solid #e5e7eb">
-          ${p.orden}. ${p.nombre}${p.hora_estimada ? ` · ${p.hora_estimada}` : ""} <span style="font-weight:400;color:#6b7280">(${bP.length}/${ppP.length} embarcaron)</span>
+        <tr style="background:#eff6ff"><td colspan="4" style="padding:8px 14px;font-weight:800;color:#1e40af;font-size:10.5px;border-bottom:1px solid #dbeafe;letter-spacing:.2px">
+          ${p.orden}. ${p.nombre}${p.hora_estimada ? ` &nbsp;·&nbsp; ${p.hora_estimada}` : ""} &nbsp;<span style="font-weight:500;color:#64748b;font-size:10px">(${bP.length}/${ppP.length} embarcaron)</span>
         </td></tr>
-        ${ppP.map(x => { const emb = bl.find(b => b.pasajero_id === x.pasajero_id && b.parada_id === p.id); return `<tr>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb">${x.pasajero?.nombre || `#${x.pasajero_id}`}</td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;font-family:monospace">${x.pasajero?.dni || "—"}</td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;text-align:center"><span style="font-weight:900;color:${emb ? "#16a34a" : "#dc2626"}">${emb ? "✅ Embarcó" : "❌ No asistió"}</span></td>
-          <td style="padding:7px 12px;border:1px solid #e5e7eb;color:#6b7280">${emb ? fmtTs(emb.timestamp) : "—"}</td>
+        ${ppP.map((x, xi) => { const emb = bl.find(b => b.pasajero_id === x.pasajero_id && b.parada_id === p.id); return `<tr style="background:${xi%2===0?"#fff":"#f8fafc"}">
+          <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9">${x.pasajero?.nombre || `#${x.pasajero_id}`}</td>
+          <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;font-family:monospace;font-size:10px;color:#475569">${x.pasajero?.dni || "–"}</td>
+          <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;text-align:center"><span style="font-size:10px;font-weight:700;padding:2px 10px;border-radius:12px;background:${emb?"#dbeafe":"#f1f5f9"};color:${emb?"#1e40af":"#475569"}">${emb ? "✓ Embarcó" : "✗ No asistió"}</span></td>
+          <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;color:#64748b;font-family:monospace;font-size:10px">${emb ? fmtTs(emb.timestamp) : "–"}</td>
         </tr>`; }).join("")}`;
     }).join("");
 
-    const html = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/>
-<title>Reporte — ${fmtFecha(r.fecha_servicio)}</title>
+    const html = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Reporte · ${fmtFecha(r.fecha_servicio)}</title>
 <style>
-@page{size:A4;margin:18mm 15mm}*{box-sizing:border-box}
-body{font-family:Arial,sans-serif;font-size:11px;color:#1a1a1a;margin:0}
-.hd{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #0b315f;padding-bottom:14px;margin-bottom:18px}
-.hd h1{font-size:20px;font-weight:900;color:#0b315f;margin:0}
-.hd p{color:#6b7280;font-size:11px;margin:3px 0 0}
-.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
-.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
-.box{border:1px solid #e5e7eb;border-radius:8px;padding:12px 16px}
-.bt{font-weight:900;font-size:10px;color:#0b315f;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #f1f5f9;padding-bottom:6px;margin-bottom:10px}
-.kpi{text-align:center;border-radius:8px;padding:10px}
-.kpi .n{font-size:26px;font-weight:900;margin:4px 0}
-.kpi .l{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px}
-table{width:100%;border-collapse:collapse;font-size:10.5px;margin-bottom:14px}
-thead{background:#0b315f;color:white}thead th{padding:8px 12px;text-align:left;font-size:10px;letter-spacing:.3px}
-.ft{border-top:1px solid #e5e7eb;padding-top:10px;text-align:center;font-size:9px;color:#9ca3af;margin-top:24px}
+@page{size:A4;margin:16mm 14mm}
+*{box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#1e293b;margin:0;background:#fff}
+.hd{display:flex;justify-content:space-between;align-items:center;border:1.5px solid #cbd5e1;border-left:5px solid #0b315f;padding:10px 16px;gap:12px;background:#f8faff;margin-bottom:0;border-radius:4px 4px 0 0}
+.hd-center{text-align:center;flex:1}
+.hd-right{text-align:right;min-width:120px}
+.hd-title{background:linear-gradient(135deg,#0b315f 0%,#1e4d8c 100%);padding:9px 18px;margin-bottom:18px;border-radius:0 0 4px 4px}
+.hd-title h1{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin:0;color:#fff}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+.box{border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;background:#fff}
+.box-accent{border-left:4px solid #0b315f}
+.box-green{border-left:4px solid #1e4d8c}
+.box-red{border-left:4px solid #334155}
+.bt{font-weight:800;font-size:9px;color:#0b315f;text-transform:uppercase;letter-spacing:1px;padding-bottom:8px;margin-bottom:10px;border-bottom:1.5px solid #e2e8f0}
+table{width:100%;border-collapse:collapse;font-size:10.5px;margin-bottom:0}
+thead tr{background:#f1f5f9}
+thead th{padding:8px 14px;text-align:left;font-size:9px;color:#475569;font-weight:700;letter-spacing:.5px;border-bottom:2px solid #cbd5e1;text-transform:uppercase}
+tbody tr:nth-child(even){background:#f8fafc}
+tbody td{vertical-align:middle}
+.kv{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:10.5px}
+.kv:last-child{border-bottom:none}
+.kv .lbl{color:#64748b}
+.kv .val{font-weight:700;color:#1e293b}
+.ft{border-top:1.5px solid #e2e8f0;padding-top:10px;text-align:center;font-size:8.5px;color:#94a3b8;margin-top:20px}
 @media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
 </style></head><body>
 <div class="hd">
-  <div><h1>${empNombre}</h1><p>📞 ${empTel} &nbsp;·&nbsp; ✉️ ${empEmail}</p></div>
-  <div style="text-align:right"><p style="font-weight:900;font-size:15px;color:#0b315f;margin:0">REPORTE DE SERVICIO</p>
-    <p style="color:#6b7280;font-size:10px;margin:3px 0">Generado: ${new Date().toLocaleDateString("es-PE")} ${new Date().toLocaleTimeString("es-PE",{hour:"2-digit",minute:"2-digit"})}</p>
+  <div><img src="${pdfLogo}" alt="AFA" style="height:52px;object-fit:contain;max-width:150px"/></div>
+  <div class="hd-center">
+    <p style="font-size:10px;font-weight:900;margin:0;text-transform:uppercase;letter-spacing:.6px;color:#0b315f">AFA TOURS PERU SAC</p>
+    <p style="font-size:8px;color:#475569;margin:3px 0 1px">Calle la bajada Mz F Lote 2, Lurigancho</p>
+    <p style="font-size:8px;color:#475569;margin:1px 0">Tel: 966707225 / 01-3453707</p>
+    <p style="font-size:8px;color:#475569;margin:1px 0">transporte@afatoursperu.com</p>
+  </div>
+  <div class="hd-right">
+    <p style="font-size:8px;color:#64748b;margin:0;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Reporte de Servicio</p>
+    <p style="font-size:7.5px;color:#94a3b8;margin:4px 0 2px">Generado: ${new Date().toLocaleDateString("es-PE")} ${new Date().toLocaleTimeString("es-PE",{hour:"2-digit",minute:"2-digit"})}</p>
+    <p style="font-size:7.5px;color:#94a3b8;margin:0">Total esperados: <b style="color:#0b315f;font-size:9px">${totalEsp}</b></p>
   </div>
 </div>
+<div class="hd-title"><h1>Detalle de embarques &nbsp;·&nbsp; ${fmtFecha(r.fecha_servicio)}</h1></div>
 <div class="g2">
-  <div class="box"><div class="bt">Datos del servicio</div>
-    <div style="margin:4px 0"><b>CLIENTE:</b> ${cliente?.empresa || cliente?.nombre}</div>
-    <div style="margin:4px 0"><b>RUC:</b> ${cliente?.ruc || "—"}</div>
-    <div style="margin:4px 0"><b>FECHA:</b> ${fmtFecha(r.fecha_servicio)}</div>
-    <div style="margin:4px 0"><b>HORA:</b> ${r.hora_servicio?.slice(0,5) || "—"}</div>
-    <div style="margin:4px 0"><b>RUTA:</b> ${r.origen} → ${r.destino}</div>
+  <div class="box box-accent">
+    <div class="bt">Datos del servicio</div>
+    <div class="kv"><span class="lbl">Cliente</span><span class="val">${cliente?.empresa || cliente?.nombre}</span></div>
+    <div class="kv"><span class="lbl">RUC</span><span class="val" style="font-family:monospace">${cliente?.ruc || "–"}</span></div>
+    <div class="kv"><span class="lbl">Fecha</span><span class="val">${fmtFecha(r.fecha_servicio)}</span></div>
+    <div class="kv"><span class="lbl">Hora</span><span class="val" style="font-family:monospace">${r.hora_servicio?.slice(0,5) || "–"}</span></div>
+    <div class="kv"><span class="lbl">Ruta</span><span class="val">${r.origen} → ${r.destino}</span></div>
   </div>
-  <div class="box"><div class="bt">Cumplimiento</div>
-    <div style="display:flex;justify-content:space-between;margin:4px 0"><span>Pasajeros esperados</span><b>${totalEsp}</b></div>
-    <div style="display:flex;justify-content:space-between;margin:4px 0"><span>Embarcaron</span><b style="color:#16a34a">${totalEmb}</b></div>
-    <div style="display:flex;justify-content:space-between;margin:4px 0"><span>No asistieron</span><b style="color:#dc2626">${noEmb.length}</b></div>
-    <div style="margin-top:10px;height:10px;background:#fee2e2;border-radius:5px;overflow:hidden">
-      <div style="height:100%;background:#16a34a;width:${pct}%;border-radius:5px"></div>
+  <div class="box box-green">
+    <div class="bt">Cumplimiento</div>
+    <div class="kv"><span class="lbl">Pasajeros esperados</span><span class="val">${totalEsp}</span></div>
+    <div class="kv"><span class="lbl">Embarcaron</span><span class="val" style="color:#0b315f">${totalEmb}</span></div>
+    <div class="kv"><span class="lbl">No asistieron</span><span class="val" style="color:#475569">${noEmb.length}</span></div>
+    <div style="margin-top:12px;height:8px;background:#f1f5f9;border-radius:4px;overflow:hidden"><div style="height:100%;background:#0b315f;width:${pct}%;border-radius:4px"></div></div>
+    <p style="font-weight:900;font-size:22px;color:#0b315f;margin:8px 0 0;letter-spacing:-0.5px">${pct}% <span style="font-size:11px;font-weight:600;color:#64748b">de cumplimiento</span></p>
+  </div>
+</div>
+<div class="box" style="margin-bottom:14px">
+  <div class="bt">Detalle de embarques por parada</div>
+  <table><thead><tr><th>Pasajero</th><th>DNI</th><th>Estado</th><th>Hora embarque</th></tr></thead><tbody>${filas || `<tr><td colspan="4" style="text-align:center;padding:16px;color:#94a3b8;font-style:italic">Sin datos de embarque registrados</td></tr>`}</tbody></table>
+</div>
+${noEmb.length > 0 ? `<div class="box box-red" style="margin-bottom:14px"><div class="bt">No se presentaron · ${noEmb.length} pasajero${noEmb.length!==1?"s":""}</div><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">${noEmb.map(x => `<div style="background:#f1f5f9;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;font-size:10px"><b style="color:#1e293b">${x.pasajero?.nombre||`#${x.pasajero_id}`}</b><br/><span style="color:#94a3b8;font-family:monospace">${x.pasajero?.dni||"Sin DNI"}</span></div>`).join("")}</div></div>` : ""}
+<div class="box">
+  <div class="bt">Firma de conformidad</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:48px;margin-top:16px;align-items:end">
+    <div style="text-align:center">
+      <img src="${firmaUrl}" alt="Firma" style="width:80%;max-height:75px;height:auto;object-fit:contain;object-position:bottom;display:block;margin:0 auto 6px"/>
+      <div style="border-top:1.5px solid #334155;padding-top:6px;font-size:10px;color:#334155"><b>${empNombre}</b><br/><span style="color:#64748b;font-size:9px">Gerente General / Representante legal</span></div>
     </div>
-    <p style="font-weight:900;font-size:18px;color:#0b315f;margin:8px 0 0">${pct}% de cumplimiento</p>
-  </div>
-</div>
-<div class="box" style="margin-bottom:14px"><div class="bt">Detalle de embarques por parada</div>
-  <table><thead><tr><th>Pasajero</th><th>DNI</th><th>Estado</th><th>Hora embarque</th></tr></thead>
-  <tbody>${filas || `<tr><td colspan="4" style="text-align:center;padding:14px;color:#9ca3af">Sin datos de embarque</td></tr>`}</tbody></table>
-</div>
-${noEmb.length > 0 ? `<div class="box" style="margin-bottom:14px;border-color:#fca5a5">
-  <div class="bt" style="color:#dc2626">⚠ No se presentaron (${noEmb.length})</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
-    ${noEmb.map(x => `<div style="background:#fff5f5;border-radius:6px;padding:6px 10px;font-size:10px"><b>${x.pasajero?.nombre||`#${x.pasajero_id}`}</b><br/><span style="color:#9ca3af">${x.pasajero?.dni||"Sin DNI"}</span></div>`).join("")}
-  </div></div>` : ""}
-<div class="box"><div class="bt">Firma de conformidad</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:20px">
-    <div style="text-align:center"><div style="border-top:1px solid #333;padding-top:6px;margin-top:36px;font-size:10px;color:#6b7280"><b>${empNombre}</b><br/>Representante legal</div></div>
-    <div style="text-align:center"><div style="border-top:1px solid #333;padding-top:6px;margin-top:36px;font-size:10px;color:#6b7280"><b>${cliente?.empresa||cliente?.nombre}</b><br/>Responsable del servicio</div></div>
+    <div style="text-align:center">
+      <div style="border-top:1.5px solid #334155;padding-top:6px;font-size:10px;color:#334155"><b>${cliente?.empresa||cliente?.nombre}</b><br/><span style="color:#64748b;font-size:9px">Responsable del servicio</span></div>
+    </div>
   </div>
 </div>
 <div class="ft">${empNombre} &nbsp;·&nbsp; ${empTel} &nbsp;·&nbsp; ${empEmail}</div>
@@ -281,209 +699,667 @@ ${noEmb.length > 0 ? `<div class="box" style="margin-bottom:14px;border-color:#f
     if (win) { win.document.write(html); win.document.close(); }
   }
 
-  // ─── LOADING ─────────────────────────────────────────────────────────────
+  // ─── Manifiesto oficial R.D. 1946-2009-MTC-15 ─────────────────────────────
+  function generarManifiesto(r: Reserva) {
+    const bl  = boarding[r.id] || [];
+    const pp  = ppList[r.id] || [];
+    const cond = conductorInfo;
+    const vehi = vehiculoInfo;
+    const now  = new Date();
+    const logoUrl = empresa?.logo_url || "/logoafacotizacion.jpg";
+
+    const fmtQR = (ts: string) => {
+      const d = new Date(ts);
+      return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")} - ${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}`;
+    };
+
+    let filas = "";
+    pp.forEach((x, idx) => {
+      const emb        = bl.find(b => b.pasajero_id === x.pasajero_id);
+      const validadoQR = emb?.metodo === "qr";
+      const tsQR       = emb ? fmtQR(emb.timestamp) : null;
+      const edadStr    = (x.pasajero as any)?.edad ? String((x.pasajero as any).edad) : "–";
+      filas += `
+        <tr>
+          <td style="padding:5px 8px;border:1px solid #374151;text-align:center;font-weight:700;width:48px">${idx + 1}</td>
+          <td style="padding:5px 8px;border:1px solid #374151;font-weight:600">${x.pasajero?.nombre || "–"}</td>
+          <td style="padding:5px 8px;border:1px solid #374151;text-align:center;font-family:monospace;width:105px">${x.pasajero?.dni || "–"}</td>
+          <td style="padding:5px 8px;border:1px solid #374151;text-align:center;width:46px">${edadStr}</td>
+          <td style="padding:0;border:1px solid #374151;width:150px;vertical-align:top">
+            <div style="${validadoQR ? 'background:#f0fdf4;' : ''}padding:4px 6px;min-height:24px;border-bottom:1px dotted #d1d5db">
+              ${validadoQR
+                ? `<div style="font-size:7.5px;color:#166534;font-weight:700;font-family:monospace">&#10003; VALIDADO QR ${tsQR}</div>`
+                : `<div style="font-size:7.5px;color:#9ca3af;font-style:italic">Pendiente QR</div>`
+              }
+            </div>
+            <div style="min-height:34px;padding:4px 6px;display:flex;flex-direction:column;justify-content:flex-end">
+              <div style="border-top:1px dotted #9ca3af;padding-top:2px;font-size:6px;color:#9ca3af;text-align:center">Firma / Huella digital</div>
+            </div>
+          </td>
+        </tr>`;
+    });
+
+    if (!filas) {
+      filas = `<tr><td colspan="5" style="padding:16px;text-align:center;border:1px solid #374151;color:#6b7280;font-style:italic">Sin pasajeros registrados en este servicio</td></tr>`;
+    }
+
+    const html = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Manifiesto MTC · ${fmtFecha(r.fecha_servicio)}</title>
+<style>
+@page{size:A4;margin:14mm 12mm}*{box-sizing:border-box}
+body{font-family:Arial,sans-serif;font-size:9.5px;color:#111827;margin:0}
+.hd-top{display:flex;justify-content:space-between;align-items:center;border:2px solid #111827;padding:10px 14px;gap:12px}
+.hd-empresa{text-align:center;flex:1}
+.hd-right{text-align:right;min-width:110px}
+.hd-title{text-align:center;border:2px solid #111827;border-top:none;padding:7px;background:#f9fafb}
+.hd-title h1{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin:0;color:#111827}
+.hd-title p{font-size:8px;color:#6b7280;margin:3px 0 0}
+.data-grid{display:grid;grid-template-columns:1fr 1fr;border:2px solid #111827;border-top:none}
+.dc{padding:5px 10px;border-right:1px solid #9ca3af;border-bottom:1px solid #9ca3af}
+.dc:nth-child(even){border-right:none}
+.dc:nth-last-child(1):nth-child(odd){grid-column:1/-1;border-right:none}
+.dc .lbl{font-size:7px;font-weight:700;text-transform:uppercase;color:#6b7280;letter-spacing:.5px}
+.dc .val{font-size:10px;font-weight:700;color:#111827;margin-top:2px}
+table{width:100%;border-collapse:collapse;font-size:9px;margin-top:0}
+thead tr{background:#111827;color:white}
+thead th{padding:6px 8px;text-align:left;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;border:1px solid #374151}
+tbody tr:nth-child(even){background:#f9fafb}
+.ft{margin-top:14px;border-top:2px solid #111827;padding-top:10px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+.ft-box{text-align:center}
+.ft-line{border-top:1px solid #374151;margin-top:28px;padding-top:4px;font-size:7.5px;color:#6b7280}
+.rd-ref{font-size:7px;color:#9ca3af;text-align:center;margin-top:8px}
+@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+</style></head><body>
+
+<div class="hd-top">
+  <div>
+    <img src="${logoUrl}" alt="AFA Tours Peru" style="height:52px;object-fit:contain;max-width:160px" />
+  </div>
+  <div class="hd-empresa">
+    <p style="font-size:10px;font-weight:900;margin:0;text-transform:uppercase;letter-spacing:.5px">AFA TOURS PERU SAC</p>
+    <p style="font-size:8px;color:#374151;margin:3px 0 1px">Calle la bajada Mz F Lote 2, Lurigancho</p>
+    <p style="font-size:8px;color:#374151;margin:1px 0">Tel: 966707225 / 01-3453707</p>
+    <p style="font-size:8px;color:#374151;margin:1px 0">transporte@afatoursperu.com</p>
+  </div>
+  <div class="hd-right">
+    <p style="font-size:7.5px;color:#6b7280;margin:0">Generado: ${now.toLocaleDateString("es-PE")} ${now.toLocaleTimeString("es-PE",{hour:"2-digit",minute:"2-digit"})}</p>
+    <p style="font-size:7.5px;color:#6b7280;margin:3px 0">Total pasajeros: <b style="color:#111827;font-size:9px">${pp.length}</b></p>
+  </div>
+</div>
+
+<div class="hd-title">
+  <h1>Manifiesto de Pasajeros</h1>
+  <p>Res. Directoral N° 1946-2009-MTC-15 &nbsp;·&nbsp; Exigido por SUTRAN</p>
+</div>
+
+<div class="data-grid">
+  <div class="dc"><div class="lbl">Fecha de viaje</div><div class="val">${fmtFecha(r.fecha_servicio)}</div></div>
+  <div class="dc"><div class="lbl">Hora de salida</div><div class="val">${r.hora_servicio?.slice(0,5) || "–"}</div></div>
+  <div class="dc"><div class="lbl">N° Placa Vehicular</div><div class="val" style="font-family:monospace;letter-spacing:2px">${vehi?.placa || "–"}</div></div>
+  <div class="dc"><div class="lbl">Ruta</div><div class="val">${r.origen} → ${r.destino}</div></div>
+  <div class="dc"><div class="lbl">Nombre del Conductor</div><div class="val">${cond?.nombre || "–"}</div></div>
+  <div class="dc"><div class="lbl">Nro. de Licencia</div><div class="val" style="font-family:monospace">${cond?.numero_licencia || "–"}</div></div>
+  <div class="dc" style="grid-column:1/-1;border-right:none"><div class="lbl">Modalidad del Servicio</div><div class="val">Transporte de Personal · Cliente: ${cliente?.empresa || cliente?.nombre || "–"}</div></div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:48px;text-align:center">N° Asiento</th>
+      <th>Apellidos y Nombres</th>
+      <th style="width:105px;text-align:center">N° Documento</th>
+      <th style="width:46px;text-align:center">Edad</th>
+      <th style="width:150px">Firma / Validación Digital</th>
+    </tr>
+  </thead>
+  <tbody>${filas}</tbody>
+</table>
+
+<div class="ft">
+  <div class="ft-box"><div class="ft-line"><b>AFA TOURS PERU SAC</b><br/>Empresa Autorizada MTC<br/>Representante Legal</div></div>
+  <div class="ft-box"><div class="ft-line"><b>${cond?.nombre || "CONDUCTOR"}</b><br/>Lic: ${cond?.numero_licencia || "–"}<br/>Firma del Conductor</div></div>
+  <div class="ft-box"><div class="ft-line"><b>${cliente?.empresa || cliente?.nombre || "EMPRESA"}</b><br/>Responsable de Servicio<br/>Firma y Sello</div></div>
+</div>
+<p class="rd-ref">R.D. N° 1946-2009-MTC-15 &nbsp;·&nbsp; AFA Tours Peru SAC &nbsp;·&nbsp; Tel: 966707225 / 01-3453707 &nbsp;·&nbsp; transporte@afatoursperu.com</p>
+<script>window.onload=()=>window.print()</script></body></html>`;
+
+    const win = window.open("", "_blank");
+    if (win) { win.document.write(html); win.document.close(); }
+  }
+
+  // ─── LOADING ──────────────────────────────────────────────────────────────
   if (initing) return (
-    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: `linear-gradient(160deg, ${C.navyDark} 0%, ${C.navy} 60%, ${C.navyLight} 100%)` }}>
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: C.navyDeep, fontFamily: C.fontSans }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');@keyframes spin{to{transform:rotate(360deg)}}`}</style>
       <div style={{ textAlign: "center" }}>
-        <div style={{ width: 44, height: 44, border: "4px solid rgba(255,255,255,0.2)", borderTopColor: "white", borderRadius: "50%", margin: "0 auto 16px", animation: "spin 0.8s linear infinite" }} />
-        <p style={{ color: "rgba(255,255,255,0.7)", fontWeight: 700, fontSize: 13 }}>Cargando portal...</p>
+        <div style={{ width: 40, height: 40, border: "3px solid rgba(255,255,255,0.15)", borderTopColor: "rgba(123,166,224,0.9)", borderRadius: "50%", margin: "0 auto 18px", animation: "spin 0.8s linear infinite" }} />
+        <p style={{ color: "rgba(255,255,255,0.5)", fontWeight: 600, fontSize: 13, letterSpacing: "0.06em", textTransform: "uppercase" as const }}>Cargando portal...</p>
       </div>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 
   // ─── LOGIN ────────────────────────────────────────────────────────────────
+  const rucValido = /^\d{11}$/.test(rucInput.trim());
+
   if (!cliente) return (
-    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", background: C.gray50, fontFamily: "system-ui,sans-serif" }}>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}} @keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}`}</style>
-
-      {/* Hero */}
-      <div style={{ background: `linear-gradient(160deg, ${C.navyDark} 0%, ${C.navy} 55%, #1a4a8a 100%)`, padding: "56px 24px 48px", textAlign: "center" }}>
-        {empresa?.logo_url
-          ? <img src={empresa.logo_url} alt="Logo" style={{ height: 60, objectFit: "contain", margin: "0 auto 20px", display: "block", filter: "brightness(0) invert(1)" }} />
-          : <div style={{ width: 72, height: 72, background: "rgba(255,255,255,0.12)", borderRadius: 20, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32, margin: "0 auto 20px", border: "1px solid rgba(255,255,255,0.15)" }}>🏢</div>
+    <div style={{ minHeight: "100vh", fontFamily: C.fontSans }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+        @keyframes spin{to{transform:rotate(360deg)}}
+        @keyframes pcPulse{0%,100%{opacity:1;transform:scale(1)}60%{opacity:.4;transform:scale(1.8)}}
+        .pc-split{display:flex;min-height:100vh}
+        .pc-left{width:600px;min-height:100vh;position:relative;overflow:hidden;padding:52px 56px;display:flex;flex-direction:column;color:white;flex-shrink:0;background:#071f3d}
+        .pc-right{flex:1;display:flex;align-items:center;justify-content:center;padding:56px 64px;background:#F6F4EE}
+        .pc-input{width:100%;border:1.5px solid #E6E2D6;border-radius:8px;padding:0 14px;height:48px;font-size:14px;font-family:inherit;outline:none;color:#0A0E1A;background:#fff;box-sizing:border-box;transition:border-color .15s}
+        .pc-input:focus{border-color:#0b315f;box-shadow:0 0 0 3px rgba(11,49,95,.08)}
+        .pc-btn-primary{width:100%;padding:13px 0;border-radius:8px;border:none;background:#0b315f;color:white;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;transition:background .15s;letter-spacing:.01em}
+        .pc-btn-primary:disabled{background:#D5D1C5;cursor:not-allowed}
+        .pc-btn-primary:not(:disabled):hover{background:#071f3d}
+        .pc-btn-secondary{flex:1;padding:10px 0;border-radius:8px;border:1.5px solid #E6E2D6;background:#F1EFE8;font-family:inherit;font-weight:700;font-size:12.5px;color:#1F2433;display:inline-flex;align-items:center;justify-content:center;gap:7px;cursor:pointer}
+        @media(max-width:900px){
+          .pc-split{flex-direction:column}
+          .pc-left{width:100%;min-height:auto;padding:28px 24px 40px}
+          .pc-right{padding:24px 22px 48px;justify-content:flex-start}
         }
-        <h1 style={{ color: "white", fontWeight: 900, fontSize: 24, margin: 0 }}>Portal Empresarial</h1>
-        <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 13, marginTop: 8 }}>
-          {empresa?.nombre || "AFA Tours Peru"} · Seguimiento de servicios corporativos
-        </p>
-      </div>
+      `}</style>
 
-      {/* Tarjeta login */}
-      <div style={{ flex: 1, padding: "0 24px 40px", maxWidth: 460, margin: "0 auto", width: "100%", boxSizing: "border-box" as const }}>
-        <div style={{ background: "white", borderRadius: 24, boxShadow: "0 8px 40px rgba(11,49,95,0.12)", padding: "32px 32px", marginTop: -24, animation: "fadeUp 0.35s ease" }}>
-          <p style={{ color: C.gray600, fontSize: 14, textAlign: "center", marginBottom: 24, marginTop: 0 }}>
-            Ingresa tu RUC o nombre de empresa para acceder a tus reportes y seguimiento
-          </p>
+      <div className="pc-split">
 
-          <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase" as const, letterSpacing: "0.08em", marginBottom: 8 }}>
-            RUC o nombre de empresa
-          </label>
-          <input
-            value={rucInput}
-            onChange={e => { setRucInput(e.target.value); setLoginErr(""); }}
-            onKeyDown={e => e.key === "Enter" && login()}
-            placeholder="Ej: 20123456789 o Compañía Minera ABC"
-            style={{ width: "100%", padding: "14px 18px", borderRadius: 14, border: `2px solid ${rucInput ? C.navy : C.gray200}`, fontSize: 15, fontWeight: 600, outline: "none", boxSizing: "border-box" as const, color: C.gray800, marginBottom: 12, transition: "border-color 0.15s" }}
-          />
+        {/* PANEL IZQUIERDO: brand */}
+        <div className="pc-left">
+          {/* Grid pattern + glow */}
+          <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }} preserveAspectRatio="none">
+            <defs>
+              <pattern id="lg" width="40" height="40" patternUnits="userSpaceOnUse">
+                <path d="M40 0H0V40" stroke="rgba(255,255,255,0.04)" strokeWidth="1" fill="none"/>
+              </pattern>
+              <radialGradient id="lglow" cx="20%" cy="85%" r="70%">
+                <stop offset="0%" stopColor="#1a4a8a" stopOpacity="0.55"/>
+                <stop offset="100%" stopColor="transparent"/>
+              </radialGradient>
+            </defs>
+            <rect width="100%" height="100%" fill="url(#lg)"/>
+            <rect width="100%" height="100%" fill="url(#lglow)"/>
+            <g stroke="#7BA6E0" strokeWidth="1.5" fill="none" strokeLinecap="round" opacity="0.4">
+              <path d="M0,585 L108,495 L210,540 L330,360 L450,405 L600,270"/>
+              {[[108,495],[210,540],[330,360],[450,405]].map(([x,y],i) => (
+                <circle key={i} cx={x} cy={y} r={4} fill="#071f3d" stroke="#7BA6E0" strokeWidth="1.5"/>
+              ))}
+            </g>
+          </svg>
 
-          {loginErr && (
-            <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 12, padding: "10px 16px", marginBottom: 12 }}>
-              <p style={{ color: C.red, fontSize: 13, fontWeight: 700, margin: 0, textAlign: "center" }}>⚠️ {loginErr}</p>
+          <div style={{ position: "relative", zIndex: 1, display: "flex", flexDirection: "column" as const, height: "100%" }}>
+            {/* Logo */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {empresa?.logo_url
+                ? <img src={empresa.logo_url} alt="AFA" style={{ height: 32, objectFit: "contain", filter: "brightness(0) invert(1)" }}/>
+                : <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ width: 32, height: 32, borderRadius: 8, background: "rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, fontSize: 13, color: "white", border: "1px solid rgba(255,255,255,0.2)" }}>AFA</div>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,0.8)" }}>Tours Peru</span>
+                  </div>
+              }
+              <span style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase" as const, marginLeft: 4 }}>· Portal Cliente</span>
             </div>
-          )}
 
-          <button
-            onClick={login}
-            disabled={loginLoad || !rucInput.trim()}
-            style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: rucInput ? C.navy : C.gray200, color: "white", fontSize: 15, fontWeight: 900, cursor: rucInput ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, transition: "background 0.15s" }}
-          >
-            {loginLoad
-              ? <><span style={{ width: 18, height: 18, border: "3px solid rgba(255,255,255,0.3)", borderTopColor: "white", borderRadius: "50%", animation: "spin 0.7s linear infinite", display: "inline-block" }} /> Buscando...</>
-              : "Acceder al portal →"
-            }
-          </button>
+            <div style={{ flex: 1 }}/>
+
+            <p style={{ fontSize: 10.5, fontWeight: 700, color: "rgba(255,255,255,0.45)", letterSpacing: "1.4px", textTransform: "uppercase" as const, margin: "0 0 14px" }}>v3.2 · Acceso seguro</p>
+            <h1 style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 52, lineHeight: 1.02, letterSpacing: -1.6, margin: "0 0 18px", color: "#fff" }}>
+              Control total<br/>de tu flota<br/><span style={{ color: "#7BA6E0" }}>contratada.</span>
+            </h1>
+            <p style={{ fontSize: 15, lineHeight: 1.55, color: "rgba(255,255,255,0.6)", maxWidth: 420, margin: "0 0 40px", fontWeight: 500 }}>
+              Seguimiento GPS en vivo, manifiestos MTC, embarques por parada y reportes auditables.
+            </p>
+
+            {/* Stats grid */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 18, maxWidth: 420, marginBottom: 40 }}>
+              {[["1,284","servicios / mes"],["42K","pasajeros embarcados"],["99.4%","cumplimiento SLA"]].map(([n,l]) => (
+                <div key={l}>
+                  <p style={{ fontFamily: C.fontMono, fontWeight: 700, fontSize: 22, color: "#fff", margin: "0 0 4px", letterSpacing: -0.4 }}>{n}</p>
+                  <p style={{ margin: 0, fontSize: 10.5, color: "rgba(255,255,255,0.45)", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: "0.8px" }}>{l}</p>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ flex: 1 }}/>
+
+            {/* TLS badge */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8 }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7BA6E0" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <div>
+                <p style={{ margin: 0, fontSize: 12, fontWeight: 700, color: "#fff" }}>Conexión cifrada · TLS 1.3</p>
+                <p style={{ margin: "2px 0 0", fontSize: 11, color: "rgba(255,255,255,0.45)" }}>Tus datos viajan protegidos en todo momento</p>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 24 }}>
+              <p style={{ margin: 0, fontSize: 10.5, color: "rgba(255,255,255,0.35)", fontWeight: 500 }}>© 2026 AFA Tours Peru S.A.C.</p>
+              <p style={{ margin: 0, fontSize: 10.5, color: "rgba(255,255,255,0.45)", fontWeight: 600 }}>Estado: <span style={{ color: "#7EE3B0" }}>● operativo</span></p>
+            </div>
+          </div>
         </div>
 
-        {/* ¿Qué puedo ver? */}
-        <div style={{ marginTop: 24, background: "white", borderRadius: 20, padding: "20px 24px", border: `1px solid ${C.gray200}` }}>
-          <p style={{ color: C.navy, fontWeight: 900, fontSize: 13, margin: "0 0 14px" }}>¿Qué puedo ver aquí?</p>
-          {[
-            ["📊", "Dashboard con KPIs de todos tus servicios"],
-            ["🚌", "Seguimiento GPS en tiempo real del bus asignado"],
-            ["📋", "Reporte de embarque: quién subió y a qué hora"],
-            ["📄", "Descarga de reportes PDF para auditoría"],
-          ].map(([icon, texto]) => (
-            <div key={texto} style={{ display: "flex", gap: 12, marginBottom: 10, alignItems: "flex-start" }}>
-              <span style={{ fontSize: 18, flexShrink: 0 }}>{icon}</span>
-              <p style={{ color: C.gray600, fontSize: 13, margin: 0 }}>{texto}</p>
+        {/* PANEL DERECHO: formulario */}
+        <div className="pc-right">
+          <div style={{ width: "100%", maxWidth: 420 }}>
+            <p style={{ fontSize: 10.5, fontWeight: 700, color: C.mute, letterSpacing: "1.4px", textTransform: "uppercase" as const, margin: "0 0 8px" }}>Acceso clientes corporativos</p>
+            <h2 style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 30, letterSpacing: -0.7, margin: "0 0 10px", color: C.ink }}>Iniciar sesión</h2>
+            <p style={{ fontSize: 14, color: C.mute, margin: "0 0 32px", lineHeight: 1.55 }}>
+              Ingresa el RUC de tu empresa, tu DNI y tu contraseña de acceso.
+            </p>
+
+            {/* Campo RUC */}
+            <div style={{ marginBottom: 18 }}>
+              <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.ink2, marginBottom: 7, letterSpacing: "0.3px", textTransform: "uppercase" as const }}>RUC de tu empresa</label>
+              <div style={{ display: "flex", alignItems: "center", border: `1.5px solid ${rucValido ? C.success : rucInput ? C.navy : C.line2}`, borderRadius: 8, background: "#fff", padding: "0 14px", height: 48, transition: "border-color .15s", boxShadow: rucInput ? `0 0 0 3px ${rucValido ? "rgba(21,128,61,.08)" : "rgba(11,49,95,.08)"}` : "none" }}>
+                <span style={{ fontFamily: C.fontMono, fontSize: 13, color: C.mute, paddingRight: 8, borderRight: `1px solid ${C.line}`, marginRight: 10, flexShrink: 0 }}>PE</span>
+                <input
+                  value={rucInput}
+                  onChange={e => { setRucInput(e.target.value.replace(/\D/g,"")); setLoginErr(""); }}
+                  onKeyDown={e => e.key === "Enter" && login()}
+                  placeholder="20123456789"
+                  maxLength={11}
+                  style={{ flex: 1, border: "none", outline: "none", fontFamily: C.fontMono, fontSize: 15, fontWeight: 600, color: C.ink, letterSpacing: 1, background: "transparent" }}
+                />
+                {rucValido && (
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={C.success} strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                )}
+              </div>
+              {rucValido && (
+                <p style={{ margin: "7px 0 0", fontSize: 11.5, color: C.success, fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                  RUC válido · 11 dígitos
+                </p>
+              )}
             </div>
-          ))}
+
+            {/* Campo DNI */}
+            <div style={{ marginBottom: 18 }}>
+              <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.ink2, marginBottom: 7, letterSpacing: "0.3px", textTransform: "uppercase" as const }}>DNI del usuario</label>
+              <div style={{ display: "flex", alignItems: "center", border: `1.5px solid ${dniInput ? C.navy : C.line2}`, borderRadius: 8, background: "#fff", padding: "0 14px", height: 48, transition: "border-color .15s", boxShadow: dniInput ? "0 0 0 3px rgba(11,49,95,.08)" : "none" }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={C.mute} strokeWidth="2" style={{ flexShrink: 0 }}><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+                <input
+                  value={dniInput}
+                  onChange={e => { setDniInput(e.target.value.replace(/\D/g,"")); setLoginErr(""); }}
+                  onKeyDown={e => e.key === "Enter" && login()}
+                  placeholder="12345678"
+                  maxLength={8}
+                  style={{ flex: 1, border: "none", outline: "none", marginLeft: 10, fontFamily: C.fontMono, fontSize: 15, fontWeight: 600, color: C.ink, background: "transparent", letterSpacing: 1 }}
+                />
+              </div>
+            </div>
+
+            {/* Campo contraseña */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.ink2, marginBottom: 7, letterSpacing: "0.3px", textTransform: "uppercase" as const }}>Contraseña / Código de acceso</label>
+              <div style={{ display: "flex", alignItems: "center", border: `1.5px solid ${passwordInput ? C.navy : C.line2}`, borderRadius: 8, background: "#fff", padding: "0 14px", height: 48, transition: "border-color .15s", boxShadow: passwordInput ? "0 0 0 3px rgba(11,49,95,.08)" : "none" }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={C.mute} strokeWidth="2" style={{ flexShrink: 0 }}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={passwordInput}
+                  onChange={e => { setPasswordInput(e.target.value); setLoginErr(""); }}
+                  onKeyDown={e => e.key === "Enter" && login()}
+                  placeholder="⬢⬢⬢⬢⬢⬢⬢⬢⬢⬢⬢⬢"
+                  style={{ flex: 1, border: "none", outline: "none", marginLeft: 10, fontFamily: C.fontMono, fontSize: 15, fontWeight: 600, color: C.ink, background: "transparent" }}
+                />
+                <button onClick={() => setShowPassword(v => !v)} style={{ background: "none", border: "none", cursor: "pointer", color: C.mute, padding: 4, display: "flex", alignItems: "center" }}>
+                  {showPassword
+                    ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                    : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  }
+                </button>
+              </div>
+            </div>
+
+            {/* Mantener sesión + Olvidaste */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 22 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: C.ink2, fontWeight: 600, cursor: "pointer" }}>
+                <span style={{ width: 16, height: 16, borderRadius: 4, background: C.navy, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+                </span>
+                Mantener sesión por 8 horas
+              </label>
+              <a style={{ fontSize: 12.5, color: C.navy, fontWeight: 700, textDecoration: "none", cursor: "pointer" }}>¿Olvidaste tu acceso?</a>
+            </div>
+
+            {/* Error */}
+            {loginErr && (
+              <div style={{ background: C.dangerTint, border: `1px solid ${C.danger}30`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.danger} strokeWidth="2" style={{ flexShrink: 0 }}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <p style={{ color: C.danger, fontSize: 13, fontWeight: 600, margin: 0 }}>{loginErr}</p>
+              </div>
+            )}
+
+            {/* Botón principal */}
+            <button className="pc-btn-primary" onClick={login} disabled={loginLoad || !rucInput.trim() || !dniInput.trim() || !passwordInput.trim()}>
+              {loginLoad
+                ? <><span style={{ width: 16, height: 16, border: "2.5px solid rgba(255,255,255,0.3)", borderTopColor: "white", borderRadius: "50%", animation: "spin 0.7s linear infinite", display: "inline-block" }} /> Verificando...</>
+                : <>Acceder al portal <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></>
+              }
+            </button>
+
+            {/* Separador */}
+            <div style={{ display: "flex", alignItems: "center", gap: 14, margin: "24px 0" }}>
+              <div style={{ flex: 1, height: 1, background: C.line }}/>
+              <span style={{ fontSize: 11, color: C.mute, fontWeight: 600, letterSpacing: "0.4px" }}>O CONTINÚA CON</span>
+              <div style={{ flex: 1, height: 1, background: C.line }}/>
+            </div>
+
+            {/* Botones alternativos */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <button className="pc-btn-secondary">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M9 9h6M9 12h6M9 15h4"/></svg>
+                Token biométrico
+              </button>
+              <button className="pc-btn-secondary">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                Código QR
+              </button>
+            </div>
+
+            <p style={{ margin: "32px 0 0", fontSize: 12.5, color: C.mute, textAlign: "center" as const }}>
+              ¿Eres nuevo cliente?{" "}
+              <a href={`https://wa.me/51${(empresa?.telefono||"966707225").replace(/\D/g,"")}`} target="_blank" rel="noopener noreferrer" style={{ color: C.navy, fontWeight: 700, textDecoration: "none" }}>
+                Solicita acceso →
+              </a>
+            </p>
+          </div>
         </div>
 
-        <p style={{ textAlign: "center", color: C.gray400, fontSize: 12, marginTop: 20 }}>
-          ¿Problemas? <a href={`tel:${empresa?.telefono || "966707225"}`} style={{ color: C.navy, fontWeight: 700 }}>{empresa?.telefono || "966 707 225"}</a>
-        </p>
       </div>
     </div>
   );
 
-  // ─── PORTAL AUTENTICADO ────────────────────────────────────────────────────
+  // ─── PORTAL AUTENTICADO ───────────────────────────────────────────────────
   return (
-    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", background: C.gray50, fontFamily: "system-ui,sans-serif" }}>
-      <style>{`@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(1.15)}} @keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" as const, background: C.bg, fontFamily: C.fontSans }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+        @keyframes pcPulse{0%,100%{opacity:1;transform:scale(1)}60%{opacity:.4;transform:scale(1.8)}}
+        @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(1.15)}}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+      `}</style>
 
-      {/* ── HEADER ── */}
-      <div style={{ background: `linear-gradient(90deg, ${C.navyDark} 0%, ${C.navy} 100%)`, padding: "10px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 30, boxShadow: "0 2px 16px rgba(7,32,63,0.35)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          {empresa?.logo_url
-            ? <img src={empresa.logo_url} alt="Logo" style={{ height: 34, objectFit: "contain", filter: "brightness(0) invert(1)", opacity: 0.9 }} />
-            : <div style={{ width: 36, height: 36, borderRadius: 10, background: "rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏢</div>
-          }
-          <div style={{ width: "1px", height: 28, background: "rgba(255,255,255,0.15)" }} />
-          <div>
-            <p style={{ color: "white", fontWeight: 800, fontSize: 13, margin: 0 }}>{cliente.empresa || cliente.nombre}</p>
-            <p style={{ color: "rgba(255,255,255,0.45)", fontSize: 10, margin: 0 }}>RUC: {cliente.ruc || "—"} · Portal Empresarial</p>
+      {/* MODAL GPS */}
+      {gpsModalOpen && gpsModalRes && (
+        <ModalGps
+          reservaId={gpsModalRes.id}
+          vehiculoId={gpsModalRes.vehiculo_id}
+          vehiculoPlaca={vehiculoInfo?.placa || "–"}
+          conductorNombre={conductorInfo?.nombre || "–"}
+          conductorTel={conductorInfo?.telefono || ""}
+          clienteNombre={cliente.empresa || cliente.nombre}
+          paradas={paradas[gpsModalRes.id] || []}
+          onClose={() => { setGpsModalOpen(false); setGpsModalRes(null); }}
+        />
+      )}
+
+      {/* MODAL FAQ */}
+      {modalFaq && (
+        <div onClick={() => setModalFaq(false)} style={{ position: "fixed", inset: 0, zIndex: 50, background: "rgba(15,23,42,0.6)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "white", borderRadius: 24, boxShadow: "0 24px 60px rgba(0,0,0,0.2)", width: "100%", maxWidth: 560, maxHeight: "85vh", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+            <div style={{ background: C.navy, padding: "20px 24px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <p style={{ color: "white", fontWeight: 900, fontSize: 16, margin: 0 }}>Preguntas Frecuentes</p>
+                <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 12, margin: "4px 0 0" }}>Portal Empresarial AFA Tours</p>
+              </div>
+              <button onClick={() => setModalFaq(false)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 10, width: 34, height: 34, color: "white", fontSize: 18, cursor: "pointer" }}>×</button>
+            </div>
+            <div style={{ overflowY: "auto", padding: "16px 24px 24px" }}>
+              {FAQ_ITEMS.map((item, i) => (
+                <div key={i} style={{ marginBottom: 10, border: `1px solid ${C.gray200}`, borderRadius: 14, overflow: "hidden" }}>
+                  <button onClick={() => setFaqOpen(faqOpen === i ? null : i)} style={{ width: "100%", padding: "14px 18px", background: faqOpen === i ? "#eef3f8" : "white", border: "none", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, textAlign: "left" }}>
+                    <p style={{ fontWeight: 700, color: C.navy, fontSize: 13, margin: 0 }}>{item.q}</p>
+                    <span style={{ color: C.navy, fontSize: 16, flexShrink: 0, display: "inline-block", transform: faqOpen === i ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>▾</span>
+                  </button>
+                  {faqOpen === i && (
+                    <div style={{ padding: "12px 18px", background: "#f8fafc", borderTop: `1px solid ${C.gray100}` }}>
+                      <p style={{ color: C.gray600, fontSize: 13, margin: 0, lineHeight: 1.6 }}>{item.a}</p>
+                    </div>
+                  )}
+                </div>
+              ))}
+              <div style={{ marginTop: 16, background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 14, padding: "16px 18px" }}>
+                <p style={{ color: C.green, fontWeight: 900, fontSize: 13, margin: "0 0 6px" }}>¿Necesitas más ayuda?</p>
+                <p style={{ color: "#166534", fontSize: 12, margin: 0 }}>Escríbenos por <b>WhatsApp 966707225</b> o llama al <b>01-3453707</b></p>
+              </div>
+            </div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {servicioActivo && (
-            <div style={{ background: "rgba(22,163,74,0.2)", border: "1px solid rgba(74,222,128,0.4)", borderRadius: 8, padding: "5px 12px", display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#4ade80", display: "inline-block", animation: "pulse 1.5s infinite" }} />
-              <p style={{ color: "#4ade80", fontSize: 11, fontWeight: 700, margin: 0 }}>Servicio activo</p>
+      )}
+
+      {/* HEADER */}
+      <div style={{ background: C.navyDeep, borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "0 20px", display: "flex", alignItems: "center", gap: 12, position: "sticky", top: 0, zIndex: 30, height: 56 }}>
+        {/* Logo */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+          <img src="/logoafa-removebg-preview.png" alt="AFA Tours Peru" style={{ height: 36, objectFit: "contain", imageRendering: "-webkit-optimize-contrast" as any }} />
+          <span style={{ color: "rgba(255,255,255,0.22)", fontSize: 9.5, fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase" as const }}>PORTAL CLIENTE</span>
+        </div>
+
+        <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.1)", flexShrink: 0, marginLeft: 4 }} />
+
+        {/* Badge en vivo */}
+        {servicioActivo && efectivoEstado(servicioActivo) === "en_curso" && (
+          <div style={{ background: "rgba(21,128,61,0.18)", border: "1px solid rgba(21,128,61,0.35)", borderRadius: 999, padding: "3px 10px", display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#4ade80", display: "inline-block", animation: "pcPulse 1.6s ease-out infinite" }} />
+            <p style={{ color: "#4ade80", fontSize: 11, fontWeight: 700, margin: 0 }}>EN RUTA</p>
+          </div>
+        )}
+        {servicioActivo && efectivoEstado(servicioActivo) !== "en_curso" && (
+          <div style={{ background: "rgba(29,78,216,0.15)", border: "1px solid rgba(29,78,216,0.3)", borderRadius: 999, padding: "3px 10px", display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#60a5fa", display: "inline-block" }} />
+            <p style={{ color: "#60a5fa", fontSize: 11, fontWeight: 700, margin: 0 }}>HOY</p>
+          </div>
+        )}
+
+        {/* Buscador */}
+        <div style={{ flex: 1, maxWidth: 360, position: "relative" as const }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth="2" style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input value={busqueda} onChange={e => setBusqueda(e.target.value)}
+            placeholder="Buscar servicios, rutas, fechas..."
+            style={{ width: "100%", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, padding: "7px 14px 7px 33px", color: "white", fontSize: 12.5, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const }}
+          />
+        </div>
+
+        {/* Derecha */}
+        <div style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: "auto", flexShrink: 0 }}>
+          {/* Bell */}
+          <button onClick={() => setModalFaq(true)} style={{ position: "relative" as const, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 7, width: 34, height: 34, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.65)" strokeWidth="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            {notifs.filter(n => n.tipo === "warning").length > 0 && (
+              <span style={{ position: "absolute", top: 5, right: 5, width: 7, height: 7, borderRadius: "50%", background: C.danger, border: "1.5px solid #071f3d" }} />
+            )}
+          </button>
+          {/* Ayuda */}
+          <button onClick={() => setModalFaq(true)} style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 7, padding: "6px 12px", color: "rgba(255,255,255,0.65)", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+            Ayuda
+          </button>
+          {/* Avatar empresa */}
+          <button onClick={() => setTab("cuenta")} style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, padding: "5px 10px 5px 6px", cursor: "pointer" }}>
+            <div style={{ width: 26, height: 26, borderRadius: 6, background: "#1a4a7a", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 10.5, color: "white", flexShrink: 0 }}>
+              {(portalUsuario?.nombre || cliente.empresa || cliente.nombre).split(" ").map((w: string) => w[0]).slice(0,2).join("").toUpperCase()}
             </div>
-          )}
-          <button
-            onClick={() => { clearSession(); setCliente(null); setReservas([]); }}
-            style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "6px 14px", color: "rgba(255,255,255,0.7)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
-          >
+            <div style={{ textAlign: "left" as const }}>
+              <p style={{ color: "rgba(255,255,255,0.9)", fontWeight: 700, fontSize: 11.5, margin: 0, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{portalUsuario?.nombre || cliente.empresa || cliente.nombre}</p>
+              <p style={{ color: "rgba(255,255,255,0.4)", fontSize: 9.5, margin: 0, fontFamily: C.fontMono }}>{cliente.empresa ? cliente.empresa : `RUC ${cliente.ruc || "–"}`}</p>
+            </div>
+          </button>
+          {/* Salir */}
+          <button onClick={() => { clearSession(); setCliente(null); setReservas([]); }}
+            style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 7, padding: "6px 12px", color: "rgba(255,255,255,0.4)", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
             Salir
           </button>
         </div>
       </div>
 
-      {/* ── TABS ── */}
-      <div style={{ background: C.white, borderBottom: `1px solid ${C.gray200}`, display: "flex", overflowX: "auto" as const, scrollbarWidth: "none" as const }}>
+      {/* TABS */}
+      <div style={{ background: C.surface, borderBottom: `1px solid ${C.line}`, display: "flex", overflowX: "auto" as const, scrollbarWidth: "none" as const, paddingLeft: 8 }}>
         {([
-          { id: "dashboard", icon: "📊", label: "Dashboard" },
-          { id: "activos",   icon: "🗺️", label: "En tiempo real", dot: !!servicioActivo },
-          { id: "historial", icon: "📋", label: "Historial", badge: reservas.length },
-          { id: "reporte",   icon: "📄", label: "Reporte", disabled: !reservaSel },
-        ] as any[]).map(t => (
-          <button key={t.id} onClick={() => !t.disabled && setTab(t.id)}
-            style={{ padding: "13px 22px", border: "none", background: "none", cursor: t.disabled ? "not-allowed" : "pointer", borderBottom: `3px solid ${tab === t.id ? C.navy : "transparent"}`, color: tab === t.id ? C.navy : t.disabled ? C.gray200 : C.gray600, fontWeight: tab === t.id ? 800 : 600, fontSize: 13, whiteSpace: "nowrap" as const, display: "flex", alignItems: "center", gap: 7, position: "relative" as const, transition: "color 0.15s" }}>
-            <span>{t.icon}</span> {t.label}
-            {t.dot && <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.green, animation: "pulse 1.5s infinite" }} />}
-            {t.badge > 0 && tab !== "historial" && (
-              <span style={{ fontSize: 10, fontWeight: 800, background: tab === "historial" ? C.navy : C.gray200, color: tab === "historial" ? "white" : C.gray600, padding: "1px 7px", borderRadius: 20 }}>{t.badge}</span>
-            )}
-          </button>
-        ))}
+          { id: "dashboard",   label: "Dashboard",
+            icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg> },
+          { id: "activos",     label: "En vivo",     dot: !!servicioActivo, badge: activosCount || undefined,
+            icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12h3l3-9 4 18 3-9h5"/></svg> },
+          { id: "historial",   label: "Historial",   badge: reservas.length || undefined,
+            icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg> },
+          { id: "reporte",     label: "Reportes",    disabled: !reservaSel,
+            icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg> },
+          { id: "facturacion", label: "Facturación", badge: (facturas.filter(f => f.estado === "vencida").length) || undefined,
+            icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg> },
+          { id: "documentos",  label: "Documentos",
+            icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> },
+          { id: "cuenta",      label: "Cuenta",
+            icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg> },
+        ] as any[]).filter(t => tienePermiso(t.id)).map(t => {
+          const active = tab === t.id;
+          return (
+            <button key={t.id} onClick={() => !t.disabled && setTab(t.id)}
+              style={{ padding: "0 16px", height: 44, border: "none", background: "none", cursor: t.disabled ? "not-allowed" : "pointer", borderBottom: `2px solid ${active ? C.navy : "transparent"}`, color: active ? C.navy : t.disabled ? C.mute2 : C.mute, fontWeight: active ? 800 : 600, fontSize: 13, whiteSpace: "nowrap" as const, display: "flex", alignItems: "center", gap: 6, transition: "color .15s, border-color .15s", fontFamily: "inherit" }}>
+              {t.icon}
+              {t.label}
+              {t.dot && <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.success, animation: "pcPulse 1.6s ease-out infinite", display: "inline-block" }} />}
+              {t.badge !== undefined && (
+                <span style={{ fontSize: 10, fontWeight: 700, background: active ? C.navyTint : C.surfaceAlt, color: active ? C.navy : C.mute, padding: "1px 7px", borderRadius: 4 }}>
+                  {t.badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
-      <div style={{ flex: 1, padding: "20px 20px 40px", maxWidth: 1120, margin: "0 auto", width: "100%", boxSizing: "border-box" as const }}>
+      <div style={{ flex: 1, padding: "20px 24px 48px", maxWidth: 1140, margin: "0 auto", width: "100%", boxSizing: "border-box" as const }}>
 
-        {/* ════ DASHBOARD ════ */}
+        {/* DASHBOARD */}
         {tab === "dashboard" && (
-          <div style={{ display: "flex", flexDirection: "column" as const, gap: 20 }}>
+          <div style={{ display: "flex", flexDirection: "column" as const, gap: 16 }}>
 
-            {/* KPIs */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(155px,1fr))", gap: 12 }}>
-              {[
-                { label: "Servicios este mes", val: serviciosMes,    icon: "🗓️", color: C.navy,  bg: "#eef3f8" },
-                { label: "Total histórico",    val: serviciosTotal,  icon: "✅", color: "#166534",bg: "#dcfce7" },
-                { label: "Gasto acumulado",    val: fmtSoles(gastosTotal), icon: "💰", color: "#854d0e", bg: "#fef9c3" },
-                { label: "Puntualidad",        val: `${puntualidad}%`, icon: "⏱️", color: C.blue,  bg: "#dbeafe" },
-                { label: "Pasajeros totales",  val: pasajerosTotal,  icon: "👥", color: "#6d28d9",bg: "#ede9fe" },
-              ].map(k => (
-                <div key={k.label} style={{ background: k.bg, borderRadius: 18, padding: "18px 20px", border: `1px solid ${k.color}20`, position: "relative" as const, overflow: "hidden" }}>
-                  <span style={{ position: "absolute", top: 14, right: 16, fontSize: 26, opacity: 0.25 }}>{k.icon}</span>
-                  <p style={{ fontSize: 28, fontWeight: 900, color: k.color, margin: 0 }}>{k.val}</p>
-                  <p style={{ fontSize: 11, color: k.color + "b0", fontWeight: 700, textTransform: "uppercase" as const, margin: "5px 0 0", letterSpacing: "0.04em" }}>{k.label}</p>
+            {/* Title row */}
+            <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, marginBottom: 4 }}>
+              <div>
+                <p style={{ fontSize: 10.5, fontWeight: 700, color: C.mute, letterSpacing: "1.4px", textTransform: "uppercase" as const, margin: "0 0 6px" }}>
+                  Resumen · {new Date().toLocaleDateString("es-PE",{weekday:"short",day:"2-digit",month:"short",year:"numeric"})}
+                </p>
+                <h1 style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 24, letterSpacing: -0.5, margin: 0, color: C.ink }}>
+                  {saludoHora}, {(portalUsuario?.nombre || cliente.nombre).split(" ")[0]}{cliente.empresa ? ` · ${cliente.empresa}` : ""}
+                </h1>
+                <p style={{ margin: "4px 0 0", fontSize: 13, color: C.mute }}>
+                  {activosCount > 0 ? `${activosCount} servicio en ruta · ` : ""}{proximosSvcs.length} programados esta semana{notifs.filter(n => n.tipo === "warning").length > 0 ? ` · ${notifs.filter(n => n.tipo === "warning").length} alerta${notifs.filter(n => n.tipo === "warning").length !== 1 ? "s" : ""} activa${notifs.filter(n => n.tipo === "warning").length !== 1 ? "s" : ""}` : ""}
+                </p>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button style={{ padding: "8px 14px", borderRadius: 7, border: `1px solid ${C.line2}`, background: C.surface, color: C.ink2, fontSize: 12.5, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6 }}>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Exportar resumen
+                </button>
+                <a href="https://wa.me/51966707225?text=Hola%2C%20necesito%20programar%20un%20servicio" target="_blank" rel="noopener noreferrer"
+                  style={{ padding: "8px 16px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontSize: 12.5, fontWeight: 700, cursor: "pointer", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  + Solicitar servicio
+                </a>
+              </div>
+            </div>
+
+            {/* KPI cards */}
+            <div style={{ display: "grid", gridTemplateColumns: `repeat(${puedeVerMontos ? 5 : 3},1fr)`, gap: 10 }}>
+              {([
+                { label: `Servicios · ${new Date(esteM + "-01").toLocaleDateString("es-PE",{month:"short"}).toUpperCase()}`, val: String(serviciosMes), delta: deltaServicios },
+                { label: "Total histórico",  val: String(serviciosTotal), delta: null },
+                ...(puedeVerMontos ? [{ label: "Gasto del mes", val: fmtSoles(gastoMes), delta: null }] : []),
+                { label: "Cumplimiento SLA", val: `${puntualidad}%`,      delta: null },
+                ...(puedeVerMontos ? [{ label: "Por pagar",     val: fmtSoles(porPagar), delta: null }] : []),
+              ] as { label: string; val: string; delta: number | null }[]).map(k => (
+                <div key={k.label} style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "14px 16px" }}>
+                  <p style={{ fontSize: 10.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1.2px", margin: "0 0 10px" }}>{k.label}</p>
+                  <p style={{ fontFamily: C.fontMono, fontWeight: 700, fontSize: 22, color: C.navy, margin: 0, letterSpacing: -0.4, lineHeight: 1 }}>{k.val}</p>
+                  {k.delta !== null && (
+                    <p style={{ fontSize: 11, margin: "6px 0 0", color: k.delta > 0 ? C.success : k.delta < 0 ? C.danger : C.mute, fontWeight: 700 }}>
+                      {k.delta > 0 ? "↑" : k.delta < 0 ? "↓" : "–"} {Math.abs(k.delta)} vs mes anterior
+                    </p>
+                  )}
                 </div>
               ))}
             </div>
 
-            {/* Alerta servicio activo */}
+            {/* EN RUTA card con timeline de paradas */}
             {servicioActivo && (
-              <div style={{ background: "#f0fdf4", border: "2px solid #86efac", borderRadius: 20, padding: "20px 24px" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" as const, gap: 14 }}>
-                  <div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                      <span style={{ width: 10, height: 10, borderRadius: "50%", background: C.green, animation: "pulse 1.5s infinite", display: "inline-block" }} />
-                      <p style={{ color: C.green, fontWeight: 900, fontSize: 14, margin: 0 }}>Servicio en curso HOY</p>
+              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 0 }}>
+                  <div style={{ padding: "18px 20px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.success, animation: "pcPulse 1.6s ease-out infinite", display: "inline-block", position: "relative" as const }} />
+                      <p style={{ color: C.success, fontWeight: 800, fontSize: 11, margin: 0, letterSpacing: "1.2px", textTransform: "uppercase" as const }}>En ruta · HOY</p>
+                      <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: "auto" }}>#{servicioActivo.id}</span>
                     </div>
-                    <p style={{ color: C.gray800, fontWeight: 800, fontSize: 18, margin: 0 }}>{servicioActivo.origen} → {servicioActivo.destino}</p>
-                    <p style={{ color: C.gray600, fontSize: 13, margin: "4px 0 0" }}>
-                      🕐 {servicioActivo.hora_servicio?.slice(0,5)} &nbsp;·&nbsp; {fmtFecha(servicioActivo.fecha_servicio)}
+                    <p style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 18, letterSpacing: -0.4, margin: "0 0 6px", color: C.ink }}>
+                      {servicioActivo.origen} → {servicioActivo.destino}
                     </p>
-                    {gpsActual && <p style={{ color: C.gray400, fontSize: 12, margin: "4px 0 0" }}>📡 Última señal: {fmtTs(gpsActual.timestamp)} · {gpsActual.velocidad} km/h</p>}
+                    <p style={{ color: C.mute, fontSize: 12.5, margin: "0 0 14px" }}>
+                      Turno {servicioActivo.hora_servicio?.slice(0,5) || "–"} &nbsp;·&nbsp; {fmtFecha(servicioActivo.fecha_servicio)}
+                      {gpsActual && <span> &nbsp;·&nbsp; <span style={{ fontFamily: C.fontMono }}>{gpsActual.velocidad}</span> km/h</span>}
+                    </p>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => setTab("activos")} style={{ padding: "8px 16px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 12.5, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                        GPS en vivo
+                      </button>
+                      {conductorInfo?.telefono && (
+                        <a href={`tel:${conductorInfo.telefono}`} style={{ padding: "8px 16px", borderRadius: 7, border: `1px solid ${C.line2}`, background: C.surface, color: C.ink2, fontWeight: 600, fontSize: 12.5, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, textDecoration: "none", fontFamily: "inherit" }}>
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13.6a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.59 3h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 10.09a16 16 0 0 0 6 6l1.27-.97a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 17.19z"/></svg>
+                          Llamar
+                        </a>
+                      )}
+                    </div>
                   </div>
-                  <button onClick={() => setTab("activos")} style={{ padding: "12px 28px", borderRadius: 14, border: "none", background: C.navy, color: "white", fontWeight: 900, fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", gap: 8, boxShadow: "0 4px 14px rgba(11,49,95,0.2)" }}>
-                    🗺️ Ver en mapa →
-                  </button>
+                  <div style={{ width: 180, background: C.navyDeep, position: "relative" as const, display: "flex", flexDirection: "column" as const, alignItems: "center", justifyContent: "center", gap: 6, padding: "18px 16px", cursor: "pointer" }} onClick={() => abrirGps(servicioActivo)}>
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="rgba(123,166,224,0.6)" strokeWidth="1.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                    <p style={{ color: "rgba(255,255,255,0.7)", fontSize: 11.5, fontWeight: 700, margin: 0 }}>Ver mapa</p>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#4ade80", animation: "pcPulse 1.6s ease-out infinite", display: "inline-block" }} />
+                      <p style={{ color: "#4ade80", fontSize: 10.5, fontWeight: 700, margin: 0 }}>EN VIVO</p>
+                    </div>
+                  </div>
                 </div>
+                {/* Timeline de paradas */}
+                {(paradas[servicioActivo.id] || []).length > 0 && (
+                  <div style={{ borderTop: `1px solid ${C.line}`, padding: "12px 20px", overflowX: "auto" }}>
+                    <p style={{ fontSize: 9.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: "0 0 10px" }}>
+                      Timeline del día · {(paradas[servicioActivo.id] || []).length} paradas
+                    </p>
+                    <div style={{ display: "flex", alignItems: "flex-start", minWidth: "max-content" }}>
+                      {(paradas[servicioActivo.id] || []).map((p, i, arr) => (
+                        <div key={p.id} style={{ display: "flex", alignItems: "flex-start" }}>
+                          <div style={{ display: "flex", flexDirection: "column" as const, alignItems: "center", gap: 4 }}>
+                            <div style={{ width: 20, height: 20, borderRadius: "50%", background: i === 0 ? C.navy : C.navyTint, border: `2px solid ${i === 0 ? C.navy : C.line2}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                              {i === 0 && <div style={{ width: 6, height: 6, borderRadius: "50%", background: "white" }} />}
+                            </div>
+                            <p style={{ fontSize: 9, color: C.mute, maxWidth: 68, textAlign: "center" as const, margin: 0, lineHeight: 1.3 }}>{p.nombre}</p>
+                            {p.hora_estimada && <p style={{ fontFamily: C.fontMono, fontSize: 8.5, color: C.navy, margin: 0, fontWeight: 700 }}>{p.hora_estimada}</p>}
+                          </div>
+                          {i < arr.length - 1 && <div style={{ height: 2, background: C.line2, width: 36, marginTop: 9, flexShrink: 0 }} />}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
-            <div style={{ display: "grid", gridTemplateColumns: proximosSvcs.length > 0 ? "1fr 1fr" : "1fr", gap: 20 }}>
-
-              {/* Próximos servicios */}
+            {/* Próximos + Últimos servicios */}
+            <div style={{ display: "grid", gridTemplateColumns: proximosSvcs.length > 0 ? "1fr 1fr" : "1fr", gap: 12 }}>
               {proximosSvcs.length > 0 && (
-                <div style={{ background: C.white, borderRadius: 18, overflow: "hidden", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
-                  <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.gray100}`, display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontSize: 16 }}>🔜</span>
-                    <p style={{ fontWeight: 900, color: C.gray800, margin: 0, fontSize: 14 }}>Próximos servicios</p>
+                <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+                  <div style={{ padding: "12px 18px", borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <p style={{ fontWeight: 800, color: C.ink, margin: 0, fontSize: 13 }}>Próximos servicios</p>
+                    <span style={{ fontSize: 10, fontWeight: 700, background: C.navyTint, color: C.navy, padding: "2px 8px", borderRadius: 4 }}>{proximosSvcs.length}</span>
                   </div>
                   {proximosSvcs.map(r => (
-                    <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 20px", borderBottom: `1px solid ${C.gray100}` }}>
-                      <div style={{ background: "#eef3f8", borderRadius: 12, padding: "8px 10px", textAlign: "center", flexShrink: 0, minWidth: 52 }}>
-                        <p style={{ color: C.navy, fontWeight: 900, fontSize: 16, margin: 0 }}>{new Date(r.fecha_servicio! + "T00:00:00").getDate()}</p>
-                        <p style={{ color: C.gray400, fontSize: 9, fontWeight: 700, margin: 0, textTransform: "uppercase" as const }}>{new Date(r.fecha_servicio! + "T00:00:00").toLocaleDateString("es-PE", { month: "short" })}</p>
+                    <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 18px", borderBottom: `1px solid ${C.line}` }}>
+                      <div style={{ background: C.navyTint, borderRadius: 8, padding: "6px 9px", textAlign: "center" as const, flexShrink: 0, minWidth: 46 }}>
+                        <p style={{ color: C.navy, fontWeight: 800, fontSize: 15, margin: 0, fontFamily: C.fontMono }}>{new Date(r.fecha_servicio! + "T00:00:00").getDate()}</p>
+                        <p style={{ color: C.mute, fontSize: 9, fontWeight: 700, margin: 0, textTransform: "uppercase" as const }}>{new Date(r.fecha_servicio! + "T00:00:00").toLocaleDateString("es-PE", { month: "short" })}</p>
                       </div>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{r.origen} → {r.destino}</p>
-                        <p style={{ color: C.gray400, fontSize: 11, margin: "2px 0 0" }}>🕐 {r.hora_servicio?.slice(0,5) || "—"}</p>
+                        <p style={{ fontWeight: 700, color: C.ink, fontSize: 12.5, margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{r.origen} → {r.destino}</p>
+                        <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0", fontFamily: C.fontMono }}>{r.hora_servicio?.slice(0,5) || "–"}</p>
                       </div>
                       <Badge estado={r.estado} />
                     </div>
@@ -491,162 +1367,477 @@ ${noEmb.length > 0 ? `<div class="box" style="margin-bottom:14px;border-color:#f
                 </div>
               )}
 
-              {/* Últimos servicios */}
-              <div style={{ background: C.white, borderRadius: 18, overflow: "hidden", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
-                <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.gray100}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontSize: 16 }}>🕐</span>
-                    <p style={{ fontWeight: 900, color: C.gray800, margin: 0, fontSize: 14 }}>Últimos servicios</p>
-                  </div>
-                  <button onClick={() => setTab("historial")} style={{ color: C.navy, fontSize: 12, fontWeight: 700, background: "none", border: "none", cursor: "pointer" }}>Ver todos →</button>
+              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ padding: "12px 18px", borderBottom: `1px solid ${C.line}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <p style={{ fontWeight: 800, color: C.ink, margin: 0, fontSize: 13 }}>Últimos servicios</p>
+                  <button onClick={() => setTab("historial")} style={{ color: C.navy, fontSize: 12, fontWeight: 700, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>Ver todos →</button>
                 </div>
                 {loading
                   ? [1,2,3].map(i => (
-                    <div key={i} style={{ padding: "14px 20px", borderBottom: `1px solid ${C.gray100}` }}>
-                      <div style={{ height: 12, background: "#f3f4f6", borderRadius: 6, marginBottom: 6, width: "70%" }} />
-                      <div style={{ height: 10, background: "#f3f4f6", borderRadius: 6, width: "45%" }} />
+                    <div key={i} style={{ padding: "12px 18px", borderBottom: `1px solid ${C.line}` }}>
+                      <div style={{ height: 11, background: C.surfaceAlt, borderRadius: 4, marginBottom: 6, width: "68%" }} />
+                      <div style={{ height: 9, background: C.surfaceAlt, borderRadius: 4, width: "42%" }} />
                     </div>
                   ))
                   : reservas.slice(0, 6).map(r => (
-                    <div key={r.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "11px 20px", borderBottom: `1px solid ${C.gray100}`, gap: 12 }}>
+                    <div key={r.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 18px", borderBottom: `1px solid ${C.line}`, gap: 10 }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{r.origen} → {r.destino}</p>
-                        <p style={{ color: C.gray400, fontSize: 11, margin: "2px 0 0" }}>{fmtFechaLrg(r.fecha_servicio)} · {r.hora_servicio?.slice(0,5) || "—"}</p>
+                        <p style={{ fontWeight: 700, color: C.ink, fontSize: 12.5, margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{r.origen} → {r.destino}</p>
+                        <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0", fontFamily: C.fontMono }}>{fmtFechaLrg(r.fecha_servicio)} · {r.hora_servicio?.slice(0,5) || "–"}</p>
                       </div>
                       <Badge estado={r.estado} />
-                      <span style={{ color: C.navy, fontWeight: 800, fontSize: 13, flexShrink: 0 }}>{fmtSoles(Number(r.precio_cliente))}</span>
-                      <button onClick={() => cargarDetalle(r)} style={{ padding: "5px 12px", borderRadius: 8, border: `1px solid ${C.navy}22`, color: C.navy, fontSize: 11, fontWeight: 700, background: "#eef3f8", cursor: "pointer", flexShrink: 0 }}>Ver</button>
+                      {puedeVerMontos && <span style={{ color: C.navy, fontWeight: 700, fontSize: 12.5, flexShrink: 0, fontFamily: C.fontMono }}>{fmtSoles(Number(r.precio_cliente))}</span>}
+                      <button onClick={() => cargarDetalle(r)} style={{ padding: "4px 11px", borderRadius: 6, border: `1px solid ${C.line2}`, color: C.navy, fontSize: 11.5, fontWeight: 700, background: C.navyTint, cursor: "pointer", flexShrink: 0, fontFamily: "inherit" }}>Ver</button>
                     </div>
                   ))
                 }
                 {!loading && reservas.length === 0 && (
-                  <div style={{ padding: 32, textAlign: "center" }}>
-                    <p style={{ fontSize: 32 }}>📋</p>
-                    <p style={{ color: C.gray400, fontWeight: 600, fontSize: 14 }}>Sin servicios registrados aún</p>
+                  <div style={{ padding: 36, textAlign: "center" as const }}>
+                    <p style={{ color: C.mute, fontWeight: 600, fontSize: 13 }}>Sin servicios registrados aún</p>
                   </div>
                 )}
+              </div>
+            </div>
+
+            {/* SLA por ruta + Acciones rápidas + Alertas */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+
+              {/* SLA por ruta */}
+              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ padding: "12px 18px", borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+                  <p style={{ fontWeight: 800, color: C.ink, margin: 0, fontSize: 13 }}>SLA por ruta</p>
+                  <p style={{ color: C.mute, fontSize: 10.5, margin: 0 }}>Histórico de cumplimiento</p>
+                </div>
+                {topRutas.length === 0 ? (
+                  <div style={{ padding: 28, textAlign: "center" as const, color: C.mute, fontSize: 13 }}>Sin datos suficientes</div>
+                ) : topRutas.map((rt, i) => (
+                  <div key={i} style={{ padding: "12px 18px", borderBottom: `1px solid ${C.line}` }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                      <p style={{ fontWeight: 700, color: C.ink2, fontSize: 12, margin: 0, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{rt.ruta}</p>
+                      <span style={{ fontFamily: C.fontMono, fontWeight: 800, fontSize: 13, color: rt.sla >= 90 ? C.navy : rt.sla >= 70 ? C.warn : C.danger, marginLeft: 10, flexShrink: 0 }}>{rt.sla}%</span>
+                    </div>
+                    <p style={{ color: C.mute, fontSize: 10.5, margin: "0 0 7px", fontFamily: C.fontMono }}>{rt.servicios} servicio{rt.servicios !== 1 ? "s" : ""}</p>
+                    <div style={{ height: 5, background: C.surfaceAlt, borderRadius: 3, overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${rt.sla}%`, background: rt.sla >= 90 ? C.navy : rt.sla >= 70 ? C.warn : C.danger, borderRadius: 3 }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Acciones rápidas + Alertas */}
+              <div style={{ display: "flex", flexDirection: "column" as const, gap: 12 }}>
+
+                {/* Acciones rápidas */}
+                <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+                  <div style={{ padding: "12px 18px", borderBottom: `1px solid ${C.line}` }}>
+                    <p style={{ fontWeight: 800, color: C.ink, margin: 0, fontSize: 13 }}>Acciones rápidas</p>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1, background: C.line }}>
+                    {([
+                      { label: "Programar", icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>, action: () => window.open("https://wa.me/51966707225?text=Hola%2C%20necesito%20programar%20un%20servicio","_blank") },
+                      { label: "Exportar", icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>, action: () => {} },
+                      { label: "Coordinador", icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>, action: () => window.open("https://wa.me/51966707225","_blank") },
+                      { label: "Manifiesto", icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>, action: () => setTab("historial") },
+                    ] as { label: string; icon: React.ReactNode; action: () => void }[]).map(a => (
+                      <button key={a.label} onClick={a.action}
+                        style={{ background: C.surface, border: "none", padding: "18px 16px", cursor: "pointer", display: "flex", flexDirection: "column" as const, alignItems: "center", gap: 7, fontFamily: "inherit", color: C.navy }}
+                        onMouseEnter={e => (e.currentTarget.style.background = C.navyTint)}
+                        onMouseLeave={e => (e.currentTarget.style.background = C.surface)}>
+                        {a.icon}
+                        <span style={{ fontSize: 11.5, fontWeight: 700, color: C.ink2 }}>{a.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Alertas activas */}
+                {notifs.filter(n => n.tipo === "warning").length > 0 && (
+                  <div style={{ background: C.warnTint, border: `1px solid rgba(166,91,10,0.25)`, borderRadius: 10, overflow: "hidden" }}>
+                    <div style={{ padding: "10px 16px", borderBottom: "1px solid rgba(166,91,10,0.2)", display: "flex", alignItems: "center", gap: 6 }}>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={C.warn} strokeWidth="2.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                      <p style={{ fontWeight: 800, color: C.warn, margin: 0, fontSize: 12 }}>{notifs.filter(n => n.tipo === "warning").length} Alerta{notifs.filter(n => n.tipo === "warning").length !== 1 ? "s" : ""} activa{notifs.filter(n => n.tipo === "warning").length !== 1 ? "s" : ""}</p>
+                    </div>
+                    {notifs.filter(n => n.tipo === "warning").slice(0, 2).map(n => (
+                      <div key={n.id} style={{ padding: "10px 16px", borderBottom: "1px solid rgba(166,91,10,0.15)" }}>
+                        <p style={{ fontWeight: 700, color: C.ink2, fontSize: 12, margin: 0 }}>{n.titulo}</p>
+                        <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0" }}>{n.desc}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Notificaciones info/success */}
+                <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+                  <div style={{ padding: "10px 16px", borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", gap: 8 }}>
+                    <p style={{ fontWeight: 800, color: C.ink, margin: 0, fontSize: 12 }}>Notificaciones</p>
+                    {notifs.length > 0 && <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 700, background: C.navyTint, color: C.navy, padding: "2px 7px", borderRadius: 4 }}>{notifs.length}</span>}
+                  </div>
+                  {notifs.length === 0
+                    ? <div style={{ padding: 20, textAlign: "center" as const, color: C.mute, fontSize: 12 }}>Sin notificaciones</div>
+                    : notifs.filter(n => n.tipo !== "warning").slice(0, 3).map(n => (
+                      <div key={n.id} style={{ display: "flex", gap: 10, padding: "10px 16px", borderBottom: `1px solid ${C.line}`, alignItems: "flex-start" }}>
+                        <div style={{ width: 7, height: 7, borderRadius: "50%", background: n.tipo === "success" ? C.success : C.info, flexShrink: 0, marginTop: 3 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <p style={{ fontWeight: 700, color: C.ink2, fontSize: 12, margin: 0 }}>{n.titulo}</p>
+                          <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{n.desc}</p>
+                        </div>
+                      </div>
+                    ))
+                  }
+                </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* ════ EN TIEMPO REAL ════ */}
+        {/* EN TIEMPO REAL */}
         {tab === "activos" && (
-          <div style={{ display: "flex", flexDirection: "column" as const, gap: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column" as const, gap: 12, animation: "fadeIn 0.3s ease" }}>
             {!servicioActivo ? (
-              <div style={{ background: C.white, borderRadius: 22, padding: 56, textAlign: "center", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
-                <p style={{ fontSize: 48, margin: "0 0 16px" }}>🚌</p>
-                <p style={{ color: C.navy, fontWeight: 900, fontSize: 20, margin: 0 }}>Sin servicio activo hoy</p>
-                <p style={{ color: C.gray400, fontSize: 14, marginTop: 8 }}>El seguimiento GPS aparecerá aquí cuando haya un bus asignado para este día.</p>
-                <button onClick={() => setTab("historial")} style={{ marginTop: 20, padding: "10px 24px", borderRadius: 12, border: "none", background: C.navy, color: "white", fontWeight: 800, fontSize: 13, cursor: "pointer" }}>Ver historial de servicios →</button>
+              /* ESTADO VACÍO */
+              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ background: servicioHoy?.estado === "cancelado" ? C.dangerTint : C.navyDeep, padding: "48px 32px", textAlign: "center" as const, position: "relative" as const, overflow: "hidden" }}>
+                  <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0.15, pointerEvents: "none" }}><defs><pattern id="ev-g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" stroke="white" strokeWidth="1" fill="none"/></pattern></defs><rect width="100%" height="100%" fill="url(#ev-g)"/></svg>
+                  <div style={{ position: "relative" as const }}>
+                    <div style={{ width: 64, height: 64, borderRadius: 16, background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px" }}>
+                      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.8)" strokeWidth="1.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                    </div>
+                    <p style={{ color: "white", fontWeight: 800, fontSize: 20, margin: "0 0 8px" }}>
+                      {servicioHoy?.estado === "cancelado" ? "Servicio de hoy cancelado" : "Sin servicio programado hoy"}
+                    </p>
+                    <p style={{ color: "rgba(255,255,255,0.55)", fontSize: 13.5, margin: 0, maxWidth: 480, marginLeft: "auto", marginRight: "auto" }}>
+                      {servicioHoy?.estado === "cancelado"
+                        ? `${servicioHoy.origen} → ${servicioHoy.destino} · ${servicioHoy.hora_servicio?.slice(0,5) || "–"}`
+                        : "El seguimiento GPS aparecerá aquí cuando haya un bus asignado para hoy."}
+                    </p>
+                  </div>
+                </div>
+                <div style={{ padding: "20px 28px", display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" as const, borderBottom: `1px solid ${C.line}` }}>
+                  <button onClick={() => setTab("historial")} style={{ padding: "9px 20px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                    Ver historial
+                  </button>
+                  <a href="https://wa.me/51966707225?text=Hola%2C%20necesito%20programar%20un%20nuevo%20servicio" target="_blank" rel="noopener noreferrer"
+                    style={{ padding: "9px 20px", borderRadius: 7, border: `1px solid ${C.line2}`, background: C.surface, color: C.ink2, fontWeight: 700, fontSize: 13, cursor: "pointer", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    Programar servicio →
+                  </a>
+                </div>
+                <div style={{ padding: "18px 28px", display: "flex", gap: 10, flexWrap: "wrap" as const, background: C.bg }}>
+                  <a href="https://wa.me/51966707225" target="_blank" rel="noopener noreferrer"
+                    style={{ flex: 1, minWidth: 200, display: "flex", alignItems: "center", gap: 12, padding: "14px 18px", background: C.successTint, border: `1px solid ${C.success}30`, borderRadius: 8, textDecoration: "none" }}>
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={C.success} strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    <div>
+                      <p style={{ color: C.success, fontWeight: 700, fontSize: 12.5, margin: 0 }}>WhatsApp</p>
+                      <p style={{ color: C.success, fontWeight: 800, fontSize: 14, margin: "2px 0 0", fontFamily: C.fontMono }}>966 707 225</p>
+                    </div>
+                  </a>
+                  <a href="tel:966707225" style={{ flex: 1, minWidth: 200, display: "flex", alignItems: "center", gap: 12, padding: "14px 18px", background: C.infoTint, border: `1px solid ${C.info}30`, borderRadius: 8, textDecoration: "none" }}>
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={C.info} strokeWidth="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13.6a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.59 3h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 10.09a16 16 0 0 0 6 6l1.27-.97a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 17.19z"/></svg>
+                    <div>
+                      <p style={{ color: C.info, fontWeight: 700, fontSize: 12.5, margin: 0 }}>Teléfono</p>
+                      <p style={{ color: C.info, fontWeight: 800, fontSize: 14, margin: "2px 0 0", fontFamily: C.fontMono }}>01-3453707</p>
+                    </div>
+                  </a>
+                </div>
               </div>
+
             ) : (
               <>
-                {/* Info strip */}
-                <div style={{ background: C.white, borderRadius: 18, padding: "16px 24px", boxShadow: "0 1px 8px rgba(0,0,0,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" as const, gap: 16 }}>
+                {/* Encabezado del servicio */}
+                <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "18px 22px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" as const, gap: 14 }}>
                   <div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                      <span style={{ width: 9, height: 9, borderRadius: "50%", background: C.green, display: "inline-block", animation: "pulse 1.5s infinite" }} />
-                      <p style={{ color: C.green, fontWeight: 900, margin: 0, fontSize: 13, textTransform: "uppercase" as const, letterSpacing: "0.05em" }}>En ruta</p>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: "50%", background: efectivoEstado(servicioActivo) === "en_curso" ? C.success : C.info, display: "inline-block", animation: "pcPulse 1.6s ease-out infinite" }} />
+                      <p style={{ color: efectivoEstado(servicioActivo) === "en_curso" ? C.success : C.info, fontWeight: 800, margin: 0, fontSize: 11, textTransform: "uppercase" as const, letterSpacing: "1.2px" }}>
+                        {efectivoEstado(servicioActivo) === "en_curso" ? "En ruta" : esFinalizado(servicioActivo.estado) ? "Finalizado hoy" : "Confirmado · Hoy"}
+                      </p>
+                      <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: 4 }}>#{servicioActivo.id}</span>
                     </div>
-                    <p style={{ color: C.navy, fontWeight: 900, fontSize: 20, margin: 0 }}>{servicioActivo.origen}</p>
-                    <p style={{ color: C.gray600, fontSize: 14, margin: "2px 0 0" }}>→ {servicioActivo.destino} &nbsp;·&nbsp; 🕐 {servicioActivo.hora_servicio?.slice(0,5)}</p>
+                    <p style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 20, letterSpacing: -0.4, margin: "0 0 4px", color: C.ink }}>
+                      {servicioActivo.origen} → {servicioActivo.destino}
+                    </p>
+                    <p style={{ color: C.mute, fontSize: 13, margin: 0, fontFamily: C.fontMono }}>
+                      {servicioActivo.hora_servicio?.slice(0,5) || "–"} &nbsp;·&nbsp; {fmtFecha(servicioActivo.fecha_servicio)}
+                      {gpsActual && <span> &nbsp;·&nbsp; {gpsActual.velocidad} km/h &nbsp;·&nbsp; señal {fmtTs(gpsActual.timestamp)}</span>}
+                    </p>
                   </div>
-                  {gpsActual && (
-                    <div style={{ display: "flex", gap: 10 }}>
-                      {[
-                        ["🚀", "Velocidad", `${gpsActual.velocidad} km/h`],
-                        ["📡", "Última señal", fmtTs(gpsActual.timestamp)],
-                      ].map(([ic, lbl, val]) => (
-                        <div key={lbl} style={{ background: "#eef3f8", borderRadius: 14, padding: "10px 16px", textAlign: "center" as const }}>
-                          <p style={{ fontSize: 18, margin: "0 0 4px" }}>{ic}</p>
-                          <p style={{ color: C.navy, fontWeight: 900, fontSize: 16, margin: 0 }}>{val}</p>
-                          <p style={{ color: C.gray400, fontSize: 10, fontWeight: 700, margin: "2px 0 0", textTransform: "uppercase" as const }}>{lbl}</p>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+                    {gpsActual && (
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <div style={{ background: C.surfaceAlt, border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 16px", textAlign: "center" as const }}>
+                          <p style={{ fontFamily: C.fontMono, color: C.navy, fontWeight: 700, fontSize: 16, margin: 0 }}>{gpsActual.velocidad}</p>
+                          <p style={{ color: C.mute, fontSize: 9.5, fontWeight: 700, margin: "2px 0 0", textTransform: "uppercase" as const, letterSpacing: "0.8px" }}>km/h</p>
                         </div>
-                      ))}
-                    </div>
-                  )}
+                        <div style={{ background: C.surfaceAlt, border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 16px", textAlign: "center" as const }}>
+                          <p style={{ fontFamily: C.fontMono, color: C.success, fontWeight: 700, fontSize: 14, margin: 0 }}>{fmtTs(gpsActual.timestamp)}</p>
+                          <p style={{ color: C.mute, fontSize: 9.5, fontWeight: 700, margin: "2px 0 0", textTransform: "uppercase" as const, letterSpacing: "0.8px" }}>Señal</p>
+                        </div>
+                      </div>
+                    )}
+                    <button onClick={() => cliente && cargarDatos(cliente.id)} style={{ padding: "10px 14px", borderRadius: 7, border: `1px solid ${C.line2}`, background: C.surface, color: C.ink2, fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                      Actualizar
+                    </button>
+                    <button onClick={() => abrirGps(servicioActivo)} style={{ padding: "10px 20px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 7, fontFamily: "inherit" }}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                      GPS EN VIVO
+                    </button>
+                  </div>
                 </div>
 
-                {/* Mapa */}
-                <div style={{ height: 460, borderRadius: 18, overflow: "hidden", boxShadow: "0 2px 16px rgba(0,0,0,0.1)", position: "relative" as const }}>
-                  <div ref={mapContainer} style={{ width: "100%", height: "100%" }} />
-                  {!gpsActual && (
-                    <div style={{ position: "absolute" as const, inset: 0, display: "flex", flexDirection: "column" as const, alignItems: "center", justifyContent: "center", background: "rgba(248,250,252,0.9)" }}>
-                      <div style={{ width: 36, height: 36, border: `4px solid ${C.gray200}`, borderTopColor: C.navy, borderRadius: "50%", animation: "spin 0.8s linear infinite", marginBottom: 12 }} />
-                      <p style={{ color: C.gray600, fontWeight: 700, margin: 0 }}>Esperando señal GPS del conductor...</p>
+                {/* GPS preview clickable */}
+                <div onClick={() => abrirGps(servicioActivo)} style={{ background: C.navyDeep, borderRadius: 10, padding: "44px 24px", textAlign: "center" as const, cursor: "pointer", position: "relative" as const, overflow: "hidden" }}>
+                  <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0.1, pointerEvents: "none" }}><defs><pattern id="gps-g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" stroke="white" strokeWidth="1" fill="none"/></pattern></defs><rect width="100%" height="100%" fill="url(#gps-g)"/></svg>
+                  <div style={{ position: "relative" as const }}>
+                    <div style={{ width: 64, height: 64, borderRadius: 999, background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.14)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
+                      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="rgba(123,166,224,0.9)" strokeWidth="1.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
                     </div>
-                  )}
+                    <p style={{ color: "white", fontWeight: 800, fontSize: 18, margin: "0 0 8px" }}>Ver mapa GPS en vivo</p>
+                    <p style={{ color: "rgba(255,255,255,0.45)", fontSize: 13, margin: "0 0 22px" }}>
+                      {gpsActual ? `${gpsActual.velocidad} km/h · última señal ${fmtTs(gpsActual.timestamp)}` : "Esperando señal GPS del conductor..."}
+                    </p>
+                    <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8, padding: "10px 22px", color: "white", fontWeight: 700, fontSize: 13 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: "50%", background: gpsActual ? "#4ade80" : "#f87171", animation: "pcPulse 1.6s ease-out infinite", display: "inline-block" }} />
+                      {gpsActual ? "Señal activa · Abrir mapa completo" : "Sin señal GPS · Haz clic para revisar"}
+                    </div>
+                  </div>
                 </div>
               </>
             )}
           </div>
         )}
 
-        {/* ════ HISTORIAL ════ */}
-        {tab === "historial" && (
-          <div style={{ display: "flex", flexDirection: "column" as const, gap: 14 }}>
-            {/* Filtros */}
-            <div style={{ background: C.white, borderRadius: 16, padding: "14px 20px", boxShadow: "0 1px 8px rgba(0,0,0,0.06)", display: "flex", gap: 12, flexWrap: "wrap" as const, alignItems: "center" }}>
-              <input
-                value={filtroBusqueda}
-                onChange={e => setFiltroBusqueda(e.target.value)}
-                placeholder="🔍 Buscar por ruta o fecha..."
-                style={{ flex: 1, minWidth: 180, border: `1px solid ${C.gray200}`, borderRadius: 10, padding: "8px 14px", fontSize: 13, outline: "none", fontFamily: "inherit" }}
-              />
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const }}>
-                {["todos", "confirmado", "completado", "pendiente", "cancelado"].map(e => (
-                  <button key={e} onClick={() => setFiltroEstado(e)}
-                    style={{ padding: "6px 14px", borderRadius: 20, border: `1px solid ${filtroEstado === e ? C.navy : C.gray200}`, background: filtroEstado === e ? C.navy : "white", color: filtroEstado === e ? "white" : C.gray600, fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "capitalize" as const }}>
-                    {e === "todos" ? "Todos" : (ESTADO[e]?.label || e)}
-                  </button>
-                ))}
+        {/* HISTORIAL */}
+        {tab === "historial" && (() => {
+          const totalEmbarcados = Object.values(reservaStats).reduce((s, x) => s + x.embarcados, 0);
+          const reservasConStats = Object.values(reservaStats).filter(x => x.esperados > 0);
+          const slaPromedio = reservasConStats.length > 0
+            ? Math.round(reservasConStats.reduce((s, x) => s + (x.embarcados / x.esperados) * 100, 0) / reservasConStats.length)
+            : null;
+          const tasaCancelacion = reservas.length > 0
+            ? Math.round((reservas.filter(r => esCancelado(r.estado)).length / reservas.length) * 100)
+            : 0;
+          const slaColor = (pct: number) => pct >= 95 ? C.success : pct >= 85 ? C.warn : C.danger;
+          const exportCSV = () => {
+            const headers = ["#","Fecha","Hora","Ruta","Estado","Pasajeros",...(puedeVerMontos ? ["Total"] : [])];
+            const rows = [headers];
+            reservasFiltradas.forEach(r => {
+              const st = reservaStats[r.id];
+              const base = [String(r.id), fmtFecha(r.fecha_servicio), r.hora_servicio?.slice(0,5)||"–", `${r.origen} → ${r.destino}`, r.estado, st ? `${st.embarcados}/${st.esperados}` : "–"];
+              rows.push(puedeVerMontos ? [...base, fmtSoles(Number(r.precio_cliente))] : base);
+            });
+            const csv = rows.map(r => r.map(v => `"${v}"`).join(",")).join("\n");
+            const a = document.createElement("a"); a.href = "data:text/csv;charset=utf-8," + encodeURIComponent(csv); a.download = `historial_${hoy}.csv`; a.click();
+          };
+          return (
+          <div style={{ display: "flex", flexDirection: "column" as const, gap: 16 }}>
+
+            {/* Header */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" as const, gap: 12 }}>
+              <div>
+                <p style={{ margin: 0, fontSize: 10, fontWeight: 800, color: C.mute, letterSpacing: "1.2px", textTransform: "uppercase" as const }}>HISTORIAL COMPLETO</p>
+                <h2 style={{ margin: "4px 0 6px", fontSize: 22, fontWeight: 900, color: C.ink, letterSpacing: -0.5 }}>Servicios contratados</h2>
+                <p style={{ margin: 0, fontSize: 13, color: C.mute }}>
+                  <span style={{ fontFamily: C.fontMono, fontWeight: 700, color: C.navy }}>{reservas.length}</span> servicios registrados · {cliente?.empresa || cliente?.nombre}
+                </p>
               </div>
-              <p style={{ color: C.gray400, fontSize: 12, margin: 0, flexShrink: 0 }}>{reservasFiltradas.length} resultado{reservasFiltradas.length !== 1 ? "s" : ""}</p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+                <button onClick={() => cliente && cargarDatos(cliente.id)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 10, border: `1.5px solid ${C.line2}`, background: C.surface, color: C.ink2, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                  Actualizar
+                </button>
+                <button onClick={exportCSV} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 10, border: `1.5px solid ${C.line2}`, background: C.surface, color: C.ink2, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Exportar CSV
+                </button>
+                <button onClick={() => window.open("https://wa.me/51966707225?text=Hola%2C+quiero+solicitar+un+nuevo+servicio", "_blank")} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 10, border: "none", background: C.navy, color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  Solicitar servicio
+                </button>
+              </div>
             </div>
 
-            {/* Tabla */}
-            <div style={{ background: C.white, borderRadius: 18, overflow: "hidden", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
+            {/* KPI strip */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12 }}>
+              {[
+                {
+                  label: "Servicios este mes", value: serviciosMes,
+                  sub: deltaServicios !== 0 ? `${deltaServicios > 0 ? "+" : ""}${deltaServicios} vs mes anterior` : "igual al mes anterior",
+                  accent: C.navy, subColor: deltaServicios > 0 ? C.success : deltaServicios < 0 ? C.danger : C.mute,
+                  icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                },
+                {
+                  label: "Pasajeros embarcados", value: loadingStats ? "..." : totalEmbarcados || "–",
+                  sub: "total histórico",
+                  accent: C.info, subColor: C.mute,
+                  icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                },
+                ...(puedeVerMontos ? [{
+                  label: "Gasto total", value: fmtSoles(gastosTotal),
+                  sub: `${fmtSoles(gastoMes)} este mes`,
+                  accent: C.navyDeep, subColor: C.mute,
+                  icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                }] : []),
+                {
+                  label: "SLA promedio", value: loadingStats ? "..." : slaPromedio !== null ? `${slaPromedio}%` : "–",
+                  sub: "tasa de embarque",
+                  accent: slaPromedio !== null ? slaColor(slaPromedio) : C.mute, subColor: C.mute,
+                  icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                },
+                {
+                  label: "Tasa cancelación", value: `${tasaCancelacion}%`,
+                  sub: `${reservas.filter(r => esCancelado(r.estado)).length} cancelados`,
+                  accent: tasaCancelacion > 10 ? C.danger : C.mute, subColor: C.mute,
+                  icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                },
+              ].map(k => (
+                <div key={k.label} style={{ background: C.surface, borderRadius: 14, padding: "14px 16px", border: `1px solid ${C.line}`, borderTop: `3px solid ${k.accent}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                    <p style={{ margin: 0, fontSize: 10, fontWeight: 800, color: C.mute, letterSpacing: "0.06em", textTransform: "uppercase" as const, lineHeight: 1.3 }}>{k.label}</p>
+                    <span style={{ color: k.accent, opacity: 0.7 }}>{k.icon}</span>
+                  </div>
+                  <p style={{ fontFamily: C.fontMono, fontSize: 22, fontWeight: 900, color: k.accent, margin: "0 0 4px" }}>{k.value}</p>
+                  <p style={{ fontSize: 10.5, color: k.subColor, margin: 0, fontWeight: 600 }}>{k.sub}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Filter bar */}
+            <div style={{ background: C.surface, borderRadius: 14, padding: "12px 16px", border: `1px solid ${C.line}`, display: "flex", gap: 10, flexWrap: "wrap" as const, alignItems: "center" }}>
+              <div style={{ position: "relative" as const, flex: 1, minWidth: 200 }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.mute} strokeWidth="2" style={{ position: "absolute" as const, left: 11, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" as const }}><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                <input value={filtroBusqueda} onChange={e => setFiltroBusqueda(e.target.value)}
+                  placeholder="Buscar por ruta o fecha..."
+                  style={{ width: "100%", paddingLeft: 34, paddingRight: 12, paddingTop: 8, paddingBottom: 8, border: `1px solid ${C.line}`, borderRadius: 9, fontSize: 13, outline: "none", fontFamily: C.fontSans, boxSizing: "border-box" as const, background: C.bg, color: C.ink }}
+                />
+              </div>
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
+                {(["todos","confirmado","en_curso","completado","pendiente","cancelado"] as const).map(e => {
+                  const cnt = e === "todos" ? reservas.length : reservas.filter(r => efectivoEstado(r) === e).length;
+                  const active = filtroEstado === e;
+                  return (
+                    <button key={e} onClick={() => setFiltroEstado(e)}
+                      style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: 20, border: `1px solid ${active ? C.navy : C.line}`, background: active ? C.navy : C.surface, color: active ? "white" : C.mute, fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans, transition: "all .12s" }}>
+                      {e === "todos" ? "Todos" : (ESTADO[e]?.label || e)}
+                      <span style={{ fontSize: 9.5, background: active ? "rgba(255,255,255,0.2)" : C.surfaceAlt, color: active ? "rgba(255,255,255,0.8)" : C.mute2, borderRadius: 10, padding: "0 5px", lineHeight: "17px", minWidth: 20, textAlign: "center" as const }}>{cnt}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <span style={{ fontSize: 11, color: C.mute2, fontWeight: 600, whiteSpace: "nowrap" as const }}>
+                {reservasFiltradas.length !== reservas.length ? `${reservasFiltradas.length} de ${reservas.length}` : `${reservas.length} servicios`}
+              </span>
+            </div>
+
+            {/* Table */}
+            <div style={{ background: C.surface, borderRadius: 16, overflow: "hidden" as const, border: `1px solid ${C.line}` }}>
               <div style={{ overflowX: "auto" as const }}>
                 <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 13 }}>
                   <thead>
-                    <tr style={{ background: C.gray50, borderBottom: `1px solid ${C.gray200}` }}>
-                      {["Fecha", "Hora", "Ruta", "Estado", "Precio", "Reporte"].map(h => (
-                        <th key={h} style={{ padding: "11px 18px", textAlign: "left" as const, fontSize: 10, fontWeight: 800, color: C.gray600, textTransform: "uppercase" as const, letterSpacing: "0.06em", whiteSpace: "nowrap" as const }}>{h}</th>
+                    <tr style={{ background: C.surfaceAlt, borderBottom: `1.5px solid ${C.line2}` }}>
+                      {[["#","48px"],["Fecha","120px"],["Hora","70px"],["Ruta","auto"],["Estado","110px"],["Pasajeros","110px"],["SLA","120px"],...(puedeVerMontos ? [["Total","110px"]] : []),["GPS","68px"],["Reporte","80px"]].map(([h,w]) => (
+                        <th key={h} style={{ padding: "10px 14px", textAlign: "left" as const, fontSize: 9.5, fontWeight: 800, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.07em", whiteSpace: "nowrap" as const, width: w !== "auto" ? w : undefined }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {reservasFiltradas.length === 0 ? (
-                      <tr><td colSpan={6} style={{ padding: "40px 20px", textAlign: "center", color: C.gray400, fontSize: 14 }}>Sin resultados para los filtros seleccionados</td></tr>
-                    ) : reservasFiltradas.map(r => (
-                      <tr key={r.id} style={{ borderBottom: `1px solid ${C.gray100}` }}
-                        onMouseEnter={e => (e.currentTarget.style.background = C.gray50)}
-                        onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
-                      >
-                        <td style={{ padding: "12px 18px", fontWeight: 700, color: C.gray800, whiteSpace: "nowrap" as const }}>{fmtFecha(r.fecha_servicio)}</td>
-                        <td style={{ padding: "12px 18px", color: C.gray600, whiteSpace: "nowrap" as const }}>{r.hora_servicio?.slice(0,5) || "—"}</td>
-                        <td style={{ padding: "12px 18px" }}>
-                          <p style={{ fontWeight: 700, color: C.gray800, margin: 0, fontSize: 13, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{r.origen}</p>
-                          <p style={{ color: C.gray400, fontSize: 11, margin: "2px 0 0" }}>→ {r.destino}</p>
-                        </td>
-                        <td style={{ padding: "12px 18px" }}><Badge estado={r.estado} /></td>
-                        <td style={{ padding: "12px 18px", fontWeight: 800, color: C.navy, whiteSpace: "nowrap" as const }}>{fmtSoles(Number(r.precio_cliente))}</td>
-                        <td style={{ padding: "12px 18px" }}>
-                          <button onClick={() => cargarDetalle(r)} style={{ padding: "6px 16px", borderRadius: 10, border: "none", background: "#eef3f8", color: C.navy, fontSize: 12, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
-                            📄 Reporte
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                      <tr><td colSpan={puedeVerMontos ? 10 : 9} style={{ padding: "56px 20px", textAlign: "center" as const }}>
+                        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke={C.line2} strokeWidth="1.2" style={{ display: "block", margin: "0 auto 12px" }}><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
+                        <p style={{ color: C.mute, fontSize: 14, fontWeight: 600, margin: 0 }}>Sin resultados para los filtros seleccionados</p>
+                      </td></tr>
+                    ) : reservasFiltradas.map((r, idx) => {
+                      const st = reservaStats[r.id];
+                      const sla = st && st.esperados > 0 ? Math.round((st.embarcados / st.esperados) * 100) : null;
+                      const rowBg = efectivoEstado(r) === "en_curso" ? "#F0F7F3" : idx % 2 === 0 ? C.surface : C.paper;
+                      return (
+                        <tr key={r.id}
+                          onMouseEnter={e => (e.currentTarget.style.background = C.navyTint)}
+                          onMouseLeave={e => (e.currentTarget.style.background = rowBg)}
+                          style={{ borderBottom: `1px solid ${C.line}`, background: rowBg, transition: "background 0.1s" }}>
+                          <td style={{ padding: "10px 14px", fontFamily: C.fontMono, fontSize: 10, color: C.mute2, whiteSpace: "nowrap" as const }}>
+                            {String(r.id).padStart(4, "0")}
+                          </td>
+                          <td style={{ padding: "10px 14px", whiteSpace: "nowrap" as const }}>
+                            <p style={{ fontFamily: C.fontMono, fontSize: 11.5, fontWeight: 700, color: C.ink2, margin: 0 }}>{fmtFecha(r.fecha_servicio)}</p>
+                            <p style={{ fontSize: 10, color: C.mute2, margin: "2px 0 0", textTransform: "capitalize" as const }}>{fmtFechaLrg(r.fecha_servicio).split(",")[0]}</p>
+                          </td>
+                          <td style={{ padding: "10px 14px", fontFamily: C.fontMono, fontSize: 11.5, color: C.mute, whiteSpace: "nowrap" as const }}>
+                            {r.hora_servicio?.slice(0,5) || "–"}
+                          </td>
+                          <td style={{ padding: "10px 14px", maxWidth: 220 }}>
+                            <p style={{ fontWeight: 700, color: C.ink, margin: 0, fontSize: 12.5, overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>{r.origen}</p>
+                            <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0", overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>→ {r.destino}</p>
+                          </td>
+                          <td style={{ padding: "10px 14px" }}><Badge estado={efectivoEstado(r)} /></td>
+                          <td style={{ padding: "10px 14px", whiteSpace: "nowrap" as const }}>
+                            {loadingStats ? (
+                              <span style={{ color: C.mute2, fontSize: 11 }}>...</span>
+                            ) : st ? (
+                              <div>
+                                <span style={{ fontFamily: C.fontMono, fontWeight: 700, fontSize: 13, color: C.ink2 }}>{st.embarcados}</span>
+                                <span style={{ fontFamily: C.fontMono, fontSize: 11, color: C.mute }}> / {st.esperados}</span>
+                                <p style={{ fontSize: 9.5, color: C.mute2, margin: "1px 0 0" }}>embarcados</p>
+                              </div>
+                            ) : (
+                              <span style={{ color: C.mute2, fontSize: 11 }}>–</span>
+                            )}
+                          </td>
+                          <td style={{ padding: "10px 14px", minWidth: 110 }}>
+                            {loadingStats ? (
+                              <span style={{ color: C.mute2, fontSize: 11 }}>...</span>
+                            ) : sla !== null ? (
+                              <div>
+                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                                  <span style={{ fontFamily: C.fontMono, fontWeight: 800, fontSize: 12, color: slaColor(sla) }}>{sla}%</span>
+                                </div>
+                                <div style={{ height: 5, background: C.surfaceAlt, borderRadius: 3, overflow: "hidden" as const }}>
+                                  <div style={{ height: "100%", width: `${sla}%`, background: slaColor(sla), borderRadius: 3, transition: "width .4s ease" }} />
+                                </div>
+                              </div>
+                            ) : (
+                              <span style={{ color: C.mute2, fontSize: 11 }}>–</span>
+                            )}
+                          </td>
+                          {puedeVerMontos && <td style={{ padding: "10px 14px", fontFamily: C.fontMono, fontWeight: 700, color: C.navy, fontSize: 12.5, whiteSpace: "nowrap" as const }}>{fmtSoles(Number(r.precio_cliente))}</td>}
+                          <td style={{ padding: "10px 14px" }}>
+                            {r.vehiculo_id ? (
+                              <button onClick={() => abrirGps(r)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 9px", borderRadius: 7, border: `1px solid ${C.navyTint2}`, background: C.navyTint, color: C.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans, whiteSpace: "nowrap" as const }}>
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                                GPS
+                              </button>
+                            ) : <span style={{ color: C.mute2, fontSize: 11 }}>–</span>}
+                          </td>
+                          <td style={{ padding: "10px 14px" }}>
+                            <button onClick={() => cargarDetalle(r)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 9px", borderRadius: 7, border: `1px solid ${C.line}`, background: C.surface, color: C.ink2, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans, whiteSpace: "nowrap" as const }}>
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                              Ver
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
-                  {/* Totales */}
                   {reservasFiltradas.length > 0 && (
                     <tfoot>
-                      <tr style={{ background: "#eef3f8", borderTop: `2px solid ${C.gray200}` }}>
-                        <td colSpan={4} style={{ padding: "10px 18px", fontWeight: 800, color: C.navy, fontSize: 12 }}>TOTAL ({reservasFiltradas.length} servicios)</td>
-                        <td style={{ padding: "10px 18px", fontWeight: 900, color: C.navy, fontSize: 14 }}>{fmtSoles(reservasFiltradas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0))}</td>
-                        <td />
+                      <tr style={{ background: C.navyDeep, borderTop: `2px solid ${C.navy}` }}>
+                        <td colSpan={4} style={{ padding: "11px 14px", fontWeight: 700, color: "rgba(255,255,255,0.5)", fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase" as const }}>
+                          {reservasFiltradas.length} servicio{reservasFiltradas.length !== 1 ? "s" : ""} · {reservasFiltradas.filter(r => esFinalizado(r.estado)).length} finalizados
+                        </td>
+                        <td style={{ padding: "11px 14px" }}>
+                          <span style={{ fontSize: 10, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: "rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.55)" }}>
+                            {reservasFiltradas.filter(r => esCancelado(r.estado)).length} cancelados
+                          </span>
+                        </td>
+                        <td style={{ padding: "11px 14px", fontFamily: C.fontMono, fontSize: 11, color: "rgba(255,255,255,0.65)" }}>
+                          {(() => { const total = Object.entries(reservaStats).filter(([id]) => reservasFiltradas.find(r => r.id === Number(id))).reduce((s, [,x]) => s + x.embarcados, 0); return total > 0 ? `${total} emb.` : "–"; })()}
+                        </td>
+                        <td style={{ padding: "11px 14px" }} />
+                        {puedeVerMontos && (
+                          <td style={{ padding: "11px 14px", fontFamily: C.fontMono, fontWeight: 900, color: "white", fontSize: 14 }}>
+                            {fmtSoles(reservasFiltradas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0))}
+                          </td>
+                        )}
+                        <td colSpan={2} />
                       </tr>
                     </tfoot>
                   )}
@@ -654,103 +1845,153 @@ ${noEmb.length > 0 ? `<div class="box" style="margin-bottom:14px;border-color:#f
               </div>
             </div>
           </div>
-        )}
+          );
+        })()}
 
-        {/* ════ REPORTE ════ */}
+        {/* REPORTE */}
         {tab === "reporte" && reservaSel && (
           <div style={{ display: "flex", flexDirection: "column" as const, gap: 16 }}>
-            {/* Cabecera */}
-            <div style={{ background: C.white, borderRadius: 18, padding: "20px 24px", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
+            {/* Header card */}
+            <div style={{ background: C.surface, borderRadius: 16, padding: "20px 24px", border: `1px solid ${C.line}` }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" as const, gap: 14 }}>
                 <div>
-                  <p style={{ color: C.gray400, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, margin: "0 0 6px", letterSpacing: "0.06em" }}>Reporte de servicio</p>
-                  <p style={{ color: C.navy, fontWeight: 900, fontSize: 22, margin: 0 }}>{reservaSel.origen} → {reservaSel.destino}</p>
-                  <p style={{ color: C.gray600, fontSize: 13, margin: "5px 0 0" }}>
-                    📅 {fmtFecha(reservaSel.fecha_servicio)} &nbsp;·&nbsp; 🕐 {reservaSel.hora_servicio?.slice(0,5) || "—"} &nbsp;·&nbsp; <Badge estado={reservaSel.estado} />
-                  </p>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                    <button onClick={() => { setReservaSel(null); setTab("historial"); }}
+                      style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", cursor: "pointer", color: C.mute, fontSize: 12, fontWeight: 600, padding: 0, fontFamily: C.fontSans }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+                      Historial
+                    </button>
+                    <span style={{ color: C.mute2, fontSize: 11 }}>⬺</span>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: C.ink2 }}>Reporte</span>
+                  </div>
+                  <p style={{ color: C.navy, fontWeight: 900, fontSize: 20, margin: "0 0 8px" }}>{reservaSel.origen} → {reservaSel.destino}</p>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" as const }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, color: C.mute, fontSize: 12 }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                      <span style={{ fontFamily: C.fontMono, fontSize: 12 }}>{fmtFecha(reservaSel.fecha_servicio)}</span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, color: C.mute, fontSize: 12 }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                      <span style={{ fontFamily: C.fontMono, fontSize: 12 }}>{reservaSel.hora_servicio?.slice(0,5) || "–"}</span>
+                    </div>
+                    <Badge estado={reservaSel.estado} />
+                    {conductorInfo && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 4, color: C.mute, fontSize: 12 }}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                        <span>{conductorInfo.nombre}</span>
+                        {vehiculoInfo && <>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginLeft: 4 }}><rect x="1" y="3" width="15" height="13" rx="1"/><path d="M16 8h4l3 5v3h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
+                          <span style={{ fontFamily: C.fontMono }}>{vehiculoInfo.placa}</span>
+                        </>}
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                  <button onClick={() => { setReservaSel(null); setTab("historial"); }} style={{ padding: "10px 18px", borderRadius: 12, border: `1px solid ${C.gray200}`, background: "white", color: C.gray600, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
-                    ← Volver
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" as const }}>
+                  {reservaSel.vehiculo_id && (
+                    <button onClick={() => abrirGps(reservaSel)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 10, border: `1px solid ${C.navyTint2}`, background: C.navyTint, color: C.navy, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                      GPS en vivo
+                    </button>
+                  )}
+                  <button onClick={() => generarManifiesto(reservaSel)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 18px", borderRadius: 10, border: "none", background: C.success, color: "white", fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: C.fontSans }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
+                    Manifiesto MTC
                   </button>
-                  <button onClick={() => generarPDF(reservaSel)} style={{ padding: "12px 24px", borderRadius: 14, border: "none", background: C.navy, color: "white", fontWeight: 900, fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", gap: 8, boxShadow: "0 4px 14px rgba(11,49,95,0.2)" }}>
-                    📄 Descargar PDF
+                  <button onClick={() => generarReportePDF(reservaSel)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 18px", borderRadius: 10, border: "none", background: C.navy, color: "white", fontWeight: 800, fontSize: 12, cursor: "pointer", fontFamily: C.fontSans }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    Reporte PDF
                   </button>
                 </div>
               </div>
             </div>
 
-            {/* KPIs reporte */}
             {(() => {
-              const bl = boarding[reservaSel.id] || [];
-              const pp = ppList[reservaSel.id] || [];
+              const bl  = boarding[reservaSel.id] || [];
+              const pp  = ppList[reservaSel.id] || [];
               const pct = pp.length > 0 ? Math.round((bl.length / pp.length) * 100) : 0;
-              const ps = paradas[reservaSel.id] || [];
+              const ps  = paradas[reservaSel.id] || [];
+              const pctColor = pct >= 80 ? C.success : pct >= 50 ? C.warn : C.danger;
               return (
                 <>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10 }}>
+                  {/* KPI Strip */}
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 10 }}>
                     {[
-                      { l: "Esperados",    v: pp.length,            c: C.navy,    bg: "#eef3f8" },
-                      { l: "Embarcaron",   v: bl.length,            c: C.green,   bg: "#dcfce7" },
-                      { l: "No asistieron",v: pp.length - bl.length,c: C.red,     bg: "#fee2e2" },
-                      { l: "Cumplimiento", v: `${pct}%`,            c: C.blue,    bg: "#dbeafe" },
-                      { l: "Paradas",      v: ps.length,            c: "#854d0e", bg: "#fef9c3" },
+                      { l: "Esperados",     v: pp.length,             sub: "pasajeros",  accent: C.navy    },
+                      { l: "Embarcaron",    v: bl.length,             sub: "a bordo",    accent: C.success },
+                      { l: "No asistieron", v: pp.length - bl.length, sub: "ausentes",   accent: C.danger  },
+                      { l: "Cumplimiento",  v: `${pct}%`,             sub: "SLA",        accent: pctColor  },
+                      { l: "Paradas",       v: ps.length,             sub: "paraderos",  accent: C.warn    },
                     ].map(k => (
-                      <div key={k.l} style={{ background: k.bg, borderRadius: 16, padding: "14px 18px" }}>
-                        <p style={{ fontSize: 26, fontWeight: 900, color: k.c, margin: 0 }}>{k.v}</p>
-                        <p style={{ fontSize: 10, color: k.c + "99", fontWeight: 700, textTransform: "uppercase" as const, margin: "5px 0 0", letterSpacing: "0.04em" }}>{k.l}</p>
+                      <div key={k.l} style={{ background: C.surface, borderRadius: 14, padding: "14px 16px", border: `1px solid ${C.line}`, borderTop: `3px solid ${k.accent}` }}>
+                        <p style={{ fontFamily: C.fontMono, fontSize: 26, fontWeight: 900, color: k.accent, margin: 0 }}>{k.v}</p>
+                        <p style={{ fontSize: 11, fontWeight: 700, color: C.mute, margin: "5px 0 0", textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>{k.l}</p>
+                        <p style={{ fontSize: 10, color: C.mute2, margin: "2px 0 0" }}>{k.sub}</p>
                       </div>
                     ))}
                   </div>
 
-                  {/* Barra progreso */}
-                  <div style={{ background: C.white, borderRadius: 16, padding: "16px 20px", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                      <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0 }}>Tasa de embarque</p>
-                      <p style={{ fontWeight: 900, color: pct >= 80 ? C.green : pct >= 50 ? C.amber : C.red, fontSize: 14, margin: 0 }}>{pct}%</p>
+                  {/* Progress bar */}
+                  <div style={{ background: C.surface, borderRadius: 14, padding: "16px 20px", border: `1px solid ${C.line}` }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+                      <div>
+                        <p style={{ fontWeight: 700, color: C.ink2, fontSize: 13, margin: 0 }}>Tasa de embarque</p>
+                        <p style={{ fontSize: 11, color: C.mute, margin: "2px 0 0" }}>{bl.length} de {pp.length} pasajeros esperados embarcaron</p>
+                      </div>
+                      <span style={{ fontFamily: C.fontMono, fontWeight: 900, color: pctColor, fontSize: 20 }}>{pct}%</span>
                     </div>
-                    <div style={{ height: 10, background: "#fee2e2", borderRadius: 5, overflow: "hidden" }}>
-                      <div style={{ height: "100%", background: pct >= 80 ? C.green : pct >= 50 ? C.amber : C.red, width: `${pct}%`, borderRadius: 5, transition: "width 0.6s ease" }} />
+                    <div style={{ height: 8, background: C.surfaceAlt, borderRadius: 4, overflow: "hidden" as const }}>
+                      <div style={{ height: "100%", background: pctColor, width: `${pct}%`, borderRadius: 4, transition: "width 0.6s ease" }} />
                     </div>
-                    <p style={{ color: C.gray400, fontSize: 11, marginTop: 8, marginBottom: 0 }}>{bl.length} de {pp.length} pasajeros esperados embarcaron</p>
                   </div>
                 </>
               );
             })()}
 
-            {/* Paradas */}
             {(paradas[reservaSel.id] || []).length === 0 ? (
-              <div style={{ background: C.white, borderRadius: 18, padding: 40, textAlign: "center", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
-                <p style={{ fontSize: 36 }}>📋</p>
-                <p style={{ color: C.navy, fontWeight: 700, margin: 0 }}>Sin paradas configuradas en este servicio</p>
-                <p style={{ color: C.gray400, fontSize: 13 }}>Los datos de boarding aparecerán cuando se configuren los paraderos</p>
+              <div style={{ background: C.surface, borderRadius: 16, padding: 48, textAlign: "center" as const, border: `1px solid ${C.line}` }}>
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke={C.line2} strokeWidth="1.2" style={{ display: "block", margin: "0 auto 14px" }}><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
+                <p style={{ color: C.ink2, fontWeight: 700, margin: 0, fontSize: 14 }}>Sin paradas configuradas en este servicio</p>
+                <p style={{ color: C.mute, fontSize: 13, margin: "6px 0 0" }}>Los datos de boarding aparecerán cuando se configuren los paraderos</p>
               </div>
             ) : (paradas[reservaSel.id] || []).map(p => {
-              const bParada = (boarding[reservaSel.id] || []).filter(b => b.parada_id === p.id);
+              const bParada  = (boarding[reservaSel.id] || []).filter(b => b.parada_id === p.id);
               const ppParada = (ppList[reservaSel.id] || []).filter(x => x.parada_id === p.id);
-              const pct = ppParada.length > 0 ? Math.round((bParada.length / ppParada.length) * 100) : 0;
+              const pct      = ppParada.length > 0 ? Math.round((bParada.length / ppParada.length) * 100) : 0;
+              const pctColor = pct >= 80 ? C.success : pct >= 50 ? C.warn : C.danger;
               return (
-                <div key={p.id} style={{ background: C.white, borderRadius: 18, overflow: "hidden", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
-                  <div style={{ padding: "14px 20px", background: C.gray50, borderBottom: `1px solid ${C.gray100}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div key={p.id} style={{ background: C.surface, borderRadius: 16, overflow: "hidden" as const, border: `1px solid ${C.line}` }}>
+                  <div style={{ padding: "14px 20px", background: C.surfaceAlt, borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                      <div style={{ width: 32, height: 32, borderRadius: "50%", background: p.estado === "completada" ? C.navy : C.gray200, display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontSize: 13, fontWeight: 900, flexShrink: 0 }}>{p.orden}</div>
+                      <div style={{ width: 32, height: 32, borderRadius: "50%", background: p.estado === "completada" ? C.navy : C.mute2, display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontSize: 12, fontWeight: 900, flexShrink: 0 }}>{p.orden}</div>
                       <div>
-                        <p style={{ color: C.gray800, fontWeight: 900, fontSize: 15, margin: 0 }}>{p.nombre}</p>
-                        {p.hora_estimada && <p style={{ color: C.gray400, fontSize: 11, margin: "2px 0 0" }}>🕐 {p.hora_estimada}</p>}
+                        <p style={{ color: C.ink, fontWeight: 800, fontSize: 14, margin: 0 }}>{p.nombre}</p>
+                        {p.direccion && (
+                          <div style={{ display: "flex", alignItems: "center", gap: 4, color: C.mute, marginTop: 2 }}>
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                            <span style={{ fontSize: 11 }}>{p.direccion}</span>
+                          </div>
+                        )}
+                        {p.hora_estimada && (
+                          <div style={{ display: "flex", alignItems: "center", gap: 4, color: C.mute, marginTop: 2 }}>
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            <span style={{ fontFamily: C.fontMono, fontSize: 11 }}>{p.hora_estimada}</span>
+                          </div>
+                        )}
                       </div>
                     </div>
                     <div style={{ textAlign: "right" as const }}>
-                      <p style={{ color: C.navy, fontWeight: 900, fontSize: 18, margin: 0 }}>{bParada.length}/{ppParada.length}</p>
-                      <p style={{ color: pct >= 80 ? C.green : pct >= 50 ? C.amber : C.red, fontSize: 11, fontWeight: 800, margin: "2px 0 0" }}>{pct}% cumplimiento</p>
+                      <p style={{ fontFamily: C.fontMono, fontWeight: 900, fontSize: 16, color: C.navy, margin: 0 }}>{bParada.length}/{ppParada.length}</p>
+                      <p style={{ color: pctColor, fontSize: 11, fontWeight: 700, margin: "2px 0 0" }}>{pct}% cumplimiento</p>
                     </div>
                   </div>
                   {ppParada.length > 0 ? (
                     <div style={{ overflowX: "auto" as const }}>
                       <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
                         <thead>
-                          <tr style={{ background: "#f8fafc" }}>
-                            {["Pasajero", "DNI", "Estado", "Hora embarque", "Método"].map(h => (
-                              <th key={h} style={{ padding: "9px 18px", textAlign: "left" as const, fontSize: 10, fontWeight: 800, color: C.gray600, textTransform: "uppercase" as const, borderBottom: `1px solid ${C.gray200}`, letterSpacing: "0.05em" }}>{h}</th>
+                          <tr style={{ background: C.paper, borderBottom: `1px solid ${C.line}` }}>
+                            {["Pasajero","DNI","Estado","Hora embarque","Método"].map(h => (
+                              <th key={h} style={{ padding: "8px 16px", textAlign: "left" as const, fontSize: 10, fontWeight: 800, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.05em" }}>{h}</th>
                             ))}
                           </tr>
                         </thead>
@@ -758,16 +1999,31 @@ ${noEmb.length > 0 ? `<div class="box" style="margin-bottom:14px;border-color:#f
                           {ppParada.map(x => {
                             const emb = bParada.find(b => b.pasajero_id === x.pasajero_id);
                             return (
-                              <tr key={x.id} style={{ borderBottom: `1px solid ${C.gray100}`, background: emb ? "#f0fdf4" : "#fff5f5" }}>
-                                <td style={{ padding: "11px 18px", fontWeight: 700, color: C.gray800 }}>{x.pasajero?.nombre || `#${x.pasajero_id}`}</td>
-                                <td style={{ padding: "11px 18px", fontFamily: "monospace", color: C.gray600, fontSize: 12 }}>{x.pasajero?.dni || "—"}</td>
-                                <td style={{ padding: "11px 18px" }}>
-                                  <span style={{ fontSize: 11, fontWeight: 800, padding: "4px 12px", borderRadius: 20, background: emb ? "#dcfce7" : "#fee2e2", color: emb ? C.green : C.red }}>
-                                    {emb ? "✅ Embarcó" : "❌ No asistió"}
+                              <tr key={x.id} style={{ borderBottom: `1px solid ${C.line}` }}>
+                                <td style={{ padding: "10px 16px", fontWeight: 700, color: C.ink2 }}>{x.pasajero?.nombre || `#${x.pasajero_id}`}</td>
+                                <td style={{ padding: "10px 16px", fontFamily: C.fontMono, color: C.mute, fontSize: 11 }}>{x.pasajero?.dni || "–"}</td>
+                                <td style={{ padding: "10px 16px" }}>
+                                  <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: emb ? C.successTint : C.dangerTint, color: emb ? C.success : C.danger }}>
+                                    {emb
+                                      ? <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                      : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>}
+                                    {emb ? "Embarcó" : "No asistió"}
                                   </span>
                                 </td>
-                                <td style={{ padding: "11px 18px", color: C.gray600 }}>{emb ? fmtTs(emb.timestamp) : "—"}</td>
-                                <td style={{ padding: "11px 18px", color: C.gray400, fontSize: 11 }}>{emb ? (emb.metodo === "qr" ? "📷 QR" : "✋ Manual") : "—"}</td>
+                                <td style={{ padding: "10px 16px", fontFamily: C.fontMono, color: C.mute, fontSize: 11 }}>{emb ? fmtTs(emb.timestamp) : "–"}</td>
+                                <td style={{ padding: "10px 16px", color: C.mute2, fontSize: 11 }}>
+                                  {emb ? (
+                                    emb.metodo === "qr"
+                                      ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: C.navy, fontWeight: 600 }}>
+                                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                                          QR
+                                        </span>
+                                      : <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: C.mute }}>
+                                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+                                          Manual
+                                        </span>
+                                  ) : "–"}
+                                </td>
                               </tr>
                             );
                           })}
@@ -775,11 +2031,584 @@ ${noEmb.length > 0 ? `<div class="box" style="margin-bottom:14px;border-color:#f
                       </table>
                     </div>
                   ) : (
-                    <div style={{ padding: 20, textAlign: "center" as const, color: C.gray400, fontSize: 13 }}>Sin pasajeros asignados a esta parada</div>
+                    <div style={{ padding: 20, textAlign: "center" as const, color: C.mute, fontSize: 13 }}>Sin pasajeros asignados a esta parada</div>
                   )}
                 </div>
               );
             })}
+
+            {/* Documentos vinculados */}
+            <div style={{ background: C.surface, borderRadius: 14, padding: "16px 20px", border: `1px solid ${C.line}` }}>
+              <p style={{ fontSize: 10, fontWeight: 800, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.07em", margin: "0 0 12px" }}>Documentos vinculados</p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+                {([
+                  { label: "Cotización PDF",  color: C.navy,    bg: C.navyTint,    act: () => {},
+                    svg: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg> },
+                  { label: "Factura",         color: C.warn,    bg: C.warnTint,    act: () => setTab("facturacion"),
+                    svg: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> },
+                  { label: "Manifiesto MTC",  color: C.success, bg: C.successTint, act: () => generarManifiesto(reservaSel!),
+                    svg: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg> },
+                  { label: "Reporte PDF",     color: C.info,    bg: C.infoTint,    act: () => generarReportePDF(reservaSel!),
+                    svg: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> },
+                ] as { label: string; color: string; bg: string; act: () => void; svg: any }[]).map(a => (
+                  <button key={a.label} onClick={a.act} style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 16px", borderRadius: 10, border: "none", background: a.bg, color: a.color, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                    {a.svg} {a.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* FACTURACIÓN */}
+        {tab === "facturacion" && (
+          <div style={{ display: "flex", flexDirection: "column" as const, gap: 16, animation: "fadeIn 0.3s ease" }}>
+            {/* KPIs */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(155px,1fr))", gap: 12 }}>
+              {([
+                { label: "Total pagado",   val: fmtSoles(totalPagado),  accent: C.success, bg: C.successTint,
+                  svg: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12"/></svg> },
+                { label: "Por cobrar",     val: fmtSoles(porPagar),     accent: C.warn,    bg: C.warnTint,
+                  svg: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> },
+                { label: "Vencido",        val: fmtSoles(totalVencido), accent: C.danger,  bg: C.dangerTint,
+                  svg: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> },
+                { label: "Total facturas", val: facturas.length,        accent: C.navy,    bg: C.navyTint,
+                  svg: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> },
+              ] as { label: string; val: any; accent: string; bg: string; svg: any }[]).map(k => (
+                <div key={k.label} style={{ background: C.surface, borderRadius: 14, padding: "16px 20px", border: `1px solid ${C.line}`, borderTop: `3px solid ${k.accent}` }}>
+                  <div style={{ color: k.accent, marginBottom: 8 }}>{k.svg}</div>
+                  <p style={{ fontFamily: C.fontMono, fontSize: 20, fontWeight: 900, color: k.accent, margin: "0 0 4px" }}>{k.val}</p>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.05em", margin: 0 }}>{k.label}</p>
+                </div>
+              ))}
+            </div>
+            {/* Filtros */}
+            <div style={{ background: C.surface, borderRadius: 12, padding: "12px 18px", border: `1px solid ${C.line}`, display: "flex", gap: 10, flexWrap: "wrap" as const, alignItems: "center" }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const }}>
+                {["todos","emitida","enviada","cobrada","vencida"].map(e => (
+                  <button key={e} onClick={() => setFiltroFactEstado(e)}
+                    style={{ padding: "5px 12px", borderRadius: 20, border: `1px solid ${filtroFactEstado === e ? C.navy : C.line}`, background: filtroFactEstado === e ? C.navy : C.surface, color: filtroFactEstado === e ? "white" : C.mute, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                    {e === "todos" ? "Todas" : e.charAt(0).toUpperCase() + e.slice(1)}
+                  </button>
+                ))}
+              </div>
+              <input type="date" value={filtroFactDesde} onChange={e => setFiltroFactDesde(e.target.value)}
+                style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "5px 10px", fontSize: 12, outline: "none", fontFamily: C.fontSans, color: C.ink2 }} />
+              <input type="date" value={filtroFactHasta} onChange={e => setFiltroFactHasta(e.target.value)}
+                style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "5px 10px", fontSize: 12, outline: "none", fontFamily: C.fontSans, color: C.ink2 }} />
+            </div>
+            {/* Lista */}
+            <div style={{ background: C.surface, borderRadius: 16, overflow: "hidden" as const, border: `1px solid ${C.line}` }}>
+              {loadingFact
+                ? [1,2,3].map(i => <div key={i} style={{ padding: "16px 20px", borderBottom: `1px solid ${C.line}` }}><div style={{ height: 12, background: C.surfaceAlt, borderRadius: 6, width: "60%", marginBottom: 6 }} /><div style={{ height: 10, background: C.surfaceAlt, borderRadius: 6, width: "40%" }} /></div>)
+                : (() => {
+                    const filt = facturas.filter(f => {
+                      const cumpleEstado = filtroFactEstado === "todos" || f.estado === filtroFactEstado;
+                      const cumpleDesde  = !filtroFactDesde || (f.fecha_emision || "") >= filtroFactDesde;
+                      const cumpleHasta  = !filtroFactHasta || (f.fecha_emision || "") <= filtroFactHasta;
+                      return cumpleEstado && cumpleDesde && cumpleHasta;
+                    });
+                    const colorEst: Record<string,{bg:string;c:string}> = {
+                      emitida: { bg: C.infoTint,    c: C.info    },
+                      enviada: { bg: C.warnTint,    c: C.warn    },
+                      cobrada: { bg: C.successTint, c: C.success },
+                      vencida: { bg: C.dangerTint,  c: C.danger  },
+                      anulada: { bg: C.surfaceAlt,  c: C.mute    },
+                    };
+                    if (filt.length === 0) return (
+                      <div style={{ padding: "56px 20px", textAlign: "center" as const }}>
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke={C.line2} strokeWidth="1.2" style={{ display: "block", margin: "0 auto 12px" }}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        <p style={{ color: C.mute, fontSize: 14, fontWeight: 600, margin: 0 }}>No hay facturas que coincidan con los filtros</p>
+                      </div>
+                    );
+                    return filt.map(f => {
+                      const est = colorEst[f.estado] || { bg: C.surfaceAlt, c: C.mute };
+                      const num = `${f.serie || "F"}-${f.numero || f.id}`;
+                      return (
+                        <div key={f.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 20px", borderBottom: `1px solid ${C.line}`, transition: "background 0.1s" }}
+                          onMouseEnter={e => (e.currentTarget.style.background = C.surfaceAlt)}
+                          onMouseLeave={e => (e.currentTarget.style.background = "")}>
+                          <div style={{ width: 40, height: 40, borderRadius: 10, background: C.navyTint, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={C.navy} strokeWidth="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <p style={{ fontWeight: 700, color: C.ink2, fontSize: 13, margin: 0 }}>{f.tipo_comprobante?.toUpperCase() || "FACTURA"} <span style={{ fontFamily: C.fontMono }}>{num}</span></p>
+                            <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0", fontFamily: C.fontMono }}>
+                              {fmtFecha(f.fecha_emision)}{f.fecha_vencimiento ? ` · Vence ${fmtFecha(f.fecha_vencimiento)}` : ""}
+                            </p>
+                          </div>
+                          <span style={{ fontFamily: C.fontMono, fontWeight: 800, color: C.navy, fontSize: 14, flexShrink: 0 }}>{fmtSoles(Number(f.total))}</span>
+                          <span style={{ fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: est.bg, color: est.c, flexShrink: 0 }}>{f.estado.charAt(0).toUpperCase() + f.estado.slice(1)}</span>
+                          {f.pdf_url
+                            ? <a href={f.pdf_url} target="_blank" rel="noopener noreferrer" style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 12px", borderRadius: 8, border: `1px solid ${C.navyTint2}`, background: C.navyTint, color: C.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", textDecoration: "none", flexShrink: 0 }}>
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                PDF
+                              </a>
+                            : <span style={{ padding: "6px 12px", borderRadius: 8, background: C.surfaceAlt, color: C.mute2, fontSize: 11, flexShrink: 0 }}>Sin PDF</span>}
+                        </div>
+                      );
+                    });
+                  })()
+              }
+            </div>
+          </div>
+        )}
+
+        {/* DOCUMENTOS */}
+        {tab === "documentos" && (
+          <div style={{ display: "flex", flexDirection: "column" as const, gap: 16, animation: "fadeIn 0.3s ease" }}>
+            {(["Contratos","Cotizaciones"] as const).map(cat => {
+              const docs = MOCK_DOCS.filter(d => d.categoria === cat);
+              if (!docs.length) return null;
+              return (
+                <div key={cat} style={{ background: C.white, borderRadius: 18, overflow: "hidden", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
+                  <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.gray100}`, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span>{cat === "Contratos" ? "📋" : cat === "Cotizaciones" ? "📑" : "📎"}</span>
+                    <p style={{ fontWeight: 900, color: C.gray800, margin: 0, fontSize: 14 }}>{cat}</p>
+                    <span style={{ marginLeft: "auto", fontSize: 11, color: C.gray400 }}>{docs.length} archivo{docs.length !== 1 ? "s" : ""}</span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 12, padding: 16 }}>
+                    {docs.map(d => (
+                      <div key={d.id} style={{ border: `1px solid ${C.gray200}`, borderRadius: 14, padding: "14px 18px", display: "flex", gap: 12, alignItems: "flex-start" }}>
+                        <span style={{ fontSize: 32, flexShrink: 0 }}>{d.tipo === "PDF" ? "PDF" : "DOC"}</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0 }}>{d.nombre}</p>
+                          <p style={{ color: C.gray400, fontSize: 11, margin: "4px 0 8px" }}>{d.tipo} · {d.tamano} · {fmtFecha(d.fecha)}</p>
+                          {d.url
+                            ? <a href={d.url} target="_blank" rel="noopener noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 10, background: "#eef3f8", color: C.navy, fontSize: 11, fontWeight: 800, textDecoration: "none" }}>↓ Descargar</a>
+                            : <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 10, background: "#f3f4f6", color: C.gray400, fontSize: 11 }}>Solicitar archivo</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+            <div style={{ background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 16, padding: "16px 20px", display: "flex", alignItems: "center", gap: 14 }}>
+              <span style={{ fontSize: 28 }}>📂</span>
+              <div>
+                <p style={{ color: "#166534", fontWeight: 800, fontSize: 13, margin: 0 }}>¿Necesitas un documento adicional?</p>
+                <p style={{ color: "#16a34a", fontSize: 12, margin: "2px 0 0" }}>Escríbenos por WhatsApp al <b>966 707 225</b> y lo gestionamos de inmediato.</p>
+              </div>
+              <a href="https://wa.me/51966707225" target="_blank" rel="noopener noreferrer" style={{ marginLeft: "auto", padding: "8px 18px", borderRadius: 12, background: "#16a34a", color: "white", fontSize: 12, fontWeight: 800, textDecoration: "none", flexShrink: 0 }}>WhatsApp →</a>
+            </div>
+          </div>
+        )}
+
+        {/* CUENTA / CONFIGURACIÓN */}
+        {tab === "cuenta" && (
+          <div style={{ animation: "fadeIn 0.3s ease" }}>
+            {/* Modal crear / editar usuario */}
+            {modalColab && (
+              <div onClick={() => { setModalColab(false); resetColabForm(); }} style={{ position: "fixed", inset: 0, zIndex: 50, background: "rgba(15,23,42,0.6)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+                <div onClick={e => e.stopPropagation()} style={{ background: "white", borderRadius: 18, padding: "28px", width: "100%", maxWidth: 460, boxShadow: "0 24px 60px rgba(0,0,0,0.2)", maxHeight: "90vh", overflowY: "auto" as const }}>
+                  <p style={{ fontWeight: 900, color: C.navy, fontSize: 17, margin: "0 0 20px" }}>{editColab ? "Editar usuario" : "Nuevo usuario"}</p>
+                  {([
+                    { label: "Nombre completo *", val: newColabNombre, set: setNewColabNombre, ph: "Ej. Juan Pérez" },
+                    { label: "DNI *", val: newColabDni, set: (v: string) => setNewColabDni(v.replace(/\D/g,"")), ph: "12345678", mono: true },
+                    { label: "Email", val: newColabEmail, set: setNewColabEmail, ph: "juan@empresa.com" },
+                    { label: "Cargo", val: newColabCargo, set: setNewColabCargo, ph: "Ej. Gerente de Logística" },
+                  ] as { label: string; val: string; set: (v: string) => void; ph: string; mono?: boolean }[]).map(f => (
+                    <div key={f.label} style={{ marginBottom: 14 }}>
+                      <label style={{ fontSize: 11, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>{f.label}</label>
+                      <input value={f.val} onChange={e => f.set(e.target.value)} placeholder={f.ph}
+                        style={{ width: "100%", border: `1.5px solid ${C.line2}`, borderRadius: 8, padding: "10px 14px", fontSize: 13, outline: "none", boxSizing: "border-box" as const, fontFamily: f.mono ? C.fontMono : "inherit", letterSpacing: f.mono ? 1 : "normal" }} />
+                    </div>
+                  ))}
+                  <div style={{ marginBottom: 14 }}>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Contraseña {editColab ? "(dejar en blanco para no cambiar)" : "*"}</label>
+                    <input type="password" value={newColabPass} onChange={e => setNewColabPass(e.target.value)} placeholder="⬢⬢⬢⬢⬢⬢⬢⬢"
+                      style={{ width: "100%", border: `1.5px solid ${C.line2}`, borderRadius: 8, padding: "10px 14px", fontSize: 13, outline: "none", boxSizing: "border-box" as const, fontFamily: C.fontMono }} />
+                  </div>
+                  <div style={{ marginBottom: 16 }}>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>Rol de acceso</label>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      {(["admin","visor"] as const).map(r => (
+                        <button key={r} onClick={() => setNewColabRol(r)} style={{ flex: 1, padding: "10px", borderRadius: 10, border: `2px solid ${newColabRol === r ? C.navy : C.line2}`, background: newColabRol === r ? C.navyTint : "white", color: newColabRol === r ? C.navy : C.mute, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+                          {r === "admin" ? "Admin · acceso completo" : "Visor · solo lectura"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Módulos permitidos */}
+                  <div style={{ marginBottom: 20 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <label style={{ fontSize: 11, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.06em" }}>Módulos con acceso</label>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button onClick={() => setNewColabPermisos(MODULOS_CTRL.map(m => m.id))} style={{ fontSize: 10.5, fontWeight: 700, color: C.navy, background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>Todos</button>
+                        <button onClick={() => setNewColabPermisos([])} style={{ fontSize: 10.5, fontWeight: 700, color: C.mute, background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>Ninguno</button>
+                      </div>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
+                      {MODULOS_CTRL.map(m => {
+                        const on = newColabPermisos.includes(m.id);
+                        return (
+                          <label key={m.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", border: `1.5px solid ${on ? C.navy : C.line2}`, borderRadius: 8, cursor: "pointer", background: on ? C.navyTint : "white", userSelect: "none" as const }}>
+                            <input type="checkbox" checked={on} onChange={e => setNewColabPermisos(prev => e.target.checked ? [...prev, m.id] : prev.filter(x => x !== m.id))} style={{ width: 14, height: 14, accentColor: C.navy, flexShrink: 0 }} />
+                            <span style={{ fontSize: 12, fontWeight: 600, color: on ? C.navy : C.mute }}>{m.label}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    {newColabPermisos.length === 0 && <p style={{ fontSize: 11, color: C.danger, margin: "6px 0 0", fontWeight: 600 }}>Sin acceso a ningún módulo – el usuario no podrá ver nada.</p>}
+                  </div>
+
+                  {colabErr && <p style={{ color: C.danger, fontSize: 12, fontWeight: 600, margin: "0 0 12px", background: C.dangerTint, padding: "8px 12px", borderRadius: 7 }}>{colabErr}</p>}
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <button onClick={() => { setModalColab(false); resetColabForm(); }} style={{ flex: 1, padding: "11px", borderRadius: 12, border: `1px solid ${C.line2}`, background: "white", color: C.mute, fontWeight: 700, cursor: "pointer", fontSize: 13 }}>Cancelar</button>
+                    <button onClick={() => guardarColab(cliente.id)} disabled={colabLoad} style={{ flex: 2, padding: "11px", borderRadius: 12, border: "none", background: C.navy, color: "white", fontWeight: 800, cursor: "pointer", fontSize: 13, opacity: colabLoad ? 0.7 : 1 }}>
+                      {colabLoad ? "Guardando..." : editColab ? "Guardar cambios" : "Crear usuario"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Breadcrumb + header */}
+            <div style={{ marginBottom: 16 }}>
+              <p style={{ color: C.gray400, fontSize: 11, fontWeight: 700, margin: "0 0 4px", letterSpacing: "0.08em" }}>CONFIGURACIÓN ⬺ {cuentaSeccion.toUpperCase().replace("_CFG","")}</p>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" as const, gap: 12 }}>
+                <div>
+                  <p style={{ color: C.gray800, fontWeight: 900, fontSize: 22, margin: 0 }}>{cliente.empresa || cliente.nombre}</p>
+                  <p style={{ color: C.gray400, fontSize: 13, margin: "4px 0 0" }}>
+                    RUC {cliente.ruc || "–"} &nbsp;·&nbsp; cliente desde {new Date(cliente.id > 0 ? "2024-03-01" : "2024-01-01").toLocaleDateString("es-PE",{month:"short",year:"numeric"})} &nbsp;·&nbsp; {reservas.length} servicios contratados
+                  </p>
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 10, border: `1px solid ${C.line}`, background: C.surface, color: C.mute, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                    Vista pública
+                  </button>
+                  {editandoEmpresa && <button onClick={() => setEditandoEmpresa(false)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 20px", borderRadius: 10, border: "none", background: C.navy, color: "white", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: C.fontSans }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+                    Guardar cambios
+                  </button>}
+                </div>
+              </div>
+            </div>
+
+            {/* KPIs */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 16 }}>
+              {[
+                { label: "USUARIOS ACTIVOS",  val: colabs.filter(c=>c.activo).length, sub: `de ${colabs.length} permitidos` },
+                { label: "SERVICIOS ESTE MES",val: serviciosMes, sub: `+${Math.max(0,serviciosMes-2)} vs mes anterior` },
+                { label: "MÉTODOS DE PAGO",   val: 2, sub: "tarjeta + factura" },
+                { label: "CUMPLIMIENTO SLA",  val: `${puntualidad}%`, sub: "últimos 90 días", color: puntualidad >= 90 ? C.green : C.amber },
+              ].map(k => (
+                <div key={k.label} style={{ background: C.white, borderRadius: 14, padding: "18px 20px", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: C.gray400, margin: "0 0 8px", letterSpacing: "0.07em" }}>{k.label}</p>
+                  <p style={{ fontSize: 28, fontWeight: 900, color: (k as any).color || C.gray800, margin: 0 }}>{k.val}</p>
+                  <p style={{ fontSize: 11, color: C.gray400, margin: "4px 0 0" }}>{k.sub}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Cuerpo: sidebar + contenido */}
+            <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: 16, alignItems: "start" }}>
+
+              {/* Sidebar izquierdo */}
+              <div style={{ display: "flex", flexDirection: "column" as const, gap: 4 }}>
+                <div style={{ background: C.surface, borderRadius: 16, overflow: "hidden" as const, border: `1px solid ${C.line}`, marginBottom: 4 }}>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: C.mute, padding: "12px 16px 8px", margin: 0, letterSpacing: "0.08em" }}>CUENTA</p>
+                  {(() => {
+                    const SVG: Record<string, any> = {
+                      empresa:        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
+                      usuarios:       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+                      notificaciones: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>,
+                      facturacion_cfg:<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>,
+                      integraciones:  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>,
+                      seguridad:      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>,
+                      preferencias:   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="8" cy="6" r="2.2" fill="currentColor" stroke="none"/><circle cx="16" cy="12" r="2.2" fill="currentColor" stroke="none"/><circle cx="10" cy="18" r="2.2" fill="currentColor" stroke="none"/></svg>,
+                    };
+                    return ([
+                      { id: "empresa",        label: "Empresa",           sub: "Razón social, RUC, datos fiscales" },
+                      { id: "usuarios",       label: "Usuarios y accesos",sub: `${colabs.filter(c=>c.activo).length} activos · ${colabs.filter(c=>c.rol==="admin").length} admin` },
+                      { id: "notificaciones", label: "Notificaciones",    sub: "Email, SMS, push, WhatsApp" },
+                      { id: "facturacion_cfg",label: "Facturación",       sub: "Datos de pago, historial" },
+                      { id: "integraciones",  label: "Integraciones",     sub: "API, webhooks, Slack, SAP" },
+                      { id: "seguridad",      label: "Seguridad",         sub: "2FA, sesiones, auditoría" },
+                      { id: "preferencias",   label: "Preferencias",      sub: "Idioma, zona horaria, formato" },
+                    ] as { id: CuentaSeccion; label: string; sub: string }[]).map(item => (
+                      <button key={item.id} onClick={() => setCuentaSeccion(item.id)}
+                        style={{ width: "100%", padding: "10px 14px", border: "none", background: cuentaSeccion === item.id ? C.navyTint : "transparent", cursor: "pointer", textAlign: "left" as const, borderLeft: `3px solid ${cuentaSeccion === item.id ? C.navy : "transparent"}`, transition: "all 0.15s", fontFamily: C.fontSans }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <div style={{ width: 28, height: 28, borderRadius: 8, background: cuentaSeccion === item.id ? C.navyTint2 : C.surfaceAlt, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: cuentaSeccion === item.id ? C.navy : C.mute, transition: "all 0.15s" }}>
+                            {SVG[item.id]}
+                          </div>
+                          <div>
+                            <p style={{ fontWeight: 700, color: cuentaSeccion === item.id ? C.navy : C.ink2, fontSize: 13, margin: 0 }}>{item.label}</p>
+                            <p style={{ color: C.mute2, fontSize: 10, margin: "1px 0 0" }}>{item.sub}</p>
+                          </div>
+                        </div>
+                      </button>
+                    ));
+                  })()}
+                </div>
+
+                {/* Plan actual */}
+                <div style={{ background: C.navyDeep, borderRadius: 16, padding: "16px", color: "white" }}>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.45)", margin: "0 0 8px", letterSpacing: "0.08em" }}>PLAN ACTUAL</p>
+                  <p style={{ fontWeight: 900, fontSize: 15, margin: "0 0 4px" }}>Empresarial Plus</p>
+                  <p style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", margin: "0 0 12px" }}>Hasta 50 usuarios · GPS · API</p>
+                  <button style={{ width: "100%", padding: "8px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.08)", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>Cambiar plan</button>
+                </div>
+              </div>
+
+              {/* Contenido principal */}
+              <div style={{ display: "flex", flexDirection: "column" as const, gap: 14 }}>
+
+                {/* EMPRESA */}
+                {cuentaSeccion === "empresa" && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, alignItems: "start" }}>
+                    <div style={{ background: C.white, borderRadius: 16, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
+                      <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", gap: 10 }}>
+                        <div style={{ width: 32, height: 32, borderRadius: 10, background: C.navyTint, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: C.navy }}>
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        </div>
+                        <div>
+                          <p style={{ fontWeight: 800, color: C.ink2, fontSize: 14, margin: 0 }}>Datos de la empresa</p>
+                          <p style={{ color: C.mute, fontSize: 11, margin: 0 }}>Información fiscal y de contacto principal</p>
+                        </div>
+                        <button onClick={() => setEditandoEmpresa(!editandoEmpresa)} style={{ marginLeft: "auto", padding: "5px 14px", borderRadius: 8, border: `1px solid ${C.line}`, background: "white", color: C.navy, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                          {editandoEmpresa ? "Cancelar" : "Editar"}
+                        </button>
+                      </div>
+                      {[
+                        { label: "Razón social",     val: cliente.empresa || cliente.nombre, editable: false },
+                        { label: "RUC",               val: cliente.ruc || "–",               editable: false, badge: "✓ verificado" },
+                        { label: "Dirección fiscal",  val: empDireccion,                      editable: true,  set: setEmpDireccion },
+                        { label: "Sector",            val: empSector,                         editable: true,  set: setEmpSector },
+                        { label: "Tamaño de flota",   val: empFlota,                          editable: true,  set: setEmpFlota },
+                      ].map(row => (
+                        <div key={row.label} style={{ display: "flex", alignItems: "center", padding: "13px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                          <p style={{ width: 120, flexShrink: 0, color: C.gray400, fontSize: 12, margin: 0 }}>{row.label}</p>
+                          <div style={{ flex: 1 }}>
+                            {editandoEmpresa && row.editable && row.set
+                              ? <input value={row.val} onChange={e => (row.set as any)(e.target.value)} style={{ width: "100%", border: `1px solid ${C.navy}`, borderRadius: 8, padding: "6px 10px", fontSize: 13, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const }} />
+                              : <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                  <p style={{ fontWeight: 600, color: C.gray800, fontSize: 13, margin: 0 }}>{row.val}</p>
+                                  {(row as any).badge && <span style={{ fontSize: 10, fontWeight: 800, padding: "2px 8px", borderRadius: 20, background: "#dcfce7", color: C.green }}>{(row as any).badge}</span>}
+                                </div>
+                            }
+                          </div>
+                          {!editandoEmpresa && row.editable && <button onClick={() => setEditandoEmpresa(true)} style={{ color: C.navy, fontSize: 12, fontWeight: 700, background: "none", border: "none", cursor: "pointer" }}>Editar</button>}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Notificaciones rápidas */}
+                    <div style={{ background: C.white, borderRadius: 16, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
+                      <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", gap: 10 }}>
+                        <div style={{ width: 32, height: 32, borderRadius: 10, background: C.warnTint, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: C.warn }}>
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                        </div>
+                        <div>
+                          <p style={{ fontWeight: 800, color: C.ink2, fontSize: 14, margin: 0 }}>Notificaciones</p>
+                          <p style={{ color: C.mute, fontSize: 11, margin: 0 }}>Cómo quieres enterarte de cada evento</p>
+                        </div>
+                      </div>
+                      {notifPrefs.map(np => (
+                        <div key={np.id} style={{ padding: "13px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                            <div>
+                              <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0 }}>{np.titulo}</p>
+                              <p style={{ color: C.gray400, fontSize: 11, margin: "2px 0 6px" }}>{np.desc}</p>
+                              <div style={{ display: "flex", gap: 4, flexWrap: "wrap" as const }}>
+                                {np.canales.map(c => <span key={c} style={{ fontSize: 9, fontWeight: 800, padding: "2px 7px", borderRadius: 20, background: "#eef3f8", color: C.navy, letterSpacing: "0.04em" }}>{c}</span>)}
+                              </div>
+                            </div>
+                            {/* Toggle */}
+                            <button onClick={() => setNotifPrefs(prev => prev.map(p => p.id === np.id ? {...p, activo: !p.activo} : p))}
+                              style={{ width: 40, height: 22, borderRadius: 11, border: "none", background: np.activo ? "#1a6fb8" : C.gray200, cursor: "pointer", position: "relative" as const, flexShrink: 0, transition: "background 0.2s" }}>
+                              <span style={{ position: "absolute", top: 3, left: np.activo ? 20 : 3, width: 16, height: 16, borderRadius: "50%", background: "white", boxShadow: "0 1px 3px rgba(0,0,0,0.2)", transition: "left 0.2s" }} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* USUARIOS Y ACCESOS */}
+                {cuentaSeccion === "usuarios" && (
+                  <div style={{ background: C.white, borderRadius: 16, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
+                    <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.line}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <p style={{ fontWeight: 800, color: C.ink2, fontSize: 14, margin: 0 }}>Usuarios y accesos</p>
+                        <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0" }}>{colabs.filter(c=>c.activo).length} activos · {colabs.filter(c=>!c.activo).length} inactivos · {colabs.filter(c=>c.rol==="admin").length} admin, {colabs.filter(c=>c.rol==="visor").length} visor</p>
+                      </div>
+                      {portalUsuario?.rol === "admin" && (
+                        <button onClick={() => { resetColabForm(); setModalColab(true); }} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 18px", borderRadius: 10, border: "none", background: C.navy, color: "white", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: C.fontSans }}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                          Nuevo usuario
+                        </button>
+                      )}
+                    </div>
+                    {loadingColabs
+                      ? [1,2].map(i => <div key={i} style={{ padding: "16px 20px", borderBottom: `1px solid ${C.line}` }}><div style={{ height: 12, background: C.surfaceAlt, borderRadius: 4, width: "60%", marginBottom: 6 }} /><div style={{ height: 10, background: C.surfaceAlt, borderRadius: 4, width: "40%" }} /></div>)
+                      : colabs.length === 0
+                        ? <div style={{ padding: "32px 20px", textAlign: "center" as const, color: C.mute, fontSize: 13 }}>Sin usuarios configurados. Crea el primer usuario con el botón de arriba.</div>
+                        : colabs.map(c => (
+                          <div key={c.id} style={{ display: "flex", gap: 14, padding: "14px 20px", borderBottom: `1px solid ${C.line}`, alignItems: "center", opacity: c.activo ? 1 : 0.5 }}>
+                            <div style={{ width: 40, height: 40, borderRadius: "50%", background: c.rol === "admin" ? C.navy : C.navyTint, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, fontSize: 14, color: c.rol === "admin" ? "white" : C.navy, flexShrink: 0 }}>
+                              {c.nombre.split(" ").map((w: string) => w[0]).slice(0,2).join("")}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <p style={{ fontWeight: 700, color: C.ink2, fontSize: 13, margin: 0 }}>{c.nombre}</p>
+                              <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0", fontFamily: C.fontMono }}>
+                                DNI {c.dni}{c.cargo ? ` · ${c.cargo}` : ""}{c.email ? ` · ${c.email}` : ""}
+                              </p>
+                              {c.modulos_permitidos && (
+                                <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 4, marginTop: 5 }}>
+                                  {MODULOS_CTRL.map(m => {
+                                    const ok = c.modulos_permitidos!.includes(m.id);
+                                    return (
+                                      <span key={m.id} style={{ fontSize: 9.5, fontWeight: 700, padding: "2px 7px", borderRadius: 4, background: ok ? C.navyTint : C.surfaceAlt, color: ok ? C.navy : C.mute2, textDecoration: ok ? "none" : "line-through" }}>
+                                        {m.label}
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                            <span style={{ fontSize: 11, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: c.rol === "admin" ? C.navyTint : C.successTint, color: c.rol === "admin" ? C.navy : C.success, flexShrink: 0 }}>{c.rol === "admin" ? "Admin" : "Visor"}</span>
+                            {portalUsuario?.rol === "admin" && (<>
+                              <button onClick={() => abrirEditarColab(c)}
+                                style={{ padding: "5px 11px", borderRadius: 8, border: `1px solid ${C.line2}`, background: C.surface, color: C.ink2, fontSize: 11, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>
+                                Editar
+                              </button>
+                              <button onClick={() => toggleColabActivo(c.id, c.activo)}
+                                style={{ padding: "5px 11px", borderRadius: 8, border: `1px solid ${c.activo ? "#fca5a5" : "#86efac"}`, background: c.activo ? "#fff5f5" : "#f0fdf4", color: c.activo ? C.danger : C.success, fontSize: 11, fontWeight: 800, cursor: "pointer", flexShrink: 0 }}>
+                                {c.activo ? "Desactivar" : "Reactivar"}
+                              </button>
+                              <button onClick={() => eliminarColab(c.id, c.nombre, cliente.id)}
+                                style={{ padding: "5px 11px", borderRadius: 8, border: `1px solid ${C.line2}`, background: C.surface, color: C.danger, fontSize: 11, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>
+                                Eliminar
+                              </button>
+                            </>)}
+                          </div>
+                        ))
+                    }
+                    <div style={{ padding: "12px 20px", background: C.navyTint, borderTop: `1px solid ${C.line}` }}>
+                      <p style={{ color: C.navy, fontSize: 12, margin: 0 }}><b>Admin:</b> acceso completo · <b>Visor:</b> solo lectura de servicios e historial · <b>Login:</b> RUC empresa + DNI + contraseña</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* NOTIFICACIONES */}
+                {cuentaSeccion === "notificaciones" && (
+                  <div style={{ background: C.white, borderRadius: 16, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
+                    <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                      <p style={{ fontWeight: 800, color: C.gray800, fontSize: 14, margin: 0 }}>Preferencias de notificación</p>
+                      <p style={{ color: C.gray400, fontSize: 12, margin: "4px 0 0" }}>Configura cómo y cuándo quieres recibir alertas de tus servicios</p>
+                    </div>
+                    {notifPrefs.map(np => (
+                      <div key={np.id} style={{ display: "flex", alignItems: "center", gap: 16, padding: "16px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                        <div style={{ flex: 1 }}>
+                          <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0 }}>{np.titulo}</p>
+                          <p style={{ color: C.gray400, fontSize: 11, margin: "3px 0 8px" }}>{np.desc}</p>
+                          <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
+                            {np.canales.map(ch => <span key={ch} style={{ fontSize: 9, fontWeight: 800, padding: "3px 9px", borderRadius: 20, background: "#eef3f8", color: C.navy, letterSpacing: "0.04em" }}>{ch}</span>)}
+                          </div>
+                        </div>
+                        <button onClick={() => setNotifPrefs(prev => prev.map(p => p.id === np.id ? {...p, activo: !p.activo} : p))}
+                          style={{ width: 44, height: 24, borderRadius: 12, border: "none", background: np.activo ? "#1a6fb8" : C.gray200, cursor: "pointer", position: "relative" as const, flexShrink: 0, transition: "background 0.2s" }}>
+                          <span style={{ position: "absolute", top: 3, left: np.activo ? 22 : 3, width: 18, height: 18, borderRadius: "50%", background: "white", boxShadow: "0 1px 3px rgba(0,0,0,0.2)", transition: "left 0.2s" }} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* FACTURACIÓN */}
+                {cuentaSeccion === "facturacion_cfg" && (
+                  <div style={{ display: "flex", flexDirection: "column" as const, gap: 14 }}>
+                    <div style={{ background: C.white, borderRadius: 16, padding: "20px", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
+                      <p style={{ fontWeight: 800, color: C.gray800, fontSize: 14, margin: "0 0 16px" }}>Datos de facturación</p>
+                      {[["Razón social",cliente.empresa||cliente.nombre],["RUC",cliente.ruc||"–"],["Condición de pago","Crédito 30 días"],["Moneda preferida","Soles (PEN)"]].map(([l,v]) => (
+                        <div key={l} style={{ display: "flex", padding: "10px 0", borderBottom: `1px solid ${C.gray100}` }}>
+                          <p style={{ width: 160, flexShrink: 0, color: C.gray400, fontSize: 12, margin: 0 }}>{l}</p>
+                          <p style={{ fontWeight: 600, color: C.gray800, fontSize: 13, margin: 0 }}>{v}</p>
+                        </div>
+                      ))}
+                    </div>
+                    <button onClick={() => setTab("facturacion")} style={{ alignSelf: "flex-start" as const, padding: "10px 22px", borderRadius: 12, border: "none", background: C.navy, color: "white", fontWeight: 800, fontSize: 13, cursor: "pointer" }}>Ver historial de facturas →</button>
+                  </div>
+                )}
+
+                {/* INTEGRACIONES */}
+                {cuentaSeccion === "integraciones" && (
+                  <div style={{ background: C.white, borderRadius: 16, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
+                    <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                      <p style={{ fontWeight: 800, color: C.gray800, fontSize: 14, margin: 0 }}>Integraciones disponibles</p>
+                      <p style={{ color: C.gray400, fontSize: 12, margin: "4px 0 0" }}>Conecta el portal con tus herramientas empresariales</p>
+                    </div>
+                    {[
+                      { nombre: "API REST", desc: "Consulta servicios y tracking programáticamente", estado: "Activo",        color: C.success, bg: C.successTint },
+                      { nombre: "Webhooks", desc: "Recibe eventos en tiempo real en tu sistema",    estado: "Configurar",   color: C.navy,    bg: C.navyTint    },
+                      { nombre: "Slack",    desc: "Notificaciones de servicio en tu canal Slack",   estado: "Próximamente", color: C.mute,    bg: C.surfaceAlt  },
+                      { nombre: "SAP / ERP",desc: "Sincronización con tu ERP de gestión",           estado: "Próximamente", color: C.mute,    bg: C.surfaceAlt  },
+                    ].map(int => (
+                      <div key={int.nombre} style={{ display: "flex", alignItems: "center", gap: 16, padding: "14px 20px", borderBottom: `1px solid ${C.line}` }}>
+                        <div style={{ width: 42, height: 42, borderRadius: 12, background: int.bg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: int.color }}>
+                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0 }}>{int.nombre}</p>
+                          <p style={{ color: C.gray400, fontSize: 11, margin: "2px 0 0" }}>{int.desc}</p>
+                        </div>
+                        <span style={{ fontSize: 11, fontWeight: 800, padding: "4px 14px", borderRadius: 20, background: int.bg, color: int.color }}>{int.estado}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* SEGURIDAD */}
+                {cuentaSeccion === "seguridad" && (
+                  <div style={{ background: C.white, borderRadius: 16, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
+                    <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                      <p style={{ fontWeight: 800, color: C.gray800, fontSize: 14, margin: 0 }}>Seguridad de la cuenta</p>
+                    </div>
+                    {[
+                      { titulo: "Autenticación en 2 pasos (2FA)", desc: "Capa extra de seguridad para el acceso", activo: false },
+                      { titulo: "Sesiones activas",               desc: "1 sesión activa · Lima, Perú",          activo: true  },
+                      { titulo: "Registro de auditoría",          desc: "Historial de accesos e inicios de sesión",activo: true  },
+                    ].map(s => (
+                      <div key={s.titulo} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                        <div>
+                          <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0 }}>{s.titulo}</p>
+                          <p style={{ color: C.gray400, fontSize: 11, margin: "2px 0 0" }}>{s.desc}</p>
+                        </div>
+                        <span style={{ fontSize: 11, fontWeight: 800, padding: "4px 14px", borderRadius: 20, background: s.activo ? "#dcfce7" : "#fee2e2", color: s.activo ? C.green : C.red }}>{s.activo ? "Activo" : "Inactivo"}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* PREFERENCIAS */}
+                {cuentaSeccion === "preferencias" && (
+                  <div style={{ background: C.white, borderRadius: 16, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
+                    <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                      <p style={{ fontWeight: 800, color: C.gray800, fontSize: 14, margin: 0 }}>Preferencias del portal</p>
+                    </div>
+                    {[
+                      { label: "Idioma",         val: "Español (Perú)" },
+                      { label: "Zona horaria",   val: "America/Lima (UTC-5)" },
+                      { label: "Formato de fecha", val: "DD/MM/YYYY" },
+                      { label: "Moneda",         val: "Soles peruanos (PEN, S/)" },
+                    ].map(p => (
+                      <div key={p.label} style={{ display: "flex", alignItems: "center", padding: "14px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                        <p style={{ width: 160, flexShrink: 0, color: C.gray400, fontSize: 12, margin: 0 }}>{p.label}</p>
+                        <p style={{ flex: 1, fontWeight: 600, color: C.gray800, fontSize: 13, margin: 0 }}>{p.val}</p>
+                        <button style={{ color: C.navy, fontSize: 12, fontWeight: 700, background: "none", border: "none", cursor: "pointer" }}>Editar</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+              </div>
+            </div>
           </div>
         )}
       </div>

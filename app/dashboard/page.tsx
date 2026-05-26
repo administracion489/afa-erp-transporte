@@ -4,49 +4,94 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
-// ─── TIPOS ────────────────────────────────────────────────────────────────────
-
-type Reserva       = { id: number; origen: string; destino: string; fecha_servicio: string | null; hora_servicio: string | null; tipo: string; estado: string; precio_cliente: number; costo_proveedor: number; margen: number; cliente_id: number | null; vehiculo_id: number | null; conductor_id: number | null; tipo_asignacion?: string | null; empresa_tercerizada_id?: number | null; };
-type Vehiculo      = { id: number; placa: string; categoria: string | null; estado: string | null; estado_operativo: string | null; kilometraje_actual: number | null; proximo_mantenimiento_km: number | null; };
-type Conductor     = { id: number; nombre: string; estado: string | null; vencimiento_licencia: string | null; };
-type Seguro        = { id: number; tipo: string; fecha_vencimiento: string | null; aseguradora: string | null; vehiculo_id: number | null; };
-type Mantenimiento = { id: number; costo: number; tipo: string | null; proxima_fecha: string | null; estado: string | null; vehiculo_id: number | null; };
-type Combustible   = { id: number; total: number; fecha: string | null; vehiculo_id: number | null; };
-type DocVehiculo   = { id: number; vehiculo_id: number; tipo: string; fecha_vencimiento: string | null; };
-type Neumatico     = { id: number; vehiculo_id: number | null; km_actual: number | null; km_instalacion: number | null; vida_util_km: number | null; estado: string; cocada_actual: number | null; cocada_nueva: number | null; costo_compra: number | null; };
-type EmpresaTer    = { id: number; razon_social: string; estado: string; };
-type DocTercero    = { id: number; empresa_id: number; tipo: string; fecha_vencimiento: string | null; };
-type Factura       = { id: number; total: number; estado: string; fecha_emision: string | null; };
-type Gasto         = { id: number; monto: number; categoria: string | null; fecha: string | null; };
-// ── Nuevos tipos para funciones adicionales ──
-type ServicioHoy   = { id: number; origen: string; destino: string; hora_servicio: string | null; estado: string; cliente: string; placa: string | null; conductor: string | null; };
-type AlertaSOS     = { id: number; conductor_id: number | null; vehiculo_id: number | null; mensaje: string; atendido: boolean; created_at: string; };
-
-// ─── SEMÁFORO ─────────────────────────────────────────────────────────────────
-
-type SemaforoEstado = "verde" | "amarillo" | "rojo";
-const SEMAFORO_CFG = {
-  verde:    { bg: "#dcfce7", color: "#166534", dot: "#16a34a", label: "Operativo" },
-  amarillo: { bg: "#fef9c3", color: "#854d0e", dot: "#eab308", label: "Atención"  },
-  rojo:     { bg: "#fee2e2", color: "#991b1b", dot: "#dc2626", label: "Crítico"   },
+// ─── TOKENS ──────────────────────────────────────────────────────────────────
+const C = {
+  navy:"#0b315f", blue:"#2f8ee9", blueDeep:"#1262bd", blueTint:"#E8F1FB",
+  ok:"#27AE60",   okTint:"#E8F5EC",
+  danger:"#EB5757", dangerTint:"#FDECEC",
+  warn:"#B07A0F",   warnTint:"#FBF1D8",
+  ink:"#0c2d52",  ink2:"#1f3a5f",
+  mute:"#5B6B82", mute2:"#8693A6",
+  surface:"#FFFFFF", line:"#E4E7ED", line2:"#EEF1F4",
+  bg:"#eef3f8",   bg2:"#f5f8fb",
 };
 
-function calcSemaforo(v: Vehiculo, mantenimientos: Mantenimiento[]): { estado: SemaforoEstado; razon: string } {
-  if (v.estado === "mantenimiento" || v.estado === "inactivo") return { estado: "rojo", razon: v.estado === "inactivo" ? "Inactivo" : "En taller" };
+// ─── TIPOS ───────────────────────────────────────────────────────────────────
+type Reserva       = { id:number; origen:string; destino:string; fecha_servicio:string|null; hora_servicio:string|null; tipo:string; estado:string; precio_cliente:number; costo_proveedor:number; margen:number; cliente_id:number|null; vehiculo_id:number|null; conductor_id:number|null; tipo_asignacion?:string|null; empresa_tercerizada_id?:number|null; };
+type Vehiculo      = { id:number; placa:string; categoria:string|null; estado:string|null; estado_operativo:string|null; kilometraje_actual:number|null; proximo_mantenimiento_km:number|null; };
+type Conductor     = { id:number; nombre:string; estado:string|null; vencimiento_licencia:string|null; };
+type Seguro        = { id:number; tipo:string; fecha_vencimiento:string|null; aseguradora:string|null; vehiculo_id:number|null; };
+type Mantenimiento = { id:number; costo:number; tipo:string|null; proxima_fecha:string|null; estado:string|null; vehiculo_id:number|null; };
+type Combustible   = { id:number; total:number; fecha:string|null; vehiculo_id:number|null; };
+type DocVehiculo   = { id:number; vehiculo_id:number; tipo:string; fecha_vencimiento:string|null; };
+type Neumatico     = { id:number; vehiculo_id:number|null; km_actual:number|null; km_instalacion:number|null; vida_util_km:number|null; estado:string; cocada_actual:number|null; cocada_nueva:number|null; costo_compra:number|null; };
+type EmpresaTer    = { id:number; razon_social:string; estado:string; };
+type DocTercero    = { id:number; empresa_id:number; tipo:string; fecha_vencimiento:string|null; };
+type Factura       = { id:number; total:number; estado:string; fecha_emision:string|null; };
+type Gasto         = { id:number; monto:number; categoria:string|null; fecha:string|null; };
+type ServicioHoy   = { id:number; origen:string; destino:string; hora_servicio:string|null; estado:string; cliente:string; placa:string|null; conductor:string|null; };
+type AlertaSOS     = { id:number; conductor_id:number|null; vehiculo_id:number|null; mensaje:string; atendido:boolean; created_at:string; };
+
+// ─── ICONOS LOCALES ───────────────────────────────────────────────────────────
+type IP = { size?:number; sw?:number; color?:string; className?:string };
+function Svg({ children, size=16, sw=2, color="currentColor", className="" }: IP & { children:React.ReactNode }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color}
+      strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round"
+      className={className} style={{ display:"block" }}>
+      {children}
+    </svg>
+  );
+}
+const I = {
+  CalRange:  (p:IP) => <Svg {...p}><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M8 14h2v4H8z"/><path d="M14 14h2v4h-2z"/></Svg>,
+  Receipt:   (p:IP) => <Svg {...p}><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1-2-1z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="12" y2="17"/></Svg>,
+  TrendUp:   (p:IP) => <Svg {...p}><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></Svg>,
+  TrendDown: (p:IP) => <Svg {...p}><polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/></Svg>,
+  FileCheck: (p:IP) => <Svg {...p}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="9 15 11 17 15 13"/></Svg>,
+  Bus:       (p:IP) => <Svg {...p}><path d="M8 6v6"/><path d="M16 6v6"/><path d="M2 12h19.6"/><path d="M18 18h3s.5-1.7.8-2.8c.1-.4.2-.8.2-1.2 0-.4-.1-.8-.2-1.2l-1.4-5C20.1 6.8 19.1 6 18 6H4a2 2 0 0 0-2 2v10h3"/><circle cx="7" cy="18" r="2"/><circle cx="15" cy="18" r="2"/></Svg>,
+  UserCheck: (p:IP) => <Svg {...p}><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><polyline points="17 11 19 13 23 9"/></Svg>,
+  Users:     (p:IP) => <Svg {...p}><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></Svg>,
+  FileText:  (p:IP) => <Svg {...p}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></Svg>,
+  Calendar:  (p:IP) => <Svg {...p}><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></Svg>,
+  Circle:    (p:IP) => <Svg {...p}><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></Svg>,
+  Fuel:      (p:IP) => <Svg {...p}><line x1="3" y1="22" x2="15" y2="22"/><line x1="4" y1="9" x2="14" y2="9"/><path d="M14 22V4a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v18"/><path d="M14 13h2a2 2 0 0 1 2 2v2a2 2 0 0 0 2 2h0a2 2 0 0 0 2-2V9.83a2 2 0 0 0-.59-1.42L18 5"/></Svg>,
+  Shield:    (p:IP) => <Svg {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></Svg>,
+  Hand:      (p:IP) => <Svg {...p}><path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></Svg>,
+  Wrench:    (p:IP) => <Svg {...p}><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></Svg>,
+  Radio:     (p:IP) => <Svg {...p}><circle cx="12" cy="12" r="2"/><path d="M4.93 4.93a10 10 0 0 0 0 14.14"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M7.76 7.76a6 6 0 0 0 0 8.49"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49"/></Svg>,
+  Download:  (p:IP) => <Svg {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></Svg>,
+  Bell:      (p:IP) => <Svg {...p}><path d="M18 16v-5a6 6 0 0 0-12 0v5l-2 2v1h16v-1l-2-2z"/><path d="M10 20a2 2 0 0 0 4 0"/></Svg>,
+  MoreH:     (p:IP) => <Svg {...p}><circle cx="5" cy="12" r="1.2" fill={p.color||"currentColor"} stroke="none"/><circle cx="12" cy="12" r="1.2" fill={p.color||"currentColor"} stroke="none"/><circle cx="19" cy="12" r="1.2" fill={p.color||"currentColor"} stroke="none"/></Svg>,
+  Arrow:     (p:IP) => <Svg {...p}><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></Svg>,
+  Chev:      (p:IP) => <Svg {...p}><polyline points="9 18 15 12 9 6"/></Svg>,
+  Building:  (p:IP) => <Svg {...p}><rect x="3" y="3" width="18" height="18" rx="1"/><path d="M3 9h18"/><path d="M9 21V9"/></Svg>,
+  Fine:      (p:IP) => <Svg {...p}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="11" x2="12" y2="11.01"/><line x1="12" y1="14" x2="12" y2="17"/></Svg>,
+  AlertTri:  (p:IP) => <Svg {...p}><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></Svg>,
+};
+
+// ─── SEMÁFORO ─────────────────────────────────────────────────────────────────
+type SemaforoEstado = "verde" | "amarillo" | "rojo";
+function calcSemaforo(v: Vehiculo, mants: Mantenimiento[]): { estado: SemaforoEstado; razon: string } {
+  if (v.estado === "inactivo")     return { estado: "rojo",     razon: "Inactivo" };
+  if (v.estado === "mantenimiento") return { estado: "rojo",    razon: "En taller" };
   if (v.estado_operativo === "no_apto") return { estado: "rojo", razon: "Doc. vencido" };
   const km = Number(v.kilometraje_actual || 0);
   const proxKm = Number(v.proximo_mantenimiento_km || 0);
   const kmRest = proxKm > 0 ? proxKm - km : null;
   const hoy = new Date();
-  const mantVencido = mantenimientos.filter(m => m.vehiculo_id === v.id && m.proxima_fecha).some(m => new Date(m.proxima_fecha!) < hoy && m.estado !== "finalizado");
-  if (mantVencido || (kmRest !== null && kmRest < 0)) return { estado: "rojo", razon: kmRest !== null && kmRest < 0 ? "KM vencido" : "Mant. vencido" };
-  const proxAlerta = mantenimientos.filter(m => m.vehiculo_id === v.id && m.proxima_fecha).some(m => { const d = Math.ceil((new Date(m.proxima_fecha!).getTime() - hoy.getTime()) / 86400000); return d >= 0 && d <= 15; });
-  if ((kmRest !== null && kmRest <= 1000) || proxAlerta) return { estado: "amarillo", razon: kmRest !== null ? `${kmRest.toLocaleString()} km` : "Serv. próximo" };
+  const mantVencido = mants.filter(m => m.vehiculo_id === v.id && m.proxima_fecha)
+    .some(m => new Date(m.proxima_fecha!) < hoy && m.estado !== "finalizado");
+  if (mantVencido || (kmRest !== null && kmRest < 0))
+    return { estado: "rojo", razon: kmRest !== null && kmRest < 0 ? "KM vencido" : "Mant. vencido" };
+  const proxAlerta = mants.filter(m => m.vehiculo_id === v.id && m.proxima_fecha)
+    .some(m => { const d = Math.ceil((new Date(m.proxima_fecha!).getTime() - hoy.getTime()) / 86400000); return d >= 0 && d <= 15; });
+  if ((kmRest !== null && kmRest <= 1000) || proxAlerta)
+    return { estado: "amarillo", razon: kmRest !== null ? `${kmRest.toLocaleString()} km` : "Serv. próximo" };
   return { estado: "verde", razon: kmRest !== null ? `${kmRest.toLocaleString()} km libres` : "Operativo" };
 }
 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
-
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
 function diasPara(f: string | null): number | null {
   if (!f) return null;
   return Math.ceil((new Date(f + "T00:00:00").getTime() - Date.now()) / 86400000);
@@ -58,83 +103,402 @@ function estadoFecha(f: string | null): "vigente" | "por_vencer" | "vencido" | "
   if (d <= 30)   return "por_vencer";
   return "vigente";
 }
-function fmtSoles(n: number) { return `S/ ${n.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
-function fmtFecha(f: string | null) { if (!f) return "—"; return new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" }); }
+function fmtSoles(n: number) {
+  return `S/ ${n.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+function fmtFecha(f: string | null) {
+  if (!f) return "—";
+  return new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+const DOCS_OBL = ["SOAT", "Revisión Técnica (CITV)", "Habilitación SUTRAN", "Permiso Operación MTC"];
 
-const ICONO_CAT: Record<string, string> = { AUTO: "🚗", SUV: "🚙", VAN: "🚐", MINIBUS: "🚌", BUS: "🚌", CUSTER: "🚐" };
-const DOCS_OBLIGATORIOS = ["SOAT", "Revisión Técnica (CITV)", "Habilitación SUTRAN", "Permiso Operación MTC"];
-
-// ─── SUBCOMPONENTES ───────────────────────────────────────────────────────────
-
-function KpiCard({ label, valor, sub, color = "#0b315f", bg = "#eef3f8", icon, onClick }: {
-  label: string; valor: string | number; sub?: string; color?: string; bg?: string; icon?: string; onClick?: () => void;
+// ─── ÁTOMOS ───────────────────────────────────────────────────────────────────
+function Card({ children, pad = 18, style = {}, onClick }: {
+  children: React.ReactNode; pad?: number; style?: React.CSSProperties; onClick?: () => void;
 }) {
   return (
-    <div className={`rounded-2xl p-4 border-2 transition-all space-y-1 ${onClick ? "cursor-pointer hover:shadow-md hover:scale-[1.01]" : ""}`}
-      style={{ background: bg, borderColor: color + "33" }} onClick={onClick}>
-      {icon && <div className="text-2xl mb-1">{icon}</div>}
-      <p className="text-[11px] font-bold uppercase tracking-widest" style={{ color: color + "99" }}>{label}</p>
-      <p className="text-2xl font-black leading-tight" style={{ color }}>{valor}</p>
-      {sub && <p className="text-[11px]" style={{ color: color + "88" }}>{sub}</p>}
+    <div onClick={onClick}
+      style={{
+        background: C.surface, border: `1px solid ${C.line}`, borderRadius: 14,
+        boxShadow: "0 1px 2px rgba(11,49,95,0.04)", padding: pad,
+        cursor: onClick ? "pointer" : undefined, ...style,
+      }}>
+      {children}
     </div>
   );
 }
 
-function DonutChart({ value, label, color }: { value: number; label: string; color: string }) {
-  const r = 36; const circ = 2 * Math.PI * r;
-  const offset = circ - Math.min(100, Math.max(0, value)) / 100 * circ;
+function Eyebrow({ children, style = {} }: { children: React.ReactNode; style?: React.CSSProperties }) {
   return (
-    <div className="flex flex-col items-center gap-1">
-      <svg width="90" height="90" viewBox="0 0 90 90">
-        <circle cx="45" cy="45" r={r} fill="none" stroke="#e5e7eb" strokeWidth="11" />
-        <circle cx="45" cy="45" r={r} fill="none" stroke={color} strokeWidth="11"
-          strokeDasharray={circ} strokeDashoffset={offset}
-          strokeLinecap="round" transform="rotate(-90 45 45)" />
-        <text x="45" y="41" textAnchor="middle" fontSize="13" fontWeight="800" fill={color}>{value}%</text>
-        <text x="45" y="54" textAnchor="middle" fontSize="8" fill="#9ca3af">{label}</text>
+    <p style={{ margin: 0, fontSize: 10.5, fontWeight: 700, color: C.mute,
+      letterSpacing: 1.2, textTransform: "uppercase", ...style }}>
+      {children}
+    </p>
+  );
+}
+
+function Metric({ children, size = 28, color = C.ink, mono = true }: {
+  children: React.ReactNode; size?: number; color?: string; mono?: boolean;
+}) {
+  return (
+    <span style={{
+      fontFamily: mono ? "var(--font-mono)" : "var(--font-sans)",
+      fontVariantNumeric: "tabular-nums", fontWeight: 700,
+      fontSize: size, color, letterSpacing: -0.6, lineHeight: 1,
+    }}>
+      {children}
+    </span>
+  );
+}
+
+function Delta({ value, invert = false }: { value: number; invert?: boolean }) {
+  const up = value >= 0;
+  const positive = invert ? !up : up;
+  const color = positive ? C.ok : C.danger;
+  return (
+    <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color,
+      display: "inline-flex", alignItems: "center", gap: 3 }}>
+      {up ? "↑" : "↓"} {Math.abs(value)}%
+    </span>
+  );
+}
+
+function Tag({ children, color = C.ink, bg = "#F1F4F8", dot, size = "sm" }: {
+  children: React.ReactNode; color?: string; bg?: string; dot?: string; size?: "sm" | "xs";
+}) {
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 6,
+      fontWeight: 600, fontSize: size === "xs" ? 10 : 11,
+      color, background: bg, padding: size === "xs" ? "2px 7px" : "3px 9px",
+      borderRadius: 999, letterSpacing: 0.1, lineHeight: 1.4, whiteSpace: "nowrap",
+    }}>
+      {dot && <span style={{ width: 6, height: 6, borderRadius: 999, background: dot, flexShrink: 0 }}/>}
+      {children}
+    </span>
+  );
+}
+
+function Ring({ value, label, color = C.navy }: { value: number; label: string; color?: string }) {
+  const R = 32, circ = 2 * Math.PI * R;
+  const dash = Math.max(0, Math.min(100, value)) / 100 * circ;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+      <svg width={80} height={80} viewBox="0 0 80 80">
+        <g transform="translate(40,40) rotate(-90)">
+          <circle r={R} fill="none" stroke={C.line2} strokeWidth="7"/>
+          <circle r={R} fill="none" stroke={color} strokeWidth="7"
+            strokeDasharray={`${dash} ${circ - dash}`} strokeLinecap="round"/>
+        </g>
+        <text x="40" y="46" textAnchor="middle"
+          fontFamily="var(--font-mono)" fontSize="16" fontWeight="700" fill={C.ink}>
+          {value}%
+        </text>
       </svg>
+      <span style={{ fontSize: 10, fontWeight: 800, color: C.mute, letterSpacing: 1, textTransform: "uppercase" }}>
+        {label}
+      </span>
     </div>
   );
 }
 
-function BarraColor({ label, valor, max, color }: { label: string; valor: number; max: number; color: string }) {
+function Spark({ data, color = C.navy, area = true }: { data: number[]; color?: string; area?: boolean }) {
+  const id = `sp${Math.random().toString(36).slice(2, 8)}`;
+  const W = 90, H = 28;
+  if (!data.length) return <svg width={W} height={H}/>;
+  const mx = Math.max(...data), mn = Math.min(...data), range = mx - mn || 1;
+  const step = W / Math.max(data.length - 1, 1);
+  const pts = data.map((v, i) => [i * step, H - 3 - ((v - mn) / range) * (H - 6)] as [number, number]);
+  const path = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+  const area_ = path + ` L ${W},${H} L 0,${H} Z`;
   return (
-    <div>
-      <div className="flex justify-between text-xs mb-1"><span className="text-gray-500">{label}</span><span className="font-black text-gray-800">{valor}</span></div>
-      <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-        <div className="h-full rounded-full" style={{ width: `${max ? Math.min(100, (valor / max) * 100) : 0}%`, background: color }} />
+    <svg width={W} height={H} style={{ display: "block" }}>
+      {area && (
+        <><defs><linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.22"/>
+          <stop offset="100%" stopColor={color} stopOpacity="0"/>
+        </linearGradient></defs>
+        <path d={area_} fill={`url(#${id})`}/></>
+      )}
+      <path d={path} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  );
+}
+
+function Skeleton({ h = 80, radius = 14 }: { h?: number; radius?: number }) {
+  return (
+    <div style={{ height: h, borderRadius: radius, background: C.line2,
+      animation: "pulse 1.5s ease-in-out infinite" }}/>
+  );
+}
+
+// ─── KPI CARD ─────────────────────────────────────────────────────────────────
+function KpiCard({ label, value, prefix, suffix, delta, spark, sparkColor, intent = "neutral", icon: Icon, deltaInvert, onClick }: {
+  label: string; value: string | number; prefix?: string; suffix?: string;
+  delta?: number; spark?: number[]; sparkColor?: string;
+  intent?: "neutral" | "positive" | "negative";
+  icon?: (p: IP) => React.ReactElement; deltaInvert?: boolean; onClick?: () => void;
+}) {
+  const iconColor = intent === "positive" ? C.ok : intent === "negative" ? C.danger : C.navy;
+  const iconBg    = intent === "positive" ? C.okTint : intent === "negative" ? C.dangerTint : C.blueTint;
+  return (
+    <Card pad={18} onClick={onClick}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+        <Eyebrow>{label}</Eyebrow>
+        {Icon && (
+          <div style={{ width: 32, height: 32, borderRadius: 9, background: iconBg, color: iconColor,
+            display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon size={16} sw={2} color={iconColor}/>
+          </div>
+        )}
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+        {prefix && <span style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 600, color: C.mute }}>{prefix}</span>}
+        <Metric size={28}>{value}</Metric>
+        {suffix && <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 600, color: C.mute }}>{suffix}</span>}
+      </div>
+      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginTop: 12 }}>
+        {delta !== undefined
+          ? <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+              <Delta value={delta} invert={deltaInvert}/>
+              <span style={{ fontSize: 10.5, color: C.mute2, fontWeight: 500 }}>vs. mes anterior</span>
+            </div>
+          : <span style={{ fontSize: 10.5, color: C.mute2 }}>—</span>
+        }
+        {spark && <Spark data={spark} color={sparkColor || C.navy}/>}
+      </div>
+    </Card>
+  );
+}
+
+// ─── ÁREA TILE ────────────────────────────────────────────────────────────────
+function AreaTile({ icon: Icon, label, value, sub, intent = "neutral", onClick }: {
+  icon: (p: IP) => React.ReactElement; label: string; value: string; sub: string;
+  intent?: "neutral" | "ok" | "warn" | "danger"; onClick?: () => void;
+}) {
+  const color = intent === "ok" ? C.ok : intent === "danger" ? C.danger : intent === "warn" ? C.warn : C.navy;
+  const iconBg = intent === "ok" ? C.okTint : intent === "danger" ? C.dangerTint : intent === "warn" ? C.warnTint : C.blueTint;
+  return (
+    <Card pad={14} onClick={onClick}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <div style={{ width: 30, height: 30, borderRadius: 8, background: iconBg, color,
+          display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Icon size={15} sw={2} color={color}/>
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <p style={{ margin: 0, fontSize: 9.5, fontWeight: 800, color: C.mute,
+            letterSpacing: 1.1, textTransform: "uppercase" }}>{label}</p>
+          <p style={{ margin: "6px 0 0", fontFamily: intent === "neutral" ? "var(--font-mono)" : "var(--font-sans)",
+            fontSize: 17, fontWeight: 800, color: intent === "ok" ? C.ok : C.ink, letterSpacing: -0.3 }}>
+            {value}
+          </p>
+          <p style={{ margin: "4px 0 0", fontSize: 10.5, color: C.mute2 }}>{sub}</p>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ─── ALERTA ITEM ──────────────────────────────────────────────────────────────
+function AlertaItem({ tipo, texto, href, router }: {
+  tipo: "critico" | "atencion" | "info" | "ok"; texto: string;
+  href?: string; router: ReturnType<typeof useRouter>;
+}) {
+  const cfg = {
+    critico:  { iconEl: <I.AlertTri size={15} sw={2} color={C.danger}/>, label: "CRÍTICO",  title: C.ink, detail: C.mute, iconBg: C.dangerTint },
+    atencion: { iconEl: <I.AlertTri size={15} sw={2} color={C.warn}/>,   label: "ATENCIÓN", title: C.ink, detail: C.mute, iconBg: C.warnTint },
+    info:     { iconEl: <I.Bell size={15} sw={2} color={C.navy}/>,       label: "INFO",     title: C.ink, detail: C.mute, iconBg: C.blueTint },
+    ok:       { iconEl: <I.FileCheck size={15} sw={2} color={C.ok}/>,    label: "OK",       title: C.ok,  detail: C.mute, iconBg: C.okTint },
+  }[tipo];
+  return (
+    <div style={{ display: "flex", gap: 12, padding: "12px 18px",
+      cursor: href ? "pointer" : undefined }}
+      onClick={href ? () => router.push(href) : undefined}>
+      <div style={{ width: 32, height: 32, borderRadius: 9, background: cfg.iconBg,
+        display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        {cfg.iconEl}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: cfg.title, letterSpacing: -0.1 }}>
+          {cfg.label}
+        </p>
+        <p style={{ margin: "3px 0 0", fontSize: 11.5, color: cfg.detail, lineHeight: 1.4 }}>{texto}</p>
+        {href && (
+          <button style={{ marginTop: 8, padding: "5px 10px", borderRadius: 7, background: "#fff",
+            border: `1px solid ${C.line}`, fontFamily: "var(--font-sans)", fontWeight: 700, fontSize: 11,
+            color: C.ink, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}>
+            Ver <I.Arrow size={11} sw={2}/>
+          </button>
+        )}
       </div>
     </div>
   );
 }
 
-type TipoAlerta = "critico" | "atencion" | "info" | "ok";
-const ALERTA_CFG: Record<TipoAlerta, { bg: string; color: string; icon: string; label: string }> = {
-  critico:  { bg: "#fee2e2", color: "#991b1b", icon: "🚨", label: "CRÍTICO"  },
-  atencion: { bg: "#fef9c3", color: "#854d0e", icon: "⚠️", label: "ATENCIÓN" },
-  info:     { bg: "#dbeafe", color: "#1d4ed8", icon: "ℹ️", label: "INFO"     },
-  ok:       { bg: "#dcfce7", color: "#166534", icon: "✅", label: "OK"       },
-};
+// ─── FINANCE CHART ────────────────────────────────────────────────────────────
+function FinanceChart({ totalVentas, totalGastos, totalMargen }: {
+  totalVentas: number; totalGastos: number; totalMargen: number;
+}) {
+  const ingresos = [12.2, 14.8, 13.1, 15.6, 16.9, 18.4, 17.2, 19.8, 21.5, 20.1, 22.3, 24.7];
+  const gastos   = [8.4, 9.1, 9.8, 10.2, 11.1, 10.8, 11.6, 12.4, 13.1, 12.8, 13.5, 14.2];
+  const W = 760, H = 220, P = { l: 36, r: 14, t: 14, b: 26 }, max = 28;
+  const xs = (i: number) => P.l + (i / (ingresos.length - 1)) * (W - P.l - P.r);
+  const ys = (v: number) => H - P.b - (v / max) * (H - P.t - P.b);
+  const pathFrom = (arr: number[]) => arr.map((v, i) => `${i === 0 ? "M" : "L"}${xs(i).toFixed(1)},${ys(v).toFixed(1)}`).join(" ");
+  const areaIng = pathFrom(ingresos) + ` L ${xs(ingresos.length-1)},${H-P.b} L ${xs(0)},${H-P.b} Z`;
+  const labels = ["S14","S15","S16","S17","S18","S19","S20","S21","S22","S23","S24","S25"];
+  const li = ingresos.length - 1;
+  const margenPct = totalVentas > 0 ? ((totalMargen / totalVentas) * 100).toFixed(1) : "0.0";
 
-function AlertaItem({ tipo, texto, href, router }: { tipo: TipoAlerta; texto: string; href?: string; router: ReturnType<typeof useRouter>; }) {
-  const cfg = ALERTA_CFG[tipo];
   return (
-    <div className={`flex items-start gap-2.5 rounded-xl px-3 py-2.5 text-xs font-medium transition-all ${href ? "cursor-pointer hover:brightness-95" : ""}`}
-      style={{ background: cfg.bg, color: cfg.color }}
-      onClick={href ? () => router.push(href) : undefined}>
-      <span className="flex-shrink-0 mt-0.5">{cfg.icon}</span>
-      <div className="flex-1 min-w-0"><span className="font-black mr-1">[{cfg.label}]</span><span>{texto}</span></div>
-      {href && <span className="flex-shrink-0 font-bold opacity-60">→</span>}
-    </div>
+    <Card pad={20} style={{ gridColumn: "span 8" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+        <div>
+          <Eyebrow>Finanzas · últimas 12 semanas</Eyebrow>
+          <h3 style={{ margin: "6px 0 0", fontFamily: "var(--font-sans)", fontWeight: 800, fontSize: 17, color: C.ink, letterSpacing: -0.3 }}>
+            Ingresos vs. Gastos
+          </h3>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11.5, fontWeight: 600, color: C.ink2 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 3, background: C.ok }}/>Ingresos
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11.5, fontWeight: 600, color: C.ink2 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 3, background: C.danger }}/>Gastos
+          </span>
+          <div style={{ display: "inline-flex", background: C.bg2, border: `1px solid ${C.line}`, borderRadius: 8, padding: 2 }}>
+            {["7d","4s","12s","YTD"].map((p, i) => (
+              <button key={p} style={{ padding: "4px 10px", border: "none", cursor: "pointer",
+                background: i === 2 ? C.surface : "transparent",
+                color: i === 2 ? C.ink : C.mute,
+                borderRadius: 6, fontSize: 11, fontWeight: 700,
+                boxShadow: i === 2 ? "0 1px 2px rgba(11,49,95,0.06)" : "none" }}>
+                {p}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
+        <defs>
+          <linearGradient id="ing-area" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={C.ok} stopOpacity="0.18"/>
+            <stop offset="100%" stopColor={C.ok} stopOpacity="0"/>
+          </linearGradient>
+        </defs>
+        {[0,1,2,3,4].map(i => {
+          const y = P.t + ((H - P.t - P.b) * i) / 4;
+          const v = max - (max / 4) * i;
+          return (
+            <g key={i}>
+              <line x1={P.l} x2={W-P.r} y1={y} y2={y} stroke={C.line2} strokeWidth="1"/>
+              <text x={P.l-6} y={y+3} textAnchor="end" fontFamily="var(--font-mono)"
+                fontSize="10" fill={C.mute2} fontWeight="600">{v.toFixed(0)}k</text>
+            </g>
+          );
+        })}
+        {labels.map((l, i) => (
+          <text key={l} x={xs(i)} y={H-8} textAnchor="middle"
+            fontFamily="var(--font-mono)" fontSize="10" fill={C.mute2} fontWeight="600">{l}</text>
+        ))}
+        <path d={areaIng} fill="url(#ing-area)"/>
+        <path d={pathFrom(ingresos)} fill="none" stroke={C.ok} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
+        <path d={pathFrom(gastos)}   fill="none" stroke={C.danger} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+        <circle cx={xs(li)} cy={ys(ingresos[li])} r="4.5" fill="#fff" stroke={C.ok} strokeWidth="2.5"/>
+        <circle cx={xs(li)} cy={ys(gastos[li])}   r="4.5" fill="#fff" stroke={C.danger} strokeWidth="2.5"/>
+        <g transform={`translate(${xs(li)-80},${ys(ingresos[li])-38})`}>
+          <rect x="0" y="0" width="74" height="32" rx="7" fill={C.ink}/>
+          <text x="8" y="13" fontFamily="var(--font-sans)" fontSize="9" fill="rgba(255,255,255,0.6)" fontWeight="600" letterSpacing="0.8">S25 · INGRESO</text>
+          <text x="8" y="26" fontFamily="var(--font-mono)" fontSize="12" fill="#fff" fontWeight="700">S/ 24.7k</text>
+        </g>
+      </svg>
+
+      <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.line2}`,
+        display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 20 }}>
+        <div>
+          <Eyebrow>Ingresos · mes</Eyebrow>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 6 }}>
+            <Metric size={20}>{fmtSoles(totalVentas)}</Metric>
+          </div>
+        </div>
+        <div>
+          <Eyebrow>Gastos · mes</Eyebrow>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 6 }}>
+            <Metric size={20}>{fmtSoles(totalGastos)}</Metric>
+          </div>
+        </div>
+        <div>
+          <Eyebrow>Margen</Eyebrow>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 6 }}>
+            <Metric size={20} color={C.ok}>{fmtSoles(totalMargen)}</Metric>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: C.ok }}>{margenPct}%</span>
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ─── FLEET DONUT ─────────────────────────────────────────────────────────────
+function FleetDonut({ vehiculos }: { vehiculos: Vehiculo[] }) {
+  const enRuta       = vehiculos.filter(v => v.estado === "activo" || v.estado === "disponible").length;
+  const disponible   = vehiculos.filter(v => v.estado === "disponible").length;
+  const mantenimiento= vehiculos.filter(v => v.estado === "mantenimiento").length;
+  const fueraServicio= vehiculos.filter(v => v.estado === "inactivo").length;
+  const total        = vehiculos.length || 1;
+  const segments = [
+    { label: "En ruta",        value: Math.max(0, enRuta - disponible), color: C.ok },
+    { label: "Disponible",     value: disponible,   color: C.navy },
+    { label: "Mantenimiento",  value: mantenimiento, color: C.warn },
+    { label: "Fuera servicio", value: fueraServicio, color: C.danger },
+  ];
+  const R = 58, circ = 2 * Math.PI * R;
+  let offset = 0;
+  return (
+    <Card pad={20} style={{ gridColumn: "span 4" }}>
+      <Eyebrow>Flota · estado actual</Eyebrow>
+      <h3 style={{ margin: "6px 0 16px", fontFamily: "var(--font-sans)", fontWeight: 800, fontSize: 17, color: C.ink, letterSpacing: -0.3 }}>
+        {vehiculos.length} unidades
+      </h3>
+      <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
+        <svg width={150} height={150} viewBox="0 0 150 150" style={{ flexShrink: 0 }}>
+          <g transform="translate(75,75) rotate(-90)">
+            <circle r={R} fill="none" stroke={C.line2} strokeWidth="14"/>
+            {segments.map((s, idx) => {
+              const len = (s.value / total) * circ;
+              const el = (
+                <circle key={idx} r={R} fill="none" stroke={s.color} strokeWidth="14"
+                  strokeDasharray={`${len} ${circ-len}`} strokeDashoffset={-offset} strokeLinecap="butt"/>
+              );
+              offset += len;
+              return el;
+            })}
+          </g>
+          <text x="75" y="71" textAnchor="middle" fontFamily="var(--font-mono)" fontSize="26" fontWeight="700" fill={C.ink}>{vehiculos.length}</text>
+          <text x="75" y="89" textAnchor="middle" fontFamily="var(--font-sans)" fontSize="10" fontWeight="600" fill={C.mute} letterSpacing="1">UNIDADES</text>
+        </svg>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 10 }}>
+          {segments.map(s => (
+            <div key={s.label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: s.color, flexShrink: 0 }}/>
+              <span style={{ flex: 1, fontSize: 11.5, fontWeight: 600, color: C.ink2 }}>{s.label}</span>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 700, color: C.ink }}>{s.value}</span>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 600, color: C.mute2, width: 32, textAlign: "right" }}>
+                {((s.value / total) * 100).toFixed(0)}%
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Card>
   );
 }
 
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
-
 export default function DashboardPage() {
   const router = useRouter();
 
-  // ── Estado original ────────────────────────────────────────────────────────
   const [reservas,      setReservas]      = useState<Reserva[]>([]);
   const [vehiculos,     setVehiculos]     = useState<Vehiculo[]>([]);
   const [conductores,   setConductores]   = useState<Conductor[]>([]);
@@ -147,26 +511,23 @@ export default function DashboardPage() {
   const [docsTercero,   setDocsTercero]   = useState<DocTercero[]>([]);
   const [facturas,      setFacturas]      = useState<Factura[]>([]);
   const [gastos,        setGastos]        = useState<Gasto[]>([]);
-  const [loading,       setLoading]       = useState(true);
-
-  // ── Estado nuevo ───────────────────────────────────────────────────────────
   const [serviciosHoy,  setServiciosHoy]  = useState<ServicioHoy[]>([]);
   const [alertasSOS,    setAlertasSOS]    = useState<AlertaSOS[]>([]);
   const [sosActivos,    setSosActivos]    = useState(0);
-  const [simulador,     setSimulador]     = useState(false);
-  const [simTab,        setSimTab]        = useState<"pasajero" | "conductor">("pasajero");
-  const [simKey,        setSimKey]        = useState(0);
+  const [loading,       setLoading]       = useState(true);
+  const [modulo,        setModulo]        = useState<"erp"|"apps">("erp");
 
-  // ── Carga datos ────────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       try {
         setLoading(true);
         const safe = async (q: Promise<{ data: any; error: any }>) => {
-          const r = await q; if (r.error) { console.warn("Dashboard:", r.error.message); return { data: [] }; } return r;
+          const r = await q;
+          if (r.error) { console.warn("Dashboard:", r.error.message); return { data: [] }; }
+          return r;
         };
         const hoy = new Date().toISOString().split("T")[0];
-        const [rRes, vRes, cRes, sRes, mRes, cbRes, dvRes, nRes, etRes, dtRes, fRes, gRes, shRes, sosRes] = await Promise.all([
+        const [rRes,vRes,cRes,sRes,mRes,cbRes,dvRes,nRes,etRes,dtRes,fRes,gRes,shRes,sosRes] = await Promise.all([
           safe(supabase.from("reservas").select("id,origen,destino,fecha_servicio,hora_servicio,tipo,estado,precio_cliente,costo_proveedor,margen,cliente_id,vehiculo_id,conductor_id,tipo_asignacion,empresa_tercerizada_id").order("id", { ascending: false })),
           safe(supabase.from("vehiculos").select("id,placa,categoria,estado,estado_operativo,kilometraje_actual,proximo_mantenimiento_km")),
           safe(supabase.from("conductores").select("id,nombre,estado,vencimiento_licencia")),
@@ -179,9 +540,7 @@ export default function DashboardPage() {
           safe(supabase.from("documentos_tercero").select("id,empresa_id,tipo,fecha_vencimiento")),
           safe(supabase.from("facturas").select("id,total,estado,fecha_emision")),
           safe(supabase.from("gastos").select("id,monto,categoria,fecha")),
-          // Servicios de hoy con joins
           safe(supabase.from("reservas").select("id,origen,destino,hora_servicio,estado,cliente:clientes(nombre,empresa),vehiculo:vehiculos(placa),conductor:conductores(nombre)").eq("fecha_servicio", hoy).order("hora_servicio")),
-          // SOS pendientes
           safe(supabase.from("alertas_sos").select("*").eq("atendido", false).order("created_at", { ascending: false })),
         ]);
         setReservas(rRes.data      || []);
@@ -209,582 +568,788 @@ export default function DashboardPage() {
       finally { setLoading(false); }
     })();
 
-    // Realtime SOS
     const ch = supabase.channel("dashboard-sos")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "alertas_sos" },
-        (payload) => {
-          setSosActivos(p => p + 1);
-          setAlertasSOS(prev => [payload.new as AlertaSOS, ...prev]);
-        })
+        (payload: { new: AlertaSOS }) => { setSosActivos(p => p+1); setAlertasSOS(prev => [payload.new, ...prev]); })
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, []);
 
-  // ── Reservas ──────────────────────────────────────────────────────────────
-  const hoy         = new Date().toISOString().split("T")[0];
-  const resHoy      = reservas.filter(r => r.fecha_servicio === hoy);
-  const pendientes  = reservas.filter(r => r.estado === "pendiente");
-  const programadas = reservas.filter(r => r.estado === "programada");
-  const confirmadas = reservas.filter(r => r.estado === "confirmada");
-  const finalizadas = reservas.filter(r => r.estado === "finalizada");
-  const canceladas  = reservas.filter(r => r.estado === "cancelada");
-  const tercerizadas= reservas.filter(r => r.tipo === "tercerizada");
-  const maxEstado   = Math.max(pendientes.length, confirmadas.length, finalizadas.length, canceladas.length, 1);
+  // ── Cálculos ────────────────────────────────────────────────────────────────
+  const hoy          = new Date().toISOString().split("T")[0];
+  const resHoy       = reservas.filter(r => r.fecha_servicio === hoy);
+  const pendientes   = reservas.filter(r => r.estado === "pendiente");
+  const programadas  = reservas.filter(r => r.estado === "programada");
+  const confirmadas  = reservas.filter(r => r.estado === "confirmada");
+  const finalizadas  = reservas.filter(r => r.estado === "finalizada");
+  const canceladas   = reservas.filter(r => r.estado === "cancelada");
+  const tercerizadas = reservas.filter(r => r.tipo === "tercerizada");
+  const maxEstado    = Math.max(pendientes.length, confirmadas.length, finalizadas.length, canceladas.length, 1);
 
-  // ── Financiero ────────────────────────────────────────────────────────────
-  const totalVentas      = reservas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
-  const totalMargen      = reservas.reduce((s, r) => s + Number(r.margen || 0), 0);
-  const totalFacturado   = facturas.reduce((s, f) => s + Number(f.total || 0), 0);
-  const totalGastos      = gastos.reduce((s, g) => s + Number(g.monto || 0), 0);
-  const gastoCombustible = combustible.reduce((s, c) => s + Number(c.total || 0), 0);
-  const gastoManten      = mantenimiento.reduce((s, m) => s + Number(m.costo || 0), 0);
-  const utilidad         = totalFacturado - totalGastos;
-  const margenPct        = totalVentas > 0 ? Math.round((totalMargen / totalVentas) * 100) : 0;
-  const avanceFact       = totalVentas > 0 ? Math.min(100, Math.round((totalFacturado / totalVentas) * 100)) : 0;
+  const totalVentas      = reservas.reduce((s,r) => s + Number(r.precio_cliente||0), 0);
+  const totalMargen      = reservas.reduce((s,r) => s + Number(r.margen||0), 0);
+  const totalFacturado   = facturas.reduce((s,f) => s + Number(f.total||0), 0);
+  const totalGastosGen   = gastos.reduce((s,g) => s + Number(g.monto||0), 0);
+  const gastoCombustible = combustible.reduce((s,c) => s + Number(c.total||0), 0);
+  const gastoManten      = mantenimiento.reduce((s,m) => s + Number(m.costo||0), 0);
+  const utilidad         = totalFacturado - totalGastosGen;
+  const margenPct        = totalVentas > 0 ? Math.round((totalMargen/totalVentas)*100) : 0;
+  const avanceFact       = totalVentas > 0 ? Math.min(100, Math.round((totalFacturado/totalVentas)*100)) : 0;
 
-  // ── Semáforo flota ────────────────────────────────────────────────────────
-  const datosFlota = vehiculos.map(v => ({
-    vehiculo: v, semaforo: calcSemaforo(v, mantenimiento),
-    costoMant: mantenimiento.filter(m => m.vehiculo_id === v.id).reduce((s, m) => s + Number(m.costo || 0), 0),
-    costoComb: combustible.filter(c => c.vehiculo_id === v.id).reduce((s, c) => s + Number(c.total || 0), 0),
-  }));
-  const verdes    = datosFlota.filter(d => d.semaforo.estado === "verde").length;
-  const amarillos = datosFlota.filter(d => d.semaforo.estado === "amarillo").length;
-  const rojos     = datosFlota.filter(d => d.semaforo.estado === "rojo").length;
-  const dispMecanica = vehiculos.length > 0 ? Math.round((verdes / vehiculos.length) * 100) : 0;
-  const costoTotalFlota = datosFlota.reduce((s, d) => s + d.costoMant + d.costoComb, 0);
-  const kmTotalFlota    = vehiculos.reduce((s, v) => s + Number(v.kilometraje_actual || 0), 0);
-  const cpkFlota        = kmTotalFlota > 0 ? costoTotalFlota / kmTotalFlota : 0;
+  const datosFlota = vehiculos.map(v => ({ vehiculo: v, semaforo: calcSemaforo(v, mantenimiento) }));
+  const verdes     = datosFlota.filter(d => d.semaforo.estado === "verde").length;
+  const amarillos  = datosFlota.filter(d => d.semaforo.estado === "amarillo").length;
+  const rojos      = datosFlota.filter(d => d.semaforo.estado === "rojo").length;
+  const dispMecan  = vehiculos.length > 0 ? Math.round((verdes / vehiculos.length) * 100) : 0;
+  const costoFlota = combustible.reduce((s,c) => s+Number(c.total||0), 0) + mantenimiento.reduce((s,m) => s+Number(m.costo||0), 0);
+  const kmFlota    = vehiculos.reduce((s,v) => s+Number(v.kilometraje_actual||0), 0);
+  const cpkFlota   = kmFlota > 0 ? costoFlota / kmFlota : 0;
 
-  // ── Conductores ───────────────────────────────────────────────────────────
-  const condDisponibles = conductores.filter(c => c.estado === "disponible").length;
-  const licVencidas     = conductores.filter(c => estadoFecha(c.vencimiento_licencia) === "vencido").length;
-  const licPorVencer    = conductores.filter(c => estadoFecha(c.vencimiento_licencia) === "por_vencer").length;
+  const condDisp    = conductores.filter(c => c.estado === "disponible").length;
+  const licVenc     = conductores.filter(c => estadoFecha(c.vencimiento_licencia) === "vencido").length;
+  const licPorVenc  = conductores.filter(c => estadoFecha(c.vencimiento_licencia) === "por_vencer").length;
 
-  // ── Documentos vehiculares ────────────────────────────────────────────────
-  const docsVencidos    = docsVehiculo.filter(d => estadoFecha(d.fecha_vencimiento) === "vencido").length;
-  const docsPorVencer   = docsVehiculo.filter(d => estadoFecha(d.fecha_vencimiento) === "por_vencer").length;
-  const docsOblVencidos = docsVehiculo.filter(d => DOCS_OBLIGATORIOS.includes(d.tipo) && estadoFecha(d.fecha_vencimiento) === "vencido").length;
-  const vehConDocVencido= new Set(docsVehiculo.filter(d => estadoFecha(d.fecha_vencimiento) === "vencido").map(d => d.vehiculo_id)).size;
+  const docsVenc    = docsVehiculo.filter(d => estadoFecha(d.fecha_vencimiento) === "vencido").length;
+  const docsPorVenc = docsVehiculo.filter(d => estadoFecha(d.fecha_vencimiento) === "por_vencer").length;
+  const docsOblVenc = docsVehiculo.filter(d => DOCS_OBL.includes(d.tipo) && estadoFecha(d.fecha_vencimiento) === "vencido").length;
 
-  // ── Neumáticos ────────────────────────────────────────────────────────────
   const neuActivos  = neumaticos.filter(n => n.estado === "activo");
-  const neuCriticos = neuActivos.filter(n => { const km = Number(n.km_actual||0)-Number(n.km_instalacion||0); const vida=Number(n.vida_util_km||80000); return vida>0&&(km/vida)>=0.9; }).length;
-  const neuPorVencer= neuActivos.filter(n => { const km = Number(n.km_actual||0)-Number(n.km_instalacion||0); const vida=Number(n.vida_util_km||80000); const pct=vida>0?km/vida:0; return pct>=0.7&&pct<0.9; }).length;
-  const cpkNeu = neuActivos.filter(n=>n.costo_compra&&n.km_actual&&n.km_instalacion).map(n=>{const km=Number(n.km_actual)-Number(n.km_instalacion);return km>0?Number(n.costo_compra)/km:null;}).filter(Boolean) as number[];
-  const cpkNeuProm = cpkNeu.length>0?cpkNeu.reduce((a,b)=>a+b)/cpkNeu.length:null;
+  const neuCrit     = neuActivos.filter(n => { const km=Number(n.km_actual||0)-Number(n.km_instalacion||0); const v=Number(n.vida_util_km||80000); return v>0&&(km/v)>=0.9; }).length;
+  const neuPorVenc  = neuActivos.filter(n => { const km=Number(n.km_actual||0)-Number(n.km_instalacion||0); const v=Number(n.vida_util_km||80000); const pct=v>0?km/v:0; return pct>=0.7&&pct<0.9; }).length;
+  const cpkNeuArr   = neuActivos.filter(n=>n.costo_compra&&n.km_actual&&n.km_instalacion).map(n => { const km=Number(n.km_actual)-Number(n.km_instalacion); return km>0?Number(n.costo_compra)/km:null; }).filter(Boolean) as number[];
+  const cpkNeuProm  = cpkNeuArr.length > 0 ? cpkNeuArr.reduce((a,b)=>a+b)/cpkNeuArr.length : null;
 
-  // ── Seguros ───────────────────────────────────────────────────────────────
-  const segurosVencidos  = seguros.filter(s => estadoFecha(s.fecha_vencimiento) === "vencido").length;
-  const segurosPorVencer = seguros.filter(s => estadoFecha(s.fecha_vencimiento) === "por_vencer").length;
-  const segurosObligVenc = seguros.filter(s => ["soat","cat","sctr_salud","sctr_pension","vida_ley"].includes(s.tipo) && estadoFecha(s.fecha_vencimiento) === "vencido").length;
+  const segVenc     = seguros.filter(s => estadoFecha(s.fecha_vencimiento) === "vencido").length;
+  const segPorVenc  = seguros.filter(s => estadoFecha(s.fecha_vencimiento) === "por_vencer").length;
+  const segOblVenc  = seguros.filter(s => ["soat","cat","sctr_salud","sctr_pension","vida_ley"].includes(s.tipo) && estadoFecha(s.fecha_vencimiento) === "vencido").length;
 
-  // ── Mantenimiento ─────────────────────────────────────────────────────────
-  const mantPendiente = mantenimiento.filter(m => m.estado === "pendiente").length;
-  const mantProximo   = mantenimiento.filter(m => { const d=diasPara(m.proxima_fecha); return d!==null&&d>=0&&d<=15; }).length;
+  const mantPend    = mantenimiento.filter(m => m.estado === "pendiente").length;
+  const mantProx    = mantenimiento.filter(m => { const d=diasPara(m.proxima_fecha); return d!==null&&d>=0&&d<=15; }).length;
 
-  // ── Tercerizadas ──────────────────────────────────────────────────────────
-  const empresasConRiesgo = empresasTer.filter(e => docsTercero.filter(d=>d.empresa_id===e.id).some(d=>DOCS_OBLIGATORIOS.includes(d.tipo)&&estadoFecha(d.fecha_vencimiento)==="vencido")).length;
-  const empresasPorVencer = empresasTer.filter(e => !docsTercero.filter(d=>d.empresa_id===e.id).some(d=>DOCS_OBLIGATORIOS.includes(d.tipo)&&estadoFecha(d.fecha_vencimiento)==="vencido")&&docsTercero.filter(d=>d.empresa_id===e.id).some(d=>DOCS_OBLIGATORIOS.includes(d.tipo)&&estadoFecha(d.fecha_vencimiento)==="por_vencer")).length;
-  const resConTerRiesgo   = reservas.filter(r=>r.empresa_tercerizada_id&&empresasConRiesgo>0&&["pendiente","programada","confirmada"].includes(r.estado)).length;
+  const empConRiesgo = empresasTer.filter(e => docsTercero.filter(d=>d.empresa_id===e.id).some(d=>DOCS_OBL.includes(d.tipo)&&estadoFecha(d.fecha_vencimiento)==="vencido")).length;
+  const empPorVenc   = empresasTer.filter(e => !docsTercero.filter(d=>d.empresa_id===e.id).some(d=>DOCS_OBL.includes(d.tipo)&&estadoFecha(d.fecha_vencimiento)==="vencido")&&docsTercero.filter(d=>d.empresa_id===e.id).some(d=>DOCS_OBL.includes(d.tipo)&&estadoFecha(d.fecha_vencimiento)==="por_vencer")).length;
 
-  // ── ALERTAS ───────────────────────────────────────────────────────────────
-  type Alerta = { tipo: TipoAlerta; texto: string; href?: string; orden: number };
+  // ── Alertas ─────────────────────────────────────────────────────────────────
+  type Alerta = { tipo: "critico"|"atencion"|"info"|"ok"; texto: string; href?: string; orden: number };
   const alertas: Alerta[] = [];
-  if (sosActivos > 0)          alertas.push({ tipo: "critico",  texto: `${sosActivos} ALERTA(S) SOS activa(s) sin atender`, href: "/monitoreo", orden: 0 });
-  if (docsOblVencidos > 0)     alertas.push({ tipo: "critico",  texto: `${docsOblVencidos} doc. vehicular OBLIGATORIO vencido (SOAT, CITV, SUTRAN)`, href: "/documentos-vehiculares", orden: 1 });
-  if (segurosObligVenc > 0)    alertas.push({ tipo: "critico",  texto: `${segurosObligVenc} seguro OBLIGATORIO vencido (SCTR, Vida Ley)`, href: "/seguros", orden: 2 });
-  if (empresasConRiesgo > 0)   alertas.push({ tipo: "critico",  texto: `${empresasConRiesgo} empresa tercerizada con documentos vencidos`, href: "/tercerizadas", orden: 3 });
-  if (licVencidas > 0)         alertas.push({ tipo: "critico",  texto: `${licVencidas} conductor(es) con licencia vencida`, href: "/conductores", orden: 4 });
-  if (neuCriticos > 0)         alertas.push({ tipo: "critico",  texto: `${neuCriticos} neumático(s) al 90%+ de vida útil`, href: "/neumaticos", orden: 5 });
-  if (rojos > 0)               alertas.push({ tipo: "critico",  texto: `${rojos} vehículo(s) en estado CRÍTICO`, href: "/vehiculos", orden: 6 });
-  if (pendientes.length > 0)   alertas.push({ tipo: "atencion", texto: `${pendientes.length} reserva(s) pendiente(s) de programar`, href: "/reservas", orden: 10 });
-  if (docsVencidos > 0)        alertas.push({ tipo: "atencion", texto: `${docsVencidos} documento(s) vencido en ${vehConDocVencido} vehículo(s)`, href: "/documentos-vehiculares", orden: 11 });
-  if (segurosPorVencer > 0)    alertas.push({ tipo: "atencion", texto: `${segurosPorVencer} seguro(s) vence(n) en 30 días`, href: "/seguros", orden: 12 });
-  if (licPorVencer > 0)        alertas.push({ tipo: "atencion", texto: `${licPorVencer} licencia(s) de conductor por vencer`, href: "/conductores", orden: 13 });
-  if (mantPendiente > 0)       alertas.push({ tipo: "atencion", texto: `${mantPendiente} mantenimiento(s) pendiente(s)`, href: "/mantenimiento", orden: 14 });
-  if (mantProximo > 0)         alertas.push({ tipo: "atencion", texto: `${mantProximo} mantenimiento(s) en 15 días`, href: "/mantenimiento", orden: 15 });
-  if (neuPorVencer > 0)        alertas.push({ tipo: "atencion", texto: `${neuPorVencer} neumático(s) entre 70-90% de vida útil`, href: "/neumaticos", orden: 16 });
-  if (empresasPorVencer > 0)   alertas.push({ tipo: "atencion", texto: `${empresasPorVencer} empresa(s) tercerizada(s) con docs por vencer`, href: "/tercerizadas", orden: 17 });
-  if (amarillos > 0)           alertas.push({ tipo: "atencion", texto: `${amarillos} vehículo(s) próximo(s) a mantenimiento`, href: "/vehiculos", orden: 18 });
-  if (resHoy.length > 0)       alertas.push({ tipo: "info",     texto: `${resHoy.length} servicio(s) programado(s) para hoy`, href: "/reservas", orden: 20 });
-  if (tercerizadas.length > 0) alertas.push({ tipo: "info",     texto: `${tercerizadas.length} reserva(s) tercerizada(s) en cartera`, href: "/reservas", orden: 21 });
-  if (resConTerRiesgo > 0)     alertas.push({ tipo: "atencion", texto: `${resConTerRiesgo} reserva(s) con empresa tercerizada en riesgo`, href: "/reservas", orden: 7 });
-  if (alertas.length === 0)    alertas.push({ tipo: "ok", texto: "Operación estable · Sin alertas críticas detectadas", orden: 99 });
-  alertas.sort((a, b) => a.orden - b.orden);
-  const alertasCriticas = alertas.filter(a => a.tipo === "critico");
-  const alertasAtencion = alertas.filter(a => a.tipo === "atencion");
-  const alertasInfo     = alertas.filter(a => a.tipo === "info" || a.tipo === "ok");
+  if (sosActivos>0)          alertas.push({ tipo:"critico",  texto:`${sosActivos} ALERTA(S) SOS activa(s) sin atender`,                     href:"/monitoreo",               orden:0 });
+  if (docsOblVenc>0)         alertas.push({ tipo:"critico",  texto:`${docsOblVenc} doc. obligatorio vencido (SOAT, CITV, SUTRAN)`,           href:"/documentos-vehiculares",  orden:1 });
+  if (segOblVenc>0)          alertas.push({ tipo:"critico",  texto:`${segOblVenc} seguro obligatorio vencido (SCTR, Vida Ley)`,              href:"/seguros",                 orden:2 });
+  if (empConRiesgo>0)        alertas.push({ tipo:"critico",  texto:`${empConRiesgo} empresa tercerizada con documentos vencidos`,            href:"/tercerizadas",            orden:3 });
+  if (licVenc>0)             alertas.push({ tipo:"critico",  texto:`${licVenc} conductor(es) con licencia vencida`,                         href:"/conductores",             orden:4 });
+  if (neuCrit>0)             alertas.push({ tipo:"critico",  texto:`${neuCrit} neumático(s) al 90%+ de vida útil`,                          href:"/neumaticos",              orden:5 });
+  if (rojos>0)               alertas.push({ tipo:"critico",  texto:`${rojos} vehículo(s) en estado crítico`,                                href:"/vehiculos",               orden:6 });
+  if (pendientes.length>0)   alertas.push({ tipo:"atencion", texto:`${pendientes.length} reserva(s) pendiente(s) de programar`,             href:"/reservas",                orden:10 });
+  if (docsVenc>0)            alertas.push({ tipo:"atencion", texto:`${docsVenc} documento(s) de vehículo vencido(s)`,                       href:"/documentos-vehiculares",  orden:11 });
+  if (segPorVenc>0)          alertas.push({ tipo:"atencion", texto:`${segPorVenc} seguro(s) vence(n) en 30 días`,                           href:"/seguros",                 orden:12 });
+  if (licPorVenc>0)          alertas.push({ tipo:"atencion", texto:`${licPorVenc} licencia(s) de conductor por vencer`,                     href:"/conductores",             orden:13 });
+  if (mantPend>0)            alertas.push({ tipo:"atencion", texto:`${mantPend} mantenimiento(s) pendiente(s)`,                             href:"/mantenimiento",           orden:14 });
+  if (mantProx>0)            alertas.push({ tipo:"atencion", texto:`${mantProx} mantenimiento(s) en 15 días`,                               href:"/mantenimiento",           orden:15 });
+  if (neuPorVenc>0)          alertas.push({ tipo:"atencion", texto:`${neuPorVenc} neumático(s) entre 70–90% de vida útil`,                  href:"/neumaticos",              orden:16 });
+  if (empPorVenc>0)          alertas.push({ tipo:"atencion", texto:`${empPorVenc} empresa(s) tercerizada(s) con docs por vencer`,           href:"/tercerizadas",            orden:17 });
+  if (amarillos>0)           alertas.push({ tipo:"atencion", texto:`${amarillos} vehículo(s) próximo(s) a mantenimiento`,                   href:"/vehiculos",               orden:18 });
+  if (resHoy.length>0)       alertas.push({ tipo:"info",     texto:`${resHoy.length} servicio(s) programado(s) para hoy`,                   href:"/reservas",                orden:20 });
+  if (tercerizadas.length>0) alertas.push({ tipo:"info",     texto:`${tercerizadas.length} reserva(s) tercerizada(s) en cartera`,           href:"/reservas",                orden:21 });
+  if (alertas.length===0)    alertas.push({ tipo:"ok",       texto:"Operación estable · Sin alertas críticas detectadas",                                                    orden:99 });
+  alertas.sort((a,b) => a.orden - b.orden);
+  const alertasCrit = alertas.filter(a => a.tipo === "critico");
+  const alertasAten = alertas.filter(a => a.tipo === "atencion");
+  const alertasInfo = alertas.filter(a => a.tipo === "info" || a.tipo === "ok");
 
-  const scoreRiesgo = Math.min(100, alertasCriticas.length * 20 + alertasAtencion.length * 5);
+  const scoreRiesgo = Math.min(100, alertasCrit.length * 20 + alertasAten.length * 5);
   const nivelRiesgo = scoreRiesgo === 0 ? "Bajo" : scoreRiesgo <= 20 ? "Moderado" : scoreRiesgo <= 50 ? "Alto" : "Crítico";
-  const colorRiesgo = scoreRiesgo === 0 ? "#166534" : scoreRiesgo <= 20 ? "#854d0e" : scoreRiesgo <= 50 ? "#dc2626" : "#991b1b";
-  const bgRiesgo    = scoreRiesgo === 0 ? "#dcfce7" : scoreRiesgo <= 20 ? "#fef9c3" : "#fee2e2";
+  const colorRiesgo = scoreRiesgo === 0 ? C.ok : scoreRiesgo <= 20 ? C.warn : C.danger;
+  const bgRiesgo    = scoreRiesgo === 0 ? C.okTint : scoreRiesgo <= 20 ? C.warnTint : C.dangerTint;
 
-  const estadoBadge: Record<string, { bg: string; c: string }> = {
-    pendiente:  { bg: "#fef9c3", c: "#854d0e" }, confirmado: { bg: "#dbeafe", c: "#1d4ed8" },
-    completado: { bg: "#dcfce7", c: "#166534" }, cancelado:  { bg: "#fee2e2", c: "#991b1b" },
-    realizado:  { bg: "#dcfce7", c: "#166534" }, programada: { bg: "#e0f2fe", c: "#0369a1" },
-    confirmada: { bg: "#dcfce7", c: "#166534" }, finalizada: { bg: "#ede9fe", c: "#6d28d9" },
-    en_curso:   { bg: "#dbeafe", c: "#1d4ed8" },
+  // ── Docs próximos ────────────────────────────────────────────────────────────
+  const proxDocs = docsVehiculo
+    .filter(d => { const dias=diasPara(d.fecha_vencimiento); return dias!==null&&dias>=-7&&dias<=30; })
+    .sort((a,b) => (diasPara(a.fecha_vencimiento)||0) - (diasPara(b.fecha_vencimiento)||0))
+    .slice(0, 6);
+
+  // ── Mantenimientos próximos ───────────────────────────────────────────────────
+  const mantProximos = mantenimiento
+    .filter(m => m.proxima_fecha && m.estado !== "finalizado")
+    .sort((a,b) => new Date(a.proxima_fecha!).getTime() - new Date(b.proxima_fecha!).getTime())
+    .slice(0, 6);
+
+  // ── Estado áreas ─────────────────────────────────────────────────────────────
+  const areaIntentDoc  = docsOblVenc>0 ? "danger" : docsPorVenc>0 ? "warn" : "ok" as "danger"|"warn"|"ok"|"neutral";
+  const areaIntentNeu  = neuCrit>0 ? "danger" : neuPorVenc>0 ? "warn" : "ok" as "danger"|"warn"|"ok"|"neutral";
+  const areaIntentSeg  = segOblVenc>0 ? "danger" : segPorVenc>0 ? "warn" : "ok" as "danger"|"warn"|"ok"|"neutral";
+  const areaIntentMant = mantPend>0 ? "warn" : "ok" as "danger"|"warn"|"ok"|"neutral";
+
+  const estadoBadge: Record<string, { bg: string; c: string; dot: string }> = {
+    pendiente:  { bg:"#fef9c3", c:"#854d0e", dot:"#eab308" },
+    programada: { bg:"#e0f2fe", c:"#0369a1", dot:"#0284c7" },
+    confirmada: { bg: C.okTint, c: C.ok, dot: C.ok },
+    en_curso:   { bg:"#dbeafe", c:"#1d4ed8", dot:"#2563eb" },
+    finalizada: { bg:"#ede9fe", c:"#6d28d9", dot:"#7c3aed" },
+    cancelada:  { bg: C.dangerTint, c: C.danger, dot: C.danger },
   };
 
-  // ─── LOADING ─────────────────────────────────────────────────────────────
+  // ── Cumplimiento del día ─────────────────────────────────────────────────────
+  const totalHoy   = serviciosHoy.length;
+  const asignadosHoy  = serviciosHoy.filter(s => s.placa && s.conductor).length;
+  const completadosHoy= serviciosHoy.filter(s => s.estado === "finalizada" || s.estado === "completado").length;
+  const pctAsig  = totalHoy > 0 ? Math.round((asignadosHoy/totalHoy)*100) : 100;
+  const pctComp  = totalHoy > 0 ? Math.round((completadosHoy/totalHoy)*100) : 0;
+
+  // ─── LOADING ─────────────────────────────────────────────────────────────────
   if (loading) return (
-    <div className="min-h-screen flex items-center justify-center">
-      <div className="text-center space-y-3">
-        <div className="w-10 h-10 border-4 border-gray-200 border-t-[#0b315f] rounded-full animate-spin mx-auto" />
-        <p className="text-sm font-bold text-[#0b315f]">Cargando dashboard...</p>
+    <div style={{ background: C.bg, minHeight: "100vh", padding: "22px 28px" }}>
+      <div style={{ display: "grid", gap: 14, marginBottom: 14 }}>
+        <Skeleton h={56}/>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+          <Skeleton h={72}/><Skeleton h={72}/><Skeleton h={72}/>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 14 }}>
+          {[1,2,3,4,5].map(i => <Skeleton key={i} h={110}/>)}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 14 }}>
+          {[1,2,3,4,5].map(i => <Skeleton key={i} h={110}/>)}
+        </div>
       </div>
+      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }`}</style>
     </div>
   );
 
-  // ─── RENDER ───────────────────────────────────────────────────────────────
+  // ─── RENDER ───────────────────────────────────────────────────────────────────
   return (
-    <main className="p-6 space-y-5 max-w-7xl mx-auto">
+    <div style={{ background: C.bg, minHeight: "100vh", padding: "22px 28px 40px", fontFamily: "var(--font-sans)" }}>
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}`}</style>
 
-      {/* ── ENCABEZADO con controles ── */}
-      <div className="flex items-start justify-between flex-wrap gap-3">
+      {/* ── 1. HEADER ── */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 18 }}>
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
-          <p className="text-gray-400 text-sm mt-1">
-            {new Date().toLocaleDateString("es-PE", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
-            {resHoy.length > 0 && <span className="ml-2 font-bold text-[#0b315f]">· 🚌 {resHoy.length} servicio{resHoy.length > 1 ? "s" : ""} hoy</span>}
+          <Eyebrow>Resumen · {new Date().toLocaleDateString("es-PE", { weekday:"long", day:"numeric", month:"long", year:"numeric" })}</Eyebrow>
+          <h1 style={{ margin: "6px 0 0", fontFamily: "var(--font-sans)", fontWeight: 800, fontSize: 26, color: C.ink, letterSpacing: -0.6 }}>
+            Dashboard
+          </h1>
+          <p style={{ margin: "4px 0 0", fontSize: 13, color: C.mute, fontWeight: 500 }}>
+            {serviciosHoy.length > 0 && `${serviciosHoy.length} servicios hoy · `}
+            {alertasCrit.length > 0 ? `${alertasCrit.length} alerta(s) crítica(s)` : "Sin alertas críticas"}
           </p>
         </div>
-        <div className="flex items-center gap-3 flex-wrap">
-          {/* Toggle simulador */}
-          <div className="flex items-center gap-1 rounded-xl border p-1" style={{ background: "#f8fafc" }}>
-            <button onClick={() => setSimulador(false)}
-              className="px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
-              style={{ background: !simulador ? "#0b315f" : "transparent", color: !simulador ? "white" : "#94a3b8" }}>
-              🖥️ ERP
-            </button>
-            <button onClick={() => { setSimulador(true); setSimKey(k => k + 1); }}
-              className="px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
-              style={{ background: simulador ? "#0b315f" : "transparent", color: simulador ? "white" : "#94a3b8" }}>
-              📱 Apps móviles
-            </button>
+        <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
+          {/* Module switcher */}
+          <div style={{ display: "inline-flex", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 9, padding: 3 }}>
+            {(["erp","apps"] as const).map(t => (
+              <button key={t} onClick={() => setModulo(t)}
+                style={{ padding: "6px 12px", border: "none", cursor: "pointer", borderRadius: 7,
+                  background: modulo === t ? C.navy : "transparent",
+                  color: modulo === t ? "#fff" : C.mute,
+                  fontSize: 12, fontWeight: 700, fontFamily: "var(--font-sans)" }}>
+                {t === "erp" ? "ERP" : "Apps móviles"}
+              </button>
+            ))}
           </div>
-          <a href="/monitoreo" target="_blank"
-            className="px-4 py-2 rounded-xl text-sm font-bold text-white flex items-center gap-2"
-            style={{ background: "#0b315f" }}>
-            🗺️ Monitoreo GPS
-          </a>
-          {/* Score de riesgo */}
-          <div className="flex items-center gap-3 rounded-2xl px-4 py-2.5 border-2" style={{ background: bgRiesgo, borderColor: colorRiesgo + "44" }}>
+          {/* Monitoreo GPS */}
+          <button onClick={() => router.push("/monitoreo")}
+            style={{ padding: "6px 14px", borderRadius: 9, background: C.surface,
+              border: `1px solid ${C.line}`, cursor: "pointer", display: "inline-flex",
+              alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: C.ink,
+              fontFamily: "var(--font-sans)" }}>
+            <I.Radio size={13} sw={2} color={C.ink}/> Monitoreo GPS
+          </button>
+          {/* Riesgo operativo */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.surface,
+            border: `1px solid ${C.line}`, borderRadius: 9, padding: "6px 10px 6px 12px" }}>
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-widest" style={{ color: colorRiesgo + "99" }}>Riesgo operativo</p>
-              <p className="text-lg font-black" style={{ color: colorRiesgo }}>{nivelRiesgo}</p>
+              <span style={{ display: "block", fontSize: 9, fontWeight: 800, color: C.mute,
+                letterSpacing: 1.2, textTransform: "uppercase" }}>Riesgo operativo</span>
+              <span style={{ display: "block", fontSize: 13, fontWeight: 800, color: C.ink, marginTop: 1 }}>
+                {nivelRiesgo}
+              </span>
             </div>
-            <div className="text-3xl">{scoreRiesgo === 0 ? "🟢" : scoreRiesgo <= 20 ? "🟡" : "🔴"}</div>
+            <div style={{ width: 26, height: 26, borderRadius: 999, background: bgRiesgo,
+              display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <span style={{ width: 10, height: 10, borderRadius: 999, background: colorRiesgo }}/>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* ── BANNER SOS REALTIME ── */}
+      {/* ── SOS BANNER ── */}
       {sosActivos > 0 && (
-        <div className="rounded-2xl border-2 border-red-400 p-4 flex items-center gap-4 animate-pulse" style={{ background: "#1c0202" }}>
-          <span className="text-3xl">🆘</span>
-          <div className="flex-1">
-            <p className="text-red-400 font-black text-base">ALERTA SOS ACTIVA — {sosActivos} sin atender</p>
-            <p className="text-red-700 text-xs mt-0.5">{alertasSOS[0]?.mensaje}</p>
+        <div style={{ borderRadius: 14, border: `2px solid ${C.danger}`, padding: "14px 18px",
+          display: "flex", alignItems: "center", gap: 14, marginBottom: 14,
+          background: "#1c0202", animation: "pulse 1.5s ease-in-out infinite" }}>
+          <I.AlertTri size={28} sw={2.5} color={C.danger}/>
+          <div style={{ flex: 1 }}>
+            <p style={{ margin: 0, color: C.danger, fontWeight: 800, fontSize: 15 }}>
+              ALERTA SOS ACTIVA — {sosActivos} sin atender
+            </p>
+            {alertasSOS[0] && <p style={{ margin: "3px 0 0", color: "#b91c1c", fontSize: 12 }}>{alertasSOS[0].mensaje}</p>}
           </div>
           <button onClick={() => router.push("/monitoreo")}
-            className="px-5 py-2.5 rounded-xl font-bold text-sm text-white flex-shrink-0"
-            style={{ background: "#dc2626" }}>
+            style={{ padding: "9px 18px", borderRadius: 9, background: C.danger, border: "none",
+              color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", flexShrink: 0,
+              fontFamily: "var(--font-sans)" }}>
             Atender →
           </button>
         </div>
       )}
 
-      {/* ── BANNER ALERTAS CRÍTICAS (no SOS) ── */}
-      {alertasCriticas.filter(a => !a.texto.includes("SOS")).length > 0 && (
-        <div className="rounded-2xl border-2 border-red-300 bg-red-50 p-4 space-y-2">
-          <p className="text-xs font-black uppercase tracking-widest text-red-800 mb-2">
-            🚨 {alertasCriticas.filter(a => !a.texto.includes("SOS")).length} Alerta{alertasCriticas.length > 1 ? "s" : ""} crítica{alertasCriticas.length > 1 ? "s" : ""} — acción inmediata requerida
-          </p>
-          {alertasCriticas.filter(a => !a.texto.includes("SOS")).map((a, i) =>
-            <AlertaItem key={i} tipo={a.tipo} texto={a.texto} href={a.href} router={router} />)}
-        </div>
-      )}
-
-      {/* ── SIMULADOR DE APPS MÓVILES ── */}
-      {simulador && (
-        <section className="bg-white rounded-2xl border shadow-sm p-6">
-          <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
-            <div>
-              <h2 className="text-lg font-bold text-gray-900">📱 Simulador de Apps Móviles</h2>
-              <p className="text-xs text-gray-400 mt-0.5">Prueba la experiencia del pasajero y conductor directamente desde el ERP</p>
-            </div>
-            <div className="flex gap-2 flex-wrap">
-              {([
-                { id: "pasajero" as const,  label: "🎫 App Pasajero",  url: "/pasajero" },
-                { id: "conductor" as const, label: "🚌 App Conductor", url: "/conductor" },
-              ]).map(app => (
-                <div key={app.id} className="flex items-center gap-1">
-                  <button onClick={() => { setSimTab(app.id); setSimKey(k => k + 1); }}
-                    className="px-3 py-1.5 rounded-xl text-xs font-bold border transition-all"
-                    style={{ background: simTab === app.id ? "#0b315f" : "white", color: simTab === app.id ? "white" : "#475569", borderColor: simTab === app.id ? "#0b315f" : "#e2e8f0" }}>
-                    {app.label}
-                  </button>
-                  <a href={app.url} target="_blank" rel="noreferrer"
-                    className="px-2 py-1.5 rounded-xl text-xs font-bold border hover:bg-gray-50"
-                    style={{ borderColor: "#e2e8f0", color: "#475569" }}>↗</a>
-                </div>
-              ))}
-              <button onClick={() => setSimulador(false)}
-                className="px-2.5 py-1.5 rounded-xl text-xs border hover:bg-gray-50 text-gray-500">✕</button>
-            </div>
-          </div>
-          <div className="flex items-start justify-center gap-12 flex-wrap">
-            {/* iPhone frame */}
-            <div className="flex flex-col items-center">
-              <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">
-                {simTab === "pasajero" ? "App Pasajero" : "App Conductor"}
-              </p>
-              <div className="relative" style={{ width: 300 }}>
-                <div style={{ background: "#1a1a2e", borderRadius: 44, padding: "12px 10px", boxShadow: "0 30px 80px rgba(0,0,0,0.4), inset 0 0 0 2px #333", position: "relative" }}>
-                  <div style={{ position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)", width: 96, height: 20, background: "#0a0a1a", borderRadius: 20, zIndex: 10 }} />
-                  <div style={{ borderRadius: 34, overflow: "hidden", height: 580, background: "white", position: "relative" }}>
-                    <iframe key={simKey}
-                      src={simTab === "pasajero" ? "/pasajero" : "/conductor"}
-                      style={{ width: "118%", height: "118%", border: "none", transform: "scale(0.848)", transformOrigin: "top left" }}
-                      title={`Preview ${simTab}`} />
-                  </div>
-                  <div style={{ width: 56, height: 4, background: "#333", borderRadius: 2, margin: "10px auto 0" }} />
-                </div>
-                <div style={{ position: "absolute", left: -4, top: 80,  width: 4, height: 30, background: "#2a2a3a", borderRadius: "4px 0 0 4px" }} />
-                <div style={{ position: "absolute", left: -4, top: 118, width: 4, height: 54, background: "#2a2a3a", borderRadius: "4px 0 0 4px" }} />
-                <div style={{ position: "absolute", left: -4, top: 180, width: 4, height: 54, background: "#2a2a3a", borderRadius: "4px 0 0 4px" }} />
-                <div style={{ position: "absolute", right:-4, top: 118, width: 4, height: 68, background: "#2a2a3a", borderRadius: "0 4px 4px 0" }} />
-              </div>
-              <p className="text-[10px] text-gray-400 mt-3">Resolución real: iPhone 14 Pro</p>
-            </div>
-            {/* Info + accesos */}
-            <div className="space-y-4 max-w-xs">
-              <div className="rounded-2xl p-4 space-y-3" style={{ background: "#f8fafc", border: "1px solid #e2e8f0" }}>
-                <p className="font-black text-sm text-gray-800">{simTab === "pasajero" ? "🎫 App Pasajero" : "🚌 App Conductor"}</p>
-                <p className="text-xs text-gray-500">{simTab === "pasajero" ? "Los trabajadores ingresan con DNI para ver el bus en tiempo real, su QR de embarque y el ETA a su paradero." : "Los conductores usan DNI + PIN para gestionar el recorrido, escanear pasajeros con QR, enviar GPS y completar el checklist."}</p>
-                <div className="space-y-2">
-                  {(simTab === "pasajero" ? [["🗺️","Mapa con bus en tiempo real + ETA"],["🎫","QR de embarque único"],["📍","Timeline de paradas"]] : [["🗺️","Hoja de ruta diaria"],["📷","Escanear QR pasajeros"],["✅","Checklist pre-servicio"],["🆘","SOS (hold 2 seg)"]]).map(([i,t]) => (
-                    <div key={t} className="flex gap-2 items-center"><span className="text-base">{i}</span><span className="text-xs text-gray-600">{t}</span></div>
-                  ))}
-                </div>
-              </div>
-              <div className="space-y-2">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Accesos directos</p>
-                {[
-                  { href: "/pasajero",  label: "Abrir App Pasajero",       icon: "🎫" },
-                  { href: "/conductor", label: "Abrir App Conductor",      icon: "🚌" },
-                  { href: "/cliente",   label: "Portal Empresarial",        icon: "🏢" },
-                  { href: "/monitoreo", label: "Monitoreo GPS",             icon: "🗺️" },
-                ].map(link => (
-                  <a key={link.href} href={link.href} target="_blank" rel="noreferrer"
-                    className="flex items-center gap-2 px-3 py-2.5 rounded-xl border hover:border-[#0b315f] hover:bg-blue-50 transition-all text-xs font-bold text-gray-700"
-                    style={{ borderColor: "#e2e8f0" }}>
-                    <span>{link.icon}</span>↗ {link.label}
-                  </a>
-                ))}
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {/* ── ACCESO RÁPIDO APPS ── */}
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      {/* ── 2. PORTAL QUICK-ACCESS ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14, marginBottom: 14 }}>
         {[
-          { href: "/pasajero",  label: "App Pasajero",       sub: "Portal para trabajadores · login con DNI",    icon: "🎫", color: "#0b315f", bg: "#eef3f8" },
-          { href: "/conductor", label: "App Conductor",      sub: "App para choferes · DNI + PIN",               icon: "🚌", color: "#166534", bg: "#dcfce7" },
-          { href: "/cliente",   label: "Portal Empresarial", sub: "Reportes de boarding para clientes",          icon: "🏢", color: "#6d28d9", bg: "#ede9fe" },
-        ].map(app => (
-          <a key={app.href} href={app.href} target="_blank" rel="noreferrer"
-            className="flex items-center gap-4 rounded-2xl p-4 border-2 hover:shadow-md transition-all"
-            style={{ background: app.bg, borderColor: app.color + "33", textDecoration: "none" }}>
-            <div className="w-11 h-11 rounded-xl flex items-center justify-center text-2xl flex-shrink-0" style={{ background: app.color }}>
-              {app.icon}
-            </div>
-            <div>
-              <p className="font-black text-gray-900 text-sm">{app.label}</p>
-              <p className="text-xs text-gray-500 mt-0.5">{app.sub}</p>
-            </div>
-            <span className="ml-auto text-gray-300 text-xl">↗</span>
+          { href:"/pasajero",  title:"App Pasajero",       sub:"Portal para pasajeros · login con DNI", Icon:I.Users },
+          { href:"/conductor", title:"App Conductor",      sub:"App para choferes · DNI + PIN",         Icon:I.UserCheck },
+          { href:"/cliente",   title:"Portal Empresarial", sub:"Reportes de boarding para clientes",    Icon:I.Building },
+        ].map(p => (
+          <a key={p.href} href={p.href} target="_blank" rel="noreferrer"
+            style={{ textDecoration: "none", display: "block" }}>
+            <Card pad={16}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ width: 42, height: 42, borderRadius: 11, background: C.blueTint,
+                  display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <p.Icon size={20} sw={2} color={C.navy}/>
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{ margin: 0, fontSize: 14, fontWeight: 800, color: C.ink, letterSpacing: -0.2 }}>{p.title}</p>
+                  <p style={{ margin: "3px 0 0", fontSize: 11.5, color: C.mute }}>{p.sub}</p>
+                </div>
+                <div style={{ width: 32, height: 32, borderRadius: 8, background: C.bg2,
+                  border: `1px solid ${C.line}`, display: "flex", alignItems: "center",
+                  justifyContent: "center", flexShrink: 0, color: C.ink2 }}>
+                  <I.Arrow size={14} sw={2} color={C.ink2}/>
+                </div>
+              </div>
+            </Card>
           </a>
         ))}
-      </section>
+      </div>
 
-      {/* ── KPIs OPERATIVOS ── */}
-      <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <KpiCard icon="🎫" label="Reservas" valor={reservas.length} sub={`${confirmadas.length} confirmadas · ${resHoy.length} hoy`} color="#0b315f" bg="#eef3f8" onClick={() => router.push("/reservas")} />
-        <KpiCard icon="⏳" label="Pendientes" valor={pendientes.length} sub={`${programadas.length} programadas`} color={pendientes.length>0?"#854d0e":"#166534"} bg={pendientes.length>0?"#fef9c3":"#dcfce7"} onClick={() => router.push("/reservas")} />
-        <KpiCard icon="🚌" label="Flota" valor={`${verdes}/${vehiculos.length}`} sub={`${dispMecanica}% disponibilidad · CPK S/ ${cpkFlota.toFixed(2)}`} color="#166534" bg="#dcfce7" onClick={() => router.push("/vehiculos")} />
-        <KpiCard icon="🧑‍✈️" label="Conductores" valor={`${condDisponibles}/${conductores.length}`} sub={licVencidas>0?`⚠ ${licVencidas} lic. vencida(s)`:"Todos habilitados"} color={licVencidas>0?"#991b1b":"#1d4ed8"} bg={licVencidas>0?"#fee2e2":"#dbeafe"} onClick={() => router.push("/conductores")} />
-      </section>
+      {/* ── 3. KPIs FINANCIEROS ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 14, marginBottom: 14 }}>
+        <KpiCard label="Servicios · mes"  value={reservas.length} delta={12} intent="neutral"
+          spark={[18,22,19,25,28,30,27,32,34,36]} icon={I.CalRange} onClick={() => router.push("/reservas")}/>
+        <KpiCard label="Facturado · mes"  value={fmtSoles(totalFacturado)} delta={9.4} intent="neutral"
+          spark={[12,14,13,15,17,19,21,20,22,24]} icon={I.Receipt} onClick={() => router.push("/facturacion")}/>
+        <KpiCard label="Margen · mes"     value={fmtSoles(totalMargen)} delta={6.1} intent="positive"
+          spark={[5,6,5.5,7,8,7.5,8.2,9,9.8]} sparkColor={C.ok} icon={I.TrendUp}/>
+        <KpiCard label="Gastos · mes"     value={fmtSoles(totalGastosGen)} delta={3.2} deltaInvert intent="negative"
+          spark={[8,9,9.5,10,11,10.5,11.5,12,13,14]} sparkColor={C.danger} icon={I.TrendDown} onClick={() => router.push("/gastos")}/>
+        <KpiCard label="Cumplimiento SLA" value={`${margenPct}%`} delta={1.2} intent="neutral"
+          spark={[94,95,96,95,97,96,98,98,99]} icon={I.FileCheck}/>
+      </div>
 
-      {/* ── KPIs FINANCIEROS ── */}
-      <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <KpiCard icon="💰" label="Ventas proyectadas" valor={fmtSoles(totalVentas)} sub={`Margen: ${margenPct}%`} color="#166534" bg="#dcfce7" />
-        <KpiCard icon="🧾" label="Facturado" valor={fmtSoles(totalFacturado)} sub={`${avanceFact}% de ventas`} color="#1d4ed8" bg="#dbeafe" onClick={() => router.push("/facturacion")} />
-        <KpiCard icon="💸" label="Gastos" valor={fmtSoles(totalGastos)} sub={`Comb: ${fmtSoles(gastoCombustible)} · Mant: ${fmtSoles(gastoManten)}`} color="#991b1b" bg="#fee2e2" onClick={() => router.push("/gastos")} />
-        <KpiCard icon="📈" label="Utilidad estimada" valor={fmtSoles(utilidad)} sub={utilidad>=0?"Positiva":"Negativa"} color={utilidad>=0?"#166534":"#991b1b"} bg={utilidad>=0?"#dcfce7":"#fee2e2"} />
-      </section>
+      {/* ── 4. KPIs OPERATIVOS ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 14, marginBottom: 18 }}>
+        <KpiCard label="Flota activa"         value={verdes} suffix={`/ ${vehiculos.length}`} intent="neutral" icon={I.Bus} onClick={() => router.push("/vehiculos")}/>
+        <KpiCard label="Conductores activos"  value={condDisp} suffix={`/ ${conductores.length}`} intent="neutral" icon={I.UserCheck} onClick={() => router.push("/conductores")}/>
+        <KpiCard label="Clientes activos"     value={confirmadas.length + finalizadas.length} delta={4} intent="neutral" icon={I.Users}/>
+        <KpiCard label="Reservas pendientes"  value={pendientes.length} delta={pendientes.length > 0 ? -(pendientes.length) : 0} intent="neutral" icon={I.FileText} onClick={() => router.push("/reservas")}/>
+        <KpiCard label="Servicios hoy"        value={resHoy.length} intent="neutral" icon={I.Calendar}/>
+      </div>
 
-      {/* ── KPIs MÓDULOS ── */}
-      <section className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-        <KpiCard icon="📄" label="Docs. vehiculares" valor={docsVencidos>0?`${docsVencidos} venc.`:"Al día"} sub={`${docsPorVencer} por vencer`} color={docsVencidos>0?"#991b1b":"#166534"} bg={docsVencidos>0?"#fee2e2":"#dcfce7"} onClick={() => router.push("/documentos-vehiculares")} />
-        <KpiCard icon="🛞" label="Neumáticos" valor={neuCriticos>0?`${neuCriticos} críticos`:"OK"} sub={`${neuPorVencer} por vencer · ${neuActivos.length} activos`} color={neuCriticos>0?"#991b1b":"#166534"} bg={neuCriticos>0?"#fee2e2":"#dcfce7"} onClick={() => router.push("/neumaticos")} />
-        <KpiCard icon="⛽" label="Combustible" valor={fmtSoles(gastoCombustible)} sub={`${combustible.length} cargas`} color="#ea580c" bg="#fff7ed" onClick={() => router.push("/combustible")} />
-        <KpiCard icon="🛡️" label="Seguros" valor={segurosVencidos>0?`${segurosVencidos} venc.`:"Al día"} sub={`${segurosPorVencer} por vencer`} color={segurosVencidos>0?"#991b1b":"#166634"} bg={segurosVencidos>0?"#fee2e2":"#dcfce7"} onClick={() => router.push("/seguros")} />
-        <KpiCard icon="🤝" label="Tercerizadas" valor={`${empresasTer.length} emp.`} sub={empresasConRiesgo>0?`🚨 ${empresasConRiesgo} en riesgo`:"Docs al día"} color={empresasConRiesgo>0?"#991b1b":"#166534"} bg={empresasConRiesgo>0?"#fee2e2":"#dcfce7"} onClick={() => router.push("/tercerizadas")} />
-        <KpiCard icon="🔧" label="Mantenimiento" valor={mantPendiente>0?`${mantPendiente} pend.`:"Al día"} sub={`${mantProximo} en 15 días`} color={mantPendiente>0?"#854d0e":"#166534"} bg={mantPendiente>0?"#fef9c3":"#dcfce7"} onClick={() => router.push("/mantenimiento")} />
-      </section>
+      {/* ── 5. ESTADO POR ÁREA ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 14, marginBottom: 18 }}>
+        <AreaTile icon={I.FileCheck} label="Docs. Vehiculares"
+          value={docsOblVenc > 0 ? `${docsOblVenc} venc.` : "Al día"}
+          sub={`${docsPorVenc} por vencer`} intent={areaIntentDoc} onClick={() => router.push("/documentos-vehiculares")}/>
+        <AreaTile icon={I.Circle} label="Neumáticos"
+          value={neuCrit > 0 ? `${neuCrit} críticos` : "OK"}
+          sub={`${neuPorVenc} por vencer`} intent={areaIntentNeu} onClick={() => router.push("/neumaticos")}/>
+        <AreaTile icon={I.Fuel} label="Combustible"
+          value={fmtSoles(gastoCombustible)}
+          sub="Carga del mes" intent="neutral" onClick={() => router.push("/combustible")}/>
+        <AreaTile icon={I.Shield} label="Seguros"
+          value={segOblVenc > 0 ? `${segOblVenc} venc.` : "Al día"}
+          sub={segPorVenc > 0 ? `${segPorVenc} por vencer` : "Pólizas vigentes"} intent={areaIntentSeg} onClick={() => router.push("/seguros")}/>
+        <AreaTile icon={I.Hand} label="Tercerizadas"
+          value={`${empresasTer.length} emp.`}
+          sub={empConRiesgo > 0 ? `${empConRiesgo} en riesgo` : "Flota externa activa"}
+          intent={empConRiesgo > 0 ? "danger" : "neutral"} onClick={() => router.push("/tercerizadas")}/>
+        <AreaTile icon={I.Wrench} label="Mantenimiento"
+          value={mantPend > 0 ? `${mantPend} pend.` : "Al día"}
+          sub={`${mantProx} en 15 días`} intent={areaIntentMant} onClick={() => router.push("/mantenimiento")}/>
+      </div>
 
-      {/* ── FILA GRÁFICOS + SEMÁFORO + ALERTAS ── */}
-      <section className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+      {/* ── 6. EFICIENCIA + SEMÁFORO + ALERTAS ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14, marginBottom: 14 }}>
 
-        {/* Eficiencia operativa */}
-        <div className="bg-white rounded-2xl border shadow-sm p-5">
-          <h2 className="text-sm font-bold text-gray-700 mb-4">Eficiencia operativa</h2>
-          <div className="flex justify-around mb-4">
-            <DonutChart value={dispMecanica}           label="Flota apta"  color="#0b315f" />
-            <DonutChart value={avanceFact}             label="Facturación" color="#166534" />
-            <DonutChart value={Math.max(0,margenPct)}  label="Margen"      color="#1d4ed8" />
+        {/* 6A Eficiencia */}
+        <Card pad={18}>
+          <Eyebrow>Eficiencia operativa</Eyebrow>
+          <h3 style={{ margin: "6px 0 16px", fontFamily: "var(--font-sans)", fontWeight: 800, fontSize: 16, color: C.ink, letterSpacing: -0.3 }}>
+            Cumplimiento del día
+          </h3>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, marginBottom: 16 }}>
+            <Ring value={pctAsig} label="Asignación" color={C.navy}/>
+            <Ring value={pctComp} label="Completados" color={C.mute2}/>
+            <Ring value={dispMecan} label="Disponib."  color={C.ok}/>
           </div>
-          <div className="space-y-2.5 pt-3 border-t" style={{ borderColor: "#f1f5f9" }}>
-            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Reservas por estado</p>
-            <BarraColor label="Pendientes"  valor={pendientes.length}  max={maxEstado} color="#eab308" />
-            <BarraColor label="Confirmadas" valor={confirmadas.length} max={maxEstado} color="#16a34a" />
-            <BarraColor label="Finalizadas" valor={finalizadas.length} max={maxEstado} color="#2563eb" />
-            <BarraColor label="Canceladas"  valor={canceladas.length}  max={maxEstado} color="#dc2626" />
-          </div>
-          <div className="grid grid-cols-2 gap-2 text-xs text-gray-500 mt-3 pt-3 border-t" style={{ borderColor: "#f1f5f9" }}>
-            <span>🤝 Tercerizadas: <b className="text-gray-700">{tercerizadas.length}</b></span>
-            <span>🚌 Hoy: <b className="text-gray-700">{resHoy.length}</b></span>
-          </div>
-        </div>
-
-        {/* Semáforo de flota */}
-        <div className="bg-white rounded-2xl border shadow-sm p-5">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-bold text-gray-700">Semáforo de flota</h2>
-            <button onClick={() => router.push("/vehiculos")} className="text-xs font-bold text-[#0b315f] hover:underline">Ver flota →</button>
-          </div>
-          <div className="grid grid-cols-3 gap-2 mb-4">
-            {([{est:"verde" as SemaforoEstado,valor:verdes,icon:"🟢"},{est:"amarillo" as SemaforoEstado,valor:amarillos,icon:"🟡"},{est:"rojo" as SemaforoEstado,valor:rojos,icon:"🔴"}]).map(s => {
-              const cfg = SEMAFORO_CFG[s.est];
-              return (
-                <div key={s.est} className="rounded-xl p-3 text-center border" style={{ background: cfg.bg, borderColor: cfg.dot+"44" }}>
-                  <div className="text-xl mb-0.5">{s.icon}</div>
-                  <div className="text-2xl font-black" style={{ color: cfg.color }}>{s.valor}</div>
-                  <div className="text-[10px] font-bold uppercase" style={{ color: cfg.color+"99" }}>{cfg.label}</div>
+          <div style={{ paddingTop: 14, borderTop: `1px solid ${C.line2}` }}>
+            <Eyebrow style={{ marginBottom: 10 }}>Reservas por estado</Eyebrow>
+            {[
+              { label:"Pendientes",  value:pendientes.length,  color:C.line },
+              { label:"Confirmadas", value:confirmadas.length, color:C.ok },
+              { label:"Finalizadas", value:finalizadas.length, color:C.navy },
+              { label:"Canceladas",  value:canceladas.length,  color:C.mute },
+            ].map(r => (
+              <div key={r.label} style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8 }}>
+                <span style={{ width:80, fontSize:11.5, color:C.ink2, fontWeight:600, flexShrink:0 }}>{r.label}</span>
+                <div style={{ flex:1, height:5, background:C.line2, borderRadius:999, overflow:"hidden" }}>
+                  <div style={{ width:`${(r.value/maxEstado)*100}%`, height:"100%", background:r.color, borderRadius:999 }}/>
                 </div>
-              );
-            })}
-          </div>
-          <div className="mb-4">
-            <div className="flex justify-between text-xs mb-1">
-              <span className="font-bold text-gray-600">Disponibilidad mecánica</span>
-              <span className="font-black" style={{ color: dispMecanica>=80?"#166534":dispMecanica>=60?"#854d0e":"#991b1b" }}>{dispMecanica}%</span>
-            </div>
-            <div className="h-2.5 bg-gray-100 rounded-full overflow-hidden">
-              <div className="h-full rounded-full" style={{ width:`${dispMecanica}%`, background: dispMecanica>=80?"#16a34a":dispMecanica>=60?"#eab308":"#dc2626" }} />
-            </div>
-            <p className="text-[10px] text-gray-400 mt-1">Meta: 80% · CPK flota: <b style={{ color: cpkFlota>5?"#dc2626":"#166534" }}>S/ {cpkFlota.toFixed(3)}</b></p>
-          </div>
-          <div className="space-y-1.5">
-            {datosFlota.slice(0,5).map(d => {
-              const cfg = SEMAFORO_CFG[d.semaforo.estado];
-              const costoT = d.costoMant + d.costoComb;
-              const km = Number(d.vehiculo.kilometraje_actual||0);
-              const cpk = km>0?costoT/km:0;
-              return (
-                <div key={d.vehiculo.id} className="flex items-center justify-between py-1.5 border-b last:border-0" style={{ borderColor: "#f8fafc" }}>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2.5 h-2.5 rounded-full" style={{ background: cfg.dot }} />
-                    <span>{ICONO_CAT[d.vehiculo.categoria||""]||"🚌"}</span>
-                    <div><span className="font-mono font-black text-sm text-gray-800">{d.vehiculo.placa}</span><span className="text-[10px] text-gray-400 ml-1">{d.vehiculo.categoria}</span></div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-[10px] font-bold" style={{ color: cfg.color }}>{d.semaforo.razon}</div>
-                    {cpk>0&&<div className="text-[10px] text-gray-400">CPK: <b style={{color:cpk>5?"#dc2626":"#166534"}}>S/ {cpk.toFixed(3)}</b></div>}
-                  </div>
-                </div>
-              );
-            })}
-            {vehiculos.length>5&&<button onClick={()=>router.push("/vehiculos")} className="w-full text-xs text-center text-[#0b315f] font-bold pt-1 hover:underline">+{vehiculos.length-5} más →</button>}
-            {vehiculos.length===0&&<p className="text-sm text-gray-300 text-center py-3">Sin vehículos</p>}
-          </div>
-        </div>
-
-        {/* Centro de alertas */}
-        <div className="bg-white rounded-2xl border shadow-sm p-5 flex flex-col">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-bold text-gray-700">Centro de alertas</h2>
-            <div className="flex gap-1.5">
-              {alertasCriticas.length>0&&<span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700">🚨 {alertasCriticas.length}</span>}
-              {alertasAtencion.length>0&&<span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">⚠️ {alertasAtencion.length}</span>}
-            </div>
-          </div>
-          <div className="flex-1 space-y-2 overflow-y-auto max-h-[380px]">
-            {alertasCriticas.length>0&&<><p className="text-[9px] font-black uppercase tracking-widest text-red-600">Críticos</p>{alertasCriticas.map((a,i)=><AlertaItem key={`c${i}`} tipo={a.tipo} texto={a.texto} href={a.href} router={router}/>)}</>}
-            {alertasAtencion.length>0&&<><p className="text-[9px] font-black uppercase tracking-widest text-amber-600 mt-2">Atención</p>{alertasAtencion.map((a,i)=><AlertaItem key={`a${i}`} tipo={a.tipo} texto={a.texto} href={a.href} router={router}/>)}</>}
-            {alertasInfo.map((a,i)=><AlertaItem key={`i${i}`} tipo={a.tipo} texto={a.texto} href={a.href} router={router}/>)}
-          </div>
-        </div>
-      </section>
-
-      {/* ── SERVICIOS DE HOY ── */}
-      {serviciosHoy.length > 0 && (
-        <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
-          <div className="px-5 py-4 border-b flex items-center justify-between" style={{ borderColor: "#f1f5f9" }}>
-            <h2 className="font-bold text-gray-900">🗓️ Servicios de hoy ({serviciosHoy.length})</h2>
-            <button onClick={() => router.push("/reservas")} className="text-xs font-bold text-[#0b315f] hover:underline">Ver todos →</button>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                  {["Hora","Cliente","Ruta","Conductor","Placa","Estado"].map(h=>(
-                    <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {serviciosHoy.map(s => {
-                  const est = estadoBadge[s.estado] || { bg: "#f3f4f6", c: "#4b5563" };
-                  return (
-                    <tr key={s.id} className="border-t hover:bg-gray-50 cursor-pointer" style={{ borderColor: "#f1f5f9" }}
-                      onClick={() => router.push("/reservas")}>
-                      <td className="p-3 font-bold text-gray-700 font-mono">{s.hora_servicio?.slice(0,5)||"—"}</td>
-                      <td className="p-3 font-bold text-gray-800 max-w-[120px]"><div className="truncate">{s.cliente}</div></td>
-                      <td className="p-3 text-gray-600 text-xs max-w-[180px]">
-                        <span className="font-medium">{s.origen}</span><span className="text-gray-400"> → {s.destino}</span>
-                      </td>
-                      <td className="p-3 text-gray-600 text-xs">{s.conductor?.split(" ").slice(0,2).join(" ")||<span className="text-gray-300">Sin asignar</span>}</td>
-                      <td className="p-3 font-mono font-bold text-xs text-[#0b315f]">{s.placa||"—"}</td>
-                      <td className="p-3"><span className="text-xs font-bold px-2.5 py-1 rounded-full" style={{ background: est.bg, color: est.c }}>{s.estado}</span></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {/* ── TERCERIZADAS + DOCS + COSTOS ── */}
-      <section className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-
-        {/* Empresas tercerizadas */}
-        <div className="bg-white rounded-2xl border shadow-sm p-5">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-bold text-gray-700">🤝 Empresas tercerizadas</h2>
-            <button onClick={() => router.push("/tercerizadas")} className="text-xs font-bold text-[#0b315f] hover:underline">Gestionar →</button>
-          </div>
-          {empresasTer.length === 0 ? <p className="text-sm text-gray-300 text-center py-4">Sin empresas registradas</p> : (
-            <div className="space-y-2">
-              {empresasTer.slice(0,6).map(e => {
-                const docs = docsTercero.filter(d => d.empresa_id === e.id);
-                const tieneVencido = docs.some(d => DOCS_OBLIGATORIOS.includes(d.tipo) && estadoFecha(d.fecha_vencimiento) === "vencido");
-                const tienePorVencer = !tieneVencido && docs.some(d => DOCS_OBLIGATORIOS.includes(d.tipo) && estadoFecha(d.fecha_vencimiento) === "por_vencer");
-                const color = tieneVencido?"#dc2626":tienePorVencer?"#eab308":"#16a34a";
-                const icon  = tieneVencido?"🚨":tienePorVencer?"⚠️":"✅";
-                return (
-                  <div key={e.id} className="flex items-center justify-between rounded-xl px-3 py-2.5 border cursor-pointer hover:bg-gray-50"
-                    style={{ borderColor: tieneVencido?"#fca5a5":tienePorVencer?"#fde68a":"#e5e7eb" }}
-                    onClick={() => router.push("/tercerizadas")}>
-                    <div className="flex items-center gap-2 min-w-0"><span>{icon}</span><span className="font-bold text-xs text-gray-800 truncate">{e.razon_social}</span></div>
-                    <div className="text-[10px] font-bold flex-shrink-0 ml-2" style={{ color }}>{tieneVencido?"Doc. vencido":tienePorVencer?"Por vencer":"OK"}</div>
-                  </div>
-                );
-              })}
-              {empresasTer.length>6&&<p className="text-xs text-center text-gray-400">+{empresasTer.length-6} más</p>}
-            </div>
-          )}
-          {cpkNeuProm!==null&&<div className="mt-4 pt-3 border-t flex justify-between text-xs" style={{ borderColor: "#f1f5f9" }}><span className="text-gray-500">🛞 CPK neumáticos prom.</span><b style={{ color: cpkNeuProm>3?"#dc2626":"#166534" }}>S/ {cpkNeuProm.toFixed(3)}/km</b></div>}
-        </div>
-
-        {/* Documentos próximos a vencer */}
-        <div className="bg-white rounded-2xl border shadow-sm p-5">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-bold text-gray-700">📄 Docs. por vencer (30d)</h2>
-            <button onClick={() => router.push("/documentos-vehiculares")} className="text-xs font-bold text-[#0b315f] hover:underline">Ver todos →</button>
-          </div>
-          {(() => {
-            const proxDocs = docsVehiculo.filter(d=>{const dias=diasPara(d.fecha_vencimiento);return dias!==null&&dias>=0&&dias<=30;}).sort((a,b)=>(diasPara(a.fecha_vencimiento)||0)-(diasPara(b.fecha_vencimiento)||0)).slice(0,6);
-            const docVenc  = docsVehiculo.filter(d=>estadoFecha(d.fecha_vencimiento)==="vencido").slice(0,3);
-            if (proxDocs.length===0&&docVenc.length===0) return <p className="text-sm text-gray-300 text-center py-4">Sin vencimientos próximos</p>;
-            return (
-              <div className="space-y-2">
-                {docVenc.map(d=>{const veh=vehiculos.find(v=>v.id===d.vehiculo_id);const dias=diasPara(d.fecha_vencimiento);return(<div key={d.id} className="flex items-center justify-between rounded-xl px-3 py-2 bg-red-50 border border-red-100"><div className="text-xs"><span className="font-black text-[#0b315f] font-mono">{veh?.placa||"—"}</span><span className="text-gray-600 ml-2">{d.tipo}</span></div><span className="text-xs font-black text-red-700">{Math.abs(dias||0)}d venc.</span></div>);})}
-                {proxDocs.map(d=>{const veh=vehiculos.find(v=>v.id===d.vehiculo_id);const dias=diasPara(d.fecha_vencimiento)||0;const urg=dias<=7;return(<div key={d.id} className="flex items-center justify-between rounded-xl px-3 py-2" style={{background:urg?"#fef9c3":"#f8fafc"}}><div className="text-xs"><span className="font-black text-[#0b315f] font-mono">{veh?.placa||"—"}</span><span className="text-gray-600 ml-2">{d.tipo}</span></div><span className="text-xs font-black" style={{color:urg?"#854d0e":"#0b315f"}}>{dias}d</span></div>);})}
-              </div>
-            );
-          })()}
-        </div>
-
-        {/* Desglose costos */}
-        <div className="bg-white rounded-2xl border shadow-sm p-5">
-          <h2 className="text-sm font-bold text-gray-700 mb-4">💸 Desglose de costos</h2>
-          <div className="space-y-3">
-            {[{label:"⛽ Combustible",valor:gastoCombustible,color:"#ef4444",href:"/combustible"},{label:"🔧 Mantenimiento",valor:gastoManten,color:"#f97316",href:"/mantenimiento"},{label:"💸 Gastos gral.",valor:totalGastos,color:"#eab308",href:"/gastos"}].map(({label,valor,color,href})=>(
-              <div key={label} className="flex items-center justify-between py-2 border-b last:border-0 cursor-pointer hover:bg-gray-50 rounded-lg px-2 -mx-2" style={{borderColor:"#f1f5f9"}} onClick={()=>router.push(href)}>
-                <div className="flex items-center gap-2"><div className="w-2.5 h-2.5 rounded-full" style={{background:color}}/><span className="text-sm text-gray-600">{label}</span></div>
-                <span className="font-bold text-sm text-gray-800">{fmtSoles(valor)}</span>
+                <span style={{ fontFamily:"var(--font-mono)", fontSize:12, fontWeight:700, color:C.ink, width:16, textAlign:"right" }}>{r.value}</span>
               </div>
             ))}
-            <div className="flex items-center justify-between pt-2 border-t" style={{borderColor:"#e5e7eb"}}><span className="text-sm font-bold text-gray-700">Margen total</span><span className="font-black text-sm" style={{color:totalMargen>=0?"#166534":"#991b1b"}}>{fmtSoles(totalMargen)}</span></div>
-            <div className="flex items-center justify-between pb-2 border-b" style={{borderColor:"#f1f5f9"}}><div><span className="text-sm font-bold text-gray-700">CPK flota</span><span className="text-[10px] text-gray-400 ml-1">costo/km</span></div><span className="font-black text-sm" style={{color:cpkFlota>5?"#dc2626":cpkFlota>2?"#eab308":"#166534"}}>{cpkFlota>0?`S/ ${cpkFlota.toFixed(3)}`:"—"}</span></div>
-            {cpkNeuProm&&<div className="flex items-center justify-between"><span className="text-sm font-bold text-gray-700">CPK neumáticos</span><span className="font-black text-sm" style={{color:cpkNeuProm>3?"#dc2626":"#166534"}}>S/ {cpkNeuProm.toFixed(3)}</span></div>}
-            <div className="rounded-xl p-3 mt-2" style={{background:utilidad>=0?"#dcfce7":"#fee2e2"}}><div className="flex justify-between"><span className="text-sm font-bold" style={{color:utilidad>=0?"#166534":"#991b1b"}}>Utilidad estimada</span><span className="font-black text-lg" style={{color:utilidad>=0?"#166534":"#991b1b"}}>{fmtSoles(utilidad)}</span></div></div>
+            <div style={{ display:"flex", gap:14, marginTop:12, paddingTop:12, borderTop:`1px solid ${C.line2}` }}>
+              <span style={{ fontSize:11, color:C.mute, fontWeight:600 }}>
+                <span style={{ color:C.ink, fontWeight:700 }}>Tercerizado:</span> {tercerizadas.length}
+              </span>
+              <span style={{ fontSize:11, color:C.mute, fontWeight:600 }}>
+                <span style={{ color:C.ink, fontWeight:700 }}>Hoy:</span> {resHoy.length}
+              </span>
+            </div>
           </div>
-        </div>
-      </section>
+        </Card>
 
-      {/* ── ÚLTIMAS 8 RESERVAS ── */}
-      <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
-        <div className="px-5 py-4 flex items-center justify-between border-b" style={{ borderColor: "#f1f5f9" }}>
-          <h2 className="text-sm font-bold text-gray-700">Últimas 8 reservas</h2>
-          <button onClick={() => router.push("/reservas")} className="text-xs font-bold text-[#0b315f] hover:underline">Ver todas →</button>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead><tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-              {["ID","Ruta","Fecha","Asignación","Estado","Precio","Margen"].map(h=>(
-                <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>
+        {/* 6B Semáforo */}
+        <Card pad={18}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:10 }}>
+            <div>
+              <Eyebrow>Semáforo de flota</Eyebrow>
+              <h3 style={{ margin:"6px 0 0", fontFamily:"var(--font-sans)", fontWeight:800, fontSize:16, color:C.ink, letterSpacing:-0.3 }}>
+                Estado mecánico
+              </h3>
+            </div>
+            <button onClick={() => router.push("/vehiculos")}
+              style={{ fontSize:11, fontWeight:700, color:C.blue, background:"none", border:"none",
+                cursor:"pointer", display:"inline-flex", alignItems:"center", gap:3, fontFamily:"var(--font-sans)" }}>
+              Ver flota <I.Arrow size={11} sw={2} color={C.blue}/>
+            </button>
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:16 }}>
+            {[
+              { value:verdes,    label:"Operativo", color:C.ok,     bg:C.okTint },
+              { value:amarillos, label:"Atención",  color:C.warn,   bg:C.warnTint },
+              { value:rojos,     label:"Crítico",   color:C.danger, bg:C.dangerTint },
+            ].map(s => (
+              <div key={s.label} style={{ background:s.bg, borderRadius:11, padding:"14px 10px",
+                textAlign:"center", border:`1px solid ${s.color}22` }}>
+                <Metric size={26} color={s.color}>{s.value}</Metric>
+                <p style={{ margin:"6px 0 0", fontSize:9.5, fontWeight:800, color:s.color,
+                  letterSpacing:1.1, textTransform:"uppercase" }}>{s.label}</p>
+              </div>
+            ))}
+          </div>
+          <div style={{ paddingTop:14, borderTop:`1px solid ${C.line2}` }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:8 }}>
+              <span style={{ fontSize:11.5, fontWeight:700, color:C.ink2 }}>Disponibilidad mecánica</span>
+              <Metric size={15} color={dispMecan>=80?C.ok:dispMecan>=60?C.warn:C.danger}>{dispMecan}%</Metric>
+            </div>
+            <div style={{ height:7, background:C.line2, borderRadius:999, overflow:"hidden" }}>
+              <div style={{ width:`${dispMecan}%`, height:"100%", borderRadius:999,
+                background: dispMecan>=80?C.ok:dispMecan>=60?C.warn:C.danger }}/>
+            </div>
+            <p style={{ margin:"6px 0 0", fontFamily:"var(--font-mono)", fontSize:10.5, color:C.mute, fontWeight:600 }}>
+              Meta: 95% · CPK: {cpkFlota > 0 ? `S/ ${cpkFlota.toFixed(3)}` : "—"}
+            </p>
+            <div style={{ marginTop:12, paddingTop:12, borderTop:`1px solid ${C.line2}` }}>
+              {datosFlota.slice(0,3).map(d => (
+                <div key={d.vehiculo.id} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
+                  <span style={{ width:8, height:8, borderRadius:999, flexShrink:0,
+                    background: d.semaforo.estado==="verde"?C.ok:d.semaforo.estado==="amarillo"?C.warn:C.danger }}/>
+                  <span style={{ fontFamily:"var(--font-mono)", fontSize:12, fontWeight:700, color:C.ink }}>{d.vehiculo.placa}</span>
+                  <span style={{ fontSize:11, color:C.mute, marginLeft:"auto", fontWeight:600 }}>{d.semaforo.razon}</span>
+                </div>
               ))}
-            </tr></thead>
-            <tbody>
-              {reservas.slice(0,8).map(r=>{
-                const estCfg: Record<string,{label:string;bg:string;color:string}> = {
-                  pendiente:{label:"Pendiente",bg:"#fef9c3",color:"#854d0e"},programada:{label:"Programada",bg:"#e0f2fe",color:"#0369a1"},
-                  confirmada:{label:"Confirmada",bg:"#dcfce7",color:"#166534"},en_curso:{label:"En curso",bg:"#dbeafe",color:"#1d4ed8"},
-                  finalizada:{label:"Finalizada",bg:"#ede9fe",color:"#6d28d9"},cancelada:{label:"Cancelada",bg:"#fee2e2",color:"#991b1b"},
-                };
-                const est = estCfg[r.estado]||estCfg.pendiente;
-                const margen = Number(r.margen||0);
-                const esTer  = r.tipo==="tercerizada";
-                const empTer = esTer&&r.empresa_tercerizada_id?empresasTer.find(e=>e.id===r.empresa_tercerizada_id):null;
-                const riesgoTer = empTer?docsTercero.filter(d=>d.empresa_id===empTer.id).some(d=>DOCS_OBLIGATORIOS.includes(d.tipo)&&estadoFecha(d.fecha_vencimiento)==="vencido"):false;
-                return (
-                  <tr key={r.id} className="border-t hover:bg-gray-50 cursor-pointer" style={{borderColor:"#f1f5f9"}} onClick={()=>router.push("/reservas")}>
-                    <td className="p-3"><span className="font-black font-mono text-[#0b315f]">#{r.id}</span>{r.fecha_servicio===hoy&&<div className="text-[9px] font-bold text-orange-500">HOY</div>}{riesgoTer&&<div className="text-[9px] font-bold text-red-600">🚨</div>}</td>
-                    <td className="p-3 text-gray-700 max-w-[180px]"><div className="truncate text-xs">{r.origen} → {r.destino}</div></td>
-                    <td className="p-3 text-gray-500 text-xs">{fmtFecha(r.fecha_servicio)}</td>
-                    <td className="p-3"><span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={esTer?{background:"#ede9fe",color:"#6d28d9"}:{background:"#e0f2fe",color:"#0369a1"}}>{esTer?"🤝 Ter.":"🚌 Prop."}</span></td>
-                    <td className="p-3"><span className="text-xs font-bold px-2.5 py-1 rounded-lg" style={{background:est.bg,color:est.color}}>{est.label}</span></td>
-                    <td className="p-3 font-bold text-gray-800 text-xs">{fmtSoles(Number(r.precio_cliente||0))}</td>
-                    <td className="p-3 font-bold text-xs" style={{color:margen>=0?"#166534":"#991b1b"}}>{fmtSoles(margen)}</td>
-                  </tr>
-                );
-              })}
-              {reservas.length===0&&<tr><td colSpan={7} className="p-10 text-center text-gray-400"><p className="text-2xl mb-1">📋</p><p>No hay reservas</p></td></tr>}
-            </tbody>
-          </table>
+              {vehiculos.length===0 && <p style={{ fontSize:13, color:C.mute, textAlign:"center" }}>Sin vehículos</p>}
+            </div>
+          </div>
+        </Card>
+
+        {/* 6C Centro de alertas */}
+        <Card pad={0} style={{ overflow:"hidden" }}>
+          <div style={{ padding:"18px 18px 14px", display:"flex", justifyContent:"space-between",
+            alignItems:"center", borderBottom:`1px solid ${C.line2}` }}>
+            <div>
+              <Eyebrow>Alertas críticas</Eyebrow>
+              <h3 style={{ margin:"6px 0 0", fontFamily:"var(--font-sans)", fontWeight:800, fontSize:16, color:C.ink, letterSpacing:-0.3 }}>
+                Requieren acción
+              </h3>
+            </div>
+            <span style={{ width:26, height:26, borderRadius:999, background:C.dangerTint, color:C.danger,
+              display:"flex", alignItems:"center", justifyContent:"center",
+              fontFamily:"var(--font-mono)", fontSize:12, fontWeight:700 }}>
+              {alertasCrit.length + alertasAten.length}
+            </span>
+          </div>
+          <div style={{ overflowY:"auto", maxHeight:340 }}>
+            {alertasCrit.map((a,i) => (
+              <div key={`c${i}`} style={{ borderBottom:`1px solid ${C.line2}` }}>
+                <AlertaItem tipo={a.tipo} texto={a.texto} href={a.href} router={router}/>
+              </div>
+            ))}
+            {alertasAten.map((a,i) => (
+              <div key={`a${i}`} style={{ borderBottom:`1px solid ${C.line2}` }}>
+                <AlertaItem tipo={a.tipo} texto={a.texto} href={a.href} router={router}/>
+              </div>
+            ))}
+            {alertasInfo.map((a,i) => (
+              <div key={`i${i}`} style={{ borderBottom:`1px solid ${C.line2}` }}>
+                <AlertaItem tipo={a.tipo} texto={a.texto} href={a.href} router={router}/>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+
+      {/* ── 7. TERCERIZADAS + DOCS + COSTOS ── */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14, marginBottom:14 }}>
+
+        {/* 7A Empresas tercerizadas */}
+        <Card pad={0} style={{ overflow:"hidden" }}>
+          <div style={{ padding:"16px 18px", display:"flex", justifyContent:"space-between",
+            alignItems:"center", borderBottom:`1px solid ${C.line2}` }}>
+            <div>
+              <Eyebrow>Flota externa</Eyebrow>
+              <h3 style={{ margin:"6px 0 0", fontFamily:"var(--font-sans)", fontWeight:800, fontSize:16, color:C.ink, letterSpacing:-0.3 }}>
+                Empresas tercerizadas
+              </h3>
+            </div>
+            <button onClick={() => router.push("/tercerizadas")}
+              style={{ fontSize:11, fontWeight:700, color:C.blue, background:"none", border:"none",
+                cursor:"pointer", display:"inline-flex", alignItems:"center", gap:3, fontFamily:"var(--font-sans)" }}>
+              Gestionar <I.Arrow size={11} sw={2} color={C.blue}/>
+            </button>
+          </div>
+          <div style={{ padding:"14px 18px" }}>
+            {empresasTer.length === 0
+              ? <p style={{ fontSize:13, color:C.mute, textAlign:"center", padding:"12px 0" }}>Sin empresas registradas</p>
+              : empresasTer.slice(0, 5).map(e => {
+                  const docs = docsTercero.filter(d => d.empresa_id === e.id);
+                  const venc = docs.some(d => DOCS_OBL.includes(d.tipo) && estadoFecha(d.fecha_vencimiento) === "vencido");
+                  const porV = !venc && docs.some(d => DOCS_OBL.includes(d.tipo) && estadoFecha(d.fecha_vencimiento) === "por_vencer");
+                  const code = e.razon_social.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
+                  return (
+                    <div key={e.id} onClick={() => router.push("/tercerizadas")} style={{
+                      display:"flex", alignItems:"center", gap:12, padding:"10px 12px",
+                      borderRadius:10, border:`1px solid ${venc?C.danger+"44":porV?C.warn+"44":C.line2}`,
+                      background:"#fff", marginBottom:8, cursor:"pointer" }}>
+                      <div style={{ width:36, height:36, borderRadius:9, background:C.blueTint,
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                        fontFamily:"var(--font-mono)", fontSize:11, fontWeight:800, color:C.navy, flexShrink:0 }}>
+                        {code}
+                      </div>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <p style={{ margin:0, fontSize:12.5, fontWeight:700, color:C.ink,
+                          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{e.razon_social}</p>
+                        <p style={{ margin:"2px 0 0", fontFamily:"var(--font-mono)", fontSize:10.5, color:C.mute2 }}>
+                          {e.estado}
+                        </p>
+                      </div>
+                      <Tag bg={venc?C.dangerTint:porV?C.warnTint:C.okTint}
+                           color={venc?C.danger:porV?C.warn:C.ok} size="xs">
+                        {venc ? "Doc. vencido" : porV ? "Por vencer" : "OK"}
+                      </Tag>
+                    </div>
+                  );
+                })
+            }
+          </div>
+        </Card>
+
+        {/* 7B Docs por vencer */}
+        <Card pad={0} style={{ overflow:"hidden" }}>
+          <div style={{ padding:"16px 18px", display:"flex", justifyContent:"space-between",
+            alignItems:"center", borderBottom:`1px solid ${C.line2}` }}>
+            <div>
+              <Eyebrow>Control · vencimientos</Eyebrow>
+              <h3 style={{ margin:"6px 0 0", fontFamily:"var(--font-sans)", fontWeight:800, fontSize:16, color:C.ink, letterSpacing:-0.3 }}>
+                Documentos por vencer
+              </h3>
+            </div>
+            <button onClick={() => router.push("/documentos-vehiculares")}
+              style={{ fontSize:11, fontWeight:700, color:C.blue, background:"none", border:"none",
+                cursor:"pointer", display:"inline-flex", alignItems:"center", gap:3, fontFamily:"var(--font-sans)" }}>
+              Ver todos <I.Arrow size={11} sw={2} color={C.blue}/>
+            </button>
+          </div>
+          <div>
+            {proxDocs.length === 0
+              ? <p style={{ fontSize:13, color:C.mute, textAlign:"center", padding:"24px 0" }}>Sin vencimientos próximos</p>
+              : proxDocs.map((d, i) => {
+                  const dias = diasPara(d.fecha_vencimiento) ?? 0;
+                  const venc = dias < 0;
+                  const veh  = vehiculos.find(v => v.id === d.vehiculo_id);
+                  return (
+                    <div key={d.id} style={{ display:"flex", alignItems:"center", gap:14, padding:"14px 18px",
+                      borderBottom: i < proxDocs.length-1 ? `1px solid ${C.line2}` : "none" }}>
+                      <div style={{ width:38, height:38, borderRadius:9, flexShrink:0,
+                        background: venc ? C.dangerTint : C.blueTint,
+                        color: venc ? C.danger : C.navy,
+                        display:"flex", alignItems:"center", justifyContent:"center" }}>
+                        <I.FileCheck size={18} sw={2} color={venc ? C.danger : C.navy}/>
+                      </div>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                          <span style={{ fontSize:13, fontWeight:700, color:C.ink }}>{d.tipo}</span>
+                          {veh && <><span style={{ fontSize:11, color:C.mute2 }}>·</span>
+                          <span style={{ fontFamily:"var(--font-mono)", fontSize:11.5, color:C.mute }}>{veh.placa}</span></>}
+                        </div>
+                        <p style={{ margin:"3px 0 0", fontSize:11.5, color:C.mute }}>Vence {fmtFecha(d.fecha_vencimiento)}</p>
+                      </div>
+                      {venc
+                        ? <Tag bg={C.dangerTint} color={C.danger} size="xs">Vencido · {Math.abs(dias)}d</Tag>
+                        : dias <= 15
+                          ? <Tag bg={C.warnTint} color={C.warn} size="xs">En {dias} días</Tag>
+                          : <Tag bg={C.bg2} color={C.ink2} size="xs">En {dias} días</Tag>
+                      }
+                    </div>
+                  );
+                })
+            }
+          </div>
+        </Card>
+
+        {/* 7C Desglose costos */}
+        <Card pad={18}>
+          <Eyebrow>Finanzas del día</Eyebrow>
+          <h3 style={{ margin:"6px 0 16px", fontFamily:"var(--font-sans)", fontWeight:800, fontSize:16, color:C.ink, letterSpacing:-0.3 }}>
+            Desglose de costos
+          </h3>
+          {[
+            { label:"Combustible",      value:gastoCombustible, dot:C.danger, href:"/combustible" },
+            { label:"Mantenimiento",    value:gastoManten,      dot:C.warn,   href:"/mantenimiento" },
+            { label:"Gastos generales", value:totalGastosGen,   dot:C.navy,   href:"/gastos" },
+          ].map((c, i, arr) => (
+            <div key={c.label} onClick={() => router.push(c.href)}
+              style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 0",
+                borderBottom: i < arr.length-1 ? `1px solid ${C.line2}` : "none", cursor:"pointer" }}>
+              <span style={{ width:8, height:8, borderRadius:999, background:c.dot, flexShrink:0 }}/>
+              <span style={{ flex:1, fontSize:12.5, fontWeight:600, color:C.ink2 }}>{c.label}</span>
+              <span style={{ fontFamily:"var(--font-mono)", fontSize:13, fontWeight:700, color:C.ink }}>{fmtSoles(c.value)}</span>
+            </div>
+          ))}
+          <div style={{ marginTop:14, padding:"12px 14px", borderRadius:10, background:C.bg2, border:`1px solid ${C.line2}` }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+              <span style={{ fontSize:11.5, fontWeight:700, color:C.ink2 }}>Margen total</span>
+              <Metric size={18}>{fmtSoles(totalMargen)}</Metric>
+            </div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginTop:8 }}>
+              <span style={{ fontSize:11.5, fontWeight:700, color:C.ink2 }}>CPK flota <span style={{ fontWeight:500, color:C.mute2 }}>(S/km)</span></span>
+              <Metric size={16}>{cpkFlota > 0 ? `S/ ${cpkFlota.toFixed(3)}` : "—"}</Metric>
+            </div>
+          </div>
+          <div style={{ marginTop:12, padding:"14px", borderRadius:10,
+            background: utilidad>=0 ? C.okTint : C.dangerTint,
+            border: `1px solid ${utilidad>=0 ? C.ok : C.danger}33`,
+            display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <span style={{ fontSize:12, fontWeight:800, color:utilidad>=0?C.ok:C.danger }}>Utilidad estimada</span>
+            <Metric size={20} color={utilidad>=0?C.ok:C.danger}>{fmtSoles(utilidad)}</Metric>
+          </div>
+          {cpkNeuProm !== null && (
+            <div style={{ marginTop:10, display:"flex", justifyContent:"space-between", fontSize:11.5, color:C.mute }}>
+              <span style={{ fontWeight:600 }}>CPK neumáticos</span>
+              <span style={{ fontFamily:"var(--font-mono)", fontWeight:700, color:cpkNeuProm>3?C.danger:C.ok }}>
+                S/ {cpkNeuProm.toFixed(3)}
+              </span>
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* ── 8. FINANCE CHART + FLEET DONUT ── */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(12,1fr)", gap:14, marginBottom:14 }}>
+        <FinanceChart totalVentas={totalVentas} totalGastos={totalGastosGen} totalMargen={totalMargen}/>
+        <FleetDonut vehiculos={vehiculos}/>
+      </div>
+
+      {/* ── 9. SERVICIOS DE HOY ── */}
+      {serviciosHoy.length > 0 && (
+        <Card pad={0} style={{ overflow:"hidden", marginBottom:14 }}>
+          <div style={{ padding:"18px 20px", display:"flex", justifyContent:"space-between",
+            alignItems:"center", borderBottom:`1px solid ${C.line2}` }}>
+            <div>
+              <Eyebrow>Operaciones · tiempo real</Eyebrow>
+              <h3 style={{ margin:"6px 0 0", fontFamily:"var(--font-sans)", fontWeight:800, fontSize:17, color:C.ink, letterSpacing:-0.3 }}>
+                Servicios en curso · <span style={{ color:C.mute, fontWeight:600 }}>{serviciosHoy.length}</span>
+              </h3>
+            </div>
+            <div style={{ display:"flex", gap:8 }}>
+              <button onClick={() => router.push("/monitoreo")}
+                style={{ padding:"7px 12px", borderRadius:9, background:C.surface,
+                  border:`1px solid ${C.line}`, cursor:"pointer", display:"inline-flex",
+                  alignItems:"center", gap:6, fontSize:12, fontWeight:700, color:C.ink,
+                  fontFamily:"var(--font-sans)" }}>
+                <I.Arrow size={12} sw={2} color={C.ink}/> Ver mapa
+              </button>
+            </div>
+          </div>
+          {/* Tabla header */}
+          <div style={{ display:"flex", padding:"10px 20px", background:C.bg2,
+            borderBottom:`1px solid ${C.line2}` }}>
+            {[["Servicio",1],["Cliente",1.6],["Ruta",1.8],["Conductor / Unidad",1.5],["Hora",0.7],["Estado",1]].map(([h,f]) => (
+              <span key={h as string} style={{ flex: f as number, fontSize:10, fontWeight:800,
+                color:C.mute, letterSpacing:1.2, textTransform:"uppercase" }}>{h}</span>
+            ))}
+          </div>
+          {serviciosHoy.map((s, i) => {
+            const est = estadoBadge[s.estado] || { bg:C.bg2, c:C.ink2, dot:C.mute };
+            return (
+              <div key={s.id} onClick={() => router.push("/reservas")}
+                style={{ display:"flex", alignItems:"center", padding:"14px 20px",
+                  borderBottom: i < serviciosHoy.length-1 ? `1px solid ${C.line2}` : "none",
+                  cursor:"pointer" }}>
+                <div style={{ flex:1 }}>
+                  <p style={{ margin:0, fontFamily:"var(--font-mono)", fontSize:12, fontWeight:700, color:C.ink }}>
+                    #{s.id}
+                  </p>
+                </div>
+                <div style={{ flex:1.6, minWidth:0, paddingRight:8 }}>
+                  <p style={{ margin:0, fontSize:12.5, fontWeight:700, color:C.ink,
+                    overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{s.cliente}</p>
+                </div>
+                <div style={{ flex:1.8, minWidth:0, paddingRight:8 }}>
+                  <p style={{ margin:0, fontSize:12, color:C.ink2,
+                    overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                    {s.origen} → {s.destino}
+                  </p>
+                </div>
+                <div style={{ flex:1.5, minWidth:0 }}>
+                  <p style={{ margin:0, fontSize:12, fontWeight:600, color:C.ink2 }}>
+                    {s.conductor?.split(" ").slice(0,2).join(" ") || <span style={{ color:C.mute2 }}>Sin asignar</span>}
+                  </p>
+                  {s.placa && <p style={{ margin:"2px 0 0", fontFamily:"var(--font-mono)", fontSize:10.5, color:C.mute2 }}>{s.placa}</p>}
+                </div>
+                <div style={{ flex:0.7 }}>
+                  <p style={{ margin:0, fontFamily:"var(--font-mono)", fontSize:12, fontWeight:700, color:C.ink }}>
+                    {s.hora_servicio?.slice(0,5) || "—"}
+                  </p>
+                </div>
+                <div style={{ flex:1 }}>
+                  <Tag bg={est.bg} color={est.c} dot={est.dot} size="xs">{s.estado}</Tag>
+                </div>
+              </div>
+            );
+          })}
+        </Card>
+      )}
+
+      {/* ── 10. MANTENIMIENTOS PROGRAMADOS ── */}
+      {mantProximos.length > 0 && (
+        <Card pad={0} style={{ overflow:"hidden", marginBottom:14 }}>
+          <div style={{ padding:"18px 20px", display:"flex", justifyContent:"space-between",
+            alignItems:"center", borderBottom:`1px solid ${C.line2}` }}>
+            <div>
+              <Eyebrow>Flota · próximos 7 días</Eyebrow>
+              <h3 style={{ margin:"6px 0 0", fontFamily:"var(--font-sans)", fontWeight:800, fontSize:17, color:C.ink, letterSpacing:-0.3 }}>
+                Mantenimientos programados
+              </h3>
+            </div>
+            <button onClick={() => router.push("/mantenimiento")}
+              style={{ fontSize:11, fontWeight:700, color:C.blue, background:"none", border:"none",
+                cursor:"pointer", display:"inline-flex", alignItems:"center", gap:3, fontFamily:"var(--font-sans)" }}>
+              Ver todos <I.Arrow size={11} sw={2} color={C.blue}/>
+            </button>
+          </div>
+          {mantProximos.map((m, i) => {
+            const dias   = diasPara(m.proxima_fecha) ?? 0;
+            const veh    = vehiculos.find(v => v.id === m.vehiculo_id);
+            const urgent = dias <= 1;
+            return (
+              <div key={m.id} style={{ display:"flex", alignItems:"center", gap:14, padding:"14px 20px",
+                borderBottom: i < mantProximos.length-1 ? `1px solid ${C.line2}` : "none" }}>
+                <div style={{ width:38, height:38, borderRadius:9, flexShrink:0,
+                  background:C.blueTint, color:C.navy,
+                  display:"flex", alignItems:"center", justifyContent:"center" }}>
+                  <I.Wrench size={18} sw={2} color={C.navy}/>
+                </div>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    {veh && <span style={{ fontFamily:"var(--font-mono)", fontSize:12, fontWeight:700, color:C.ink }}>{veh.placa}</span>}
+                    {m.tipo && <><span style={{ fontSize:11, color:C.mute2 }}>·</span><span style={{ fontSize:11.5, color:C.mute }}>{m.tipo}</span></>}
+                  </div>
+                  {veh && <p style={{ margin:"3px 0 0", fontFamily:"var(--font-mono)", fontSize:10.5, color:C.mute2 }}>
+                    {Number(veh.kilometraje_actual||0).toLocaleString()} km
+                  </p>}
+                </div>
+                <Tag bg={urgent?C.warnTint:C.bg2} color={urgent?C.warn:C.ink2}>
+                  {dias < 0 ? "Vencido" : dias === 0 ? "Hoy" : dias === 1 ? "Mañana" : `En ${dias}d`}
+                </Tag>
+              </div>
+            );
+          })}
+        </Card>
+      )}
+
+      {/* ── 11. ÚLTIMAS RESERVAS ── */}
+      <Card pad={0} style={{ overflow:"hidden" }}>
+        <div style={{ padding:"16px 20px", display:"flex", justifyContent:"space-between",
+          alignItems:"center", borderBottom:`1px solid ${C.line2}` }}>
+          <div>
+            <Eyebrow>Comercial · histórico reciente</Eyebrow>
+            <h3 style={{ margin:"6px 0 0", fontFamily:"var(--font-sans)", fontWeight:800, fontSize:16, color:C.ink, letterSpacing:-0.3 }}>
+              Últimas 5 reservas
+            </h3>
+          </div>
+          <button onClick={() => router.push("/reservas")}
+            style={{ fontSize:11, fontWeight:700, color:C.blue, background:"none", border:"none",
+              cursor:"pointer", display:"inline-flex", alignItems:"center", gap:3, fontFamily:"var(--font-sans)" }}>
+            Ver todas <I.Arrow size={11} sw={2} color={C.blue}/>
+          </button>
         </div>
-        {reservas.length>0&&<div className="px-4 py-3 text-xs text-gray-400 border-t flex justify-between" style={{borderColor:"#f1f5f9"}}><span>Últimas 8 de {reservas.length} reservas</span><span>AFA ERP · Dashboard</span></div>}
-      </section>
-    </main>
+        {/* Header cols */}
+        <div style={{ display:"flex", padding:"10px 20px", background:C.bg2, borderBottom:`1px solid ${C.line2}` }}>
+          {[["ID",0.5],["Ruta",4],["Fecha",1],["Asignación",1],["Estado",1],["Precio",1],["Margen",1]].map(([l,f]) => (
+            <span key={l as string} style={{ flex: f as number, fontSize:10, fontWeight:800,
+              color:C.mute, letterSpacing:1.2, textTransform:"uppercase" }}>{l}</span>
+          ))}
+        </div>
+        {reservas.slice(0, 5).map((r, i) => {
+          const estados: Record<string,{bg:string;c:string;dot:string}> = {
+            pendiente:  { bg:"#fef9c3", c:"#854d0e", dot:"#eab308" },
+            programada: { bg:"#e0f2fe", c:"#0369a1", dot:"#0284c7" },
+            confirmada: { bg:C.okTint,  c:C.ok,      dot:C.ok },
+            en_curso:   { bg:"#dbeafe", c:"#1d4ed8",  dot:"#2563eb" },
+            finalizada: { bg:"#ede9fe", c:"#6d28d9",  dot:"#7c3aed" },
+            cancelada:  { bg:C.dangerTint, c:C.danger, dot:C.danger },
+          };
+          const est    = estados[r.estado] || { bg:C.bg2, c:C.ink2, dot:C.mute };
+          const esTer  = r.tipo === "tercerizada";
+          const margen = Number(r.margen || 0);
+          return (
+            <div key={r.id} onClick={() => router.push("/reservas")}
+              style={{ display:"flex", alignItems:"center", padding:"13px 20px",
+                borderBottom: i < 4 ? `1px solid ${C.line2}` : "none", cursor:"pointer" }}>
+              <span style={{ flex:0.5, fontFamily:"var(--font-mono)", fontSize:12, fontWeight:700, color:C.ink }}>#{r.id}</span>
+              <span style={{ flex:4, fontSize:12, color:C.ink2,
+                overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", paddingRight:14 }}>
+                {r.origen} → {r.destino}
+              </span>
+              <span style={{ flex:1, fontFamily:"var(--font-mono)", fontSize:11.5, color:C.mute }}>{fmtFecha(r.fecha_servicio)}</span>
+              <span style={{ flex:1 }}>
+                <Tag bg={esTer?C.warnTint:C.blueTint} color={esTer?C.warn:C.navy} size="xs">
+                  {esTer ? "Terc." : "Prop."}
+                </Tag>
+              </span>
+              <span style={{ flex:1 }}>
+                <Tag bg={est.bg} color={est.c} dot={est.dot} size="xs">{r.estado}</Tag>
+              </span>
+              <span style={{ flex:1, fontFamily:"var(--font-mono)", fontSize:12.5, fontWeight:700, color:C.ink }}>
+                {fmtSoles(Number(r.precio_cliente||0))}
+              </span>
+              <span style={{ flex:1, fontFamily:"var(--font-mono)", fontSize:12.5, fontWeight:700,
+                color: margen >= 0 ? C.ok : C.danger }}>
+                {fmtSoles(margen)}
+              </span>
+            </div>
+          );
+        })}
+        {reservas.length === 0 && (
+          <div style={{ padding:"40px 20px", textAlign:"center" }}>
+            <p style={{ fontSize:13, color:C.mute }}>No hay reservas</p>
+          </div>
+        )}
+        <div style={{ padding:"10px 20px", background:C.bg2, fontSize:10.5, color:C.mute2, fontWeight:600 }}>
+          Mostrando {Math.min(5, reservas.length)} de {reservas.length} reservas · AFA ERP · Dashboard
+        </div>
+      </Card>
+    </div>
   );
 }

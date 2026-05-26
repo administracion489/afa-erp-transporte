@@ -367,6 +367,10 @@ export default function ReservasPage() {
           capacidad={capacidadDe(reservaModal)}
           sincronizadoApp={!!reservaModal.sincronizado_app}
           fechaSincronizacion={reservaModal.fecha_sincronizacion || null}
+          origen={(reservaModal as any).origen || null}
+          destino={(reservaModal as any).destino || null}
+          puntoRetorno={(reservaModal as any).punto_retorno || null}
+          paradasJson={reservaModal.paradas_json || null}
           onClose={() => setModalReservaId(null)}
           onChange={async () => {
             await cargarOcupaciones();
