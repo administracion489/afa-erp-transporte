@@ -19,6 +19,7 @@ type VehiculoTercero = {
   categoria: string | null; marca: string | null; modelo: string | null;
   capacidad: number | null; estado: string;
   foto_externa_url: string | null; foto_interna_url: string | null;
+  descripcion_unidad: string | null;
 };
 
 type ConductorTercero = {
@@ -110,7 +111,7 @@ const FORM_EMP = {
   venc_autorizacion: "", venc_habilitacion: "",
   estado: "activo", observaciones: "",
 };
-const FORM_VEH = { placa: "", categoria: "BUS", marca: "", modelo: "", capacidad: "", estado: "disponible", foto_externa_url: "", foto_interna_url: "" };
+const FORM_VEH = { placa: "", categoria: "BUS", marca: "", modelo: "", capacidad: "", estado: "disponible", foto_externa_url: "", foto_interna_url: "", descripcion_unidad: "" };
 const FORM_COND = { nombre: "", dni: "", licencia: "", categoria_licencia: "A-IIb", vencimiento_licencia: "", telefono: "", estado: "disponible", pin_acceso: "", activo_app: false };
 const FORM_DOC = { vehiculo_id: "", tipo: "SOAT", numero: "", fecha_vencimiento: "", entidad_emisora: "", archivo_url: "", observaciones: "" };
 
@@ -278,6 +279,7 @@ export default function EmpresasTercerizadasPage() {
       estado: formVeh.estado,
       foto_externa_url: formVeh.foto_externa_url.trim() || null,
       foto_interna_url: formVeh.foto_interna_url.trim() || null,
+      descripcion_unidad: formVeh.descripcion_unidad.trim() || null,
     };
     const { error } = editVehId
       ? await supabase.from("vehiculos_tercero").update(payload).eq("id", editVehId)
@@ -655,6 +657,15 @@ export default function EmpresasTercerizadasPage() {
                             </label>
                           </div>
                         </Campo>
+                        <Campo label="Características de la unidad" span={3}>
+                          <textarea
+                            rows={3}
+                            className={inputCls("resize-none")}
+                            placeholder="Ej: Bus con capacidad para 50 pasajeros, A/C, asientos reclinables, bodega, GPS, sistema de audio/video."
+                            value={formVeh.descripcion_unidad}
+                            onChange={e => setFormVeh(p => ({ ...p, descripcion_unidad: e.target.value }))}
+                          />
+                        </Campo>
                       </div>
                       <div className="flex gap-2">
                         <button onClick={guardarVehiculo} disabled={guardando}
@@ -687,6 +698,9 @@ export default function EmpresasTercerizadasPage() {
                             <div className="flex-1">
                               <p className="font-black font-mono text-gray-900">{v.placa}</p>
                               <p className="text-xs text-gray-400">{v.categoria} · {v.marca} {v.modelo}{v.capacidad ? ` · ${v.capacidad} pax` : ""}</p>
+                              {v.descripcion_unidad && (
+                                <p className="text-[10px] text-gray-500 mt-0.5 line-clamp-2">{v.descripcion_unidad}</p>
+                              )}
                               {(v.foto_externa_url || v.foto_interna_url) && (
                                 <p className="text-[10px] text-green-600 font-bold mt-0.5">
                                   📸 {[v.foto_externa_url && "ext.", v.foto_interna_url && "int."].filter(Boolean).join(" · ")}
@@ -698,7 +712,7 @@ export default function EmpresasTercerizadasPage() {
                                 style={{ background: v.estado === "disponible" ? "#dcfce7" : "#f3f4f6", color: v.estado === "disponible" ? "#166534" : "#4b5563" }}>
                                 {v.estado}
                               </span>
-                              <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}
+                              <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}
                                 className="text-xs font-bold text-gray-500 hover:text-gray-800">✏️</button>
                               <button onClick={async () => { if (!confirm("¿Eliminar?")) return; await supabase.from("vehiculos_tercero").delete().eq("id", v.id); cargarTodo(); }}
                                 className="text-xs font-bold text-red-400 hover:text-red-600">✕</button>
