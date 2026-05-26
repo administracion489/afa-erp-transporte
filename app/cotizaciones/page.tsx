@@ -535,7 +535,7 @@ export default function CotizacionesPage(){
 
   const cargar=async()=>{
     setLoading(true);
-    const[clR,cotR,tR,vR,pR,cR,vtR,empR]=await Promise.all([supabase.from("clientes").select("*").order("nombre").limit(1000),supabase.from("cotizaciones").select("*").order("id",{ascending:false}),supabase.from("tarifario").select("*").eq("activo",true),supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,capacidad_pasajeros,equipamiento,foto_externa_url,foto_interna_url,descripcion_unidad").order("placa"),supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),supabase.from("precios_combustible").select("tipo,precio"),supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,foto_externa_url,foto_interna_url").eq("estado","activo").order("placa"),supabase.from("empresas_tercerizadas").select("id,razon_social").order("razon_social")]);
+    const[clR,cotR,tR,vR,pR,cR,vtR,empR]=await Promise.all([supabase.from("clientes").select("*").order("nombre").limit(1000),supabase.from("cotizaciones").select("*").order("id",{ascending:false}),supabase.from("tarifario").select("*").eq("activo",true),supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,capacidad_pasajeros,equipamiento,foto_externa_url,foto_interna_url,descripcion_unidad").order("placa"),supabase.from("parametros_costos").select("*").eq("activo",true).order("grupo_vehiculo").order("capacidad"),supabase.from("precios_combustible").select("tipo,precio"),supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,foto_externa_url,foto_interna_url").neq("estado","inactivo").order("placa"),supabase.from("empresas_tercerizadas").select("id,razon_social").order("razon_social")]);
     setClientes(clR.data||[]);setCotizas(cotR.data||[]);setTarifas(tR.data||[]);setFlota(vR.data||[]);setParamsDB(pR.data||[]);
     const pr:Record<string,number>={};(cR.data||[]).forEach((c:any)=>{pr[c.tipo]=Number(c.precio);});setPreciosDB(pr);
     const emps:any[]=empR.data||[];
@@ -556,7 +556,9 @@ export default function CotizacionesPage(){
   const buscarTarifa=()=>tarifas.find(t=>norm(t.origen)===norm(form.origen)&&norm(t.destino)===norm(form.destino)&&t.tipo_vehiculo===form.tipo_vehiculo&&t.equipamiento===form.equipamiento&&t.tipo_servicio===form.tipo_servicio&&(t.modo||"eventual")===form.modo_servicio)||null;
 
   const guardarCotizacion=async()=>{
-    if(!form.cliente_id||!form.origen||!form.destino){alert("Selecciona cliente, origen y destino");return;}
+    if(!form.origen.trim()){alert("⚠️ Falta el Punto de origen");return;}
+    if(!form.destino.trim()){alert("⚠️ Falta el Punto de destino");return;}
+    if(!form.cliente_id){alert("⚠️ Falta seleccionar el cliente");return;}
     const cl=clientes.find(c=>c.id===Number(form.cliente_id));if(cl?.estado==="bloqueado"){alert("Cliente bloqueado.");return;}
     if(items.some(it=>!it.descripcion.trim())){alert("Todos los items necesitan descripción");return;}
     setGuardando(true);
