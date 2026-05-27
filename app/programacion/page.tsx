@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { FileText, Pencil, Trash2 } from "lucide-react";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
 
@@ -794,10 +795,16 @@ export default function ReservasPage() {
                       </td>
 
                       <td className="p-3" onClick={e => e.stopPropagation()}>
-                        <div className="flex gap-1.5">
-                          <button onClick={() => setModalReservaId(r.id)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white" style={{ background: "#0b315f" }} title="Manifiesto y paradas">M</button>
-                          <button onClick={() => editarReserva(r)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">P</button>
-                          <button onClick={() => eliminarReserva(r.id)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50">X</button>
+                        <div className="flex gap-1.5 flex-wrap">
+                          <button onClick={() => setModalReservaId(r.id)} className="flex items-center gap-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
+                            <FileText size={13} /> Manifiesto
+                          </button>
+                          <button onClick={() => editarReserva(r)} className="flex items-center gap-1.5 bg-gray-50 hover:bg-gray-100 text-gray-600 text-xs font-bold px-3 py-2 rounded-xl transition-colors border border-gray-200">
+                            <Pencil size={13} /> Editar
+                          </button>
+                          <button onClick={() => eliminarReserva(r.id)} className="flex items-center gap-1.5 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
+                            <Trash2 size={13} /> Eliminar
+                          </button>
                         </div>
                       </td>
                     </tr>
