@@ -37,7 +37,20 @@
       "Bash(node -e ' *)",
       "Bash(find \"C:/Users/trans\" -name \"README.md\" -path \"*dashboard*\" 2>/dev/null | head -20)",
       "Bash(Get-ChildItem \"C:\\\\Users\\\\trans\\\\Downloads\\\\App onboarding \\(5\\)\\\\design_handoff_dashboard_erp\" -Recurse)",
-      "Bash(Select-Object FullName, Extension)"
+      "Bash(Select-Object FullName, Extension)",
+      "Bash(python -c ' *)",
+      "Bash(xxd)",
+      "Bash(head -n 1611 app/cliente/page.tsx)",
+      "Bash(tail -n +1727 app/cliente/page.tsx)",
+      "Read(//tmp/**)",
+      "Bash(find / -name \"parte2.tsx\" 2>/dev/null | head -5)",
+      "Bash(ls \"/mnt/c/tmp/\" 2>/dev/null || ls \"/c/tmp/\" 2>/dev/null || echo \"not found\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/cliente)",
+      "Bash(tasklist.exe /FI \"PID eq 37184\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000)",
+      "Bash(curl -s http://localhost:3000/cliente)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/api/portal/reset-password -X POST -H \"Content-Type: application/json\" -d '{\"ruc\":\"test\",\"email\":\"test@test.com\"}')",
+      "Bash(mkdir -p \"/mnt/c/Users/trans/afa-erp-transporte/components/portal\" && echo \"OK\")"
     ]
   }
 }

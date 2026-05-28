@@ -15,6 +15,7 @@ export type PasajeroImportado = {
   empresa:  string | null;
   asiento:  string | null;
   notas:    string | null;
+  parada:   string | null;  // nombre de la parada donde aborda (para portal cliente)
 };
 
 export type ResultadoImport = {
@@ -32,6 +33,7 @@ const COLUMNAS = {
   empresa:  ["empresa", "compañia", "compañía", "company", "organización", "organizacion"],
   asiento:  ["asiento", "seat", "butaca"],
   notas:    ["notas", "observaciones", "obs", "comentarios", "notes"],
+  parada:   ["parada", "paradero", "stop", "punto abordaje", "punto de abordaje", "lugar abordaje", "embarque", "subida"],
 } as const;
 
 function normaliza(s: string): string {
@@ -129,6 +131,7 @@ export async function parsearManifiesto(file: File): Promise<ResultadoImport> {
       empresa:  get("empresa")  || null,
       asiento:  get("asiento")  || null,
       notas:    get("notas")    || null,
+      parada:   get("parada")   || null,
     });
   }
 
@@ -151,4 +154,46 @@ export function descargarPlantilla(): void {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Manifiesto");
   XLSX.writeFile(wb, "plantilla_manifiesto_afa.xlsx");
+}
+
+/**
+ * Plantilla para portal cliente — incluye columna Parada y hoja de referencia con paradas.
+ * @param paradas - lista de paradas del servicio [{orden, nombre}]
+ */
+export function descargarPlantillaPortal(
+  paradas: { orden: number; nombre: string }[]
+): void {
+  const wb = XLSX.utils.book_new();
+
+  // Hoja 1: Plantilla de pasajeros
+  const headerRow = ["Nombre", "DNI", "Empresa", "Teléfono", "Parada"];
+  const ejemplos = paradas.length > 0
+    ? [
+        ["Juan Pérez Quispe",      "12345678", "ACME S.A.C.", "999111222", paradas[0]?.nombre || ""],
+        ["María García Rodríguez", "87654321", "ACME S.A.C.", "999333444", paradas[Math.min(1, paradas.length - 1)]?.nombre || ""],
+      ]
+    : [
+        ["Juan Pérez Quispe",      "12345678", "ACME S.A.C.", "999111222", ""],
+        ["María García Rodríguez", "87654321", "ACME S.A.C.", "999333444", ""],
+      ];
+
+  const ws1 = XLSX.utils.aoa_to_sheet([headerRow, ...ejemplos]);
+  (ws1 as any)["!cols"] = [
+    { wch: 30 }, { wch: 11 }, { wch: 22 }, { wch: 13 }, { wch: 28 },
+  ];
+  XLSX.utils.book_append_sheet(wb, ws1, "Pasajeros");
+
+  // Hoja 2: Paradas del servicio (referencia)
+  if (paradas.length > 0) {
+    const ws2 = XLSX.utils.aoa_to_sheet([
+      ["Referencia de paradas — usa estos nombres exactos en la columna Parada"],
+      [""],
+      ["#", "Nombre de la parada"],
+      ...paradas.map(p => [p.orden, p.nombre]),
+    ]);
+    (ws2 as any)["!cols"] = [{ wch: 6 }, { wch: 40 }];
+    XLSX.utils.book_append_sheet(wb, ws2, "Paradas (referencia)");
+  }
+
+  XLSX.writeFile(wb, "plantilla_manifiesto_portal_afa.xlsx");
 }

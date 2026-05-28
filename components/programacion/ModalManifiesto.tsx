@@ -96,6 +96,11 @@ export default function ModalManifiesto(props: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const autoCreacionRef = useRef(false);
 
+  // ── Agregar pasajero individual ──────────────────────────────────────────
+  const [mostrarFormAdd, setMostrarFormAdd] = useState(false);
+  const [formAdd, setFormAdd] = useState({ nombre: "", dni: "", empresa: "", telefono: "", parada_id: "" });
+  const [savingAdd, setSavingAdd] = useState(false);
+
   const autoCrearParadasIniciales = async (): Promise<number> => {
     // Prioridad 1: paradas_json de la cotización (ya trae coordenadas de Google Maps)
     if (paradasJson && paradasJson.length >= 2) {
@@ -430,6 +435,56 @@ export default function ModalManifiesto(props: Props) {
     if (onChange) onChange();
   };
 
+  // ─── Agregar 1 pasajero manualmente ──────────────────────────────────────
+  const agregarPasajeroManual = async () => {
+    if (!formAdd.nombre.trim() || !formAdd.dni.trim()) {
+      setMensaje({ tipo: "err", texto: "Nombre y DNI son requeridos" });
+      return;
+    }
+    if (dnisExistentes.has(formAdd.dni.trim())) {
+      setMensaje({ tipo: "warn", texto: `Ya existe un pasajero con DNI ${formAdd.dni.trim()} en este servicio` });
+      return;
+    }
+    setSavingAdd(true);
+    setMensaje(null);
+    try {
+      const { data: nuevo, error: insErr } = await supabase
+        .from("pasajeros")
+        .insert({
+          reserva_id: reservaId,
+          cliente_id: clienteId,
+          nombre:     formAdd.nombre.trim(),
+          dni:        formAdd.dni.trim(),
+          empresa:    formAdd.empresa.trim() || null,
+          telefono:   formAdd.telefono.trim() || null,
+          activo:     true,
+        })
+        .select("id")
+        .single();
+
+      if (insErr || !nuevo) {
+        setMensaje({ tipo: "err", texto: insErr?.message || "Error al agregar pasajero" });
+        return;
+      }
+
+      if (formAdd.parada_id) {
+        await supabase.from("pasajeros_parada").insert({
+          pasajero_id:    nuevo.id,
+          parada_id:      Number(formAdd.parada_id),
+          estado_abordaje: "Pendiente",
+        });
+      }
+
+      setMensaje({ tipo: "ok", texto: `${formAdd.nombre.trim()} agregado al manifiesto ✓` });
+      setFormAdd({ nombre: "", dni: "", empresa: "", telefono: "", parada_id: "" });
+      setMostrarFormAdd(false);
+      await cargar();
+      if (onChange) onChange();
+    } finally {
+      setSavingAdd(false);
+    }
+  };
+
   // ─── SINCRONIZAR + NOTIFICAR ───────────────────────────────────────────────
   const sincronizar = async () => {
     if (paradas.length === 0) {
@@ -622,6 +677,19 @@ export default function ModalManifiesto(props: Props) {
                 <input className="w-full border rounded-xl pl-3 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20" placeholder="Buscar por nombre, DNI o empresa..." value={busqueda} onChange={(e) => setBusqueda(e.target.value)} />
               </div>
 
+              {/* Agregar 1 pasajero */}
+              <button
+                onClick={() => { setMostrarFormAdd(v => !v); setMensaje(null); }}
+                className="px-3 py-2 rounded-xl font-bold text-xs border transition-colors"
+                style={{
+                  borderColor: mostrarFormAdd ? "#0b315f" : "#e2e8f0",
+                  background:  mostrarFormAdd ? "#eaeff6"  : "white",
+                  color:       mostrarFormAdd ? "#0b315f"  : "#374151",
+                }}
+              >
+                {mostrarFormAdd ? "✕ Cancelar" : "+ Agregar 1 pasajero"}
+              </button>
+
               <CargadorUnificado
                 reservaId={reservaId}
                 clienteId={clienteId}
@@ -643,6 +711,83 @@ export default function ModalManifiesto(props: Props) {
 
               <button onClick={descargarPlantilla} className="px-3 py-2 rounded-xl font-bold text-xs border hover:bg-gray-50 text-gray-600">Plantilla pax</button>
             </div>
+
+            {/* Formulario agregar 1 pasajero */}
+            {mostrarFormAdd && (
+              <div className="mx-6 mt-3 rounded-xl border p-4" style={{ borderColor: "#e2e8f0", background: "#f8fafc" }}>
+                <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3">Nuevo pasajero</p>
+                <div className="flex gap-2 flex-wrap items-end">
+                  {/* Nombre */}
+                  <div className="flex-[2_1_170px]">
+                    <p className="text-[10px] font-bold text-gray-400 uppercase mb-1">Nombre completo *</p>
+                    <input
+                      value={formAdd.nombre}
+                      onChange={e => setFormAdd(f => ({ ...f, nombre: e.target.value }))}
+                      onKeyDown={e => e.key === "Enter" && agregarPasajeroManual()}
+                      placeholder="Ej. Juan Pérez López"
+                      className="w-full border rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
+                    />
+                  </div>
+                  {/* DNI */}
+                  <div className="flex-[0_1_120px]">
+                    <p className="text-[10px] font-bold text-gray-400 uppercase mb-1">DNI *</p>
+                    <input
+                      value={formAdd.dni}
+                      onChange={e => setFormAdd(f => ({ ...f, dni: e.target.value }))}
+                      onKeyDown={e => e.key === "Enter" && agregarPasajeroManual()}
+                      placeholder="12345678"
+                      maxLength={12}
+                      className="w-full border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
+                    />
+                  </div>
+                  {/* Empresa */}
+                  <div className="flex-[1_1_140px]">
+                    <p className="text-[10px] font-bold text-gray-400 uppercase mb-1">Empresa</p>
+                    <input
+                      value={formAdd.empresa}
+                      onChange={e => setFormAdd(f => ({ ...f, empresa: e.target.value }))}
+                      placeholder="Opcional"
+                      className="w-full border rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
+                    />
+                  </div>
+                  {/* Teléfono */}
+                  <div className="flex-[0_1_130px]">
+                    <p className="text-[10px] font-bold text-gray-400 uppercase mb-1">Teléfono</p>
+                    <input
+                      value={formAdd.telefono}
+                      onChange={e => setFormAdd(f => ({ ...f, telefono: e.target.value }))}
+                      placeholder="999111222"
+                      className="w-full border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
+                    />
+                  </div>
+                  {/* Parada */}
+                  {paradas.length > 0 && (
+                    <div className="flex-[1_1_170px]">
+                      <p className="text-[10px] font-bold text-gray-400 uppercase mb-1">Parada de abordaje</p>
+                      <select
+                        value={formAdd.parada_id}
+                        onChange={e => setFormAdd(f => ({ ...f, parada_id: e.target.value }))}
+                        className="w-full border rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 bg-white"
+                      >
+                        <option value="">– Sin asignar –</option>
+                        {paradas.map(p => (
+                          <option key={p.id} value={p.id}>{p.orden}. {p.nombre}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {/* Botón */}
+                  <button
+                    onClick={agregarPasajeroManual}
+                    disabled={savingAdd || !formAdd.nombre.trim() || !formAdd.dni.trim()}
+                    className="px-5 py-2 rounded-xl font-bold text-xs text-white disabled:opacity-50 whitespace-nowrap"
+                    style={{ background: formAdd.nombre.trim() && formAdd.dni.trim() ? "#0b315f" : "#9ca3af" }}
+                  >
+                    {savingAdd ? "Guardando..." : "Agregar"}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {mensaje ? (
               <div className="mx-6 mt-3 rounded-xl px-4 py-2.5 text-xs font-medium flex items-start justify-between gap-2" style={{

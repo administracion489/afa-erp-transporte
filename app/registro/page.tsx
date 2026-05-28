@@ -6,9 +6,9 @@ import { supabase } from "@/lib/supabase";
 /* ══════════════════════════════════════════════
    TYPES & CONSTANTS
 ══════════════════════════════════════════════ */
-type Contacto = { nombre: string; apellido: string; cargo: string; telefono: string; email: string };
+type Contacto = { nombre: string; apellido: string; cargo: string; telefono: string; email: string; tipoDoc: string; numDoc: string };
 
-const BLANK: Contacto = { nombre: "", apellido: "", cargo: "", telefono: "", email: "" };
+const BLANK: Contacto = { nombre: "", apellido: "", cargo: "", telefono: "", email: "", tipoDoc: "DNI", numDoc: "" };
 
 const DEPARTAMENTOS = [
   "Amazonas","Áncash","Apurímac","Arequipa","Ayacucho","Cajamarca","Callao",
@@ -100,9 +100,40 @@ function ContactCard({ ct, idx, tipo, onChange, onRemove, canRemove }: {
           <input style={fieldStyle()} placeholder="+51 9XX XXX XXX" value={ct.telefono} onChange={e => onChange("telefono", e.target.value)} />
         </div>
       </div>
-      <div>
+      <div style={{ marginBottom: 10 }}>
         <Label>Correo electrónico</Label>
         <input type="email" style={fieldStyle()} placeholder="correo@empresa.com" value={ct.email} onChange={e => onChange("email", e.target.value)} />
+      </div>
+
+      {/* Documento de identidad — necesario para acceso al portal */}
+      <div style={{ borderTop: "1px dashed #D8DDE8", paddingTop: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+          <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: ".06em", color: "#8892A4" }}>Documento de identidad</span>
+          <span style={{ fontSize: 10, background: color + "18", color, padding: "2px 8px", borderRadius: 20, fontWeight: 700 }}>Requerido para acceso al portal</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 10 }}>
+          <div>
+            <Label>Tipo</Label>
+            <select style={fieldStyle()} value={ct.tipoDoc} onChange={e => onChange("tipoDoc", e.target.value)}>
+              <option value="DNI">DNI</option>
+              <option value="CE">Cédula / CE</option>
+              <option value="Pasaporte">Pasaporte</option>
+            </select>
+          </div>
+          <div>
+            <Label>Número de documento</Label>
+            <input
+              style={fieldStyle()}
+              placeholder={ct.tipoDoc === "DNI" ? "12345678 (8 dígitos)" : "Número de documento"}
+              maxLength={ct.tipoDoc === "DNI" ? 8 : 20}
+              value={ct.numDoc}
+              onChange={e => onChange("numDoc", ct.tipoDoc === "DNI" ? e.target.value.replace(/\D/g, "") : e.target.value)}
+            />
+            <p style={{ fontSize: 11, color: "#8892A4", marginTop: 3 }}>
+              Será el usuario de ingreso al portal cliente
+            </p>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -232,8 +263,24 @@ export default function RegistroClientePage() {
       provincia:    provincia.trim(),
       departamento,
       email_facturacion: emailFact.trim(),
-      contactos_administrativos: admins.filter(c => c.nombre.trim()),
-      contactos_operativos:      ops.filter(c => c.nombre.trim()),
+      contactos_administrativos: admins.filter(c => c.nombre.trim()).map(c => ({
+        nombre:   c.nombre.trim(),
+        apellido: c.apellido.trim() || null,
+        cargo:    c.cargo.trim()    || null,
+        telefono: c.telefono.trim() || null,
+        email:    c.email.trim()    || null,
+        tipo_doc: c.tipoDoc         || "DNI",
+        num_doc:  c.numDoc.trim()   || null,
+      })),
+      contactos_operativos: ops.filter(c => c.nombre.trim()).map(c => ({
+        nombre:   c.nombre.trim(),
+        apellido: c.apellido.trim() || null,
+        cargo:    c.cargo.trim()    || null,
+        telefono: c.telefono.trim() || null,
+        email:    c.email.trim()    || null,
+        tipo_doc: c.tipoDoc         || "DNI",
+        num_doc:  c.numDoc.trim()   || null,
+      })),
       tipo_cliente:  tipoCliente  || null,
       condicion_pago: condPago,
       moneda,

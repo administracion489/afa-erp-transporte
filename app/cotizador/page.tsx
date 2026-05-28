@@ -207,7 +207,9 @@ function PlacesInput({placeholder,value,onChange,onSelect,mapsLoaded,disabled=fa
     acRef.current.addListener("place_changed",()=>{
       const p=acRef.current!.getPlace();
       if(!p.geometry?.location)return;
-      const address=p.formatted_address||p.name||"";
+      const pName=p.name||"";
+      const pAddr=p.formatted_address||"";
+      const address=pName&&pAddr&&!pAddr.toLowerCase().includes(pName.toLowerCase())?`${pName}, ${pAddr}`:pAddr||pName;
       onChange(address);
       onSelect({address,lat:p.geometry.location.lat(),lng:p.geometry.location.lng(),placeId:p.place_id||""});
     });

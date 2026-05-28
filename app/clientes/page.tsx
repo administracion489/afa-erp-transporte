@@ -9,7 +9,7 @@ import { supabase } from "@/lib/supabase";
 type TipoCliente    = "b2b" | "b2c";
 type EstadoCliente  = "activo" | "inactivo" | "bloqueado";
 type EstadoSolicitud = "pendiente" | "en_revision" | "aprobada" | "rechazada";
-type Tab            = "clientes" | "solicitudes";
+type Tab            = "clientes" | "solicitudes" | "acceso";
 type SortDir        = "asc" | "desc";
 type Toast          = { id: number; msg: string; type: "ok" | "error" | "info" };
 
@@ -91,10 +91,21 @@ type Solicitud = {
 
 type FormContacto = { nombre: string; apellido: string; cargo: string; telefono: string; email: string };
 
+type PortalUsuario = { id: number; cliente_id: number; nombre: string; dni: string; cargo: string | null; rol: "admin" | "visor"; email: string | null; codigo_acceso: string; activo: boolean; created_at: string; modulos_permitidos: string[] | null; };
+
 /* ══════════════════════════════════════════════
    CONSTANTS
 ══════════════════════════════════════════════ */
 const SERVICIOS = ["Transporte de personal", "Transporte turístico", "Alquiler de vehículos", "Otros"];
+
+const MODULOS_CTRL = [
+  { id: "activos",     label: "En vivo · GPS" },
+  { id: "historial",   label: "Historial de servicios" },
+  { id: "reporte",     label: "Reportes de embarque" },
+  { id: "facturacion", label: "Facturación" },
+  { id: "documentos",  label: "Documentos" },
+  { id: "cuenta",      label: "Cuenta y configuración" },
+];
 
 const ESTADO_CLIENTE: Record<EstadoCliente, { label: string; bg: string; color: string }> = {
   activo:    { label: "Activo",    bg: "#dcfce7", color: "#166534" },
@@ -689,6 +700,112 @@ export default function ClientesPage() {
   };
 
   /* ══════════════════════════════════════════
+     TAB: ACCESO PORTAL
+  ══════════════════════════════════════════ */
+  const [accesoCliente,  setAccesoCliente]  = useState<Cliente | null>(null);
+  const [portalUsers,    setPortalUsers]    = useState<PortalUsuario[]>([]);
+  const [loadingPU,      setLoadingPU]      = useState(false);
+  const [busqAcceso,     setBusqAcceso]     = useState("");
+  const [modalPU,        setModalPU]        = useState(false);
+  const [editPU,         setEditPU]         = useState<PortalUsuario | null>(null);
+  const [puNombre,       setPuNombre]       = useState("");
+  const [puTipoDoc,      setPuTipoDoc]      = useState<"DNI"|"CE"|"Celular">("DNI");
+  const [puDni,          setPuDni]          = useState("");
+  const [puEmail,        setPuEmail]        = useState("");
+  const [puCargo,        setPuCargo]        = useState("");
+  const [puRol,          setPuRol]          = useState<"admin"|"visor">("visor");
+  const [puPass,         setPuPass]         = useState("");
+  const [puPermisos,     setPuPermisos]     = useState<string[]>(MODULOS_CTRL.map(m => m.id).filter(id => id !== "facturacion"));
+  const [puErr,          setPuErr]          = useState("");
+  const [puLoad,         setPuLoad]         = useState(false);
+  const [toDeletePU,     setToDeletePU]     = useState<{ id: number; nombre: string } | null>(null);
+  const [showPuPass,     setShowPuPass]     = useState(false);
+  const [puContactosTab, setPuContactosTab] = useState<"admin"|"op">("admin");
+  const [puImportadoDe,  setPuImportadoDe]  = useState("");
+
+  const cargarPortalUsers = async (clienteId: number) => {
+    setLoadingPU(true);
+    const { data } = await supabase.from("portal_usuarios").select("*").eq("cliente_id", clienteId).order("created_at");
+    setPortalUsers((data || []) as PortalUsuario[]);
+    setLoadingPU(false);
+  };
+
+  const seleccionarClienteAcceso = (c: Cliente) => {
+    setAccesoCliente(c);
+    setPortalUsers([]);
+    cargarPortalUsers(c.id);
+  };
+
+  function resetPUForm() {
+    setPuNombre(""); setPuTipoDoc("DNI"); setPuDni(""); setPuEmail(""); setPuCargo("");
+    setPuRol("visor"); setPuPass(""); setPuErr(""); setEditPU(null); setShowPuPass(false);
+    setPuContactosTab("admin"); setPuImportadoDe("");
+    setPuPermisos(MODULOS_CTRL.map(m => m.id).filter(id => id !== "facturacion"));
+  }
+
+  function importarContacto(ct: Contacto) {
+    const nombreCompleto = [ct.nombre, ct.apellido].filter(Boolean).join(" ");
+    setPuNombre(nombreCompleto);
+    setPuEmail(ct.email || "");
+    setPuCargo(ct.cargo || "");
+    setPuImportadoDe(nombreCompleto);
+    setPuDni(""); // El documento se ingresa manualmente
+  }
+
+  function abrirEditarPU(u: PortalUsuario) {
+    setEditPU(u); setPuNombre(u.nombre); setPuDni(u.dni);
+    // Detectar tipo por el valor almacenado
+    const detectedTipo: "DNI"|"CE"|"Celular" =
+      /^\d{8}$/.test(u.dni) ? "DNI" :
+      /^\d{7,15}$/.test(u.dni) ? "Celular" : "CE";
+    setPuTipoDoc(detectedTipo);
+    setPuEmail(u.email || ""); setPuCargo(u.cargo || ""); setPuRol(u.rol);
+    setPuPass(""); setPuErr(""); setShowPuPass(false);
+    setPuPermisos(u.modulos_permitidos || MODULOS_CTRL.map(m => m.id));
+    setModalPU(true);
+  }
+
+  async function guardarPU() {
+    if (!accesoCliente) return;
+    if (!puNombre.trim() || !puDni.trim()) { setPuErr("Nombre e identificación son obligatorios"); return; }
+    if (!editPU && !puPass.trim()) { setPuErr("La contraseña es obligatoria para nuevos usuarios"); return; }
+    if (puTipoDoc === "DNI" && puDni.trim().length !== 8) { setPuErr("El DNI debe tener exactamente 8 dígitos"); return; }
+    if (puTipoDoc === "Celular" && (puDni.trim().length < 7 || puDni.trim().length > 15)) { setPuErr("El número de celular debe tener entre 7 y 15 dígitos"); return; }
+    if (puTipoDoc === "CE" && puDni.trim().length < 6) { setPuErr("La Cédula / CE debe tener al menos 6 caracteres"); return; }
+    setPuErr(""); setPuLoad(true);
+    const modulos = (puRol === "admin" && puPermisos.length === MODULOS_CTRL.length) ? null : puPermisos;
+
+    if (editPU) {
+      const updates: Record<string, unknown> = { nombre: puNombre.trim(), dni: puDni.trim(), cargo: puCargo.trim() || null, rol: puRol, email: puEmail.trim() || null, modulos_permitidos: modulos };
+      if (puPass.trim()) updates.codigo_acceso = puPass.trim();
+      const { error } = await supabase.from("portal_usuarios").update(updates).eq("id", editPU.id);
+      if (error) { setPuErr("Error al actualizar: " + error.message); setPuLoad(false); return; }
+      toast("Usuario actualizado ✓", "ok");
+    } else {
+      const { error } = await supabase.from("portal_usuarios").insert({ cliente_id: accesoCliente.id, nombre: puNombre.trim(), dni: puDni.trim(), cargo: puCargo.trim() || null, rol: puRol, email: puEmail.trim() || null, codigo_acceso: puPass.trim(), activo: true, modulos_permitidos: modulos });
+      if (error) { setPuErr(error.message.includes("unique") ? `Ya existe un usuario con ese ${puTipoDoc} para este cliente` : error.message); setPuLoad(false); return; }
+      toast("Usuario creado ✓", "ok");
+    }
+
+    await cargarPortalUsers(accesoCliente.id);
+    setModalPU(false); resetPUForm(); setPuLoad(false);
+  }
+
+  async function togglePUActivo(id: number, activo: boolean) {
+    await supabase.from("portal_usuarios").update({ activo: !activo }).eq("id", id);
+    setPortalUsers(prev => prev.map(u => u.id === id ? { ...u, activo: !activo } : u));
+    toast(activo ? "Usuario desactivado" : "Usuario activado", "info");
+  }
+
+  async function eliminarPU() {
+    if (!toDeletePU || !accesoCliente) return;
+    const { error } = await supabase.from("portal_usuarios").delete().eq("id", toDeletePU.id);
+    if (error) { toast(error.message, "error"); }
+    else { toast(`"${toDeletePU.nombre}" eliminado`, "ok"); await cargarPortalUsers(accesoCliente.id); }
+    setToDeletePU(null);
+  }
+
+  /* ══════════════════════════════════════════
      RENDER
   ══════════════════════════════════════════ */
   return (
@@ -770,6 +887,186 @@ export default function ClientesPage() {
         </ConfirmModal>
       )}
 
+      {toDeletePU && (
+        <ConfirmModal title="¿Eliminar usuario del portal?" danger
+          msg={`Se eliminará permanentemente el acceso de "${toDeletePU.nombre}" al portal cliente.`}
+          confirmLabel="Eliminar" onOk={eliminarPU} onCancel={() => setToDeletePU(null)} />
+      )}
+
+      {modalPU && accesoCliente && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.5)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ background: "white", borderRadius: 20, padding: 28, maxWidth: 560, width: "100%", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 64px rgba(0,0,0,.22)", animation: "scaleIn .18s ease" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+              <div>
+                <h3 style={{ fontWeight: 800, fontSize: 17, color: "#0f172a", margin: 0 }}>{editPU ? "Editar usuario" : "Nuevo usuario del portal"}</h3>
+                <p style={{ fontSize: 12, color: "#94a3b8", margin: "3px 0 0" }}>{accesoCliente.empresa || accesoCliente.nombre}</p>
+              </div>
+              <button onClick={() => { setModalPU(false); resetPUForm(); }} style={{ background: "transparent", border: "none", fontSize: 18, cursor: "pointer", color: "#94a3b8" }}>✕</button>
+            </div>
+
+            {/* ── Importar desde contactos registrados ── */}
+            {!editPU && (() => {
+              const allContactos = accesoCliente.contactos || [];
+              const admins = allContactos.filter(ct => ct.tipo === "administrativo");
+              const ops    = allContactos.filter(ct => ct.tipo === "operativo");
+              const lista  = puContactosTab === "admin" ? admins : ops;
+              if (allContactos.length === 0) return null;
+              return (
+                <div style={{ marginBottom: 18 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                    <p style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: ".06em", color: "#6b7280", margin: 0 }}>
+                      Importar de contactos registrados
+                    </p>
+                    {puImportadoDe && (
+                      <span style={{ fontSize: 11, fontWeight: 700, background: "#dcfce7", color: "#166534", padding: "3px 10px", borderRadius: 20, display: "flex", alignItems: "center", gap: 5 }}>
+                        ✓ {puImportadoDe}
+                        <button type="button" onClick={() => setPuImportadoDe("")} style={{ background: "none", border: "none", cursor: "pointer", color: "#166534", fontSize: 12, padding: 0, lineHeight: 1 }}>✕</button>
+                      </span>
+                    )}
+                  </div>
+                  {/* Tabs admin / operativo */}
+                  <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                    {([["admin","administrativo","Administrativos","#1262bd"],["op","operativo","Operativos","#0f6e56"]] as [string,string,string,string][]).map(([key,_tipo,label,color]) => {
+                      const count = key === "admin" ? admins.length : ops.length;
+                      const active = puContactosTab === key;
+                      return (
+                        <button key={key} type="button" onClick={() => setPuContactosTab(key as "admin"|"op")}
+                          style={{ padding: "5px 14px", borderRadius: 20, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", transition: "all .12s",
+                            border: `1.5px solid ${active ? color : "#e5e7eb"}`,
+                            background: active ? color + "14" : "white", color: active ? color : "#94a3b8" }}>
+                          {label} ({count})
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {/* Lista de contactos */}
+                  {lista.length === 0 ? (
+                    <p style={{ fontSize: 12, color: "#94a3b8", padding: "10px 12px", background: "#f8fafc", borderRadius: 8, margin: 0 }}>
+                      Sin contactos {puContactosTab === "admin" ? "administrativos" : "operativos"} registrados para este cliente.
+                    </p>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column" as const, gap: 6 }}>
+                      {lista.map((ct, i) => {
+                        const nombreCompleto = [ct.nombre, ct.apellido].filter(Boolean).join(" ");
+                        const isSelected = puImportadoDe === nombreCompleto;
+                        return (
+                          <div key={i} onClick={() => importarContacto(ct)}
+                            style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", borderRadius: 10, cursor: "pointer", transition: "all .12s",
+                              border: `1.5px solid ${isSelected ? "#0b315f" : "#e5e7eb"}`,
+                              background: isSelected ? "#eef3f8" : "#f8fafc" }}>
+                            <div style={{ width: 36, height: 36, borderRadius: 10, background: isSelected ? "#0b315f" : avatarBg(nombreCompleto), display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontSize: 11, fontWeight: 800, flexShrink: 0 }}>
+                              {iniciales(nombreCompleto)}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <p style={{ fontWeight: 700, fontSize: 13, color: "#0f172a", margin: 0, whiteSpace: "nowrap" as const, overflow: "hidden", textOverflow: "ellipsis" }}>{nombreCompleto}</p>
+                              <p style={{ fontSize: 11, color: "#94a3b8", margin: 0 }}>
+                                {[ct.cargo, ct.telefono, ct.email].filter(Boolean).join(" · ")}
+                              </p>
+                            </div>
+                            {ct.principal && <span style={{ fontSize: 10, fontWeight: 700, background: "#eff6ff", color: "#1262bd", padding: "2px 7px", borderRadius: 10, flexShrink: 0 }}>Principal</span>}
+                            <span style={{ fontSize: 11, fontWeight: 700, color: isSelected ? "#0b315f" : "#94a3b8", flexShrink: 0 }}>
+                              {isSelected ? "✓ Seleccionado" : "Usar →"}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {/* Divisor */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0 0" }}>
+                    <div style={{ flex: 1, height: 1, background: "#f1f5f9" }}/>
+                    <span style={{ fontSize: 10, fontWeight: 600, color: "#94a3b8", letterSpacing: ".04em", textTransform: "uppercase" as const }}>o completar manualmente</span>
+                    <div style={{ flex: 1, height: 1, background: "#f1f5f9" }}/>
+                  </div>
+                </div>
+              );
+            })()}
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+              <Field label="Nombre completo *">
+                <input style={inp()} placeholder="Nombre y apellidos" value={puNombre} onChange={e => { setPuNombre(e.target.value); setPuImportadoDe(""); }} />
+              </Field>
+              <div>
+                <label style={{ display: "block", fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: ".04em", color: "#6b7280", marginBottom: 4 }}>
+                  Identificación * <span style={{ fontSize: 10, color: "#94a3b8", textTransform: "none" as const, fontWeight: 500, letterSpacing: 0 }}>— usado para iniciar sesión</span>
+                </label>
+                {/* Pills selector */}
+                <div style={{ display: "flex", gap: 5, marginBottom: 7 }}>
+                  {(["DNI","CE","Celular"] as const).map(t => (
+                    <button key={t} type="button"
+                      onClick={() => { setPuTipoDoc(t); setPuDni(""); }}
+                      style={{ flex: 1, padding: "5px 0", borderRadius: 7, border: `1.5px solid ${puTipoDoc === t ? "#0b315f" : "#e5e7eb"}`, background: puTipoDoc === t ? "#eef3f8" : "white", color: puTipoDoc === t ? "#0b315f" : "#9ca3af", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", transition: "all .12s" }}>
+                      {t === "CE" ? "Cédula / CE" : t}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  style={inp()}
+                  placeholder={puTipoDoc === "DNI" ? "12345678" : puTipoDoc === "CE" ? "000123456" : "3001234567"}
+                  maxLength={puTipoDoc === "DNI" ? 8 : 15}
+                  value={puDni}
+                  onChange={e => {
+                    const v = e.target.value;
+                    setPuDni(puTipoDoc === "CE" ? v.replace(/[^a-zA-Z0-9]/g, "") : v.replace(/\D/g, ""));
+                  }}
+                />
+              </div>
+              <Field label="Correo electrónico">
+                <input type="email" style={inp()} placeholder="correo@empresa.com" value={puEmail} onChange={e => setPuEmail(e.target.value)} />
+              </Field>
+              <Field label="Cargo / Área">
+                <input style={inp()} placeholder="Ej: Coordinador de transporte" value={puCargo} onChange={e => setPuCargo(e.target.value)} />
+              </Field>
+              <Field label="Rol">
+                <select style={inp()} value={puRol} onChange={e => setPuRol(e.target.value as "admin"|"visor")}>
+                  <option value="visor">Visor — solo lectura</option>
+                  <option value="admin">Admin — gestión completa</option>
+                </select>
+              </Field>
+              <Field label={editPU ? "Nueva contraseña (vacío = sin cambio)" : "Contraseña *"}>
+                <div style={{ position: "relative" }}>
+                  <input type={showPuPass ? "text" : "password"} style={{ ...inp(), paddingRight: 38 }} placeholder={editPU ? "Dejar vacío para no cambiar" : "Contraseña de acceso"} value={puPass} onChange={e => setPuPass(e.target.value)} />
+                  <button type="button" onClick={() => setShowPuPass(p => !p)} style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "#94a3b8", fontSize: 14 }}>{showPuPass ? "🙈" : "👁"}</button>
+                </div>
+              </Field>
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
+              <p style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "#6b7280", marginBottom: 10, marginTop: 0 }}>Módulos permitidos</p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                {MODULOS_CTRL.map(m => {
+                  const on = puPermisos.includes(m.id);
+                  return (
+                    <button key={m.id} type="button"
+                      onClick={() => setPuPermisos(p => on ? p.filter(x => x !== m.id) : [...p, m.id])}
+                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 10, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", textAlign: "left",
+                        border: `1.5px solid ${on ? "#0b315f" : "#e5e7eb"}`,
+                        background: on ? "#eef3f8" : "white", color: on ? "#0b315f" : "#94a3b8" }}>
+                      <span style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${on ? "#0b315f" : "#d1d5db"}`, background: on ? "#0b315f" : "white", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 10, color: "white" }}>{on ? "✓" : ""}</span>
+                      {m.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <button type="button" onClick={() => setPuPermisos(puPermisos.length === MODULOS_CTRL.length ? [] : MODULOS_CTRL.map(m => m.id))}
+                style={{ marginTop: 8, fontSize: 11, fontWeight: 600, color: "#64748b", background: "transparent", border: "none", cursor: "pointer", padding: 0, fontFamily: "inherit" }}>
+                {puPermisos.length === MODULOS_CTRL.length ? "✕ Quitar todos" : "✓ Seleccionar todos"}
+              </button>
+            </div>
+
+            {puErr && <p style={{ fontSize: 12, color: "#dc2626", background: "#fef2f2", padding: "8px 12px", borderRadius: 8, margin: "0 0 14px" }}>⚠ {puErr}</p>}
+
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", paddingTop: 16, borderTop: "1px solid #f1f5f9" }}>
+              <button onClick={() => { setModalPU(false); resetPUForm(); }} style={{ padding: "9px 22px", borderRadius: 10, border: "1px solid #e5e7eb", background: "white", fontSize: 13, fontWeight: 600, cursor: "pointer", color: "#374151" }}>Cancelar</button>
+              <button onClick={guardarPU} disabled={puLoad}
+                style={{ padding: "9px 22px", borderRadius: 10, border: "none", background: puLoad ? "#94a3b8" : "#0b315f", color: "white", fontSize: 13, fontWeight: 700, cursor: puLoad ? "not-allowed" : "pointer" }}>
+                {puLoad ? "Guardando..." : editPU ? "Actualizar usuario" : "Crear usuario"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <main style={{ padding: "28px 24px", maxWidth: 1320, margin: "0 auto", fontFamily: "system-ui,-apple-system,sans-serif", color: "#0f172a" }}>
 
         {/* ── HEADER ── */}
@@ -815,9 +1112,10 @@ export default function ClientesPage() {
         {/* ── TABS ── */}
         <div style={{ display: "flex", gap: 4, marginBottom: 24, background: "#f8fafc", borderRadius: 12, padding: 4, width: "fit-content" }}>
           {([
-            { key: "clientes",     label: "Clientes",    count: total },
-            { key: "solicitudes",  label: "Solicitudes", count: pendienteCount },
-          ] as { key: Tab; label: string; count: number }[]).map(t => (
+            { key: "clientes",     label: "Clientes",       count: total,          badge: false },
+            { key: "solicitudes",  label: "Solicitudes",    count: pendienteCount, badge: true  },
+            { key: "acceso",       label: "Acceso Portal",  count: 0,              badge: false },
+          ] as { key: Tab; label: string; count: number; badge: boolean }[]).map(t => (
             <button key={t.key} onClick={() => setTab(t.key)}
               style={{ padding: "8px 20px", borderRadius: 9, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, transition: "all .15s",
                 background: tab === t.key ? "white" : "transparent",
@@ -825,7 +1123,7 @@ export default function ClientesPage() {
                 boxShadow: tab === t.key ? "0 1px 4px rgba(0,0,0,.08)" : "none",
                 display: "flex", alignItems: "center", gap: 8 }}>
               {t.label}
-              {t.key === "solicitudes" && t.count > 0 && (
+              {t.badge && t.count > 0 && (
                 <span style={{ background: "#ef4444", color: "white", borderRadius: 10, fontSize: 11, fontWeight: 700, padding: "1px 7px", minWidth: 20, textAlign: "center" }}>{t.count}</span>
               )}
             </button>
@@ -1407,6 +1705,175 @@ export default function ClientesPage() {
             </div>
           )}
         </>)}
+
+        {/* ════════════════════════════════════
+            ACCESO PORTAL TAB
+        ════════════════════════════════════ */}
+        {tab === "acceso" && (
+          <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 20, alignItems: "start" }}>
+
+            {/* ── Panel izquierdo: lista de clientes ── */}
+            <div style={{ background: "white", borderRadius: 18, border: "1px solid #e5e7eb", boxShadow: "0 2px 12px rgba(0,0,0,.04)", overflow: "hidden" }}>
+              <div style={{ padding: "16px 16px 12px", borderBottom: "1px solid #f1f5f9" }}>
+                <p style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".07em", color: "#94a3b8", margin: "0 0 10px" }}>Seleccionar cliente</p>
+                <div style={{ position: "relative" }}>
+                  <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: "#94a3b8" }}>🔍</span>
+                  <input style={{ width: "100%", boxSizing: "border-box", padding: "8px 10px 8px 32px", border: "1px solid #e5e7eb", borderRadius: 9, fontSize: 13, outline: "none" }}
+                    placeholder="Buscar cliente..." value={busqAcceso} onChange={e => setBusqAcceso(e.target.value)} />
+                </div>
+              </div>
+              <div style={{ maxHeight: 540, overflowY: "auto" }}>
+                {clientes
+                  .filter(c => {
+                    const q = busqAcceso.toLowerCase();
+                    return !q || c.nombre.toLowerCase().includes(q) || (c.empresa||"").toLowerCase().includes(q) || (c.ruc||"").includes(q);
+                  })
+                  .map(c => {
+                    const display = c.tipo === "b2b" ? (c.empresa || c.nombre) : c.nombre;
+                    const sel = accesoCliente?.id === c.id;
+                    return (
+                      <div key={c.id} onClick={() => seleccionarClienteAcceso(c)}
+                        style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer", transition: "background .12s",
+                          background: sel ? "#eef3f8" : "white",
+                          borderLeft: sel ? "3px solid #0b315f" : "3px solid transparent",
+                          borderBottom: "1px solid #f8fafc" }}>
+                        <div style={{ width: 36, height: 36, borderRadius: 10, background: sel ? "#0b315f" : avatarBg(display), display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontSize: 11, fontWeight: 800, flexShrink: 0 }}>{iniciales(display)}</div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <p style={{ fontWeight: 700, fontSize: 12, color: sel ? "#0b315f" : "#0f172a", margin: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{display}</p>
+                          <p style={{ fontSize: 10, color: "#94a3b8", margin: 0 }}>{c.tipo === "b2b" ? (c.ruc ? `RUC ${c.ruc}` : "B2B") : (c.dni ? `DNI ${c.dni}` : "B2C")}</p>
+                        </div>
+                        <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 7px", borderRadius: 8, background: c.estado === "activo" ? "#dcfce7" : "#f3f4f6", color: c.estado === "activo" ? "#166534" : "#6b7280", flexShrink: 0 }}>{c.estado === "activo" ? "Activo" : c.estado}</span>
+                      </div>
+                    );
+                  })
+                }
+                {clientes.length === 0 && (
+                  <div style={{ padding: 32, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Sin clientes registrados</div>
+                )}
+              </div>
+            </div>
+
+            {/* ── Panel derecho: usuarios del portal ── */}
+            {!accesoCliente ? (
+              <div style={{ background: "white", borderRadius: 18, border: "1px solid #e5e7eb", padding: "56px 32px", textAlign: "center", color: "#94a3b8" }}>
+                <div style={{ fontSize: 42, marginBottom: 14 }}>🔐</div>
+                <p style={{ fontWeight: 700, fontSize: 15, color: "#475569", margin: "0 0 6px" }}>Selecciona un cliente</p>
+                <p style={{ fontSize: 13, margin: 0 }}>Elige un cliente de la lista para gestionar sus accesos al portal</p>
+              </div>
+            ) : (
+              <div style={{ background: "white", borderRadius: 18, border: "1px solid #e5e7eb", boxShadow: "0 2px 12px rgba(0,0,0,.04)", overflow: "hidden" }}>
+                {/* Header panel */}
+                <div style={{ padding: "18px 22px", borderBottom: "1px solid #f1f5f9", display: "flex", alignItems: "center", gap: 14 }}>
+                  <div style={{ width: 44, height: 44, borderRadius: 13, background: avatarBg(accesoCliente.empresa || accesoCliente.nombre), display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontSize: 14, fontWeight: 800, flexShrink: 0 }}>
+                    {iniciales(accesoCliente.empresa || accesoCliente.nombre)}
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <h3 style={{ fontWeight: 800, fontSize: 16, color: "#0f172a", margin: 0 }}>{accesoCliente.empresa || accesoCliente.nombre}</h3>
+                    <p style={{ fontSize: 12, color: "#94a3b8", margin: "2px 0 0" }}>
+                      {accesoCliente.ruc ? `RUC ${accesoCliente.ruc} · ` : ""}{portalUsers.length} usuario{portalUsers.length !== 1 ? "s" : ""} configurado{portalUsers.length !== 1 ? "s" : ""}
+                    </p>
+                  </div>
+                  <button onClick={() => { resetPUForm(); setModalPU(true); }}
+                    style={{ padding: "9px 18px", borderRadius: 10, border: "none", background: "#0b315f", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                    + Nuevo usuario
+                  </button>
+                  <button onClick={() => cargarPortalUsers(accesoCliente.id)} title="Recargar"
+                    style={{ padding: "9px 12px", borderRadius: 10, border: "1px solid #e5e7eb", background: "white", fontSize: 14, cursor: "pointer", color: "#64748b" }}>↻</button>
+                </div>
+
+                {/* Info URL */}
+                <div style={{ padding: "10px 22px", background: "#f0fdf4", borderBottom: "1px solid #dcfce7", display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 11, color: "#166534", fontWeight: 600 }}>🔗 Portal de acceso:</span>
+                  <span style={{ fontSize: 11, fontFamily: "monospace", color: "#166534" }}>/cliente</span>
+                  <span style={{ fontSize: 11, color: "#86efac" }}>· Login con DNI + Contraseña + RUC de empresa</span>
+                </div>
+
+                {/* Lista de usuarios */}
+                {loadingPU ? (
+                  <div style={{ padding: 48, textAlign: "center", color: "#94a3b8" }}>
+                    <div style={{ width: 26, height: 26, border: "3px solid #e5e7eb", borderTopColor: "#0b315f", borderRadius: "50%", margin: "0 auto 12px", animation: "spin 1s linear infinite" }} />
+                    Cargando usuarios...
+                  </div>
+                ) : portalUsers.length === 0 ? (
+                  <div style={{ padding: "52px 24px", textAlign: "center", color: "#94a3b8" }}>
+                    <div style={{ fontSize: 36, marginBottom: 12 }}>👤</div>
+                    <p style={{ fontWeight: 700, fontSize: 14, color: "#475569", margin: "0 0 6px" }}>Sin usuarios configurados</p>
+                    <p style={{ fontSize: 12, margin: "0 0 20px" }}>Este cliente aún no tiene acceso al portal</p>
+                    <button onClick={() => { resetPUForm(); setModalPU(true); }}
+                      style={{ padding: "9px 20px", borderRadius: 10, border: "none", background: "#0b315f", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                      + Crear primer usuario
+                    </button>
+                  </div>
+                ) : (
+                  <div>
+                    {/* Tabla header */}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 100px 80px 90px 130px", gap: 0, padding: "10px 22px", background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                      {["Usuario","Rol","Estado","Módulos","Acciones"].map(h => (
+                        <p key={h} style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "#64748b", margin: 0 }}>{h}</p>
+                      ))}
+                    </div>
+
+                    {portalUsers.map(u => (
+                      <div key={u.id} style={{ display: "grid", gridTemplateColumns: "1fr 100px 80px 90px 130px", gap: 0, padding: "14px 22px", borderBottom: "1px solid #f1f5f9", alignItems: "center" }}
+                        className="row-hover">
+                        {/* Usuario info */}
+                        <div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <div style={{ width: 34, height: 34, borderRadius: 9, background: u.activo ? avatarBg(u.nombre) : "#e5e7eb", display: "flex", alignItems: "center", justifyContent: "center", color: u.activo ? "white" : "#9ca3af", fontSize: 10, fontWeight: 800, flexShrink: 0 }}>{iniciales(u.nombre)}</div>
+                            <div>
+                              <p style={{ fontWeight: 700, fontSize: 13, color: u.activo ? "#0f172a" : "#94a3b8", margin: 0 }}>{u.nombre}</p>
+                              <p style={{ fontSize: 11, color: "#94a3b8", margin: 0, fontFamily: "monospace" }}>DNI: {u.dni}{u.email ? ` · ${u.email}` : ""}</p>
+                              {u.cargo && <p style={{ fontSize: 11, color: "#94a3b8", margin: 0 }}>{u.cargo}</p>}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Rol */}
+                        <div>
+                          <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 9px", borderRadius: 8,
+                            background: u.rol === "admin" ? "#eef3f8" : "#f0fdf4",
+                            color: u.rol === "admin" ? "#0b315f" : "#166534" }}>
+                            {u.rol === "admin" ? "Admin" : "Visor"}
+                          </span>
+                        </div>
+
+                        {/* Estado toggle */}
+                        <div>
+                          <button onClick={() => togglePUActivo(u.id, u.activo)}
+                            style={{ fontSize: 11, fontWeight: 700, padding: "4px 10px", borderRadius: 8, border: "none", cursor: "pointer",
+                              background: u.activo ? "#dcfce7" : "#fee2e2",
+                              color: u.activo ? "#166534" : "#991b1b" }}>
+                            {u.activo ? "Activo" : "Inactivo"}
+                          </button>
+                        </div>
+
+                        {/* Módulos count */}
+                        <div>
+                          <span style={{ fontSize: 11, color: "#64748b" }}>
+                            {u.modulos_permitidos === null ? "Todos" : `${u.modulos_permitidos.length}/${MODULOS_CTRL.length}`}
+                          </span>
+                        </div>
+
+                        {/* Acciones */}
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button className="act-btn" onClick={() => abrirEditarPU(u)}
+                            style={{ padding: "5px 12px", borderRadius: 8, border: "1px solid #e5e7eb", background: "white", fontSize: 11, fontWeight: 600, cursor: "pointer", color: "#374151" }}>Editar</button>
+                          <button className="del-btn" onClick={() => setToDeletePU({ id: u.id, nombre: u.nombre })}
+                            style={{ padding: "5px 10px", borderRadius: 8, border: "1px solid #fecaca", background: "white", fontSize: 11, fontWeight: 600, cursor: "pointer", color: "#dc2626" }}>✕</button>
+                        </div>
+                      </div>
+                    ))}
+
+                    <div style={{ padding: "10px 22px", borderTop: "1px solid #f1f5f9", fontSize: 11, color: "#94a3b8", display: "flex", justifyContent: "space-between" }}>
+                      <span>{portalUsers.filter(u => u.activo).length} activo{portalUsers.filter(u => u.activo).length !== 1 ? "s" : ""} · {portalUsers.filter(u => !u.activo).length} inactivo{portalUsers.filter(u => !u.activo).length !== 1 ? "s" : ""}</span>
+                      <span>Alta: {fmtDate(portalUsers[0]?.created_at)}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
       </main>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>

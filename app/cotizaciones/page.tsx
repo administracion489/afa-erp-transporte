@@ -2,14 +2,15 @@
 import React, { useEffect, useState, useMemo, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 
+type FechaMultidia={dia:number;fecha:string;hora_ida:string;hora_fin:string;tipo_noche:"pernocte"|"cochera"|"";destino_nombre:string;destino_lat:string;destino_lng:string;};
 type ParamCosto={tipo_vehiculo:string;nombre:string;capacidad:number;activo:boolean;icono:string|null;grupo_vehiculo:string|null;euronorm:string|null;usa_urea:boolean;consumo_urea_pct:number|null;tipo_combustible_1:string;rendimiento_1:number;pct_uso_1:number;tipo_combustible_2:string|null;rendimiento_2:number|null;pct_uso_2:number|null;n_neumaticos:number;costo_neumatico:number;vida_neumatico_km:number;mantenimiento_km:number;valor_compra:number;residual_pct:number;vida_util_anios:number;km_anio:number;seguro_anual:number;soat_anual:number;revision_semestral:number;permisos_anual:number;otros_fijos_mensual:number;conductor_dia:number;};
 type EstadoCot="borrador"|"pendiente"|"enviado"|"aprobado"|"rechazado";
 type ModoServ="eventual"|"fijo";
 type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;descuento_pct:number;};
 type ConsidCot={incluye:string[];no_incluye:string[];generales:string[];};
 type Cliente={id:number;nombre:string;empresa?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
-type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;};
-type EmpresaPerfilPDF={nombre:string|null;razon_social:string|null;ruc:string|null;logo_url:string|null;telefono:string|null;email:string|null;direccion:string|null;color_primario:string|null;};
+type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;};
+type EmpresaPerfilPDF={nombre:string|null;razon_social:string|null;ruc:string|null;logo_url:string|null;telefono:string|null;email:string|null;direccion:string|null;color_primario:string|null;web:string|null;};
 type CotPlantillaConfig={id:string;color_primario:string;color_secundario:string;color_acento:string;titulo_documento:string;subtitulo:string|null;mensaje_cierre:string|null;mostrar_logo:boolean;mostrar_fotos_vehiculo:boolean;mostrar_itinerario:boolean;mostrar_precio_pax:boolean;mostrar_cuentas_bancarias:boolean;mostrar_firma:boolean;condiciones_incluye:string[]|null;condiciones_no_incluye:string[]|null;condiciones_generales:string[]|null;banco_1_nombre:string|null;banco_1_cuenta:string|null;banco_1_cci:string|null;banco_2_nombre:string|null;banco_2_cuenta:string|null;banco_2_cci:string|null;banco_3_nombre:string|null;banco_3_cuenta:string|null;banco_3_cci:string|null;usar_bancos_propios:boolean;idioma:string;};
 type ParadaTP={id:string;tipo:"inicio"|"intermedia"|"destino";nombre:string;direccion:string;lat:string;lng:string;hora:string;};
 type Tarifa={id:number;origen:string;destino:string;tipo_vehiculo:string;equipamiento:string;tipo_servicio:string;modo:string;precio:number;moneda:string;confidencial:boolean;incluye_guia:boolean;incluye_peajes:boolean;incluye_alimentacion:boolean;notas:string|null;};
@@ -24,7 +25,7 @@ const ESTADO_CFG:Record<EstadoCot,{label:string;bg:string;color:string}>={borrad
 const TRANSICIONES:Record<EstadoCot,EstadoCot[]>={borrador:["pendiente"],pendiente:["enviado"],enviado:["aprobado","rechazado"],aprobado:[],rechazado:["pendiente"]};
 const TIPOS_APROBACION=["Operación bancaria","Orden de compra","Orden de servicio","Correo de confirmación","Contrato firmado"];
 const ITEM_VACIO:ItemCot={descripcion:"",dias:1,cantidad:1,precio_unit:0,descuento_pct:0};
-const FORM0={cliente_id:"",origen:"",destino:"",km:"",costo_estimado:"",estado:"pendiente" as EstadoCot,numero_cotizacion:"",atencion:"",asunto:"",punto_retorno:"",fecha_servicio:"",hora_ida:"",hora_retorno:"",descuento_pct:"0",tipo_vehiculo:"",equipamiento:"full_equipo",vehiculo_flota_id:"",vehiculo_tercero_id:"",modo_servicio:"eventual" as ModoServ,tipo_servicio:"solo_ida",dias_servicio:"1",horas_servicio:"8",pernocte_costo:"0",precio_dia:"",incluye_igv:true};
+const FORM0={cliente_id:"",origen:"",destino:"",km:"",costo_estimado:"",estado:"pendiente" as EstadoCot,numero_cotizacion:"",atencion:"",asunto:"",punto_retorno:"",fecha_servicio:"",hora_ida:"",hora_retorno:"",descuento_pct:"0",tipo_vehiculo:"",equipamiento:"full_equipo",vehiculo_flota_id:"",vehiculo_tercero_id:"",modo_servicio:"eventual" as ModoServ,tipo_servicio:"solo_ida",dias_servicio:"1",horas_servicio:"8",pernocte_costo:"0",precio_dia:"",incluye_igv:true,itinerario_texto:""};
 
 const fmtS=(n:number)=>`S/ ${n.toLocaleString("es-PE",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 const fmtF=(f:string|null)=>f?new Date(f+"T00:00:00").toLocaleDateString("es-PE",{day:"2-digit",month:"2-digit",year:"numeric"}):"—";
@@ -224,42 +225,45 @@ function ModalPlantilla({cot,plantillaActual,onElegir,onGenerar,onCancelar}:{cot
 }
 
 // ── CardParada: FUERA de ParadasBuilder para evitar pérdida de foco al escribir ──
-function CardParada({ p, lbl, col, onUpd }: {
+function CardParada({ p, lbl, col, onUpd, onDel, mapsLoaded }: {
   p: ParadaTP; lbl: string; col: string;
   onUpd: (id: string, k: keyof ParadaTP, v: string) => void;
+  onDel?: () => void;
+  mapsLoaded?: boolean;
 }) {
-  const inp = "w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#0b315f]";
+  const inp = "w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#0b315f] bg-white";
   return (
     <div className="bg-white rounded-2xl border-2 overflow-hidden" style={{ borderColor: col }}>
-      <div className="px-4 py-2.5" style={{ background: col }}>
+      <div className="px-4 py-2.5 flex items-center justify-between" style={{ background: col }}>
         <span className="text-white font-black text-sm">{lbl}</span>
+        {onDel && <button type="button" onClick={onDel} className="text-white/60 hover:text-white font-bold text-xs leading-none px-1">✕</button>}
       </div>
-      <div className="p-4 space-y-2">
+      <div className="p-4 grid gap-3" style={{ gridTemplateColumns: "1fr 120px" }}>
         <div>
-          <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Nombre *</label>
-          <input className={inp} value={p.nombre} onChange={e => onUpd(p.id, "nombre", e.target.value)} />
+          <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Lugar</label>
+          {p.tipo === "intermedia" && mapsLoaded ? (
+            <PlacesInputCot placeholder="Buscar parada…" value={p.nombre} mapsLoaded={mapsLoaded}
+              onChange={v => onUpd(p.id, "nombre", v)}
+              onSelect={r => { onUpd(p.id, "nombre", r.address); onUpd(p.id, "lat", String(r.lat)); onUpd(p.id, "lng", String(r.lng)); }} />
+          ) : (
+            <input className={inp} value={p.nombre} onChange={e => onUpd(p.id, "nombre", e.target.value)} placeholder="—" />
+          )}
+          {p.lat && p.lng && <p className="text-[9px] text-gray-300 mt-1 font-mono">📍 {Number(p.lat).toFixed(5)}, {Number(p.lng).toFixed(5)}</p>}
         </div>
-        <div className="grid grid-cols-3 gap-2">
-          <div>
-            <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Lat</label>
-            <input className={inp + " font-mono text-xs"} value={p.lat} onChange={e => onUpd(p.id, "lat", e.target.value)} />
-          </div>
-          <div>
-            <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Lng</label>
-            <input className={inp + " font-mono text-xs"} value={p.lng} onChange={e => onUpd(p.id, "lng", e.target.value)} />
-          </div>
-          <div>
-            <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Hora</label>
-            <input type="time" className={inp} value={p.hora} onChange={e => onUpd(p.id, "hora", e.target.value)} />
-          </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Hora</label>
+          <input type="time" className={inp} value={p.hora} onChange={e => onUpd(p.id, "hora", e.target.value)} />
         </div>
       </div>
     </div>
   );
 }
 
-function ParadasBuilder({ paradas, onChange, tipo = "solo_ida" }: {
+function ParadasBuilder({ paradas, onChange, tipo = "solo_ida", mapsLoaded, origenNombre, destinoNombre, origenLat, origenLng, destinoLat, destinoLng, horaIda, horaRetorno }: {
   paradas: ParadaTP[]; onChange: (p: ParadaTP[]) => void; tipo?: string;
+  mapsLoaded?: boolean; origenNombre?: string; destinoNombre?: string;
+  origenLat?: string; origenLng?: string; destinoLat?: string; destinoLng?: string;
+  horaIda?: string; horaRetorno?: string;
 }) {
   const nId = () => Math.random().toString(36).slice(2, 8);
   const upd = (id: string, k: keyof ParadaTP, v: string) =>
@@ -272,51 +276,135 @@ function ParadasBuilder({ paradas, onChange, tipo = "solo_ida" }: {
     const idx = paradas.findIndex(p => p.tipo === "destino");
     const a = [...paradas]; a.splice(idx < 0 ? a.length : idx, 0, n); onChange(a);
   };
-  const inp = "w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#0b315f]";
   const esTP = tipo === "transporte_personal" || tipo === "fijo_multiparada";
 
   if (paradas.length === 0) return (
-    <div className="rounded-2xl border-2 border-dashed p-8 text-center" style={{ borderColor: "#be185d" }}>
-      <p className="text-3xl mb-2">🚏</p>
-      <p className="font-bold text-gray-700 mb-3">{esTP ? "Define los paraderos" : "Define los puntos"}</p>
-      <button onClick={() => onChange([
-        { id: nId(), tipo: "inicio",  nombre: "", direccion: "", lat: "", lng: "", hora: "" },
-        { id: nId(), tipo: "destino", nombre: "", direccion: "", lat: "", lng: "", hora: "" },
-      ])} className="px-6 py-2.5 rounded-xl font-bold text-sm text-white" style={{ background: "#0b315f" }}>
-        🗺️ Definir puntos
+    <div className="rounded-2xl border-2 border-dashed p-5 text-center" style={{ borderColor: "#0b315f33" }}>
+      <p className="text-2xl mb-1.5">🗺️</p>
+      {(origenNombre || destinoNombre) && (
+        <p className="text-xs text-gray-400 mb-3 px-4 truncate">{origenNombre||"—"} → {destinoNombre||"—"}</p>
+      )}
+      <button type="button" onClick={() => onChange([
+        { id: nId(), tipo: "inicio",  nombre: origenNombre||"", direccion: "", lat: origenLat||"", lng: origenLng||"", hora: horaIda||"" },
+        { id: nId(), tipo: "destino", nombre: destinoNombre||"", direccion: "", lat: destinoLat||"", lng: destinoLng||"", hora: horaRetorno||"" },
+      ])} className="px-6 py-2.5 rounded-xl font-bold text-sm text-white transition-all hover:opacity-90" style={{ background: "#0b315f" }}>
+        🚏 {esTP ? "Definir paraderos" : "Definir puntos del recorrido"}
       </button>
     </div>
   );
 
   return (
     <div className="space-y-3">
-      {inicio && <CardParada p={inicio} lbl={esTP ? "🟢 Primer Paradero" : "🟢 Inicio"} col="#16a34a" onUpd={upd} />}
+      {inicio && <CardParada p={inicio} lbl={esTP ? "🟢 Primer Paradero" : "🟢 Inicio"} col="#16a34a" onUpd={upd} mapsLoaded={mapsLoaded} />}
       {meds.map((p, i) => (
-        <div key={p.id} className="bg-white rounded-2xl border-2 overflow-hidden" style={{ borderColor: "#0b315f" }}>
-          <div className="px-4 py-2.5 flex items-center justify-between" style={{ background: "#0b315f" }}>
-            <span className="text-white font-black text-sm">📍 {esTP ? "Paradero" : "Parada"} {i + 1}</span>
-            <button onClick={() => onChange(paradas.filter(x => x.id !== p.id))} className="text-white opacity-60 hover:opacity-100 font-bold">✕</button>
-          </div>
-          <div className="p-4 space-y-2">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Nombre</label>
-                <input className={inp} value={p.nombre} onChange={e => upd(p.id, "nombre", e.target.value)} />
-              </div>
-              <div>
-                <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Hora</label>
-                <input type="time" className={inp} value={p.hora} onChange={e => upd(p.id, "hora", e.target.value)} />
-              </div>
-            </div>
-          </div>
-        </div>
+        <CardParada key={p.id} p={p} lbl={`📍 ${esTP ? "Paradero" : "Parada"} ${i + 1}`} col="#0b315f" onUpd={upd} onDel={() => onChange(paradas.filter(x => x.id !== p.id))} mapsLoaded={mapsLoaded} />
       ))}
-      <button onClick={addMed} className="w-full py-2.5 rounded-xl border-2 border-dashed font-bold text-sm hover:bg-blue-50" style={{ borderColor: "#0b315f", color: "#0b315f" }}>
-        + {esTP ? "Paradero" : "Parada intermedia"}
+      <button type="button" onClick={addMed} className="w-full py-2.5 rounded-xl border-2 border-dashed font-bold text-sm hover:bg-blue-50 transition-colors" style={{ borderColor: "#0b315f", color: "#0b315f" }}>
+        + {esTP ? "Paradero intermedio" : "Parada intermedia"}
       </button>
-      {fin && <CardParada p={fin} lbl={esTP ? "🔴 Último Paradero" : "🔴 Destino"} col="#dc2626" onUpd={upd} />}
+      {fin && <CardParada p={fin} lbl={esTP ? "🔴 Último Paradero" : "🔴 Destino"} col="#dc2626" onUpd={upd} mapsLoaded={mapsLoaded} />}
     </div>
   );
+}
+
+// ── Helpers para Anexo de Itinerario ──
+function formatItinerarioHtml(texto:string,cp:string,acento:string):string{
+  return texto.split('\n').map(l=>{
+    if(!l.trim())return'<div style="height:5px;"></div>';
+    if(/^d[iíI][aA]\s*\d+/i.test(l.trim()))
+      return`<div style="margin:16px 0 8px;padding:8px 14px;background:${cp}18;border-left:4px solid ${cp};border-radius:0 8px 8px 0;font-size:13px;font-weight:900;color:${cp};">${l}</div>`;
+    const m=l.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(.*)/);
+    if(m)return`<div style="display:flex;gap:12px;padding:5px 0;border-bottom:1px solid #f3f4f6;"><span style="font-size:10px;font-weight:900;color:${acento};min-width:42px;flex-shrink:0;padding-top:1px;">${m[1]}</span><span style="font-size:11px;">${m[2]}</span></div>`;
+    return`<p style="margin:4px 0;font-size:11px;">${l}</p>`;
+  }).join('');
+}
+const LOGO_DEFAULT="/logoafacotizacion-removebg-preview.png";
+
+function buildHeaderPDFHtml(logoUrl:string,cp:string,titulo:string,subtitulo:string):string{
+  return`<div class="pdf-header" style="background:${cp};display:flex;align-items:stretch;height:65px;">
+    <div style="background:white;border-radius:0 20px 20px 0;padding:8px 20px 8px 14px;display:flex;align-items:center;min-width:140px;max-width:160px;flex-shrink:0;">
+      <img src="${logoUrl}" style="max-height:46px;max-width:130px;object-fit:contain;"/>
+    </div>
+    <div style="flex:1;display:flex;align-items:center;justify-content:flex-end;padding:0 24px;">
+      <div style="text-align:right;">
+        <p style="font-size:16px;font-weight:900;color:white;margin:0;letter-spacing:.3px;">${titulo}</p>
+        <p style="font-size:9.5px;color:rgba(255,255,255,0.72);margin:3px 0 0;">${subtitulo}</p>
+      </div>
+    </div>
+  </div>`;
+}
+function buildFooterPDFHtml(cp:string,empDir:string,empTel:string,empEmail:string,empWeb:string):string{
+  return`<div class="pdf-footer" style="background:${cp};padding:9px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+    <span style="color:white;font-size:8.5px;">&#8962; Dir.: ${empDir}</span>
+    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
+    <span style="color:white;font-size:8.5px;">&#9990; ${empTel}</span>
+    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
+    <span style="color:white;font-size:8.5px;">&#9993; ${empEmail}</span>
+    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
+    <span style="color:white;font-size:8.5px;">&#9741; ${empWeb}</span>
+  </div>`;
+}
+const sharedCSS=(extraCss="")=>`@page{size:A4;margin:0}*{box-sizing:border-box}body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:11px;color:#1a1a1a;margin:0;padding:82px 15mm 55px;line-height:1.4}.pdf-header{position:fixed;top:0;left:0;right:0;z-index:100;}.pdf-footer{position:fixed;bottom:0;left:0;right:0;z-index:100;}.page-break{page-break-before:always}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}${extraCss}`;
+
+function buildAnexoHtml(cot:Cotizacion,nomCl:string,nCot:string,cp:string,acento:string):string{
+  const texto=(cot.itinerario_texto||'').trim();if(!texto)return'';
+  const itHtml=formatItinerarioHtml(texto,cp,acento);
+  const fechaStr=cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():'';
+  return`<div style="page-break-before:always;padding:82px 40px 20px;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid ${cp};padding-bottom:12px;margin-bottom:24px;">
+      <div>
+        <p style="font-size:9px;font-weight:900;text-transform:uppercase;color:${acento};letter-spacing:1.5px;margin:0 0 4px;">ANEXO 1</p>
+        <h2 style="font-size:20px;font-weight:900;color:${cp};margin:0;">PROGRAMA DETALLADO</h2>
+      </div>
+      <div style="text-align:right;">
+        <p style="font-size:10px;color:#6b7280;margin:0 0 2px;">N° ${nCot}</p>
+        <p style="font-size:12px;font-weight:800;color:${cp};margin:0;">${nomCl}</p>
+        ${fechaStr?`<p style="font-size:10px;color:#6b7280;margin:2px 0 0;">${fechaStr}</p>`:''}
+      </div>
+    </div>
+    <div>${itHtml}</div>
+  </div>`;
+}
+
+function buildCronogramaMultidiaPDF(cot:Cotizacion,cp:string):string{
+  const dias=cot.fechas_multidia_json;if(!dias?.length)return'';
+  const hasDestino=dias.some(d=>d.destino_nombre?.trim());
+  const rows=dias.map((d,i)=>{
+    const esUltimo=i===dias.length-1;
+    const fechaFmt=d.fecha?new Date(d.fecha+"T00:00:00").toLocaleDateString("es-PE",{weekday:"short",day:"numeric",month:"short",year:"numeric"}).toUpperCase():"—";
+    const horaFin=(d as any).hora_fin??(d as any).hora_retorno??"";
+    const tipoNoche=(d as any).tipo_noche??(horaFin?"":"pernocte");
+    let finLabel="";
+    if(esUltimo){finLabel=horaFin?`<b>⏰ ${horaFin}</b> <span style="color:#166534;font-size:9px;">✅ Retorno final</span>`:`<span style="color:#6b7280;font-size:9px;font-style:italic;">Por confirmar</span>`;}
+    else if(tipoNoche==="cochera"){finLabel=horaFin?`<b>⏰ ${horaFin}</b> <span style="color:#1d4ed8;font-size:9px;">🏠 Retorno cochera</span>`:`<span style="color:#1d4ed8;font-size:9px;">🏠 Retorno cochera</span>`;}
+    else{finLabel=horaFin?`<b>⏰ ${horaFin}</b> <span style="color:#b45309;font-size:9px;">🏨 Pernocte</span>`:`<span style="color:#b45309;font-size:9px;font-style:italic;">🏨 Pernocte</span>`;}
+    const origenNombre=i===0?cot.origen:(dias[i-1].destino_nombre||"—");
+    const destinoNombre=d.destino_nombre||"—";
+    const rutaLabel=hasDestino?`<span style="color:#374151;">${origenNombre}</span><span style="color:${cp};font-weight:900;"> → </span><span style="font-weight:700;">${destinoNombre}</span>`:"";
+    return`<tr style="border-bottom:1px solid #f3f4f6;">
+      <td style="text-align:center;font-weight:900;font-size:11px;color:${cp};padding:5px 8px;white-space:nowrap;">DÍA ${d.dia}</td>
+      <td style="padding:5px 8px;font-size:10px;font-weight:600;">${fechaFmt}</td>
+      ${hasDestino?`<td style="padding:5px 8px;font-size:10px;">${rutaLabel}</td>`:""}
+      <td style="text-align:center;padding:5px 8px;font-size:10px;">⏰ ${d.hora_ida||"—"}</td>
+      <td style="padding:5px 8px;font-size:10px;">${finLabel}</td>
+    </tr>`;
+  }).join("");
+  const colRuta=hasDestino?`<th style="padding:4px 8px;text-align:left;font-size:9px;font-weight:900;color:${cp};text-transform:uppercase;letter-spacing:.5px;">Ruta del día</th>`:"";
+  return`<div style="margin:12px 0 16px;background:#fafafa;border:1px solid ${cp}22;border-radius:10px;overflow:hidden;">
+    <div style="background:${cp}12;padding:8px 14px;border-bottom:1px solid ${cp}22;">
+      <p style="font-size:9px;font-weight:900;color:${cp};text-transform:uppercase;letter-spacing:.8px;margin:0;">📅 Cronograma del servicio — ${dias.length} días</p>
+    </div>
+    <table style="width:100%;border-collapse:collapse;">
+      <thead><tr style="background:${cp}08;">
+        <th style="padding:4px 8px;text-align:center;font-size:9px;font-weight:900;color:${cp};text-transform:uppercase;letter-spacing:.5px;">Día</th>
+        <th style="padding:4px 8px;text-align:left;font-size:9px;font-weight:900;color:${cp};text-transform:uppercase;letter-spacing:.5px;">Fecha</th>
+        ${colRuta}
+        <th style="padding:4px 8px;text-align:center;font-size:9px;font-weight:900;color:${cp};text-transform:uppercase;letter-spacing:.5px;">H. Salida</th>
+        <th style="padding:4px 8px;text-align:left;font-size:9px;font-weight:900;color:${cp};text-transform:uppercase;letter-spacing:.5px;">Fin del día</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
 }
 
 function generarPDFModerno(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculo:VehiculoFlota|undefined,repr:string,consid:ConsidCot,cfg:CotPlantillaConfig|null,empresa:EmpresaPerfilPDF|null){
@@ -325,9 +413,10 @@ function generarPDFModerno(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCo
   const nomCl=cliente?.tipo==="b2b"?(cliente.empresa||cliente.nombre):cliente?.nombre||"—";
   const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");
   const cp=cfg?.color_primario||"#1a1a2e"; const cs=cfg?.color_secundario||"#2f8ee9";
-  const logoUrl=empresa?.logo_url||"/logoafacotizacion.jpg";
+  const logoUrl=empresa?.logo_url||LOGO_DEFAULT;
   const empNombre=empresa?.nombre||"AFA Tours Peru S.A.C.";
   const empRuc=empresa?.ruc||"20602117091"; const empTel=empresa?.telefono||"966 707 225"; const empEmail=empresa?.email||"transporte@afatoursperu.com";
+  const empWeb=empresa?.web||"www.afatoursperu.com";
   const esFull=(vehiculo?.equipamiento||cot.equipamiento||"full_equipo")==="full_equipo";
   const descUnidad=vehiculo?.descripcion_unidad||(esFull?`Bus con capacidad para ${vehiculo?.capacidad_pasajeros||"—"} pasajeros, con A/C, sistema de audio, asientos reclinables, bodega y GPS.`:`Bus con capacidad para ${vehiculo?.capacidad_pasajeros||"—"} pasajeros, estándar, bodega y GPS.`);
   const fotosHtml=vehiculo&&(vehiculo.foto_externa_url||vehiculo.foto_interna_url)?`<div style="display:grid;grid-template-columns:${vehiculo.foto_externa_url&&vehiculo.foto_interna_url?"1fr 1fr":"1fr"};gap:12px;margin:16px 0;">${vehiculo.foto_externa_url?`<div style="border-radius:12px;overflow:hidden;height:200px;"><img src="${driveImg(vehiculo.foto_externa_url)}" style="width:100%;height:100%;object-fit:cover;"/></div>`:""}${vehiculo.foto_interna_url?`<div style="border-radius:12px;overflow:hidden;height:200px;"><img src="${driveImg(vehiculo.foto_interna_url)}" style="width:100%;height:100%;object-fit:cover;"/></div>`:""}</div>`:"";
@@ -336,19 +425,16 @@ function generarPDFModerno(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCo
   const noInc=(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<li style="margin:4px 0;font-size:10px;color:#333;">${i}</li>`).join("");
   const win=window.open("","_blank");if(!win)return;
   win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización N° ${nCot}</title>
-  <style>@page{size:A4;margin:0}*{box-sizing:border-box}body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:11px;color:#1a1a1a;margin:0}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style>
+  <style>${sharedCSS()}</style>
   </head><body>
-  <div style="background:${cp};padding:32px 40px 24px;display:flex;align-items:center;justify-content:space-between;">
-    <img src="${logoUrl}" style="height:52px;object-fit:contain;filter:brightness(0) invert(1);"/>
-    <div style="text-align:right;color:white;"><p style="font-size:22px;font-weight:900;margin:0;">${cfg?.titulo_documento||"PROPUESTA DE SERVICIO"}</p><p style="font-size:13px;opacity:0.7;margin:4px 0 0;">N° ${nCot} · ${new Date().toLocaleDateString("es-PE")}</p></div>
-  </div>
-  <div style="padding:28px 40px;background:white;">
+  ${buildHeaderPDFHtml(logoUrl,cp,cfg?.titulo_documento||"PROPUESTA DE SERVICIO",`N° ${nCot} · ${new Date().toLocaleDateString("es-PE")} · Válida 30 días`)}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
       <div style="background:#f8fafc;border-radius:12px;padding:16px;"><p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 8px;letter-spacing:.8px;">Cliente</p>
         <p style="font-weight:800;font-size:14px;margin:0;">${nomCl}</p><p style="color:#64748b;font-size:10px;margin:3px 0 0;">${cliente?.ruc?"RUC: "+cliente.ruc:cliente?.dni?"DNI: "+cliente.dni:""}${cot.atencion?" · "+cot.atencion:""}</p></div>
       <div style="background:#f8fafc;border-radius:12px;padding:16px;"><p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 8px;letter-spacing:.8px;">Servicio</p>
         <p style="font-weight:800;font-size:14px;margin:0;">${cot.origen} → ${cot.destino}</p><p style="color:#64748b;font-size:10px;margin:3px 0 0;">${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"Fecha a coordinar"}${cot.hora_ida?" · "+cot.hora_ida:""}</p></div>
     </div>
+    ${buildCronogramaMultidiaPDF(cot,cp)}
     ${fotosHtml}
     <div style="background:#f8fafc;border-radius:12px;padding:16px;margin-bottom:20px;">
       <p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 12px;letter-spacing:.8px;">Descripción de la unidad</p>
@@ -370,11 +456,8 @@ function generarPDFModerno(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCo
       <div><p style="font-weight:900;font-size:10px;color:#991b1b;text-transform:uppercase;margin:0 0 8px;">❌ No incluye</p><ul style="margin:0;padding-left:16px;">${noInc}</ul></div>
     </div>
     ${cfg?.mensaje_cierre?`<p style="text-align:center;color:#64748b;font-style:italic;font-size:11px;margin-bottom:24px;">${cfg.mensaje_cierre}</p>`:""}
-    <div style="background:${cp};border-radius:12px;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;margin-top:16px;">
-      <p style="color:white;font-weight:700;font-size:10px;margin:0;">${empNombre} · RUC ${empRuc}</p>
-      <p style="color:rgba(255,255,255,0.7);font-size:10px;margin:0;">📞 ${empTel} · ✉️ ${empEmail}</p>
-    </div>
-  </div>
+  ${buildAnexoHtml(cot,nomCl,nCot,cp,cs)}
+  ${buildFooterPDFHtml(cp,empresa?.direccion||"",empTel,empEmail,empWeb)}
   <script>window.onload=()=>window.print();</script></body></html>`);
   win.document.close();
 }
@@ -385,7 +468,7 @@ function generarPDFTuristico(cot:Cotizacion,cliente:Cliente|undefined,items:Item
   const nomCl=cliente?.tipo==="b2b"?(cliente.empresa||cliente.nombre):cliente?.nombre||"—";
   const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");
   const cp=cfg?.color_primario||"#b45309"; const cs=cfg?.color_secundario||"#d97706";
-  const logoUrl=empresa?.logo_url||"/logoafacotizacion.jpg";
+  const logoUrl=empresa?.logo_url||LOGO_DEFAULT;
   const empNombre=empresa?.nombre||"AFA Tours Peru S.A.C."; const empTel=empresa?.telefono||"966 707 225"; const empEmail=empresa?.email||"transporte@afatoursperu.com";
   const esFull=(vehiculo?.equipamiento||cot.equipamiento||"full_equipo")==="full_equipo";
   const descUnidad=vehiculo?.descripcion_unidad||(esFull?`Bus con capacidad para ${vehiculo?.capacidad_pasajeros||"—"} pasajeros, con A/C, sistema de audio, asientos reclinables, bodega y GPS.`:`Bus con capacidad para ${vehiculo?.capacidad_pasajeros||"—"} pasajeros, estándar, bodega y GPS.`);
@@ -394,24 +477,14 @@ function generarPDFTuristico(cot:Cotizacion,cliente:Cliente|undefined,items:Item
   const paradas=cot.paradas_json||[];const paradasHtml=paradas.length>0?`<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:14px;margin-bottom:16px;"><p style="font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;margin:0 0 10px;">🗺️ Itinerario de paradas</p>${paradas.map((p,i)=>`<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;"><div style="width:24px;height:24px;border-radius:50%;background:${cp};color:white;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;flex-shrink:0;">${i+1}</div><div><p style="font-weight:700;font-size:11px;margin:0;">${p.nombre||p.tipo}</p>${p.hora?`<p style="font-size:10px;color:#92400e;margin:1px 0 0;">🕐 ${p.hora}</p>`:""}</div></div>`).join("")}</div>`:""  ;
   const win=window.open("","_blank");if(!win)return;
   win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización Turística N° ${nCot}</title>
-  <style>@page{size:A4;margin:0}*{box-sizing:border-box}body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:11px;color:#1a1a1a;margin:0}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style>
+  <style>${sharedCSS()}</style>
   </head><body>
-  <div style="background:linear-gradient(135deg,${cp} 0%,${cs} 100%);padding:36px 40px 28px;position:relative;overflow:hidden;">
-    <div style="position:absolute;top:-20px;right:-20px;width:160px;height:160px;border-radius:50%;background:rgba(255,255,255,0.08);"></div>
-    <div style="display:flex;align-items:center;justify-content:space-between;position:relative;">
-      <img src="${logoUrl}" style="height:48px;object-fit:contain;filter:brightness(0) invert(1);"/>
-      <div style="text-align:right;color:white;"><p style="font-size:20px;font-weight:900;margin:0;">${cfg?.titulo_documento||"COTIZACIÓN TURÍSTICA"}</p><p style="font-size:12px;opacity:0.75;margin:4px 0 0;">N° ${nCot} · Válida 30 días</p></div>
-    </div>
-    <div style="margin-top:24px;background:rgba(255,255,255,0.15);border-radius:12px;padding:14px 18px;color:white;display:grid;grid-template-columns:1fr 1fr;">
-      <div><p style="font-size:10px;opacity:0.7;margin:0 0 2px;">CLIENTE</p><p style="font-weight:900;font-size:14px;margin:0;">${nomCl}</p></div>
-      <div style="text-align:right;"><p style="font-size:10px;opacity:0.7;margin:0 0 2px;">FECHA</p><p style="font-weight:700;font-size:12px;margin:0;">${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"A COORDINAR"}</p></div>
-    </div>
-  </div>
-  <div style="padding:24px 40px;">
+  ${buildHeaderPDFHtml(logoUrl,cp,cfg?.titulo_documento||"COTIZACIÓN TURÍSTICA",`N° ${nCot} · Válida 30 días`)}
     <div style="background:#fff7ed;border-left:4px solid ${cp};border-radius:0 10px 10px 0;padding:14px 18px;margin-bottom:18px;">
       <p style="font-weight:900;color:${cp};font-size:13px;margin:0 0 4px;">📍 ${cot.origen} → ${cot.destino}</p>
       <p style="color:#92400e;font-size:11px;margin:0;">${cot.hora_ida?"Salida: "+cot.hora_ida:""}${cot.km?" · "+cot.km+" km":""}</p>
     </div>
+    ${buildCronogramaMultidiaPDF(cot,cp)}
     ${fotosHtml}
     ${paradasHtml}
     <table style="width:100%;border-collapse:collapse;margin-bottom:18px;">
@@ -430,11 +503,8 @@ function generarPDFTuristico(cot:Cotizacion,cliente:Cliente|undefined,items:Item
       <div style="background:#fff5f5;border-radius:10px;padding:12px;"><p style="font-weight:900;font-size:10px;color:#991b1b;margin:0 0 6px;">❌ NO INCLUYE</p>${(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<p style="font-size:10px;color:#991b1b;margin:2px 0;">• ${i}</p>`).join("")}</div>
     </div>
     ${cfg?.mensaje_cierre?`<p style="text-align:center;color:${cp};font-weight:700;font-size:12px;margin:16px 0;padding:12px;background:#fff7ed;border-radius:10px;">${cfg.mensaje_cierre}</p>`:""}
-    <div style="background:linear-gradient(90deg,${cp},${cs});border-radius:10px;padding:12px 18px;display:flex;justify-content:space-between;align-items:center;margin-top:12px;">
-      <p style="color:white;font-weight:700;font-size:10px;margin:0;">${empNombre}</p>
-      <p style="color:rgba(255,255,255,0.8);font-size:10px;margin:0;">📞 ${empTel} · ✉️ ${empEmail}</p>
-    </div>
-  </div>
+  ${buildAnexoHtml(cot,nomCl,nCot,cp,cs)}
+  ${buildFooterPDFHtml(cp,empresa?.direccion||"",empTel,empEmail,empresa?.web||"www.afatoursperu.com")}
   <script>window.onload=()=>window.print();</script></body></html>`);
   win.document.close();
 }
@@ -445,7 +515,7 @@ function generarPDFEjecutivo(cot:Cotizacion,cliente:Cliente|undefined,items:Item
   const nomCl=cliente?.tipo==="b2b"?(cliente.empresa||cliente.nombre):cliente?.nombre||"—";
   const nCot=cot.numero_cotizacion||String(cot.id).padStart(5,"0");
   const cp=cfg?.color_primario||"#1a1a1a"; const acento=cfg?.color_acento||"#C8A24B";
-  const logoUrl=empresa?.logo_url||"/logoafacotizacion.jpg";
+  const logoUrl=empresa?.logo_url||LOGO_DEFAULT;
   const empNombre=empresa?.nombre||"AFA Tours Peru S.A.C."; const empRuc=empresa?.ruc||"20602117091"; const empTel=empresa?.telefono||"966 707 225"; const empEmail=empresa?.email||"transporte@afatoursperu.com";
   const esFull=(vehiculo?.equipamiento||cot.equipamiento||"full_equipo")==="full_equipo";
   const descUnidad=vehiculo?.descripcion_unidad||(esFull?`Bus con capacidad para ${vehiculo?.capacidad_pasajeros||"—"} pasajeros, con A/C, sistema de audio, asientos reclinables, bodega y GPS.`:`Bus con capacidad para ${vehiculo?.capacidad_pasajeros||"—"} pasajeros, estándar, bodega y GPS.`);
@@ -453,15 +523,9 @@ function generarPDFEjecutivo(cot:Cotizacion,cliente:Cliente|undefined,items:Item
   const filasItems=items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return`<tr><td style="padding:10px 14px;border-bottom:1px solid #f0f0f0;font-size:10.5px;">${it.descripcion}</td><td style="padding:10px 14px;text-align:center;border-bottom:1px solid #f0f0f0;font-size:10px;color:#6b7280;">${it.dias}d × ${it.cantidad}</td><td style="padding:10px 14px;text-align:right;border-bottom:1px solid #f0f0f0;font-weight:800;color:${cp};">S/ ${tf.toLocaleString("es-PE",{minimumFractionDigits:2})}</td><td style="padding:10px 14px;text-align:center;border-bottom:1px solid #f0f0f0;color:#6b7280;font-style:italic;font-size:9.5px;">USD ${(tf/3.7).toFixed(2)}</td></tr>`;}).join("");
   const win=window.open("","_blank");if(!win)return;
   win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Service Quotation N° ${nCot}</title>
-  <style>@page{size:A4;margin:18mm 15mm}*{box-sizing:border-box}body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:11px;color:#1a1a1a;margin:0;line-height:1.5}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style>
+  <style>${sharedCSS()}</style>
   </head><body>
-  <div style="display:flex;align-items:flex-start;justify-content:space-between;padding-bottom:16px;border-bottom:3px solid ${acento};margin-bottom:20px;">
-    <img src="${logoUrl}" style="height:52px;object-fit:contain;"/>
-    <div style="text-align:right;">
-      <p style="font-size:20px;font-weight:900;color:${cp};margin:0;">${cfg?.titulo_documento||"SERVICE QUOTATION / COTIZACIÓN"}</p>
-      <p style="color:#6b7280;font-size:11px;margin:4px 0 0;">N° ${nCot} · ${new Date().toLocaleDateString("es-PE")} · Valid 30 days / Válida 30 días</p>
-    </div>
-  </div>
+  ${buildHeaderPDFHtml(logoUrl,cp,cfg?.titulo_documento||"SERVICE QUOTATION / COTIZACIÓN",`N° ${nCot} · ${new Date().toLocaleDateString("es-PE")} · Valid 30 days`)}
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
     <div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;">
       <p style="font-size:9px;font-weight:900;text-transform:uppercase;color:${acento};letter-spacing:1px;margin:0 0 8px;">CLIENT / CLIENTE</p>
@@ -484,6 +548,7 @@ function generarPDFEjecutivo(cot:Cotizacion,cliente:Cliente|undefined,items:Item
       <div><p style="font-size:9px;color:#6b7280;margin:0;">Date / Fecha</p><p style="font-weight:700;font-size:11px;margin:2px 0 0;">${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"2-digit",month:"2-digit",year:"numeric"}):"—"}</p></div>
     </div>
   </div>
+  ${buildCronogramaMultidiaPDF(cot,cp)}
   ${fotosHtml}
   <div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;margin-bottom:20px;">
     <p style="font-size:9px;font-weight:900;text-transform:uppercase;color:${acento};letter-spacing:1px;margin:0 0 8px;">UNIT / UNIDAD</p>
@@ -505,10 +570,8 @@ function generarPDFEjecutivo(cot:Cotizacion,cliente:Cliente|undefined,items:Item
     <div><p style="font-size:9px;font-weight:900;color:#991b1b;text-transform:uppercase;letter-spacing:.5px;margin:0 0 6px;">Not included / No incluye</p>${(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<p style="font-size:10px;color:#991b1b;margin:3px 0;">✗ ${i}</p>`).join("")}</div>
   </div>
   ${cfg?.mensaje_cierre?`<p style="text-align:center;color:#6b7280;font-style:italic;font-size:11px;margin-bottom:20px;border-top:1px solid #e5e7eb;padding-top:14px;">${cfg.mensaje_cierre}</p>`:""}
-  <div style="border-top:3px solid ${acento};padding-top:10px;display:flex;justify-content:space-between;align-items:center;">
-    <p style="color:#6b7280;font-size:9px;margin:0;">${empNombre} · RUC ${empRuc} · ${empresa?.direccion||""}</p>
-    <p style="color:#6b7280;font-size:9px;margin:0;">📞 ${empTel} · ✉️ ${empEmail}</p>
-  </div>
+  ${buildAnexoHtml(cot,nomCl,nCot,cp,acento)}
+  ${buildFooterPDFHtml(cp,empresa?.direccion||"",empTel,empEmail,empresa?.web||"www.afatoursperu.com")}
   <script>window.onload=()=>window.print();</script></body></html>`);
   win.document.close();
 }
@@ -529,10 +592,10 @@ function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],veh
   const fotosHtml=vehiculo&&(vehiculo.foto_externa_url||vehiculo.foto_interna_url)?`<div style="display:grid;grid-template-columns:${vehiculo.foto_externa_url&&vehiculo.foto_interna_url?"1fr 1fr":"1fr"};gap:10px;margin-top:12px;">${vehiculo.foto_externa_url?`<div><p style="font-size:9px;font-weight:700;color:#6b7280;margin-bottom:4px;">Vista exterior</p><div style="background:#f3f4f6;border-radius:8px;border:1px solid #e5e7eb;height:180px;display:flex;align-items:center;justify-content:center;overflow:hidden;"><img src="${driveImg(vehiculo.foto_externa_url)}" style="max-width:100%;max-height:180px;object-fit:contain;"/></div></div>`:""}${vehiculo.foto_interna_url?`<div><p style="font-size:9px;font-weight:700;color:#6b7280;margin-bottom:4px;">Vista interior</p><div style="background:#f3f4f6;border-radius:8px;border:1px solid #e5e7eb;height:180px;display:flex;align-items:center;justify-content:center;overflow:hidden;"><img src="${driveImg(vehiculo.foto_interna_url)}" style="max-width:100%;max-height:180px;object-fit:contain;"/></div></div>`:""}</div>`:"";
   const filasItems=items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return`<tr><td style="text-align:center;padding:6px;border:1px solid #ccc;">${i+1}</td><td style="padding:6px;border:1px solid #ccc;">${it.descripcion}</td><td style="text-align:center;padding:6px;border:1px solid #ccc;">${it.dias}</td><td style="text-align:center;padding:6px;border:1px solid #ccc;">${it.cantidad}</td><td style="text-align:right;padding:6px;border:1px solid #ccc;">S/ ${it.precio_unit.toLocaleString("es-PE",{minimumFractionDigits:2})}</td><td style="text-align:center;padding:6px;border:1px solid #ccc;">${it.descuento_pct>0?it.descuento_pct+"%":""}</td><td style="text-align:right;padding:6px;border:1px solid #ccc;font-weight:bold;">S/ ${tf.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;}).join("");
   const notaFijo=cot.modo_servicio==="fijo"?`<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:8px 12px;margin-top:8px;font-size:10.5px;"><b style="color:#166534;">📅 Servicio Fijo</b> — Precio/día: <b>${fmtS(Number(cot.precio_dia||0))}</b> · Mes est. (×26): <b>${fmtS(Number(cot.precio_mes_estimado||0))}</b></div>`:"";
-  const css=`@page{size:A4;margin:18mm 15mm}*{box-sizing:border-box}body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:11px;color:#1a1a1a;margin:0;line-height:1.4}.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;border-bottom:3px solid #0b315f;padding-bottom:10px}.logo{height:60px}.titulo{text-align:right}.titulo h1{font-size:18px;font-weight:900;color:#0b315f;margin:0}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}.box{border:1px solid #ccc;border-radius:4px;padding:8px 10px}.box-title{font-weight:900;font-size:10px;color:#0b315f;text-transform:uppercase;border-bottom:1px solid #e5e7eb;padding-bottom:4px;margin-bottom:6px}.box-row{margin:3px 0;font-size:10.5px}table{width:100%;border-collapse:collapse;margin:10px 0;font-size:10.5px}thead{background:#0b315f;color:white}thead th{padding:6px;text-align:center;font-weight:700;font-size:10px;border:1px solid #0b315f}tbody tr:nth-child(even){background:#f8fafc}.totales td{padding:4px 10px}.totales .label{text-align:right;color:#555;font-weight:600}.totales .valor{text-align:right;font-weight:700}.totales .total-neto{font-size:13px;font-weight:900;color:#0b315f}.totales .sep{border-top:2px solid #0b315f}.cuentas{margin-top:12px;border-top:2px solid #0b315f;padding-top:10px}.cuentas h3{font-size:11px;font-weight:900;color:#0b315f;margin:0 0 6px}.cuentas-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}.cuenta-box{border:1px solid #ddd;border-radius:4px;padding:6px 8px}.cuenta-box .banco{font-weight:900;font-size:10px;color:#0b315f;margin-bottom:3px}.cuenta-box p{margin:1px 0;font-size:9.5px}.page-break{page-break-before:always}.anexo h3{font-size:10.5px;font-weight:900;margin:8px 0 4px;text-transform:uppercase}.anexo li{font-size:10.5px;color:#333;line-height:1.6}.footer-doc{margin-top:14px;border-top:2px solid #0b315f;padding-top:6px;text-align:center;font-size:9px;color:#0b315f}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}`;
+  const css=sharedCSS(`.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}.box{border:1px solid #ccc;border-radius:4px;padding:8px 10px}.box-title{font-weight:900;font-size:10px;color:#0b315f;text-transform:uppercase;border-bottom:1px solid #e5e7eb;padding-bottom:4px;margin-bottom:6px}.box-row{margin:3px 0;font-size:10.5px}table{width:100%;border-collapse:collapse;margin:10px 0;font-size:10.5px}thead{background:#0b315f;color:white}thead th{padding:6px;text-align:center;font-weight:700;font-size:10px;border:1px solid #0b315f}tbody tr:nth-child(even){background:#f8fafc}.totales td{padding:4px 10px}.totales .label{text-align:right;color:#555;font-weight:600}.totales .valor{text-align:right;font-weight:700}.totales .total-neto{font-size:13px;font-weight:900;color:#0b315f}.totales .sep{border-top:2px solid #0b315f}.cuentas{margin-top:12px;border-top:2px solid #0b315f;padding-top:10px}.cuentas h3{font-size:11px;font-weight:900;color:#0b315f;margin:0 0 6px}.cuentas-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.cuenta-box{border:1px solid #ddd;border-radius:4px;padding:6px 8px}.cuenta-box .banco{font-weight:900;font-size:10px;color:#0b315f;margin-bottom:3px}.cuenta-box p{margin:1px 0;font-size:9.5px}.anexo h3{font-size:10.5px;font-weight:900;margin:8px 0 4px;text-transform:uppercase}.anexo li{font-size:10.5px;color:#333;line-height:1.6}`);
   const totalesCorpHtml=(()=>{let h="<table class=\"totales\">";if(conIGV){h+=`<tr><td class="label">SUBTOTAL</td><td class="valor">S/ ${subtotal.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;if(desc>0)h+=`<tr><td class="label">DESCUENTO</td><td class="valor" style="color:#dc2626;">- S/ ${desc.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;h+=`<tr><td class="label">IGV (18%)</td><td class="valor">S/ ${igv.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;}h+=`<tr class="sep"><td class="label total-neto">TOTAL NETO</td><td class="valor total-neto">S/ ${total.toLocaleString("es-PE",{minimumFractionDigits:2})}</td></tr>`;if(!conIGV)h+="<tr><td colspan=\"2\" style=\"text-align:right;font-size:9px;color:#6b7280;padding:2px 10px 0;\">No incluye IGV</td></tr>";h+="</table>";return h;})();
   const win=window.open("","_blank");if(!win)return;
-  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización N° ${nCot}</title><style>${css}</style></head><body><div class="header"><img src="${empresa?.logo_url||"/logoafacotizacion.jpg"}" alt="${empNombre}" class="logo"/><div class="titulo"><h1>COTIZACIÓN N° ${nCot} - ${anio}</h1><p><b>FECHA:</b> ${fechaDoc}</p><p style="font-style:italic;color:#666;font-size:10px;">Válida por 30 días</p></div></div><div class="grid2"><div class="box"><div class="box-title">Datos del cliente</div><div class="box-row"><b>CLIENTE:</b> ${nomCl}</div><div class="box-row"><b>${cliente?.ruc?"RUC":"DNI"}:</b> ${cliente?.ruc||cliente?.dni||"—"}</div><div class="box-row"><b>DIRECCIÓN:</b> ${cliente?.direccion||"—"}</div><div class="box-row"><b>CELULAR:</b> ${cliente?.telefono||"—"}</div><div class="box-row"><b>ATENCIÓN:</b> ${cot.atencion||cliente?.operativo_nombre||"—"}</div></div><div class="box"><div class="box-title">${empNombre}</div><div class="box-row"><b>RUC:</b> ${empRuc}</div><div class="box-row"><b>REPR:</b> ${repr}</div><div class="box-row"><b>EMAIL:</b> ${empEmail}</div><div class="box-row"><b>TELF:</b> ${empTel}</div></div></div><div class="box" style="margin-bottom:10px;"><div class="box-title">Detalle del servicio</div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;"><div class="box-row"><b>ORIGEN:</b> ${cot.origen||"—"}</div><div class="box-row"><b>DESTINO:</b> ${cot.destino||"—"}</div><div class="box-row"><b>RETORNO:</b> ${cot.punto_retorno||cot.origen||"—"}</div></div>${cot.asunto?`<div class="box-row" style="margin-top:4px;"><b>ASUNTO:</b> ${cot.asunto}</div>`:""}<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px;"><div class="box-row"><b>FECHA:</b> ${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"_____________"}</div><div class="box-row"><b>HORARIO:</b> Salida: <b>${cot.hora_ida||"_____"}</b> | Retorno: <b>${cot.hora_retorno||"_____"}</b></div></div>${notaFijo}</div><table><thead><tr><th style="width:40px;">ITEM</th><th style="text-align:left;">DESCRIPCIÓN</th><th style="width:45px;">DÍAS</th><th style="width:55px;">CANT.</th><th style="width:110px;">P. UNIT S/ sin IGV</th><th style="width:55px;">% DSCTO.</th><th style="width:110px;">TOTAL S/</th></tr></thead><tbody>${filasItems}<tr><td colspan="4" style="border:1px solid #ccc;padding:6px 8px;font-size:9.5px;color:#555;font-style:italic;"><b>INCLUYE:</b> Traslado, conductor, combustible y peajes de ruta.</td><td colspan="3" style="border:1px solid #ccc;padding:0;vertical-align:top;">${totalesCorpHtml}</td></tr></tbody></table><div class="cuentas"><h3>Nuestras cuentas bancarias</h3><div class="cuentas-grid"><div class="cuenta-box"><div class="banco">BCP — Soles</div><p>Cta: 191-2644342-0-24</p><p>CCI: 00219100264434202450</p></div><div class="cuenta-box"><div class="banco">BCP — Dólares</div><p>Cta: 191-7394169-1-83</p><p>CCI: 00219100739416918351</p></div><div class="cuenta-box"><div class="banco">Banco de la Nación</div><p>Cta: 00-091-069571</p><p>CCI: 01809100009106957197</p></div></div></div><div class="footer-doc">📍 ${empDir} &nbsp;|&nbsp; 📞 ${empTel} &nbsp;|&nbsp; ✉️ ${empEmail}</div><div class="page-break"></div><div class="header"><img src="${empresa?.logo_url||"/logoafacotizacion.jpg"}" class="logo"/><div class="titulo"><h1>COTIZACIÓN N° ${nCot} - ${anio}</h1><p style="font-size:12px;font-weight:700;color:#6b7280;">Descripción de la unidad y condiciones</p></div></div><div class="box" style="margin-bottom:10px;"><div class="box-title">Características de la unidad</div><div class="box-row">${descUnidad}</div></div>${fotosHtml}<div class="anexo"><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;"><div><h3 style="color:#166534;border-bottom:2px solid #16a34a;padding-bottom:3px;">✅ Servicio incluye</h3><ul>${(cfg?.condiciones_incluye||consid.incluye).map(i=>`<li>${i}</li>`).join("")}</ul></div><div><h3 style="color:#991b1b;border-bottom:2px solid #dc2626;padding-bottom:3px;">❌ No incluye</h3><ul>${(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<li>${i}</li>`).join("")}</ul></div></div><h3 style="color:#0b315f;border-bottom:2px solid #0b315f;padding-bottom:3px;">📋 Consideraciones generales</h3><ul>${(cfg?.condiciones_generales||consid.generales).map(i=>`<li>${i}</li>`).join("")}</ul></div><div class="footer-doc" style="margin-top:24px;">📍 Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima &nbsp;|&nbsp; 📞 (01) 3453707 &nbsp;·&nbsp; 📱 966 707 225 &nbsp;|&nbsp; ✉️ transporte@afatoursperu.com</div><script>window.onload=()=>window.print();</script></body></html>`);
+  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Cotización N° ${nCot}</title><style>${css}</style></head><body>${buildHeaderPDFHtml(empresa?.logo_url||LOGO_DEFAULT,"#0b315f",`COTIZACIÓN N° ${nCot} - ${anio}`,`Fecha: ${fechaDoc} · Válida 30 días`)}<div class="grid2"><div class="box"><div class="box-title">Datos del cliente</div><div class="box-row"><b>CLIENTE:</b> ${nomCl}</div><div class="box-row"><b>${cliente?.ruc?"RUC":"DNI"}:</b> ${cliente?.ruc||cliente?.dni||"—"}</div><div class="box-row"><b>DIRECCIÓN:</b> ${cliente?.direccion||"—"}</div><div class="box-row"><b>CELULAR:</b> ${cliente?.telefono||"—"}</div><div class="box-row"><b>ATENCIÓN:</b> ${cot.atencion||cliente?.operativo_nombre||"—"}</div></div><div class="box"><div class="box-title">${empNombre}</div><div class="box-row"><b>RUC:</b> ${empRuc}</div><div class="box-row"><b>REPR:</b> ${repr}</div><div class="box-row"><b>EMAIL:</b> ${empEmail}</div><div class="box-row"><b>TELF:</b> ${empTel}</div></div></div><div class="box" style="margin-bottom:10px;"><div class="box-title">Detalle del servicio</div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;"><div class="box-row"><b>ORIGEN:</b> ${cot.origen||"—"}</div><div class="box-row"><b>DESTINO:</b> ${cot.destino||"—"}</div><div class="box-row"><b>RETORNO:</b> ${cot.punto_retorno||cot.origen||"—"}</div></div>${cot.asunto?`<div class="box-row" style="margin-top:4px;"><b>ASUNTO:</b> ${cot.asunto}</div>`:""}<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px;"><div class="box-row"><b>FECHA:</b> ${cot.fecha_servicio?new Date(cot.fecha_servicio+"T00:00:00").toLocaleDateString("es-PE",{day:"numeric",month:"long",year:"numeric"}).toUpperCase():"_____________"}</div><div class="box-row"><b>HORARIO:</b> Salida: <b>${cot.hora_ida||"_____"}</b> | Retorno: <b>${cot.hora_retorno||"_____"}</b></div></div>${notaFijo}</div>${buildCronogramaMultidiaPDF(cot,"#0b315f")}<table><thead><tr><th style="width:40px;">ITEM</th><th style="text-align:left;">DESCRIPCIÓN</th><th style="width:45px;">DÍAS</th><th style="width:55px;">CANT.</th><th style="width:110px;">P. UNIT S/ sin IGV</th><th style="width:55px;">% DSCTO.</th><th style="width:110px;">TOTAL S/</th></tr></thead><tbody>${filasItems}<tr><td colspan="7" style="border:1px solid #ccc;padding:0;vertical-align:top;">${totalesCorpHtml}</td></tr></tbody></table><div class="cuentas"><h3>Nuestras cuentas bancarias</h3><div class="cuentas-grid"><div class="cuenta-box"><div class="banco">BCP — Soles</div><p>Cta: 191-2644342-0-24</p><p>CCI: 00219100264434202450</p></div><div class="cuenta-box"><div class="banco">BCP — Dólares</div><p>Cta: 191-7394169-1-83</p><p>CCI: 00219100739416918351</p></div></div></div>${buildAnexoHtml(cot,nomCl,nCot,"#0b315f","#1d4ed8")}<div class="page-break"></div><h2 style="font-size:14px;font-weight:900;color:#0b315f;border-bottom:2px solid #0b315f;padding-bottom:6px;margin-bottom:16px;padding-top:82px;">Descripción de la unidad y condiciones</h2><div class="box" style="margin-bottom:10px;"><div class="box-title">Características de la unidad</div><div class="box-row">${descUnidad}</div></div>${fotosHtml}<div class="anexo"><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;"><div><h3 style="color:#166534;border-bottom:2px solid #16a34a;padding-bottom:3px;">✅ Servicio incluye</h3><ul>${(cfg?.condiciones_incluye||consid.incluye).map(i=>`<li>${i}</li>`).join("")}</ul></div><div><h3 style="color:#991b1b;border-bottom:2px solid #dc2626;padding-bottom:3px;">❌ No incluye</h3><ul>${(cfg?.condiciones_no_incluye||consid.no_incluye).map(i=>`<li>${i}</li>`).join("")}</ul></div></div><h3 style="color:#0b315f;border-bottom:2px solid #0b315f;padding-bottom:3px;">📋 Consideraciones generales</h3><ul>${(cfg?.condiciones_generales||consid.generales).map(i=>`<li>${i}</li>`).join("")}</ul></div>${buildFooterPDFHtml("#0b315f",empDir,empTel,empEmail,empresa?.web||"www.afatoursperu.com")}<script>window.onload=()=>window.print();</script></body></html>`);
   win.document.close();
 }
 
@@ -554,14 +617,14 @@ function useGoogleMapsCot(){
   return loaded;
 }
 
-function PlacesInputCot({placeholder,value,onChange,onSelect,mapsLoaded}:{
+function PlacesInputCot({placeholder,value,onChange,onSelect,mapsLoaded,inputCls}:{
   placeholder:string;value:string;
   onChange:(v:string)=>void;onSelect:(r:PlaceResultCot)=>void;
-  mapsLoaded:boolean;
+  mapsLoaded:boolean;inputCls?:string;
 }){
   const inputRef=useRef<HTMLInputElement>(null);
   const acRef=useRef<any>(null);
-  const cls="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all pr-8";
+  const cls=inputCls||"w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all pr-8";
   useEffect(()=>{
     if(!mapsLoaded||!inputRef.current||acRef.current)return;
     acRef.current=new (window as any).google.maps.places.Autocomplete(inputRef.current,{
@@ -572,7 +635,10 @@ function PlacesInputCot({placeholder,value,onChange,onSelect,mapsLoaded}:{
     acRef.current.addListener("place_changed",()=>{
       const p=acRef.current.getPlace();
       if(!p.geometry?.location)return;
-      const address=p.formatted_address||p.name||"";
+      const pName=p.name||"";
+      const pAddr=p.formatted_address||"";
+      // Si el nombre del lugar no está incluido en la dirección (ej: plus codes), preponerlo
+      const address=pName&&pAddr&&!pAddr.toLowerCase().includes(pName.toLowerCase())?`${pName}, ${pAddr}`:pAddr||pName;
       onChange(address);
       onSelect({address,lat:p.geometry.location.lat(),lng:p.geometry.location.lng(),placeId:p.place_id||""});
     });
@@ -599,11 +665,14 @@ export default function CotizacionesPage(){
   const [modalEnvio,setModalEnvio]=useState<Cotizacion|null>(null);
   const [vehExpandido,setVehExpandido]=useState(false);
   const [pendDespacho,setPendDespacho]=useState(0);
+  const [fechasMultidia,setFechasMultidia]=useState<FechaMultidia[]>([]);
+  const skipFechasRef=useRef(false);
   const skipDescRef=useRef(false);
+  const skipParadasRef=useRef(false);
   useEffect(()=>{supabase.from("reservas").select("id",{count:"exact",head:true}).eq("origen_despacho",true).is("cotizacion_id",null).then((res: any)=>setPendDespacho((res.count as number)||0));},[]);
   const mapsLoaded=useGoogleMapsCot();
-  const [origenPlace,setOrigenPlace]=useState<{placeId:string}|null>(null);
-  const [destinoPlace,setDestinoPlace]=useState<{placeId:string}|null>(null);
+  const [origenPlace,setOrigenPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
+  const [destinoPlace,setDestinoPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
   const [kmBase,setKmBase]=useState<number>(0);
   useEffect(()=>{
     if(!mapsLoaded||!origenPlace?.placeId||!destinoPlace?.placeId)return;
@@ -650,11 +719,12 @@ export default function CotizacionesPage(){
     try{
       const raw=localStorage.getItem(DRAFT_KEY);if(!raw)return;
       const d=JSON.parse(raw);if(!d?.form)return;
-      skipDescRef.current=true;
+      skipDescRef.current=true;skipParadasRef.current=true;
       setForm(d.form);
       if(d.items?.length)setItems(d.items);
       if(d.consid)setConsid(d.consid);
       if(d.paradas?.length)setParadas(d.paradas);
+      if(d.fechasMultidia?.length)setFechasMultidia(d.fechasMultidia);
       if(d.editandoId)setEditandoId(d.editandoId);
       if(d.diasCond)setDiasCond(d.diasCond);
       if(d.peajesF)setPeajesF(d.peajesF);
@@ -668,7 +738,7 @@ export default function CotizacionesPage(){
   useEffect(()=>{
     if(!mostrarForm)return;
     if(!form.origen&&!form.destino&&!form.cliente_id&&!editandoId)return;
-    try{localStorage.setItem(DRAFT_KEY,JSON.stringify({form,items,consid,paradas,editandoId,diasCond,peajesF,pernocteF,viaticosF,savedAt:new Date().toISOString()}));}catch{}
+    try{localStorage.setItem(DRAFT_KEY,JSON.stringify({form,items,consid,paradas,fechasMultidia,editandoId,diasCond,peajesF,pernocteF,viaticosF,savedAt:new Date().toISOString()}));}catch{}
   },[form,items,consid,paradas,mostrarForm,editandoId,diasCond,peajesF,pernocteF,viaticosF]);
 
   // Auto-construir descripción del primer ítem cuando cambia modo/tipo/equipamiento
@@ -682,11 +752,39 @@ export default function CotizacionesPage(){
     setItems(prev=>{const n=[...prev];if(n[0])n[0]={...n[0],descripcion:autoDesc};return n;});
   },[form.modo_servicio,form.tipo_vehiculo,form.equipamiento,mostrarForm]);
 
+  // Sincronizar Inicio/Destino de paradas con origen/destino del formulario
+  useEffect(()=>{
+    if(!mostrarForm)return;
+    if(skipParadasRef.current){skipParadasRef.current=false;return;}
+    setParadas(prev=>{
+      if(prev.length===0)return prev;
+      let changed=false;
+      const next=prev.map(p=>{
+        if(p.tipo==="inicio"){
+          const nom=!p.nombre?form.origen:p.nombre;
+          const lat=origenPlace?.lat!==undefined?String(origenPlace.lat):p.lat;
+          const lng=origenPlace?.lng!==undefined?String(origenPlace.lng):p.lng;
+          if(nom!==p.nombre||lat!==p.lat||lng!==p.lng){changed=true;return{...p,nombre:nom,lat,lng};}
+          return p;
+        }
+        if(p.tipo==="destino"){
+          const nom=!p.nombre?form.destino:p.nombre;
+          const lat=destinoPlace?.lat!==undefined?String(destinoPlace.lat):p.lat;
+          const lng=destinoPlace?.lng!==undefined?String(destinoPlace.lng):p.lng;
+          if(nom!==p.nombre||lat!==p.lat||lng!==p.lng){changed=true;return{...p,nombre:nom,lat,lng};}
+          return p;
+        }
+        return p;
+      });
+      return changed?next:prev;
+    });
+  },[form.origen,form.destino,origenPlace,destinoPlace,mostrarForm]);
+
   const gruposVeh=useMemo(()=>{const m:Record<string,ParamCosto[]>={};paramsDB.forEach(v=>{const g=v.grupo_vehiculo||"Otros";if(!m[g])m[g]=[];m[g].push(v);});return m;},[paramsDB]);
   const updItem=(i:number,k:keyof ItemCot,v:string|number)=>setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:Number.isNaN(Number(v))?v:Number(v)}:it));
   const addItem=()=>setItems(p=>[...p,{...ITEM_VACIO}]);const delItem=(i:number)=>setItems(p=>p.filter((_,idx)=>idx!==i));
   const{subtotal,igv,total}=calcItems(items,form.incluye_igv);
-  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setKmBase(0);setVehExpandido(false);setDraftRecuperado(false);try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
+  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setKmBase(0);setVehExpandido(false);setDraftRecuperado(false);try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
 
   const selVeh=(id:string)=>{setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:""}));if(!id)return;const v=flota.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:"",equipamiento:v.equipamiento||"full_equipo"}));};
   const selVehTercero=(id:string)=>{setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:""}));};
@@ -694,6 +792,49 @@ export default function CotizacionesPage(){
   const buscarTarifa=()=>tarifas.find(t=>norm(t.origen)===norm(form.origen)&&norm(t.destino)===norm(form.destino)&&t.tipo_vehiculo===form.tipo_vehiculo&&t.equipamiento===form.equipamiento&&t.tipo_servicio===form.tipo_servicio&&(t.modo||"eventual")===form.modo_servicio)||null;
 
   const agregarItemItinerario=()=>{setItems(prev=>[...prev,{descripcion:"Itinerario del recorrido:\n- Punto de partida: \n- Parada 1: \n- Parada 2: \n- Destino final: ",dias:1,cantidad:1,precio_unit:0,descuento_pct:0}]);};
+  const preLlenarItinerario=()=>{
+    const dias=Number(form.dias_servicio)||1;
+    const esFD=form.tipo_servicio==="full_day";
+    let tpl="";
+    if(esFD){
+      tpl=`06:00 - Recojo en punto de salida\n08:00 - Llegada a ${form.destino||"[Destino]"}\n09:00 - [Actividad 1]\n12:00 - Almuerzo en [Lugar]\n14:00 - [Actividad 2]\n16:00 - Visita a [Atractivo]\n18:00 - Retorno\n20:00 - Llegada al punto de origen`;
+    } else {
+      tpl=Array.from({length:dias},(_,i)=>`DÍA ${i+1} — [Título del día]\n07:00 - Desayuno y salida\n09:00 - [Actividad principal]\n12:00 - Almuerzo en [Lugar]\n14:00 - [Actividad tarde]\n18:00 - Alojamiento en [Hotel]\n20:00 - Cena`).join("\n\n");
+    }
+    setForm(p=>({...p,itinerario_texto:tpl}));
+  };
+
+  const updDia=(i:number,k:keyof FechaMultidia,v:string)=>setFechasMultidia(p=>p.map((d,idx)=>idx===i?{...d,[k]:v}:d));
+  const updDiaDestino=(i:number,nombre:string,lat:string,lng:string)=>setFechasMultidia(p=>p.map((d,idx)=>idx===i?{...d,destino_nombre:nombre,destino_lat:lat,destino_lng:lng}:d));
+  const delDia=(i:number)=>setFechasMultidia(p=>{
+    const filtered=p.filter((_,idx)=>idx!==i).map((d,idx)=>({...d,dia:idx+1}));
+    if(i===p.length-1&&filtered.length>0){
+      // el penúltimo pasa a ser último: hora_fin del form, tipo_noche vacío
+      filtered[filtered.length-1]={...filtered[filtered.length-1],hora_fin:form.hora_retorno||"",tipo_noche:""};
+    }
+    return filtered;
+  });
+  const addDia=()=>setFechasMultidia(p=>{
+    const last=p[p.length-1];
+    const sig=last?.fecha?new Date(last.fecha+"T00:00:00"):new Date();
+    if(last)sig.setDate(sig.getDate()+1);
+    // el que era último pasa a ser intermedio: tipo_noche pernocte por defecto
+    const prevActualizado=p.map((d,idx)=>idx===p.length-1?{...d,hora_fin:"",tipo_noche:"pernocte" as const}:d);
+    return[...prevActualizado,{dia:p.length+1,fecha:sig.toISOString().split("T")[0],hora_ida:last?.hora_ida||"06:00",hora_fin:form.hora_retorno||"",tipo_noche:"" as const,destino_nombre:"",destino_lat:"",destino_lng:""}];
+  });
+  const generarCronograma=()=>{
+    if(!form.fecha_servicio){alert("Ingresa primero la Fecha inicio");return;}
+    const nDias=Number(form.dias_servicio)||1;
+    const hIda=form.hora_ida||"06:00";
+    const hFin=form.hora_retorno||"";
+    const rows:FechaMultidia[]=Array.from({length:nDias},(_,i)=>{
+      const d=new Date(form.fecha_servicio+"T00:00:00");
+      d.setDate(d.getDate()+i);
+      const esUltimo=i===nDias-1;
+      return{dia:i+1,fecha:d.toISOString().split("T")[0],hora_ida:hIda,hora_fin:esUltimo?hFin:"",tipo_noche:esUltimo?"":"pernocte",destino_nombre:"",destino_lat:"",destino_lng:""};
+    });
+    setFechasMultidia(rows);
+  };
 
   const buildPayload=(estadoOverride?:EstadoCot)=>{
     const tarifaEnc=buscarTarifa();const kmNum2=Number(form.km)||0;const esFijo=form.modo_servicio==="fijo";
@@ -708,7 +849,10 @@ export default function CotizacionesPage(){
       margen_estimado:esFijo?((precioDiaNum||0)-Number(form.costo_estimado||0)):(tot-Number(form.costo_estimado||0)),
       estado:estadoOverride||form.estado,numero_cotizacion:form.numero_cotizacion.trim()||null,atencion:form.atencion.trim()||null,
       asunto:form.asunto.trim()||null,punto_retorno:esSoloIda?null:form.punto_retorno.trim()||null,
-      fecha_servicio:form.fecha_servicio||null,hora_ida:form.hora_ida||null,hora_retorno:form.hora_retorno||null,
+      fecha_servicio:(form.tipo_servicio==="multi_dia"&&fechasMultidia.length>0?fechasMultidia[0].fecha:form.fecha_servicio)||null,
+      hora_ida:(form.tipo_servicio==="multi_dia"&&fechasMultidia.length>0?fechasMultidia[0].hora_ida:form.hora_ida)||null,
+      hora_retorno:(form.tipo_servicio==="multi_dia"&&fechasMultidia.length>0?fechasMultidia[fechasMultidia.length-1].hora_fin:form.hora_retorno)||null,
+      fechas_multidia_json:form.tipo_servicio==="multi_dia"&&fechasMultidia.length>0?fechasMultidia:null,
       descuento_pct:Number(form.descuento_pct||0),items_json:items,tipo_vehiculo:form.tipo_vehiculo||null,
       tipo_servicio:form.tipo_servicio||null,equipamiento:form.equipamiento||null,
       vehiculo_flota_id:form.vehiculo_flota_id?Number(form.vehiculo_flota_id):null,
@@ -721,6 +865,7 @@ export default function CotizacionesPage(){
       costo_cotizador:costoCalc?.baseCosto||null,margen_cotizador:20,vehiculo_cotizador:vehParam?.nombre||null,
       precio_sugerido:costoCalc?(esFijo?costoCalc.diaEstIGV:costoCalc.totalEst20):null,
       modo_precio:tarifaEnc?"tarifario":"cotizador",incluye_igv:form.incluye_igv,
+      itinerario_texto:form.itinerario_texto.trim()||null,
     } as any;
   };
 
@@ -772,13 +917,13 @@ export default function CotizacionesPage(){
   };
   const confirmarAprob=async(tipo:string,numero:string)=>{if(!modalAprob)return;await supabase.from("cotizaciones").update({estado:"aprobado",tipo_aprobacion:tipo,numero_aprobacion:numero}).eq("id",modalAprob.id);if(modalAprob.tipo_vehiculo&&modalAprob.tipo_servicio&&modalAprob.equipamiento){const esFijo=modalAprob.modo_servicio==="fijo";await supabase.from("tarifario").upsert({origen:modalAprob.origen.toUpperCase(),destino:modalAprob.destino.toUpperCase(),tipo_vehiculo:modalAprob.tipo_vehiculo,equipamiento:modalAprob.equipamiento,tipo_servicio:modalAprob.tipo_servicio,modo:modalAprob.modo_servicio||"eventual",precio:esFijo?(Number(modalAprob.precio_dia||0)/1.18):Math.round(Number(modalAprob.precio_cliente)/1.18*100)/100,moneda:"PEN",confidencial:false,incluye_guia:false,incluye_peajes:false,incluye_alimentacion:false,notas:`Aprobada #${modalAprob.numero_cotizacion||modalAprob.id}`,activo:true},{onConflict:"origen,destino,tipo_vehiculo,equipamiento,tipo_servicio"});}setModalAprob(null);cargar();};
   const convertirAReserva=async(cot:Cotizacion)=>{if(cot.estado!=="aprobado"){alert("Solo cotizaciones aprobadas");return;}const{data:existe}=await supabase.from("reservas").select("id").eq("cotizacion_id",cot.id).maybeSingle();if(existe){alert("Ya fue convertida en reserva");return;}const ps=cot.paradas_json||[];const pI=ps.find(p=>p.tipo==="inicio");const pD=ps.find(p=>p.tipo==="destino");const{data:r,error}=await supabase.from("reservas").insert({cliente_id:cot.cliente_id,cotizacion_id:cot.id,origen:pI?.nombre||cot.origen,destino:pD?.nombre||cot.destino,precio_cliente:cot.precio_cliente,costo_proveedor:0,fecha_servicio:cot.fecha_servicio||new Date().toISOString().split("T")[0],hora_servicio:pI?.hora||cot.hora_ida||"06:00",estado:"pendiente",tipo:"propia",tipo_servicio_detalle:cot.tipo_servicio||null,paradas_json:cot.paradas_json||null}).select().single();if(error){alert(error.message);return;}if(ps.length>0&&r){await supabase.from("paradas").insert([...ps.filter(p=>p.tipo==="inicio"),...ps.filter(p=>p.tipo==="intermedia"),...ps.filter(p=>p.tipo==="destino")].map((p,i)=>({reserva_id:r.id,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));}alert(`✅ Reserva creada${ps.length>0?` con ${ps.length} paradas`:""}`);cargar();};
-  const editarCot=(c:Cotizacion)=>{setOrigenPlace(null);setDestinoPlace(null);setKmBase(0);skipDescRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setVehExpandido(!!c.tipo_vehiculo);setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
+  const editarCot=(c:Cotizacion)=>{setOrigenPlace(null);setDestinoPlace(null);setKmBase(0);skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
   const abrirPDF=async(cot:Cotizacion,plantilla:string=plantillaElegida)=>{
     const cl=clientes.find(c=>c.id===cot.cliente_id);const vt=flotaTercero.find(v=>v.id===cot.vehiculo_tercero_id);const veh:VehiculoFlota|undefined=flota.find(v=>v.id===cot.vehiculo_flota_id)||(vt?{id:vt.id,placa:vt.placa,categoria:vt.categoria,marca:vt.marca,modelo:vt.modelo,anio:null,capacidad_pasajeros:vt.capacidad,equipamiento:null,foto_externa_url:vt.foto_externa_url||null,foto_interna_url:vt.foto_interna_url||null,descripcion_unidad:vt.descripcion_unidad||`${vt.empresa_nombre||"Tercero"} — ${vt.placa} ${vt.categoria||""} ${vt.marca||""} ${vt.capacidad?`(${vt.capacidad} pax)`:""}`}:undefined);
     const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];
     let nombreFinal=(cot as any).creado_por||"";
     if(!nombreFinal){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreFinal=extraerNombreApellido(uRow.nombre);}}catch(e){}}
-    const[{data:empData},{data:cfgData}]=await Promise.all([supabase.from("empresa_perfil").select("nombre,razon_social,ruc,logo_url,telefono,email,direccion,color_primario").eq("id",1).maybeSingle(),supabase.from("cotizacion_plantillas").select("*").eq("id",plantilla).maybeSingle()]);
+    const[{data:empData},{data:cfgData}]=await Promise.all([supabase.from("empresa_perfil").select("nombre,razon_social,ruc,logo_url,telefono,email,direccion,color_primario,web").eq("id",1).maybeSingle(),supabase.from("cotizacion_plantillas").select("*").eq("id",plantilla).maybeSingle()]);
     if(plantilla!=="corporativo")await supabase.from("cotizaciones").update({plantilla_pdf:plantilla}).eq("id",cot.id);
     setModalPlantilla(null);
     generarPDF(cot,cl,its,veh,nombreFinal||"JENNY ELYZABETH URBINA AFATA",cot.consideraciones_json||consid,plantilla,cfgData as CotPlantillaConfig|null,empData as EmpresaPerfilPDF|null);
@@ -834,7 +979,7 @@ export default function CotizacionesPage(){
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Identificación</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <Campo label="Cliente" req><div className="flex gap-2"><select className={iCls()} value={form.cliente_id} onChange={e=>{const id=e.target.value;const cl=clientes.find(c=>c.id===Number(id));setForm(p=>({...p,cliente_id:id,incluye_igv:cl?.tipo==="b2b"?true:false}));}}><option value="">— Seleccionar ({clientes.length}) —</option>{clientes.filter(c=>c.estado!=="bloqueado").sort((a,b)=>{const nA=c=>c.tipo==="b2b"?(c.empresa||c.nombre):c.nombre;return nA(a).localeCompare(nA(b));}).map(c=>{const esB2B=c.tipo==="b2b";const label=esB2B?(c.empresa||c.nombre):c.nombre;const doc=esB2B?(c.ruc?` · RUC ${c.ruc}`:""):(c.dni?` · DNI ${c.dni}`:"");return<option key={c.id} value={c.id}>{label}{doc}</option>;})}</select><a href="/clientes" target="_blank" rel="noreferrer" className="flex-shrink-0 w-10 h-10 rounded-xl border-2 flex items-center justify-center font-black text-lg" style={{background:"#eef3f8",borderColor:"#0b315f33",color:"#0b315f"}}>+</a></div></Campo>
+                <Campo label="Cliente" req><div className="flex gap-2"><select className={iCls()} value={form.cliente_id} onChange={e=>{const id=e.target.value;const cl=clientes.find(c=>c.id===Number(id));setForm(p=>({...p,cliente_id:id,incluye_igv:cl?.tipo==="b2b"?true:false}));}}><option value="">— Seleccionar ({clientes.length}) —</option>{clientes.filter(c=>c.estado!=="bloqueado").sort((a,b)=>{const nA=c=>c.tipo==="b2b"?(c.empresa||c.nombre):c.nombre;return nA(a).localeCompare(nA(b));}).map(c=>{const esB2B=c.tipo==="b2b";const label=esB2B?(c.empresa||c.nombre):c.nombre;const doc=esB2B?"":(c.dni?` · DNI ${c.dni}`:"");return<option key={c.id} value={c.id}>{label}{doc}</option>;})}</select><a href="/clientes" target="_blank" rel="noreferrer" className="flex-shrink-0 w-10 h-10 rounded-xl border-2 flex items-center justify-center font-black text-lg" style={{background:"#eef3f8",borderColor:"#0b315f33",color:"#0b315f"}}>+</a></div></Campo>
                 <Campo label="N° cotización"><input className={iCls("font-mono")} placeholder="Ej: 10996" value={form.numero_cotizacion} onChange={f("numero_cotizacion")}/></Campo>
                 <Campo label="Estado"><select className={iCls()} value={form.estado} onChange={f("estado")}><option value="pendiente">Pendiente</option><option value="enviado">Enviado</option><option value="rechazado">Rechazado</option></select></Campo>
                 <Campo label="IGV" span={2}>
@@ -959,21 +1104,81 @@ export default function CotizacionesPage(){
                 <Campo label="Punto de origen" req>
                   <PlacesInputCot placeholder="Av. República de Panamá 3623" value={form.origen} mapsLoaded={mapsLoaded}
                     onChange={v=>{setForm(p=>({...p,origen:v}));setOrigenPlace(null);setKmBase(0);}}
-                    onSelect={p=>{setOrigenPlace(p.placeId?{placeId:p.placeId}:null);if(p.address)setForm(prev=>({...prev,origen:p.address}));}}/>
+                    onSelect={p=>{setOrigenPlace(p.placeId?{placeId:p.placeId,lat:p.lat,lng:p.lng}:null);if(p.address)setForm(prev=>({...prev,origen:p.address}));}}/>
                 </Campo>
                 <Campo label="Punto de destino" req>
                   <PlacesInputCot placeholder="Planta Cajamarquilla" value={form.destino} mapsLoaded={mapsLoaded}
                     onChange={v=>{setForm(p=>({...p,destino:v}));setDestinoPlace(null);setKmBase(0);}}
-                    onSelect={p=>{setDestinoPlace(p.placeId?{placeId:p.placeId}:null);if(p.address)setForm(prev=>({...prev,destino:p.address}));}}/>
+                    onSelect={p=>{setDestinoPlace(p.placeId?{placeId:p.placeId,lat:p.lat,lng:p.lng}:null);if(p.address)setForm(prev=>({...prev,destino:p.address}));}}/>
                 </Campo>
                 {!esSoloIda&&<Campo label="Punto de retorno">
                   <PlacesInputCot placeholder="Igual al origen" value={form.punto_retorno} mapsLoaded={mapsLoaded}
                     onChange={v=>setForm(p=>({...p,punto_retorno:v}))}
                     onSelect={p=>{if(p.placeId)setForm(prev=>({...prev,punto_retorno:p.address}));}}/>
                 </Campo>}
-                <Campo label="Fecha de servicio"><input type="date" className={iCls()} value={form.fecha_servicio} onChange={f("fecha_servicio")}/></Campo>
-                <Campo label="Hora de ida"><input type="time" className={iCls()} value={form.hora_ida} onChange={f("hora_ida")}/></Campo>
-                <Campo label="Hora de retorno"><input type="time" className={iCls()} value={form.hora_retorno} onChange={f("hora_retorno")}/></Campo>
+                <Campo label={form.tipo_servicio==="multi_dia"?"Fecha inicio (Día 1)":"Fecha de servicio"}><input type="date" className={iCls()} value={form.fecha_servicio} onChange={f("fecha_servicio")}/></Campo>
+                <Campo label={form.tipo_servicio==="multi_dia"?"H. salida (por defecto)":"Hora de ida"}><input type="time" className={iCls()} value={form.hora_ida} onChange={f("hora_ida")}/></Campo>
+                <Campo label={form.tipo_servicio==="multi_dia"?"H. retorno (último día)":"Hora de retorno"}><input type="time" className={iCls()} value={form.hora_retorno} onChange={f("hora_retorno")}/></Campo>
+                {form.tipo_servicio==="multi_dia"&&<div className="md:col-span-3 mt-1">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">📅 Cronograma detallado</p>
+                    <button type="button" onClick={generarCronograma} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-black text-white bg-[#0b315f] hover:bg-[#0b315f]/80 transition-colors">⚡ Generar desde fecha inicio</button>
+                  </div>
+                  <div className="rounded-xl overflow-hidden border border-gray-200 bg-white">
+                    <div className="grid gap-0 text-[9px] font-black uppercase tracking-wide text-gray-400 bg-gray-50 px-3 py-2 border-b border-gray-200" style={{gridTemplateColumns:"44px 120px 1fr 76px 116px 28px"}}>
+                      <span>Día</span><span>Fecha</span>
+                      <span className="pl-1">Destino del día <span className="font-normal normal-case text-gray-300">← Places</span></span>
+                      <span className="text-center">H. Salida</span>
+                      <span className="text-center">Fin del día</span>
+                      <span></span>
+                    </div>
+                    {fechasMultidia.length===0&&<div className="text-center py-8 text-gray-400 text-xs">Usa el botón "Generar desde fecha inicio" o agrega días manualmente</div>}
+                    {fechasMultidia.map((dia,i)=>{
+                      const esUltimo=i===fechasMultidia.length-1;
+                      return(
+                      <div key={i} className="grid gap-1.5 items-center px-2 py-2 border-b border-gray-100 last:border-0" style={{gridTemplateColumns:"44px 120px 1fr 76px 116px 28px"}}>
+                        <div className="flex flex-col items-center gap-0.5">
+                          <span className="text-[11px] font-black text-[#0b315f]">D{dia.dia}</span>
+                          {dia.destino_lat&&<span className="text-[8px] text-green-500">📍</span>}
+                        </div>
+                        <input type="date" value={dia.fecha} onChange={e=>updDia(i,"fecha",e.target.value)} className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-[#0b315f] focus:ring-1 focus:ring-[#0b315f]/20"/>
+                        <PlacesInputCot
+                          placeholder={i===0?`Desde ${form.origen||"origen"} →`:`Desde ${fechasMultidia[i-1]?.destino_nombre||"día anterior"} →`}
+                          value={dia.destino_nombre}
+                          mapsLoaded={mapsLoaded}
+                          inputCls="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-[#0b315f] focus:ring-1 focus:ring-[#0b315f]/20 pr-6 bg-white"
+                          onChange={v=>updDia(i,"destino_nombre",v)}
+                          onSelect={r=>{if(r.lat)updDiaDestino(i,r.address,String(r.lat),String(r.lng));}}
+                        />
+                        <input type="time" value={dia.hora_ida} onChange={e=>updDia(i,"hora_ida",e.target.value)} className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-[#0b315f] focus:ring-1 focus:ring-[#0b315f]/20"/>
+                        {/* Fin del día: hora + tipo_noche */}
+                        <div className="flex flex-col gap-0.5">
+                          <input type="time" value={dia.hora_fin} onChange={e=>updDia(i,"hora_fin",e.target.value)}
+                            className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-[#0b315f] focus:ring-1 focus:ring-[#0b315f]/20"/>
+                          {esUltimo
+                            ? <span className="text-[9px] font-bold text-green-600 text-center">✅ Retorno final</span>
+                            : <div className="grid grid-cols-2 gap-0.5">
+                                <button type="button" onClick={()=>updDia(i,"tipo_noche","pernocte")}
+                                  className={`py-0.5 rounded text-[9px] font-bold transition-colors ${dia.tipo_noche==="pernocte"||dia.tipo_noche===""?"bg-amber-100 text-amber-700 border border-amber-300":"bg-gray-100 text-gray-400 border border-gray-200 hover:bg-amber-50"}`}>
+                                  🏨 Fuera
+                                </button>
+                                <button type="button" onClick={()=>updDia(i,"tipo_noche","cochera")}
+                                  className={`py-0.5 rounded text-[9px] font-bold transition-colors ${dia.tipo_noche==="cochera"?"bg-blue-100 text-blue-700 border border-blue-300":"bg-gray-100 text-gray-400 border border-gray-200 hover:bg-blue-50"}`}>
+                                  🏠 Base
+                                </button>
+                              </div>
+                          }
+                        </div>
+                        <button type="button" onClick={()=>delDia(i)} className="w-7 h-7 rounded-lg text-red-400 hover:bg-red-50 font-bold text-xs flex items-center justify-center">✕</button>
+                      </div>
+                      );
+                    })}
+                    <div className="px-3 py-2 bg-gray-50 flex items-center justify-between border-t border-gray-100">
+                      <button type="button" onClick={addDia} className="text-xs font-bold text-[#0b315f] hover:underline">+ Agregar día</button>
+                      <p className="text-[9px] text-gray-400">🏨 Fuera = pernocte en destino · 🏠 Base = regresa a cochera esa noche</p>
+                    </div>
+                  </div>
+                </div>}
               </div>
             </div>
 
@@ -993,9 +1198,23 @@ export default function CotizacionesPage(){
 
             <div>
               <div className="flex items-center justify-between border-b pb-1 mb-3"><p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Items</p><button onClick={addItem} className="text-xs font-bold text-[#0b315f] hover:underline">+ Agregar</button></div>
-              {esTurismo&&<div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-center justify-between gap-3 mb-3">
-                <div className="flex items-center gap-2"><span className="text-base">🗺️</span><p className="text-xs font-bold text-amber-800">Servicio turístico — ¿Agregas el itinerario del recorrido? <span className="font-normal text-amber-600">(recomendado para el PDF)</span></p></div>
-                <button onClick={agregarItemItinerario} className="flex-shrink-0 text-xs font-bold text-amber-700 bg-amber-100 hover:bg-amber-200 px-3 py-1.5 rounded-lg border border-amber-300 transition-colors whitespace-nowrap">+ Pre-llenar ítem</button>
+              {esTurismo&&<div className="rounded-xl border-2 border-amber-300 bg-amber-50 p-4 mb-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-base">🗺️</span>
+                    <p className="text-xs font-black text-amber-800">Programa del recorrido <span className="font-normal text-amber-600">— aparece como Pág. 2 en el PDF</span></p>
+                  </div>
+                  <button type="button" onClick={preLlenarItinerario} className="flex-shrink-0 text-xs font-bold text-amber-700 bg-amber-100 hover:bg-amber-200 px-3 py-1.5 rounded-lg border border-amber-300 transition-colors whitespace-nowrap">📋 Pre-llenar plantilla</button>
+                </div>
+                <textarea
+                  rows={5}
+                  className="w-full border border-amber-200 rounded-xl px-3 py-2.5 text-sm bg-white focus:outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-100 resize-y min-h-[110px] leading-relaxed"
+                  placeholder={`Ej:\n06:00 - Recojo en hotel\n08:00 - Llegada a Paracas\n...`}
+                  value={form.itinerario_texto}
+                  onChange={e=>{setForm(p=>({...p,itinerario_texto:e.target.value}));e.target.style.height="auto";e.target.style.height=e.target.scrollHeight+"px";}}
+                  style={{overflow:"hidden"}}
+                />
+                {form.itinerario_texto.trim()&&<p className="text-[9px] text-amber-600">✓ Se generará Pág. 2 — ANEXO 1 (Programa Detallado) en el PDF</p>}
               </div>}
               <div className="space-y-2">
                 {items.map((it,i)=>{const tf=it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100);return(<div key={i} className="grid grid-cols-12 gap-2 items-start bg-gray-50 rounded-xl p-2"><div className="col-span-12 md:col-span-4"><textarea rows={1} className={iCls("resize-y min-h-[40px] leading-snug")} placeholder="Descripción del servicio" value={it.descripcion} onChange={e=>{updItem(i,"descripcion",e.target.value);e.target.style.height="auto";e.target.style.height=e.target.scrollHeight+"px";}} style={{overflow:"hidden"}}/></div><div className="col-span-3 md:col-span-1"><input type="number" min="1" className={iCls("text-center")} value={it.dias} onChange={e=>updItem(i,"dias",e.target.value)}/></div><div className="col-span-3 md:col-span-1"><input type="number" min="1" className={iCls("text-center")} value={it.cantidad} onChange={e=>updItem(i,"cantidad",e.target.value)}/></div><div className="col-span-6 md:col-span-2"><input type="number" min="0" className={iCls("text-right")} placeholder="0.00" value={it.precio_unit||""} onChange={e=>updItem(i,"precio_unit",e.target.value)}/></div><div className="col-span-3 md:col-span-1"><input type="number" min="0" max="100" className={iCls("text-center")} placeholder="0" value={it.descuento_pct||""} onChange={e=>updItem(i,"descuento_pct",e.target.value)}/></div><div className="col-span-9 md:col-span-2 text-right font-bold text-sm text-gray-800 pr-2">{fmtS(tf)}</div><div className="col-span-3 md:col-span-1 flex justify-end">{items.length>1&&<button onClick={()=>delItem(i)} className="w-7 h-7 rounded-lg text-red-400 hover:bg-red-50 font-bold text-sm">✕</button>}</div></div>);})}
@@ -1038,7 +1257,14 @@ export default function CotizacionesPage(){
                   :<span className="text-[9px] font-black text-green-700 bg-green-100 border border-green-300 px-2 py-0.5 rounded-full">✓ {paradas.length} puntos</span>
                 )}
               </div>
-              <ParadasBuilder paradas={paradas} onChange={setParadas} tipo={form.tipo_servicio}/>
+              <ParadasBuilder
+                paradas={paradas} onChange={setParadas} tipo={form.tipo_servicio}
+                mapsLoaded={mapsLoaded}
+                origenNombre={form.origen} destinoNombre={form.destino}
+                origenLat={origenPlace?.lat?String(origenPlace.lat):""} origenLng={origenPlace?.lng?String(origenPlace.lng):""}
+                destinoLat={destinoPlace?.lat?String(destinoPlace.lat):""} destinoLng={destinoPlace?.lng?String(destinoPlace.lng):""}
+                horaIda={form.hora_ida} horaRetorno={form.hora_retorno}
+              />
             </div>
 
             {form.tipo_vehiculo&&form.tipo_servicio&&form.origen&&form.destino&&<div className="rounded-xl border px-4 py-3 flex items-start gap-3" style={{background:"#f0fdf4",borderColor:"#86efac"}}><input type="checkbox" id="chk_tar" checked={guardarTar} onChange={e=>setGuardarTar(e.target.checked)} className="w-4 h-4 mt-0.5 accent-green-600 flex-shrink-0"/><label htmlFor="chk_tar" className="cursor-pointer text-xs text-green-800"><b>Guardar en Tarifario</b> — {form.origen}→{form.destino} · {paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo)?.nombre||form.tipo_vehiculo} · {form.modo_servicio.toUpperCase()}</label></div>}

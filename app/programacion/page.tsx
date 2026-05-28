@@ -2,8 +2,9 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { FileText, Pencil, Trash2 } from "lucide-react";
+import { Calendar, FileText, Pencil, Trash2 } from "lucide-react";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
+import ModalGenerarPrograma from "@/components/programacion/ModalGenerarPrograma";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
 
 type ParadaTP = {
@@ -142,7 +143,9 @@ export default function ReservasPage() {
   const [filtroTipo,   setFiltroTipo]   = useState("todos");
   const [filtroServicio, setFiltroServicio] = useState<"todos" | "fijo" | "eventual">("todos");
   const [form, setForm] = useState(FORM_VACIO);
-  const [modalReservaId, setModalReservaId] = useState<number | null>(null);
+  const [modalReservaId,       setModalReservaId]       = useState<number | null>(null);
+  const [mostrarModalPrograma, setMostrarModalPrograma] = useState(false);
+  const [expandidoContrato,    setExpandidoContrato]    = useState<string | null>(null);
 
   const f = (k: keyof typeof FORM_VACIO) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -356,10 +359,34 @@ export default function ReservasPage() {
       (filtroServicio === "todos" || (filtroServicio === "fijo" ? !esEventual(r) : esEventual(r)));
   }), [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, clientes]);
 
+  // Agrupación de servicios fijos por contrato (cotizacion_id)
+  const gruposContratos = useMemo(() => {
+    if (filtroServicio !== "fijo") return null;
+    const grupos = new Map<string, Reserva[]>();
+    filtradas.forEach(r => {
+      const key = r.cotizacion_id != null ? String(r.cotizacion_id) : "sin_cotizacion";
+      if (!grupos.has(key)) grupos.set(key, []);
+      grupos.get(key)!.push(r);
+    });
+    return Array.from(grupos.entries()).map(([clave, filas]) => {
+      const sorted = [...filas].sort((a, b) => (a.fecha_servicio || "").localeCompare(b.fecha_servicio || ""));
+      const proxima = sorted.find(r => r.fecha_servicio && r.fecha_servicio >= hoy) || sorted[0];
+      return { clave, cotId: filas[0].cotizacion_id, filas: sorted, proxima };
+    });
+  }, [filtradas, filtroServicio, hoy]);
+
   const reservaModal = modalReservaId ? reservas.find(r => r.id === modalReservaId) : null;
 
   return (
     <main className="p-6 space-y-5 max-w-7xl mx-auto">
+
+      {mostrarModalPrograma && (
+        <ModalGenerarPrograma
+          clientes={clientes}
+          onClose={() => setMostrarModalPrograma(false)}
+          onGenerado={() => { cargarDatos(); setFiltroServicio("fijo"); }}
+        />
+      )}
 
       {reservaModal && (
         <ModalManifiesto
@@ -391,11 +418,20 @@ export default function ReservasPage() {
             {conSobrecupo > 0 && <span className="ml-2 font-bold text-red-600">· {conSobrecupo} con sobrecupo</span>}
           </p>
         </div>
-        {editandoId && (
-          <button onClick={limpiar} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
-            Cancelar edicion
+        <div className="flex gap-2 flex-wrap">
+          <button
+            onClick={() => setMostrarModalPrograma(true)}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm text-white transition-colors hover:opacity-90"
+            style={{ background: "#0b315f" }}
+          >
+            <Calendar size={15} /> Programa fijo
           </button>
-        )}
+          {editandoId && (
+            <button onClick={limpiar} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
+              Cancelar edicion
+            </button>
+          )}
+        </div>
       </div>
 
       {/* FLUJO DE ESTADOS */}
@@ -645,7 +681,171 @@ export default function ReservasPage() {
         </div>
       </section>
 
-      {/* TABLA */}
+      {/* VISTA AGRUPADA POR CONTRATO (solo cuando filtro = Fijos) */}
+      {filtroServicio === "fijo" && (
+        <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
+          {/* Sub-encabezado */}
+          <div className="px-5 py-3 border-b flex items-center justify-between" style={{ background: "#f8fafc", borderColor: "#e2e8f0" }}>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">
+              Contratos activos · {gruposContratos?.length ?? 0} contrato(s) · {filtradas.length} servicio(s)
+            </p>
+            <p className="text-[10px] text-gray-400">Haz clic en un contrato para ver sus fechas</p>
+          </div>
+
+          {loading ? (
+            <div className="p-10 text-center text-gray-400 flex items-center justify-center gap-2">
+              <div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />
+              Cargando...
+            </div>
+          ) : !gruposContratos || gruposContratos.length === 0 ? (
+            <div className="p-10 text-center text-gray-400">
+              <p className="text-3xl mb-2">📋</p>
+              <p className="font-medium">No hay servicios fijos</p>
+              <p className="text-sm mt-1">Usa el botón <b>Programa fijo</b> para generar servicios desde una cotización.</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-gray-100">
+              {gruposContratos.map(({ clave, cotId, filas, proxima }) => {
+                const r0           = filas[0];
+                const expandido    = expandidoContrato === clave;
+                const pendientesG  = filas.filter(r => r.estado === "pendiente").length;
+                const programadasG = filas.filter(r => r.estado === "programada").length;
+                const finalizadasG = filas.filter(r => r.estado === "finalizada").length;
+                const totalIngreso = filas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
+
+                return (
+                  <div key={clave} className="border-t" style={{ borderColor: "#f1f5f9" }}>
+                    {/* Fila resumen del contrato */}
+                    <div
+                      className="flex items-center gap-4 px-5 py-4 cursor-pointer hover:bg-gray-50 transition-colors"
+                      onClick={() => setExpandidoContrato(expandido ? null : clave)}
+                    >
+                      <span className="text-gray-300 text-xs w-3 shrink-0">{expandido ? "▼" : "▶"}</span>
+
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {cotId && (
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md" style={{ background: "#eef3f8", color: "#0b315f" }}>
+                              Cot.#{cotId}
+                            </span>
+                          )}
+                          <span className="font-bold text-gray-800">{nombreCliente(r0.cliente_id)}</span>
+                          <span className="text-xs text-gray-400 truncate max-w-[200px]">
+                            {(r0 as any).origen || "-"} → {(r0 as any).destino || "-"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3 mt-1.5 flex-wrap">
+                          <span className="text-[11px] text-gray-500">{filas.length} servicios en total</span>
+                          {proxima && (
+                            <span className="text-[11px] text-gray-500">
+                              Próximo: <b>{fmtFecha(proxima.fecha_servicio)}</b>
+                            </span>
+                          )}
+                          {pendientesG > 0  && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md" style={{ background: "#fef9c3", color: "#854d0e" }}>{pendientesG} pendientes</span>}
+                          {programadasG > 0 && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md" style={{ background: "#e0f2fe", color: "#0369a1" }}>{programadasG} programadas</span>}
+                          {finalizadasG > 0 && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md" style={{ background: "#ede9fe", color: "#6d28d9" }}>{finalizadasG} finalizadas</span>}
+                        </div>
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <div className="font-bold text-gray-800 text-sm">{fmtSoles(Number(r0.precio_cliente || 0))}/día</div>
+                        <div className="text-[10px] text-gray-400 mt-0.5">
+                          {fmtSoles(totalIngreso)} ingreso total
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Sub-tabla de fechas */}
+                    {expandido && (
+                      <div style={{ background: "#f8fafc", borderTop: "1px solid #e2e8f0" }}>
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr style={{ borderBottom: "1px solid #e2e8f0" }}>
+                              {["Fecha", "Día", "Hora", "Estado", "Recurso", "Ingreso", "Acciones"].map(h => (
+                                <th key={h} className="px-4 py-2 text-left text-[10px] font-bold text-gray-400 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filas.map(r => {
+                              const estCfg   = ESTADO_CFG[r.estado] || ESTADO_CFG.pendiente;
+                              const esTer    = r.tipo === "tercerizada";
+                              const esHoyR   = r.fecha_servicio === hoy;
+                              const diaSem   = r.fecha_servicio
+                                ? new Date(r.fecha_servicio + "T12:00:00").toLocaleDateString("es-PE", { weekday: "short" })
+                                : "-";
+                              return (
+                                <tr key={r.id} className="border-t hover:bg-white transition-colors" style={{ borderColor: "#e2e8f0" }}>
+                                  <td className="px-4 py-2.5">
+                                    <span className="font-medium text-gray-700">{fmtFecha(r.fecha_servicio)}</span>
+                                    {esHoyR && <span className="ml-1.5 text-[9px] font-bold text-orange-500">HOY</span>}
+                                  </td>
+                                  <td className="px-4 py-2.5 capitalize text-gray-500">{diaSem}</td>
+                                  <td className="px-4 py-2.5 text-gray-500">{r.hora_servicio?.slice(0,5) || "-"}</td>
+                                  <td className="px-4 py-2.5">
+                                    <select
+                                      value={r.estado}
+                                      onChange={e => cambiarEstadoRapido(r.id, e.target.value as EstadoReserva)}
+                                      className="text-[11px] font-bold px-2 py-1 rounded-lg border-0 cursor-pointer"
+                                      style={{ background: estCfg.bg, color: estCfg.color }}
+                                    >
+                                      {Object.entries(ESTADO_CFG).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                                    </select>
+                                  </td>
+                                  <td className="px-4 py-2.5 text-gray-600 max-w-[160px]">
+                                    <div className="truncate">
+                                      {esTer
+                                        ? nombreEmpTer(r.empresa_tercerizada_id)
+                                        : (nombreVehiculo(r.vehiculo_id) !== "-" ? nombreVehiculo(r.vehiculo_id) + " · " + nombreConductor(r.conductor_id) : "Sin asignar")}
+                                    </div>
+                                  </td>
+                                  <td className="px-4 py-2.5 font-bold text-gray-700">{fmtSoles(Number(r.precio_cliente || 0))}</td>
+                                  <td className="px-4 py-2.5">
+                                    <div className="flex gap-1.5">
+                                      <button
+                                        onClick={() => setModalReservaId(r.id)}
+                                        className="flex items-center gap-1 bg-purple-50 hover:bg-purple-100 text-purple-700 text-[10px] font-bold px-2 py-1 rounded-lg transition-colors"
+                                      >
+                                        <FileText size={11} /> Pax
+                                      </button>
+                                      <button
+                                        onClick={() => editarReserva(r)}
+                                        className="flex items-center gap-1 bg-gray-50 hover:bg-gray-100 text-gray-600 text-[10px] font-bold px-2 py-1 rounded-lg transition-colors border border-gray-200"
+                                      >
+                                        <Pencil size={11} /> Editar
+                                      </button>
+                                      <button
+                                        onClick={() => eliminarReserva(r.id)}
+                                        className="flex items-center gap-1 bg-red-50 hover:bg-red-100 text-red-600 text-[10px] font-bold px-2 py-1 rounded-lg transition-colors"
+                                      >
+                                        <Trash2 size={11} />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {filtradas.length > 0 && (
+            <div className="px-4 py-3 text-xs text-gray-400 border-t flex justify-between" style={{ borderColor: "#f1f5f9" }}>
+              <span>{filtradas.length} servicios en {gruposContratos?.length ?? 0} contrato(s)</span>
+              <span>AFA ERP · Operaciones</span>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* TABLA PLANA (Todos / Eventuales) */}
+      {filtroServicio !== "fijo" && (
       <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -928,6 +1128,7 @@ export default function ReservasPage() {
           </div>
         )}
       </section>
+      )}
     </main>
   );
 }

@@ -17,13 +17,6 @@ type Reserva = {
   tipo_servicio_detalle: string | null;
 };
 
-type Cotizacion = {
-  id: number; cliente_id: number | null;
-  origen: string; destino: string;
-  fecha_servicio: string | null; hora_ida: string | null;
-  estado: string; precio_cliente: number;
-  numero_cotizacion: string | null; asunto: string | null;
-};
 
 type Cliente   = { id: number; nombre: string; empresa?: string; tipo?: string; };
 type Vehiculo  = { id: number; placa: string; categoria?: string; };
@@ -138,79 +131,32 @@ function ModalReserva({ reserva, cliente, vehiculo, conductor, onCerrar, onCambi
   );
 }
 
-function ModalCotizacion({ cotizacion, cliente, onCerrar }: {
-  cotizacion: Cotizacion; cliente?: Cliente; onCerrar: () => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{ background: "rgba(0,0,0,0.4)" }} onClick={onCerrar}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
-        <div className="px-5 py-4" style={{ background: "#f59e0b" }}>
-          <div className="flex items-start justify-between">
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-white text-xs font-bold px-2 py-0.5 rounded-full" style={{ background: "rgba(255,255,255,0.25)" }}>Cotizacion aprobada sin reserva</span>
-              </div>
-              <h3 className="text-white font-black text-lg">{cotizacion.origen} - {cotizacion.destino}</h3>
-              <p className="text-white/80 text-sm">{cliente?.empresa || cliente?.nombre || "Sin cliente"}</p>
-            </div>
-            <button onClick={onCerrar} className="text-white/70 hover:text-white text-xl font-bold">X</button>
-          </div>
-        </div>
-        <div className="px-5 py-4 space-y-3">
-          <div className="bg-amber-50 rounded-xl p-3 text-sm text-amber-800">
-            <p className="font-bold mb-1">Esta cotizacion esta aprobada pero aun no se convirtio en reserva.</p>
-            <p className="text-xs">Ve a Cotizaciones y usa el boton Reserva para programar este servicio.</p>
-          </div>
-          <div className="grid grid-cols-2 gap-3 text-xs">
-            <div className="bg-gray-50 rounded-xl p-3">
-              <p className="text-gray-400 font-bold uppercase text-[10px] mb-1">Fecha</p>
-              <p className="font-bold text-gray-800">{fmtFecha(cotizacion.fecha_servicio)}</p>
-            </div>
-            <div className="bg-gray-50 rounded-xl p-3">
-              <p className="text-gray-400 font-bold uppercase text-[10px] mb-1">Monto</p>
-              <p className="font-black text-green-700">{fmtSoles(Number(cotizacion.precio_cliente || 0))}</p>
-            </div>
-          </div>
-          {cotizacion.asunto ? <p className="text-xs text-gray-500 italic">"{cotizacion.asunto}"</p> : null}
-          <button onClick={onCerrar} className="w-full py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">Cerrar</button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 export default function CalendarioPage() {
   const calRef = useRef<any>(null);
 
-  const [reservas,     setReservas]     = useState<Reserva[]>([]);
-  const [cotizaciones, setCotizaciones] = useState<Cotizacion[]>([]);
-  const [clientes,     setClientes]     = useState<Cliente[]>([]);
-  const [vehiculos,    setVehiculos]    = useState<Vehiculo[]>([]);
-  const [conductores,  setConductores]  = useState<Conductor[]>([]);
-  const [loading,      setLoading]      = useState(true);
+  const [reservas,    setReservas]    = useState<Reserva[]>([]);
+  const [clientes,    setClientes]    = useState<Cliente[]>([]);
+  const [vehiculos,   setVehiculos]   = useState<Vehiculo[]>([]);
+  const [conductores, setConductores] = useState<Conductor[]>([]);
+  const [loading,     setLoading]     = useState(true);
 
-  const [modalReserva,          setModalReserva]          = useState<Reserva | null>(null);
-  const [modalCotizacion,       setModalCotizacion]       = useState<Cotizacion | null>(null);
-  const [filtroEstado,          setFiltroEstado]          = useState("todos");
-  const [filtroTipo,            setFiltroTipo]            = useState("todos");
-  const [filtroServicio,        setFiltroServicio]        = useState<"todos" | "fijo" | "eventual">("todos");
-  const [mostrarCotAprobadas,   setMostrarCotAprobadas]   = useState(true);
-  const [vistaActual,           setVistaActual]           = useState("timeGridWeek");
+  const [modalReserva,  setModalReserva]  = useState<Reserva | null>(null);
+  const [filtrosEstado, setFiltrosEstado] = useState<string[]>([]);
+  const [filtroTipo,    setFiltroTipo]    = useState("todos");
+  const [filtroServicio, setFiltroServicio] = useState<"todos" | "fijo" | "eventual">("todos");
+  const [vistaActual,   setVistaActual]   = useState("timeGridWeek");
 
   useEffect(() => {
     (async () => {
       setLoading(true);
-      const [rRes, cotRes, clRes, vRes, cRes] = await Promise.all([
+      const [rRes, clRes, vRes, cRes] = await Promise.all([
         supabase.from("reservas").select("id,cliente_id,vehiculo_id,conductor_id,origen,destino,fecha_servicio,hora_servicio,estado,tipo,precio_cliente,costo_proveedor,margen,observaciones,tipo_servicio_detalle").order("fecha_servicio").order("hora_servicio"),
-        supabase.from("cotizaciones").select("id,cliente_id,origen,destino,fecha_servicio,hora_ida,estado,precio_cliente,numero_cotizacion,asunto").eq("estado", "aprobado").not("fecha_servicio", "is", null),
         supabase.from("clientes").select("id,nombre,empresa,tipo"),
         supabase.from("vehiculos").select("id,placa,categoria"),
         supabase.from("conductores").select("id,nombre"),
       ]);
       setReservas(rRes.data || []);
-      const cotData = cotRes.data || [];
-      const rData = rRes.data || [];
-      setCotizaciones(cotData.filter((c: Cotizacion) => !rData.some((r: any) => r.cotizacion_id === c.id)));
       setClientes(clRes.data || []);
       setVehiculos(vRes.data || []);
       setConductores(cRes.data || []);
@@ -224,8 +170,11 @@ export default function CalendarioPage() {
     if (modalReserva?.id === id) setModalReserva(prev => prev ? { ...prev, estado } : prev);
   };
 
+  const toggleEstado = (est: string) =>
+    setFiltrosEstado(prev => prev.includes(est) ? prev.filter(e => e !== est) : [...prev, est]);
+
   const reservasFiltradas = reservas.filter(r =>
-    (filtroEstado === "todos" || r.estado === filtroEstado) &&
+    (filtrosEstado.length === 0 || filtrosEstado.includes(r.estado)) &&
     (filtroTipo === "todos" || r.tipo === filtroTipo) &&
     (filtroServicio === "todos" || (filtroServicio === "fijo" ? !esEventual(r) : esEventual(r))) &&
     r.fecha_servicio
@@ -236,43 +185,29 @@ export default function CalendarioPage() {
     const vehiculo = vehiculos.find(v => v.id === r.vehiculo_id);
     const nombreCl = cliente ? (cliente.empresa || cliente.nombre) : "Sin cliente";
     const color = RESERVA_FC[r.estado] || "#eab308";
-    const esFijo = !esEventual(r);
     return {
       id: "r-" + r.id,
-      title: (esFijo ? "[F] " : "[E] ") + nombreCl + " - " + r.origen.split(",")[0] + " - " + r.destino.split(",")[0],
+      title: nombreCl + " · " + r.origen.split(",")[0] + " → " + r.destino.split(",")[0],
       start: r.hora_servicio ? (r.fecha_servicio + "T" + r.hora_servicio) : r.fecha_servicio!,
       allDay: !r.hora_servicio,
       backgroundColor: color, borderColor: color, textColor: "#fff",
-      extendedProps: { tipo: "reserva", reserva: r, vehiculo },
+      extendedProps: { tipo: "reserva", reserva: r, vehiculo, nombreCl },
     };
   });
 
-  const eventosCotizaciones = mostrarCotAprobadas ? cotizaciones.map(c => {
-    const cliente = clientes.find(cl => cl.id === c.cliente_id);
-    const nombreCl = cliente ? (cliente.empresa || cliente.nombre) : "Sin cliente";
-    return {
-      id: "c-" + c.id,
-      title: "[!] " + nombreCl + " - " + c.origen.split(",")[0] + " - " + c.destino.split(",")[0],
-      start: c.hora_ida ? (c.fecha_servicio + "T" + c.hora_ida) : c.fecha_servicio!,
-      allDay: !c.hora_ida,
-      backgroundColor: "#f59e0b", borderColor: "#d97706", textColor: "#fff",
-      extendedProps: { tipo: "cotizacion", cotizacion: c },
-    };
-  }) : [];
-
-  const eventos = [...eventosReservas, ...eventosCotizaciones];
+  const eventos = eventosReservas;
 
   const hoy  = new Date().toISOString().split("T")[0];
   const mes  = new Date().getMonth();
   const anio = new Date().getFullYear();
 
-  const resMes  = reservas.filter(r => { if (!r.fecha_servicio) return false; const d = new Date(r.fecha_servicio + "T00:00:00"); return d.getMonth() === mes && d.getFullYear() === anio; });
-  const resHoy  = reservas.filter(r => r.fecha_servicio === hoy);
-  const pendMes = resMes.filter(r => r.estado === "pendiente").length;
-  const confMes = resMes.filter(r => r.estado === "confirmada").length;
-  const progMes = resMes.filter(r => r.estado === "programada").length;
+  const resMes       = reservas.filter(r => { if (!r.fecha_servicio) return false; const d = new Date(r.fecha_servicio + "T00:00:00"); return d.getMonth() === mes && d.getFullYear() === anio; });
+  const resHoy       = reservas.filter(r => r.fecha_servicio === hoy);
+  const pendMes      = resMes.filter(r => r.estado === "pendiente").length;
+  const confMes      = resMes.filter(r => r.estado === "confirmada").length;
+  const progMes      = resMes.filter(r => r.estado === "programada").length;
   const fijosMes     = resMes.filter(r => !esEventual(r)).length;
-  const eventualesMes = resMes.filter(r => esEventual(r)).length;
+  const eventualesMes= resMes.filter(r => esEventual(r)).length;
 
   const cambiarVista = (vista: string) => { setVistaActual(vista); calRef.current?.getApi().changeView(vista); };
 
@@ -297,14 +232,6 @@ export default function CalendarioPage() {
           onCambiarEstado={cambiarEstado}
         />
       ) : null}
-      {modalCotizacion ? (
-        <ModalCotizacion
-          cotizacion={modalCotizacion}
-          cliente={clientes.find(c => c.id === modalCotizacion.cliente_id)}
-          onCerrar={() => setModalCotizacion(null)}
-        />
-      ) : null}
-
       <main className="p-6 space-y-4 max-w-7xl mx-auto">
 
         <div className="flex items-start justify-between flex-wrap gap-3">
@@ -313,23 +240,12 @@ export default function CalendarioPage() {
             <p className="text-gray-400 text-sm mt-1">
               Programacion visual · {resMes.length} servicios este mes
               {resHoy.length > 0 ? <span className="ml-2 font-bold text-[#0b315f]">· {resHoy.length} hoy</span> : null}
-              {cotizaciones.length > 0 ? <span className="ml-2 font-bold text-amber-600">· {cotizaciones.length} cotiz. aprobadas sin reserva</span> : null}
             </p>
           </div>
         </div>
 
-        {cotizaciones.length > 0 ? (
-          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-3">
-            <span className="text-xl mt-0.5">!</span>
-            <div className="text-sm text-amber-800">
-              <span className="font-bold">{cotizaciones.length} cotizacion(es) aprobada(s) sin reserva — </span>
-              servicios comprometidos que no estan en la agenda. Ve a Cotizaciones y usa la opcion de Reserva para programarlos.
-            </div>
-          </div>
-        ) : null}
-
         {/* KPIs */}
-        <section className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3">
+        <section className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
           {[
             { label: "Este mes",    valor: resMes.length,       color: "#0b315f", bg: "#eef3f8" },
             { label: "Hoy",         valor: resHoy.length,       color: "#0f766e", bg: "#f0fdfa" },
@@ -337,8 +253,7 @@ export default function CalendarioPage() {
             { label: "Eventuales",  valor: eventualesMes,       color: "#6d28d9", bg: "#ede9fe" },
             { label: "Pendientes",  valor: pendMes,             color: "#854d0e", bg: "#fef9c3" },
             { label: "Programadas", valor: progMes,             color: "#0369a1", bg: "#e0f2fe" },
-            { label: "Confirmadas", valor: confMes,             color: "#166534", bg: "#dcfce7" },
-            { label: "Sin reserva", valor: cotizaciones.length, color: "#b45309", bg: "#fef3c7" },
+            { label: "Confirmadas", valor: confMes, color: "#166534", bg: "#dcfce7" },
           ].map(k => (
             <div key={k.label} className="rounded-xl p-3 border" style={{ background: k.bg, borderColor: k.color + "22" }}>
               <p className="text-[10px] font-bold uppercase tracking-wide" style={{ color: k.color + "99" }}>{k.label}</p>
@@ -369,15 +284,6 @@ export default function CalendarioPage() {
             </div>
 
             <div className="flex gap-2 flex-wrap items-center">
-              <select className="border rounded-xl px-3 py-1.5 text-xs font-bold focus:outline-none" value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)}>
-                <option value="todos">Todos los estados</option>
-                <option value="pendiente">Pendientes</option>
-                <option value="programada">Programadas</option>
-                <option value="confirmada">Confirmadas</option>
-                <option value="en_curso">En curso</option>
-                <option value="finalizada">Finalizadas</option>
-                <option value="cancelada">Canceladas</option>
-              </select>
               <select className="border rounded-xl px-3 py-1.5 text-xs font-bold focus:outline-none" value={filtroTipo} onChange={e => setFiltroTipo(e.target.value)}>
                 <option value="todos">Todos los tipos</option>
                 <option value="propia">Propia</option>
@@ -402,25 +308,67 @@ export default function CalendarioPage() {
                 ))}
               </div>
 
-              <button
-                onClick={() => setMostrarCotAprobadas(v => !v)}
-                className="px-3 py-1.5 rounded-lg text-xs font-bold border transition-all"
-                style={{ background: mostrarCotAprobadas ? "#fef3c7" : "white", color: mostrarCotAprobadas ? "#b45309" : "#6b7280", borderColor: mostrarCotAprobadas ? "#f59e0b" : "#e5e7eb" }}
-              >
-                Cotiz. sin reserva {mostrarCotAprobadas ? "ON" : "OFF"}
-              </button>
             </div>
 
-            <div className="flex gap-3 flex-wrap">
-              {Object.entries(RESERVA_FC).map(([est, color]) => (
-                <div key={est} className="flex items-center gap-1.5">
-                  <div className="w-3 h-3 rounded-full" style={{ background: color }} />
-                  <span className="text-[11px] font-medium text-gray-500 capitalize">{est.replace("_", " ")}</span>
+            {/* Filtro de estados multi-select + leyenda */}
+            <div className="w-full border-t pt-3 mt-1" style={{ borderColor: "#f1f5f9" }}>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mr-1">
+                  Estado:
+                </span>
+                {[
+                  { key: "pendiente",  label: "Pendiente",       color: "#eab308" },
+                  { key: "programada", label: "Programada",      color: "#0284c7" },
+                  { key: "confirmada", label: "Confirmada",      color: "#16a34a" },
+                  { key: "en_curso",   label: "En curso",        color: "#2563eb" },
+                  { key: "finalizada", label: "Finalizada",      color: "#7c3aed" },
+                  { key: "cancelada",  label: "Cancelada",       color: "#dc2626" },
+                ].map(({ key, label, color }) => {
+                  const activo = filtrosEstado.includes(key);
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => toggleEstado(key)}
+                      title={activo ? `Quitar filtro: ${label}` : `Filtrar por: ${label}`}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border-2 transition-all"
+                      style={{
+                        background:   activo ? color : color + "15",
+                        borderColor:  activo ? color : color + "40",
+                        color:        activo ? "white" : color,
+                        transform:    activo ? "scale(1.05)" : "scale(1)",
+                        boxShadow:    activo ? `0 2px 8px ${color}55` : "none",
+                      }}
+                    >
+                      <div className="w-2 h-2 rounded-full" style={{ background: activo ? "white" : color }} />
+                      <span className="text-[11px] font-bold">{label}</span>
+                    </button>
+                  );
+                })}
+                {filtrosEstado.length > 0 && (
+                  <button
+                    onClick={() => setFiltrosEstado([])}
+                    className="text-[11px] font-bold px-2.5 py-1.5 rounded-lg border transition-all hover:bg-gray-100 text-gray-400 border-gray-200"
+                  >
+                    Limpiar ({filtrosEstado.length})
+                  </button>
+                )}
+                {filtrosEstado.length > 0 && (
+                  <span className="text-[11px] text-gray-400 ml-1">
+                    · mostrando {reservasFiltradas.length} servicio(s)
+                  </span>
+                )}
+
+                <div className="ml-4 flex items-center gap-3 border-l pl-4" style={{ borderColor: "#e5e7eb" }}>
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Tipo:</span>
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-4 h-2 rounded-sm" style={{ background: "#0b315f" }} />
+                    <span className="text-[11px] font-bold text-gray-500">Fijo</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-4 h-2 rounded-sm" style={{ background: "#7c3aed" }} />
+                    <span className="text-[11px] font-bold text-gray-500">Eventual</span>
+                  </div>
                 </div>
-              ))}
-              <div className="flex items-center gap-1.5">
-                <div className="w-3 h-3 rounded-full" style={{ background: "#f59e0b" }} />
-                <span className="text-[11px] font-medium text-amber-600">Cot. aprobada</span>
               </div>
             </div>
           </div>
@@ -462,12 +410,11 @@ export default function CalendarioPage() {
             initialView="timeGridWeek"
             headerToolbar={false}
             locale="es"
+            timeZone="America/Lima"
             height={680}
             events={eventos}
             eventClick={(info) => {
-              const tipo = info.event.extendedProps.tipo;
-              if (tipo === "reserva") setModalReserva(info.event.extendedProps.reserva);
-              else setModalCotizacion(info.event.extendedProps.cotizacion);
+              setModalReserva(info.event.extendedProps.reserva);
             }}
             eventDisplay="block"
             dayMaxEvents={3}
@@ -481,20 +428,43 @@ export default function CalendarioPage() {
             allDaySlot={true}
             allDayText="Todo el dia"
             eventContent={(arg) => {
-              const r = arg.event.extendedProps.reserva as Reserva | undefined;
-              const v = arg.event.extendedProps.vehiculo as Vehiculo | undefined;
-              const esCot = arg.event.extendedProps.tipo === "cotizacion";
+              const r      = arg.event.extendedProps.reserva as Reserva | undefined;
+              const v      = arg.event.extendedProps.vehiculo as Vehiculo | undefined;
+              const esFijo = r ? !esEventual(r) : false;
+              const nomCl  = arg.event.extendedProps.nombreCl as string || "Sin cliente";
+              const esMes  = arg.view.type === "dayGridMonth";
+
+              const ESTADO_LABEL: Record<string, string> = {
+                pendiente: "Pendiente", programada: "Programada", confirmada: "Confirmada",
+                en_curso: "En curso", finalizada: "Finalizada", cancelada: "Cancelada",
+              };
+
+              if (esMes) {
+                return (
+                  <div style={{ padding: "1px 5px", overflow: "hidden" }} title={arg.event.title}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: "white", whiteSpace: "nowrap" as const, overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
+                      {r?.hora_servicio?.slice(0, 5) ? r.hora_servicio.slice(0, 5) + " " : ""}{nomCl}
+                    </span>
+                  </div>
+                );
+              }
+
               return (
-                <div className="px-1 py-0.5 overflow-hidden" title={arg.event.title}>
-                  <div className="font-bold text-white truncate" style={{ fontSize: "11px" }}>{arg.event.title}</div>
-                  {arg.view.type !== "dayGridMonth" && !esCot && r ? (
-                    <div className="text-white/80 truncate" style={{ fontSize: "10px" }}>
-                      {v?.placa || "Sin vehiculo"} · {r.hora_servicio?.slice(0, 5)}
-                    </div>
-                  ) : null}
-                  {esCot && arg.view.type !== "dayGridMonth" ? (
-                    <div className="text-white/80 truncate" style={{ fontSize: "10px" }}>Pendiente de programar</div>
-                  ) : null}
+                <div style={{ padding: "3px 6px", overflow: "hidden", display: "flex", flexDirection: "column" as const, gap: 1 }} title={arg.event.title}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" as const }}>
+                    <span style={{ fontSize: 9, fontWeight: 800, color: "rgba(255,255,255,0.95)", textTransform: "uppercase" as const, letterSpacing: "0.06em", background: "rgba(0,0,0,0.18)", padding: "1px 5px", borderRadius: 3, whiteSpace: "nowrap" as const }}>
+                      {r ? (ESTADO_LABEL[r.estado] || r.estado) : ""}
+                    </span>
+                    <span style={{ fontSize: 9, color: "rgba(255,255,255,0.75)", fontWeight: 700 }}>
+                      {esFijo ? "Fijo" : "Eventual"}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: "white", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>
+                    {nomCl}
+                  </div>
+                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.8)", fontFamily: "monospace" }}>
+                    {v?.placa || "Sin vehículo"}
+                  </div>
                 </div>
               );
             }}

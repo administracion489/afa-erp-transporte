@@ -223,6 +223,59 @@ function Celda({
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// GOOGLE PLACES AUTOCOMPLETE
+// ══════════════════════════════════════════════════════════════════════════════
+
+function useGoogleMapsTar(){
+  const[loaded,setLoaded]=useState(false);
+  useEffect(()=>{
+    if(typeof window==="undefined")return;
+    if((window as any).google?.maps?.places){setLoaded(true);return;}
+    const ex=document.getElementById("gmaps-script");
+    if(ex){const h=()=>setLoaded(true);ex.addEventListener("load",h);return()=>ex.removeEventListener("load",h);}
+    const s=document.createElement("script");
+    s.id="gmaps-script";
+    s.src=`https://maps.googleapis.com/maps/api/js?key=${process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}&libraries=places&language=es&region=PE`;
+    s.async=true;s.defer=true;s.onload=()=>setLoaded(true);
+    document.head.appendChild(s);
+  },[]);
+  return loaded;
+}
+
+function PlacesInputTar({placeholder,value,onChange,mapsLoaded}:{
+  placeholder:string;value:string;onChange:(v:string)=>void;mapsLoaded:boolean;
+}){
+  const inputRef=useRef<HTMLInputElement>(null);
+  const acRef=useRef<any>(null);
+  useEffect(()=>{
+    if(!mapsLoaded||!inputRef.current||acRef.current)return;
+    acRef.current=new (window as any).google.maps.places.Autocomplete(inputRef.current,{
+      componentRestrictions:{country:"pe"},
+      fields:["formatted_address","geometry","place_id","name"],
+      types:["geocode","establishment"],
+    });
+    acRef.current.addListener("place_changed",()=>{
+      const p=acRef.current.getPlace();
+      if(!p.geometry?.location)return;
+      const pName=p.name||"";
+      const pAddr=p.formatted_address||"";
+      const address=pName&&pAddr&&!pAddr.toLowerCase().includes(pName.toLowerCase())?`${pName}, ${pAddr}`:pAddr||pName;
+      onChange(address.toUpperCase());
+    });
+  },[mapsLoaded]);
+  return(
+    <div className="relative">
+      <input ref={inputRef} type="text" value={value}
+        onChange={e=>onChange(e.target.value.toUpperCase())}
+        placeholder={placeholder}
+        className={iCls("uppercase font-mono pr-8")+" bg-white"}/>
+      {value&&<button type="button" onClick={()=>onChange("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-300 hover:text-gray-500 font-bold text-xs">✕</button>}
+      {!mapsLoaded&&<div className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3 h-3 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin"/>}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // FORMULARIO NUEVA TARIFA
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -235,13 +288,14 @@ const FORM0 = {
 };
 
 function FormTarifa({
-  modo, onGuardado, editando, datoEditar, onCancelar,
+  modo, onGuardado, editando, datoEditar, onCancelar, mapsLoaded,
 }: {
   modo: Modo;
   onGuardado: () => void;
   editando: boolean;
   datoEditar: Tarifa | null;
   onCancelar: () => void;
+  mapsLoaded: boolean;
 }) {
   const [form,     setForm]     = useState(FORM0);
   const [saving,   setSaving]   = useState(false);
@@ -369,13 +423,13 @@ function FormTarifa({
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div>
           <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Origen *</label>
-          <input className={iCls("uppercase font-mono")} placeholder="LIMA"
-            value={form.origen} onChange={e => setForm(p => ({ ...p, origen: e.target.value.toUpperCase() }))} />
+          <PlacesInputTar placeholder="Ej: Plaza Norte, Lima" value={form.origen} mapsLoaded={mapsLoaded}
+            onChange={v => setForm(p => ({ ...p, origen: v }))} />
         </div>
         <div>
           <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Destino *</label>
-          <input className={iCls("uppercase font-mono")} placeholder="CHOSICA"
-            value={form.destino} onChange={e => setForm(p => ({ ...p, destino: e.target.value.toUpperCase() }))} />
+          <PlacesInputTar placeholder="Ej: Planta Cajamarquilla" value={form.destino} mapsLoaded={mapsLoaded}
+            onChange={v => setForm(p => ({ ...p, destino: v }))} />
         </div>
         <div>
           <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
@@ -440,6 +494,7 @@ function FormTarifa({
 // ══════════════════════════════════════════════════════════════════════════════
 
 export default function TarifarioPage() {
+  const mapsLoaded = useGoogleMapsTar();
   const [tarifas,     setTarifas]     = useState<Tarifa[]>([]);
   const [cotRefs,     setCotRefs]     = useState<CotRef[]>([]);
   const [loading,     setLoading]     = useState(false);
@@ -652,6 +707,7 @@ export default function TarifarioPage() {
         <FormTarifa
           modo={modo} editando={!!editandoT} datoEditar={editandoT}
           onGuardado={cargar} onCancelar={() => { setMostrarForm(false); setEditandoT(null); }}
+          mapsLoaded={mapsLoaded}
         />
       )}
 

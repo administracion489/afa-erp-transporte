@@ -82,9 +82,13 @@ function BuscadorGooglePlaces(props: {
           const place = autocomplete.getPlace();
           if (!place.geometry || !place.geometry.location) { setError("Selecciona una opcion de la lista"); return; }
           setError(null);
+          const pName = place.name || "";
+          const pAddr = place.formatted_address || "";
+          const direccion = pName && pAddr && !pAddr.toLowerCase().includes(pName.toLowerCase())
+            ? `${pName}, ${pAddr}` : pAddr || pName;
           props.onSeleccionar({
-            nombre: place.name || place.formatted_address || "",
-            direccion: place.formatted_address || "",
+            nombre: pName || pAddr,
+            direccion,
             lat: place.geometry.location.lat(),
             lng: place.geometry.location.lng(),
             place_id: place.place_id || "",

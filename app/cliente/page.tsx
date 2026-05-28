@@ -1,8 +1,13 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import ModalGps from "@/components/seguimiento/ModalGps";
+import ModalManifiestoPortal from "@/components/portal/ModalManifiestoPortal";
+import mapboxgl from "mapbox-gl";
+import "mapbox-gl/dist/mapbox-gl.css";
+
+mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────
 type Cliente        = { id: number; nombre: string; empresa: string | null; ruc: string | null; email: string | null; telefono: string | null; };
@@ -14,7 +19,7 @@ type GPS            = { lat: number; lng: number; velocidad: number; timestamp: 
 type EmpresaPerfil  = { nombre: string | null; logo_url: string | null; color_primario: string | null; telefono: string | null; email: string | null; slogan: string | null; };
 type ConductorInfo  = { nombre: string; numero_licencia: string | null; telefono: string | null; };
 type VehiculoInfo   = { placa: string; };
-type Tab = "dashboard" | "activos" | "historial" | "reporte" | "facturacion" | "documentos" | "cuenta";
+type Tab = "dashboard" | "activos" | "historial" | "facturacion" | "documentos" | "cuenta";
 type CuentaSeccion = "empresa" | "usuarios" | "notificaciones" | "facturacion_cfg" | "integraciones" | "seguridad" | "preferencias";
 type Factura = { id: number; reserva_id: number | null; tipo_comprobante: string; serie: string | null; numero: string | null; fecha_emision: string | null; fecha_vencimiento: string | null; total: number; estado: string; pdf_url: string | null; };
 type PortalUsuario = { id: number; cliente_id: number; nombre: string; dni: string; cargo: string | null; rol: "admin" | "visor"; email: string | null; codigo_acceso: string; activo: boolean; created_at: string; modulos_permitidos: string[] | null; };
@@ -138,7 +143,7 @@ const FAQ_ITEMS = [
   { q: "¿Cómo descargo el manifiesto oficial?", a: "En la pestaña 'Reporte', selecciona el servicio y presiona 'Manifiesto MTC'. El documento sigue el formato R.D. 1946-2009-MTC-15 exigido por SUTRAN." },
   { q: "¿Puedo programar un nuevo servicio desde aquí?", a: "Para programar un nuevo servicio, comunícate con nuestro equipo al 966707225 o escríbenos por WhatsApp." },
   { q: "¿Qué significa cada estado del servicio?", a: "Pendiente: aún no confirmado. Confirmado: aprobado y asignado. En curso: el bus está en ruta hoy. Completado/Realizado: servicio finalizado. Cancelado: servicio anulado." },
-  { q: "¿Qué hago si un pasajero no aparece en la lista?", a: "Comunícate con tu coordinador para que actualice la lista de pasajeros en el sistema antes del servicio." },
+  { q: "¿Puedo agregar o editar pasajeros yo mismo?", a: "Sí. En el Historial de servicios, selecciona un servicio pendiente o confirmado y presiona 'Editar manifiesto'. Podrás agregar pasajeros por nombre/DNI, eliminarlos o subir una lista completa en formato Excel/CSV." },
 ];
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────
@@ -151,11 +156,25 @@ export default function ClientePortal() {
   // Login
   const [rucInput,      setRucInput]      = useState("");
   const [dniInput,      setDniInput]      = useState("");
+  const [tipoIdInput,   setTipoIdInput]   = useState<"DNI"|"CE"|"Celular">("DNI");
   const [passwordInput, setPasswordInput] = useState("");
   const [showPassword,  setShowPassword]  = useState(false);
   const [loginErr,      setLoginErr]      = useState("");
   const [loginLoad,     setLoginLoad]     = useState(false);
   const [portalUsuario, setPortalUsuario] = useState<PortalUsuario | null>(null);
+
+  // Reset de contraseña
+  const [modalReset,  setModalReset]  = useState(false);
+  const [resetStep,   setResetStep]   = useState<1|2>(1);
+  const [resetRuc,    setResetRuc]    = useState("");
+  const [resetEmail,  setResetEmail]  = useState("");
+  const [resetToken,  setResetToken]  = useState("");
+  const [resetPass,   setResetPass]   = useState("");
+  const [resetPass2,  setResetPass2]  = useState("");
+  const [showRPass,   setShowRPass]   = useState(false);
+  const [resetErr,    setResetErr]    = useState("");
+  const [resetLoad,   setResetLoad]   = useState(false);
+  const [resetOk,     setResetOk]     = useState(false);
 
   // Datos
   const [reservas,       setReservas]       = useState<Reserva[]>([]);
@@ -217,7 +236,19 @@ export default function ClientePortal() {
   const [gpsModalOpen, setGpsModalOpen] = useState(false);
   const [gpsModalRes,  setGpsModalRes]  = useState<Reserva | null>(null);
   const [modalFaq,     setModalFaq]     = useState(false);
+  const [modalNotif,   setModalNotif]   = useState(false);
   const [faqOpen,      setFaqOpen]      = useState<number | null>(null);
+
+  // ── Modal manifiesto portal ────────────────────────────────────────────────
+  const [modalManifiestoData, setModalManifiestoData] = useState<{ reservaId: number; clienteId: number; readonly: boolean } | null>(null);
+
+  // En vivo — mapa Mapbox
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapRef          = useRef<mapboxgl.Map | null>(null);
+  const markersEnVivo   = useRef<Record<string, mapboxgl.Marker>>({});
+  const [vehiculosCliente,  setVehiculosCliente]  = useState<{id:number;placa:string}[]>([]);
+  const [ubicacionesEnVivo, setUbicacionesEnVivo] = useState<{vehiculo_id:number;lat:number;lng:number;velocidad:number;timestamp:string}[]>([]);
+  const [mapListoEnVivo,    setMapListoEnVivo]    = useState(false);
 
   // ─── Init ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -231,7 +262,7 @@ export default function ClientePortal() {
   // ─── Login ────────────────────────────────────────────────────────────────
   async function login() {
     if (!rucInput.trim())      { setLoginErr("Ingresa el RUC de tu empresa"); return; }
-    if (!dniInput.trim())      { setLoginErr("Ingresa tu DNI"); return; }
+    if (!dniInput.trim())      { setLoginErr(`Ingresa tu ${tipoIdInput === "Celular" ? "número de celular" : tipoIdInput}`); return; }
     if (!passwordInput.trim()) { setLoginErr("Ingresa tu contraseña"); return; }
     setLoginErr(""); setLoginLoad(true);
     const q = rucInput.trim();
@@ -254,13 +285,55 @@ export default function ClientePortal() {
       await cargarDatos((clienteData as any).id); setLoginLoad(false); return;
     }
     const usuario = usuarios.find(u => u.dni === dniInput.trim());
-    if (!usuario) { setLoginErr("DNI no registrado para este cliente."); setLoginLoad(false); return; }
+    if (!usuario) { setLoginErr(`${tipoIdInput === "Celular" ? "Celular" : tipoIdInput} no registrado para este cliente.`); setLoginLoad(false); return; }
     if (usuario.codigo_acceso !== passwordInput.trim()) {
       setLoginErr("Contraseña incorrecta."); setLoginLoad(false); return;
     }
     saveSession(clienteData as Cliente, usuario);
     setCliente(clienteData as Cliente); setPortalUsuario(usuario);
     await cargarDatos((clienteData as any).id); setLoginLoad(false);
+  }
+
+  // ─── Reset de contraseña — paso 1: solicitar código ──────────────────────
+  async function solicitarReset() {
+    if (!resetRuc.trim())   { setResetErr("Ingresa el RUC de tu empresa"); return; }
+    if (!resetEmail.trim()) { setResetErr("Ingresa tu correo electrónico"); return; }
+    setResetErr(""); setResetLoad(true);
+    try {
+      const res = await fetch("/api/portal/reset-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ruc: resetRuc.trim(), email: resetEmail.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setResetErr(data.error || "Error al enviar"); setResetLoad(false); return; }
+      setResetStep(2);
+    } catch { setResetErr("Error de conexión. Intenta de nuevo."); }
+    setResetLoad(false);
+  }
+
+  // ─── Reset de contraseña — paso 2: confirmar código + nueva contraseña ───
+  async function confirmarReset() {
+    if (!resetToken.trim())              { setResetErr("Ingresa el código recibido"); return; }
+    if (resetPass.trim().length < 6)     { setResetErr("La contraseña debe tener al menos 6 caracteres"); return; }
+    if (resetPass.trim() !== resetPass2.trim()) { setResetErr("Las contraseñas no coinciden"); return; }
+    setResetErr(""); setResetLoad(true);
+    try {
+      const res = await fetch("/api/portal/confirmar-reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: resetToken.trim().toUpperCase(), nueva_password: resetPass.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setResetErr(data.error || "Código inválido"); setResetLoad(false); return; }
+      setResetOk(true);
+    } catch { setResetErr("Error de conexión. Intenta de nuevo."); }
+    setResetLoad(false);
+  }
+
+  function cerrarModalReset() {
+    setModalReset(false);
+    setTimeout(() => { setResetStep(1); setResetRuc(""); setResetEmail(""); setResetToken(""); setResetPass(""); setResetPass2(""); setResetErr(""); setResetOk(false); }, 300);
   }
 
   // ─── Cargar datos ─────────────────────────────────────────────────────────
@@ -298,7 +371,7 @@ export default function ClientePortal() {
   // ─── Cargar detalles (paradas + boarding + pasajeros + conductor + vehiculo) 
   const cargarDetalle = useCallback(async (r: Reserva) => {
     setReservaSel(r);
-    setTab("reporte");
+    setTab("historial");
     setConductorInfo(null);
     setVehiculoInfo(null);
 
@@ -446,6 +519,30 @@ export default function ClientePortal() {
     setLoadingStats(false);
   }, []);
 
+  // ─── Vehículos del cliente para mapa En vivo ──────────────────────────────
+  const cargarVehiculosCliente = useCallback(async (cid: number) => {
+    const { data: resData } = await supabase.from("reservas")
+      .select("vehiculo_id").eq("cliente_id", cid).not("vehiculo_id", "is", null);
+    const vIds = [...new Set((resData || []).map((r: any) => r.vehiculo_id).filter(Boolean))] as number[];
+    if (vIds.length === 0) { setVehiculosCliente([]); setUbicacionesEnVivo([]); return; }
+
+    const { data: vData } = await supabase.from("vehiculos").select("id,placa").in("id", vIds);
+    setVehiculosCliente((vData || []) as {id:number;placa:string}[]);
+
+    const { data: gpsData } = await supabase.from("ubicaciones_gps")
+      .select("vehiculo_id,lat,lng,velocidad,timestamp")
+      .in("vehiculo_id", vIds)
+      .order("timestamp", { ascending: false })
+      .limit(vIds.length * 20);
+    const latest: Record<number, any> = {};
+    (gpsData || []).forEach((g: any) => {
+      if (!latest[g.vehiculo_id] || new Date(g.timestamp) > new Date(latest[g.vehiculo_id].timestamp)) {
+        latest[g.vehiculo_id] = g;
+      }
+    });
+    setUbicacionesEnVivo(Object.values(latest));
+  }, []);
+
   // ─── Cargar colabs cuando se abre la sección de usuarios ──────────────────
   useEffect(() => {
     if (cuentaSeccion === "usuarios" && cliente && colabs.length === 0 && !loadingColabs) {
@@ -530,6 +627,67 @@ export default function ClientePortal() {
     return () => { supabase.removeChannel(ch); };
   }, [cliente]);
 
+  // ─── Mapa En vivo: cargar vehículos cuando se abre el tab ─────────────────
+  useEffect(() => {
+    if (tab === "activos" && cliente) cargarVehiculosCliente(cliente.id);
+  }, [tab, cliente, cargarVehiculosCliente]);
+
+  // ─── Mapa En vivo: refresco periódico GPS cada 15s ────────────────────────
+  useEffect(() => {
+    if (tab !== "activos" || !cliente) return;
+    const iv = setInterval(() => cargarVehiculosCliente(cliente.id), 15000);
+    return () => clearInterval(iv);
+  }, [tab, cliente, cargarVehiculosCliente]);
+
+  // ─── Mapa En vivo: inicializar / destruir Mapbox ──────────────────────────
+  useEffect(() => {
+    if (tab !== "activos") {
+      if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
+      Object.values(markersEnVivo.current).forEach(m => m.remove());
+      markersEnVivo.current = {};
+      setMapListoEnVivo(false);
+      return;
+    }
+    const t = setTimeout(() => {
+      if (!mapContainerRef.current || mapRef.current) return;
+      const m = new mapboxgl.Map({
+        container: mapContainerRef.current,
+        style: "mapbox://styles/mapbox/streets-v12",
+        center: [-77.0428, -12.0464],
+        zoom: 11,
+      });
+      m.addControl(new mapboxgl.NavigationControl(), "top-right");
+      m.on("load", () => setMapListoEnVivo(true));
+      mapRef.current = m;
+    }, 80);
+    return () => clearTimeout(t);
+  }, [tab]);
+
+  // ─── Mapa En vivo: actualizar marcadores cuando cambian ubicaciones ────────
+  useEffect(() => {
+    if (!mapListoEnVivo || !mapRef.current) return;
+    Object.values(markersEnVivo.current).forEach(m => m.remove());
+    markersEnVivo.current = {};
+    ubicacionesEnVivo.forEach(u => {
+      const key = `v${u.vehiculo_id}`;
+      const v = vehiculosCliente.find(x => x.id === u.vehiculo_id);
+      const placa = v?.placa || `V${u.vehiculo_id}`;
+      const min = Math.floor((Date.now() - new Date(u.timestamp).getTime()) / 60000);
+      const color = min <= 2 ? "#16a34a" : min <= 10 ? "#d97706" : "#dc2626";
+      const label = min <= 2 ? "En línea" : min <= 10 ? `Hace ${min}m` : "Sin señal";
+      const el = document.createElement("div");
+      el.style.cssText = `width:32px;height:32px;border-radius:50%;background:${color};border:2.5px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;cursor:pointer;`;
+      el.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>`;
+      const popup = new mapboxgl.Popup({ offset: 28, closeButton: false }).setHTML(
+        `<div style="font-family:system-ui,sans-serif;padding:2px 0"><b style="font-size:13px;color:#0a0e1a">${placa}</b><br><span style="font-size:12px;color:${color};font-weight:600">${label}</span><br><span style="font-size:11px;color:#6b6f7c">${u.velocidad} km/h</span></div>`
+      );
+      markersEnVivo.current[key] = new mapboxgl.Marker({ element: el })
+        .setLngLat([u.lng, u.lat])
+        .setPopup(popup)
+        .addTo(mapRef.current!);
+    });
+  }, [ubicacionesEnVivo, vehiculosCliente, mapListoEnVivo]);
+
   // ─── KPIs ─────────────────────────────────────────────────────────────────
   const hoy          = getHoyPeru();
   const esteM        = hoy.slice(0, 7);
@@ -559,10 +717,16 @@ export default function ClientePortal() {
   const porPagar       = facturas.filter(f => f.estado === "emitida" || f.estado === "enviada").reduce((s, f) => s + Number(f.total || 0), 0);
   const totalPagado    = facturas.filter(f => f.estado === "cobrada").reduce((s, f) => s + Number(f.total || 0), 0);
   const totalVencido   = facturas.filter(f => f.estado === "vencida").reduce((s, f) => s + Number(f.total || 0), 0);
+  const mañana = (() => { const d = new Date(hoy + "T00:00:00"); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10); })();
   const notifs: Notif[] = [
-    ...facturas.filter(f => f.estado === "vencida").slice(0,2).map(f => ({ id: f.id, tipo: "warning" as const, titulo: "Factura vencida", desc: `${f.serie || ""}-${f.numero || f.id} por ${fmtSoles(f.total)}`, fecha: f.fecha_vencimiento || "" })),
-    ...reservas.filter(r => esFuturo(r.fecha_servicio) && (r.estado === "confirmado" || r.estado === "confirmada")).slice(0,2).map(r => ({ id: r.id + 1000, tipo: "success" as const, titulo: "Servicio confirmado", desc: `${r.origen} → ${r.destino} · ${fmtFecha(r.fecha_servicio)}`, fecha: r.created_at })),
-    { id: 9999, tipo: "info" as const, titulo: "Nuevo documento disponible", desc: "Cotización actualizada en Documentos", fecha: hoy },
+    // Facturas vencidas → alertas urgentes
+    ...facturas.filter(f => f.estado === "vencida").slice(0, 3).map(f => ({ id: f.id, tipo: "warning" as const, titulo: "Factura vencida", desc: `${f.serie ? f.serie + "-" : ""}${f.numero || "#" + f.id} · ${fmtSoles(f.total)}`, fecha: f.fecha_vencimiento || hoy })),
+    // Servicio de hoy activo
+    ...reservas.filter(r => esHoy(r.fecha_servicio) && !esCancelado(r.estado) && !esFinalizado(r.estado)).slice(0, 1).map(r => ({ id: r.id + 5000, tipo: "info" as const, titulo: efectivoEstado(r) === "en_curso" ? "🚌 Servicio en ruta ahora" : "Servicio programado hoy", desc: `${r.origen} → ${r.destino} · ${r.hora_servicio?.slice(0,5) || "–"}`, fecha: r.fecha_servicio || hoy })),
+    // Servicios mañana
+    ...reservas.filter(r => r.fecha_servicio === mañana && !esCancelado(r.estado)).slice(0, 1).map(r => ({ id: r.id + 6000, tipo: "info" as const, titulo: "Servicio programado mañana", desc: `${r.origen} → ${r.destino} · ${r.hora_servicio?.slice(0,5) || "–"}`, fecha: r.fecha_servicio || mañana })),
+    // Próximos servicios confirmados
+    ...reservas.filter(r => esFuturo(r.fecha_servicio) && r.fecha_servicio !== mañana && (r.estado === "confirmado" || r.estado === "confirmada")).slice(0, 2).map(r => ({ id: r.id + 1000, tipo: "success" as const, titulo: "Servicio confirmado", desc: `${r.origen} → ${r.destino} · ${fmtFecha(r.fecha_servicio)}`, fecha: r.fecha_servicio || hoy })),
   ];
   const servicioHoy    = reservas.find(r => esHoy(r.fecha_servicio)); // cualquier estado
   const servicioActivo = reservas.find(r => esHoy(r.fecha_servicio) && !esCancelado(r.estado));
@@ -890,13 +1054,11 @@ tbody tr:nth-child(even){background:#f9fafb}
           <div style={{ position: "relative", zIndex: 1, display: "flex", flexDirection: "column" as const, height: "100%" }}>
             {/* Logo */}
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              {empresa?.logo_url
-                ? <img src={empresa.logo_url} alt="AFA" style={{ height: 32, objectFit: "contain", filter: "brightness(0) invert(1)" }}/>
-                : <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <div style={{ width: 32, height: 32, borderRadius: 8, background: "rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, fontSize: 13, color: "white", border: "1px solid rgba(255,255,255,0.2)" }}>AFA</div>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,0.8)" }}>Tours Peru</span>
-                  </div>
-              }
+              <img
+                src={empresa?.logo_url || "/logoafa-removebg-preview.png"}
+                alt="AFA Tours Peru"
+                style={{ height: 38, objectFit: "contain", imageRendering: "-webkit-optimize-contrast" as any }}
+              />
               <span style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase" as const, marginLeft: 4 }}>· Portal Cliente</span>
             </div>
 
@@ -944,7 +1106,7 @@ tbody tr:nth-child(even){background:#f9fafb}
             <p style={{ fontSize: 10.5, fontWeight: 700, color: C.mute, letterSpacing: "1.4px", textTransform: "uppercase" as const, margin: "0 0 8px" }}>Acceso clientes corporativos</p>
             <h2 style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 30, letterSpacing: -0.7, margin: "0 0 10px", color: C.ink }}>Iniciar sesión</h2>
             <p style={{ fontSize: 14, color: C.mute, margin: "0 0 32px", lineHeight: 1.55 }}>
-              Ingresa el RUC de tu empresa, tu DNI y tu contraseña de acceso.
+              Ingresa el RUC de tu empresa, tu documento o celular y tu contraseña.
             </p>
 
             {/* Campo RUC */}
@@ -972,17 +1134,38 @@ tbody tr:nth-child(even){background:#f9fafb}
               )}
             </div>
 
-            {/* Campo DNI */}
+            {/* Campo Identificación */}
             <div style={{ marginBottom: 18 }}>
-              <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.ink2, marginBottom: 7, letterSpacing: "0.3px", textTransform: "uppercase" as const }}>DNI del usuario</label>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 7 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: C.ink2, letterSpacing: "0.3px", textTransform: "uppercase" as const }}>Identificación del usuario</label>
+              </div>
+              {/* Pills selector de tipo */}
+              <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                {(["DNI","CE","Celular"] as const).map(t => (
+                  <button key={t} type="button"
+                    onClick={() => { setTipoIdInput(t); setDniInput(""); setLoginErr(""); }}
+                    style={{ flex: 1, padding: "6px 0", borderRadius: 6, border: `1.5px solid ${tipoIdInput === t ? C.navy : C.line2}`, background: tipoIdInput === t ? C.navyTint : "#fff", color: tipoIdInput === t ? C.navy : C.mute, fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", transition: "all .12s" }}>
+                    {t === "CE" ? "Cédula / CE" : t}
+                  </button>
+                ))}
+              </div>
+              {/* Input */}
               <div style={{ display: "flex", alignItems: "center", border: `1.5px solid ${dniInput ? C.navy : C.line2}`, borderRadius: 8, background: "#fff", padding: "0 14px", height: 48, transition: "border-color .15s", boxShadow: dniInput ? "0 0 0 3px rgba(11,49,95,.08)" : "none" }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={C.mute} strokeWidth="2" style={{ flexShrink: 0 }}><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+                {tipoIdInput === "Celular"
+                  ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={C.mute} strokeWidth="2" style={{ flexShrink: 0 }}><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+                  : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={C.mute} strokeWidth="2" style={{ flexShrink: 0 }}><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+                }
                 <input
                   value={dniInput}
-                  onChange={e => { setDniInput(e.target.value.replace(/\D/g,"")); setLoginErr(""); }}
+                  onChange={e => {
+                    const v = e.target.value;
+                    const cleaned = (tipoIdInput === "DNI" || tipoIdInput === "Celular") ? v.replace(/\D/g,"") : v.replace(/[^a-zA-Z0-9]/g,"");
+                    setDniInput(cleaned);
+                    setLoginErr("");
+                  }}
                   onKeyDown={e => e.key === "Enter" && login()}
-                  placeholder="12345678"
-                  maxLength={8}
+                  placeholder={tipoIdInput === "DNI" ? "12345678" : tipoIdInput === "CE" ? "000123456" : "3001234567"}
+                  maxLength={tipoIdInput === "DNI" ? 8 : 15}
                   style={{ flex: 1, border: "none", outline: "none", marginLeft: 10, fontFamily: C.fontMono, fontSize: 15, fontWeight: 600, color: C.ink, background: "transparent", letterSpacing: 1 }}
                 />
               </div>
@@ -1018,7 +1201,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                 </span>
                 Mantener sesión por 8 horas
               </label>
-              <a style={{ fontSize: 12.5, color: C.navy, fontWeight: 700, textDecoration: "none", cursor: "pointer" }}>¿Olvidaste tu acceso?</a>
+              <a onClick={() => { setModalReset(true); setResetRuc(rucInput); }} style={{ fontSize: 12.5, color: C.navy, fontWeight: 700, textDecoration: "none", cursor: "pointer" }}>¿Olvidaste tu acceso?</a>
             </div>
 
             {/* Error */}
@@ -1037,26 +1220,7 @@ tbody tr:nth-child(even){background:#f9fafb}
               }
             </button>
 
-            {/* Separador */}
-            <div style={{ display: "flex", alignItems: "center", gap: 14, margin: "24px 0" }}>
-              <div style={{ flex: 1, height: 1, background: C.line }}/>
-              <span style={{ fontSize: 11, color: C.mute, fontWeight: 600, letterSpacing: "0.4px" }}>O CONTINÚA CON</span>
-              <div style={{ flex: 1, height: 1, background: C.line }}/>
-            </div>
-
-            {/* Botones alternativos */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <button className="pc-btn-secondary">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M9 9h6M9 12h6M9 15h4"/></svg>
-                Token biométrico
-              </button>
-              <button className="pc-btn-secondary">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                Código QR
-              </button>
-            </div>
-
-            <p style={{ margin: "32px 0 0", fontSize: 12.5, color: C.mute, textAlign: "center" as const }}>
+            <p style={{ margin: "24px 0 0", fontSize: 12.5, color: C.mute, textAlign: "center" as const }}>
               ¿Eres nuevo cliente?{" "}
               <a href={`https://wa.me/51${(empresa?.telefono||"966707225").replace(/\D/g,"")}`} target="_blank" rel="noopener noreferrer" style={{ color: C.navy, fontWeight: 700, textDecoration: "none" }}>
                 Solicita acceso →
@@ -1066,6 +1230,146 @@ tbody tr:nth-child(even){background:#f9fafb}
         </div>
 
       </div>
+
+      {/* MODAL RESET — dentro del login */}
+      {modalReset && (
+        <div onClick={e => { if (e.target === e.currentTarget) cerrarModalReset(); }}
+          style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(7,31,61,0.65)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, backdropFilter: "blur(4px)" }}>
+          <div style={{ background: "#FFFFFF", borderRadius: 20, width: "100%", maxWidth: 420, boxShadow: "0 24px 64px rgba(0,0,0,0.25)", overflow: "hidden" }}>
+
+            {/* Cabecera */}
+            <div style={{ background: "#071f3d", padding: "22px 28px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <p style={{ margin: 0, fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.45)", letterSpacing: "0.12em", textTransform: "uppercase" as const }}>
+                  {resetOk ? "Listo" : resetStep === 1 ? "Paso 1 de 2" : "Paso 2 de 2"}
+                </p>
+                <p style={{ margin: "3px 0 0", fontSize: 16, fontWeight: 800, color: "white" }}>
+                  {resetOk ? "Contraseña actualizada" : resetStep === 1 ? "Recuperar acceso" : "Ingresa el código"}
+                </p>
+              </div>
+              <button onClick={cerrarModalReset}
+                style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 8, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "white" }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+
+            {/* Barra de progreso */}
+            {!resetOk && (
+              <div style={{ height: 3, background: "#E6E2D6" }}>
+                <div style={{ height: "100%", width: resetStep === 1 ? "50%" : "100%", background: "#0b315f", transition: "width 0.4s ease" }} />
+              </div>
+            )}
+
+            <div style={{ padding: "28px 28px 24px" }}>
+
+              {/* ── ÉXITO ── */}
+              {resetOk && (
+                <div style={{ textAlign: "center" as const, padding: "12px 0 8px" }}>
+                  <div style={{ width: 56, height: 56, borderRadius: "50%", background: "#E3F1E6", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
+                    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#15803d" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                  </div>
+                  <p style={{ fontWeight: 800, fontSize: 16, color: "#0A0E1A", margin: "0 0 8px" }}>¡Contraseña actualizada!</p>
+                  <p style={{ fontSize: 13.5, color: "#6B6F7C", margin: "0 0 24px", lineHeight: 1.55 }}>Ya puedes iniciar sesión con tu nueva contraseña.</p>
+                  <button onClick={cerrarModalReset}
+                    style={{ width: "100%", padding: 13, borderRadius: 12, border: "none", background: "#0b315f", color: "white", fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+                    Ir al login
+                  </button>
+                </div>
+              )}
+
+              {/* ── PASO 1: RUC + EMAIL ── */}
+              {!resetOk && resetStep === 1 && (
+                <div style={{ display: "flex", flexDirection: "column" as const, gap: 14 }}>
+                  <p style={{ margin: "0 0 4px", fontSize: 13.5, color: "#6B6F7C", lineHeight: 1.55 }}>
+                    Ingresa el RUC de tu empresa y tu correo registrado en el portal. Te enviaremos un código de 6 caracteres.
+                  </p>
+                  <div>
+                    <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: "#1F2433", marginBottom: 6 }}>RUC de la empresa</label>
+                    <input value={resetRuc} onChange={e => setResetRuc(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && solicitarReset()}
+                      placeholder="20XXXXXXXXX" maxLength={11}
+                      style={{ width: "100%", padding: "11px 14px", borderRadius: 10, border: "1.5px solid #E6E2D6", fontSize: 14, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const, background: "#F6F4EE" }} />
+                  </div>
+                  <div>
+                    <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: "#1F2433", marginBottom: 6 }}>Tu correo electrónico</label>
+                    <input type="email" value={resetEmail} onChange={e => setResetEmail(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && solicitarReset()}
+                      placeholder="correo@empresa.com"
+                      style={{ width: "100%", padding: "11px 14px", borderRadius: 10, border: "1.5px solid #E6E2D6", fontSize: 14, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const, background: "#F6F4EE" }} />
+                  </div>
+                  {resetErr && (
+                    <p style={{ margin: 0, fontSize: 12.5, color: "#B91C1C", fontWeight: 600, background: "#FCE5E2", padding: "8px 12px", borderRadius: 8 }}>{resetErr}</p>
+                  )}
+                  <button onClick={solicitarReset} disabled={resetLoad}
+                    style={{ width: "100%", padding: 13, borderRadius: 12, border: "none", background: resetLoad ? "#9AA0AC" : "#0b315f", color: "white", fontWeight: 800, fontSize: 14, cursor: resetLoad ? "not-allowed" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                    {resetLoad ? "Enviando..." : "Enviar código →"}
+                  </button>
+                </div>
+              )}
+
+              {/* ── PASO 2: CÓDIGO + NUEVA CONTRASEÑA ── */}
+              {!resetOk && resetStep === 2 && (
+                <div style={{ display: "flex", flexDirection: "column" as const, gap: 14 }}>
+                  <div style={{ background: "#E3F1E6", border: "1px solid rgba(21,128,61,0.2)", borderRadius: 10, padding: "10px 14px" }}>
+                    <p style={{ margin: 0, fontSize: 12.5, color: "#15803d", fontWeight: 600 }}>
+                      Código enviado a <strong>{resetEmail}</strong>. Revisa tu bandeja de entrada (y spam).
+                    </p>
+                  </div>
+                  <div>
+                    <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: "#1F2433", marginBottom: 6 }}>Código de 6 caracteres</label>
+                    <input value={resetToken} onChange={e => setResetToken(e.target.value.toUpperCase())}
+                      placeholder="Ej: A3KP7M" maxLength={6}
+                      style={{ width: "100%", padding: "11px 14px", borderRadius: 10, border: "1.5px solid #E6E2D6", fontSize: 22, fontWeight: 800, letterSpacing: "0.35em", outline: "none", fontFamily: "ui-monospace, monospace", textAlign: "center" as const, textTransform: "uppercase" as const, boxSizing: "border-box" as const, background: "#F6F4EE" }} />
+                  </div>
+                  <div>
+                    <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: "#1F2433", marginBottom: 6 }}>Nueva contraseña</label>
+                    <div style={{ position: "relative" as const }}>
+                      <input type={showRPass ? "text" : "password"} value={resetPass} onChange={e => setResetPass(e.target.value)}
+                        placeholder="Mínimo 6 caracteres"
+                        style={{ width: "100%", padding: "11px 40px 11px 14px", borderRadius: 10, border: "1.5px solid #E6E2D6", fontSize: 14, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const, background: "#F6F4EE" }} />
+                      <button onClick={() => setShowRPass(p => !p)} type="button"
+                        style={{ position: "absolute" as const, right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "#6B6F7C", padding: 4 }}>
+                        {showRPass
+                          ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                          : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>}
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: "#1F2433", marginBottom: 6 }}>Confirmar contraseña</label>
+                    <input type={showRPass ? "text" : "password"} value={resetPass2} onChange={e => setResetPass2(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && confirmarReset()}
+                      placeholder="Repite la contraseña"
+                      style={{ width: "100%", padding: "11px 14px", borderRadius: 10, border: `1.5px solid ${resetPass2 && resetPass !== resetPass2 ? "#B91C1C" : "#E6E2D6"}`, fontSize: 14, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const, background: "#F6F4EE" }} />
+                  </div>
+                  {resetErr && (
+                    <p style={{ margin: 0, fontSize: 12.5, color: "#B91C1C", fontWeight: 600, background: "#FCE5E2", padding: "8px 12px", borderRadius: 8 }}>{resetErr}</p>
+                  )}
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <button onClick={() => { setResetStep(1); setResetErr(""); setResetToken(""); setResetPass(""); setResetPass2(""); }}
+                      style={{ flex: 1, padding: 12, borderRadius: 12, border: "1.5px solid #E6E2D6", background: "white", color: "#6B6F7C", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                      ← Volver
+                    </button>
+                    <button onClick={confirmarReset} disabled={resetLoad}
+                      style={{ flex: 2, padding: 12, borderRadius: 12, border: "none", background: resetLoad ? "#9AA0AC" : "#0b315f", color: "white", fontWeight: 800, fontSize: 14, cursor: resetLoad ? "not-allowed" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                      {resetLoad ? "Verificando..." : "Guardar contraseña"}
+                    </button>
+                  </div>
+                  <p style={{ margin: 0, fontSize: 12, color: "#6B6F7C", textAlign: "center" as const }}>
+                    ¿No llegó el correo?{" "}
+                    <a onClick={() => { setResetStep(1); setResetErr(""); setResetToken(""); setResetPass(""); setResetPass2(""); }}
+                      style={{ color: "#0b315f", fontWeight: 700, cursor: "pointer" }}>
+                      Pedir otro código
+                    </a>
+                  </p>
+                </div>
+              )}
+
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 
@@ -1080,6 +1384,157 @@ tbody tr:nth-child(even){background:#f9fafb}
         @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
       `}</style>
 
+      {/* MODAL RESET CONTRASEÑA */}
+      {modalReset && (
+        <div onClick={e => { if (e.target === e.currentTarget) cerrarModalReset(); }}
+          style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(7,31,61,0.65)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, backdropFilter: "blur(4px)" }}>
+          <div style={{ background: C.surface, borderRadius: 20, width: "100%", maxWidth: 420, boxShadow: "0 24px 64px rgba(0,0,0,0.25)", overflow: "hidden" }}>
+
+            {/* Cabecera */}
+            <div style={{ background: C.navyDeep, padding: "22px 28px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <p style={{ margin: 0, fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.45)", letterSpacing: "0.12em", textTransform: "uppercase" as const }}>
+                  {resetOk ? "Listo" : resetStep === 1 ? "Paso 1 de 2" : "Paso 2 de 2"}
+                </p>
+                <p style={{ margin: "3px 0 0", fontSize: 16, fontWeight: 800, color: "white" }}>
+                  {resetOk ? "Contraseña actualizada" : resetStep === 1 ? "Recuperar acceso" : "Nuevo código recibido"}
+                </p>
+              </div>
+              <button onClick={cerrarModalReset}
+                style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 8, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "white" }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+
+            {/* Barra de progreso */}
+            {!resetOk && (
+              <div style={{ height: 3, background: C.line }}>
+                <div style={{ height: "100%", width: resetStep === 1 ? "50%" : "100%", background: C.navy, transition: "width 0.4s ease", borderRadius: "0 2px 2px 0" }} />
+              </div>
+            )}
+
+            <div style={{ padding: "28px 28px 24px" }}>
+
+              {/* ── PASO OK ── */}
+              {resetOk && (
+                <div style={{ textAlign: "center" as const, padding: "12px 0 8px" }}>
+                  <div style={{ width: 56, height: 56, borderRadius: "50%", background: C.successTint, border: `2px solid ${C.success}30`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
+                    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke={C.success} strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                  </div>
+                  <p style={{ fontWeight: 800, fontSize: 16, color: C.ink, margin: "0 0 8px" }}>¡Contraseña actualizada!</p>
+                  <p style={{ fontSize: 13.5, color: C.mute, margin: "0 0 24px", lineHeight: 1.55 }}>
+                    Ya puedes iniciar sesión con tu nueva contraseña.
+                  </p>
+                  <button onClick={cerrarModalReset}
+                    style={{ width: "100%", padding: "13px", borderRadius: 12, border: "none", background: C.navy, color: "white", fontWeight: 800, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>
+                    Ir al login
+                  </button>
+                </div>
+              )}
+
+              {/* ── PASO 1: RUC + EMAIL ── */}
+              {!resetOk && resetStep === 1 && (
+                <div style={{ display: "flex", flexDirection: "column" as const, gap: 14 }}>
+                  <p style={{ margin: "0 0 4px", fontSize: 13.5, color: C.mute, lineHeight: 1.55 }}>
+                    Ingresa el RUC de tu empresa y el correo que tiene registrado en el portal. Te enviaremos un código para restablecer tu contraseña.
+                  </p>
+                  <div>
+                    <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: C.ink2, marginBottom: 6, letterSpacing: "0.04em" }}>RUC de la empresa</label>
+                    <input
+                      value={resetRuc} onChange={e => setResetRuc(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && solicitarReset()}
+                      placeholder="20XXXXXXXXX" maxLength={11}
+                      style={{ width: "100%", padding: "11px 14px", borderRadius: 10, border: `1.5px solid ${C.line2}`, fontSize: 14, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const, background: C.bg }} />
+                  </div>
+                  <div>
+                    <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: C.ink2, marginBottom: 6, letterSpacing: "0.04em" }}>Tu correo electrónico</label>
+                    <input
+                      type="email" value={resetEmail} onChange={e => setResetEmail(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && solicitarReset()}
+                      placeholder="correo@empresa.com"
+                      style={{ width: "100%", padding: "11px 14px", borderRadius: 10, border: `1.5px solid ${C.line2}`, fontSize: 14, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const, background: C.bg }} />
+                  </div>
+                  {resetErr && (
+                    <p style={{ margin: 0, fontSize: 12.5, color: C.danger, fontWeight: 600, background: C.dangerTint, padding: "8px 12px", borderRadius: 8 }}>{resetErr}</p>
+                  )}
+                  <button onClick={solicitarReset} disabled={resetLoad}
+                    style={{ width: "100%", padding: "13px", borderRadius: 12, border: "none", background: resetLoad ? C.mute2 : C.navy, color: "white", fontWeight: 800, fontSize: 14, cursor: resetLoad ? "not-allowed" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, transition: "background 0.2s" }}>
+                    {resetLoad
+                      ? <><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" style={{ animation: "spin 1s linear infinite" }}><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Enviando...</>
+                      : "Enviar código →"}
+                  </button>
+                </div>
+              )}
+
+              {/* ── PASO 2: CÓDIGO + NUEVA CONTRASEÑA ── */}
+              {!resetOk && resetStep === 2 && (
+                <div style={{ display: "flex", flexDirection: "column" as const, gap: 14 }}>
+                  <div style={{ background: C.successTint, border: `1px solid ${C.success}30`, borderRadius: 10, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={C.success} strokeWidth="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13.6"/><path d="M22 10.92V8a2 2 0 0 0-2-2h-6"/><polyline points="9 11 12 14 22 4"/></svg>
+                    <p style={{ margin: 0, fontSize: 12.5, color: C.success, fontWeight: 600 }}>
+                      Código enviado a <strong>{resetEmail}</strong>. Revisa tu bandeja de entrada.
+                    </p>
+                  </div>
+                  <div>
+                    <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: C.ink2, marginBottom: 6, letterSpacing: "0.04em" }}>Código de 6 caracteres</label>
+                    <input
+                      value={resetToken} onChange={e => setResetToken(e.target.value.toUpperCase())}
+                      placeholder="EJ: A3KP7M" maxLength={6}
+                      style={{ width: "100%", padding: "11px 14px", borderRadius: 10, border: `1.5px solid ${C.line2}`, fontSize: 20, fontWeight: 800, letterSpacing: "0.3em", outline: "none", fontFamily: "ui-monospace, monospace", textAlign: "center" as const, textTransform: "uppercase" as const, boxSizing: "border-box" as const, background: C.bg }} />
+                  </div>
+                  <div>
+                    <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: C.ink2, marginBottom: 6, letterSpacing: "0.04em" }}>Nueva contraseña</label>
+                    <div style={{ position: "relative" as const }}>
+                      <input
+                        type={showRPass ? "text" : "password"} value={resetPass} onChange={e => setResetPass(e.target.value)}
+                        placeholder="Mínimo 6 caracteres"
+                        style={{ width: "100%", padding: "11px 40px 11px 14px", borderRadius: 10, border: `1.5px solid ${C.line2}`, fontSize: 14, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const, background: C.bg }} />
+                      <button onClick={() => setShowRPass(p => !p)} type="button"
+                        style={{ position: "absolute" as const, right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: C.mute, padding: 4 }}>
+                        {showRPass
+                          ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                          : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>}
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: C.ink2, marginBottom: 6, letterSpacing: "0.04em" }}>Confirmar contraseña</label>
+                    <input
+                      type={showRPass ? "text" : "password"} value={resetPass2} onChange={e => setResetPass2(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && confirmarReset()}
+                      placeholder="Repite la contraseña"
+                      style={{ width: "100%", padding: "11px 14px", borderRadius: 10, border: `1.5px solid ${resetPass2 && resetPass !== resetPass2 ? C.danger : C.line2}`, fontSize: 14, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const, background: C.bg }} />
+                  </div>
+                  {resetErr && (
+                    <p style={{ margin: 0, fontSize: 12.5, color: C.danger, fontWeight: 600, background: C.dangerTint, padding: "8px 12px", borderRadius: 8 }}>{resetErr}</p>
+                  )}
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <button onClick={() => { setResetStep(1); setResetErr(""); setResetToken(""); setResetPass(""); setResetPass2(""); }}
+                      style={{ flex: 1, padding: "12px", borderRadius: 12, border: `1.5px solid ${C.line2}`, background: C.surface, color: C.mute, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                      ← Volver
+                    </button>
+                    <button onClick={confirmarReset} disabled={resetLoad}
+                      style={{ flex: 2, padding: "12px", borderRadius: 12, border: "none", background: resetLoad ? C.mute2 : C.navy, color: "white", fontWeight: 800, fontSize: 14, cursor: resetLoad ? "not-allowed" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, transition: "background 0.2s" }}>
+                      {resetLoad
+                        ? <><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" style={{ animation: "spin 1s linear infinite" }}><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Verificando...</>
+                        : "Guardar contraseña"}
+                    </button>
+                  </div>
+                  <p style={{ margin: 0, fontSize: 12, color: C.mute, textAlign: "center" as const }}>
+                    ¿No recibiste el correo?{" "}
+                    <a onClick={() => { setResetStep(1); setResetErr(""); setResetToken(""); setResetPass(""); setResetPass2(""); }}
+                      style={{ color: C.navy, fontWeight: 700, cursor: "pointer" }}>
+                      Solicitar de nuevo
+                    </a>
+                  </p>
+                </div>
+              )}
+
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MODAL GPS */}
       {gpsModalOpen && gpsModalRes && (
         <ModalGps
@@ -1092,6 +1547,97 @@ tbody tr:nth-child(even){background:#f9fafb}
           paradas={paradas[gpsModalRes.id] || []}
           onClose={() => { setGpsModalOpen(false); setGpsModalRes(null); }}
         />
+      )}
+
+      {/* ══ PANEL NOTIFICACIONES ══ */}
+      {modalNotif && (
+        <div onClick={() => setModalNotif(false)} style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(7,20,40,0.55)", backdropFilter: "blur(2px)" }}>
+          <div onClick={e => e.stopPropagation()}
+            style={{ position: "absolute", top: 56, right: 12, width: 360, maxHeight: "calc(100vh - 80px)", background: "white", borderRadius: 16, boxShadow: "0 20px 60px rgba(0,0,0,0.25)", display: "flex", flexDirection: "column", overflow: "hidden", animation: "fadeIn 0.15s ease" }}>
+
+            {/* Cabecera */}
+            <div style={{ background: C.navyDeep, padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                <p style={{ color: "white", fontWeight: 800, fontSize: 14, margin: 0 }}>Notificaciones</p>
+                {notifs.length > 0 && (
+                  <span style={{ background: notifs.filter(n => n.tipo === "warning").length > 0 ? C.danger : "#2563eb", color: "white", fontSize: 10, fontWeight: 800, borderRadius: 8, padding: "1px 6px" }}>{notifs.length}</span>
+                )}
+              </div>
+              <button onClick={() => setModalNotif(false)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 28, height: 28, color: "white", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>×</button>
+            </div>
+
+            {/* Cuerpo scrollable */}
+            <div style={{ overflowY: "auto", flex: 1 }}>
+
+              {notifs.length === 0 ? (
+                <div style={{ padding: "40px 24px", textAlign: "center" as const }}>
+                  <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke={C.mute} strokeWidth="1.4" style={{ margin: "0 auto 12px", display: "block" }}><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                  <p style={{ color: C.mute, fontSize: 13, margin: 0, fontWeight: 600 }}>Todo al día</p>
+                  <p style={{ color: C.mute2, fontSize: 12, margin: "4px 0 0" }}>Sin alertas pendientes</p>
+                </div>
+              ) : (
+                <div style={{ padding: "12px 14px", display: "flex", flexDirection: "column" as const, gap: 8 }}>
+
+                  {/* ── Alertas urgentes ── */}
+                  {notifs.filter(n => n.tipo === "warning").length > 0 && (
+                    <div>
+                      <p style={{ fontFamily: C.fontMono, fontSize: 9.5, fontWeight: 700, color: C.warn, letterSpacing: "0.1em", textTransform: "uppercase" as const, margin: "4px 0 6px 2px" }}>
+                        ⚠ Requiere atención
+                      </p>
+                      {notifs.filter(n => n.tipo === "warning").map(n => (
+                        <div key={n.id} style={{ display: "flex", gap: 10, padding: "10px 12px", background: C.warnTint, border: `1px solid rgba(166,91,10,0.25)`, borderRadius: 10, marginBottom: 6, alignItems: "flex-start" }}>
+                          <div style={{ width: 32, height: 32, borderRadius: 8, background: "rgba(166,91,10,0.15)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.warn} strokeWidth="2.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <p style={{ fontWeight: 700, color: C.ink, fontSize: 12.5, margin: 0 }}>{n.titulo}</p>
+                            <p style={{ color: C.mute, fontSize: 11.5, margin: "2px 0 0", whiteSpace: "nowrap" as const, overflow: "hidden", textOverflow: "ellipsis" }}>{n.desc}</p>
+                            {n.fecha && <p style={{ color: C.warn, fontSize: 10.5, margin: "4px 0 0", fontFamily: C.fontMono }}>{fmtFecha(n.fecha)}</p>}
+                          </div>
+                          <button onClick={() => { setModalNotif(false); setTab("facturacion"); }} style={{ flexShrink: 0, background: "none", border: "none", color: C.warn, fontSize: 11, fontWeight: 700, cursor: "pointer", padding: "2px 4px", fontFamily: "inherit" }}>Ver →</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* ── Servicios ── */}
+                  {notifs.filter(n => n.tipo === "info" || n.tipo === "success").length > 0 && (
+                    <div>
+                      <p style={{ fontFamily: C.fontMono, fontSize: 9.5, fontWeight: 700, color: C.navy, letterSpacing: "0.1em", textTransform: "uppercase" as const, margin: "4px 0 6px 2px" }}>
+                        Servicios
+                      </p>
+                      {notifs.filter(n => n.tipo === "info" || n.tipo === "success").map(n => (
+                        <div key={n.id} style={{ display: "flex", gap: 10, padding: "10px 12px", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, marginBottom: 6, alignItems: "flex-start" }}>
+                          <div style={{ width: 32, height: 32, borderRadius: 8, background: n.tipo === "info" ? C.infoTint : C.successTint, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                            {n.tipo === "info"
+                              ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.info} strokeWidth="2"><rect x="1" y="3" width="15" height="13" rx="2"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
+                              : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.success} strokeWidth="2"><polyline points="20 6 9 17 4 12"/></svg>
+                            }
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <p style={{ fontWeight: 700, color: C.ink, fontSize: 12.5, margin: 0 }}>{n.titulo}</p>
+                            <p style={{ color: C.mute, fontSize: 11.5, margin: "2px 0 0", whiteSpace: "nowrap" as const, overflow: "hidden", textOverflow: "ellipsis" }}>{n.desc}</p>
+                          </div>
+                          <button onClick={() => { setModalNotif(false); setTab(n.titulo.toLowerCase().includes("ruta") || n.titulo.toLowerCase().includes("hoy") || n.titulo.toLowerCase().includes("mañana") ? "activos" : "historial"); }} style={{ flexShrink: 0, background: "none", border: "none", color: C.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", padding: "2px 4px", fontFamily: "inherit" }}>Ver →</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                </div>
+              )}
+            </div>
+
+            {/* Pie */}
+            <div style={{ padding: "10px 14px", borderTop: `1px solid ${C.line}`, background: C.surfaceAlt, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <p style={{ color: C.mute, fontSize: 11, margin: 0 }}>Portal cliente · AFA Tours</p>
+              <button onClick={() => { setModalNotif(false); setModalFaq(true); }} style={{ background: "none", border: "none", color: C.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                ¿Necesitas ayuda? →
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* MODAL FAQ */}
@@ -1163,14 +1709,16 @@ tbody tr:nth-child(even){background:#f9fafb}
 
         {/* Derecha */}
         <div style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: "auto", flexShrink: 0 }}>
-          {/* Bell */}
-          <button onClick={() => setModalFaq(true)} style={{ position: "relative" as const, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 7, width: 34, height: 34, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.65)" strokeWidth="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-            {notifs.filter(n => n.tipo === "warning").length > 0 && (
-              <span style={{ position: "absolute", top: 5, right: 5, width: 7, height: 7, borderRadius: "50%", background: C.danger, border: "1.5px solid #071f3d" }} />
+          {/* Bell — panel de notificaciones */}
+          <button onClick={() => setModalNotif(true)} style={{ position: "relative" as const, background: notifs.length > 0 ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.06)", border: notifs.length > 0 ? "1px solid rgba(255,255,255,0.2)" : "1px solid rgba(255,255,255,0.1)", borderRadius: 7, width: 34, height: 34, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", transition: "all 0.15s" }}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.8)" strokeWidth="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            {notifs.length > 0 && (
+              <span style={{ position: "absolute", top: 4, right: 4, minWidth: 14, height: 14, borderRadius: 7, background: notifs.filter(n => n.tipo === "warning").length > 0 ? C.danger : "#2563eb", border: "1.5px solid #071f3d", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 8.5, fontWeight: 800, color: "white", padding: "0 2px" }}>
+                {notifs.length}
+              </span>
             )}
           </button>
-          {/* Ayuda */}
+          {/* Ayuda → FAQ */}
           <button onClick={() => setModalFaq(true)} style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 7, padding: "6px 12px", color: "rgba(255,255,255,0.65)", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
             Ayuda
           </button>
@@ -1201,8 +1749,6 @@ tbody tr:nth-child(even){background:#f9fafb}
             icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12h3l3-9 4 18 3-9h5"/></svg> },
           { id: "historial",   label: "Historial",   badge: reservas.length || undefined,
             icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg> },
-          { id: "reporte",     label: "Reportes",    disabled: !reservaSel,
-            icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg> },
           { id: "facturacion", label: "Facturación", badge: (facturas.filter(f => f.estado === "vencida").length) || undefined,
             icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg> },
           { id: "documentos",  label: "Documentos",
@@ -1490,124 +2036,164 @@ tbody tr:nth-child(even){background:#f9fafb}
           </div>
         )}
 
+
         {/* EN TIEMPO REAL */}
         {tab === "activos" && (
           <div style={{ display: "flex", flexDirection: "column" as const, gap: 12, animation: "fadeIn 0.3s ease" }}>
-            {!servicioActivo ? (
-              /* ESTADO VACÍO */
-              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
-                <div style={{ background: servicioHoy?.estado === "cancelado" ? C.dangerTint : C.navyDeep, padding: "48px 32px", textAlign: "center" as const, position: "relative" as const, overflow: "hidden" }}>
-                  <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0.15, pointerEvents: "none" }}><defs><pattern id="ev-g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" stroke="white" strokeWidth="1" fill="none"/></pattern></defs><rect width="100%" height="100%" fill="url(#ev-g)"/></svg>
-                  <div style={{ position: "relative" as const }}>
-                    <div style={{ width: 64, height: 64, borderRadius: 16, background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px" }}>
-                      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.8)" strokeWidth="1.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+
+            {/* Encabezado de servicio activo */}
+            {servicioActivo && (
+              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "16px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" as const, gap: 12 }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 6 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: efectivoEstado(servicioActivo) === "en_curso" ? C.success : C.info, display: "inline-block", animation: "pcPulse 1.6s ease-out infinite" }} />
+                    <p style={{ color: efectivoEstado(servicioActivo) === "en_curso" ? C.success : C.info, fontWeight: 800, margin: 0, fontSize: 11, textTransform: "uppercase" as const, letterSpacing: "1.2px" }}>
+                      {efectivoEstado(servicioActivo) === "en_curso" ? "En ruta" : esFinalizado(servicioActivo.estado) ? "Finalizado hoy" : "Confirmado · Hoy"}
+                    </p>
+                    <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: 4 }}>#{servicioActivo.id}</span>
+                  </div>
+                  <p style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 18, letterSpacing: -0.4, margin: "0 0 3px", color: C.ink }}>
+                    {servicioActivo.origen} → {servicioActivo.destino}
+                  </p>
+                  <p style={{ color: C.mute, fontSize: 12.5, margin: 0, fontFamily: C.fontMono }}>
+                    {servicioActivo.hora_servicio?.slice(0,5) || "–"} &nbsp;·&nbsp; {fmtFecha(servicioActivo.fecha_servicio)}
+                    {gpsActual && <span> &nbsp;·&nbsp; {gpsActual.velocidad} km/h &nbsp;·&nbsp; señal {fmtTs(gpsActual.timestamp)}</span>}
+                  </p>
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+                  {gpsActual && (
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <div style={{ background: C.surfaceAlt, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 14px", textAlign: "center" as const }}>
+                        <p style={{ fontFamily: C.fontMono, color: C.navy, fontWeight: 700, fontSize: 15, margin: 0 }}>{gpsActual.velocidad}</p>
+                        <p style={{ color: C.mute, fontSize: 9, fontWeight: 700, margin: "2px 0 0", textTransform: "uppercase" as const, letterSpacing: "0.8px" }}>km/h</p>
+                      </div>
+                      <div style={{ background: C.surfaceAlt, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 14px", textAlign: "center" as const }}>
+                        <p style={{ fontFamily: C.fontMono, color: C.success, fontWeight: 700, fontSize: 13, margin: 0 }}>{fmtTs(gpsActual.timestamp)}</p>
+                        <p style={{ color: C.mute, fontSize: 9, fontWeight: 700, margin: "2px 0 0", textTransform: "uppercase" as const, letterSpacing: "0.8px" }}>Señal</p>
+                      </div>
                     </div>
-                    <p style={{ color: "white", fontWeight: 800, fontSize: 20, margin: "0 0 8px" }}>
+                  )}
+                  <button onClick={() => cliente && cargarDatos(cliente.id)} style={{ padding: "9px 13px", borderRadius: 7, border: `1px solid ${C.line2}`, background: C.surface, color: C.ink2, fontWeight: 700, fontSize: 12.5, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                    Actualizar
+                  </button>
+                  <button onClick={() => abrirGps(servicioActivo)} style={{ padding: "9px 18px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 12.5, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                    GPS EN VIVO
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Aviso compacto cuando no hay servicio hoy */}
+            {!servicioActivo && (
+              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "14px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" as const, gap: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 8, background: C.navyTint, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke={C.navy} strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                  </div>
+                  <div>
+                    <p style={{ fontWeight: 700, fontSize: 13.5, color: C.ink, margin: 0 }}>
                       {servicioHoy?.estado === "cancelado" ? "Servicio de hoy cancelado" : "Sin servicio programado hoy"}
                     </p>
-                    <p style={{ color: "rgba(255,255,255,0.55)", fontSize: 13.5, margin: 0, maxWidth: 480, marginLeft: "auto", marginRight: "auto" }}>
+                    <p style={{ fontSize: 12, color: C.mute, margin: "2px 0 0" }}>
                       {servicioHoy?.estado === "cancelado"
                         ? `${servicioHoy.origen} → ${servicioHoy.destino} · ${servicioHoy.hora_servicio?.slice(0,5) || "–"}`
-                        : "El seguimiento GPS aparecerá aquí cuando haya un bus asignado para hoy."}
+                        : "Los vehículos asignados a tu empresa aparecen en el mapa."}
                     </p>
                   </div>
                 </div>
-                <div style={{ padding: "20px 28px", display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" as const, borderBottom: `1px solid ${C.line}` }}>
-                  <button onClick={() => setTab("historial")} style={{ padding: "9px 20px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                  <button onClick={() => setTab("historial")} style={{ padding: "7px 14px", borderRadius: 7, border: `1px solid ${C.line2}`, background: C.surface, color: C.ink2, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
                     Ver historial
                   </button>
                   <a href="https://wa.me/51966707225?text=Hola%2C%20necesito%20programar%20un%20nuevo%20servicio" target="_blank" rel="noopener noreferrer"
-                    style={{ padding: "9px 20px", borderRadius: 7, border: `1px solid ${C.line2}`, background: C.surface, color: C.ink2, fontWeight: 700, fontSize: 13, cursor: "pointer", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    Programar servicio →
-                  </a>
-                </div>
-                <div style={{ padding: "18px 28px", display: "flex", gap: 10, flexWrap: "wrap" as const, background: C.bg }}>
-                  <a href="https://wa.me/51966707225" target="_blank" rel="noopener noreferrer"
-                    style={{ flex: 1, minWidth: 200, display: "flex", alignItems: "center", gap: 12, padding: "14px 18px", background: C.successTint, border: `1px solid ${C.success}30`, borderRadius: 8, textDecoration: "none" }}>
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={C.success} strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                    <div>
-                      <p style={{ color: C.success, fontWeight: 700, fontSize: 12.5, margin: 0 }}>WhatsApp</p>
-                      <p style={{ color: C.success, fontWeight: 800, fontSize: 14, margin: "2px 0 0", fontFamily: C.fontMono }}>966 707 225</p>
-                    </div>
-                  </a>
-                  <a href="tel:966707225" style={{ flex: 1, minWidth: 200, display: "flex", alignItems: "center", gap: 12, padding: "14px 18px", background: C.infoTint, border: `1px solid ${C.info}30`, borderRadius: 8, textDecoration: "none" }}>
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={C.info} strokeWidth="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13.6a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.59 3h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 10.09a16 16 0 0 0 6 6l1.27-.97a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 17.19z"/></svg>
-                    <div>
-                      <p style={{ color: C.info, fontWeight: 700, fontSize: 12.5, margin: 0 }}>Teléfono</p>
-                      <p style={{ color: C.info, fontWeight: 800, fontSize: 14, margin: "2px 0 0", fontFamily: C.fontMono }}>01-3453707</p>
-                    </div>
+                    style={{ padding: "7px 14px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 12, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                    Programar →
                   </a>
                 </div>
               </div>
+            )}
 
-            ) : (
-              <>
-                {/* Encabezado del servicio */}
-                <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "18px 22px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" as const, gap: 14 }}>
-                  <div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
-                      <span style={{ width: 7, height: 7, borderRadius: "50%", background: efectivoEstado(servicioActivo) === "en_curso" ? C.success : C.info, display: "inline-block", animation: "pcPulse 1.6s ease-out infinite" }} />
-                      <p style={{ color: efectivoEstado(servicioActivo) === "en_curso" ? C.success : C.info, fontWeight: 800, margin: 0, fontSize: 11, textTransform: "uppercase" as const, letterSpacing: "1.2px" }}>
-                        {efectivoEstado(servicioActivo) === "en_curso" ? "En ruta" : esFinalizado(servicioActivo.estado) ? "Finalizado hoy" : "Confirmado · Hoy"}
-                      </p>
-                      <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: 4 }}>#{servicioActivo.id}</span>
-                    </div>
-                    <p style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 20, letterSpacing: -0.4, margin: "0 0 4px", color: C.ink }}>
-                      {servicioActivo.origen} → {servicioActivo.destino}
-                    </p>
-                    <p style={{ color: C.mute, fontSize: 13, margin: 0, fontFamily: C.fontMono }}>
-                      {servicioActivo.hora_servicio?.slice(0,5) || "–"} &nbsp;·&nbsp; {fmtFecha(servicioActivo.fecha_servicio)}
-                      {gpsActual && <span> &nbsp;·&nbsp; {gpsActual.velocidad} km/h &nbsp;·&nbsp; señal {fmtTs(gpsActual.timestamp)}</span>}
-                    </p>
-                  </div>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
-                    {gpsActual && (
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <div style={{ background: C.surfaceAlt, border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 16px", textAlign: "center" as const }}>
-                          <p style={{ fontFamily: C.fontMono, color: C.navy, fontWeight: 700, fontSize: 16, margin: 0 }}>{gpsActual.velocidad}</p>
-                          <p style={{ color: C.mute, fontSize: 9.5, fontWeight: 700, margin: "2px 0 0", textTransform: "uppercase" as const, letterSpacing: "0.8px" }}>km/h</p>
+            {/* MAPA MAPBOX — siempre visible */}
+            <div style={{ borderRadius: 10, overflow: "hidden", border: `1px solid ${C.line}`, position: "relative" as const, background: C.navyDeep }}>
+              <div ref={mapContainerRef} style={{ width: "100%", height: 420 }} />
+              {!mapListoEnVivo && (
+                <div style={{ position: "absolute" as const, inset: 0, display: "flex", flexDirection: "column" as const, alignItems: "center", justifyContent: "center", gap: 10, background: C.navyDeep, pointerEvents: "none" }}>
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.35)" strokeWidth="1.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                  <p style={{ color: "rgba(255,255,255,0.4)", fontSize: 13, margin: 0 }}>Cargando mapa…</p>
+                </div>
+              )}
+              {servicioActivo && gpsActual && (
+                <div style={{ position: "absolute" as const, bottom: 14, left: 14 }}>
+                  <button onClick={() => abrirGps(servicioActivo)}
+                    style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 16px", borderRadius: 8, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 12.5, cursor: "pointer", boxShadow: "0 2px 12px rgba(0,0,0,0.35)", fontFamily: "inherit" }}>
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#4ade80", animation: "pcPulse 1.6s ease-out infinite", display: "inline-block" }} />
+                    Ver ruta GPS completa
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Lista de vehículos del cliente */}
+            {vehiculosCliente.length > 0 && (
+              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ padding: "12px 18px", borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <p style={{ fontWeight: 700, fontSize: 13, color: C.ink, margin: 0 }}>Flota asignada</p>
+                  <button onClick={() => cliente && cargarVehiculosCliente(cliente.id)}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: C.mute, display: "flex", alignItems: "center", gap: 5, fontSize: 12, fontFamily: "inherit", fontWeight: 600 }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                    Actualizar
+                  </button>
+                </div>
+                <div style={{ display: "flex", overflowX: "auto" as const }}>
+                  {vehiculosCliente.map((v, idx) => {
+                    const gps = ubicacionesEnVivo.find(u => u.vehiculo_id === v.id);
+                    const min = gps ? Math.floor((Date.now() - new Date(gps.timestamp).getTime()) / 60000) : null;
+                    const color = min === null ? C.mute2 : min <= 2 ? "#16a34a" : min <= 10 ? "#d97706" : "#dc2626";
+                    const label = min === null ? "Sin GPS" : min <= 2 ? "En línea" : min <= 10 ? `Hace ${min}m` : "Sin señal";
+                    return (
+                      <div key={v.id} style={{ flexShrink: 0, padding: "12px 18px", borderRight: idx < vehiculosCliente.length - 1 ? `1px solid ${C.line}` : "none", minWidth: 130 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 5 }}>
+                          <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block", flexShrink: 0 }} />
+                          <span style={{ fontFamily: C.fontMono, fontWeight: 800, fontSize: 14, color: C.ink, letterSpacing: 0.5 }}>{v.placa}</span>
                         </div>
-                        <div style={{ background: C.surfaceAlt, border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 16px", textAlign: "center" as const }}>
-                          <p style={{ fontFamily: C.fontMono, color: C.success, fontWeight: 700, fontSize: 14, margin: 0 }}>{fmtTs(gpsActual.timestamp)}</p>
-                          <p style={{ color: C.mute, fontSize: 9.5, fontWeight: 700, margin: "2px 0 0", textTransform: "uppercase" as const, letterSpacing: "0.8px" }}>Señal</p>
-                        </div>
+                        <p style={{ margin: 0, fontSize: 11.5, color, fontWeight: 600 }}>{label}</p>
+                        {gps && <p style={{ margin: "2px 0 0", fontSize: 11, color: C.mute }}>{gps.velocidad} km/h</p>}
+                        {!gps && <p style={{ margin: "2px 0 0", fontSize: 11, color: C.mute2 }}>Sin posición</p>}
                       </div>
-                    )}
-                    <button onClick={() => cliente && cargarDatos(cliente.id)} style={{ padding: "10px 14px", borderRadius: 7, border: `1px solid ${C.line2}`, background: C.surface, color: C.ink2, fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-                      Actualizar
-                    </button>
-                    <button onClick={() => abrirGps(servicioActivo)} style={{ padding: "10px 20px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 7, fontFamily: "inherit" }}>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-                      GPS EN VIVO
-                    </button>
-                  </div>
+                    );
+                  })}
                 </div>
+              </div>
+            )}
 
-                {/* GPS preview clickable */}
-                <div onClick={() => abrirGps(servicioActivo)} style={{ background: C.navyDeep, borderRadius: 10, padding: "44px 24px", textAlign: "center" as const, cursor: "pointer", position: "relative" as const, overflow: "hidden" }}>
-                  <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0.1, pointerEvents: "none" }}><defs><pattern id="gps-g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" stroke="white" strokeWidth="1" fill="none"/></pattern></defs><rect width="100%" height="100%" fill="url(#gps-g)"/></svg>
-                  <div style={{ position: "relative" as const }}>
-                    <div style={{ width: 64, height: 64, borderRadius: 999, background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.14)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
-                      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="rgba(123,166,224,0.9)" strokeWidth="1.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-                    </div>
-                    <p style={{ color: "white", fontWeight: 800, fontSize: 18, margin: "0 0 8px" }}>Ver mapa GPS en vivo</p>
-                    <p style={{ color: "rgba(255,255,255,0.45)", fontSize: 13, margin: "0 0 22px" }}>
-                      {gpsActual ? `${gpsActual.velocidad} km/h · última señal ${fmtTs(gpsActual.timestamp)}` : "Esperando señal GPS del conductor..."}
-                    </p>
-                    <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8, padding: "10px 22px", color: "white", fontWeight: 700, fontSize: 13 }}>
-                      <span style={{ width: 7, height: 7, borderRadius: "50%", background: gpsActual ? "#4ade80" : "#f87171", animation: "pcPulse 1.6s ease-out infinite", display: "inline-block" }} />
-                      {gpsActual ? "Señal activa · Abrir mapa completo" : "Sin señal GPS · Haz clic para revisar"}
-                    </div>
+            {/* Contacto rápido sin servicio */}
+            {!servicioActivo && (
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const }}>
+                <a href="https://wa.me/51966707225" target="_blank" rel="noopener noreferrer"
+                  style={{ flex: 1, minWidth: 180, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: C.successTint, border: `1px solid ${C.success}30`, borderRadius: 8, textDecoration: "none" }}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={C.success} strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                  <div>
+                    <p style={{ color: C.success, fontWeight: 700, fontSize: 12, margin: 0 }}>WhatsApp</p>
+                    <p style={{ color: C.success, fontWeight: 800, fontSize: 13.5, margin: "1px 0 0", fontFamily: C.fontMono }}>966 707 225</p>
                   </div>
-                </div>
-              </>
+                </a>
+                <a href="tel:966707225" style={{ flex: 1, minWidth: 180, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: C.infoTint, border: `1px solid ${C.info}30`, borderRadius: 8, textDecoration: "none" }}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={C.info} strokeWidth="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13.6a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.59 3h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 10.09a16 16 0 0 0 6 6l1.27-.97a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 17.19z"/></svg>
+                  <div>
+                    <p style={{ color: C.info, fontWeight: 700, fontSize: 12, margin: 0 }}>Teléfono</p>
+                    <p style={{ color: C.info, fontWeight: 800, fontSize: 13.5, margin: "1px 0 0", fontFamily: C.fontMono }}>01-3453707</p>
+                  </div>
+                </a>
+              </div>
             )}
           </div>
         )}
 
+
         {/* HISTORIAL */}
-        {tab === "historial" && (() => {
+        {tab === "historial" && !reservaSel && (() => {
           const totalEmbarcados = Object.values(reservaStats).reduce((s, x) => s + x.embarcados, 0);
           const reservasConStats = Object.values(reservaStats).filter(x => x.esperados > 0);
           const slaPromedio = reservasConStats.length > 0
@@ -1734,14 +2320,14 @@ tbody tr:nth-child(even){background:#f9fafb}
                 <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 13 }}>
                   <thead>
                     <tr style={{ background: C.surfaceAlt, borderBottom: `1.5px solid ${C.line2}` }}>
-                      {[["#","48px"],["Fecha","120px"],["Hora","70px"],["Ruta","auto"],["Estado","110px"],["Pasajeros","110px"],["SLA","120px"],...(puedeVerMontos ? [["Total","110px"]] : []),["GPS","68px"],["Reporte","80px"]].map(([h,w]) => (
+                      {[["#","48px"],["Fecha","120px"],["Hora","70px"],["Ruta","auto"],["Estado","110px"],["Manifiesto","90px"],["Pasajeros","110px"],["SLA","120px"],...(puedeVerMontos ? [["Total","110px"]] : []),["GPS","68px"],["Reporte","80px"]].map(([h,w]) => (
                         <th key={h} style={{ padding: "10px 14px", textAlign: "left" as const, fontSize: 9.5, fontWeight: 800, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.07em", whiteSpace: "nowrap" as const, width: w !== "auto" ? w : undefined }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {reservasFiltradas.length === 0 ? (
-                      <tr><td colSpan={puedeVerMontos ? 10 : 9} style={{ padding: "56px 20px", textAlign: "center" as const }}>
+                      <tr><td colSpan={puedeVerMontos ? 11 : 10} style={{ padding: "56px 20px", textAlign: "center" as const }}>
                         <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke={C.line2} strokeWidth="1.2" style={{ display: "block", margin: "0 auto 12px" }}><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
                         <p style={{ color: C.mute, fontSize: 14, fontWeight: 600, margin: 0 }}>Sin resultados para los filtros seleccionados</p>
                       </td></tr>
@@ -1769,6 +2355,25 @@ tbody tr:nth-child(even){background:#f9fafb}
                             <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0", overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>→ {r.destino}</p>
                           </td>
                           <td style={{ padding: "10px 14px" }}><Badge estado={efectivoEstado(r)} /></td>
+                          {/* ── Manifiesto ── */}
+                          <td style={{ padding: "8px 14px" }}>
+                            {(() => {
+                              const esEditable = ["pendiente","confirmado","confirmada","por_confirmar","programada"].includes(r.estado);
+                              const esCanc     = esCancelado(r.estado);
+                              const paxCount   = st?.esperados ?? null;
+                              return (
+                                <button
+                                  onClick={() => cliente && setModalManifiestoData({ reservaId: r.id, clienteId: cliente.id, readonly: !esEditable })}
+                                  style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", borderRadius: 7, border: `1px solid ${esEditable ? C.navyTint2 : C.line}`, background: esEditable ? C.navyTint : C.surfaceAlt, color: esEditable ? C.navy : C.mute, fontSize: 11, fontWeight: 700, cursor: esCanc ? "default" : "pointer", fontFamily: C.fontSans, whiteSpace: "nowrap" as const, opacity: esCanc ? 0.45 : 1 }}
+                                  disabled={esCanc}
+                                  title={esCanc ? "Servicio cancelado" : esEditable ? "Gestionar manifiesto" : "Ver manifiesto"}
+                                >
+                                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
+                                  {paxCount !== null ? paxCount : "–"}
+                                </button>
+                              );
+                            })()}
+                          </td>
                           <td style={{ padding: "10px 14px", whiteSpace: "nowrap" as const }}>
                             {loadingStats ? (
                               <span style={{ color: C.mute2, fontSize: 11 }}>...</span>
@@ -1828,6 +2433,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                             {reservasFiltradas.filter(r => esCancelado(r.estado)).length} cancelados
                           </span>
                         </td>
+                        <td style={{ padding: "11px 14px" }} />
                         <td style={{ padding: "11px 14px", fontFamily: C.fontMono, fontSize: 11, color: "rgba(255,255,255,0.65)" }}>
                           {(() => { const total = Object.entries(reservaStats).filter(([id]) => reservasFiltradas.find(r => r.id === Number(id))).reduce((s, [,x]) => s + x.embarcados, 0); return total > 0 ? `${total} emb.` : "–"; })()}
                         </td>
@@ -1848,8 +2454,8 @@ tbody tr:nth-child(even){background:#f9fafb}
           );
         })()}
 
-        {/* REPORTE */}
-        {tab === "reporte" && reservaSel && (
+        {/* DETALLE / EXPORTAR — se muestra dentro de Historial al hacer clic en "Ver" */}
+        {tab === "historial" && reservaSel && (
           <div style={{ display: "flex", flexDirection: "column" as const, gap: 16 }}>
             {/* Header card */}
             <div style={{ background: C.surface, borderRadius: 16, padding: "20px 24px", border: `1px solid ${C.line}` }}>
@@ -1887,7 +2493,17 @@ tbody tr:nth-child(even){background:#f9fafb}
                     )}
                   </div>
                 </div>
+                {/* Botones de acción */}
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" as const }}>
+                  {/* Botón manifiesto — abre el modal */}
+                  {!esCancelado(reservaSel.estado) && (
+                    <button
+                      onClick={() => setModalManifiestoData({ reservaId: reservaSel.id, clienteId: cliente.id, readonly: esFinalizado(reservaSel.estado) })}
+                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 10, border: `1.5px solid ${C.navyTint2}`, background: C.navyTint, color: C.navy, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: C.fontSans }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
+                      {esFinalizado(reservaSel.estado) ? "Ver manifiesto" : "Editar manifiesto"}
+                    </button>
+                  )}
                   {reservaSel.vehiculo_id && (
                     <button onClick={() => abrirGps(reservaSel)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 10, border: `1px solid ${C.navyTint2}`, background: C.navyTint, color: C.navy, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
@@ -1961,6 +2577,7 @@ tbody tr:nth-child(even){background:#f9fafb}
               const pctColor = pct >= 80 ? C.success : pct >= 50 ? C.warn : C.danger;
               return (
                 <div key={p.id} style={{ background: C.surface, borderRadius: 16, overflow: "hidden" as const, border: `1px solid ${C.line}` }}>
+                  {/* Cabecera parada */}
                   <div style={{ padding: "14px 20px", background: C.surfaceAlt, borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                       <div style={{ width: 32, height: 32, borderRadius: "50%", background: p.estado === "completada" ? C.navy : C.mute2, display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontSize: 12, fontWeight: 900, flexShrink: 0 }}>{p.orden}</div>
@@ -1985,6 +2602,8 @@ tbody tr:nth-child(even){background:#f9fafb}
                       <p style={{ color: pctColor, fontSize: 11, fontWeight: 700, margin: "2px 0 0" }}>{pct}% cumplimiento</p>
                     </div>
                   </div>
+
+                  {/* Tabla de pasajeros */}
                   {ppParada.length > 0 ? (
                     <div style={{ overflowX: "auto" as const }}>
                       <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
@@ -2007,7 +2626,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                                     {emb
                                       ? <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
                                       : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>}
-                                    {emb ? "Embarcó" : "No asistió"}
+                                    {emb ? "Embarcó" : "Pendiente"}
                                   </span>
                                 </td>
                                 <td style={{ padding: "10px 16px", fontFamily: C.fontMono, color: C.mute, fontSize: 11 }}>{emb ? fmtTs(emb.timestamp) : "–"}</td>
@@ -2031,7 +2650,9 @@ tbody tr:nth-child(even){background:#f9fafb}
                       </table>
                     </div>
                   ) : (
-                    <div style={{ padding: 20, textAlign: "center" as const, color: C.mute, fontSize: 13 }}>Sin pasajeros asignados a esta parada</div>
+                    <div style={{ padding: "16px 20px", textAlign: "center" as const, color: C.mute, fontSize: 13 }}>
+                      Sin pasajeros asignados a esta parada
+                    </div>
                   )}
                 </div>
               );
@@ -2068,7 +2689,7 @@ tbody tr:nth-child(even){background:#f9fafb}
               {([
                 { label: "Total pagado",   val: fmtSoles(totalPagado),  accent: C.success, bg: C.successTint,
                   svg: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12"/></svg> },
-                { label: "Por cobrar",     val: fmtSoles(porPagar),     accent: C.warn,    bg: C.warnTint,
+                { label: "Por pagar",      val: fmtSoles(porPagar),     accent: C.warn,    bg: C.warnTint,
                   svg: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> },
                 { label: "Vencido",        val: fmtSoles(totalVencido), accent: C.danger,  bg: C.dangerTint,
                   svg: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> },
@@ -2085,10 +2706,15 @@ tbody tr:nth-child(even){background:#f9fafb}
             {/* Filtros */}
             <div style={{ background: C.surface, borderRadius: 12, padding: "12px 18px", border: `1px solid ${C.line}`, display: "flex", gap: 10, flexWrap: "wrap" as const, alignItems: "center" }}>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const }}>
-                {["todos","emitida","enviada","cobrada","vencida"].map(e => (
-                  <button key={e} onClick={() => setFiltroFactEstado(e)}
-                    style={{ padding: "5px 12px", borderRadius: 20, border: `1px solid ${filtroFactEstado === e ? C.navy : C.line}`, background: filtroFactEstado === e ? C.navy : C.surface, color: filtroFactEstado === e ? "white" : C.mute, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
-                    {e === "todos" ? "Todas" : e.charAt(0).toUpperCase() + e.slice(1)}
+                {([
+                  { val: "todos",     label: "Todas"     },
+                  { val: "pendiente", label: "Pendiente" },
+                  { val: "pagada",    label: "Pagada"    },
+                  { val: "vencida",   label: "Vencida"   },
+                ] as { val: string; label: string }[]).map(e => (
+                  <button key={e.val} onClick={() => setFiltroFactEstado(e.val)}
+                    style={{ padding: "5px 12px", borderRadius: 20, border: `1px solid ${filtroFactEstado === e.val ? C.navy : C.line}`, background: filtroFactEstado === e.val ? C.navy : C.surface, color: filtroFactEstado === e.val ? "white" : C.mute, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                    {e.label}
                   </button>
                 ))}
               </div>
@@ -2103,17 +2729,20 @@ tbody tr:nth-child(even){background:#f9fafb}
                 ? [1,2,3].map(i => <div key={i} style={{ padding: "16px 20px", borderBottom: `1px solid ${C.line}` }}><div style={{ height: 12, background: C.surfaceAlt, borderRadius: 6, width: "60%", marginBottom: 6 }} /><div style={{ height: 10, background: C.surfaceAlt, borderRadius: 6, width: "40%" }} /></div>)
                 : (() => {
                     const filt = facturas.filter(f => {
-                      const cumpleEstado = filtroFactEstado === "todos" || f.estado === filtroFactEstado;
+                      const cumpleEstado = filtroFactEstado === "todos"
+                      || (filtroFactEstado === "pendiente" && (f.estado === "emitida" || f.estado === "enviada"))
+                      || (filtroFactEstado === "pagada"    && f.estado === "cobrada")
+                      || (filtroFactEstado === "vencida"   && f.estado === "vencida");
                       const cumpleDesde  = !filtroFactDesde || (f.fecha_emision || "") >= filtroFactDesde;
                       const cumpleHasta  = !filtroFactHasta || (f.fecha_emision || "") <= filtroFactHasta;
                       return cumpleEstado && cumpleDesde && cumpleHasta;
                     });
-                    const colorEst: Record<string,{bg:string;c:string}> = {
-                      emitida: { bg: C.infoTint,    c: C.info    },
-                      enviada: { bg: C.warnTint,    c: C.warn    },
-                      cobrada: { bg: C.successTint, c: C.success },
-                      vencida: { bg: C.dangerTint,  c: C.danger  },
-                      anulada: { bg: C.surfaceAlt,  c: C.mute    },
+                    const colorEst: Record<string,{bg:string;c:string;label:string}> = {
+                      emitida: { bg: C.warnTint,    c: C.warn,    label: "Pendiente" },
+                      enviada: { bg: C.warnTint,    c: C.warn,    label: "Pendiente" },
+                      cobrada: { bg: C.successTint, c: C.success, label: "Pagada"    },
+                      vencida: { bg: C.dangerTint,  c: C.danger,  label: "Vencida"   },
+                      anulada: { bg: C.surfaceAlt,  c: C.mute,    label: "Anulada"   },
                     };
                     if (filt.length === 0) return (
                       <div style={{ padding: "56px 20px", textAlign: "center" as const }}>
@@ -2138,7 +2767,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                             </p>
                           </div>
                           <span style={{ fontFamily: C.fontMono, fontWeight: 800, color: C.navy, fontSize: 14, flexShrink: 0 }}>{fmtSoles(Number(f.total))}</span>
-                          <span style={{ fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: est.bg, color: est.c, flexShrink: 0 }}>{f.estado.charAt(0).toUpperCase() + f.estado.slice(1)}</span>
+                          <span style={{ fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: est.bg, color: est.c, flexShrink: 0 }}>{est.label}</span>
                           {f.pdf_url
                             ? <a href={f.pdf_url} target="_blank" rel="noopener noreferrer" style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 12px", borderRadius: 8, border: `1px solid ${C.navyTint2}`, background: C.navyTint, color: C.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", textDecoration: "none", flexShrink: 0 }}>
                                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -2612,6 +3241,19 @@ tbody tr:nth-child(even){background:#f9fafb}
           </div>
         )}
       </div>
+
+      {/* ══ MODAL MANIFIESTO PORTAL ══ */}
+      {modalManifiestoData && (
+        <ModalManifiestoPortal
+          reservaId={modalManifiestoData.reservaId}
+          clienteId={modalManifiestoData.clienteId}
+          readonly={modalManifiestoData.readonly}
+          onClose={() => setModalManifiestoData(null)}
+          onChanged={() => {
+            if (cliente) cargarHistorialStats(reservas.map(r => r.id));
+          }}
+        />
+      )}
     </div>
   );
 }
