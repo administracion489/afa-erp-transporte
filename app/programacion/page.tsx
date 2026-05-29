@@ -235,6 +235,7 @@ export default function ReservasPage() {
   const [mostrarModalPrograma, setMostrarModalPrograma] = useState(false);
   const [expandidoContrato,    setExpandidoContrato]    = useState<string | null>(null);
   const [modalLinksId,         setModalLinksId]         = useState<number | null>(null);
+  const [confirmEliminarId,    setConfirmEliminarId]    = useState<number | null>(null);
   const [generandoToken,       setGenerandoToken]       = useState<string | null>(null);
   const [copiadoKey,           setCopiadoKey]           = useState<string | null>(null);
   // ── Paradas inline ──────────────────────────────────────────────────────
@@ -582,8 +583,8 @@ export default function ReservasPage() {
   };
 
   const eliminarReserva = async (id: number) => {
-    if (!confirm("Eliminar esta reserva?")) return;
     await supabase.from("reservas").delete().eq("id", id);
+    setConfirmEliminarId(null);
     cargarDatos();
   };
 
@@ -747,6 +748,41 @@ export default function ReservasPage() {
                   className="flex-1 py-2 rounded-lg text-xs font-bold border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors disabled:opacity-40"
                 >
                   {generandoToken ? "Generando..." : "Regenerar links (invalida los anteriores)"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {confirmEliminarId !== null && (() => {
+        const r = reservas.find(x => x.id === confirmEliminarId);
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setConfirmEliminarId(null)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6" onClick={e => e.stopPropagation()}>
+              <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4">
+                <Trash2 size={22} className="text-red-600" />
+              </div>
+              <h3 className="text-lg font-bold text-gray-900 text-center mb-1">¿Eliminar reserva?</h3>
+              {r && (
+                <p className="text-sm text-gray-500 text-center mb-5">
+                  <b className="text-gray-800">#{r.id} · {nombreCliente(r.cliente_id)}</b><br />
+                  {fmtFecha(r.fecha_servicio)} {r.hora_servicio?.slice(0, 5) || ""}
+                </p>
+              )}
+              <p className="text-xs text-red-600 text-center mb-5 font-medium">Esta acción no se puede deshacer.</p>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setConfirmEliminarId(null)}
+                  className="flex-1 py-2.5 rounded-xl font-bold text-sm border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={() => eliminarReserva(confirmEliminarId)}
+                  className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white bg-red-600 hover:bg-red-700 transition-colors"
+                >
+                  Sí, eliminar
                 </button>
               </div>
             </div>
@@ -1184,10 +1220,10 @@ export default function ReservasPage() {
                                         onClick={() => editarReserva(r)}
                                         className="flex items-center gap-1 bg-gray-50 hover:bg-gray-100 text-gray-600 text-[10px] font-bold px-2 py-1 rounded-lg transition-colors border border-gray-200"
                                       >
-                                        <Pencil size={11} /> Editar
+                                        <Pencil size={11} />
                                       </button>
                                       <button
-                                        onClick={() => eliminarReserva(r.id)}
+                                        onClick={() => setConfirmEliminarId(r.id)}
                                         className="flex items-center gap-1 bg-red-50 hover:bg-red-100 text-red-600 text-[10px] font-bold px-2 py-1 rounded-lg transition-colors"
                                       >
                                         <Trash2 size={11} />
@@ -1224,21 +1260,21 @@ export default function ReservasPage() {
             <thead>
               <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
                 <th className="p-3 w-8"></th>
-                {["ID", "Cliente", "Ruta", "Fecha", "Asignacion", "Recurso", "Ocupacion", "Sync", "Precio", "Estado", "Acciones"].map(h => (
+                {["ID", "Cliente", "Ruta", "Fecha", "Recurso", "Ocupacion", "Estado", "Acciones"].map(h => (
                   <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={12} className="p-10 text-center text-gray-400">
+                <tr><td colSpan={9} className="p-10 text-center text-gray-400">
                   <div className="flex items-center justify-center gap-2">
                     <div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />
                     Cargando...
                   </div>
                 </td></tr>
               ) : filtradas.length === 0 ? (
-                <tr><td colSpan={12} className="p-10 text-center text-gray-400">
+                <tr><td colSpan={9} className="p-10 text-center text-gray-400">
                   <p className="text-3xl mb-2">🎫</p>
                   <p className="font-medium">No hay reservas</p>
                 </td></tr>
@@ -1303,12 +1339,6 @@ export default function ReservasPage() {
                         )}
                       </td>
 
-                      <td className="p-3">
-                        <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={esTer ? { background: "#ede9fe", color: "#6d28d9" } : { background: "#dbeafe", color: "#1d4ed8" }}>
-                          {esTer ? "Tercerizado" : "Propio"}
-                        </span>
-                      </td>
-
                       <td className="p-3 text-xs">
                         {esTer ? (
                           <div>
@@ -1321,6 +1351,9 @@ export default function ReservasPage() {
                             <div className="text-gray-400">{nombreConductor(r.conductor_id)}</div>
                           </div>
                         )}
+                        <span className="mt-1 inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-md" style={esTer ? { background: "#ede9fe", color: "#6d28d9" } : { background: "#dbeafe", color: "#1d4ed8" }}>
+                          {esTer ? "Tercerizado" : "Propio"}
+                        </span>
                       </td>
 
                       <td className="p-3" onClick={e => e.stopPropagation()}>
@@ -1338,22 +1371,6 @@ export default function ReservasPage() {
                           </span>
                         </button>
                       </td>
-
-                      <td className="p-3 text-center">
-                        {r.sincronizado_app ? (
-                          <div className="inline-flex flex-col items-center" title={r.fecha_sincronizacion ? "Sincronizado: " + new Date(r.fecha_sincronizacion).toLocaleString("es-PE") : ""}>
-                            <span className="text-base">S</span>
-                            <span className="text-[8px] font-bold text-green-700 uppercase tracking-wide">Sync</span>
-                          </div>
-                        ) : (
-                          <div className="inline-flex flex-col items-center opacity-60">
-                            <span className="text-base">II</span>
-                            <span className="text-[8px] font-bold text-gray-500 uppercase tracking-wide">Pend.</span>
-                          </div>
-                        )}
-                      </td>
-
-                      <td className="p-3 font-bold text-gray-800 text-xs">{fmtSoles(Number(r.precio_cliente || 0))}</td>
 
                       <td className="p-3" onClick={e => e.stopPropagation()}>
                         <select
@@ -1375,11 +1392,11 @@ export default function ReservasPage() {
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                             Links
                           </button>
-                          <button onClick={() => editarReserva(r)} className="flex items-center gap-1.5 bg-gray-50 hover:bg-gray-100 text-gray-600 text-xs font-bold px-3 py-2 rounded-xl transition-colors border border-gray-200">
-                            <Pencil size={13} /> Editar
+                          <button onClick={() => editarReserva(r)} title="Editar" className="flex items-center justify-center bg-gray-50 hover:bg-gray-100 text-gray-600 p-2 rounded-xl transition-colors border border-gray-200">
+                            <Pencil size={14} />
                           </button>
-                          <button onClick={() => eliminarReserva(r.id)} className="flex items-center gap-1.5 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
-                            <Trash2 size={13} /> Eliminar
+                          <button onClick={() => setConfirmEliminarId(r.id)} title="Eliminar" className="flex items-center justify-center bg-red-50 hover:bg-red-100 text-red-600 p-2 rounded-xl transition-colors">
+                            <Trash2 size={14} />
                           </button>
                         </div>
                       </td>
@@ -1387,7 +1404,7 @@ export default function ReservasPage() {
 
                     {expandido && (
                       <tr style={{ background: "#f8fafc" }} className="border-t">
-                        <td colSpan={12} className="px-6 py-5">
+                        <td colSpan={9} className="px-6 py-5">
                           {(() => {
                             const paradasR = paradasMap[r.id] || [];
                             const tieneJSON = r.paradas_json && r.paradas_json.length > 0;
