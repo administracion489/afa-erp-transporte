@@ -1,11 +1,77 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { Calendar, FileText, Pencil, Trash2 } from "lucide-react";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
 import ModalGenerarPrograma from "@/components/programacion/ModalGenerarPrograma";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
+
+// ── Google Maps Places para el formulario inline de paradas ──────────────
+function useGoogleMapsLoaded() {
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if ((window as any).google?.maps?.places) { setLoaded(true); return; }
+    const ex = document.getElementById("gmaps-script");
+    if (ex) {
+      const h = () => setLoaded(true);
+      ex.addEventListener("load", h);
+      return () => ex.removeEventListener("load", h);
+    }
+    const s = document.createElement("script");
+    s.id = "gmaps-script";
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}&libraries=places&language=es&region=PE`;
+    s.async = true; s.defer = true; s.onload = () => setLoaded(true);
+    document.head.appendChild(s);
+  }, []);
+  return loaded;
+}
+
+type PlaceParada = { nombre: string; direccion: string; lat: number; lng: number };
+
+function ParadaPlacesInput({ value, onChange, onSelect, onEnter, mapsLoaded }: {
+  value: string;
+  onChange: (v: string) => void;
+  onSelect: (r: PlaceParada) => void;
+  onEnter?: () => void;
+  mapsLoaded: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const acRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (!mapsLoaded || !inputRef.current || acRef.current) return;
+    acRef.current = new (window as any).google.maps.places.Autocomplete(inputRef.current, {
+      componentRestrictions: { country: "pe" },
+      fields: ["formatted_address", "geometry", "name"],
+      types: ["geocode", "establishment"],
+    });
+    acRef.current.addListener("place_changed", () => {
+      const p = acRef.current.getPlace();
+      if (!p.geometry?.location) return;
+      const pName = p.name || "";
+      const pAddr = p.formatted_address || "";
+      // Igual que cotizaciones: si el nombre no está en la dirección, lo prepone
+      const nombre = pName && pAddr && !pAddr.toLowerCase().includes(pName.toLowerCase())
+        ? `${pName}, ${pAddr}` : pAddr || pName;
+      onChange(nombre);
+      onSelect({ nombre, direccion: pAddr, lat: p.geometry.location.lat(), lng: p.geometry.location.lng() });
+    });
+  }, [mapsLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <input
+      ref={inputRef}
+      type="text"
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      onKeyDown={e => e.key === "Enter" && onEnter?.()}
+      placeholder="Nombre / dirección de la parada"
+      className="flex-1 text-xs bg-transparent outline-none text-gray-700 placeholder-gray-300 min-w-0"
+    />
+  );
+}
 
 type ParadaTP = {
   id: string; tipo: "inicio" | "intermedia" | "destino";
@@ -32,10 +98,14 @@ type Reserva = {
   tipo_asignacion: string | null;
   empresa_tercerizada_id: number | null;
   vehiculo_tercero_id: number | null;
+  conductor_tercero_id: number | null;
   paradas_json: any[] | null;
   tipo_servicio_detalle: string | null;
   sincronizado_app?: boolean;
   fecha_sincronizacion?: string | null;
+  token_seguimiento?: string | null;
+  token_conductor_tercero?: string | null;
+  token_expira_at?: string | null;
 };
 
 type Ocupacion = {
@@ -114,6 +184,24 @@ function riesgoEmpresa(docs: DocumentoTercero[], empresaId: number): "alto" | "o
   return vencidos.length > 0 ? "alto" : "ok";
 }
 
+// ─── Geocodificación via Google Maps Geocoding API ───────────────────────────
+
+async function geocodificar(direccion: string): Promise<{ lat: number; lng: number } | null> {
+  const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  if (!key || !direccion.trim()) return null;
+  try {
+    const res = await fetch(
+      `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(direccion)}&key=${key}&region=pe&language=es`
+    );
+    const data = await res.json();
+    if (data.status === "OK" && data.results?.[0]) {
+      const loc = data.results[0].geometry.location;
+      return { lat: loc.lat, lng: loc.lng };
+    }
+  } catch {}
+  return null;
+}
+
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 export default function ReservasPage() {
@@ -146,6 +234,17 @@ export default function ReservasPage() {
   const [modalReservaId,       setModalReservaId]       = useState<number | null>(null);
   const [mostrarModalPrograma, setMostrarModalPrograma] = useState(false);
   const [expandidoContrato,    setExpandidoContrato]    = useState<string | null>(null);
+  const [modalLinksId,         setModalLinksId]         = useState<number | null>(null);
+  const [generandoToken,       setGenerandoToken]       = useState<string | null>(null);
+  const [copiadoKey,           setCopiadoKey]           = useState<string | null>(null);
+  // ── Paradas inline ──────────────────────────────────────────────────────
+  const mapsLoaded = useGoogleMapsLoaded();
+  const [nuevoParNombre,       setNuevoParNombre]       = useState<Record<number, string>>({});
+  const [nuevoParHora,         setNuevoParHora]         = useState<Record<number, string>>({});
+  const [nuevoParDir,          setNuevoParDir]          = useState<Record<number, string>>({});
+  const [nuevoParLat,          setNuevoParLat]          = useState<Record<number, number>>({});
+  const [nuevoParLng,          setNuevoParLng]          = useState<Record<number, number>>({});
+  const [agregandoPar2,        setAgregandoPar2]        = useState<Record<number, boolean>>({});
 
   const f = (k: keyof typeof FORM_VACIO) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -205,8 +304,74 @@ export default function ReservasPage() {
   const cargarParadasReserva = async (reservaId: number) => {
     setCargandoPar(prev => ({ ...prev, [reservaId]: true }));
     const { data } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
-    setParadasMap(prev => ({ ...prev, [reservaId]: data || [] }));
+
+    if (!data || data.length === 0) {
+      // Auto-crear paradas desde origen / destino / punto_retorno si existen
+      const reserva = reservas.find(r => r.id === reservaId);
+      const origen       = (reserva as any)?.origen?.trim();
+      const destino      = (reserva as any)?.destino?.trim();
+      const puntoRetorno = (reserva as any)?.punto_retorno?.trim();
+
+      // Solo auto-crear si el valor es una dirección real (no un placeholder genérico)
+      const esValido = (v: string | undefined | null) =>
+        v && v.trim() && v.trim().toLowerCase() !== "sin especificar" && v.trim() !== "-";
+
+      if (esValido(origen) || esValido(destino) || esValido(puntoRetorno)) {
+        const filas: any[] = [];
+        if (esValido(origen))       filas.push({ reserva_id: reservaId, orden: filas.length + 1, nombre: origen,       estado: "pendiente" });
+        if (esValido(destino))      filas.push({ reserva_id: reservaId, orden: filas.length + 1, nombre: destino,      estado: "pendiente" });
+        if (esValido(puntoRetorno)) filas.push({ reserva_id: reservaId, orden: filas.length + 1, nombre: puntoRetorno, estado: "pendiente" });
+
+        await supabase.from("paradas").insert(filas);
+        const { data: creadas } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
+
+        // Geocodificar cada parada para obtener lat/lng desde Google Maps
+        if (creadas && creadas.length > 0) {
+          for (const parada of creadas) {
+            if (!parada.lat || !parada.lng) {
+              const coords = await geocodificar(parada.nombre);
+              if (coords) {
+                await supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
+                parada.lat = coords.lat;
+                parada.lng = coords.lng;
+              }
+            }
+          }
+        }
+
+        setParadasMap(prev => ({ ...prev, [reservaId]: creadas || [] }));
+        // Sync origen/destino para que la columna Ruta quede actualizada
+        if (creadas && creadas.length > 0) {
+          const o = creadas[0].nombre;
+          const d = creadas[creadas.length - 1].nombre;
+          await supabase.from("reservas").update({ origen: o, destino: d }).eq("id", reservaId);
+          setReservas(prev => prev.map(r => r.id === reservaId ? { ...r, origen: o, destino: d } as any : r));
+        }
+        setCargandoPar(prev => ({ ...prev, [reservaId]: false }));
+        return;
+      }
+    }
+
+    const paradasCargadas = data || [];
+    setParadasMap(prev => ({ ...prev, [reservaId]: paradasCargadas }));
     setCargandoPar(prev => ({ ...prev, [reservaId]: false }));
+
+    // Geocodificar en background paradas existentes sin coordenadas
+    const sinCoords = paradasCargadas.filter((p: any) => !p.lat || !p.lng);
+    if (sinCoords.length > 0) {
+      for (const parada of sinCoords) {
+        geocodificar(parada.nombre).then(coords => {
+          if (!coords) return;
+          supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
+          setParadasMap(prev => ({
+            ...prev,
+            [reservaId]: (prev[reservaId] || []).map((p: any) =>
+              p.id === parada.id ? { ...p, lat: coords.lat, lng: coords.lng } : p
+            ),
+          }));
+        });
+      }
+    }
   };
 
   const cargarPasajerosCliente = async (reservaId: number, clienteId: number | null) => {
@@ -216,6 +381,100 @@ export default function ReservasPage() {
     setPasajerosCliente(prev => ({ ...prev, [reservaId]: data || [] }));
     setCargandoPas(prev => ({ ...prev, [reservaId]: false }));
     await cargarPasajerosAsignados(reservaId);
+  };
+
+  // ── Helpers de paradas inline ─────────────────────────────────────────
+  const syncOrigenDestino = async (reservaId: number, nuevasParadas: any[]) => {
+    if (nuevasParadas.length === 0) return;
+    const origen  = nuevasParadas[0].nombre;
+    const destino = nuevasParadas[nuevasParadas.length - 1].nombre;
+    await supabase.from("reservas").update({ origen, destino }).eq("id", reservaId);
+    setReservas(prev => prev.map(r => r.id === reservaId ? { ...r, origen, destino } as any : r));
+  };
+
+  const recargarParadas = async (reservaId: number) => {
+    const { data } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
+    setParadasMap(prev => ({ ...prev, [reservaId]: data || [] }));
+    return data || [];
+  };
+
+  const agregarParadaInline = async (reservaId: number) => {
+    const nombre = (nuevoParNombre[reservaId] || "").trim();
+    if (!nombre) return;
+    setAgregandoPar2(prev => ({ ...prev, [reservaId]: true }));
+    const actuales = paradasMap[reservaId] || [];
+    const nextOrden = actuales.length > 0 ? Math.max(...actuales.map((p: any) => p.orden)) + 1 : 1;
+    await supabase.from("paradas").insert({
+      reserva_id: reservaId, orden: nextOrden, nombre,
+      direccion: nuevoParDir[reservaId]?.trim() || null,
+      lat:       nuevoParLat[reservaId] || null,
+      lng:       nuevoParLng[reservaId] || null,
+      hora_estimada: nuevoParHora[reservaId]?.trim() || null,
+      estado: "pendiente",
+    });
+    const nuevas = await recargarParadas(reservaId);
+    await syncOrigenDestino(reservaId, nuevas);
+    setNuevoParNombre(prev => ({ ...prev, [reservaId]: "" }));
+    setNuevoParHora(prev => ({ ...prev, [reservaId]: "" }));
+    setNuevoParDir(prev => ({ ...prev, [reservaId]: "" }));
+    setNuevoParLat(prev => ({ ...prev, [reservaId]: 0 }));
+    setNuevoParLng(prev => ({ ...prev, [reservaId]: 0 }));
+    setAgregandoPar2(prev => ({ ...prev, [reservaId]: false }));
+  };
+
+  const eliminarParadaInline = async (reservaId: number, paradaId: number) => {
+    if (!confirm("¿Eliminar esta parada?")) return;
+    await supabase.from("paradas").delete().eq("id", paradaId);
+    const nuevas = await recargarParadas(reservaId);
+    if (nuevas.length > 0) await syncOrigenDestino(reservaId, nuevas);
+  };
+
+  const crearParadasDesdeOrigenDestino = async (reservaId: number) => {
+    const reserva = reservas.find(r => r.id === reservaId);
+    const origen  = (reserva as any)?.origen?.trim();
+    const destino = (reserva as any)?.destino?.trim();
+    if (!origen && !destino) return;
+    const filas: any[] = [];
+    if (origen)  filas.push({ reserva_id: reservaId, orden: 1, nombre: origen,  estado: "pendiente" });
+    if (destino) filas.push({ reserva_id: reservaId, orden: filas.length + 1, nombre: destino, estado: "pendiente" });
+    await supabase.from("paradas").insert(filas);
+    const { data: creadas } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
+    if (creadas && creadas.length > 0) {
+      for (const parada of creadas) {
+        if (!parada.lat || !parada.lng) {
+          const coords = await geocodificar(parada.nombre);
+          if (coords) {
+            await supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
+            parada.lat = coords.lat;
+            parada.lng = coords.lng;
+          }
+        }
+      }
+      setParadasMap(prev => ({ ...prev, [reservaId]: creadas }));
+    }
+  };
+
+  const generarTokenReserva = async (reservaId: number, tipo: "seguimiento" | "conductor_tercero" | "ambos") => {
+    setGenerandoToken(tipo);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/tokens/generar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
+        body: JSON.stringify({ reservaId, tipo }),
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(data.error ?? "Error al generar token"); return; }
+      setReservas(prev => prev.map(r => r.id === reservaId ? { ...r, ...data } : r));
+    } catch { alert("Error de red"); }
+    finally { setGenerandoToken(null); }
+  };
+
+  const copiarLink = (text: string, key: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiadoKey(key);
+      setTimeout(() => setCopiadoKey(null), 2000);
+    });
   };
 
   const cargarDatos = async () => {
@@ -228,7 +487,7 @@ export default function ReservasPage() {
       supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,capacidad,estado,marca").order("placa"),
       supabase.from("conductores_tercero").select("id,empresa_id,nombre,licencia,vencimiento_licencia,telefono,estado").order("nombre"),
       supabase.from("documentos_tercero").select("id,empresa_id,tipo,fecha_vencimiento"),
-      supabase.from("reservas").select("*").order("fecha_servicio", { ascending: false }),
+      supabase.from("reservas").select("*").order("fecha_servicio", { ascending: false }).order("id", { ascending: false }),
     ]);
     setClientes(clRes.data     || []);
     setVehiculos(vRes.data     || []);
@@ -270,7 +529,7 @@ export default function ReservasPage() {
       conductor_id:           r.conductor_id              ? String(r.conductor_id)              : "",
       empresa_tercerizada_id: r.empresa_tercerizada_id    ? String(r.empresa_tercerizada_id)    : "",
       vehiculo_tercero_id:    r.vehiculo_tercero_id       ? String(r.vehiculo_tercero_id)       : "",
-      conductor_tercero_id:   "",
+      conductor_tercero_id:   r.conductor_tercero_id      ? String(r.conductor_tercero_id)      : "",
       costo_proveedor:        r.costo_proveedor           ? String(r.costo_proveedor)           : "",
       observaciones:          r.observaciones             || "",
     });
@@ -313,6 +572,7 @@ export default function ReservasPage() {
       conductor_id:           form.tipo_asignacion === "propio" ? Number(form.conductor_id) : null,
       empresa_tercerizada_id: form.tipo_asignacion === "tercerizado" ? Number(form.empresa_tercerizada_id) : null,
       vehiculo_tercero_id:    form.tipo_asignacion === "tercerizado" && form.vehiculo_tercero_id ? Number(form.vehiculo_tercero_id) : null,
+      conductor_tercero_id:   form.tipo_asignacion === "tercerizado" && form.conductor_tercero_id ? Number(form.conductor_tercero_id) : null,
       costo_proveedor:        costo,
       observaciones:          form.observaciones.trim() || null,
     }).eq("id", editandoId);
@@ -387,6 +647,112 @@ export default function ReservasPage() {
           onGenerado={() => { cargarDatos(); setFiltroServicio("fijo"); }}
         />
       )}
+
+      {/* MODAL LINKS DE COMPARTIR */}
+      {modalLinksId !== null && (() => {
+        const r = reservas.find(x => x.id === modalLinksId);
+        if (!r) return null;
+        const base = typeof window !== "undefined" ? window.location.origin : "";
+        const urlSeg  = r.token_seguimiento      ? `${base}/seguimiento/${r.token_seguimiento}` : null;
+        const urlCond = r.token_conductor_tercero ? `${base}/conductor-tercero/${r.token_conductor_tercero}` : null;
+        const expira  = r.token_expira_at ? new Date(r.token_expira_at).toLocaleString("es-PE", { dateStyle: "short", timeStyle: "short" }) : null;
+        const tieneTercero = !!(r.vehiculo_tercero_id || r.conductor_tercero_id);
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setModalLinksId(null)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-5">
+                <div>
+                  <h3 className="text-lg font-bold text-gray-800">Links de servicio #{r.id}</h3>
+                  {expira && <p className="text-xs text-gray-400 mt-0.5">Vencen: {expira}</p>}
+                </div>
+                <button onClick={() => setModalLinksId(null)} className="text-gray-400 hover:text-gray-600 text-xl font-bold leading-none">×</button>
+              </div>
+
+              {/* Link pasajero */}
+              <div className="mb-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="w-7 h-7 bg-blue-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="2.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-gray-700">Seguimiento para pasajero</p>
+                    <p className="text-xs text-gray-400">Mapa en vivo, solo lectura</p>
+                  </div>
+                </div>
+                {urlSeg ? (
+                  <div className="flex gap-2">
+                    <input readOnly value={urlSeg} className="flex-1 text-xs bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 font-mono text-gray-600 truncate" />
+                    <button
+                      onClick={() => copiarLink(urlSeg, "seg")}
+                      className="px-3 py-2 rounded-lg text-xs font-bold transition-colors flex-shrink-0"
+                      style={{ background: copiadoKey === "seg" ? "#10b981" : "#3b82f6", color: "white" }}
+                    >
+                      {copiadoKey === "seg" ? "✓" : "Copiar"}
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    disabled={generandoToken === "seguimiento"}
+                    onClick={() => generarTokenReserva(r.id, "seguimiento")}
+                    className="w-full py-2 rounded-lg text-xs font-bold text-white transition-colors disabled:opacity-60"
+                    style={{ background: "#3b82f6" }}
+                  >
+                    {generandoToken === "seguimiento" ? "Generando..." : "Generar link de seguimiento"}
+                  </button>
+                )}
+              </div>
+
+              {/* Link conductor tercero */}
+              {tieneTercero && (
+                <div className="mb-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="w-7 h-7 bg-amber-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2.5"><path d="M8 6v6M16 6v6M2 12h19.6M18 18h3s.5-1.7.8-2.8c.1-.4.2-.8.2-1.2l-1.4-5C20.1 6.8 19.1 6 18 6H4a2 2 0 0 0-2 2v10h3"/><circle cx="7" cy="18" r="2"/><circle cx="15" cy="18" r="2"/></svg>
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-gray-700">Link para conductor tercero</p>
+                      <p className="text-xs text-gray-400">Solo toca "Iniciar" — GPS automático</p>
+                    </div>
+                  </div>
+                  {urlCond ? (
+                    <div className="flex gap-2">
+                      <input readOnly value={urlCond} className="flex-1 text-xs bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 font-mono text-gray-600 truncate" />
+                      <button
+                        onClick={() => copiarLink(urlCond, "cond")}
+                        className="px-3 py-2 rounded-lg text-xs font-bold transition-colors flex-shrink-0"
+                        style={{ background: copiadoKey === "cond" ? "#10b981" : "#f59e0b", color: "white" }}
+                      >
+                        {copiadoKey === "cond" ? "✓" : "Copiar"}
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      disabled={generandoToken === "conductor_tercero"}
+                      onClick={() => generarTokenReserva(r.id, "conductor_tercero")}
+                      className="w-full py-2 rounded-lg text-xs font-bold text-white transition-colors disabled:opacity-60"
+                      style={{ background: "#f59e0b" }}
+                    >
+                      {generandoToken === "conductor_tercero" ? "Generando..." : "Generar link de conductor"}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Regenerar ambos */}
+              <div className="border-t pt-4 mt-2 flex gap-2">
+                <button
+                  disabled={!!generandoToken}
+                  onClick={() => generarTokenReserva(r.id, tieneTercero ? "ambos" : "seguimiento")}
+                  className="flex-1 py-2 rounded-lg text-xs font-bold border border-gray-200 text-gray-500 hover:bg-gray-50 transition-colors disabled:opacity-40"
+                >
+                  {generandoToken ? "Generando..." : "Regenerar links (invalida los anteriores)"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {reservaModal && (
         <ModalManifiesto
@@ -809,6 +1175,12 @@ export default function ReservasPage() {
                                         <FileText size={11} /> Pax
                                       </button>
                                       <button
+                                        onClick={() => setModalLinksId(r.id)}
+                                        className="flex items-center gap-1 bg-amber-50 hover:bg-amber-100 text-amber-700 text-[10px] font-bold px-2 py-1 rounded-lg transition-colors"
+                                      >
+                                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                                      </button>
+                                      <button
                                         onClick={() => editarReserva(r)}
                                         className="flex items-center gap-1 bg-gray-50 hover:bg-gray-100 text-gray-600 text-[10px] font-bold px-2 py-1 rounded-lg transition-colors border border-gray-200"
                                       >
@@ -999,6 +1371,10 @@ export default function ReservasPage() {
                           <button onClick={() => setModalReservaId(r.id)} className="flex items-center gap-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
                             <FileText size={13} /> Manifiesto
                           </button>
+                          <button onClick={() => setModalLinksId(r.id)} className="flex items-center gap-1.5 bg-amber-50 hover:bg-amber-100 text-amber-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                            Links
+                          </button>
                           <button onClick={() => editarReserva(r)} className="flex items-center gap-1.5 bg-gray-50 hover:bg-gray-100 text-gray-600 text-xs font-bold px-3 py-2 rounded-xl transition-colors border border-gray-200">
                             <Pencil size={13} /> Editar
                           </button>
@@ -1017,36 +1393,88 @@ export default function ReservasPage() {
                             const tieneJSON = r.paradas_json && r.paradas_json.length > 0;
                             return (
                               <div className="mb-5">
+                                {/* Cabecera */}
                                 <div className="flex items-center justify-between mb-3">
                                   <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">
                                     Paradas del recorrido ({cargandoPar[r.id] ? "..." : paradasR.length})
+                                    {paradasR.length > 0 && (
+                                      <span className="ml-2 font-normal normal-case text-gray-300">
+                                        · Inicio: <b className="text-green-600">{paradasR[0].nombre}</b>
+                                        {paradasR.length > 1 && <> · Destino: <b className="text-red-500">{paradasR[paradasR.length - 1].nombre}</b></>}
+                                      </span>
+                                    )}
                                   </p>
                                   <div className="flex gap-2">
                                     {tieneJSON && paradasR.length === 0 && (
                                       <button onClick={() => crearParadasDesdeJSON(r.id, r.paradas_json!)} className="text-xs font-bold px-3 py-1.5 rounded-lg text-white" style={{ background: "#be185d" }}>
-                                        Crear desde cotizacion ({r.paradas_json!.length} paradas)
+                                        Desde cotización ({r.paradas_json!.length})
                                       </button>
                                     )}
                                     <button onClick={() => setModalReservaId(r.id)} className="text-xs font-bold px-3 py-1.5 rounded-lg border hover:bg-blue-50" style={{ borderColor: "#0b315f", color: "#0b315f" }}>
-                                      Manifiesto completo
+                                      Manifiesto
                                     </button>
                                   </div>
                                 </div>
 
+                                {/* Lista de paradas */}
                                 {paradasR.length === 0 ? (
-                                  <div className="rounded-xl border-2 border-dashed p-4 text-center text-xs text-gray-400">
+                                  <div className="rounded-xl border-2 border-dashed p-4 text-center text-xs text-gray-400 mb-3">
                                     {tieneJSON
-                                      ? <span>Tiene {r.paradas_json!.length} paradas en la cotizacion. Haz clic en Crear desde cotizacion.</span>
-                                      : "Sin paradas configuradas. Agregalas desde Pasajeros o el modal de manifiesto."}
+                                      ? <span>Tiene {r.paradas_json!.length} paradas en la cotización. Haz clic en "Desde cotización".</span>
+                                      : "Sin paradas aún. Agrégalas con el formulario de abajo."}
                                   </div>
                                 ) : (
-                                  <TimelineParadasEditable
-                                    reservaId={r.id}
-                                    paradas={paradasMap[r.id] || []}
-                                    onChange={() => cargarParadasReserva(r.id)}
-                                    compacto={true}
-                                  />
+                                  <div className="mb-3">
+                                    <TimelineParadasEditable
+                                      reservaId={r.id}
+                                      paradas={paradasMap[r.id] || []}
+                                      onChange={async () => {
+                                        const p = await recargarParadas(r.id);
+                                        await syncOrigenDestino(r.id, p);
+                                      }}
+                                      compacto={true}
+                                      onEliminar={(pId) => eliminarParadaInline(r.id, pId)}
+                                    />
+                                  </div>
                                 )}
+
+                                {/* Formulario agregar parada */}
+                                <div className="flex gap-2 items-center bg-white border border-dashed rounded-xl px-3 py-2" style={{ borderColor: "#cbd5e1" }}>
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2.5" className="flex-shrink-0">
+                                    <circle cx="12" cy="12" r="2"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+                                  </svg>
+                                  <ParadaPlacesInput
+                                    value={nuevoParNombre[r.id] || ""}
+                                    onChange={v => setNuevoParNombre(prev => ({ ...prev, [r.id]: v }))}
+                                    onSelect={pl => {
+                                      setNuevoParNombre(prev => ({ ...prev, [r.id]: pl.nombre }));
+                                      setNuevoParDir(prev => ({ ...prev, [r.id]: pl.direccion }));
+                                      setNuevoParLat(prev => ({ ...prev, [r.id]: pl.lat }));
+                                      setNuevoParLng(prev => ({ ...prev, [r.id]: pl.lng }));
+                                    }}
+                                    onEnter={() => agregarParadaInline(r.id)}
+                                    mapsLoaded={mapsLoaded}
+                                  />
+                                  <input
+                                    type="time"
+                                    value={nuevoParHora[r.id] || ""}
+                                    onChange={e => setNuevoParHora(prev => ({ ...prev, [r.id]: e.target.value }))}
+                                    className="text-xs bg-transparent outline-none text-gray-500 w-20"
+                                    title="Hora estimada (opcional)"
+                                  />
+                                  <button
+                                    onClick={() => agregarParadaInline(r.id)}
+                                    disabled={!nuevoParNombre[r.id]?.trim() || agregandoPar2[r.id]}
+                                    className="flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-white transition-colors disabled:opacity-30"
+                                    style={{ background: "#0b315f" }}
+                                    title="Agregar parada"
+                                  >
+                                    {agregandoPar2[r.id]
+                                      ? <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                      : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                    }
+                                  </button>
+                                </div>
                               </div>
                             );
                           })()}
@@ -1054,8 +1482,18 @@ export default function ReservasPage() {
                           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs border-t pt-4" style={{ borderColor: "#e2e8f0" }}>
                             <div className="space-y-1.5">
                               <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Servicio</p>
-                              <p><span className="text-gray-400">Origen:</span> {(r as any).origen || "-"}</p>
-                              <p><span className="text-gray-400">Destino:</span> {(r as any).destino || "-"}</p>
+                              <p>
+                                <span className="text-gray-400">Origen:</span>{" "}
+                                <span className="font-medium text-green-700">
+                                  {paradasMap[r.id]?.length > 0 ? paradasMap[r.id][0].nombre : ((r as any).origen || "-")}
+                                </span>
+                              </p>
+                              <p>
+                                <span className="text-gray-400">Destino:</span>{" "}
+                                <span className="font-medium text-red-600">
+                                  {paradasMap[r.id]?.length > 0 ? paradasMap[r.id][paradasMap[r.id].length - 1].nombre : ((r as any).destino || "-")}
+                                </span>
+                              </p>
                               <p><span className="text-gray-400">Fecha:</span> {fmtFecha(r.fecha_servicio)}</p>
                               <p><span className="text-gray-400">Hora:</span> {r.hora_servicio?.slice(0,5) || "-"}</p>
                               <p>

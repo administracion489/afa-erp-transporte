@@ -50,7 +50,15 @@
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000)",
       "Bash(curl -s http://localhost:3000/cliente)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/api/portal/reset-password -X POST -H \"Content-Type: application/json\" -d '{\"ruc\":\"test\",\"email\":\"test@test.com\"}')",
-      "Bash(mkdir -p \"/mnt/c/Users/trans/afa-erp-transporte/components/portal\" && echo \"OK\")"
+      "Bash(mkdir -p \"/mnt/c/Users/trans/afa-erp-transporte/components/portal\" && echo \"OK\")",
+      "Bash(mkdir -p \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\\\\api\\\\tokens\\\\generar\" \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\\\\api\\\\seguimiento\" \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\\\\api\\\\conductor-tercero\\\\iniciar\" \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\\\\api\\\\conductor-tercero\\\\ubicacion\" \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\\\\api\\\\conductor-tercero\\\\parada\" \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\\\\api\\\\conductor-tercero\\\\finalizar\" \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\\\\seguimiento\\\\[token]\" \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\app\\\\conductor-tercero\\\\[token]\")",
+      "Bash(curl -s \"http://localhost:3000/api/seguimiento?token=72us6tfNOlgwosFEn44WizDk2X_JRlNO\")",
+      "Bash(curl -s -X POST \"http://localhost:3000/api/conductor-tercero/iniciar\" -H \"Content-Type: application/json\" -d \"{\\\\\"token\\\\\":\\\\\"SSwFLpV7gpswGVUyN9SwbVtED124igLs\\\\\",\\\\\"lat\\\\\":-12.046,\\\\\"lng\\\\\":-77.028}\")",
+      "Bash(curl -sv \"http://localhost:3000/api/seguimiento?token=TEST123\")",
+      "mcp__Claude_Preview__preview_start",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "Bash(taskkill /PID 35660 /F)",
+      "PowerShell(taskkill /PID 35660 /F)"
     ]
   }
 }

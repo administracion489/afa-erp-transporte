@@ -513,9 +513,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const router = useRouter();
 
   const esLogin = pathname === "/login";
-  const esPublica = ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad", "/cliente"].some(
-    (r) => pathname === r || pathname.startsWith(r + "/")
-  );
+  const esPublica =
+    // Rutas públicas estándar (raíz + sub-rutas)
+    ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad", "/cliente", "/conductor-tercero"].some(
+      (r) => pathname === r || pathname.startsWith(r + "/")
+    ) ||
+    // /seguimiento/[token] es público — pero /seguimiento (módulo ERP) NO
+    pathname.startsWith("/seguimiento/");
 
   const [emailUsuario, setEmailUsuario]   = useState("");
   const [nombreUsuario, setNombreUsuario] = useState("Usuario");

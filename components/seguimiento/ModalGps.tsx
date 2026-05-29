@@ -54,15 +54,53 @@ export default function ModalGps({
   const [cargandoRuta,   setCargandoRuta]   = useState(false);
   const [errorRuta,      setErrorRuta]      = useState<string | null>(null);
 
+  // ── Geocodificación auxiliar ─────────────────────────────────────────────
+
+  const geocodificarParadas = useCallback(async (lista: Parada[]): Promise<Parada[]> => {
+    const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+    if (!apiKey) return lista;
+    return Promise.all(
+      lista.map(async p => {
+        if (p.lat && p.lng) return p;
+        try {
+          const r = await fetch(
+            `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(p.nombre)}&key=${apiKey}&region=pe&language=es`
+          );
+          const d = await r.json();
+          if (d.status === "OK" && d.results?.[0]) {
+            const loc = d.results[0].geometry.location;
+            return { ...p, lat: loc.lat as number, lng: loc.lng as number };
+          }
+        } catch {}
+        return p;
+      })
+    );
+  }, []); // eslint-disable-line
+
   // ── Ruta real de Google via /api/ruta ──────────────────────────────────────
 
   const cargarRuta = useCallback(async () => {
-    const paradasConCoords = paradas
-      .filter(p => p.lat !== null && p.lng !== null)
-      .sort((a, b) => a.orden - b.orden);
+    let listaParadas = [...paradas].sort((a, b) => a.orden - b.orden);
+
+    // Si alguna parada no tiene coordenadas, geocodificar antes de calcular ruta
+    const sinCoords = listaParadas.filter(p => !p.lat || !p.lng);
+    if (sinCoords.length > 0) {
+      setCargandoRuta(true);
+      listaParadas = await geocodificarParadas(listaParadas);
+    }
+
+    const paradasConCoords = listaParadas.filter(p => p.lat !== null && p.lng !== null);
 
     if (paradasConCoords.length < 2) {
       setErrorRuta("Las paradas no tienen coordenadas — agregalas en Programación");
+      return;
+    }
+
+    // Verificar que origen y destino no sean el mismo punto
+    const orig = paradasConCoords[0];
+    const dest = paradasConCoords[paradasConCoords.length - 1];
+    if (orig.lat === dest.lat && orig.lng === dest.lng) {
+      setErrorRuta("Origen y destino tienen las mismas coordenadas — verifica las paradas en Programación");
       return;
     }
 
@@ -115,7 +153,7 @@ export default function ModalGps({
     } finally {
       setCargandoRuta(false);
     }
-  }, [paradas]);
+  }, [paradas, geocodificarParadas]); // eslint-disable-line
 
   useEffect(() => { cargarRuta(); }, [cargarRuta]);
 
@@ -170,11 +208,14 @@ export default function ModalGps({
       setUbic(d); setUltimaActualiz(new Date());
       const fechaRef = d.created_at || d.timestamp;
       setSinSenal(!fechaRef || (Date.now() - new Date(fechaRef).getTime()) / 1000 > 60);
-    } else { setSinSenal(true); }
+    } else if (!ubic) {
+      // Solo marcar sin señal si NO hay datos históricos ni de Realtime
+      setSinSenal(true);
+    }
   }, [reservaId, vehiculoId]);
 
+  // Cargar ubicación inicial al abrir modal; después updates vienen solo de Realtime
   useEffect(() => { cargarUbicacion(); }, [cargarUbicacion]);
-  useEffect(() => { const id = setInterval(cargarUbicacion, 10000); return () => clearInterval(id); }, [cargarUbicacion]);
 
   // Realtime
   useEffect(() => {

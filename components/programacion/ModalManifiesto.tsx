@@ -230,6 +230,23 @@ export default function ModalManifiesto(props: Props) {
 
     setParadas(par);
 
+    // Geocodificar en background las paradas que ya existen pero no tienen coordenadas
+    const apiKeyGeo = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || "";
+    if (apiKeyGeo) {
+      const sinCoords = par.filter(p => !p.lat || !p.lng);
+      for (const parada of sinCoords) {
+        const textoBusqueda = (parada.nombre || parada.direccion || "").trim();
+        if (!textoBusqueda) continue;
+        geocodearDireccion(textoBusqueda, apiKeyGeo).then(coords => {
+          if (!coords) return;
+          supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
+          setParadas(prev => prev.map(p =>
+            p.id === parada.id ? { ...p, lat: coords.lat, lng: coords.lng } : p
+          ));
+        });
+      }
+    }
+
     const paradaIds = par.map((p) => p.id);
 
     let pasajerosCliente: PasajeroManifiesto[] = [];
@@ -890,8 +907,27 @@ export default function ModalManifiesto(props: Props) {
 
         {/* Footer */}
         <div className="px-6 py-3 border-t flex items-center justify-between gap-3" style={{ borderColor: "#e2e8f0", background: "#f8fafc" }}>
-          <p className="text-[11px] text-gray-400">{pasajeros.length} pasajero(s) - {paradas.length} parada(s) en itinerario</p>
-          <button onClick={onClose} className="px-5 py-2 rounded-xl font-bold text-sm text-white" style={{ background: "#0b315f" }}>Cerrar</button>
+          <p className="text-[11px] text-gray-400">{pasajeros.length} pasajero(s) · {paradas.length} parada(s) en itinerario</p>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 rounded-xl font-bold text-sm border text-gray-500 hover:bg-gray-100 transition-colors"
+              style={{ borderColor: "#e2e8f0" }}
+            >
+              Cerrar sin sincronizar
+            </button>
+            <button
+              onClick={async () => { await sincronizar(); onClose(); }}
+              disabled={sincronizando || total === 0}
+              className="px-5 py-2 rounded-xl font-bold text-sm text-white flex items-center gap-2 disabled:opacity-50 transition-colors"
+              style={{ background: sincronizando ? "#6b7280" : "#16a34a" }}
+            >
+              {sincronizando
+                ? <><div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Sincronizando...</>
+                : <><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>Sincronizar y Cerrar</>
+              }
+            </button>
+          </div>
         </div>
       </div>
     </div>

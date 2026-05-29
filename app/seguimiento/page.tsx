@@ -32,7 +32,7 @@ type Vehiculo  = { id: number; placa: string; capacidad_pasajeros?: number|null 
 type Conductor = { id: number; nombre: string; telefono?: string|null };
 type EmpTer    = { id: number; razon_social: string; telefono?: string|null };
 type VehTer    = { id: number; placa: string };
-type Parada    = { id: number; reserva_id: number; orden: number; nombre: string; estado: string; hora_estimada?: string|null };
+type Parada    = { id: number; reserva_id: number; orden: number; nombre: string; estado: string; hora_estimada?: string|null; lat?: number|null; lng?: number|null };
 type DocTer    = { id: number; empresa_id: number; tipo: string; fecha_vencimiento?: string|null };
 type DocVeh    = { id: number; vehiculo_id: number; tipo: string; fecha_vencimiento?: string|null };
 type ChecklistRow = { id: number; reserva_id: number; item_id: string; completado: boolean };
@@ -1106,7 +1106,7 @@ export default function SeguimientoPage() {
           clienteNombre={gpsModal.cliente_nombre}
           paradas={gpsModal.paradas.map(p => ({
             id: p.id, nombre: p.nombre,
-            lat: (p as any).lat ?? null, lng: (p as any).lng ?? null,
+            lat: p.lat ?? null, lng: p.lng ?? null,
             hora_estimada: p.hora_estimada ?? null,
             estado: p.estado, orden: p.orden,
           }))}

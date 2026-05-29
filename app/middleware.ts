@@ -7,10 +7,18 @@ export function middleware(request: NextRequest) {
   const isLogin = pathname === "/login";
 
   const isPublica =
-    pathname === "/conductor"  || pathname.startsWith("/conductor/") ||
-    pathname === "/lector"     || pathname.startsWith("/lector/") ||
-    pathname === "/pasajero"   || pathname.startsWith("/pasajero/") ||
-    pathname === "/privacidad" || pathname.startsWith("/privacidad/");
+    pathname === "/conductor"         || pathname.startsWith("/conductor/") ||
+    pathname === "/lector"            || pathname.startsWith("/lector/") ||
+    pathname === "/pasajero"          || pathname.startsWith("/pasajero/") ||
+    pathname === "/privacidad"        || pathname.startsWith("/privacidad/") ||
+    // /seguimiento/[token] es público — /seguimiento (ERP) queda protegido
+    pathname.startsWith("/seguimiento/") ||
+    // API pública para el link de seguimiento del pasajero
+    pathname.startsWith("/api/seguimiento") ||
+    // /conductor-tercero/[token] es público — no hay ruta ERP en la raíz
+    pathname === "/conductor-tercero" || pathname.startsWith("/conductor-tercero/") ||
+    // APIs que llama la app del conductor tercero (sin sesión ERP)
+    pathname.startsWith("/api/conductor-tercero/");
 
   const hasSession = request.cookies
     .getAll()

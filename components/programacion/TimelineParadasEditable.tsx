@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import {
   DndContext,
@@ -37,6 +37,8 @@ type Props = {
   paradas: ParadaEditable[];
   onChange?: () => void;
   compacto?: boolean;
+  onEliminar?: (paradaId: number) => void;
+  onRenombrar?: (paradaId: number, nuevoNombre: string) => Promise<void>;
 };
 
 // Item sortable individual
@@ -47,8 +49,31 @@ function ParadaItem(props: {
   compacto: boolean;
   onEditar?: (id: number) => void;
   onEliminar?: (id: number) => void;
+  onRenombrar?: (id: number, nuevoNombre: string) => Promise<void>;
 }) {
   const { parada, index, total, compacto } = props;
+  const [editando, setEditando] = useState(false);
+  const [nombre, setNombre] = useState(parada.nombre);
+  const [guardando, setGuardando] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const iniciarEdicion = () => {
+    setNombre(parada.nombre);
+    setEditando(true);
+    setTimeout(() => inputRef.current?.select(), 50);
+  };
+
+  const cancelarEdicion = () => { setEditando(false); setNombre(parada.nombre); };
+
+  const guardarNombre = async () => {
+    const nuevo = nombre.trim();
+    if (!nuevo || nuevo === parada.nombre) { cancelarEdicion(); return; }
+    setGuardando(true);
+    await props.onRenombrar?.(parada.id, nuevo);
+    setEditando(false);
+    setGuardando(false);
+  };
+
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: parada.id,
   });
@@ -108,7 +133,31 @@ function ParadaItem(props: {
         style={{ borderColor: isDragging ? "#0b315f" : "#e2e8f0", boxShadow: isDragging ? "0 4px 12px rgba(11,49,95,0.15)" : "none" }}>
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
-            <p className={"font-bold text-gray-900 truncate " + (compacto ? "text-xs" : "text-sm")}>{parada.nombre}</p>
+            {editando ? (
+              <div className="flex items-center gap-1.5">
+                <input
+                  ref={inputRef}
+                  value={nombre}
+                  onChange={e => setNombre(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") guardarNombre(); if (e.key === "Escape") cancelarEdicion(); }}
+                  className="flex-1 min-w-0 text-xs font-bold border border-[#0b315f] rounded-lg px-2 py-1 outline-none"
+                  disabled={guardando}
+                  autoFocus
+                />
+                <button onClick={guardarNombre} disabled={guardando}
+                  className="flex-shrink-0 w-6 h-6 rounded-lg bg-green-600 hover:bg-green-700 flex items-center justify-center disabled:opacity-40"
+                  title="Guardar">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+                </button>
+                <button onClick={cancelarEdicion}
+                  className="flex-shrink-0 w-6 h-6 rounded-lg bg-gray-200 hover:bg-gray-300 flex items-center justify-center"
+                  title="Cancelar">
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#374151" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+              </div>
+            ) : (
+              <p className={"font-bold text-gray-900 truncate " + (compacto ? "text-xs" : "text-sm")}>{parada.nombre}</p>
+            )}
             {!compacto && parada.direccion ? (
               <p className="text-gray-400 text-xs mt-0.5 truncate">{parada.direccion}</p>
             ) : null}
@@ -129,12 +178,32 @@ function ParadaItem(props: {
               ) : null}
             </div>
           </div>
-          <span
-            className="flex-shrink-0 font-bold px-2 py-0.5 rounded-full text-[10px]"
-            style={{ background: tipoBg, color: tipoColor }}
-          >
-            {tipoLabel}
-          </span>
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <span
+              className="font-bold px-2 py-0.5 rounded-full text-[10px]"
+              style={{ background: tipoBg, color: tipoColor }}
+            >
+              {tipoLabel}
+            </span>
+            {props.onRenombrar && !editando && (
+              <button
+                onClick={(e) => { e.stopPropagation(); iniciarEdicion(); }}
+                className="w-5 h-5 rounded flex items-center justify-center text-blue-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                title="Editar nombre"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              </button>
+            )}
+            {props.onEliminar && !editando && (
+              <button
+                onClick={(e) => { e.stopPropagation(); props.onEliminar!(parada.id); }}
+                className="w-5 h-5 rounded flex items-center justify-center text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                title="Eliminar parada"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -142,10 +211,19 @@ function ParadaItem(props: {
 }
 
 export default function TimelineParadasEditable(props: Props) {
-  const { reservaId, paradas: paradasIniciales, onChange, compacto } = props;
+  const { reservaId, paradas: paradasIniciales, onChange, compacto, onEliminar } = props;
   const [items, setItems] = useState<ParadaEditable[]>(paradasIniciales);
   const [guardando, setGuardando] = useState(false);
   const [mensaje, setMensaje] = useState<{ tipo: "ok" | "err"; texto: string } | null>(null);
+
+  const handleRenombrar = async (paradaId: number, nuevoNombre: string) => {
+    const { error } = await supabase.from("paradas").update({ nombre: nuevoNombre }).eq("id", paradaId);
+    if (error) { setMensaje({ tipo: "err", texto: "Error al renombrar: " + error.message }); return; }
+    setItems(prev => prev.map(p => p.id === paradaId ? { ...p, nombre: nuevoNombre } : p));
+    setMensaje({ tipo: "ok", texto: "Parada renombrada" });
+    setTimeout(() => setMensaje(null), 2000);
+    if (onChange) onChange();
+  };
 
   // Sincronizar cuando cambian las paradas externas
   React.useEffect(() => {
@@ -238,6 +316,8 @@ export default function TimelineParadasEditable(props: Props) {
                 index={i}
                 total={items.length}
                 compacto={compacto || false}
+                onEliminar={onEliminar}
+                onRenombrar={handleRenombrar}
               />
             ))}
           </div>
