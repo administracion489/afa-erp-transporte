@@ -84,8 +84,8 @@ export default function ConductorTerceroPage() {
   const [errorMsg, setErrorMsg]                         = useState<string | null>(null);
   const [cargando, setCargando]                         = useState(true);
   const [mostrarConfirmFinal, setMostrarConfirmFinal]   = useState(false);
-  const [mostrarConfirmManual, setMostrarConfirmManual] = useState(false);
   const [cuentaRegresiva, setCuentaRegresiva]           = useState(AUTO_FINALIZAR_MS / 1000);
+  const [holdProgress, setHoldProgress]                 = useState(0); // 0-100 para la barra de pulsación larga
 
   // ── Estado mapa ──────────────────────────────────────────────────────────────
   const [mapaAbierto, setMapaAbierto]       = useState(false);
@@ -124,6 +124,11 @@ export default function ConductorTerceroPage() {
   const mapboxglRef        = useRef<any>(null);
   const conductorMarkerRef = useRef<any>(null);
   const paradaMarkerRef    = useRef<any>(null);
+
+  // ── Refs pulsación larga FINALIZAR ───────────────────────────────────────────
+  const holdTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const holdIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const HOLD_MS         = 3000;
 
   // ── Refs orientación ─────────────────────────────────────────────────────────
   const speedRef        = useRef<number>(0);           // velocidad actual m/s
@@ -204,6 +209,26 @@ export default function ConductorTerceroPage() {
     }).catch(() => {});
     setFase("finalizado");
   }, [token, detenerGPS, liberarWakeLock]);
+
+  // ── Pulsación larga 3 s para FINALIZAR SERVICIO ───────────────────────────────
+  const cancelarHold = useCallback(() => {
+    if (holdTimerRef.current)    { clearTimeout(holdTimerRef.current);   holdTimerRef.current = null; }
+    if (holdIntervalRef.current) { clearInterval(holdIntervalRef.current); holdIntervalRef.current = null; }
+    setHoldProgress(0);
+  }, []);
+
+  const iniciarHold = useCallback(() => {
+    cancelarHold();
+    const inicio = Date.now();
+    holdIntervalRef.current = setInterval(() => {
+      const pct = Math.min(((Date.now() - inicio) / HOLD_MS) * 100, 100);
+      setHoldProgress(pct);
+    }, 40);
+    holdTimerRef.current = setTimeout(() => {
+      cancelarHold();
+      ejecutarFinalizar();
+    }, HOLD_MS);
+  }, [cancelarHold, ejecutarFinalizar]);
 
   const iniciarAutoFinalizar = useCallback(() => {
     setMostrarConfirmFinal(true); setCuentaRegresiva(AUTO_FINALIZAR_MS / 1000);
@@ -903,16 +928,39 @@ export default function ConductorTerceroPage() {
         })}
       </div>
 
-      {/* Botón FINALIZAR — siempre visible */}
+      {/* Botón FINALIZAR — pulsación larga 3 s */}
       <div className="px-4 pb-8 pt-2 flex-shrink-0">
-        <button onClick={() => setMostrarConfirmManual(true)}
-          className="w-full py-4 rounded-2xl font-bold flex items-center justify-center gap-2 active:scale-95 transition-transform"
-          style={{ background: C.rojo, color: C.blanco, fontSize: "0.95rem" }}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5">
+        <button
+          onPointerDown={iniciarHold}
+          onPointerUp={cancelarHold}
+          onPointerLeave={cancelarHold}
+          onContextMenu={e => e.preventDefault()}
+          className="w-full py-4 rounded-2xl font-bold flex items-center justify-center gap-2 relative overflow-hidden select-none"
+          style={{ background: holdProgress > 0 ? C.rojo : C.rojo, color: C.blanco, fontSize: "0.95rem", touchAction: "none" }}
+        >
+          {/* Barra de progreso que se llena de izquierda a derecha */}
+          <div
+            className="absolute inset-0 rounded-2xl pointer-events-none"
+            style={{
+              width: `${holdProgress}%`,
+              background: "rgba(255,255,255,0.22)",
+              transition: holdProgress === 0 ? "none" : "width 0.04s linear",
+            }}
+          />
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" style={{ position: "relative", zIndex: 1 }}>
             <rect x="3" y="3" width="18" height="18" rx="2"/>
           </svg>
-          FINALIZAR SERVICIO
+          <span style={{ position: "relative", zIndex: 1 }}>
+            {holdProgress > 0
+              ? `Suelta para cancelar… ${Math.ceil(((100 - holdProgress) / 100) * HOLD_MS / 1000)}s`
+              : "FINALIZAR SERVICIO"}
+          </span>
         </button>
+        {holdProgress === 0 && (
+          <p className="text-center text-xs mt-2" style={{ color: C.grisMedio }}>
+            Mantén presionado 3 segundos para finalizar
+          </p>
+        )}
       </div>
 
       {/* ── Modal: auto-finalizar ────────────────────────────────────────────── */}
@@ -947,28 +995,6 @@ export default function ConductorTerceroPage() {
         </div>
       )}
 
-      {/* ── Modal: finalizar manual ──────────────────────────────────────────── */}
-      {mostrarConfirmManual && (
-        <div className="fixed inset-0 flex items-end justify-center z-50 p-4" style={{ background: "rgba(0,0,0,.6)" }}>
-          <div className="bg-white rounded-3xl w-full max-w-sm p-6 text-center">
-            <div className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4"
-              style={{ background: "#fef2f2", border: `2px solid ${C.rojo}` }}>
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke={C.rojo} strokeWidth="2.5">
-                <rect x="3" y="3" width="18" height="18" rx="2"/>
-              </svg>
-            </div>
-            <h3 className="text-xl font-bold mb-1" style={{ color: C.grisOscuro }}>¿Finalizar servicio?</h3>
-            <p className="text-sm mb-6" style={{ color: C.grisMedio }}>
-              El GPS se detendrá y se registrará el cierre del servicio.
-            </p>
-            <button onClick={ejecutarFinalizar} className="w-full py-4 rounded-2xl text-lg font-bold text-white mb-3"
-              style={{ background: C.rojo }}>Sí, finalizar</button>
-            <button onClick={() => setMostrarConfirmManual(false)}
-              className="w-full py-3 rounded-2xl text-base font-medium"
-              style={{ background: C.grisClaro, color: C.grisMedio }}>Cancelar</button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
