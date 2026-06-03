@@ -739,7 +739,7 @@ export default function AppPasajero() {
         {/* HERO */}
         <div style={{ padding: "48px 28px 24px" }}>
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 24 }}>
-            <img src="/Logoafapasajeros.png" alt="AFA Transportes" style={{ height: 72, objectFit: "contain", display: "block" }} />
+            <img src="/Logoafapasajeros3.png" alt="AFA Pasajero" style={{ height: 72, objectFit: "contain", display: "block" }} />
           </div>
           <h1 style={{ fontFamily: "var(--f)", fontWeight: 800, fontSize: 30, letterSpacing: -1.2, color: "var(--ink)", margin: "0 0 6px", lineHeight: 1.05 }}>
             Bienvenido a bordo.

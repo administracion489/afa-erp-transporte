@@ -58,7 +58,11 @@
       "mcp__Claude_Preview__preview_start",
       "mcp__Claude_in_Chrome__tabs_context_mcp",
       "Bash(taskkill /PID 35660 /F)",
-      "PowerShell(taskkill /PID 35660 /F)"
+      "PowerShell(taskkill /PID 35660 /F)",
+      "Read(//mnt/c/Users/**)",
+      "Bash(xargs grep -l \"Pasajero\")",
+      "PowerShell(Get-ChildItem C:\\\\Users\\\\trans\\\\Documents -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match \"afa|pasajero|conductor|transporte\" -or $_.Name -match \"app\" } | Select-Object FullName)",
+      "PowerShell(head)"
     ]
   }
 }
