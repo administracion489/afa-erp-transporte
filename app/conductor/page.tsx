@@ -784,8 +784,8 @@ export default function ConductorApp() {
       }}>
         {/* ── Logo AFA Conductores ── */}
         <img
-          src="/logoafaconductores.png"
-          alt="AFA Conductores"
+          src="/afaconductorsinfondo.png"
+          alt="AFA Conductor"
           style={{ width: "min(220px, 55vw)", display: "block", marginBottom: 28 }}
         />
         <h1 style={{
