@@ -9,7 +9,7 @@ import { supabase } from "@/lib/supabase";
 type TipoCliente    = "b2b" | "b2c";
 type EstadoCliente  = "activo" | "inactivo" | "bloqueado";
 type EstadoSolicitud = "pendiente" | "en_revision" | "aprobada" | "rechazada";
-type Tab            = "clientes" | "solicitudes" | "acceso";
+type Tab            = "clientes" | "solicitudes";
 type SortDir        = "asc" | "desc";
 type Toast          = { id: number; msg: string; type: "ok" | "error" | "info" };
 
@@ -92,6 +92,7 @@ type Solicitud = {
 type FormContacto = { nombre: string; apellido: string; cargo: string; telefono: string; email: string };
 
 type PortalUsuario = { id: number; cliente_id: number; nombre: string; dni: string; cargo: string | null; rol: "admin" | "visor"; email: string | null; codigo_acceso: string; activo: boolean; created_at: string; modulos_permitidos: string[] | null; };
+type DocCliente    = { id: number; nombre: string; categoria: string; storage_path: string; tamano_bytes: number | null; created_at: string; };
 
 /* ══════════════════════════════════════════════
    CONSTANTS
@@ -145,6 +146,7 @@ const avatarBg   = (n: string) => {
 const fmtDate  = (s?: string) => s ? new Date(s).toLocaleDateString("es-PE", { day: "2-digit", month: "short", year: "numeric" }) : "—";
 const fmtTime  = (s?: string) => s ? new Date(s).toLocaleString("es-PE",  { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
 const parseSvc = (s?: string) => s ? s.split(",").map(x => x.trim()).filter(Boolean) : [];
+const fmtBytes = (b?: number | null) => { if (!b) return "—"; if (b < 1024) return `${b} B`; if (b < 1048576) return `${(b/1024).toFixed(0)} KB`; return `${(b/1048576).toFixed(1)} MB`; };
 
 /* ══════════════════════════════════════════════
    SHARED COMPONENTS
@@ -702,10 +704,8 @@ export default function ClientesPage() {
   /* ══════════════════════════════════════════
      TAB: ACCESO PORTAL
   ══════════════════════════════════════════ */
-  const [accesoCliente,  setAccesoCliente]  = useState<Cliente | null>(null);
   const [portalUsers,    setPortalUsers]    = useState<PortalUsuario[]>([]);
   const [loadingPU,      setLoadingPU]      = useState(false);
-  const [busqAcceso,     setBusqAcceso]     = useState("");
   const [modalPU,        setModalPU]        = useState(false);
   const [editPU,         setEditPU]         = useState<PortalUsuario | null>(null);
   const [puNombre,       setPuNombre]       = useState("");
@@ -723,6 +723,17 @@ export default function ClientesPage() {
   const [puContactosTab, setPuContactosTab] = useState<"admin"|"op">("admin");
   const [puImportadoDe,  setPuImportadoDe]  = useState("");
 
+  // Documentos
+  const [expandDocs,   setExpandDocs]   = useState<DocCliente[]>([]);
+  const [loadingDocs,  setLoadingDocs]  = useState(false);
+  const [subiendoDoc,  setSubiendoDoc]  = useState(false);
+  const [docCategoria, setDocCategoria] = useState("Contratos");
+  const [toDeleteDoc,  setToDeleteDoc]  = useState<{ id: number; nombre: string; storage_path: string } | null>(null);
+  const docInputRef = useRef<HTMLInputElement>(null);
+
+  // Derivado: cliente actualmente expandido
+  const accesoCliente = expandidoId ? (clientes.find(c => c.id === expandidoId) ?? null) : null;
+
   const cargarPortalUsers = async (clienteId: number) => {
     setLoadingPU(true);
     const { data } = await supabase.from("portal_usuarios").select("*").eq("cliente_id", clienteId).order("created_at");
@@ -730,10 +741,48 @@ export default function ClientesPage() {
     setLoadingPU(false);
   };
 
-  const seleccionarClienteAcceso = (c: Cliente) => {
-    setAccesoCliente(c);
-    setPortalUsers([]);
-    cargarPortalUsers(c.id);
+  const cargarDocumentos = async (clienteId: number) => {
+    setLoadingDocs(true);
+    const { data } = await supabase.from("documentos_cliente").select("*").eq("cliente_id", clienteId).order("created_at", { ascending: false });
+    setExpandDocs((data || []) as DocCliente[]);
+    setLoadingDocs(false);
+  };
+
+  const subirDocumento = async (clienteId: number, file: File, categoria: string) => {
+    setSubiendoDoc(true);
+    const safeName = file.name.replace(/[^a-zA-Z0-9._\-]/g, "_");
+    const path = `${clienteId}/${Date.now()}_${safeName}`;
+    const { error: upErr } = await supabase.storage.from("documentos-clientes").upload(path, file);
+    if (upErr) { toast(upErr.message, "error"); setSubiendoDoc(false); return; }
+    const { error: dbErr } = await supabase.from("documentos_cliente").insert({ cliente_id: clienteId, nombre: file.name, categoria, storage_path: path, tamano_bytes: file.size });
+    if (dbErr) { toast(dbErr.message, "error"); } else { toast("Documento subido ✓", "ok"); await cargarDocumentos(clienteId); }
+    setSubiendoDoc(false);
+  };
+
+  const descargarDoc = async (doc: DocCliente) => {
+    const { data } = await supabase.storage.from("documentos-clientes").createSignedUrl(doc.storage_path, 3600);
+    if (data?.signedUrl) window.open(data.signedUrl, "_blank");
+    else toast("No se pudo generar el enlace", "error");
+  };
+
+  const eliminarDocumento = async () => {
+    if (!toDeleteDoc || !expandidoId) return;
+    await supabase.storage.from("documentos-clientes").remove([toDeleteDoc.storage_path]);
+    await supabase.from("documentos_cliente").delete().eq("id", toDeleteDoc.id);
+    toast("Documento eliminado", "ok");
+    await cargarDocumentos(expandidoId);
+    setToDeleteDoc(null);
+  };
+
+  const expandirCliente = (c: Cliente) => {
+    const newId = expandidoId === c.id ? null : c.id;
+    setExpandidoId(newId);
+    if (newId) {
+      setPortalUsers([]);
+      setExpandDocs([]);
+      cargarPortalUsers(newId);
+      cargarDocumentos(newId);
+    }
   };
 
   function resetPUForm() {
@@ -833,6 +882,12 @@ export default function ClientesPage() {
         <ConfirmModal title="¿Eliminar cliente?" danger
           msg={`Se eliminará permanentemente "${toDelete.nombre}" y todos sus contactos.`}
           confirmLabel="Eliminar" onOk={eliminarCliente} onCancel={() => setToDelete(null)} />
+      )}
+
+      {toDeleteDoc && (
+        <ConfirmModal title="¿Eliminar documento?" danger
+          msg={`Se eliminará "${toDeleteDoc.nombre}" del sistema. Esta acción no se puede deshacer.`}
+          confirmLabel="Eliminar" onOk={eliminarDocumento} onCancel={() => setToDeleteDoc(null)} />
       )}
 
       {editSol && (
@@ -1114,7 +1169,6 @@ export default function ClientesPage() {
           {([
             { key: "clientes",     label: "Clientes",       count: total,          badge: false },
             { key: "solicitudes",  label: "Solicitudes",    count: pendienteCount, badge: true  },
-            { key: "acceso",       label: "Acceso Portal",  count: 0,              badge: false },
           ] as { key: Tab; label: string; count: number; badge: boolean }[]).map(t => (
             <button key={t.key} onClick={() => setTab(t.key)}
               style={{ padding: "8px 20px", borderRadius: 9, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, transition: "all .15s",
@@ -1398,7 +1452,7 @@ export default function ClientesPage() {
                     return (
                       <React.Fragment key={c.id}>
                         <tr className="row-hover" style={{ borderTop: "1px solid #f1f5f9", cursor: "pointer" }}
-                          onClick={() => setExpandidoId(expd ? null : c.id)}>
+                          onClick={() => expandirCliente(c)}>
                           <td style={{ padding: "14px 8px 14px 18px", color: "#cbd5e1", fontSize: 11 }}>{expd ? "▼" : "▶"}</td>
                           <td style={{ padding: "14px" }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1506,6 +1560,86 @@ export default function ClientesPage() {
                                   </div>
                                 )}
                               </div>
+
+                              {/* ── Acceso al Portal ── */}
+                              <div style={{ borderTop: "1px solid #e2e8f0", marginTop: 16, paddingTop: 16 }}>
+                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                                  <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#64748b", margin: 0 }}>
+                                    Acceso al Portal {loadingPU ? "…" : `(${portalUsers.length})`}
+                                  </p>
+                                  <button onClick={e => { e.stopPropagation(); resetPUForm(); setModalPU(true); }}
+                                    style={{ padding: "5px 14px", borderRadius: 8, border: "none", background: "#0b315f", color: "white", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                                    + Nuevo usuario
+                                  </button>
+                                </div>
+                                {loadingPU ? (
+                                  <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>Cargando...</p>
+                                ) : portalUsers.length === 0 ? (
+                                  <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>Sin usuarios configurados aún.</p>
+                                ) : (
+                                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                    {portalUsers.map(u => (
+                                      <div key={u.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", background: "white", borderRadius: 10, border: "1px solid #f1f5f9" }}>
+                                        <div style={{ width: 28, height: 28, borderRadius: 8, background: u.activo ? avatarBg(u.nombre) : "#e5e7eb", display: "flex", alignItems: "center", justifyContent: "center", color: u.activo ? "white" : "#9ca3af", fontSize: 9, fontWeight: 800, flexShrink: 0 }}>{iniciales(u.nombre)}</div>
+                                        <div style={{ flex: 1 }}>
+                                          <span style={{ fontWeight: 700, fontSize: 12, color: "#0f172a" }}>{u.nombre}</span>
+                                          <span style={{ fontSize: 11, color: "#94a3b8", marginLeft: 8 }}>ID: {u.dni}</span>
+                                          {u.cargo && <span style={{ fontSize: 11, color: "#94a3b8", marginLeft: 8 }}>{u.cargo}</span>}
+                                        </div>
+                                        <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 8, background: u.rol === "admin" ? "#eef3f8" : "#f0fdf4", color: u.rol === "admin" ? "#0b315f" : "#166534" }}>{u.rol === "admin" ? "Admin" : "Visor"}</span>
+                                        <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 8, background: u.activo ? "#dcfce7" : "#fee2e2", color: u.activo ? "#166534" : "#991b1b" }}>{u.activo ? "Activo" : "Inactivo"}</span>
+                                        <button className="act-btn" onClick={e => { e.stopPropagation(); abrirEditarPU(u); }} style={{ padding: "4px 10px", borderRadius: 7, border: "1px solid #e5e7eb", background: "white", fontSize: 10, fontWeight: 600, cursor: "pointer", color: "#374151" }}>Editar</button>
+                                        <button className="del-btn" onClick={e => { e.stopPropagation(); setToDeletePU({ id: u.id, nombre: u.nombre }); }} style={{ padding: "4px 8px", borderRadius: 7, border: "1px solid #fecaca", background: "white", fontSize: 10, cursor: "pointer", color: "#dc2626" }}>✕</button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* ── Documentos ── */}
+                              <div style={{ borderTop: "1px solid #e2e8f0", marginTop: 16, paddingTop: 16 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                                  <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#64748b", margin: 0, flex: 1 }}>
+                                    Documentos {loadingDocs ? "…" : `(${expandDocs.length})`}
+                                  </p>
+                                  <select value={docCategoria} onChange={e => setDocCategoria(e.target.value)} onClick={e => e.stopPropagation()}
+                                    style={{ fontSize: 11, padding: "5px 8px", borderRadius: 8, border: "1px solid #e5e7eb", background: "white", color: "#374151", cursor: "pointer", outline: "none" }}>
+                                    <option>Contratos</option>
+                                    <option>Cotizaciones</option>
+                                    <option>Otros</option>
+                                  </select>
+                                  <button onClick={e => { e.stopPropagation(); docInputRef.current?.click(); }} disabled={subiendoDoc}
+                                    style={{ padding: "5px 14px", borderRadius: 8, border: "none", background: subiendoDoc ? "#94a3b8" : "#0f6e56", color: "white", fontSize: 11, fontWeight: 700, cursor: subiendoDoc ? "not-allowed" : "pointer" }}>
+                                    {subiendoDoc ? "Subiendo..." : "+ Subir archivo"}
+                                  </button>
+                                  <input ref={docInputRef} type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg" style={{ display: "none" }}
+                                    onChange={e => { e.stopPropagation(); const file = e.target.files?.[0]; if (file && expandidoId) subirDocumento(expandidoId, file, docCategoria); e.target.value = ""; }} />
+                                </div>
+                                {loadingDocs ? (
+                                  <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>Cargando documentos...</p>
+                                ) : expandDocs.length === 0 ? (
+                                  <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>Sin documentos. Usa "+ Subir archivo" para agregar el primero.</p>
+                                ) : (
+                                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                    {expandDocs.map(d => (
+                                      <div key={d.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", background: "white", borderRadius: 10, border: "1px solid #f1f5f9" }}>
+                                        <span style={{ fontSize: 16, flexShrink: 0 }}>📄</span>
+                                        <div style={{ flex: 1, minWidth: 0 }}>
+                                          <span style={{ fontWeight: 700, fontSize: 12, color: "#0f172a" }}>{d.nombre}</span>
+                                          <span style={{ fontSize: 11, color: "#94a3b8", marginLeft: 8 }}>{d.categoria}</span>
+                                        </div>
+                                        <span style={{ fontSize: 11, color: "#94a3b8", flexShrink: 0 }}>{fmtBytes(d.tamano_bytes)}</span>
+                                        <span style={{ fontSize: 11, color: "#94a3b8", flexShrink: 0 }}>{fmtDate(d.created_at)}</span>
+                                        <button onClick={e => { e.stopPropagation(); descargarDoc(d); }}
+                                          style={{ padding: "4px 10px", borderRadius: 7, border: "1px solid #e5e7eb", background: "white", fontSize: 10, fontWeight: 600, cursor: "pointer", color: "#0b315f", flexShrink: 0 }}>↓ Ver</button>
+                                        <button className="del-btn" onClick={e => { e.stopPropagation(); setToDeleteDoc({ id: d.id, nombre: d.nombre, storage_path: d.storage_path }); }}
+                                          style={{ padding: "4px 8px", borderRadius: 7, border: "1px solid #fecaca", background: "white", fontSize: 10, cursor: "pointer", color: "#dc2626", flexShrink: 0 }}>✕</button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+
                             </td>
                           </tr>
                         )}
@@ -1706,174 +1840,6 @@ export default function ClientesPage() {
           )}
         </>)}
 
-        {/* ════════════════════════════════════
-            ACCESO PORTAL TAB
-        ════════════════════════════════════ */}
-        {tab === "acceso" && (
-          <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 20, alignItems: "start" }}>
-
-            {/* ── Panel izquierdo: lista de clientes ── */}
-            <div style={{ background: "white", borderRadius: 18, border: "1px solid #e5e7eb", boxShadow: "0 2px 12px rgba(0,0,0,.04)", overflow: "hidden" }}>
-              <div style={{ padding: "16px 16px 12px", borderBottom: "1px solid #f1f5f9" }}>
-                <p style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".07em", color: "#94a3b8", margin: "0 0 10px" }}>Seleccionar cliente</p>
-                <div style={{ position: "relative" }}>
-                  <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: "#94a3b8" }}>🔍</span>
-                  <input style={{ width: "100%", boxSizing: "border-box", padding: "8px 10px 8px 32px", border: "1px solid #e5e7eb", borderRadius: 9, fontSize: 13, outline: "none" }}
-                    placeholder="Buscar cliente..." value={busqAcceso} onChange={e => setBusqAcceso(e.target.value)} />
-                </div>
-              </div>
-              <div style={{ maxHeight: 540, overflowY: "auto" }}>
-                {clientes
-                  .filter(c => {
-                    const q = busqAcceso.toLowerCase();
-                    return !q || c.nombre.toLowerCase().includes(q) || (c.empresa||"").toLowerCase().includes(q) || (c.ruc||"").includes(q);
-                  })
-                  .map(c => {
-                    const display = c.tipo === "b2b" ? (c.empresa || c.nombre) : c.nombre;
-                    const sel = accesoCliente?.id === c.id;
-                    return (
-                      <div key={c.id} onClick={() => seleccionarClienteAcceso(c)}
-                        style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer", transition: "background .12s",
-                          background: sel ? "#eef3f8" : "white",
-                          borderLeft: sel ? "3px solid #0b315f" : "3px solid transparent",
-                          borderBottom: "1px solid #f8fafc" }}>
-                        <div style={{ width: 36, height: 36, borderRadius: 10, background: sel ? "#0b315f" : avatarBg(display), display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontSize: 11, fontWeight: 800, flexShrink: 0 }}>{iniciales(display)}</div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <p style={{ fontWeight: 700, fontSize: 12, color: sel ? "#0b315f" : "#0f172a", margin: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{display}</p>
-                          <p style={{ fontSize: 10, color: "#94a3b8", margin: 0 }}>{c.tipo === "b2b" ? (c.ruc ? `RUC ${c.ruc}` : "B2B") : (c.dni ? `DNI ${c.dni}` : "B2C")}</p>
-                        </div>
-                        <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 7px", borderRadius: 8, background: c.estado === "activo" ? "#dcfce7" : "#f3f4f6", color: c.estado === "activo" ? "#166534" : "#6b7280", flexShrink: 0 }}>{c.estado === "activo" ? "Activo" : c.estado}</span>
-                      </div>
-                    );
-                  })
-                }
-                {clientes.length === 0 && (
-                  <div style={{ padding: 32, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Sin clientes registrados</div>
-                )}
-              </div>
-            </div>
-
-            {/* ── Panel derecho: usuarios del portal ── */}
-            {!accesoCliente ? (
-              <div style={{ background: "white", borderRadius: 18, border: "1px solid #e5e7eb", padding: "56px 32px", textAlign: "center", color: "#94a3b8" }}>
-                <div style={{ fontSize: 42, marginBottom: 14 }}>🔐</div>
-                <p style={{ fontWeight: 700, fontSize: 15, color: "#475569", margin: "0 0 6px" }}>Selecciona un cliente</p>
-                <p style={{ fontSize: 13, margin: 0 }}>Elige un cliente de la lista para gestionar sus accesos al portal</p>
-              </div>
-            ) : (
-              <div style={{ background: "white", borderRadius: 18, border: "1px solid #e5e7eb", boxShadow: "0 2px 12px rgba(0,0,0,.04)", overflow: "hidden" }}>
-                {/* Header panel */}
-                <div style={{ padding: "18px 22px", borderBottom: "1px solid #f1f5f9", display: "flex", alignItems: "center", gap: 14 }}>
-                  <div style={{ width: 44, height: 44, borderRadius: 13, background: avatarBg(accesoCliente.empresa || accesoCliente.nombre), display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontSize: 14, fontWeight: 800, flexShrink: 0 }}>
-                    {iniciales(accesoCliente.empresa || accesoCliente.nombre)}
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <h3 style={{ fontWeight: 800, fontSize: 16, color: "#0f172a", margin: 0 }}>{accesoCliente.empresa || accesoCliente.nombre}</h3>
-                    <p style={{ fontSize: 12, color: "#94a3b8", margin: "2px 0 0" }}>
-                      {accesoCliente.ruc ? `RUC ${accesoCliente.ruc} · ` : ""}{portalUsers.length} usuario{portalUsers.length !== 1 ? "s" : ""} configurado{portalUsers.length !== 1 ? "s" : ""}
-                    </p>
-                  </div>
-                  <button onClick={() => { resetPUForm(); setModalPU(true); }}
-                    style={{ padding: "9px 18px", borderRadius: 10, border: "none", background: "#0b315f", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-                    + Nuevo usuario
-                  </button>
-                  <button onClick={() => cargarPortalUsers(accesoCliente.id)} title="Recargar"
-                    style={{ padding: "9px 12px", borderRadius: 10, border: "1px solid #e5e7eb", background: "white", fontSize: 14, cursor: "pointer", color: "#64748b" }}>↻</button>
-                </div>
-
-                {/* Info URL */}
-                <div style={{ padding: "10px 22px", background: "#f0fdf4", borderBottom: "1px solid #dcfce7", display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 11, color: "#166534", fontWeight: 600 }}>🔗 Portal de acceso:</span>
-                  <span style={{ fontSize: 11, fontFamily: "monospace", color: "#166534" }}>/cliente</span>
-                  <span style={{ fontSize: 11, color: "#86efac" }}>· Login con DNI + Contraseña + RUC de empresa</span>
-                </div>
-
-                {/* Lista de usuarios */}
-                {loadingPU ? (
-                  <div style={{ padding: 48, textAlign: "center", color: "#94a3b8" }}>
-                    <div style={{ width: 26, height: 26, border: "3px solid #e5e7eb", borderTopColor: "#0b315f", borderRadius: "50%", margin: "0 auto 12px", animation: "spin 1s linear infinite" }} />
-                    Cargando usuarios...
-                  </div>
-                ) : portalUsers.length === 0 ? (
-                  <div style={{ padding: "52px 24px", textAlign: "center", color: "#94a3b8" }}>
-                    <div style={{ fontSize: 36, marginBottom: 12 }}>👤</div>
-                    <p style={{ fontWeight: 700, fontSize: 14, color: "#475569", margin: "0 0 6px" }}>Sin usuarios configurados</p>
-                    <p style={{ fontSize: 12, margin: "0 0 20px" }}>Este cliente aún no tiene acceso al portal</p>
-                    <button onClick={() => { resetPUForm(); setModalPU(true); }}
-                      style={{ padding: "9px 20px", borderRadius: 10, border: "none", background: "#0b315f", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-                      + Crear primer usuario
-                    </button>
-                  </div>
-                ) : (
-                  <div>
-                    {/* Tabla header */}
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 100px 80px 90px 130px", gap: 0, padding: "10px 22px", background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                      {["Usuario","Rol","Estado","Módulos","Acciones"].map(h => (
-                        <p key={h} style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "#64748b", margin: 0 }}>{h}</p>
-                      ))}
-                    </div>
-
-                    {portalUsers.map(u => (
-                      <div key={u.id} style={{ display: "grid", gridTemplateColumns: "1fr 100px 80px 90px 130px", gap: 0, padding: "14px 22px", borderBottom: "1px solid #f1f5f9", alignItems: "center" }}
-                        className="row-hover">
-                        {/* Usuario info */}
-                        <div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                            <div style={{ width: 34, height: 34, borderRadius: 9, background: u.activo ? avatarBg(u.nombre) : "#e5e7eb", display: "flex", alignItems: "center", justifyContent: "center", color: u.activo ? "white" : "#9ca3af", fontSize: 10, fontWeight: 800, flexShrink: 0 }}>{iniciales(u.nombre)}</div>
-                            <div>
-                              <p style={{ fontWeight: 700, fontSize: 13, color: u.activo ? "#0f172a" : "#94a3b8", margin: 0 }}>{u.nombre}</p>
-                              <p style={{ fontSize: 11, color: "#94a3b8", margin: 0, fontFamily: "monospace" }}>DNI: {u.dni}{u.email ? ` · ${u.email}` : ""}</p>
-                              {u.cargo && <p style={{ fontSize: 11, color: "#94a3b8", margin: 0 }}>{u.cargo}</p>}
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Rol */}
-                        <div>
-                          <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 9px", borderRadius: 8,
-                            background: u.rol === "admin" ? "#eef3f8" : "#f0fdf4",
-                            color: u.rol === "admin" ? "#0b315f" : "#166534" }}>
-                            {u.rol === "admin" ? "Admin" : "Visor"}
-                          </span>
-                        </div>
-
-                        {/* Estado toggle */}
-                        <div>
-                          <button onClick={() => togglePUActivo(u.id, u.activo)}
-                            style={{ fontSize: 11, fontWeight: 700, padding: "4px 10px", borderRadius: 8, border: "none", cursor: "pointer",
-                              background: u.activo ? "#dcfce7" : "#fee2e2",
-                              color: u.activo ? "#166534" : "#991b1b" }}>
-                            {u.activo ? "Activo" : "Inactivo"}
-                          </button>
-                        </div>
-
-                        {/* Módulos count */}
-                        <div>
-                          <span style={{ fontSize: 11, color: "#64748b" }}>
-                            {u.modulos_permitidos === null ? "Todos" : `${u.modulos_permitidos.length}/${MODULOS_CTRL.length}`}
-                          </span>
-                        </div>
-
-                        {/* Acciones */}
-                        <div style={{ display: "flex", gap: 6 }}>
-                          <button className="act-btn" onClick={() => abrirEditarPU(u)}
-                            style={{ padding: "5px 12px", borderRadius: 8, border: "1px solid #e5e7eb", background: "white", fontSize: 11, fontWeight: 600, cursor: "pointer", color: "#374151" }}>Editar</button>
-                          <button className="del-btn" onClick={() => setToDeletePU({ id: u.id, nombre: u.nombre })}
-                            style={{ padding: "5px 10px", borderRadius: 8, border: "1px solid #fecaca", background: "white", fontSize: 11, fontWeight: 600, cursor: "pointer", color: "#dc2626" }}>✕</button>
-                        </div>
-                      </div>
-                    ))}
-
-                    <div style={{ padding: "10px 22px", borderTop: "1px solid #f1f5f9", fontSize: 11, color: "#94a3b8", display: "flex", justifyContent: "space-between" }}>
-                      <span>{portalUsers.filter(u => u.activo).length} activo{portalUsers.filter(u => u.activo).length !== 1 ? "s" : ""} · {portalUsers.filter(u => !u.activo).length} inactivo{portalUsers.filter(u => !u.activo).length !== 1 ? "s" : ""}</span>
-                      <span>Alta: {fmtDate(portalUsers[0]?.created_at)}</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
 
       </main>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>

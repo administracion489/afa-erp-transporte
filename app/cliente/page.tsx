@@ -32,14 +32,8 @@ const MODULOS_CTRL = [
   { id: "documentos",  label: "Documentos" },
   { id: "cuenta",      label: "Cuenta y configuración" },
 ];
-type Documento = { id: number; nombre: string; tipo: string; categoria: string; tamano: string; fecha: string; url: string | null; };
+type DocPortal = { id: number; nombre: string; categoria: string; storage_path: string; tamano_bytes: number | null; created_at: string; };
 type Notif = { id: number; tipo: "warning" | "info" | "success"; titulo: string; desc: string; fecha: string; };
-
-const MOCK_DOCS: Documento[] = [
-  { id: 1, nombre: "Contrato Marco de Transporte 2025", tipo: "PDF",  categoria: "Contratos",   tamano: "1.2 MB", fecha: "2025-01-15", url: null },
-  { id: 2, nombre: "Cotización Serv. Enero 2025",       tipo: "PDF",  categoria: "Cotizaciones", tamano: "340 KB", fecha: "2025-01-08", url: null },
-  { id: 3, nombre: "Adenda N°1 – Ampliación Rutas",     tipo: "PDF",  categoria: "Contratos",   tamano: "210 KB", fecha: "2025-03-20", url: null },
-];
 
 // ─── PALETA (design tokens v3) ────────────────────────────────────────────
 const C = {
@@ -106,6 +100,7 @@ function clearSession() { localStorage.removeItem(SK); }
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────
 const fmtFecha    = (f: string | null) => f ? new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" }) : "–";
+const fmtBytesPortal = (b?: number | null) => { if (!b) return "—"; if (b < 1024) return `${b} B`; if (b < 1048576) return `${(b/1024).toFixed(0)} KB`; return `${(b/1048576).toFixed(1)} MB`; };
 const fmtFechaLrg = (f: string | null) => f ? new Date(f + "T00:00:00").toLocaleDateString("es-PE", { weekday: "short", day: "2-digit", month: "short" }) : "–";
 const fmtTs       = (ts: string) => new Date(ts).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" });
 const fmtSoles    = (n: number) => `S/ ${Number(n || 0).toLocaleString("es-PE", { minimumFractionDigits: 2 })}`;
@@ -191,6 +186,9 @@ export default function ClientePortal() {
   // Facturación
   const [facturas,          setFacturas]          = useState<Factura[]>([]);
   const [loadingFact,       setLoadingFact]       = useState(false);
+
+  // Documentos
+  const [docs, setDocs] = useState<DocPortal[]>([]);
   const [filtroFactEstado,  setFiltroFactEstado]  = useState("todos");
   const [filtroFactDesde,   setFiltroFactDesde]   = useState("");
   const [filtroFactHasta,   setFiltroFactHasta]   = useState("");
@@ -366,6 +364,9 @@ export default function ClientePortal() {
     supabase.from("facturas").select("id,reserva_id,tipo_comprobante,serie,numero,fecha_emision,fecha_vencimiento,total,estado,pdf_url")
       .eq("cliente_id", cid).order("fecha_emision", { ascending: false })
       .then(({ data }) => { setFacturas((data || []) as Factura[]); setLoadingFact(false); });
+
+    supabase.from("documentos_cliente").select("*").eq("cliente_id", cid).order("created_at", { ascending: false })
+      .then(({ data }) => { setDocs((data || []) as DocPortal[]); });
   }, []);
 
   // ─── Cargar detalles (paradas + boarding + pasajeros + conductor + vehiculo) 
@@ -2786,33 +2787,44 @@ tbody tr:nth-child(even){background:#f9fafb}
         {/* DOCUMENTOS */}
         {tab === "documentos" && (
           <div style={{ display: "flex", flexDirection: "column" as const, gap: 16, animation: "fadeIn 0.3s ease" }}>
-            {(["Contratos","Cotizaciones"] as const).map(cat => {
-              const docs = MOCK_DOCS.filter(d => d.categoria === cat);
-              if (!docs.length) return null;
-              return (
-                <div key={cat} style={{ background: C.white, borderRadius: 18, overflow: "hidden", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
-                  <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.gray100}`, display: "flex", alignItems: "center", gap: 8 }}>
-                    <span>{cat === "Contratos" ? "📋" : cat === "Cotizaciones" ? "📑" : "📎"}</span>
-                    <p style={{ fontWeight: 900, color: C.gray800, margin: 0, fontSize: 14 }}>{cat}</p>
-                    <span style={{ marginLeft: "auto", fontSize: 11, color: C.gray400 }}>{docs.length} archivo{docs.length !== 1 ? "s" : ""}</span>
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 12, padding: 16 }}>
-                    {docs.map(d => (
-                      <div key={d.id} style={{ border: `1px solid ${C.gray200}`, borderRadius: 14, padding: "14px 18px", display: "flex", gap: 12, alignItems: "flex-start" }}>
-                        <span style={{ fontSize: 32, flexShrink: 0 }}>{d.tipo === "PDF" ? "PDF" : "DOC"}</span>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0 }}>{d.nombre}</p>
-                          <p style={{ color: C.gray400, fontSize: 11, margin: "4px 0 8px" }}>{d.tipo} · {d.tamano} · {fmtFecha(d.fecha)}</p>
-                          {d.url
-                            ? <a href={d.url} target="_blank" rel="noopener noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 10, background: "#eef3f8", color: C.navy, fontSize: 11, fontWeight: 800, textDecoration: "none" }}>↓ Descargar</a>
-                            : <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 10, background: "#f3f4f6", color: C.gray400, fontSize: 11 }}>Solicitar archivo</span>}
+            {docs.length === 0 ? (
+              <div style={{ background: C.white, borderRadius: 18, padding: "48px 32px", textAlign: "center", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
+                <p style={{ fontSize: 38, margin: "0 0 12px" }}>📂</p>
+                <p style={{ fontWeight: 700, fontSize: 15, color: C.gray800, margin: "0 0 6px" }}>Sin documentos disponibles</p>
+                <p style={{ fontSize: 13, color: C.gray400, margin: 0 }}>Cuando AFA Transportes suba contratos o cotizaciones aparecerán aquí.</p>
+              </div>
+            ) : (
+              (["Contratos","Cotizaciones","Otros"] as const).map(cat => {
+                const catDocs = docs.filter(d => d.categoria === cat);
+                if (!catDocs.length) return null;
+                return (
+                  <div key={cat} style={{ background: C.white, borderRadius: 18, overflow: "hidden", boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
+                    <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.gray100}`, display: "flex", alignItems: "center", gap: 8 }}>
+                      <span>{cat === "Contratos" ? "📋" : cat === "Cotizaciones" ? "📑" : "📎"}</span>
+                      <p style={{ fontWeight: 900, color: C.gray800, margin: 0, fontSize: 14 }}>{cat}</p>
+                      <span style={{ marginLeft: "auto", fontSize: 11, color: C.gray400 }}>{catDocs.length} archivo{catDocs.length !== 1 ? "s" : ""}</span>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 12, padding: 16 }}>
+                      {catDocs.map(d => (
+                        <div key={d.id} style={{ border: `1px solid ${C.gray200}`, borderRadius: 14, padding: "14px 18px", display: "flex", gap: 12, alignItems: "flex-start" }}>
+                          <span style={{ fontSize: 28, flexShrink: 0 }}>📄</span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0, wordBreak: "break-word" }}>{d.nombre}</p>
+                            <p style={{ color: C.gray400, fontSize: 11, margin: "4px 0 8px" }}>{fmtBytesPortal(d.tamano_bytes)} · {fmtFecha(d.created_at.slice(0,10))}</p>
+                            <button onClick={async () => {
+                              const { data } = await supabase.storage.from("documentos-clientes").createSignedUrl(d.storage_path, 3600);
+                              if (data?.signedUrl) window.open(data.signedUrl, "_blank");
+                            }} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 10, background: "#eef3f8", color: C.navy, fontSize: 11, fontWeight: 800, border: "none", cursor: "pointer" }}>
+                              ↓ Descargar
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
             <div style={{ background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 16, padding: "16px 20px", display: "flex", alignItems: "center", gap: 14 }}>
               <span style={{ fontSize: 28 }}>📂</span>
               <div>
