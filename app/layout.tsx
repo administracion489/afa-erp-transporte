@@ -239,6 +239,16 @@ const Ic = {
       <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
     </svg>
   ),
+  MessageSquare: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </svg>
+  ),
+  TrendingUp: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>
+    </svg>
+  ),
 };
 
 // ─── Tipos ─────────────────────────────────────────────────────────────────
@@ -267,6 +277,13 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       { href: "/cotizaciones/plantillas",label: "Plantillas PDF",sub: "Diseño de cotizaciones", icon: Ic.FileText,   modulo: "cotizaciones" },
       { href: "/tarifario",    label: "Tarifas",      sub: "Tarifarios",           icon: Ic.DollarSign, modulo: "tarifas"      },
       { href: "/clientes",     label: "Clientes",     sub: "Base comercial",       icon: Ic.Users,      modulo: "clientes"     },
+    ],
+  },
+  {
+    grupo: "CRM",
+    items: [
+      { href: "/crm",          label: "Inbox CRM",  sub: "Conversaciones",      icon: Ic.MessageSquare, modulo: "crm" },
+      { href: "/crm/pipeline", label: "Pipeline",   sub: "Embudo de ventas",    icon: Ic.TrendingUp,    modulo: "crm" },
     ],
   },
   {
@@ -343,7 +360,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
 const menu = menuGrupos.flatMap((g) => g.items);
 
 // Grupos que arrancan abiertos por defecto
-const GRUPOS_ABIERTOS_DEFAULT = ["Principal", "Comercial", "Operaciones", "Flota"];
+const GRUPOS_ABIERTOS_DEFAULT = ["Principal", "Comercial", "CRM", "Operaciones", "Flota"];
 
 // ─── Logo ───────────────────────────────────────────────────────────────────
 function LogoAFA({ collapsed }: { collapsed: boolean }) {

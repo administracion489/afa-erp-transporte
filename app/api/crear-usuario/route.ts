@@ -34,6 +34,7 @@ const MODULOS = [
   "ajustes",
   "configuracion",
   "despachador",
+  "crm",
 ];
 
 export async function POST(request: Request) {

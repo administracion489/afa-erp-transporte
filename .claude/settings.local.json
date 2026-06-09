@@ -62,7 +62,8 @@
       "Read(//mnt/c/Users/**)",
       "Bash(xargs grep -l \"Pasajero\")",
       "PowerShell(Get-ChildItem C:\\\\Users\\\\trans\\\\Documents -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match \"afa|pasajero|conductor|transporte\" -or $_.Name -match \"app\" } | Select-Object FullName)",
-      "PowerShell(head)"
+      "PowerShell(head)",
+      "Bash(gh pr *)"
     ]
   }
 }

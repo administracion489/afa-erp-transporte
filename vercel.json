@@ -3,6 +3,10 @@
     {
       "path": "/api/notificaciones/recordatorio",
       "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/api/crm/gmail/sync",
+      "schedule": "*/15 * * * *"
     }
   ]
 }
