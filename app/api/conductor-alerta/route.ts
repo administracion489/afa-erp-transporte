@@ -1,6 +1,7 @@
 // app/api/conductor-alerta/route.ts
-// Registra alertas de retraso y SOS desde la app conductor.
-// Usa service_role para bypasear RLS (anon no tiene permiso INSERT en alertas_sos).
+// Maneja dos acciones desde la app conductor (ambas requieren service_role para saltear RLS):
+//   tipo = "alerta"   → INSERT en alertas_sos (retraso / SOS)
+//   tipo = "embarque" → INSERT en pasajeros_parada (pasajero fuera de manifiesto)
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -14,8 +15,65 @@ const supabaseAdmin = createClient(
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { reserva_id, lat, lng, motivo, estado = "pendiente" } = body;
+    const { tipo = "alerta" } = body;
 
+    // ── EMBARQUE fuera de manifiesto ────────────────────────────────────────
+    if (tipo === "embarque") {
+      const { parada_id, pasajero_id, reserva_id } = body;
+      if (!parada_id || !pasajero_id) {
+        return NextResponse.json({ error: "parada_id y pasajero_id requeridos" }, { status: 400 });
+      }
+
+      // Verificar si ya existe (evitar duplicado)
+      const { data: existe } = await supabaseAdmin
+        .from("pasajeros_parada")
+        .select("id, estado")
+        .eq("parada_id", parada_id)
+        .eq("pasajero_id", pasajero_id)
+        .maybeSingle();
+
+      if (existe) {
+        if (existe.estado === "embarcado") {
+          return NextResponse.json({ ok: true, ya_embarcado: true, id: existe.id });
+        }
+        // Existe pero no embarcado → actualizar
+        const { error: errUpd } = await supabaseAdmin
+          .from("pasajeros_parada")
+          .update({ estado: "embarcado" })
+          .eq("id", existe.id);
+        if (errUpd) return NextResponse.json({ error: errUpd.message }, { status: 500 });
+        return NextResponse.json({ ok: true, id: existe.id });
+      }
+
+      // No existe → insertar nuevo registro
+      const { data: nuevo, error: errIns } = await supabaseAdmin
+        .from("pasajeros_parada")
+        .insert({
+          parada_id,
+          pasajero_id,
+          reserva_id: reserva_id ?? null,
+          estado: "embarcado",
+          fuera_lista: true,   // flag informativo (puede no existir la columna, se ignora)
+        })
+        .select("id")
+        .single();
+
+      if (errIns) {
+        // Si falla por columna inexistente (fuera_lista), reintentar sin ese campo
+        const { data: nuevo2, error: errIns2 } = await supabaseAdmin
+          .from("pasajeros_parada")
+          .insert({ parada_id, pasajero_id, reserva_id: reserva_id ?? null, estado: "embarcado" })
+          .select("id")
+          .single();
+        if (errIns2) return NextResponse.json({ error: errIns2.message }, { status: 500 });
+        return NextResponse.json({ ok: true, id: nuevo2?.id, creado: true });
+      }
+
+      return NextResponse.json({ ok: true, id: nuevo?.id, creado: true });
+    }
+
+    // ── ALERTA (retraso / SOS) ──────────────────────────────────────────────
+    const { reserva_id, lat, lng, motivo, estado = "pendiente" } = body;
     if (!motivo) {
       return NextResponse.json({ error: "motivo requerido" }, { status: 400 });
     }

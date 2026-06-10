@@ -660,21 +660,30 @@ export default function ConductorApp() {
       setPasajeros(prev => prev.map(p => p.id === pp.id ? { ...p, estado: "embarcado" } : p));
     }
 
-    // Log GPS si disponible
-    if (conductor && posRef.current) {
-      await supabase.from("boarding_log").insert({
-        reserva_id:   reservaActiva?.id,
-        parada_id:    paradaActual.id,
-        pasajero_id:  pasajero.id,
-        conductor_id: conductor.id,
-        metodo:       "qr",
-        lat:          posRef.current.coords.latitude,
-        lng:          posRef.current.coords.longitude,
-      });
-    }
-
-    // Resultado: verde si estaba en lista, naranja si no
+    // Pasajero fuera de lista → registrar igualmente en pasajeros_parada vía API
     const fueraLista = !pp;
+    if (fueraLista) {
+      const res = await fetch("/api/conductor-alerta", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tipo:        "embarque",
+          parada_id:   paradaActual.id,
+          pasajero_id: pasajero.id,
+          reserva_id:  reservaActiva?.id ?? null,
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok) {
+        // Agregar al estado local para que aparezca en el conteo
+        setPasajeros(prev => [
+          ...prev,
+          { id: json.id ?? 0, parada_id: paradaActual.id, pasajero_id: pasajero.id, estado: "embarcado", pasajero },
+        ]);
+      } else {
+        console.warn("[embarque-extra] No se pudo registrar:", json.error);
+      }
+    }
     playBeep(fueraLista ? "warn" : "ok");
 
     // Mostrar tarjeta resultado con barra de progreso (3 s)
