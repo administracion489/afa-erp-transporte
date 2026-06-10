@@ -376,12 +376,14 @@ export default function ConductorApp() {
   }, []);
 
   async function cargarParadas(reservaId: number) {
-    const { data: ps, error: errPs } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
-    if (errPs) { alert(`Error al cargar paradas: ${errPs.message}`); return; }
-    const listaParadas = ps || [];
-    if (listaParadas.length === 0) {
-      alert(`Esta reserva (ID: ${reservaId}) no tiene paradas registradas en el sistema. Contacta a operaciones.`);
+    // Usa el API endpoint que auto-crea paradas desde origen/destino si no existen
+    const res = await fetch(`/api/conductor-paradas?reservaId=${reservaId}`);
+    const json = await res.json();
+    if (!res.ok) {
+      alert(`No se pudieron cargar las paradas: ${json.error ?? "Error desconocido"}`);
+      return;
     }
+    const listaParadas: Parada[] = json.paradas || [];
     setParadas(listaParadas);
     if (listaParadas.length > 0) {
       const { data: pp, error: errPp } = await supabase.from("pasajeros_parada")
