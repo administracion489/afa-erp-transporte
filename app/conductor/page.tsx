@@ -376,13 +376,18 @@ export default function ConductorApp() {
   }, []);
 
   async function cargarParadas(reservaId: number) {
-    const { data: ps } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
+    const { data: ps, error: errPs } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
+    if (errPs) { alert(`Error al cargar paradas: ${errPs.message}`); return; }
     const listaParadas = ps || [];
+    if (listaParadas.length === 0) {
+      alert(`Esta reserva (ID: ${reservaId}) no tiene paradas registradas en el sistema. Contacta a operaciones.`);
+    }
     setParadas(listaParadas);
     if (listaParadas.length > 0) {
-      const { data: pp } = await supabase.from("pasajeros_parada")
+      const { data: pp, error: errPp } = await supabase.from("pasajeros_parada")
         .select("*, pasajero:pasajeros(*)")
         .in("parada_id", listaParadas.map((p: Parada) => p.id));
+      if (errPp) console.error("[Pasajeros parada]", errPp.message);
       setPasajeros(pp || []);
     }
   }
