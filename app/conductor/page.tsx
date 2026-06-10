@@ -36,7 +36,7 @@ type DocCond   = { id: number; tipo: string; nombre: string | null; url: string;
 type Tab = "ruta" | "paradas" | "checklist" | "documentos" | "perfil";
 
 type IncidenciaTipo = "trafico" | "mecanica" | "pasajero" | "accidente" | "combustible" | "seguridad";
-type Severidad      = "leve" | "media" | "alta";
+type Severidad      = "bajo" | "medio" | "alto";
 
 // ─── CONSTANTES ───────────────────────────────────────────────────────────────
 
@@ -69,9 +69,9 @@ const INCIDENCIA_TIPOS: { id: IncidenciaTipo; label: string; icon: (p: any) => R
 ];
 
 const SEVERIDADES: { id: Severidad; label: string; color: string; bg: string }[] = [
-  { id: "leve",  label: "Leve",  color: "var(--c-success)", bg: "var(--c-success-tint)" },
-  { id: "media", label: "Media", color: "var(--c-warn)",    bg: "var(--c-warn-tint)" },
-  { id: "alta",  label: "Alta",  color: "var(--c-danger)",  bg: "var(--c-danger-tint)" },
+  { id: "bajo",  label: "Leve",  color: "var(--c-success)", bg: "var(--c-success-tint)" },
+  { id: "medio", label: "Media", color: "var(--c-warn)",    bg: "var(--c-warn-tint)" },
+  { id: "alto",  label: "Alta",  color: "var(--c-danger)",  bg: "var(--c-danger-tint)" },
 ];
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -268,7 +268,7 @@ export default function ConductorApp() {
   // ── Incidencia ─────────────────────────────────────────────────────────────
   const [showIncidencia, setShowIncidencia] = useState(false);
   const [incTipo,        setIncTipo]        = useState<IncidenciaTipo | null>(null);
-  const [incSev,         setIncSev]         = useState<Severidad>("media");
+  const [incSev,         setIncSev]         = useState<Severidad>("medio");
   const [incDesc,        setIncDesc]        = useState("");
   const [incRetraso,     setIncRetraso]     = useState("");
   const [incSaving,      setIncSaving]      = useState(false);
