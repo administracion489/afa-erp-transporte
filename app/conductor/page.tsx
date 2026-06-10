@@ -582,7 +582,7 @@ export default function ConductorApp() {
       qrRef.current = scanner;
       scanner.start(
         { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 264, height: 264 }, disableFlip: false },
+        { fps: 12 },  // sin qrbox → detecta en toda la pantalla
         async (text: string) => {
           scanner.stop().catch(() => {}); qrRef.current = null; setEscanear(false);
           await procesarQR(text);
@@ -2502,35 +2502,24 @@ export default function ConductorApp() {
             </div>
           </div>
 
-          {/* ── Overlay: brackets coral centrados ── */}
-          {/* box-shadow oscurece TODO fuera del cuadrado; NO hay fondo en el div padre */}
-          <div style={{
-            position: "absolute", inset: 0, zIndex: 2, pointerEvents: "none",
-            display: "flex", alignItems: "center", justifyContent: "center",
-          }}>
+          {/* ── Overlay: brackets decorativos en las 4 esquinas de la pantalla ── */}
+          <div style={{ position: "absolute", inset: 0, zIndex: 2, pointerEvents: "none" }}>
+            {/* Esquina superior-izquierda */}
+            <div style={{ position: "absolute", top: 90, left: 20, width: 48, height: 48, borderStyle: "solid", borderColor: "var(--c-coral)", borderWidth: 0, borderTopWidth: 4, borderLeftWidth: 4, borderTopLeftRadius: 14 }} />
+            {/* Esquina superior-derecha */}
+            <div style={{ position: "absolute", top: 90, right: 20, width: 48, height: 48, borderStyle: "solid", borderColor: "var(--c-coral)", borderWidth: 0, borderTopWidth: 4, borderRightWidth: 4, borderTopRightRadius: 14 }} />
+            {/* Esquina inferior-izquierda */}
+            <div style={{ position: "absolute", bottom: 110, left: 20, width: 48, height: 48, borderStyle: "solid", borderColor: "var(--c-coral)", borderWidth: 0, borderBottomWidth: 4, borderLeftWidth: 4, borderBottomLeftRadius: 14 }} />
+            {/* Esquina inferior-derecha */}
+            <div style={{ position: "absolute", bottom: 110, right: 20, width: 48, height: 48, borderStyle: "solid", borderColor: "var(--c-coral)", borderWidth: 0, borderBottomWidth: 4, borderRightWidth: 4, borderBottomRightRadius: 14 }} />
+            {/* Línea de escaneo a todo ancho */}
             <div style={{
-              position: "relative", width: 264, height: 264, borderRadius: 18,
-              boxShadow: "0 0 0 9999px rgba(0,0,0,0.55)",
-            }}>
-              {/* Esquinas coral */}
-              {[0,1,2,3].map(i => (
-                <div key={i} style={{
-                  position: "absolute", width: 38, height: 38, borderStyle: "solid",
-                  borderColor: "var(--c-coral)", borderWidth: 0,
-                  ...(i === 0 && { top: 0, left: 0, borderTopWidth: 4, borderLeftWidth: 4, borderTopLeftRadius: 12 }),
-                  ...(i === 1 && { top: 0, right: 0, borderTopWidth: 4, borderRightWidth: 4, borderTopRightRadius: 12 }),
-                  ...(i === 2 && { bottom: 0, left: 0, borderBottomWidth: 4, borderLeftWidth: 4, borderBottomLeftRadius: 12 }),
-                  ...(i === 3 && { bottom: 0, right: 0, borderBottomWidth: 4, borderRightWidth: 4, borderBottomRightRadius: 12 }),
-                }} />
-              ))}
-              {/* Línea de escaneo */}
-              <div style={{
-                position: "absolute", left: 16, right: 16, height: 2,
-                background: "linear-gradient(90deg, transparent, var(--c-coral), transparent)",
-                boxShadow: "0 0 18px var(--c-coral)",
-                animation: "scanLine 1.8s ease-in-out infinite",
-              }} />
-            </div>
+              position: "absolute", left: 20, right: 20, height: 2,
+              top: "50%", transform: "translateY(-50%)",
+              background: "linear-gradient(90deg, transparent, var(--c-coral) 20%, var(--c-coral) 80%, transparent)",
+              boxShadow: "0 0 20px var(--c-coral)",
+              animation: "scanLine 2s ease-in-out infinite",
+            }} />
           </div>
 
           {/* ── Overlay: footer ── */}
