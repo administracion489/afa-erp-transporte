@@ -655,7 +655,7 @@ export default function ConductorApp() {
       return;
     }
     setShowIncidencia(false);
-    setIncTipo(null); setIncSev("media"); setIncDesc(""); setIncRetraso("");
+    setIncTipo(null); setIncSev("medio"); setIncDesc(""); setIncRetraso("");
     setBoardingMsg({ ok: true, msg: "Incidencia reportada a operaciones" });
     setTimeout(() => setBoardingMsg(null), 3000);
   }
