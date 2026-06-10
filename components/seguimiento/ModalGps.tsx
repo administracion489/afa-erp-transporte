@@ -34,12 +34,15 @@ type Props = {
   reservaId: number; vehiculoId: number | null;
   vehiculoPlaca: string; conductorNombre: string;
   conductorTel: string; clienteNombre: string;
-  paradas: Parada[]; onClose: () => void;
+  paradas: Parada[];
+  origen?: string | null;
+  destino?: string | null;
+  onClose: () => void;
 };
 
 export default function ModalGps({
   reservaId, vehiculoId, vehiculoPlaca, conductorNombre,
-  conductorTel, clienteNombre, paradas, onClose,
+  conductorTel, clienteNombre, paradas, origen, destino, onClose,
 }: Props) {
   const mapRef    = useRef<HTMLDivElement>(null);
   const mapInst   = useRef<any>(null);
@@ -50,37 +53,64 @@ export default function ModalGps({
   const [ultimaActualiz, setUltimaActualiz] = useState<Date | null>(null);
   const [sinSenal,       setSinSenal]       = useState(false);
   const [mapListo,       setMapListo]       = useState(false);
-  const [ruta,           setRuta]           = useState<RutaData | null>(null);
-  const [cargandoRuta,   setCargandoRuta]   = useState(false);
-  const [errorRuta,      setErrorRuta]      = useState<string | null>(null);
+  const [ruta,              setRuta]              = useState<RutaData | null>(null);
+  const [cargandoRuta,      setCargandoRuta]      = useState(false);
+  const [errorRuta,         setErrorRuta]         = useState<string | null>(null);
+  const [paradasResueltas,  setParadasResueltas]  = useState<Parada[]>([]);
+  const stopMarkersRef = useRef<any[]>([]);
 
-  // ── Geocodificación auxiliar ─────────────────────────────────────────────
+  // ── Geocodificación auxiliar (server-side vía /api/geocodificar) ─────────
 
   const geocodificarParadas = useCallback(async (lista: Parada[]): Promise<Parada[]> => {
-    const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-    if (!apiKey) return lista;
-    return Promise.all(
-      lista.map(async p => {
-        if (p.lat && p.lng) return p;
-        try {
-          const r = await fetch(
-            `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(p.nombre)}&key=${apiKey}&region=pe&language=es`
-          );
-          const d = await r.json();
-          if (d.status === "OK" && d.results?.[0]) {
-            const loc = d.results[0].geometry.location;
-            return { ...p, lat: loc.lat as number, lng: loc.lng as number };
-          }
-        } catch {}
-        return p;
-      })
-    );
+    const sinCoords = lista.filter(p => !p.lat || !p.lng);
+    if (sinCoords.length === 0) return lista;
+
+    try {
+      const res = await fetch("/api/geocodificar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paradas: sinCoords.map(p => ({ id: p.id, nombre: p.nombre })) }),
+      });
+
+      const data = await res.json();
+      console.log("[ModalGps] geocodificar result:", data);
+
+      if (!res.ok || !data.paradas) {
+        console.error("[ModalGps] geocodificar error:", data.error);
+        return lista;
+      }
+
+      // Mezclar coordenadas obtenidas en la lista original
+      const coordsMap = new Map<number, { lat: number | null; lng: number | null }>(
+        data.paradas.map((p: any) => [p.id, { lat: p.lat, lng: p.lng }])
+      );
+      return lista.map(p => {
+        const coords = coordsMap.get(p.id);
+        return coords ? { ...p, lat: coords.lat, lng: coords.lng } : p;
+      });
+    } catch (e: any) {
+      console.error("[ModalGps] geocodificar fetch error:", e.message);
+      return lista;
+    }
   }, []); // eslint-disable-line
 
   // ── Ruta real de Google via /api/ruta ──────────────────────────────────────
 
   const cargarRuta = useCallback(async () => {
     let listaParadas = [...paradas].sort((a, b) => a.orden - b.orden);
+
+    // Sin paradas: intentar con origen/destino de la reserva como fallback
+    if (listaParadas.length === 0) {
+      if (origen && destino) {
+        listaParadas = [
+          { id: -1, nombre: origen,  lat: null, lng: null, hora_estimada: null, estado: "pendiente", orden: 1 },
+          { id: -2, nombre: destino, lat: null, lng: null, hora_estimada: null, estado: "pendiente", orden: 2 },
+        ];
+      } else {
+        setErrorRuta("Esta reserva no tiene paradas configuradas — agrégalas en Programación");
+        return;
+      }
+    }
 
     // Si alguna parada no tiene coordenadas, geocodificar antes de calcular ruta
     const sinCoords = listaParadas.filter(p => !p.lat || !p.lng);
@@ -92,7 +122,11 @@ export default function ModalGps({
     const paradasConCoords = listaParadas.filter(p => p.lat !== null && p.lng !== null);
 
     if (paradasConCoords.length < 2) {
-      setErrorRuta("Las paradas no tienen coordenadas — agregalas en Programación");
+      setErrorRuta(
+        sinCoords.length > 0
+          ? `No se pudo geocodificar ${sinCoords.length} parada(s) — verifica los nombres o agrégalas manualmente en Programación`
+          : "Las paradas no tienen coordenadas — agrégalas en Programación"
+      );
       return;
     }
 
@@ -147,13 +181,14 @@ export default function ModalGps({
       }
 
       setRuta(data as RutaData);
+      setParadasResueltas(paradasConCoords);
     } catch (e: any) {
       console.error("[ModalGps] Error fetch:", e);
       setErrorRuta("No se pudo conectar con /api/ruta: " + e.message);
     } finally {
       setCargandoRuta(false);
     }
-  }, [paradas, geocodificarParadas]); // eslint-disable-line
+  }, [paradas, origen, destino, geocodificarParadas]); // eslint-disable-line
 
   useEffect(() => { cargarRuta(); }, [cargarRuta]);
 
@@ -190,6 +225,71 @@ export default function ModalGps({
       console.error("[ModalGps] Error dibujando ruta:", e);
     }
   }, [ruta, mapListo]);
+
+  // ── Marcadores numerados con etiqueta de texto ────────────────────────────
+
+  useEffect(() => {
+    if (!mapListo || !mapInst.current || paradasResueltas.length === 0) return;
+    if (!window.mapboxgl) return;
+
+    // Limpiar marcadores anteriores
+    stopMarkersRef.current.forEach(m => m.remove());
+    stopMarkersRef.current = [];
+
+    const total = paradasResueltas.length;
+
+    paradasResueltas.forEach((p, i) => {
+      const lat = typeof p.lat === "string" ? parseFloat(p.lat as any) : p.lat!;
+      const lng = typeof p.lng === "string" ? parseFloat(p.lng as any) : p.lng!;
+
+      const isFirst    = i === 0;
+      const isLast     = i === total - 1;
+      const completada = p.estado === "completada";
+
+      const bg    = completada ? "#16a34a" : isFirst ? "#16a34a" : isLast ? "#dc2626" : "#0b315f";
+      const tag   = isFirst ? "ORIGEN" : isLast ? "DESTINO" : `PARADA ${i + 1}`;
+      const label = p.nombre.length > 22 ? p.nombre.slice(0, 20) + "…" : p.nombre;
+      const num   = completada ? "✓" : String(i + 1);
+
+      // Wrapper contenedor (número + etiqueta)
+      const wrapper = document.createElement("div");
+      wrapper.style.cssText = "display:flex;flex-direction:column;align-items:center;cursor:pointer";
+
+      // Círculo numerado
+      const circle = document.createElement("div");
+      circle.style.cssText = `width:34px;height:34px;border-radius:50%;background:${bg};border:3px solid white;box-shadow:0 3px 12px rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;color:white;font-size:13px;font-weight:900;transition:transform 0.15s`;
+      circle.innerHTML = num;
+      circle.onmouseenter = () => { circle.style.transform = "scale(1.15)"; };
+      circle.onmouseleave = () => { circle.style.transform = "scale(1)"; };
+
+      // Etiqueta de texto
+      const etiqueta = document.createElement("div");
+      etiqueta.style.cssText = `background:white;color:#0b315f;font-family:system-ui;font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,0.22);margin-top:4px;white-space:nowrap;border:1px solid ${bg}20`;
+      etiqueta.innerHTML = `<span style="color:${bg};font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:0.5px">${tag}</span><br/><span style="color:#1e293b">${label}</span>`;
+
+      wrapper.appendChild(circle);
+      wrapper.appendChild(etiqueta);
+
+      const popup = new window.mapboxgl.Popup({ offset: [0, -42], closeButton: false })
+        .setHTML(`
+          <div style="font-family:system-ui;padding:6px 2px;min-width:160px">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+              <div style="width:22px;height:22px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:white;font-size:10px;font-weight:900;flex-shrink:0">${num}</div>
+              <p style="font-weight:900;margin:0;color:#0b315f;font-size:13px;line-height:1.2">${p.nombre}</p>
+            </div>
+            <p style="margin:2px 0 0;color:${bg};font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">${tag}</p>
+            ${p.hora_estimada ? `<p style="margin:4px 0 0;color:#64748b;font-size:11px">⏰ ${p.hora_estimada.slice(0, 5)}</p>` : ""}
+            ${completada ? `<p style="margin:4px 0 0;color:#16a34a;font-weight:700;font-size:11px">✓ Completada</p>` : ""}
+          </div>`);
+
+      const marker = new window.mapboxgl.Marker({ element: wrapper, anchor: "bottom" })
+        .setLngLat([lng, lat])
+        .setPopup(popup)
+        .addTo(mapInst.current);
+
+      stopMarkersRef.current.push(marker);
+    });
+  }, [paradasResueltas, mapListo]);
 
   // ── GPS: última posición ──────────────────────────────────────────────────
 
@@ -288,25 +388,6 @@ export default function ModalGps({
             },
           });
 
-          // Marcadores paradas
-          const pcc = paradas.filter(p => p.lat !== null && p.lng !== null);
-          pcc.forEach((p, i) => {
-            const isFirst = i === 0, isLast = i === pcc.length - 1;
-            const completada = p.estado === "completada";
-            const bg = completada ? "#16a34a" : isFirst ? "#16a34a" : isLast ? "#dc2626" : "#0b315f";
-            const el = document.createElement("div");
-            el.style.cssText = `width:30px;height:30px;border-radius:50%;background:${bg};border:2.5px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;color:white;font-size:12px;font-weight:900`;
-            el.innerHTML = completada ? "✓" : String(i + 1);
-            const lat = typeof p.lat === "string" ? parseFloat(p.lat as any) : p.lat!;
-            const lng = typeof p.lng === "string" ? parseFloat(p.lng as any) : p.lng!;
-            new window.mapboxgl.Marker({ element: el })
-              .setLngLat([lng, lat])
-              .setPopup(new window.mapboxgl.Popup({ offset: 26 }).setHTML(
-                `<div style="font-family:system-ui"><p style="font-weight:900;margin:0;color:#0b315f">${p.nombre}</p>
-                ${p.hora_estimada ? `<p style="margin:4px 0 0;color:#64748b;font-size:12px">⏰ ${p.hora_estimada.slice(0,5)}</p>` : ""}
-                ${completada ? `<p style="margin:4px 0 0;color:#16a34a;font-weight:700;font-size:12px">✓ Completada</p>` : ""}</div>`
-              )).addTo(map);
-          });
           setMapListo(true);
         });
       } catch (e) { console.error("[ModalGps]", e); setErrorMapa(true); }

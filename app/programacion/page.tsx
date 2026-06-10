@@ -187,16 +187,16 @@ function riesgoEmpresa(docs: DocumentoTercero[], empresaId: number): "alto" | "o
 // ─── Geocodificación via Google Maps Geocoding API ───────────────────────────
 
 async function geocodificar(direccion: string): Promise<{ lat: number; lng: number } | null> {
-  const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-  if (!key || !direccion.trim()) return null;
+  if (!direccion.trim()) return null;
   try {
-    const res = await fetch(
-      `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(direccion)}&key=${key}&region=pe&language=es`
-    );
+    const res = await fetch("/api/geocodificar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paradas: [{ id: 0, nombre: direccion }] }),
+    });
     const data = await res.json();
-    if (data.status === "OK" && data.results?.[0]) {
-      const loc = data.results[0].geometry.location;
-      return { lat: loc.lat, lng: loc.lng };
+    if (res.ok && data.paradas?.[0]?.lat != null) {
+      return { lat: data.paradas[0].lat, lng: data.paradas[0].lng };
     }
   } catch {}
   return null;

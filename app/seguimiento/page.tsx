@@ -1104,6 +1104,8 @@ export default function SeguimientoPage() {
           conductorNombre={gpsModal.conductor_nombre}
           conductorTel={gpsModal.conductor_tel}
           clienteNombre={gpsModal.cliente_nombre}
+          origen={gpsModal.reserva.origen ?? null}
+          destino={gpsModal.reserva.destino ?? null}
           paradas={gpsModal.paradas.map(p => ({
             id: p.id, nombre: p.nombre,
             lat: p.lat ?? null, lng: p.lng ?? null,

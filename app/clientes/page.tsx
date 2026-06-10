@@ -824,16 +824,38 @@ export default function ClientesPage() {
     setPuErr(""); setPuLoad(true);
     const modulos = (puRol === "admin" && puPermisos.length === MODULOS_CTRL.length) ? null : puPermisos;
 
+    const { data: { session } } = await supabase.auth.getSession();
+    const bearerToken = session?.access_token ?? "";
+
+    const enviarCredenciales = async (uid: number, pass: string) => {
+      if (!puEmail.trim()) return;
+      try {
+        await fetch("/api/portal/enviar-credenciales", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${bearerToken}` },
+          body: JSON.stringify({ usuario_id: uid, password: pass, tipo_doc: puTipoDoc }),
+        });
+      } catch { /* silencioso — no bloquear el flujo */ }
+    };
+
     if (editPU) {
       const updates: Record<string, unknown> = { nombre: puNombre.trim(), dni: puDni.trim(), cargo: puCargo.trim() || null, rol: puRol, email: puEmail.trim() || null, modulos_permitidos: modulos };
       if (puPass.trim()) updates.codigo_acceso = puPass.trim();
       const { error } = await supabase.from("portal_usuarios").update(updates).eq("id", editPU.id);
       if (error) { setPuErr("Error al actualizar: " + error.message); setPuLoad(false); return; }
-      toast("Usuario actualizado ✓", "ok");
+      if (puPass.trim()) {
+        await enviarCredenciales(editPU.id, puPass.trim());
+        toast(puEmail.trim() ? "Usuario actualizado · credenciales enviadas ✓" : "Usuario actualizado ✓", "ok");
+      } else {
+        toast("Usuario actualizado ✓", "ok");
+      }
     } else {
-      const { error } = await supabase.from("portal_usuarios").insert({ cliente_id: accesoCliente.id, nombre: puNombre.trim(), dni: puDni.trim(), cargo: puCargo.trim() || null, rol: puRol, email: puEmail.trim() || null, codigo_acceso: puPass.trim(), activo: true, modulos_permitidos: modulos });
+      const { data: nuevoUser, error } = await supabase.from("portal_usuarios")
+        .insert({ cliente_id: accesoCliente.id, nombre: puNombre.trim(), dni: puDni.trim(), cargo: puCargo.trim() || null, rol: puRol, email: puEmail.trim() || null, codigo_acceso: puPass.trim(), activo: true, modulos_permitidos: modulos })
+        .select("id").single();
       if (error) { setPuErr(error.message.includes("unique") ? `Ya existe un usuario con ese ${puTipoDoc} para este cliente` : error.message); setPuLoad(false); return; }
-      toast("Usuario creado ✓", "ok");
+      if (nuevoUser) await enviarCredenciales(nuevoUser.id, puPass.trim());
+      toast(puEmail.trim() ? "Usuario creado · credenciales enviadas ✓" : "Usuario creado ✓", "ok");
     }
 
     await cargarPortalUsers(accesoCliente.id);
