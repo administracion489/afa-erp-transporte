@@ -448,6 +448,7 @@ export default function ConductorApp() {
   }, [conductor?.id]);
 
   async function iniciarRecorrido(reserva: Reserva) {
+    if (!checkDone) { alert("Debes completar el pre-viaje antes de iniciar el recorrido"); setTab("checklist"); return; }
     if (!vehiculoId) { alert("Selecciona el vehículo primero"); return; }
     if (!navigator.geolocation) { alert("GPS no disponible en este dispositivo"); return; }
     setIniciando(true);
