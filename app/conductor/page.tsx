@@ -479,7 +479,8 @@ export default function ConductorApp() {
   }
 
   async function marcarParadaCompletada(paradaId: number) {
-    await supabase.from("paradas").update({ estado: "completada" }).eq("id", paradaId);
+    const { error } = await supabase.from("paradas").update({ estado: "completada" }).eq("id", paradaId);
+    if (error) { alert(`Error al marcar parada: ${error.message}`); return; }
     setParadas(prev => prev.map(p => p.id === paradaId ? { ...p, estado: "completada" } : p));
     if (paradaIdx < paradas.length - 1) {
       const nuevaIdx = paradaIdx + 1;
@@ -508,15 +509,23 @@ export default function ConductorApp() {
     sosTimer.current = setTimeout(async () => {
       clearInterval(sosInterval.current!);
       setSosActivo(false); setSosPct(100);
-      if (posRef.current && vehiculoId && conductor) {
-        await supabase.from("alertas_sos").insert({
-          conductor_id: conductor.id, vehiculo_id: vehiculoId,
-          reserva_id: reservaActiva?.id || null,
-          lat: posRef.current.coords.latitude, lng: posRef.current.coords.longitude,
-          mensaje: "SOS — Conductor solicita ayuda urgente",
-        });
-        await enviarUbicacion(posRef.current, "sos");
+      if (!conductor || !posRef.current) {
+        alert("Error: GPS no disponible. SOS no pudo enviarse. Llama al +51 966 707 225.");
+        setSosActivo(false); setSosPct(0);
+        return;
       }
+      const { error: sosErr } = await supabase.from("alertas_sos").insert({
+        conductor_id: conductor.id, vehiculo_id: vehiculoId,
+        reserva_id: reservaActiva?.id || null,
+        lat: posRef.current.coords.latitude, lng: posRef.current.coords.longitude,
+        mensaje: "SOS — Conductor solicita ayuda urgente",
+      });
+      if (sosErr) {
+        alert(`SOS no pudo registrarse: ${sosErr.message}. Llama al +51 966 707 225.`);
+        setSosPct(0);
+        return;
+      }
+      await enviarUbicacion(posRef.current, "sos");
       setSosEnviado(true);
       setTimeout(() => { setSosEnviado(false); setSosPct(0); }, 10000);
     }, 2000);
@@ -566,12 +575,12 @@ export default function ConductorApp() {
   }, [escanear]);
 
   async function procesarQR(qrCode: string) {
-    const { data: pasajero } = await supabase
+    const { data: pasajero, error } = await supabase
       .from("pasajeros")
       .select("*")
       .eq("qr_code", qrCode)
       .single();
-    if (!pasajero) {
+    if (error || !pasajero) {
       setBoardingMsg({ ok: false, msg: "QR no reconocido. Pasajero no encontrado." });
       setTimeout(() => setBoardingMsg(null), 4000);
       return;
@@ -581,7 +590,11 @@ export default function ConductorApp() {
 
   async function confirmarEmbarque(pasajero: Pasajero) {
     const paradaActual = paradas[paradaIdx];
-    if (!paradaActual) return;
+    if (!paradaActual) {
+      setBoardingMsg({ ok: false, msg: "Error: no hay parada activa." });
+      setTimeout(() => setBoardingMsg(null), 4000);
+      return;
+    }
     const pp = pasajeros.find(p => p.pasajero_id === pasajero.id && p.parada_id === paradaActual.id);
     if (pp) {
       if (pp.estado === "embarcado") {
@@ -590,7 +603,13 @@ export default function ConductorApp() {
         setTimeout(() => setBoardingMsg(null), 4000);
         return;
       }
-      await supabase.from("pasajeros_parada").update({ estado: "embarcado" }).eq("id", pp.id);
+      const { error: errEmb } = await supabase.from("pasajeros_parada").update({ estado: "embarcado" }).eq("id", pp.id);
+      if (errEmb) {
+        setBoardingMsg({ ok: false, msg: `Error al registrar embarque: ${errEmb.message}` });
+        setValidando(null);
+        setTimeout(() => setBoardingMsg(null), 4000);
+        return;
+      }
       setPasajeros(prev => prev.map(p => p.id === pp.id ? { ...p, estado: "embarcado" } : p));
     }
     if (conductor && posRef.current) {
@@ -610,9 +629,8 @@ export default function ConductorApp() {
   }
 
   async function notificarRetraso() {
-    if (!reservaActiva) return;
-    setNotifEnviada(true);
-    await supabase.from("alertas_sos").insert({
+    if (!reservaActiva) { alert("No hay reserva activa"); return; }
+    const { error } = await supabase.from("alertas_sos").insert({
       conductor_id: conductor?.id,
       vehiculo_id:  vehiculoId,
       reserva_id:   reservaActiva.id,
@@ -620,6 +638,8 @@ export default function ConductorApp() {
       lng:          posRef.current?.coords.longitude || 0,
       mensaje:      `Retraso reportado — Conductor en ruta a ${paradas[paradaIdx]?.nombre || "siguiente parada"}`,
     });
+    if (error) { alert(`Error al notificar retraso: ${error.message}`); return; }
+    setNotifEnviada(true);
     setTimeout(() => setNotifEnviada(false), 5000);
   }
 
@@ -703,8 +723,9 @@ export default function ConductorApp() {
       observaciones: checkObs,
       estado:       checks.some(c => c.ok === false) ? "con_fallas" : "ok",
     });
-    if (!error) setCheckDone(true);
     setCheckSaving(false);
+    if (error) { alert(`Error al guardar checklist: ${error.message}`); return; }
+    setCheckDone(true);
   }
 
   // ─── Docs ───────────────────────────────────────────────────────────────────
@@ -713,15 +734,17 @@ export default function ConductorApp() {
     if (!conductor) return;
     if (!docUrl.trim()) { alert("Ingresa la URL del documento antes de registrar"); return; }
     setDocSaving(true);
-    const { data } = await supabase.from("documentos_conductor").insert({
+    const { data, error } = await supabase.from("documentos_conductor").insert({
       conductor_id: conductor.id,
       tipo:         docTipo,
       url:          docUrl.trim(),
       nombre:       docTipo,
       vencimiento:  docVenc || null,
     }).select().single();
+    setDocSaving(false);
+    if (error) { alert(`Error al registrar documento: ${error.message}`); return; }
     if (data) setDocs(prev => [data, ...prev]);
-    setDocUrl(""); setDocVenc(""); setDocSaving(false);
+    setDocUrl(""); setDocVenc("");
   }
 
   // ─── Cambiar PIN ────────────────────────────────────────────────────────────
@@ -730,7 +753,8 @@ export default function ConductorApp() {
     if (pinNuevo.length < 4 || pinNuevo !== pinConfirm) { setPinMsg("PINs no coinciden"); return; }
     if (!conductor) return;
     const tabla = conductor._tabla || "conductores";
-    await supabase.from(tabla).update({ pin_acceso: pinNuevo }).eq("id", conductor.id);
+    const { error } = await supabase.from(tabla).update({ pin_acceso: pinNuevo }).eq("id", conductor.id);
+    if (error) { setPinMsg(`Error: ${error.message}`); setTimeout(() => setPinMsg(""), 4000); return; }
     const upd = { ...conductor, pin_acceso: pinNuevo };
     saveSession(upd); setConductor(upd);
     setPinMsg("PIN cambiado"); setPinNuevo(""); setPinConfirm("");
