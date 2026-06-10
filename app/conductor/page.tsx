@@ -582,7 +582,7 @@ export default function ConductorApp() {
       qrRef.current = scanner;
       scanner.start(
         { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 260, height: 260 } },
+        { fps: 10, qrbox: { width: 264, height: 264 }, disableFlip: false },
         async (text: string) => {
           scanner.stop().catch(() => {}); qrRef.current = null; setEscanear(false);
           await procesarQR(text);
@@ -2460,87 +2460,99 @@ export default function ConductorApp() {
       {/* SCANNER QR (dark glass)                                             */}
       {/* ═══════════════════════════════════════════════════════════════════ */}
       {escanear && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 100, background: "#000",
-          display: "flex", flexDirection: "column",
-        }}>
-          <header style={{
-            padding: "20px 22px 14px",
-            background: "linear-gradient(180deg, rgba(0,0,0,0.8), transparent)",
-            display: "flex", alignItems: "center", gap: 10,
+        <div style={{ position: "fixed", inset: 0, zIndex: 100, background: "#000" }}>
+
+          {/* ── CSS: fuerza el video de html5-qrcode a llenar pantalla completa ── */}
+          <style>{`
+            #qr-container,
+            #qr-container > div { width: 100% !important; height: 100% !important; padding: 0 !important; border: none !important; }
+            #qr-container video  { position: absolute !important; inset: 0 !important; width: 100% !important; height: 100% !important; object-fit: cover !important; display: block !important; }
+            #qr-container canvas,
+            #qr-container img    { display: none !important; }
+            #qr-container span   { display: none !important; }
+          `}</style>
+
+          {/* Contenedor que html5-qrcode necesita — ocupa toda la pantalla */}
+          <div id="qr-container" style={{ position: "absolute", inset: 0 }} />
+
+          {/* ── Overlay: header ── */}
+          <div style={{
+            position: "absolute", top: 0, left: 0, right: 0, zIndex: 2,
+            padding: "52px 22px 20px",
+            background: "linear-gradient(180deg, rgba(0,0,0,0.72) 60%, transparent)",
+            display: "flex", alignItems: "center", gap: 12,
           }}>
             <button
               onClick={() => setEscanear(false)}
               style={{
-                width: 36, height: 36, borderRadius: 12,
-                background: "rgba(255,255,255,0.12)", border: "none", cursor: "pointer",
+                width: 38, height: 38, borderRadius: 12, flexShrink: 0,
+                background: "rgba(255,255,255,0.15)", border: "none", cursor: "pointer",
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}
             >
-              <IconClose size={16} color="#fff" />
+              <IconClose size={17} color="#fff" />
             </button>
-            <div style={{ flex: 1, color: "#fff" }}>
+            <div style={{ color: "#fff" }}>
               <p style={{ margin: 0, fontSize: 10, fontWeight: 700, letterSpacing: 1.2, textTransform: "uppercase", color: "rgba(255,255,255,0.55)" }}>
                 {paradaActual ? `Parada ${paradaIdx + 1} · ${paradaActual.nombre}` : "Escanear"}
               </p>
-              <p style={{ margin: "2px 0 0", fontWeight: 800, fontSize: 16, letterSpacing: -0.3 }}>
+              <p style={{ margin: "2px 0 0", fontWeight: 800, fontSize: 17, letterSpacing: -0.3 }}>
                 Escanear pasajero
               </p>
             </div>
-          </header>
+          </div>
 
-          <div style={{ flex: 1, position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            {/* Contenedor que html5-qrcode necesita */}
-            <div id="qr-container" style={{ width: 280, height: 280, borderRadius: 22, overflow: "hidden", background: "#111" }} />
-
-            {/* Brackets coral */}
-            <div style={{ position: "absolute", width: 280, height: 280, pointerEvents: "none" }}>
-              {[
-                { top: 0, left: 0, borders: "border-top-width: 4px; border-left-width: 4px; border-top-left-radius: 14px;" },
-                { top: 0, right: 0 },
-                { bottom: 0, left: 0 },
-                { bottom: 0, right: 0 },
-              ].map((corner, i) => (
-                <div
-                  key={i}
-                  style={{
-                    position: "absolute", width: 36, height: 36, borderStyle: "solid",
-                    borderColor: "var(--c-coral)", borderWidth: 0,
-                    ...(i === 0 && { top: 0, left: 0, borderTopWidth: 4, borderLeftWidth: 4, borderTopLeftRadius: 14 }),
-                    ...(i === 1 && { top: 0, right: 0, borderTopWidth: 4, borderRightWidth: 4, borderTopRightRadius: 14 }),
-                    ...(i === 2 && { bottom: 0, left: 0, borderBottomWidth: 4, borderLeftWidth: 4, borderBottomLeftRadius: 14 }),
-                    ...(i === 3 && { bottom: 0, right: 0, borderBottomWidth: 4, borderRightWidth: 4, borderBottomRightRadius: 14 }),
-                  }}
-                />
+          {/* ── Overlay: brackets coral centrados ── */}
+          <div style={{
+            position: "absolute", inset: 0, zIndex: 2, pointerEvents: "none",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            {/* Oscurecido fuera del área de scan */}
+            <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)" }} />
+            {/* Recorte transparente encima */}
+            <div style={{
+              position: "relative", width: 264, height: 264,
+              boxShadow: "0 0 0 9999px rgba(0,0,0,0.45)",
+              borderRadius: 18,
+            }}>
+              {/* Esquinas coral */}
+              {[0,1,2,3].map(i => (
+                <div key={i} style={{
+                  position: "absolute", width: 38, height: 38, borderStyle: "solid",
+                  borderColor: "var(--c-coral)", borderWidth: 0,
+                  ...(i === 0 && { top: 0, left: 0, borderTopWidth: 4, borderLeftWidth: 4, borderTopLeftRadius: 12 }),
+                  ...(i === 1 && { top: 0, right: 0, borderTopWidth: 4, borderRightWidth: 4, borderTopRightRadius: 12 }),
+                  ...(i === 2 && { bottom: 0, left: 0, borderBottomWidth: 4, borderLeftWidth: 4, borderBottomLeftRadius: 12 }),
+                  ...(i === 3 && { bottom: 0, right: 0, borderBottomWidth: 4, borderRightWidth: 4, borderBottomRightRadius: 12 }),
+                }} />
               ))}
-              {/* Línea escaneo */}
+              {/* Línea de escaneo */}
               <div style={{
-                position: "absolute", left: 18, right: 18, height: 2,
+                position: "absolute", left: 16, right: 16, height: 2,
                 background: "linear-gradient(90deg, transparent, var(--c-coral), transparent)",
                 boxShadow: "0 0 18px var(--c-coral)",
                 animation: "scanLine 1.8s ease-in-out infinite",
               }} />
             </div>
-
-            <p style={{
-              position: "absolute", bottom: 24, left: 0, right: 0, textAlign: "center",
-              color: "rgba(255,255,255,0.7)", fontSize: 13, fontWeight: 500,
-            }}>
-              Apuntá al QR del pasajero
-            </p>
           </div>
 
+          {/* ── Overlay: footer ── */}
           <div style={{
-            padding: "16px 22px 28px",
-            background: "linear-gradient(0deg, rgba(0,0,0,0.85), transparent)",
-            display: "flex", justifyContent: "center", gap: 10,
+            position: "absolute", bottom: 0, left: 0, right: 0, zIndex: 2,
+            padding: "20px 22px 40px",
+            background: "linear-gradient(0deg, rgba(0,0,0,0.72) 60%, transparent)",
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 16,
           }}>
+            <p style={{ margin: 0, color: "rgba(255,255,255,0.75)", fontSize: 14, fontWeight: 500, textAlign: "center" }}>
+              Apunta al QR del pasajero
+            </p>
             <button
               onClick={() => setEscanear(false)}
               style={{
-                padding: "12px 28px", borderRadius: 14, border: "1px solid rgba(255,255,255,0.2)",
-                background: "rgba(255,255,255,0.08)", color: "#fff",
-                fontFamily: FONT_SANS, fontWeight: 700, fontSize: 14, cursor: "pointer",
+                padding: "13px 36px", borderRadius: 14,
+                border: "1px solid rgba(255,255,255,0.22)",
+                background: "rgba(255,255,255,0.10)", color: "#fff",
+                fontFamily: FONT_SANS, fontWeight: 700, fontSize: 15, cursor: "pointer",
               }}
             >
               Cancelar
