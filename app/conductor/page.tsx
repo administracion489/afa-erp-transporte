@@ -1467,117 +1467,6 @@ export default function ConductorApp() {
                   </button>
                 </div>
 
-                {/* Tarjeta navegación a próxima parada */}
-                {paradaActual && (
-                  <div style={{
-                    background: "var(--c-navy)", color: "#fff",
-                    borderRadius: 22, padding: 18, marginBottom: 12,
-                    boxShadow: "0 14px 36px -14px rgba(11,49,95,0.5)",
-                  }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <StatusDot color="var(--c-success)" pulse size={6} />
-                        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1.2, textTransform: "uppercase", color: "rgba(255,255,255,0.7)" }}>
-                          Próxima parada
-                        </span>
-                      </div>
-                      <Chip color="#fff" bg="rgba(255,255,255,0.12)" mono sw>
-                        {paradaIdx + 1}/{paradas.length}
-                      </Chip>
-                    </div>
-
-                    <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
-                      <div style={{
-                        width: 48, height: 48, borderRadius: 16,
-                        background: "rgba(255,255,255,0.12)",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        flexShrink: 0,
-                      }}>
-                        <IconPin size={24} color="#fff" />
-                      </div>
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <p style={{ margin: 0, fontSize: 19, fontWeight: 800, letterSpacing: -0.4, lineHeight: 1.2 }}>
-                          {paradaActual.nombre}
-                        </p>
-                        {paradaActual.direccion && (
-                          <p style={{ margin: "4px 0 0", fontSize: 12, color: "rgba(255,255,255,0.55)" }}>
-                            {paradaActual.direccion}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-
-                    <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-                      {paradaActual.hora_estimada && (
-                        <Chip color="#fff" bg="rgba(255,255,255,0.12)" mono sw>
-                          <IconClock size={11} color="rgba(255,255,255,0.7)" />
-                          {paradaActual.hora_estimada.slice(0, 5)}
-                        </Chip>
-                      )}
-                      {pasParada.length > 0 && (
-                        <Chip color="var(--c-coral)" bg="var(--c-coral-tint)" sw>
-                          <IconUsers size={11} color="var(--c-coral)" />
-                          {pasParada.length} pasajero{pasParada.length === 1 ? "" : "s"}
-                        </Chip>
-                      )}
-                    </div>
-
-                    {/* Acciones nav */}
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-                      <button
-                        onClick={() => abrirWaze(paradaActual)}
-                        style={{
-                          padding: "12px 0", borderRadius: 14, border: "none",
-                          background: "#33CCFF", color: "#0b1b2e",
-                          fontFamily: FONT_SANS, fontWeight: 800, fontSize: 14, cursor: "pointer",
-                          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                          boxShadow: "0 2px 10px rgba(51,204,255,0.35)",
-                        }}
-                      >
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                          <circle cx="12" cy="10" r="8" fill="#33CCFF" stroke="#0b1b2e" strokeWidth="1.5"/>
-                          <ellipse cx="12" cy="10" rx="5" ry="5" fill="white"/>
-                          <circle cx="10.2" cy="9" r="1.1" fill="#0b1b2e"/>
-                          <circle cx="13.8" cy="9" r="1.1" fill="#0b1b2e"/>
-                          <path d="M9.5 11.5 Q12 13.5 14.5 11.5" stroke="#0b1b2e" strokeWidth="1.2" fill="none" strokeLinecap="round"/>
-                        </svg>
-                        Waze
-                      </button>
-                      <button
-                        onClick={() => abrirGoogleMaps(paradaActual)}
-                        style={{
-                          padding: "12px 0", borderRadius: 14, border: "none",
-                          background: "#fff", color: "var(--c-navy)",
-                          fontFamily: FONT_SANS, fontWeight: 800, fontSize: 14, cursor: "pointer",
-                          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                        }}
-                      >
-                        <svg width="16" height="18" viewBox="0 0 18 22" fill="none">
-                          <path d="M9 0C4.03 0 0 4.03 0 9c0 6.75 9 13 9 13s9-6.25 9-13c0-4.97-4.03-9-9-9z" fill="#EA4335"/>
-                          <circle cx="9" cy="9" r="3.5" fill="white"/>
-                        </svg>
-                        Maps
-                      </button>
-                    </div>
-
-                    {/* Botón principal: escanear o marcar llegada */}
-                    <button
-                      onClick={() => setEscanear(true)}
-                      style={{
-                        width: "100%", padding: "14px 0", borderRadius: 14, border: "none",
-                        background: "var(--c-coral)", color: "#fff",
-                        fontFamily: FONT_SANS, fontWeight: 800, fontSize: 15, cursor: "pointer",
-                        display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                        letterSpacing: -0.1,
-                        boxShadow: "0 6px 16px -8px rgba(226,107,71,0.6)",
-                      }}
-                    >
-                      <IconScan size={18} color="#fff" />
-                      Escanear QR de pasajero
-                    </button>
-                  </div>
-                )}
-
                 {/* Progreso */}
                 <div style={{
                   background: "var(--c-surface)", border: "1px solid var(--c-line)",
@@ -1667,6 +1556,43 @@ export default function ConductorApp() {
                         {/* Panel parada actual */}
                         {esActual && (
                           <div style={{ marginTop: 14 }}>
+                            {/* Navegación */}
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+                              <button
+                                onClick={() => abrirWaze(p)}
+                                style={{
+                                  padding: "11px 0", borderRadius: 12, border: "none",
+                                  background: "#33CCFF", color: "#0b1b2e",
+                                  fontFamily: FONT_SANS, fontWeight: 800, fontSize: 13, cursor: "pointer",
+                                  display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                                }}
+                              >
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                                  <circle cx="12" cy="10" r="8" fill="#33CCFF" stroke="#0b1b2e" strokeWidth="1.5"/>
+                                  <ellipse cx="12" cy="10" rx="5" ry="5" fill="white"/>
+                                  <circle cx="10.2" cy="9" r="1.1" fill="#0b1b2e"/>
+                                  <circle cx="13.8" cy="9" r="1.1" fill="#0b1b2e"/>
+                                  <path d="M9.5 11.5 Q12 13.5 14.5 11.5" stroke="#0b1b2e" strokeWidth="1.2" fill="none" strokeLinecap="round"/>
+                                </svg>
+                                Waze
+                              </button>
+                              <button
+                                onClick={() => abrirGoogleMaps(p)}
+                                style={{
+                                  padding: "11px 0", borderRadius: 12, border: "1px solid var(--c-line)",
+                                  background: "var(--c-surface)", color: "var(--c-ink)",
+                                  fontFamily: FONT_SANS, fontWeight: 800, fontSize: 13, cursor: "pointer",
+                                  display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                                }}
+                              >
+                                <svg width="14" height="16" viewBox="0 0 18 22" fill="none">
+                                  <path d="M9 0C4.03 0 0 4.03 0 9c0 6.75 9 13 9 13s9-6.25 9-13c0-4.97-4.03-9-9-9z" fill="#EA4335"/>
+                                  <circle cx="9" cy="9" r="3.5" fill="white"/>
+                                </svg>
+                                Maps
+                              </button>
+                            </div>
+
                             {pp.length > 0 && (
                               <div style={{
                                 background: "var(--c-surface)", borderRadius: 12,
