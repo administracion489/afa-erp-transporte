@@ -2503,17 +2503,14 @@ export default function ConductorApp() {
           </div>
 
           {/* ── Overlay: brackets coral centrados ── */}
+          {/* box-shadow oscurece TODO fuera del cuadrado; NO hay fondo en el div padre */}
           <div style={{
             position: "absolute", inset: 0, zIndex: 2, pointerEvents: "none",
             display: "flex", alignItems: "center", justifyContent: "center",
           }}>
-            {/* Oscurecido fuera del área de scan */}
-            <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)" }} />
-            {/* Recorte transparente encima */}
             <div style={{
-              position: "relative", width: 264, height: 264,
-              boxShadow: "0 0 0 9999px rgba(0,0,0,0.45)",
-              borderRadius: 18,
+              position: "relative", width: 264, height: 264, borderRadius: 18,
+              boxShadow: "0 0 0 9999px rgba(0,0,0,0.55)",
             }}>
               {/* Esquinas coral */}
               {[0,1,2,3].map(i => (
