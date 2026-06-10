@@ -71,7 +71,9 @@
       "Bash(taskkill /PID 10668 /F)",
       "PowerShell(Stop-Process -Id 10668 -Force -ErrorAction SilentlyContinue)",
       "PowerShell(Get-Process -Name node -ErrorAction SilentlyContinue)",
-      "PowerShell(Get-Content \".next\\\\dev\\\\logs\\\\next-development.log\" -Tail 80 | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.level -ne \"INFO\" -and $_.level -ne \"WARN\" -and $_.level -ne \"LOG\" } | Format-List)"
+      "PowerShell(Get-Content \".next\\\\dev\\\\logs\\\\next-development.log\" -Tail 80 | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.level -ne \"INFO\" -and $_.level -ne \"WARN\" -and $_.level -ne \"LOG\" } | Format-List)",
+      "Bash(chmod +x .git/hooks/post-push)",
+      "Bash(rm .git/hooks/post-push)"
     ]
   }
 }
