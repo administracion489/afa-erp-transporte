@@ -81,6 +81,7 @@ export default function CRMPage() {
   const [enviando, setEnviando] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [cargando, setCargando] = useState(true);
+  const [sincronizando, setSincronizando] = useState(false);
   const [nuevoContactoModal, setNuevoContactoModal] = useState(false);
   const [nuevoForm, setNuevoForm] = useState({ nombre: "", empresa: "", telefono: "", email: "", canal: "whatsapp", notas: "" });
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -89,6 +90,16 @@ export default function CRMPage() {
   const showToast = (msg: string, ok = true) => {
     setToast({ msg, ok });
     setTimeout(() => setToast(null), 3500);
+  };
+
+  const sincronizarGmail = async () => {
+    setSincronizando(true);
+    try {
+      const res = await fetch("/api/crm/gmail/sync", { method: "POST" });
+      if (res.ok) { showToast("Gmail sincronizado correctamente"); cargarConvs(); }
+      else showToast("Error al sincronizar Gmail", false);
+    } catch { showToast("Error al sincronizar Gmail", false); }
+    setSincronizando(false);
   };
 
   // ── Cargar conversaciones ──────────────────────────────────────────────
@@ -271,12 +282,22 @@ export default function CRMPage() {
                 </span>
               )}
             </div>
-            <button
-              onClick={() => setNuevoContactoModal(true)}
-              className="bg-[#0b315f] text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-[#1262bd] transition-colors"
-            >
-              + Nueva
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={sincronizarGmail}
+                disabled={sincronizando}
+                title="Sincronizar Gmail"
+                className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors disabled:opacity-50"
+              >
+                {sincronizando ? "⏳" : "📧↻"}
+              </button>
+              <button
+                onClick={() => setNuevoContactoModal(true)}
+                className="bg-[#0b315f] text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-[#1262bd] transition-colors"
+              >
+                + Nueva
+              </button>
+            </div>
           </div>
 
           {/* Búsqueda */}
