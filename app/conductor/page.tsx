@@ -626,9 +626,10 @@ export default function ConductorApp() {
   // ─── INCIDENCIA ────────────────────────────────────────────────────────────
 
   async function enviarIncidencia() {
-    if (!conductor || !incTipo) return;
+    if (!conductor) return;
+    if (!incTipo) { alert("Selecciona el tipo de incidencia"); return; }
     const desc = incDesc.trim();
-    if (!desc) return; // descripcion es NOT NULL en BD
+    if (!desc) { alert("Ingresa una descripción de la incidencia"); return; }
     setIncSaving(true);
 
     const retrasoTxt = incRetraso ? ` (retraso estimado: ${Number(incRetraso)} min)` : "";
@@ -709,7 +710,8 @@ export default function ConductorApp() {
   // ─── Docs ───────────────────────────────────────────────────────────────────
 
   async function subirDoc() {
-    if (!conductor || !docUrl.trim()) return;
+    if (!conductor) return;
+    if (!docUrl.trim()) { alert("Ingresa la URL del documento antes de registrar"); return; }
     setDocSaving(true);
     const { data } = await supabase.from("documentos_conductor").insert({
       conductor_id: conductor.id,
@@ -2046,7 +2048,7 @@ export default function ConductorApp() {
               />
               <PrimaryBtn
                 onClick={subirDoc}
-                disabled={docSaving || !docUrl}
+                disabled={docSaving}
                 icon={<IconArrowRight size={15} color="#fff" />}
               >
                 {docSaving ? "Guardando…" : "Registrar"}
@@ -2811,7 +2813,7 @@ export default function ConductorApp() {
                 <SecondaryBtn onClick={() => setShowIncidencia(false)}>Cancelar</SecondaryBtn>
                 <PrimaryBtn
                   onClick={enviarIncidencia}
-                  disabled={!incTipo || !incDesc.trim() || incSaving}
+                  disabled={incSaving}
                   color="var(--c-danger)"
                   icon={<IconBell size={15} color="#fff" />}
                 >
