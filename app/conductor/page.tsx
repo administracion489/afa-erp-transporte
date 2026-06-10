@@ -333,6 +333,7 @@ export default function ConductorApp() {
       supabase.from("reservas")
         .select("id,origen,destino,fecha_servicio,hora_servicio,vehiculo_id")
         .eq("fecha_servicio", hoy)
+        .eq("conductor_id", cid)
         .order("hora_servicio"),
       supabase.from("documentos_conductor")
         .select("*")
@@ -345,10 +346,14 @@ export default function ConductorApp() {
         .limit(1),
     ]);
 
-    setVehiculos(vR.data || []);
     const res: Reserva[] = rR.data || [];
+    // Solo mostrar vehículos asignados a las reservas de este conductor
+    const vehiculoIds = new Set(res.map(r => r.vehiculo_id).filter(Boolean));
+    setVehiculos((vR.data || []).filter(v => vehiculoIds.has(v.id)));
     setReservasHoy(res);
-    if (res.length === 1 && res[0].vehiculo_id) setVehiculoId(res[0].vehiculo_id);
+    // Auto-seleccionar vehículo si todas las reservas usan el mismo
+    const vidsUnicos = [...vehiculoIds];
+    if (vidsUnicos.length === 1) setVehiculoId(vidsUnicos[0] as number);
     setDocs(dR.data || []);
     if (ckR.data && ckR.data.length > 0) setCheckDone(true);
     setCargando(false);
