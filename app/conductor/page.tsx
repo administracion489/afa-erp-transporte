@@ -549,10 +549,11 @@ export default function ConductorApp() {
         return;
       }
       const { error: sosErr } = await supabase.from("alertas_sos").insert({
-        conductor_id: conductor.id, vehiculo_id: vehiculoId,
         reserva_id: reservaActiva?.id || null,
-        lat: posRef.current.coords.latitude, lng: posRef.current.coords.longitude,
-        mensaje: "SOS — Conductor solicita ayuda urgente",
+        lat:        posRef.current.coords.latitude,
+        lng:        posRef.current.coords.longitude,
+        motivo:     `SOS — ${conductor.nombre} solicita ayuda urgente`,
+        estado:     "pendiente",
       });
       if (sosErr) {
         alert(`SOS no pudo registrarse: ${sosErr.message}. Llama al +51 966 707 225.`);
@@ -691,12 +692,11 @@ export default function ConductorApp() {
   async function notificarRetraso() {
     if (!reservaActiva) { alert("No hay reserva activa"); return; }
     const { error } = await supabase.from("alertas_sos").insert({
-      conductor_id: conductor?.id,
-      vehiculo_id:  vehiculoId,
-      reserva_id:   reservaActiva.id,
-      lat:          posRef.current?.coords.latitude || 0,
-      lng:          posRef.current?.coords.longitude || 0,
-      mensaje:      `Retraso reportado — Conductor en ruta a ${paradas[paradaIdx]?.nombre || "siguiente parada"}`,
+      reserva_id: reservaActiva.id,
+      lat:        posRef.current?.coords.latitude  || null,
+      lng:        posRef.current?.coords.longitude || null,
+      motivo:     `Retraso reportado — en ruta a ${paradas[paradaIdx]?.nombre || "siguiente parada"}`,
+      estado:     "pendiente",
     });
     if (error) { alert(`Error al notificar retraso: ${error.message}`); return; }
     setNotifEnviada(true);
