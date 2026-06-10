@@ -127,6 +127,26 @@ function fmtDuracion(ms: number): string {
   return `${m}m`;
 }
 
+function playBeep(tipo: "ok" | "warn" | "error") {
+  try {
+    const ctx = new ((window as any).AudioContext || (window as any).webkitAudioContext)();
+    const play = (freq: number, startSec: number, dur: number) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = freq;
+      osc.type = "sine";
+      gain.gain.setValueAtTime(0.35, ctx.currentTime + startSec);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startSec + dur);
+      osc.start(ctx.currentTime + startSec);
+      osc.stop(ctx.currentTime + startSec + dur + 0.05);
+    };
+    if (tipo === "ok")    { play(880,  0,    0.08); play(1100, 0.12, 0.08); }
+    if (tipo === "warn")  { play(440,  0,    0.15); }
+    if (tipo === "error") { play(200,  0,    0.15); play(160,  0.18, 0.20); }
+  } catch { /* AudioContext no disponible */ }
+}
+
 function fechaTitulo(): { dow: string; fecha: string } {
   const now = new Date();
   const dow = now.toLocaleDateString("es-PE", { weekday: "long" });
@@ -233,11 +253,13 @@ export default function ConductorApp() {
   const sosInterval    = useRef<NodeJS.Timeout | null>(null);
 
   // ── QR Scanner ─────────────────────────────────────────────────────────────
-  const [escanear,     setEscanear]     = useState(false);
-  const [validando,    setValidando]    = useState<Pasajero | null>(null);
-  const [embarqueOk,   setEmbarqueOk]   = useState<Pasajero | null>(null); // animación post-embarque
-  const [boardingMsg,  setBoardingMsg]  = useState<{ok: boolean; msg: string} | null>(null);
-  const qrRef          = useRef<any>(null);
+  const [escanear,          setEscanear]          = useState(false);
+  const [validando,         setValidando]         = useState<Pasajero | null>(null); // kept for TS compat, unused after redesign
+  const [resultadoEmbarque, setResultadoEmbarque] = useState<{ pasajero: Pasajero; fueraLista: boolean } | null>(null);
+  const [resultProgreso,    setResultProgreso]    = useState(0);
+  const [boardingMsg,       setBoardingMsg]       = useState<{ok: boolean; msg: string} | null>(null);
+  const qrRef               = useRef<any>(null);
+  const resultIntervalRef   = useRef<NodeJS.Timeout | null>(null);
 
   // ── Checklist ──────────────────────────────────────────────────────────────
   const [checks,       setChecks]       = useState<CheckItem[]>(CHECKLIST_ITEMS.map(i => ({ ...i })));
@@ -588,37 +610,46 @@ export default function ConductorApp() {
       .eq("qr_code", qrCode)
       .single();
     if (error || !pasajero) {
-      setBoardingMsg({ ok: false, msg: "QR no reconocido. Pasajero no encontrado." });
+      playBeep("error");
+      setBoardingMsg({ ok: false, msg: "QR no reconocido. Pasajero no encontrado en el sistema." });
       setTimeout(() => setBoardingMsg(null), 4000);
       return;
     }
-    setValidando(pasajero);
+    await confirmarEmbarque(pasajero);
   }
 
   async function confirmarEmbarque(pasajero: Pasajero) {
     const paradaActual = paradas[paradaIdx];
     if (!paradaActual) {
+      playBeep("error");
       setBoardingMsg({ ok: false, msg: "Error: no hay parada activa." });
       setTimeout(() => setBoardingMsg(null), 4000);
       return;
     }
+
     const pp = pasajeros.find(p => p.pasajero_id === pasajero.id && p.parada_id === paradaActual.id);
+
+    // Pasajero ya embarcado → advertencia y salir
+    if (pp?.estado === "embarcado") {
+      playBeep("warn");
+      setBoardingMsg({ ok: false, msg: `${pasajero.nombre} ya está registrado en esta parada.` });
+      setTimeout(() => setBoardingMsg(null), 4000);
+      return;
+    }
+
+    // Pasajero en lista → marcar como embarcado
     if (pp) {
-      if (pp.estado === "embarcado") {
-        setBoardingMsg({ ok: false, msg: `${pasajero.nombre} ya está registrado en esta parada.` });
-        setValidando(null);
-        setTimeout(() => setBoardingMsg(null), 4000);
-        return;
-      }
       const { error: errEmb } = await supabase.from("pasajeros_parada").update({ estado: "embarcado" }).eq("id", pp.id);
       if (errEmb) {
+        playBeep("error");
         setBoardingMsg({ ok: false, msg: `Error al registrar embarque: ${errEmb.message}` });
-        setValidando(null);
         setTimeout(() => setBoardingMsg(null), 4000);
         return;
       }
       setPasajeros(prev => prev.map(p => p.id === pp.id ? { ...p, estado: "embarcado" } : p));
     }
+
+    // Log GPS si disponible
     if (conductor && posRef.current) {
       await supabase.from("boarding_log").insert({
         reserva_id:   reservaActiva?.id,
@@ -630,9 +661,26 @@ export default function ConductorApp() {
         lng:          posRef.current.coords.longitude,
       });
     }
-    setValidando(null);
-    setEmbarqueOk(pasajero);
-    setTimeout(() => setEmbarqueOk(null), 2200);
+
+    // Resultado: verde si estaba en lista, naranja si no
+    const fueraLista = !pp;
+    playBeep(fueraLista ? "warn" : "ok");
+
+    // Mostrar tarjeta resultado con barra de progreso (3 s)
+    if (resultIntervalRef.current) clearInterval(resultIntervalRef.current);
+    setResultadoEmbarque({ pasajero, fueraLista });
+    setResultProgreso(0);
+    let prog = 0;
+    resultIntervalRef.current = setInterval(() => {
+      prog++;
+      setResultProgreso(prog);
+      if (prog >= 100) {
+        clearInterval(resultIntervalRef.current!);
+        resultIntervalRef.current = null;
+        setResultadoEmbarque(null);
+        setResultProgreso(0);
+      }
+    }, 30); // 100 pasos × 30 ms = 3 000 ms
   }
 
   async function notificarRetraso() {
@@ -2502,126 +2550,96 @@ export default function ConductorApp() {
       )}
 
       {/* ═══════════════════════════════════════════════════════════════════ */}
-      {/* MODAL VALIDACIÓN PASAJERO                                           */}
+      {/* TARJETA RESULTADO EMBARQUE (auto-dismiss 3 s, toca para cerrar)    */}
       {/* ═══════════════════════════════════════════════════════════════════ */}
-      {validando && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 110,
-          background: "rgba(11,31,58,0.7)",
-          display: "flex", alignItems: "flex-end", justifyContent: "center",
-          animation: "sheetIn 0.25s ease-out",
-        }}>
-          <div style={{
-            background: "var(--c-paper)", borderRadius: "28px 28px 0 0",
-            padding: "0 0 28px", width: "100%", maxWidth: 520,
-            boxShadow: "0 -10px 30px rgba(0,0,0,0.15)",
-          }}>
-            <div style={{ width: 40, height: 4, background: "var(--c-line)", borderRadius: 2, margin: "14px auto 20px" }} />
-            <div style={{ padding: "0 22px" }}>
-              <Eyebrow color="var(--c-navy)">Validación de identidad</Eyebrow>
-              <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 14, marginBottom: 18 }}>
+      {resultadoEmbarque && (() => {
+        const { pasajero: p, fueraLista } = resultadoEmbarque;
+        const color  = fueraLista ? "var(--c-warn)"         : "var(--c-success)";
+        const tint   = fueraLista ? "var(--c-warn-tint)"    : "var(--c-success-tint)";
+        const titulo = fueraLista ? "⚠️ EMBARCADO — FUERA DE LISTA" : "✅ EMBARCADO";
+        const sub    = fueraLista ? "Pasajero no estaba asignado a esta parada" : "Embarque registrado correctamente";
+        const cerrar = () => {
+          if (resultIntervalRef.current) { clearInterval(resultIntervalRef.current); resultIntervalRef.current = null; }
+          setResultadoEmbarque(null); setResultProgreso(0);
+        };
+        return (
+          <div
+            onClick={cerrar}
+            style={{
+              position: "fixed", inset: 0, zIndex: 120,
+              background: "rgba(0,0,0,0.65)",
+              display: "flex", alignItems: "flex-end", justifyContent: "center",
+              animation: "sheetIn 0.22s ease-out",
+            }}
+          >
+            <div
+              onClick={e => e.stopPropagation()}
+              style={{
+                background: "var(--c-paper)",
+                borderRadius: "28px 28px 0 0",
+                width: "100%", maxWidth: 520,
+                overflow: "hidden",
+                boxShadow: "0 -10px 40px rgba(0,0,0,0.2)",
+              }}
+            >
+              {/* Header coloreado */}
+              <div style={{
+                background: tint, padding: "18px 22px 14px",
+                display: "flex", alignItems: "center", gap: 12,
+              }}>
                 <div style={{
-                  width: 64, height: 64, borderRadius: 18,
+                  width: 38, height: 38, borderRadius: 12,
+                  background: color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                }}>
+                  <IconCheck size={20} color="#fff" sw={2.5} />
+                </div>
+                <div>
+                  <p style={{ margin: 0, fontSize: 14, fontWeight: 800, color, letterSpacing: 0.2 }}>{titulo}</p>
+                  <p style={{ margin: "2px 0 0", fontSize: 12, color, opacity: 0.8 }}>{sub}</p>
+                </div>
+              </div>
+
+              {/* Info del pasajero */}
+              <div style={{ padding: "18px 22px 10px", display: "flex", gap: 16, alignItems: "center" }}>
+                <div style={{
+                  width: 72, height: 72, borderRadius: 20, flexShrink: 0,
                   background: "var(--c-navy-tint)", color: "var(--c-navy)",
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  fontFamily: FONT_SANS, fontWeight: 800, fontSize: 22,
-                  overflow: "hidden", flexShrink: 0,
+                  fontFamily: FONT_SANS, fontWeight: 800, fontSize: 26, overflow: "hidden",
                 }}>
-                  {validando.foto_url
-                    ? <img src={validando.foto_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                    : ini(validando.nombre)}
+                  {p.foto_url
+                    ? <img src={p.foto_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    : ini(p.nombre)}
                 </div>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <p style={{ margin: 0, fontSize: 19, fontWeight: 800, letterSpacing: -0.4 }}>
-                    {validando.nombre}
-                  </p>
-                  {validando.empresa && (
-                    <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--c-mute)" }}>
-                      {validando.empresa}
-                    </p>
+                  <p style={{ margin: 0, fontSize: 22, fontWeight: 800, letterSpacing: -0.5, lineHeight: 1.15 }}>{p.nombre}</p>
+                  {p.empresa && (
+                    <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--c-mute)" }}>{p.empresa}</p>
                   )}
-                  {validando.dni && (
-                    <p style={{ margin: "4px 0 0", fontFamily: FONT_MONO, fontSize: 12, color: "var(--c-mute)", fontWeight: 600 }}>
-                      DNI {validando.dni}
+                  {p.dni && (
+                    <p style={{ margin: "3px 0 0", fontFamily: FONT_MONO, fontSize: 12, color: "var(--c-mute)", fontWeight: 600 }}>
+                      DNI {p.dni}
                     </p>
                   )}
                 </div>
               </div>
 
-              {(() => {
-                const pp = pasajeros.find(p => p.pasajero_id === validando.id && p.parada_id === paradaActual?.id);
-                if (!pp) return (
+              {/* Barra de progreso + hint */}
+              <div style={{ padding: "8px 22px 28px" }}>
+                <div style={{ height: 4, background: "var(--c-line-2)", borderRadius: 2, overflow: "hidden" }}>
                   <div style={{
-                    background: "var(--c-soft)", borderRadius: 12, padding: "10px 14px", marginBottom: 18,
-                  }}>
-                    <p style={{ margin: 0, fontSize: 13, color: "var(--c-mute)" }}>
-                      Pasajero encontrado · No asignado a esta parada.
-                    </p>
-                  </div>
-                );
-                const onBoard = pp.estado === "embarcado";
-                return (
-                  <div style={{
-                    background: onBoard ? "var(--c-success-tint)" : "var(--c-warn-tint)",
-                    borderRadius: 12, padding: "10px 14px", marginBottom: 18,
-                    display: "flex", alignItems: "center", gap: 10,
-                  }}>
-                    {onBoard
-                      ? <IconCheck size={16} color="var(--c-success)" sw={2.5} />
-                      : <IconClock size={16} color="var(--c-warn)" />}
-                    <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: onBoard ? "var(--c-success)" : "var(--c-warn)" }}>
-                      {onBoard ? "Ya embarcó en esta parada" : "Esperando embarque"}
-                    </p>
-                  </div>
-                );
-              })()}
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <SecondaryBtn onClick={() => setValidando(null)}>Cancelar</SecondaryBtn>
-                <PrimaryBtn
-                  onClick={() => confirmarEmbarque(validando)}
-                  icon={<IconCheck size={16} color="#fff" sw={2.5} />}
-                >
-                  Confirmar
-                </PrimaryBtn>
+                    height: "100%", width: `${resultProgreso}%`,
+                    background: color, transition: "width 0.03s linear",
+                  }} />
+                </div>
+                <p style={{ margin: "8px 0 0", fontSize: 11, color: "var(--c-mute)", textAlign: "center" }}>
+                  Toca para cerrar
+                </p>
               </div>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* ═══════════════════════════════════════════════════════════════════ */}
-      {/* EMBARQUE CONFIRMADO (successPop)                                    */}
-      {/* ═══════════════════════════════════════════════════════════════════ */}
-      {embarqueOk && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 120,
-          background: "radial-gradient(circle at center, rgba(22,163,74,0.35), rgba(0,0,0,0.85))",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          flexDirection: "column",
-        }}>
-          <div style={{
-            width: 96, height: 96, borderRadius: "50%",
-            background: "var(--c-success)", color: "#fff",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            animation: "successPop 0.6s cubic-bezier(0.34,1.56,0.64,1)",
-            boxShadow: "0 0 60px rgba(22,163,74,0.7)",
-          }}>
-            <IconCheck size={56} color="#fff" sw={3} />
-          </div>
-          <Eyebrow color="var(--c-success)" style={{ marginTop: 20 }}>Embarque confirmado</Eyebrow>
-          <p style={{
-            margin: "8px 0 0", color: "#fff", fontSize: 22, fontWeight: 800, letterSpacing: -0.6,
-          }}>
-            {embarqueOk.nombre}
-          </p>
-          {embarqueOk.dni && (
-            <p style={{ margin: "4px 0 0", color: "rgba(255,255,255,0.7)", fontFamily: FONT_MONO, fontSize: 13, fontWeight: 600 }}>
-              DNI {embarqueOk.dni}
-            </p>
-          )}
-        </div>
-      )}
+        );
+      })()}
 
       {/* ═══════════════════════════════════════════════════════════════════ */}
       {/* MODAL INCIDENCIA                                                    */}
