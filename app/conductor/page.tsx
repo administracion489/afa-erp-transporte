@@ -682,6 +682,7 @@ export default function ConductorApp() {
 
   async function guardarChecklist() {
     if (!conductor) return;
+    if (!vehiculoId) { alert("Selecciona el vehículo antes de iniciar el viaje"); return; }
     if (checks.some(c => c.ok === null)) {
       alert(`Faltan ${checks.filter(c => c.ok === null).length} ítems por completar`); return;
     }
@@ -1156,13 +1157,13 @@ export default function ConductorApp() {
 
                 <button
                   onClick={() => !checkDone ? setTab("checklist") : iniciarRecorrido(proximaReserva)}
-                  disabled={iniciando || !vehiculoId}
+                  disabled={iniciando}
                   style={{
                     width: "100%", padding: "14px 0", borderRadius: 14, border: "none",
                     background: "#fff", color: "var(--c-navy)",
                     fontFamily: FONT_SANS, fontWeight: 800, fontSize: 15,
-                    cursor: (iniciando || !vehiculoId) ? "not-allowed" : "pointer",
-                    opacity: (iniciando || !vehiculoId) ? 0.5 : 1,
+                    cursor: iniciando ? "not-allowed" : "pointer",
+                    opacity: iniciando ? 0.5 : 1,
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
                     letterSpacing: -0.2,
                   }}
@@ -1327,7 +1328,7 @@ export default function ConductorApp() {
                       ) : (
                         <PrimaryBtn
                           onClick={() => iniciarRecorrido(r)}
-                          disabled={iniciando || !vehiculoId}
+                          disabled={iniciando}
                           icon={<IconPlay size={15} color="#fff" />}
                         >
                           {iniciando ? "Obteniendo GPS…" : "Iniciar recorrido"}
@@ -1942,7 +1943,7 @@ export default function ConductorApp() {
 
                 <PrimaryBtn
                   onClick={guardarChecklist}
-                  disabled={checkSaving || !vehiculoId || checkPct < 100}
+                  disabled={checkSaving}
                   icon={<IconCheck size={17} color="#fff" sw={2.5} />}
                   size="lg"
                 >
