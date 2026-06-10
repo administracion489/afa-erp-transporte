@@ -6,7 +6,7 @@
     },
     {
       "path": "/api/crm/gmail/sync",
-      "schedule": "*/15 * * * *"
+      "schedule": "0 12 * * *"
     }
   ]
 }
