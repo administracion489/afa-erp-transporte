@@ -164,6 +164,30 @@ function diasPara(f: string | null): number | null {
   return Math.ceil((new Date(f + "T00:00:00").getTime() - Date.now()) / 86400000);
 }
 
+function urgenciaBadge(fecha: string | null, estado: EstadoReserva): { label: string; color: string } | null {
+  if (!fecha || estado === "finalizada" || estado === "cancelada") return null;
+  const hS = new Date().toISOString().split("T")[0];
+  const mS = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+  const e7 = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
+  if (fecha < hS)  return { label: "ATRASADO",  color: "#6b7280" };
+  if (fecha === hS) return { label: "HOY",       color: "#ef4444" };
+  if (fecha === mS) return { label: "MAÑANA",    color: "#f97316" };
+  if (fecha <= e7)  return { label: "ESTA SEM.", color: "#eab308" };
+  return null;
+}
+
+function urgenciaFila(fecha: string | null, estado: EstadoReserva): string | undefined {
+  if (!fecha || estado === "finalizada" || estado === "cancelada") return undefined;
+  const hS = new Date().toISOString().split("T")[0];
+  const mS = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+  const e7 = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
+  if (fecha < hS)   return "inset 3px 0 0 #9ca3af";
+  if (fecha === hS) return "inset 3px 0 0 #ef4444";
+  if (fecha === mS) return "inset 3px 0 0 #f97316";
+  if (fecha <= e7)  return "inset 3px 0 0 #eab308";
+  return undefined;
+}
+
 function inputCls(extra = "") {
   return "w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all " + extra;
 }
@@ -238,6 +262,10 @@ export default function ReservasPage() {
   const [confirmEliminarId,    setConfirmEliminarId]    = useState<number | null>(null);
   const [generandoToken,       setGenerandoToken]       = useState<string | null>(null);
   const [copiadoKey,           setCopiadoKey]           = useState<string | null>(null);
+  const [filtroDesde,          setFiltroDesde]          = useState("");
+  const [filtroHasta,          setFiltroHasta]          = useState("");
+  const [filtroPorAsignar,     setFiltroPorAsignar]     = useState(false);
+  const [vistaAgenda,          setVistaAgenda]          = useState(false);
   // ── Paradas inline ──────────────────────────────────────────────────────
   const mapsLoaded = useGoogleMapsLoaded();
   const [nuevoParNombre,       setNuevoParNombre]       = useState<Record<number, string>>({});
@@ -520,6 +548,26 @@ export default function ReservasPage() {
 
   const limpiar = () => { setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); };
 
+  const setRangoRapido = (tipo: "hoy" | "semana" | "7dias" | "mes" | "limpiar") => {
+    if (tipo === "limpiar") { setFiltroDesde(""); setFiltroHasta(""); return; }
+    const h = new Date().toISOString().split("T")[0];
+    if (tipo === "hoy")   { setFiltroDesde(h); setFiltroHasta(h); return; }
+    if (tipo === "7dias") { setFiltroDesde(h); setFiltroHasta(new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0]); return; }
+    if (tipo === "semana") {
+      const d = new Date(); const dow = d.getDay() || 7;
+      const lun = new Date(d); lun.setDate(d.getDate() - dow + 1);
+      const dom = new Date(lun); dom.setDate(lun.getDate() + 6);
+      setFiltroDesde(lun.toISOString().split("T")[0]);
+      setFiltroHasta(dom.toISOString().split("T")[0]);
+      return;
+    }
+    if (tipo === "mes") {
+      const d = new Date();
+      setFiltroDesde(new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split("T")[0]);
+      setFiltroHasta(new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().split("T")[0]);
+    }
+  };
+
   const editarReserva = (r: Reserva) => {
     setForm({
       fecha_servicio:         r.fecha_servicio            || "",
@@ -610,15 +658,37 @@ export default function ReservasPage() {
   const margenTotal  = reservas.reduce((s, r) => s + Number(r.margen || 0), 0);
   const conSobrecupo = Object.values(ocupacionMap).filter(o => o.sobrecupo).length;
   const sincronizadas = reservas.filter(r => r.sincronizado_app).length;
+  const en7d          = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
+  const proximos7d    = reservas.filter(r => r.fecha_servicio && r.fecha_servicio >= hoy && r.fecha_servicio <= en7d && r.estado !== "cancelada" && r.estado !== "finalizada").length;
 
-  const filtradas = useMemo(() => reservas.filter(r => {
-    const q   = busqueda.toLowerCase();
-    const txt = (r.id + " " + nombreCliente(r.cliente_id) + " " + ((r as any).origen || "") + " " + ((r as any).destino || "")).toLowerCase();
-    return txt.includes(q) &&
-      (filtroEstado === "todos" || r.estado === filtroEstado) &&
-      (filtroTipo === "todos" || r.tipo === filtroTipo) &&
-      (filtroServicio === "todos" || (filtroServicio === "fijo" ? !esEventual(r) : esEventual(r)));
-  }), [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, clientes]);
+  const filtradas = useMemo(() => {
+    const base = reservas.filter(r => {
+      const q   = busqueda.toLowerCase();
+      const txt = (r.id + " " + nombreCliente(r.cliente_id) + " " + ((r as any).origen || "") + " " + ((r as any).destino || "")).toLowerCase();
+      const passServicio    = filtroServicio === "todos" || (filtroServicio === "fijo" ? !esEventual(r) : esEventual(r));
+      const passPorAsignar  = !filtroPorAsignar || (r.estado === "pendiente" && !r.vehiculo_id && !r.empresa_tercerizada_id);
+      return txt.includes(q) &&
+        (filtroEstado === "todos" || r.estado === filtroEstado) &&
+        (filtroTipo === "todos" || r.tipo === filtroTipo) &&
+        passServicio &&
+        (!filtroDesde || (r.fecha_servicio && r.fecha_servicio >= filtroDesde)) &&
+        (!filtroHasta || (r.fecha_servicio && r.fecha_servicio <= filtroHasta)) &&
+        passPorAsignar;
+    });
+    // Próximos primero: futuros ascendentes, luego pasados descendentes (más reciente primero)
+    return [...base].sort((a, b) => {
+      const fa = a.fecha_servicio;
+      const fb = b.fecha_servicio;
+      if (!fa && !fb) return 0;
+      if (!fa) return 1;
+      if (!fb) return -1;
+      const aFut = fa >= hoy;
+      const bFut = fb >= hoy;
+      if (aFut && bFut)   return fa.localeCompare(fb);
+      if (!aFut && !bFut) return fb.localeCompare(fa);
+      return aFut ? -1 : 1;
+    });
+  }, [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, filtroDesde, filtroHasta, filtroPorAsignar, clientes, hoy]);
 
   // Agrupación de servicios fijos por contrato (cotizacion_id)
   const gruposContratos = useMemo(() => {
@@ -635,6 +705,30 @@ export default function ReservasPage() {
       return { clave, cotId: filas[0].cotizacion_id, filas: sorted, proxima };
     });
   }, [filtradas, filtroServicio, hoy]);
+
+  // Índice donde se inserta el separador "Pasados ↑ · Próximos ↓"
+  const sepIdx = filtradas.findIndex((r, i) =>
+    i > 0 &&
+    filtradas[i - 1].fecha_servicio != null && filtradas[i - 1].fecha_servicio! < hoy &&
+    r.fecha_servicio != null && r.fecha_servicio >= hoy
+  );
+
+  const agendaGrupos = useMemo(() => {
+    const grupos = new Map<string, Reserva[]>();
+    filtradas.forEach(r => {
+      const key = r.fecha_servicio || "sin_fecha";
+      if (!grupos.has(key)) grupos.set(key, []);
+      grupos.get(key)!.push(r);
+    });
+    return Array.from(grupos.entries()).map(([fecha, filas]) => ({
+      fecha,
+      filas,
+      label: fecha === "sin_fecha" ? "Sin fecha" :
+        new Date(fecha + "T12:00:00").toLocaleDateString("es-PE", { weekday: "long", day: "numeric", month: "long", year: "numeric" }),
+      esHoyGrupo: fecha === hoy,
+      esPasado: fecha !== "sin_fecha" && fecha < hoy,
+    }));
+  }, [filtradas, hoy]);
 
   const reservaModal = modalReservaId ? reservas.find(r => r.id === modalReservaId) : null;
 
@@ -868,7 +962,7 @@ export default function ReservasPage() {
           { label: "Programadas",   valor: programadas,  color: "#0369a1", bg: "#e0f2fe" },
           { label: "Confirmadas",   valor: confirmadas,  color: "#166534", bg: "#dcfce7" },
           { label: "En curso",      valor: enCurso,      color: "#1d4ed8", bg: "#dbeafe" },
-          { label: "Sincronizadas", valor: sincronizadas,color: "#0f766e", bg: "#f0fdfa" },
+          { label: "Próx. 7 días",  valor: proximos7d,   color: "#0f766e", bg: "#f0fdfa" },
           { label: "Sobrecupo",     valor: conSobrecupo, color: "#991b1b", bg: "#fee2e2" },
         ].map(k => (
           <div key={k.label} className="rounded-xl p-3 border" style={{ background: k.bg, borderColor: k.color + "22" }}>
@@ -1045,41 +1139,109 @@ export default function ReservasPage() {
       )}
 
       {/* FILTROS */}
-      <section className="flex flex-col md:flex-row gap-3 flex-wrap">
-        <div className="relative flex-1 min-w-[180px]">
-          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">🔍</span>
-          <input className="w-full border rounded-xl pl-9 pr-4 py-2.5 text-sm focus:outline-none" placeholder="Buscar por cliente, ruta o ID..." value={busqueda} onChange={e => setBusqueda(e.target.value)} />
+      <section className="space-y-3">
+        {/* Fila 1: búsqueda, estado, tipo, servicio */}
+        <div className="flex flex-col md:flex-row gap-3 flex-wrap">
+          <div className="relative flex-1 min-w-[180px]">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">🔍</span>
+            <input className="w-full border rounded-xl pl-9 pr-4 py-2.5 text-sm focus:outline-none" placeholder="Buscar por cliente, ruta o ID..." value={busqueda} onChange={e => setBusqueda(e.target.value)} />
+          </div>
+          <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)}>
+            <option value="todos">Todos los estados</option>
+            {Object.entries(ESTADO_CFG).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+          </select>
+          <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroTipo} onChange={e => setFiltroTipo(e.target.value)}>
+            <option value="todos">Todos los tipos</option>
+            <option value="propia">Propia</option>
+            <option value="tercerizada">Tercerizada</option>
+          </select>
+          <div className="flex gap-1 rounded-xl p-1" style={{ background: "#f1f5f9" }}>
+            {(["todos", "fijo", "eventual"] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => setFiltroServicio(t)}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+                style={{
+                  background: filtroServicio === t ? "white" : "transparent",
+                  color: filtroServicio === t ? "#0b315f" : "#9ca3af",
+                  boxShadow: filtroServicio === t ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+                }}
+              >
+                {t === "todos" ? "Todos" : t === "fijo" ? "Fijos" : "Eventuales"}
+              </button>
+            ))}
+          </div>
         </div>
-        <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)}>
-          <option value="todos">Todos los estados</option>
-          {Object.entries(ESTADO_CFG).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-        </select>
-        <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroTipo} onChange={e => setFiltroTipo(e.target.value)}>
-          <option value="todos">Todos los tipos</option>
-          <option value="propia">Propia</option>
-          <option value="tercerizada">Tercerizada</option>
-        </select>
 
-        {/* NUEVO FILTRO: Fijos / Eventuales */}
-        <div className="flex gap-1 rounded-xl p-1" style={{ background: "#f1f5f9" }}>
-          {(["todos", "fijo", "eventual"] as const).map(t => (
+        {/* Fila 2: rango de fechas + atajos + toggles */}
+        <div className="flex flex-col md:flex-row gap-3 flex-wrap items-center">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-gray-400 font-bold whitespace-nowrap">📅 Desde</span>
+            <input
+              type="date"
+              className="border rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
+              value={filtroDesde}
+              onChange={e => setFiltroDesde(e.target.value)}
+            />
+            <span className="text-xs text-gray-400 font-bold">Hasta</span>
+            <input
+              type="date"
+              className="border rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
+              value={filtroHasta}
+              onChange={e => setFiltroHasta(e.target.value)}
+            />
+          </div>
+
+          <div className="flex gap-1.5 flex-wrap">
+            {([ { key: "hoy", label: "Hoy" }, { key: "7dias", label: "Próx. 7d" }, { key: "semana", label: "Esta semana" }, { key: "mes", label: "Este mes" } ] as const).map(a => (
+              <button
+                key={a.key}
+                onClick={() => setRangoRapido(a.key)}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors hover:bg-[#0b315f] hover:text-white hover:border-[#0b315f]"
+                style={{ borderColor: "#e2e8f0", color: "#475569" }}
+              >
+                {a.label}
+              </button>
+            ))}
+            {(filtroDesde || filtroHasta) && (
+              <button
+                onClick={() => setRangoRapido("limpiar")}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold border border-red-200 text-red-500 hover:bg-red-50 transition-colors"
+              >
+                × Limpiar fechas
+              </button>
+            )}
+          </div>
+
+          <div className="flex gap-2 md:ml-auto flex-wrap items-center">
             <button
-              key={t}
-              onClick={() => setFiltroServicio(t)}
-              className="px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+              onClick={() => setFiltroPorAsignar(v => !v)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all"
               style={{
-                background: filtroServicio === t ? "white" : "transparent",
-                color: filtroServicio === t ? "#0b315f" : "#9ca3af",
-                boxShadow: filtroServicio === t ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+                background: filtroPorAsignar ? "#fef9c3" : "white",
+                borderColor: filtroPorAsignar ? "#eab308" : "#e2e8f0",
+                color: filtroPorAsignar ? "#854d0e" : "#6b7280",
               }}
             >
-              {t === "todos" ? "Todos" : t === "fijo" ? "Fijos" : "Eventuales"}
+              ⚡ Por asignar
             </button>
-          ))}
-        </div>
-
-        <div className="flex items-center px-4 py-2.5 bg-gray-50 border rounded-xl text-sm text-gray-400">
-          {filtradas.length} resultado{filtradas.length !== 1 ? "s" : ""}
+            {filtroServicio !== "fijo" && (
+              <button
+                onClick={() => setVistaAgenda(v => !v)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all"
+                style={{
+                  background: vistaAgenda ? "#eef3f8" : "white",
+                  borderColor: vistaAgenda ? "#0b315f" : "#e2e8f0",
+                  color: vistaAgenda ? "#0b315f" : "#6b7280",
+                }}
+              >
+                📅 Vista agenda
+              </button>
+            )}
+            <div className="flex items-center px-4 py-1.5 bg-gray-50 border rounded-xl text-sm text-gray-400">
+              {filtradas.length} resultado{filtradas.length !== 1 ? "s" : ""}
+            </div>
+          </div>
         </div>
       </section>
 
@@ -1252,8 +1414,78 @@ export default function ReservasPage() {
         </section>
       )}
 
+      {/* VISTA AGENDA */}
+      {filtroServicio !== "fijo" && vistaAgenda && (
+        <section className="space-y-4">
+          {loading ? (
+            <div className="p-10 text-center text-gray-400 flex items-center justify-center gap-2">
+              <div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />Cargando...
+            </div>
+          ) : agendaGrupos.length === 0 ? (
+            <div className="bg-white rounded-2xl border shadow-sm p-10 text-center text-gray-400">
+              <p className="text-3xl mb-2">📅</p>
+              <p className="font-medium">No hay servicios en el período seleccionado</p>
+            </div>
+          ) : agendaGrupos.map(({ fecha, filas, label, esHoyGrupo, esPasado }) => (
+            <div key={fecha} className="bg-white rounded-2xl shadow-sm overflow-hidden" style={{ border: esHoyGrupo ? "2px solid #3b82f6" : "1px solid #e2e8f0" }}>
+              <div className="px-5 py-3 flex items-center justify-between" style={{ background: esHoyGrupo ? "#dbeafe" : esPasado ? "#f9fafb" : "#f8fafc" }}>
+                <div className="flex items-center gap-3">
+                  {esHoyGrupo && <span className="text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-full text-white" style={{ background: "#2563eb" }}>HOY</span>}
+                  {esPasado && <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">pasado</span>}
+                  <span className="font-bold capitalize" style={{ color: esHoyGrupo ? "#1d4ed8" : esPasado ? "#9ca3af" : "#374151" }}>{label}</span>
+                </div>
+                <span className="text-xs font-bold px-2.5 py-1 rounded-full" style={{ background: esHoyGrupo ? "#bfdbfe" : "#f1f5f9", color: esHoyGrupo ? "#1d4ed8" : "#475569" }}>
+                  {filas.length} servicio{filas.length !== 1 ? "s" : ""}
+                </span>
+              </div>
+              <div className="divide-y divide-gray-50">
+                {filas.map(r => {
+                  const estCfg  = ESTADO_CFG[r.estado] || ESTADO_CFG.pendiente;
+                  const esTer   = r.tipo === "tercerizada";
+                  const badge   = urgenciaBadge(r.fecha_servicio, r.estado);
+                  const ocup    = ocupacionMap[r.id];
+                  const totalPax = ocup?.total_pasajeros || 0;
+                  const cap     = capacidadDe(r);
+                  const sob     = ocup?.sobrecupo || false;
+                  return (
+                    <div key={r.id} className="flex items-center gap-4 px-5 py-3 hover:bg-gray-50 transition-colors" style={{ boxShadow: sob ? "inset 3px 0 0 #dc2626" : urgenciaFila(r.fecha_servicio, r.estado) }}>
+                      <div className="shrink-0 text-right min-w-[44px]">
+                        <div className="text-sm font-bold text-gray-600">{r.hora_servicio?.slice(0,5) || "--:--"}</div>
+                        <div className="font-mono text-[10px] text-gray-300">#{r.id}</div>
+                      </div>
+                      <div className="w-px h-8 rounded-full shrink-0" style={{ background: estCfg.dot }} />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-bold text-gray-800 truncate">{nombreCliente(r.cliente_id)}</span>
+                          {badge && <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: badge.color + "20", color: badge.color }}>{badge.label}</span>}
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: estCfg.bg, color: estCfg.color }}>{estCfg.label}</span>
+                          {sob && <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">SOBRECUPO</span>}
+                        </div>
+                        <div className="text-xs text-gray-400 mt-0.5 truncate">{(r as any).origen || "-"} → {(r as any).destino || "-"}</div>
+                        <div className="text-xs text-gray-400 mt-0.5">
+                          {esTer ? nombreEmpTer(r.empresa_tercerizada_id) : (nombreVehiculo(r.vehiculo_id) !== "-" ? nombreVehiculo(r.vehiculo_id) + " · " + nombreConductor(r.conductor_id) : "Sin asignar")}
+                          {cap !== null && <span className="ml-2 text-[10px] font-bold">{totalPax}/{cap} pax</span>}
+                        </div>
+                      </div>
+                      <div className="flex gap-1.5 shrink-0">
+                        <button onClick={() => setModalReservaId(r.id)} className="flex items-center gap-1 bg-purple-50 hover:bg-purple-100 text-purple-700 text-[10px] font-bold px-2 py-1.5 rounded-lg transition-colors"><FileText size={11} /></button>
+                        <button onClick={() => setModalLinksId(r.id)} className="flex items-center gap-1 bg-amber-50 hover:bg-amber-100 text-amber-700 text-[10px] font-bold px-2 py-1.5 rounded-lg transition-colors">
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                        </button>
+                        <button onClick={() => editarReserva(r)} className="flex items-center justify-center bg-gray-50 hover:bg-gray-100 text-gray-600 p-1.5 rounded-lg border border-gray-200 transition-colors"><Pencil size={11} /></button>
+                        <button onClick={() => setConfirmEliminarId(r.id)} className="flex items-center justify-center bg-red-50 hover:bg-red-100 text-red-600 p-1.5 rounded-lg transition-colors"><Trash2 size={11} /></button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
+
       {/* TABLA PLANA (Todos / Eventuales) */}
-      {filtroServicio !== "fijo" && (
+      {filtroServicio !== "fijo" && !vistaAgenda && (
       <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -1278,13 +1510,14 @@ export default function ReservasPage() {
                   <p className="text-3xl mb-2">🎫</p>
                   <p className="font-medium">No hay reservas</p>
                 </td></tr>
-              ) : filtradas.map(r => {
+              ) : filtradas.map((r, idx) => {
                 const estCfg    = ESTADO_CFG[r.estado] || ESTADO_CFG.pendiente;
                 const expandido = expandidoId === r.id;
                 const margen    = Number(r.margen || 0);
                 const dias      = diasPara(r.fecha_servicio);
-                const esHoy     = r.fecha_servicio === hoy;
                 const esTer     = r.tipo === "tercerizada";
+                const badge     = urgenciaBadge(r.fecha_servicio, r.estado);
+                const urgShadow = urgenciaFila(r.fecha_servicio, r.estado);
                 const riesgo    = esTer && r.empresa_tercerizada_id ? riesgoEmpresa(docsTercero, r.empresa_tercerizada_id) : "ok";
                 const ocup      = ocupacionMap[r.id];
                 const cap       = capacidadDe(r);
@@ -1300,9 +1533,22 @@ export default function ReservasPage() {
 
                 return (
                   <React.Fragment key={r.id}>
+                    {idx === sepIdx && (
+                      <tr>
+                        <td colSpan={9} className="px-4 py-2">
+                          <div className="flex items-center gap-3">
+                            <div className="flex-1 h-px" style={{ background: "#bbf7d0" }} />
+                            <span className="text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full border" style={{ color: "#166534", background: "#f0fdf4", borderColor: "#bbf7d0" }}>
+                              ↑ Pasados · Próximos ↓
+                            </span>
+                            <div className="flex-1 h-px" style={{ background: "#bbf7d0" }} />
+                          </div>
+                        </td>
+                      </tr>
+                    )}
                     <tr
                       className={"border-t transition-colors cursor-pointer " + (editandoId === r.id ? "bg-blue-50" : sobrecupo ? "bg-red-50/40" : "hover:bg-gray-50")}
-                      style={{ borderColor: "#f1f5f9", boxShadow: sobrecupo ? "inset 3px 0 0 #dc2626" : undefined }}
+                      style={{ borderColor: "#f1f5f9", boxShadow: sobrecupo ? "inset 3px 0 0 #dc2626" : urgShadow }}
                       onClick={() => {
                         const nId = expandido ? null : r.id;
                         setExpandidoId(nId);
@@ -1313,7 +1559,7 @@ export default function ReservasPage() {
 
                       <td className="p-3">
                         <span className="font-black font-mono text-[#0b315f]">#{r.id}</span>
-                        {esHoy && <div className="text-[9px] font-bold text-orange-500">HOY</div>}
+                        {badge && <div className="text-[9px] font-bold" style={{ color: badge.color }}>{badge.label}</div>}
                         {riesgo === "alto" && <div className="text-[9px] font-bold text-red-600">DOC VENC.</div>}
                         {sobrecupo && <div className="text-[9px] font-bold text-red-600">SOBRECUPO</div>}
                         <div className="mt-0.5">
@@ -1334,9 +1580,8 @@ export default function ReservasPage() {
                       <td className="p-3 text-xs">
                         <div className="text-gray-700 font-medium">{fmtFecha(r.fecha_servicio)}</div>
                         <div className="text-gray-400">{r.hora_servicio?.slice(0,5) || "-"}</div>
-                        {dias !== null && dias >= 0 && dias <= 3 && !esHoy && (
-                          <div className="text-[9px] font-bold text-amber-600">En {dias}d</div>
-                        )}
+                        {dias !== null && dias > 0 && <div className="text-[9px] font-bold text-gray-400">+{dias}d</div>}
+                        {dias !== null && dias < 0 && <div className="text-[9px] font-bold text-gray-400">{dias}d</div>}
                       </td>
 
                       <td className="p-3 text-xs">

@@ -67,7 +67,10 @@
       "Bash(Get-Content \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\.next\\\\dev\\\\logs\\\\next-development.log\" -Tail 40)",
       "Bash(Select-String -Path \"C:\\\\Users\\\\trans\\\\afa-erp-transporte\\\\.env.local\" -Pattern \"GOOGLE|MAPS\")",
       "Bash(Select-Object -ExpandProperty Line)",
-      "Bash(findstr /i keystore)"
+      "Bash(findstr /i keystore)",
+      "Bash(taskkill /PID 10668 /F)",
+      "PowerShell(Stop-Process -Id 10668 -Force -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-Process -Name node -ErrorAction SilentlyContinue)"
     ]
   }
 }
