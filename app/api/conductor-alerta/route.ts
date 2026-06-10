@@ -45,28 +45,26 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true, id: existe.id });
       }
 
-      // No existe → insertar nuevo registro
-      const { data: nuevo, error: errIns } = await supabaseAdmin
-        .from("pasajeros_parada")
-        .insert({
-          parada_id,
-          pasajero_id,
-          reserva_id: reserva_id ?? null,
-          estado: "embarcado",
-          fuera_lista: true,   // flag informativo (puede no existir la columna, se ignora)
-        })
-        .select("id")
-        .single();
-
-      if (errIns) {
-        // Si falla por columna inexistente (fuera_lista), reintentar sin ese campo
-        const { data: nuevo2, error: errIns2 } = await supabaseAdmin
+      // No existe → insertar. Intentar primero solo con columnas base (parada_id, pasajero_id, estado).
+      // Agregar columnas opcionales una a una para evitar fallo por schema.
+      const insertar = async (extra: Record<string, any> = {}) =>
+        supabaseAdmin
           .from("pasajeros_parada")
-          .insert({ parada_id, pasajero_id, reserva_id: reserva_id ?? null, estado: "embarcado" })
+          .insert({ parada_id, pasajero_id, estado: "embarcado", ...extra })
           .select("id")
           .single();
-        if (errIns2) return NextResponse.json({ error: errIns2.message }, { status: 500 });
-        return NextResponse.json({ ok: true, id: nuevo2?.id, creado: true });
+
+      // Intento 1: con reserva_id
+      let { data: nuevo, error: errIns } = await insertar({ reserva_id: reserva_id ?? null });
+
+      // Intento 2: sin reserva_id (columna puede no existir)
+      if (errIns && errIns.message.includes("reserva_id")) {
+        ({ data: nuevo, error: errIns } = await insertar());
+      }
+
+      if (errIns) {
+        console.error("[conductor-alerta] Error insertando pasajero_parada:", errIns.message);
+        return NextResponse.json({ error: errIns.message }, { status: 500 });
       }
 
       return NextResponse.json({ ok: true, id: nuevo?.id, creado: true });

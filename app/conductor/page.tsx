@@ -660,28 +660,39 @@ export default function ConductorApp() {
       setPasajeros(prev => prev.map(p => p.id === pp.id ? { ...p, estado: "embarcado" } : p));
     }
 
-    // Pasajero fuera de lista → registrar igualmente en pasajeros_parada vía API
+    // Pasajero fuera de lista → registrar en pasajeros_parada vía API (service_role)
     const fueraLista = !pp;
     if (fueraLista) {
-      const res = await fetch("/api/conductor-alerta", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tipo:        "embarque",
-          parada_id:   paradaActual.id,
-          pasajero_id: pasajero.id,
-          reserva_id:  reservaActiva?.id ?? null,
-        }),
-      });
-      const json = await res.json().catch(() => ({}));
-      if (res.ok) {
-        // Agregar al estado local para que aparezca en el conteo
-        setPasajeros(prev => [
-          ...prev,
-          { id: json.id ?? 0, parada_id: paradaActual.id, pasajero_id: pasajero.id, estado: "embarcado", pasajero },
-        ]);
-      } else {
-        console.warn("[embarque-extra] No se pudo registrar:", json.error);
+      // Actualizar estado local INMEDIATAMENTE (optimista) — con id temporal 0
+      const tempEntry: PasajeroParada = {
+        id: 0, parada_id: paradaActual.id, pasajero_id: pasajero.id,
+        estado: "embarcado", pasajero,
+      };
+      setPasajeros(prev => [...prev, tempEntry]);
+
+      // Persistir en DB vía API
+      try {
+        const res = await fetch("/api/conductor-alerta", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tipo:        "embarque",
+            parada_id:   paradaActual.id,
+            pasajero_id: pasajero.id,
+            reserva_id:  reservaActiva?.id ?? null,
+          }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (res.ok && json.id) {
+          // Actualizar el id temporal con el real
+          setPasajeros(prev => prev.map(p =>
+            p.id === 0 && p.pasajero_id === pasajero.id ? { ...p, id: json.id } : p
+          ));
+        } else if (!res.ok) {
+          alert(`⚠️ Pasajero visible localmente pero no se pudo guardar en servidor: ${json.error ?? "error desconocido"}`);
+        }
+      } catch (e: any) {
+        alert(`⚠️ Error de red al registrar embarque: ${e.message}`);
       }
     }
     playBeep(fueraLista ? "warn" : "ok");
