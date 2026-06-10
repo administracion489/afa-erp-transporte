@@ -130,20 +130,25 @@ function fmtDuracion(ms: number): string {
 function playBeep(tipo: "ok" | "warn" | "error") {
   try {
     const ctx = new ((window as any).AudioContext || (window as any).webkitAudioContext)();
-    const play = (freq: number, startSec: number, dur: number) => {
-      const osc = ctx.createOscillator();
+    // Compresor para maximizar volumen sin distorsión
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -6;
+    comp.ratio.value = 4;
+    comp.connect(ctx.destination);
+    const play = (freq: number, startSec: number, dur: number, type: OscillatorType = "square") => {
+      const osc  = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
+      osc.connect(gain); gain.connect(comp);
       osc.frequency.value = freq;
-      osc.type = "sine";
-      gain.gain.setValueAtTime(0.35, ctx.currentTime + startSec);
+      osc.type = type;
+      gain.gain.setValueAtTime(1.0, ctx.currentTime + startSec);
       gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startSec + dur);
       osc.start(ctx.currentTime + startSec);
       osc.stop(ctx.currentTime + startSec + dur + 0.05);
     };
-    if (tipo === "ok")    { play(880,  0,    0.08); play(1100, 0.12, 0.08); }
-    if (tipo === "warn")  { play(440,  0,    0.15); }
-    if (tipo === "error") { play(200,  0,    0.15); play(160,  0.18, 0.20); }
+    if (tipo === "ok")    { play(880,  0,    0.10); play(1100, 0.14, 0.10); }
+    if (tipo === "warn")  { play(440,  0,    0.20); }
+    if (tipo === "error") { play(180,  0,    0.18, "sawtooth"); play(130, 0.20, 0.25, "sawtooth"); }
   } catch { /* AudioContext no disponible */ }
 }
 
