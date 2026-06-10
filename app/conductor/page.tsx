@@ -548,15 +548,20 @@ export default function ConductorApp() {
         setSosActivo(false); setSosPct(0);
         return;
       }
-      const { error: sosErr } = await supabase.from("alertas_sos").insert({
-        reserva_id: reservaActiva?.id || null,
-        lat:        posRef.current.coords.latitude,
-        lng:        posRef.current.coords.longitude,
-        motivo:     `SOS — ${conductor.nombre} solicita ayuda urgente`,
-        estado:     "pendiente",
+      const sosRes = await fetch("/api/conductor-alerta", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reserva_id: reservaActiva?.id ?? null,
+          lat:        posRef.current.coords.latitude,
+          lng:        posRef.current.coords.longitude,
+          motivo:     `SOS — ${conductor.nombre} solicita ayuda urgente`,
+          estado:     "pendiente",
+        }),
       });
-      if (sosErr) {
-        alert(`SOS no pudo registrarse: ${sosErr.message}. Llama al +51 966 707 225.`);
+      if (!sosRes.ok) {
+        const j = await sosRes.json().catch(() => ({}));
+        alert(`SOS no pudo registrarse: ${j.error ?? "error desconocido"}. Llama al +51 966 707 225.`);
         setSosPct(0);
         return;
       }
@@ -691,14 +696,19 @@ export default function ConductorApp() {
 
   async function notificarRetraso() {
     if (!reservaActiva) { alert("No hay reserva activa"); return; }
-    const { error } = await supabase.from("alertas_sos").insert({
-      reserva_id: reservaActiva.id,
-      lat:        posRef.current?.coords.latitude  || null,
-      lng:        posRef.current?.coords.longitude || null,
-      motivo:     `Retraso reportado — en ruta a ${paradas[paradaIdx]?.nombre || "siguiente parada"}`,
-      estado:     "pendiente",
+    const res = await fetch("/api/conductor-alerta", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        reserva_id: reservaActiva.id,
+        lat:        posRef.current?.coords.latitude  ?? null,
+        lng:        posRef.current?.coords.longitude ?? null,
+        motivo:     `Retraso reportado — en ruta a ${paradas[paradaIdx]?.nombre || "siguiente parada"}`,
+        estado:     "pendiente",
+      }),
     });
-    if (error) { alert(`Error al notificar retraso: ${error.message}`); return; }
+    const json = await res.json();
+    if (!res.ok) { alert(`Error al notificar retraso: ${json.error}`); return; }
     setNotifEnviada(true);
     setTimeout(() => setNotifEnviada(false), 5000);
   }
