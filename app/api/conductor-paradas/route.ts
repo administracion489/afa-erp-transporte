@@ -43,12 +43,13 @@ export async function GET(req: NextRequest) {
   }
 
   // 2. No hay paradas → auto-crear desde origen/destino de la reserva
-  const { data: reserva } = await supabaseAdmin
+  const { data: reserva, error: errRes } = await supabaseAdmin
     .from("reservas")
-    .select("id, origen, destino, punto_retorno")
+    .select("*")
     .eq("id", reservaId)
     .single();
 
+  if (errRes) return NextResponse.json({ error: `Error al buscar reserva: ${errRes.message}` }, { status: 500 });
   if (!reserva) return NextResponse.json({ error: "Reserva no encontrada" }, { status: 404 });
 
   const esValido = (v: string | null | undefined) =>
