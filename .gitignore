@@ -48,3 +48,6 @@ android/keystore.properties
 *.keystore
 
 .vercel
+
+# Claude Code local settings (puede contener tokens en comandos permitidos)
+.claude/settings.local.json
