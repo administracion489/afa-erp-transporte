@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
+import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, geoDisponible, type GeoWatch } from "@/lib/geo";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
@@ -421,6 +422,7 @@ export default function AppPasajero() {
   const [mostrarParadasModal, setMostrarParadasModal] = useState(false);
 
   const alertaRef    = useRef(false);
+  const watchRef     = useRef<GeoWatch | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mapContainer = useRef<HTMLDivElement>(null);
   const map          = useRef<mapboxgl.Map | null>(null);
@@ -438,41 +440,54 @@ export default function AppPasajero() {
   // ── SOLICITAR GPS DEL DISPOSITIVO ──────────────────────────────────────────
   // Se dispara automáticamente al loguearse. El navegador muestra la alerta nativa del OS.
 
-  const solicitarGPS = useCallback(() => {
-    if (!navigator.geolocation) {
+  const solicitarGPS = useCallback(async () => {
+    if (!geoDisponible()) {
       setGpsPermiso("unavailable");
       return;
     }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setGpsPermiso("granted");
-        setGpsPropio({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-        setMostrarModalGPS(false);
-        // Seguir actualizando posición
-        navigator.geolocation.watchPosition(
-          (p) => setGpsPropio({ lat: p.coords.latitude, lng: p.coords.longitude }),
-          () => {},
-          { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
-        );
-      },
-      (err) => {
-        if (err.code === GeolocationPositionError.PERMISSION_DENIED) {
-          setGpsPermiso("denied");
-          setMostrarModalGPS(true); // Mostrar modal con instrucciones
-        } else {
-          setGpsPermiso("unavailable");
-        }
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-    );
+    // En la app nativa esto dispara el diálogo de permisos del sistema
+    // (igual que Maps/inDrive). En web el permiso se pide al leer la posición.
+    const permiso = await pedirPermisoUbicacion();
+    if (permiso === "denied") {
+      setGpsPermiso("denied");
+      setMostrarModalGPS(true);
+      return;
+    }
+    if (permiso === "unavailable") {
+      setGpsPermiso("unavailable");
+      return;
+    }
+    try {
+      const pos = await obtenerUbicacion({ enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+      setGpsPermiso("granted");
+      setGpsPropio({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+      setMostrarModalGPS(false);
+      // Seguir actualizando posición
+      if (watchRef.current) watchRef.current.clear();
+      watchRef.current = await observarUbicacion(
+        (p) => setGpsPropio({ lat: p.coords.latitude, lng: p.coords.longitude }),
+        () => {},
+        { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
+      );
+    } catch (err: any) {
+      if (err?.code === 1 /* PERMISSION_DENIED */) {
+        setGpsPermiso("denied");
+        setMostrarModalGPS(true); // Mostrar modal con instrucciones
+      } else {
+        setGpsPermiso("unavailable");
+      }
+    }
   }, []);
 
   // Pedir GPS cuando el pasajero se loguea
   useEffect(() => {
     if (!pasajero) return;
     // Pequeño delay para que el mapa cargue primero
-    const t = setTimeout(() => solicitarGPS(), 1500);
-    return () => clearTimeout(t);
+    const t = setTimeout(() => { void solicitarGPS(); }, 1500);
+    return () => {
+      clearTimeout(t);
+      if (watchRef.current) { watchRef.current.clear(); watchRef.current = null; }
+    };
   }, [pasajero, solicitarGPS]);
 
   // Mapbox init

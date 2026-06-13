@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
 import { supabase } from "@/lib/supabase";
+import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, geoDisponible, type GeoPos, type GeoWatch } from "@/lib/geo";
 import {
   CondorMark,
   IconActivity, IconAlert, IconArrowLeft, IconArrowRight, IconBell, IconBus,
@@ -221,7 +222,7 @@ export default function ConductorApp() {
 
   // ── GPS ────────────────────────────────────────────────────────────────────
   const [enRuta,       setEnRuta]       = useState(false);
-  const [posActual,    setPosActual]    = useState<GeolocationPosition | null>(null);
+  const [posActual,    setPosActual]    = useState<GeoPos | null>(null);
   const [velocidad,    setVelocidad]    = useState(0);
   const [totalEnvios,  setTotalEnvios]  = useState(0);
   const [ultimoEnvio,  setUltimoEnvio]  = useState<Date | null>(null);
@@ -230,9 +231,9 @@ export default function ConductorApp() {
   const [inicioViaje,        setInicioViaje]        = useState<Date | null>(null);
   const [restaurandoServicio,setRestaurandoServicio] = useState(false);
   const pinInputRef      = useRef<HTMLInputElement | null>(null);
-  const watchIdRef       = useRef<number | null>(null);
+  const watchIdRef       = useRef<GeoWatch | null>(null);
   const intervalRef      = useRef<NodeJS.Timeout | null>(null);
-  const posRef           = useRef<GeolocationPosition | null>(null);
+  const posRef           = useRef<GeoPos | null>(null);
   // Refs estables para GPS (evitan closures obsoletos en setInterval)
   const vehiculoIdRef    = useRef<number | null>(null);
   const conductorRef     = useRef<Conductor | null>(null);
@@ -310,7 +311,7 @@ export default function ConductorApp() {
   }, []);
 
   function cleanup() {
-    if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
+    if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
     if (intervalRef.current) clearInterval(intervalRef.current);
     if (sosTimer.current) clearTimeout(sosTimer.current);
     if (sosInterval.current) clearInterval(sosInterval.current);
@@ -437,7 +438,7 @@ export default function ConductorApp() {
   // ─── GPS + TRACKING ──────────────────────────────────────────────────────────
 
   // Usa refs → nunca tiene closures obsoletos aunque el intervalo se cree antes del render
-  const enviarUbicacion = useCallback(async (pos: GeolocationPosition, estado = "") => {
+  const enviarUbicacion = useCallback(async (pos: GeoPos, estado = "") => {
     const vid  = vehiculoIdRef.current;
     const cond = conductorRef.current;
     const res  = reservaActivaRef.current;
@@ -466,23 +467,37 @@ export default function ConductorApp() {
   // ─── GPS desde login: activo en todo momento mientras el conductor esté logueado ─
   useEffect(() => {
     if (!conductor) return;
-    if (!navigator.geolocation) { setGpsError("GPS no disponible en este dispositivo"); return; }
+    if (!geoDisponible()) { setGpsError("GPS no disponible en este dispositivo"); return; }
+    let cancelado = false;
     // Limpiar instancias previas por si acaso
-    if (watchIdRef.current !== null) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
-    if (intervalRef.current)         { clearInterval(intervalRef.current); intervalRef.current = null; }
-    // Arrancar watchPosition continuo
-    watchIdRef.current = navigator.geolocation.watchPosition(
-      (pos) => { posRef.current = pos; setPosActual(pos); },
-      (e)   => setGpsError(e.message),
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
-    );
+    if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+
+    (async () => {
+      // En la app nativa esto dispara el diálogo de permisos del sistema
+      // (igual que Maps/inDrive). En web el permiso se pide al leer la posición.
+      const permiso = await pedirPermisoUbicacion();
+      if (permiso === "denied")      { setGpsError("Permiso de ubicación denegado"); return; }
+      if (permiso === "unavailable") { setGpsError("GPS no disponible en este dispositivo"); return; }
+      if (cancelado) return;
+      // Arrancar watchPosition continuo
+      const w = await observarUbicacion(
+        (pos) => { posRef.current = pos; setPosActual(pos); setGpsError(null); },
+        (e)   => setGpsError(e.message),
+        { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+      );
+      if (cancelado) { w.clear(); return; }
+      watchIdRef.current = w;
+    })();
+
     // Enviar ubicación cada 15 s (sin vehículo → 🧑 persona; con vehículo → 🚌 bus)
     intervalRef.current = setInterval(() => {
       if (posRef.current) enviarUbicacion(posRef.current);
     }, 15000);
     return () => {
-      if (watchIdRef.current !== null) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
-      if (intervalRef.current)         { clearInterval(intervalRef.current); intervalRef.current = null; }
+      cancelado = true;
+      if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
+      if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conductor?.id]);
@@ -490,22 +505,21 @@ export default function ConductorApp() {
   async function iniciarRecorrido(reserva: Reserva) {
     if (!checkDone) { alert("Debes completar el pre-viaje antes de iniciar el recorrido"); setTab("checklist"); return; }
     if (!vehiculoId) { alert("Selecciona el vehículo primero"); return; }
-    if (!navigator.geolocation) { alert("GPS no disponible en este dispositivo"); return; }
+    if (!geoDisponible()) { alert("GPS no disponible en este dispositivo"); return; }
     setIniciando(true);
     setReservaActiva(reserva);
     await cargarParadas(reserva.id);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        posRef.current = pos; setPosActual(pos); enviarUbicacion(pos);
-        setEnRuta(true); setIniciando(false); setTab("paradas");
-        const ahora = new Date();
-        setInicioViaje(ahora);
-        saveServicio({ reservaId: reserva.id, vehiculoId: vehiculoId!, paradaIdx: 0, inicioViaje: ahora.toISOString() });
-        // GPS watchPosition ya está activo desde el login — no reiniciar
-      },
-      (e) => { setIniciando(false); alert(`GPS: ${e.message}`); },
-      { enableHighAccuracy: true, timeout: 15000 }
-    );
+    try {
+      const pos = await obtenerUbicacion({ enableHighAccuracy: true, timeout: 15000 });
+      posRef.current = pos; setPosActual(pos); enviarUbicacion(pos);
+      setEnRuta(true); setIniciando(false); setTab("paradas");
+      const ahora = new Date();
+      setInicioViaje(ahora);
+      saveServicio({ reservaId: reserva.id, vehiculoId: vehiculoId!, paradaIdx: 0, inicioViaje: ahora.toISOString() });
+      // GPS watchPosition ya está activo desde el login — no reiniciar
+    } catch (e: any) {
+      setIniciando(false); alert(`GPS: ${e?.message ?? "no se pudo obtener la ubicación"}`);
+    }
   }
 
   function finalizarRecorridoConfirmado() {
