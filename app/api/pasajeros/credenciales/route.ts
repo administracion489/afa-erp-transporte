@@ -274,7 +274,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: error?.message ?? "No encontrado" }, { status: 500 });
 
   const empresa_afa = process.env.EMPRESA_NOMBRE ?? "AFA Transporte";
-  const baseUrl     = process.env.NEXT_PUBLIC_APP_URL ?? "https://erp.afatoursperu.com";
+  const baseUrl     = process.env.NEXT_PUBLIC_APP_URL ?? "https://www.transportesafa.com";
 
   let enviados = 0, sinEmail = 0, errores = 0;
 
