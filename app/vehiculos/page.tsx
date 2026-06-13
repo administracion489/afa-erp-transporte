@@ -135,8 +135,7 @@ function FotoPreview({ url, label }: { url: string; label: string }) {
   if (esDrive || esImagen) {
     let src = url;
     if (esDrive) {
-      const match = url.match(/\/d\/([a-zA-Z0-9_-]{20,})/);
-      // thumbnail funciona sin CORS para archivos públicos de Drive
+      const match = url.match(/\/d\/([a-zA-Z0-9_-]{20,})/) || url.match(/[?&]id=([a-zA-Z0-9_-]{20,})/);
       if (match) src = `https://drive.google.com/thumbnail?id=${match[1]}&sz=w800`;
     }
     return (
@@ -153,6 +152,55 @@ function FotoPreview({ url, label }: { url: string; label: string }) {
       style={{ background: "#eef3f8" }}>
       🖼️ Ver {label} →
     </a>
+  );
+}
+
+function FotoField({ label, hint, value, modo, setModo, onChange, onUpload, subiendo }:{
+  label:string; hint:string; value:string;
+  modo:"url"|"upload"; setModo:(m:"url"|"upload")=>void;
+  onChange:(v:string)=>void; onUpload:(f:File)=>void; subiendo:boolean;
+}) {
+  const uid = `foto-${label.replace(/\s/g,"-").toLowerCase()}`;
+  return (
+    <div>
+      <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">📸 {label}</label>
+      {hint && <p className="text-[10px] text-gray-400 mb-2">{hint}</p>}
+      <div className="flex rounded-lg border border-gray-200 overflow-hidden mb-2 w-fit text-xs font-bold">
+        <button type="button" onClick={() => setModo("url")}
+          className={`px-3 py-1.5 transition-all ${modo==="url"?"bg-[#0b315f] text-white":"text-gray-400 hover:bg-gray-50"}`}>
+          🔗 URL externa
+        </button>
+        <button type="button" onClick={() => setModo("upload")}
+          className={`px-3 py-1.5 transition-all ${modo==="upload"?"bg-[#0b315f] text-white":"text-gray-400 hover:bg-gray-50"}`}>
+          ⬆ Subir archivo
+        </button>
+      </div>
+      {modo === "url" ? (
+        <input className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all"
+          placeholder="https://drive.google.com/file/d/..." value={value} onChange={e => onChange(e.target.value)} />
+      ) : (
+        <div
+          className="border-2 border-dashed border-gray-200 rounded-xl p-5 text-center cursor-pointer hover:border-[#0b315f]/40 hover:bg-blue-50/30 transition-all"
+          onClick={() => { if (!subiendo) document.getElementById(uid)?.click(); }}>
+          <input type="file" id={uid} accept="image/jpeg,image/png,image/webp" className="hidden"
+            onChange={e => { const f=e.target.files?.[0]; if(f) onUpload(f); e.target.value=""; }} />
+          {subiendo ? (
+            <div className="flex items-center justify-center gap-2 text-xs text-gray-400">
+              <div className="w-4 h-4 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin"/>Subiendo...
+            </div>
+          ) : value ? (
+            <p className="text-xs text-green-600 font-bold">✅ Foto guardada · clic para cambiar</p>
+          ) : (
+            <>
+              <p className="text-2xl mb-1">📁</p>
+              <p className="text-xs font-bold text-gray-500">Clic para seleccionar o arrastra aquí</p>
+              <p className="text-[10px] text-gray-400 mt-1">JPG · PNG · WEBP · máx 5 MB</p>
+            </>
+          )}
+        </div>
+      )}
+      {value && <FotoPreview url={value} label={label} />}
+    </div>
   );
 }
 
@@ -175,6 +223,9 @@ export default function VehiculosPage() {
   const [formV,        setFormV]        = useState(FORM_V);
   const [formD,        setFormD]        = useState(FORM_D);
   const [guardando,    setGuardando]    = useState(false);
+  const [modoFotoExt,  setModoFotoExt]  = useState<"url"|"upload">("url");
+  const [modoFotoInt,  setModoFotoInt]  = useState<"url"|"upload">("url");
+  const [subiendoFoto, setSubiendoFoto] = useState<"ext"|"int"|null>(null);
 
   const fv = (k: keyof typeof FORM_V) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -182,6 +233,20 @@ export default function VehiculosPage() {
   const fd = (k: keyof typeof FORM_D) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
       setFormD(p => ({ ...p, [k]: e.target.value }));
+
+  const subirFoto = async (file: File, campo: "foto_externa_url"|"foto_interna_url", slot: "ext"|"int") => {
+    if (!["image/jpeg","image/png","image/webp"].includes(file.type)) { alert("Solo se permiten JPG, PNG o WEBP"); return; }
+    if (file.size > 5*1024*1024) { alert("La imagen no puede superar 5 MB"); return; }
+    setSubiendoFoto(slot);
+    const placa = formV.placa.trim().toUpperCase().replace(/[^A-Z0-9]/g,"") || "tmp";
+    const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
+    const path = `${placa}/${slot}_${Date.now()}.${ext}`;
+    const { error } = await supabase.storage.from("vehiculos").upload(path, file, { upsert: true });
+    if (error) { alert("Error al subir foto: " + error.message); setSubiendoFoto(null); return; }
+    const { data: { publicUrl } } = supabase.storage.from("vehiculos").getPublicUrl(path);
+    setFormV(p => ({ ...p, [campo]: publicUrl }));
+    setSubiendoFoto(null);
+  };
 
   // Cuando cambia equipamiento → sugerir descripción por defecto
   const cambiarEquipamiento = (equip: string) => {
@@ -273,6 +338,7 @@ export default function VehiculosPage() {
       proximo_km: v.proximo_mantenimiento_km ? String(v.proximo_mantenimiento_km) : "",
       observaciones: v.observaciones || "",
     });
+    setModoFotoExt("url"); setModoFotoInt("url");
     setEditandoId(v.id); setMostrarFormV(true);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
   };
@@ -358,7 +424,7 @@ export default function VehiculosPage() {
           <p className="text-gray-400 mt-1 text-sm">Vehículos · características · equipamiento · fotos · documentos</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={() => { setFormV(FORM_V); setEditandoId(null); setMostrarFormD(false); setMostrarFormV(v => !v); }}
+          <button onClick={() => { setFormV(FORM_V); setEditandoId(null); setModoFotoExt("url"); setModoFotoInt("url"); setMostrarFormD(false); setMostrarFormV(v => !v); }}
             className="px-4 py-2.5 rounded-xl font-bold text-sm text-white hover:opacity-90"
             style={{ background: mostrarFormV ? "#6b7280" : "#0b315f" }}>
             {mostrarFormV ? "✕ Cancelar" : "+ Vehículo"}
@@ -497,18 +563,17 @@ export default function VehiculosPage() {
               Fotos del vehículo
               <span className="ml-2 normal-case font-normal text-blue-500">→ se incluyen en el PDF de cotización</span>
             </p>
-            <div className="rounded-xl border px-4 py-3 mb-3 text-xs text-blue-700" style={{ background: "#eff6ff" }}>
-              💡 Sube las fotos a Google Drive → clic derecho → "Obtener enlace" → "Cualquier persona con el enlace" → pegar URL aquí.
-            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <Campo label="📸 Foto exterior (URL)" hint="Lateral, frontal o 3/4 del vehículo">
-                <input className={inputCls()} placeholder="https://drive.google.com/file/d/..." value={formV.foto_externa_url} onChange={fv("foto_externa_url")} />
-                {formV.foto_externa_url && <FotoPreview url={formV.foto_externa_url} label="Exterior" />}
-              </Campo>
-              <Campo label="📸 Foto interior (URL)" hint="Asientos, pasillo, comodidades">
-                <input className={inputCls()} placeholder="https://drive.google.com/file/d/..." value={formV.foto_interna_url} onChange={fv("foto_interna_url")} />
-                {formV.foto_interna_url && <FotoPreview url={formV.foto_interna_url} label="Interior" />}
-              </Campo>
+              <FotoField label="Foto exterior" hint="Lateral, frontal o 3/4 del vehículo"
+                value={formV.foto_externa_url} modo={modoFotoExt} setModo={setModoFotoExt}
+                onChange={url => setFormV(p => ({ ...p, foto_externa_url: url }))}
+                onUpload={f => subirFoto(f, "foto_externa_url", "ext")}
+                subiendo={subiendoFoto === "ext"} />
+              <FotoField label="Foto interior" hint="Asientos, pasillo, comodidades"
+                value={formV.foto_interna_url} modo={modoFotoInt} setModo={setModoFotoInt}
+                onChange={url => setFormV(p => ({ ...p, foto_interna_url: url }))}
+                onUpload={f => subirFoto(f, "foto_interna_url", "int")}
+                subiendo={subiendoFoto === "int"} />
             </div>
           </div>
 

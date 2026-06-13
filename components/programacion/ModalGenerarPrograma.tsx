@@ -2,7 +2,17 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { X, Calendar, RefreshCw } from "lucide-react";
+import { X, Calendar, RefreshCw, ArrowRight, ArrowLeftRight, Layers } from "lucide-react";
+
+type ItemCot = {
+  descripcion: string;
+  dias: number;
+  cantidad: number;
+  precio_unit: number;
+  descuento_pct: number;
+  vehiculo_flota_id?:   number | null;  // flota propia  → reservas.vehiculo_id
+  vehiculo_tercero_id?: number | null;  // vehículo ter. → reservas.vehiculo_tercero_id + empresa_tercerizada_id
+};
 
 type CotizacionFija = {
   id: number;
@@ -11,19 +21,44 @@ type CotizacionFija = {
   precio_dia: number | null;
   precio_cliente: number | null;
   paradas_json: any[] | null;
+  hora_retorno: string | null;
+  paradas_retorno_json: any[] | null;
+  items_json: ItemCot[] | null;
+};
+
+type VehiculoTercero = {
+  id: number;
+  empresa_id: number;
+  placa: string;
+  categoria?: string | null;
+};
+
+type EmpresaTercerizada = {
+  id: number;
+  razon_social: string;
+};
+
+// Slot = un vehículo / ítem de la cotización
+type Slot = {
+  precio:                 number;
+  tipo:                   "propia" | "tercerizada";
+  vehiculo_id:            number | null;   // flota propia
+  vehiculo_tercero_id:    number | null;   // vehículo tercero
+  empresa_tercerizada_id: number | null;   // empresa del tercero
+  placa:                  string;          // para mostrar en UI
+  descripcion:            string;
 };
 
 type Cliente = { id: number; nombre: string; empresa?: string; };
 
-const DIAS_SEMANA = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
-// Mapping UI index (0=Lun … 6=Dom) → JS getDay() (1=Mon … 0=Sun)
+const DIAS_SEMANA  = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
 const UI_TO_JS_DAY = [1, 2, 3, 4, 5, 6, 0];
 
 function generarFechas(inicio: string, fin: string, diasUI: boolean[]): string[] {
   if (!inicio || !fin) return [];
   const fechas: string[] = [];
   const cur = new Date(inicio + "T12:00:00");
-  const end = new Date(fin + "T12:00:00");
+  const end = new Date(fin   + "T12:00:00");
   if (cur > end) return [];
   while (cur <= end) {
     const uiIdx = UI_TO_JS_DAY.indexOf(cur.getDay());
@@ -53,22 +88,32 @@ interface Props {
 }
 
 export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: Props) {
-  const [cotizaciones,  setCotizaciones]  = useState<CotizacionFija[]>([]);
-  const [cotizacionId,  setCotizacionId]  = useState<string>("");
-  const [fechaInicio,   setFechaInicio]   = useState<string>("");
-  const [fechaFin,      setFechaFin]      = useState<string>("");
-  const [diasUI,        setDiasUI]        = useState<boolean[]>([true, true, true, true, true, false, false]);
-  const [hora,          setHora]          = useState<string>("07:00");
-  const [generando,     setGenerando]     = useState(false);
-  const [cargando,      setCargando]      = useState(true);
+  const [cotizaciones,     setCotizaciones]     = useState<CotizacionFija[]>([]);
+  const [vehTercero,       setVehTercero]       = useState<VehiculoTercero[]>([]);
+  const [empresasTer,      setEmpresasTer]      = useState<EmpresaTercerizada[]>([]);
+  const [cotizacionId,     setCotizacionId]     = useState<string>("");
+  const [fechaInicio,      setFechaInicio]      = useState<string>("");
+  const [fechaFin,         setFechaFin]         = useState<string>("");
+  const [diasUI,           setDiasUI]           = useState<boolean[]>([true, true, true, true, true, false, false]);
+  const [hora,             setHora]             = useState<string>("07:00");
+  const [generando,        setGenerando]        = useState(false);
+  const [cargando,         setCargando]         = useState(true);
 
   useEffect(() => {
-    supabase
-      .from("cotizaciones")
-      .select("id, cliente_id, tipo_servicio, precio_dia, precio_cliente, paradas_json")
-      .eq("modo_servicio", "fijo")
-      .order("id", { ascending: false })
-      .then(({ data }: { data: CotizacionFija[] | null }) => { setCotizaciones(data || []); setCargando(false); });
+    Promise.all([
+      supabase
+        .from("cotizaciones")
+        .select("id, cliente_id, tipo_servicio, precio_dia, precio_cliente, paradas_json, hora_retorno, paradas_retorno_json, items_json")
+        .eq("modo_servicio", "fijo")
+        .order("id", { ascending: false }),
+      supabase.from("vehiculos_tercero").select("id, empresa_id, placa, categoria"),
+      supabase.from("empresas_tercerizadas").select("id, razon_social"),
+    ]).then(([cotRes, vehRes, empRes]) => {
+      setCotizaciones((cotRes.data as CotizacionFija[]) || []);
+      setVehTercero((vehRes.data as VehiculoTercero[]) || []);
+      setEmpresasTer((empRes.data as EmpresaTercerizada[]) || []);
+      setCargando(false);
+    });
   }, []);
 
   const fechasGeneradas = useMemo(
@@ -76,7 +121,55 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
     [fechaInicio, fechaFin, diasUI]
   );
 
-  const cot = cotizaciones.find(c => c.id === Number(cotizacionId));
+  const cot          = cotizaciones.find(c => c.id === Number(cotizacionId));
+  const tieneRetorno = !!cot?.hora_retorno;
+
+  // ── Construir slots: un slot por ítem de la cotización ──────────────────
+  const slots = useMemo<Slot[]>(() => {
+    const items: ItemCot[] = cot?.items_json?.length ? cot.items_json : [];
+
+    if (items.length === 0) {
+      // Sin ítems: un único slot con el precio de la cotización
+      return [{
+        precio:                 Number(cot?.precio_dia || cot?.precio_cliente || 0),
+        tipo:                   "propia",
+        vehiculo_id:            null,
+        vehiculo_tercero_id:    null,
+        empresa_tercerizada_id: null,
+        placa:                  "",
+        descripcion:            "",
+      }];
+    }
+
+    return items.map((it): Slot => {
+      // Vehículo tercerizado
+      if (it.vehiculo_tercero_id) {
+        const veh = vehTercero.find(v => v.id === it.vehiculo_tercero_id);
+        return {
+          precio:                 Number(it.precio_unit) || 0,
+          tipo:                   "tercerizada",
+          vehiculo_id:            null,
+          vehiculo_tercero_id:    it.vehiculo_tercero_id,
+          empresa_tercerizada_id: veh?.empresa_id || null,
+          placa:                  veh?.placa || `VT-${it.vehiculo_tercero_id}`,
+          descripcion:            it.descripcion,
+        };
+      }
+      // Vehículo propio
+      return {
+        precio:                 Number(it.precio_unit) || 0,
+        tipo:                   "propia",
+        vehiculo_id:            it.vehiculo_flota_id || null,
+        vehiculo_tercero_id:    null,
+        empresa_tercerizada_id: null,
+        placa:                  "",    // se mostrará la placa real al mostrar en programacion
+        descripcion:            it.descripcion,
+      };
+    });
+  }, [cot, vehTercero]);
+
+  const numItems       = slots.length;
+  const esMultiVehiculo = numItems > 1;
 
   const clienteNombre = (id: number | null) => {
     if (!id) return "Sin cliente";
@@ -84,41 +177,145 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
     return c ? (c.empresa || c.nombre) : "Cliente #" + id;
   };
 
-  const precioDia = Number(cot?.precio_dia || cot?.precio_cliente || 0);
-  const puedeGenerar = !!cotizacionId && !!fechaInicio && !!fechaFin && diasUI.some(Boolean) && fechasGeneradas.length > 0;
+  const precioDiaTotal   = slots.reduce((acc, s) => acc + s.precio, 0);
+  const totalServicios   = fechasGeneradas.length * numItems * (tieneRetorno ? 2 : 1);
+  const puedeGenerar     = !!cotizacionId && !!fechaInicio && !!fechaFin && diasUI.some(Boolean) && fechasGeneradas.length > 0;
 
+  // ── Generación ───────────────────────────────────────────────────────────
   const confirmar = async () => {
     if (!puedeGenerar || !cot) return;
-    if (!confirm(`¿Generar ${fechasGeneradas.length} reservas para este contrato? Podrás eliminar días individuales si hay feriados.`)) return;
+
+    const lineasMsg = esMultiVehiculo
+      ? `${numItems} vehículos × ${fechasGeneradas.length} días`
+      : `${fechasGeneradas.length} días`;
+    const retMsg = tieneRetorno ? " × IDA+RETORNO" : "";
+    if (!confirm(`¿Generar ${lineasMsg}${retMsg} = ${totalServicios} servicios en total?`)) return;
 
     setGenerando(true);
 
-    const origen  = cot.paradas_json?.find((p: any) => p.tipo === "inicio")?.nombre  || "Sin especificar";
-    const destino = cot.paradas_json?.find((p: any) => p.tipo === "destino")?.nombre || "Sin especificar";
+    const origenIda      = cot.paradas_json?.find((p: any) => p.tipo === "inicio")?.nombre  || "Sin especificar";
+    const destinoIda     = cot.paradas_json?.find((p: any) => p.tipo === "destino")?.nombre || "Sin especificar";
+    const paradasRetorno = cot.paradas_retorno_json?.length ? cot.paradas_retorno_json : cot.paradas_json;
+    const origenRetorno  = cot.paradas_retorno_json?.find((p: any) => p.tipo === "inicio")?.nombre  || destinoIda;
+    const destinoRetorno = cot.paradas_retorno_json?.find((p: any) => p.tipo === "destino")?.nombre || origenIda;
 
-    const filas = fechasGeneradas.map(fecha => ({
-      cotizacion_id:         cot.id,
-      cliente_id:            cot.cliente_id,
-      fecha_servicio:        fecha,
-      hora_servicio:         hora,
-      tipo:                  "propia",
-      tipo_asignacion:       "propio",
-      estado:                "pendiente",
-      precio_cliente:        precioDia,
-      costo_proveedor:       0,
-      tipo_servicio_detalle: "transporte_personal",
-      paradas_json:          cot.paradas_json,
-      origen,
-      destino,
-    }));
+    const BATCH = 50;
 
-    const BATCH = 100;
-    for (let i = 0; i < filas.length; i += BATCH) {
-      const { error } = await supabase.from("reservas").insert(filas.slice(i, i + BATCH));
-      if (error) {
-        alert("Error al generar reservas: " + error.message);
-        setGenerando(false);
-        return;
+    for (const slot of slots) {
+      // Campos de vehículo según tipo de asignación
+      const camposVehiculo = slot.tipo === "tercerizada"
+        ? {
+            tipo:                   "tercerizada",
+            tipo_asignacion:        "tercerizado",   // valor que espera el form de edición
+            ...(slot.vehiculo_tercero_id    ? { vehiculo_tercero_id:    slot.vehiculo_tercero_id    } : {}),
+            ...(slot.empresa_tercerizada_id ? { empresa_tercerizada_id: slot.empresa_tercerizada_id } : {}),
+          }
+        : {
+            tipo:            "propia",
+            tipo_asignacion: "propio",
+            ...(slot.vehiculo_id ? { vehiculo_id: slot.vehiculo_id } : {}),
+          };
+
+      const camposBase = {
+        cotizacion_id:         cot.id,
+        cliente_id:            cot.cliente_id,
+        hora_servicio:         hora,
+        estado:                "pendiente",
+        costo_proveedor:       0,
+        tipo_servicio_detalle: cot.tipo_servicio || "transporte_personal",
+        paradas_json:          cot.paradas_json,
+        origen:                origenIda,
+        destino:               destinoIda,
+        ...camposVehiculo,
+      };
+
+      if (!tieneRetorno) {
+        // ── Solo IDA ────────────────────────────────────────────────────
+        const filas = fechasGeneradas.map(fecha => ({
+          ...camposBase,
+          fecha_servicio: fecha,
+          precio_cliente: slot.precio,
+        }));
+
+        for (let i = 0; i < filas.length; i += BATCH) {
+          const { error } = await supabase.from("reservas").insert(filas.slice(i, i + BATCH));
+          if (error) {
+            alert("Error al generar servicios: " + error.message);
+            setGenerando(false);
+            return;
+          }
+        }
+
+      } else {
+        // ── Par IDA + RETORNO vinculados ────────────────────────────────
+
+        // 1. Insertar IDAs y obtener sus IDs
+        const filasIda = fechasGeneradas.map(fecha => ({
+          ...camposBase,
+          fecha_servicio:     fecha,
+          precio_cliente:     slot.precio,
+          direccion_servicio: "ida",
+        }));
+
+        const idasIds: number[] = [];
+        for (let i = 0; i < filasIda.length; i += BATCH) {
+          const { data, error } = await supabase
+            .from("reservas")
+            .insert(filasIda.slice(i, i + BATCH))
+            .select("id");
+          if (error) {
+            alert("Error al generar servicios de IDA: " + error.message);
+            setGenerando(false);
+            return;
+          }
+          idasIds.push(...(data || []).map((r: any) => r.id));
+        }
+
+        // 2. Insertar RETORNOs con referencia a cada IDA
+        const camposBaseRetorno = {
+          cotizacion_id:         cot.id,
+          cliente_id:            cot.cliente_id,
+          hora_servicio:         cot.hora_retorno,
+          estado:                "pendiente",
+          precio_cliente:        0,           // El precio del par va en la IDA
+          costo_proveedor:       0,
+          tipo_servicio_detalle: cot.tipo_servicio || "transporte_personal",
+          paradas_json:          paradasRetorno,
+          origen:                origenRetorno,
+          destino:               destinoRetorno,
+          direccion_servicio:    "retorno",
+          ...camposVehiculo,
+        };
+
+        const filasRetorno = fechasGeneradas.map((fecha, idx) => ({
+          ...camposBaseRetorno,
+          fecha_servicio:       fecha,
+          reserva_vinculada_id: idasIds[idx],
+        }));
+
+        const retornosIds: number[] = [];
+        for (let i = 0; i < filasRetorno.length; i += BATCH) {
+          const { data, error } = await supabase
+            .from("reservas")
+            .insert(filasRetorno.slice(i, i + BATCH))
+            .select("id");
+          if (error) {
+            alert("Error al generar servicios de RETORNO: " + error.message);
+            setGenerando(false);
+            return;
+          }
+          retornosIds.push(...(data || []).map((r: any) => r.id));
+        }
+
+        // 3. Enlace bidireccional: actualizar IDAs con ID del RETORNO
+        await Promise.all(
+          idasIds.map((idaId, idx) =>
+            supabase
+              .from("reservas")
+              .update({ reserva_vinculada_id: retornosIds[idx] })
+              .eq("id", idaId)
+          )
+        );
       }
     }
 
@@ -129,14 +326,72 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
 
   const toggleDia = (i: number) => setDiasUI(prev => prev.map((v, j) => j === i ? !v : v));
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.45)" }}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden">
+  // ── Label del recurso de cada slot para la UI ─────────────────────────
+  const slotRecursoLabel = (s: Slot): string => {
+    if (s.tipo === "tercerizada") {
+      const emp = empresasTer.find(e => e.id === s.empresa_tercerizada_id);
+      return `🚌 ${s.placa}${emp ? ` · ${emp.razon_social}` : " (tercerizado)"}`;
+    }
+    if (s.vehiculo_id) return `🚌 Flota propia (ID ${s.vehiculo_id})`;
+    return "Sin asignar (se asignará después)";
+  };
 
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b" style={{ borderColor: "#e2e8f0" }}>
+  // ── Preview ───────────────────────────────────────────────────────────
+  const previewLabel = () => {
+    if (fechasGeneradas.length === 0) return null;
+    const diasStr = `${fechasGeneradas.length} día${fechasGeneradas.length !== 1 ? "s" : ""}`;
+
+    if (tieneRetorno && esMultiVehiculo) {
+      return (
+        <><b>{diasStr} × {numItems} vehículos × IDA+RETORNO</b>
+          <span className="opacity-70"> = {totalServicios} servicios</span>
+          {precioDiaTotal > 0 && <span className="opacity-70"> · S/ {(fechasGeneradas.length * precioDiaTotal).toLocaleString("es-PE", { minimumFractionDigits: 2 })} total est.</span>}
+        </>
+      );
+    }
+    if (tieneRetorno) {
+      return (
+        <><b>{fechasGeneradas.length} pares IDA+RETORNO</b>
+          <span className="opacity-70"> ({fechasGeneradas.length * 2} servicios)</span>
+          {precioDiaTotal > 0 && <span className="opacity-70"> · S/ {(fechasGeneradas.length * precioDiaTotal).toLocaleString("es-PE", { minimumFractionDigits: 2 })} total est.</span>}
+        </>
+      );
+    }
+    if (esMultiVehiculo) {
+      return (
+        <><b>{diasStr} × {numItems} vehículos</b>
+          <span className="opacity-70"> = {totalServicios} servicios</span>
+          {precioDiaTotal > 0 && <span className="opacity-70"> · S/ {(fechasGeneradas.length * precioDiaTotal).toLocaleString("es-PE", { minimumFractionDigits: 2 })} total est.</span>}
+        </>
+      );
+    }
+    return (
+      <><b>{fechasGeneradas.length} servicios</b> a generar
+        {precioDiaTotal > 0 && <span className="ml-2 opacity-70">· S/ {(fechasGeneradas.length * precioDiaTotal).toLocaleString("es-PE", { minimumFractionDigits: 2 })} total est.</span>}
+      </>
+    );
+  };
+
+  const botonLabel = () => {
+    if (generando)   return "Generando...";
+    if (!puedeGenerar) return "Generar programa";
+    return `Generar ${totalServicios} servicio${totalServicios !== 1 ? "s" : ""}`;
+  };
+
+  const previewColor = tieneRetorno || esMultiVehiculo
+    ? { bg: "#ede9fe", text: "#5b21b6" }
+    : { bg: "#dcfce7", text: "#166534" };
+
+  // ── Render ───────────────────────────────────────────────────────────────
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4" style={{ background: "rgba(0,0,0,0.45)" }}>
+      {/* max-h + flex-col: header y footer siempre visibles, cuerpo hace scroll */}
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl flex flex-col" style={{ maxHeight: "calc(100vh - 16px)" }}>
+
+        {/* Header — fijo, nunca se desplaza */}
+        <div className="flex items-center justify-between px-6 py-4 border-b shrink-0" style={{ borderColor: "#e2e8f0" }}>
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white" style={{ background: "#0b315f" }}>
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white shrink-0" style={{ background: "#0b315f" }}>
               <Calendar size={18} />
             </div>
             <div>
@@ -144,35 +399,91 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
               <p className="text-xs text-gray-400">Crea múltiples servicios desde una cotización</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 rounded-xl hover:bg-gray-100 transition-colors">
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-gray-100 transition-colors shrink-0">
             <X size={18} className="text-gray-500" />
           </button>
         </div>
 
-        <div className="p-6 space-y-5">
+        {/* Cuerpo — scrollable cuando el contenido supera la pantalla */}
+        <div className="p-6 space-y-5 overflow-y-auto flex-1">
 
-          {/* Cotización */}
+          {/* Selector de cotización */}
           <div>
             <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Cotización fija *</label>
             {cargando ? (
               <p className="text-sm text-gray-400 py-2">Cargando cotizaciones...</p>
             ) : cotizaciones.length === 0 ? (
-              <p className="text-sm text-amber-600 py-2">No hay cotizaciones fijas registradas. Crea una desde el módulo de Cotizaciones.</p>
+              <p className="text-sm text-amber-600 py-2">No hay cotizaciones fijas.</p>
             ) : (
               <select className={inputCls()} value={cotizacionId} onChange={e => setCotizacionId(e.target.value)}>
                 <option value="">Seleccionar cotización...</option>
                 {cotizaciones.map(c => (
                   <option key={c.id} value={c.id}>
-                    #{c.id} — {clienteNombre(c.cliente_id)} — {nombreRuta(c.paradas_json)} — S/ {Number(c.precio_dia || c.precio_cliente || 0).toFixed(2)}/día
+                    #{c.id} — {clienteNombre(c.cliente_id)} — {nombreRuta(c.paradas_json)}
+                    {(c.items_json?.length ?? 0) > 1 ? ` [${c.items_json!.length} vehículos]` : ""}
+                    {c.hora_retorno ? ` ⇄ retorno ${c.hora_retorno}` : ""}
                   </option>
                 ))}
               </select>
             )}
+
+            {/* Ficha de la cotización seleccionada */}
             {cot && (
-              <div className="mt-2 rounded-xl px-4 py-3 text-xs space-y-1" style={{ background: "#eef3f8", color: "#0b315f" }}>
+              <div className="mt-2 rounded-xl px-4 py-3 text-xs space-y-1.5" style={{ background: "#eef3f8", color: "#0b315f" }}>
                 <p><b>Cliente:</b> {clienteNombre(cot.cliente_id)}</p>
-                <p><b>Ruta:</b> {nombreRuta(cot.paradas_json)}</p>
-                <p><b>Precio por día:</b> S/ {precioDia.toFixed(2)} · cada servicio generado registra este monto como ingreso</p>
+                <p><b>Ruta IDA:</b> {nombreRuta(cot.paradas_json)}</p>
+                {tieneRetorno && (
+                  <p>
+                    <b>Ruta RETORNO:</b>{" "}
+                    {cot.paradas_retorno_json?.length
+                      ? nombreRuta(cot.paradas_retorno_json)
+                      : <span className="italic opacity-60">mismas paradas en sentido inverso</span>}
+                  </p>
+                )}
+
+                {/* Lista de slots/vehículos */}
+                {esMultiVehiculo && (
+                  <div className="pt-1.5 mt-0.5 border-t" style={{ borderColor: "#0b315f22" }}>
+                    <div className="flex items-center gap-1.5 mb-1 font-bold">
+                      <Layers size={11} className="shrink-0" />
+                      {numItems} vehículos detectados:
+                    </div>
+                    {slots.map((s, idx) => (
+                      <p key={idx} className="pl-3 opacity-80">
+                        {idx + 1}. {s.descripcion || `Vehículo ${idx + 1}`}
+                        {s.placa ? <span className="font-semibold ml-1">· {s.placa}</span> : ""}
+                        {s.tipo === "tercerizada"
+                          ? <span className="ml-1 px-1 py-0.5 rounded text-[9px] font-bold" style={{ background: "#fef9c3", color: "#854d0e" }}>TERCERO</span>
+                          : s.vehiculo_id
+                            ? <span className="ml-1 px-1 py-0.5 rounded text-[9px] font-bold" style={{ background: "#dcfce7", color: "#166534" }}>PROPIO</span>
+                            : <span className="ml-1 opacity-50">sin asignar</span>}
+                        {s.precio ? <span className="font-semibold"> — S/ {Number(s.precio).toFixed(2)}/día</span> : ""}
+                      </p>
+                    ))}
+                  </div>
+                )}
+
+                {/* Resumen de lo que se generará */}
+                <div className="pt-1.5 mt-0.5 border-t flex items-start gap-2" style={{ borderColor: "#0b315f22" }}>
+                  {tieneRetorno ? <ArrowLeftRight size={13} className="shrink-0 mt-0.5" /> : <Layers size={13} className="shrink-0 mt-0.5" />}
+                  <div>
+                    {tieneRetorno && esMultiVehiculo && (
+                      <p><b>Por día:</b> {numItems} IDA + {numItems} RETORNO ({cot.hora_retorno}) = <b>{numItems * 2} servicios</b></p>
+                    )}
+                    {tieneRetorno && !esMultiVehiculo && (
+                      <p><b>Por día:</b> 1 IDA + 1 RETORNO ({cot.hora_retorno}) enlazados</p>
+                    )}
+                    {!tieneRetorno && esMultiVehiculo && (
+                      <p><b>Por día:</b> {numItems} servicios (uno por vehículo)</p>
+                    )}
+                    {!tieneRetorno && !esMultiVehiculo && (
+                      <p><b>Por día:</b> 1 servicio — S/ {precioDiaTotal.toFixed(2)}</p>
+                    )}
+                    {tieneRetorno && (
+                      <p className="opacity-60 text-[10px]">Precio en IDA · RETORNO = S/ 0.00 (par = un solo cobro)</p>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -200,9 +511,9 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
                   onClick={() => toggleDia(i)}
                   className="flex-1 py-2 rounded-xl text-xs font-bold transition-all border-2"
                   style={{
-                    background:   diasUI[i] ? "#0b315f" : "white",
-                    color:        diasUI[i] ? "white"   : "#9ca3af",
-                    borderColor:  diasUI[i] ? "#0b315f" : "#e5e7eb",
+                    background:  diasUI[i] ? "#0b315f" : "white",
+                    color:       diasUI[i] ? "white"   : "#9ca3af",
+                    borderColor: diasUI[i] ? "#0b315f" : "#e5e7eb",
                   }}
                 >
                   {dia}
@@ -211,26 +522,36 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
             </div>
           </div>
 
-          {/* Hora */}
+          {/* Horas */}
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Hora de salida</label>
+              <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                {tieneRetorno ? "Hora salida IDA" : "Hora de salida"}
+              </label>
               <input type="time" className={inputCls()} value={hora} onChange={e => setHora(e.target.value)} />
             </div>
+            {tieneRetorno && (
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                  Hora salida RETORNO
+                </label>
+                <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50">
+                  <ArrowRight size={14} className="text-gray-400 shrink-0" style={{ transform: "scaleX(-1)" }} />
+                  <span className="text-sm font-bold text-gray-700">{cot?.hora_retorno}</span>
+                  <span className="text-[10px] text-gray-400 ml-auto">desde cotización</span>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Preview */}
           {fechasGeneradas.length > 0 && (
-            <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: "#dcfce7", color: "#166534" }}>
+            <div
+              className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm"
+              style={{ background: previewColor.bg, color: previewColor.text }}
+            >
               <RefreshCw size={16} className="shrink-0" />
-              <div>
-                <b>{fechasGeneradas.length} servicios</b> a generar
-                {precioDia > 0 && (
-                  <span className="ml-2 opacity-70">
-                    · Ingreso total estimado: S/ {(fechasGeneradas.length * precioDia).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
-                  </span>
-                )}
-              </div>
+              <div>{previewLabel()}</div>
             </div>
           )}
           {fechaInicio && fechaFin && !diasUI.some(Boolean) && (
@@ -246,24 +567,21 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
 
         </div>
 
-        {/* Footer */}
-        <div className="flex gap-3 px-6 py-4 border-t" style={{ borderColor: "#e2e8f0" }}>
+        {/* Footer — fijo, siempre visible */}
+        <div className="flex gap-3 px-6 py-4 border-t shrink-0" style={{ borderColor: "#e2e8f0" }}>
           <button
             onClick={confirmar}
             disabled={!puedeGenerar || generando}
             className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-40 transition-all"
             style={{ background: "#0b315f" }}
           >
-            {generando
-              ? "Generando..."
-              : puedeGenerar
-                ? `Generar ${fechasGeneradas.length} servicios`
-                : "Generar programa"}
+            {botonLabel()}
           </button>
           <button onClick={onClose} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
             Cancelar
           </button>
         </div>
+
       </div>
     </div>
   );

@@ -45,6 +45,8 @@ type Props = {
   destino?: string | null;
   puntoRetorno?: string | null;
   paradasJson?: any[] | null;
+  cotizacionId?: number | null;
+  vehiculoId?: number | null;
   onClose: () => void;
   onChange?: () => void;
 };
@@ -82,7 +84,7 @@ async function geocodearDireccion(
 
 export default function ModalManifiesto(props: Props) {
   const { reservaId, clienteId, capacidad, sincronizadoApp, fechaSincronizacion,
-    origen, destino, puntoRetorno, paradasJson, onClose, onChange } = props;
+    origen, destino, puntoRetorno, paradasJson, cotizacionId, vehiculoId, onClose, onChange } = props;
 
   const [tab, setTab] = useState<Tab>("pasajeros");
   const [pasajeros, setPasajeros] = useState<PasajeroManifiesto[]>([]);
@@ -100,6 +102,12 @@ export default function ModalManifiesto(props: Props) {
   const [mostrarFormAdd, setMostrarFormAdd] = useState(false);
   const [formAdd, setFormAdd] = useState({ nombre: "", dni: "", empresa: "", telefono: "", parada_id: "" });
   const [savingAdd, setSavingAdd] = useState(false);
+
+  // ── Copiar paraderos a días futuros ─────────────────────────────────────
+  const [modalCopiar, setModalCopiar] = useState(false);
+  const [copiarDesde, setCopiarDesde] = useState("");
+  const [copiarHasta, setCopiarHasta] = useState("");
+  const [copiando, setCopiando] = useState(false);
 
   const autoCrearParadasIniciales = async (): Promise<number> => {
     // Prioridad 1: paradas_json de la cotización (ya trae coordenadas de Google Maps)
@@ -609,9 +617,110 @@ export default function ModalManifiesto(props: Props) {
     lng: p.lng ?? null,
   }));
 
+  const ejecutarCopiar = async () => {
+    if (!cotizacionId || !vehiculoId || !copiarDesde || !copiarHasta) return;
+    setCopiando(true);
+    try {
+      // 1. Load current paradas ordered by orden
+      const { data: paradasOrigen } = await supabase
+        .from("paradas")
+        .select("id, orden")
+        .eq("reserva_id", reservaId)
+        .order("orden");
+      if (!paradasOrigen || paradasOrigen.length === 0) {
+        setMensaje({ tipo: "warn", texto: "Esta reserva no tiene paradas configuradas." });
+        return;
+      }
+
+      // 2. Load current pasajeros_parada for this reserva
+      const paradaIds = paradasOrigen.map((p: any) => p.id);
+      const { data: asigOrigen } = await supabase
+        .from("pasajeros_parada")
+        .select("pasajero_id, parada_id, asiento")
+        .in("parada_id", paradaIds);
+      if (!asigOrigen || asigOrigen.length === 0) {
+        setMensaje({ tipo: "warn", texto: "No hay pasajeros asignados a paradas en este servicio." });
+        return;
+      }
+
+      // Map: orden → parada_id (origen)
+      const ordenAParadaOrigen = new Map<number, number>(
+        paradasOrigen.map((p: any) => [p.orden, p.id])
+      );
+      const paradaOrigenAOrden = new Map<number, number>(
+        paradasOrigen.map((p: any) => [p.id, p.orden])
+      );
+
+      // 3. Find target reservas: same cotizacion_id + vehiculo_id, in date range
+      const { data: reservasDestino } = await supabase
+        .from("reservas")
+        .select("id, fecha_servicio")
+        .eq("cotizacion_id", cotizacionId)
+        .eq("vehiculo_id", vehiculoId)
+        .neq("id", reservaId)
+        .gte("fecha_servicio", copiarDesde)
+        .lte("fecha_servicio", copiarHasta)
+        .not("estado", "in", "(cancelada,finalizada)");
+      if (!reservasDestino || reservasDestino.length === 0) {
+        setMensaje({ tipo: "warn", texto: "No se encontraron servicios del mismo vehículo en ese rango de fechas." });
+        return;
+      }
+
+      let totalInsertados = 0;
+      let reservasFallidas = 0;
+
+      for (const rd of reservasDestino) {
+        // Load paradas for this target reserva ordered by orden
+        const { data: paradasDest } = await supabase
+          .from("paradas")
+          .select("id, orden")
+          .eq("reserva_id", rd.id)
+          .order("orden");
+        if (!paradasDest || paradasDest.length === 0) continue;
+
+        const ordenAParadaDest = new Map<number, number>(
+          paradasDest.map((p: any) => [p.orden, p.id])
+        );
+
+        // Delete existing pasajeros_parada for this reserva to avoid duplicates
+        const destParadaIds = paradasDest.map((p: any) => p.id);
+        await supabase.from("pasajeros_parada").delete().in("parada_id", destParadaIds);
+
+        // Build rows mapping by orden
+        const rows: any[] = [];
+        for (const asig of asigOrigen) {
+          const orden = paradaOrigenAOrden.get(asig.parada_id);
+          if (orden === undefined) continue;
+          const destParadaId = ordenAParadaDest.get(orden);
+          if (!destParadaId) continue;
+          rows.push({
+            pasajero_id: asig.pasajero_id,
+            parada_id: destParadaId,
+            estado_abordaje: "Pendiente",
+            asiento: asig.asiento ?? null,
+            hora_abordaje: null,
+          });
+        }
+        if (rows.length > 0) {
+          const { error } = await supabase.from("pasajeros_parada").insert(rows);
+          if (error) { reservasFallidas++; } else { totalInsertados += rows.length; }
+        }
+      }
+
+      const msg = `Copiado a ${reservasDestino.length - reservasFallidas} servicio(s) · ${totalInsertados} asignaciones${reservasFallidas ? ` · ${reservasFallidas} con error` : ""} ✓`;
+      setMensaje({ tipo: "ok", texto: msg });
+      setModalCopiar(false);
+      setCopiarDesde(""); setCopiarHasta("");
+    } catch (e: any) {
+      setMensaje({ tipo: "err", texto: e?.message || "Error desconocido" });
+    } finally {
+      setCopiando(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15, 23, 42, 0.55)" }}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden">
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden">
 
         {/* Header */}
         <div className="px-6 py-4 border-b flex items-start justify-between gap-4" style={{ borderColor: "#e2e8f0" }}>
@@ -727,6 +836,16 @@ export default function ModalManifiesto(props: Props) {
               />
 
               <button onClick={descargarPlantilla} className="px-3 py-2 rounded-xl font-bold text-xs border hover:bg-gray-50 text-gray-600">Plantilla pax</button>
+
+              {cotizacionId && vehiculoId && (
+                <button
+                  onClick={() => setModalCopiar(true)}
+                  className="px-3 py-2 rounded-xl font-bold text-xs border transition-colors"
+                  style={{ borderColor: "#0b315f", background: "white", color: "#0b315f" }}
+                >
+                  📋 Copiar a días futuros
+                </button>
+              )}
             </div>
 
             {/* Formulario agregar 1 pasajero */}
@@ -904,6 +1023,47 @@ export default function ModalManifiesto(props: Props) {
             ) : null}
           </div>
         ) : null}
+
+        {/* Modal copiar a días futuros */}
+        {modalCopiar && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center" style={{ background: "rgba(15,23,42,0.5)" }}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden">
+              <div className="px-6 py-4" style={{ background: "#0b315f" }}>
+                <p className="text-white font-bold text-sm">Copiar paraderos a días futuros</p>
+                <p className="text-blue-200 text-xs mt-0.5">Copia las asignaciones pasajero → parada al mismo vehículo en el rango de fechas.</p>
+              </div>
+              <div className="px-6 py-5 flex flex-col gap-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Desde</p>
+                    <input type="date" value={copiarDesde} onChange={e => setCopiarDesde(e.target.value)}
+                      className="w-full border rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20" />
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Hasta</p>
+                    <input type="date" value={copiarHasta} onChange={e => setCopiarHasta(e.target.value)}
+                      className="w-full border rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20" />
+                  </div>
+                </div>
+                <p className="text-xs text-gray-400">
+                  Se reemplazarán las asignaciones existentes en cada día destino. El vehículo debe tener paradas configuradas con el mismo orden.
+                </p>
+              </div>
+              <div className="px-6 pb-5 flex gap-2 justify-end">
+                <button onClick={() => { setModalCopiar(false); setCopiarDesde(""); setCopiarHasta(""); }}
+                  className="px-4 py-2 rounded-xl font-bold text-xs border text-gray-500 hover:bg-gray-50"
+                  style={{ borderColor: "#e2e8f0" }}>
+                  Cancelar
+                </button>
+                <button onClick={ejecutarCopiar} disabled={copiando || !copiarDesde || !copiarHasta}
+                  className="px-5 py-2 rounded-xl font-bold text-xs text-white disabled:opacity-50"
+                  style={{ background: copiando ? "#6b7280" : "#0b315f" }}>
+                  {copiando ? "Copiando..." : "Copiar"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Footer */}
         <div className="px-6 py-3 border-t flex items-center justify-between gap-3" style={{ borderColor: "#e2e8f0", background: "#f8fafc" }}>

@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { Calendar, FileText, Pencil, Trash2 } from "lucide-react";
+import { Calendar, FileText, Pencil, Trash2, X } from "lucide-react";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
 import ModalGenerarPrograma from "@/components/programacion/ModalGenerarPrograma";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
@@ -106,6 +106,8 @@ type Reserva = {
   token_seguimiento?: string | null;
   token_conductor_tercero?: string | null;
   token_expira_at?: string | null;
+  reserva_vinculada_id?: number | null;
+  direccion_servicio?: string | null;
 };
 
 type Ocupacion = {
@@ -146,8 +148,15 @@ const FORM_VACIO = {
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
+const TIPOS_SERVICIO_FIJO = new Set([
+  "transporte_personal",
+  "fijo_solo_ida",
+  "fijo_multiparada",
+  "fijo_reten",
+]);
+
 function esEventual(r: Reserva): boolean {
-  return r.tipo_servicio_detalle !== "transporte_personal";
+  return !TIPOS_SERVICIO_FIJO.has(r.tipo_servicio_detalle || "");
 }
 
 function fmtSoles(n: number) {
@@ -260,6 +269,13 @@ export default function ReservasPage() {
   const [expandidoContrato,    setExpandidoContrato]    = useState<string | null>(null);
   const [modalLinksId,         setModalLinksId]         = useState<number | null>(null);
   const [confirmEliminarId,    setConfirmEliminarId]    = useState<number | null>(null);
+  const [modalAsignarBloque,   setModalAsignarBloque]   = useState<{ cotizacionId: number | null; sinAsignar: Reserva[]; todasLasFilas: Reserva[] } | null>(null);
+  const [asignarVehId,         setAsignarVehId]         = useState<string>("");
+  const [asignarCondId,        setAsignarCondId]        = useState<string>("");
+  const [asignando,            setAsignando]            = useState(false);
+  const [bloqueScope,          setBloqueScope]          = useState<"pendientes" | "rango">("pendientes");
+  const [bloqueFechaDesde,     setBloqueFechaDesde]     = useState("");
+  const [bloqueFechaHasta,     setBloqueFechaHasta]     = useState("");
   const [generandoToken,       setGenerandoToken]       = useState<string | null>(null);
   const [copiadoKey,           setCopiadoKey]           = useState<string | null>(null);
   const [filtroDesde,          setFiltroDesde]          = useState("");
@@ -274,6 +290,16 @@ export default function ReservasPage() {
   const [nuevoParLat,          setNuevoParLat]          = useState<Record<number, number>>({});
   const [nuevoParLng,          setNuevoParLng]          = useState<Record<number, number>>({});
   const [agregandoPar2,        setAgregandoPar2]        = useState<Record<number, boolean>>({});
+  const [modalAplicarMasivo,   setModalAplicarMasivo]   = useState<{
+    cotizacion_id: number;
+    payload: Record<string, any>;
+    otrasReservas: Reserva[];
+    resumen: string; // "Vehículo · Conductor" para mostrar en el modal
+  } | null>(null);
+  const [aplicarScope,         setAplicarScope]         = useState<"todos" | "rango">("todos");
+  const [aplicarDesde,         setAplicarDesde]         = useState("");
+  const [aplicarHasta,         setAplicarHasta]         = useState("");
+  const [aplicando,            setAplicando]            = useState(false);
 
   const f = (k: keyof typeof FORM_VACIO) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -506,6 +532,48 @@ export default function ReservasPage() {
     });
   };
 
+  const ejecutarAsignacionBloque = async () => {
+    if (!modalAsignarBloque || !asignarVehId) return;
+    setAsignando(true);
+
+    const todasAptas = modalAsignarBloque.todasLasFilas;
+    const targets: Reserva[] = bloqueScope === "pendientes"
+      ? modalAsignarBloque.sinAsignar
+      : todasAptas.filter(r =>
+          r.fecha_servicio &&
+          (!bloqueFechaDesde || r.fecha_servicio >= bloqueFechaDesde) &&
+          (!bloqueFechaHasta  || r.fecha_servicio <= bloqueFechaHasta)
+        );
+
+    if (targets.length === 0) { alert("No hay servicios en el rango seleccionado."); setAsignando(false); return; }
+
+    const pendienteIds = targets.filter(r => r.estado === "pendiente").map(r => r.id);
+    const otrosIds     = targets.filter(r => r.estado !== "pendiente").map(r => r.id);
+    const BATCH = 50;
+
+    const asignBase = { vehiculo_id: Number(asignarVehId), conductor_id: asignarCondId ? Number(asignarCondId) : null, tipo_asignacion: "propio" };
+
+    for (let i = 0; i < pendienteIds.length; i += BATCH) {
+      const { error } = await supabase.from("reservas").update({ ...asignBase, estado: "programada" }).in("id", pendienteIds.slice(i, i + BATCH));
+      if (error) { alert("Error: " + error.message); setAsignando(false); return; }
+    }
+    for (let i = 0; i < otrosIds.length; i += BATCH) {
+      const { error } = await supabase.from("reservas").update(asignBase).in("id", otrosIds.slice(i, i + BATCH));
+      if (error) { alert("Error: " + error.message); setAsignando(false); return; }
+    }
+
+    const allIds = targets.map(r => r.id);
+    setReservas(prev => prev.map(r =>
+      allIds.includes(r.id)
+        ? { ...r, ...asignBase, estado: r.estado === "pendiente" ? "programada" as EstadoReserva : r.estado }
+        : r
+    ));
+    setModalAsignarBloque(null);
+    setAsignarVehId("");
+    setAsignarCondId("");
+    setAsignando(false);
+  };
+
   const cargarDatos = async () => {
     setLoading(true);
     const [clRes, vRes, cRes, etRes, vtRes, ctRes, dtRes, rRes] = await Promise.all([
@@ -572,7 +640,8 @@ export default function ReservasPage() {
     setForm({
       fecha_servicio:         r.fecha_servicio            || "",
       hora_servicio:          r.hora_servicio?.slice(0,5) || "",
-      tipo_asignacion:        r.tipo_asignacion            || "propio",
+      // Normalizar: "tercero"/"tercerizada" → "tercerizado" (valor que usa el select)
+      tipo_asignacion:        (r.tipo_asignacion === "tercero" || r.tipo === "tercerizada") ? "tercerizado" : (r.tipo_asignacion || "propio"),
       estado:                 r.estado                    || "pendiente",
       vehiculo_id:            r.vehiculo_id               ? String(r.vehiculo_id)               : "",
       conductor_id:           r.conductor_id              ? String(r.conductor_id)              : "",
@@ -611,23 +680,98 @@ export default function ReservasPage() {
     }
     if (form.estado !== "pendiente") nuevoEstado = form.estado;
 
-    const { error } = await supabase.from("reservas").update({
-      fecha_servicio:         form.fecha_servicio,
-      hora_servicio:          form.hora_servicio,
+    const asignPayload = {
       tipo:                   form.tipo_asignacion === "propio" ? "propia" : "tercerizada",
       tipo_asignacion:        form.tipo_asignacion,
-      estado:                 nuevoEstado,
       vehiculo_id:            form.tipo_asignacion === "propio" ? Number(form.vehiculo_id) : null,
       conductor_id:           form.tipo_asignacion === "propio" ? Number(form.conductor_id) : null,
       empresa_tercerizada_id: form.tipo_asignacion === "tercerizado" ? Number(form.empresa_tercerizada_id) : null,
       vehiculo_tercero_id:    form.tipo_asignacion === "tercerizado" && form.vehiculo_tercero_id ? Number(form.vehiculo_tercero_id) : null,
       conductor_tercero_id:   form.tipo_asignacion === "tercerizado" && form.conductor_tercero_id ? Number(form.conductor_tercero_id) : null,
       costo_proveedor:        costo,
-      observaciones:          form.observaciones.trim() || null,
+    };
+
+    const { error } = await supabase.from("reservas").update({
+      ...asignPayload,
+      fecha_servicio:  form.fecha_servicio,
+      hora_servicio:   form.hora_servicio,
+      estado:          nuevoEstado,
+      observaciones:   form.observaciones.trim() || null,
     }).eq("id", editandoId);
 
     if (error) { alert(error.message); setGuardando(false); return; }
+
+    // ── Si es servicio FIJO con contrato, ofrecer aplicar a otros días ──
+    if (reservaActual && !esEventual(reservaActual) && reservaActual.cotizacion_id) {
+      // Filtrar SOLO los servicios que ya tienen la misma placa/empresa asignada
+      // (para no sobrescribir otros vehículos del mismo contrato que corren en paralelo)
+      const otrasReservas = reservas.filter(r => {
+        if (r.cotizacion_id !== reservaActual.cotizacion_id) return false;
+        if (r.id === editandoId) return false;
+        if (r.estado === "cancelada" || r.estado === "finalizada") return false;
+        if (form.tipo_asignacion === "propio")
+          return r.vehiculo_id === Number(form.vehiculo_id);
+        // Tercerizado: misma empresa Y mismo vehículo tercero (si se especificó)
+        if (r.empresa_tercerizada_id !== Number(form.empresa_tercerizada_id)) return false;
+        if (form.vehiculo_tercero_id && r.vehiculo_tercero_id !== Number(form.vehiculo_tercero_id)) return false;
+        return true;
+      });
+      if (otrasReservas.length > 0) {
+        // Construir resumen legible de lo asignado
+        let resumen = "";
+        if (form.tipo_asignacion === "propio") {
+          const vNombre = vehiculos.find(v => v.id === Number(form.vehiculo_id))?.placa || "";
+          const cNombre = conductores.find(c => c.id === Number(form.conductor_id))?.nombre || "";
+          resumen = [vNombre, cNombre].filter(Boolean).join(" · ");
+        } else {
+          const eNombre = empresasTer.find(e => e.id === Number(form.empresa_tercerizada_id))?.razon_social || "";
+          resumen = eNombre;
+        }
+        limpiar();
+        setGuardando(false);
+        setAplicarScope("todos");
+        setAplicarDesde("");
+        setAplicarHasta("");
+        setModalAplicarMasivo({ cotizacion_id: reservaActual.cotizacion_id, payload: asignPayload, otrasReservas, resumen });
+        cargarDatos();
+        return;
+      }
+    }
+
     limpiar(); cargarDatos(); setGuardando(false);
+  };
+
+  const aplicarMasivo = async () => {
+    if (!modalAplicarMasivo) return;
+    const { payload, otrasReservas } = modalAplicarMasivo;
+
+    let targets = otrasReservas;
+    if (aplicarScope === "rango") {
+      targets = otrasReservas.filter(r =>
+        r.fecha_servicio &&
+        (!aplicarDesde || r.fecha_servicio >= aplicarDesde) &&
+        (!aplicarHasta  || r.fecha_servicio <= aplicarHasta)
+      );
+      if (targets.length === 0) { alert("No hay servicios en ese rango de fechas"); return; }
+    }
+
+    setAplicando(true);
+    const pendienteIds = targets.filter(r => r.estado === "pendiente").map(r => r.id);
+    const otrosIds     = targets.filter(r => r.estado !== "pendiente").map(r => r.id);
+
+    const ops: Promise<any>[] = [];
+    if (pendienteIds.length > 0)
+      ops.push(supabase.from("reservas").update({ ...payload, estado: "programada" }).in("id", pendienteIds));
+    if (otrosIds.length > 0)
+      ops.push(supabase.from("reservas").update(payload).in("id", otrosIds));
+
+    const results = await Promise.all(ops);
+    const errores = results.filter(r => r.error);
+    if (errores.length > 0) alert(`Error al actualizar ${errores.length} lote(s). Revisa la consola.`);
+
+    setModalAplicarMasivo(null);
+    setAplicando(false);
+    cargarDatos();
   };
 
   const eliminarReserva = async (id: number) => {
@@ -743,6 +887,101 @@ export default function ReservasPage() {
         />
       )}
 
+      {/* MODAL APLICAR ASIGNACIÓN MASIVA A SERVICIOS FIJOS */}
+      {modalAplicarMasivo && (() => {
+        const { otrasReservas, resumen, cotizacion_id } = modalAplicarMasivo;
+        const targets = aplicarScope === "rango"
+          ? otrasReservas.filter(r =>
+              r.fecha_servicio &&
+              (!aplicarDesde || r.fecha_servicio >= aplicarDesde) &&
+              (!aplicarHasta  || r.fecha_servicio <= aplicarHasta))
+          : otrasReservas;
+        const fechas = otrasReservas.map(r => r.fecha_servicio).filter(Boolean).sort() as string[];
+        const minF = fechas[0] || "";
+        const maxF = fechas[fechas.length - 1] || "";
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
+              {/* Header */}
+              <div className="px-6 py-4 flex items-center gap-3 rounded-t-2xl" style={{ background: "#0b315f" }}>
+                <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center text-lg">📋</div>
+                <div>
+                  <p className="font-black text-white text-base">¿Aplicar a más servicios del contrato?</p>
+                  <p className="text-white/60 text-xs">Contrato #{cotizacion_id} · {otrasReservas.length} servicio(s) adicional(es)</p>
+                </div>
+              </div>
+
+              <div className="px-6 py-5 space-y-4">
+                {/* Resumen asignación */}
+                <div className="rounded-xl px-4 py-3 text-sm" style={{ background: "#f0fdf4", border: "1px solid #86efac" }}>
+                  <p className="text-[10px] font-black uppercase tracking-wide text-green-600 mb-0.5">Asignación guardada</p>
+                  <p className="font-bold text-green-800">{resumen || "—"}</p>
+                </div>
+
+                {/* Opciones */}
+                <div className="space-y-2">
+                  <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">¿A cuántos servicios aplicar?</p>
+
+                  <label className={`flex items-start gap-3 p-3 rounded-xl cursor-pointer border-2 transition-all ${aplicarScope === "todos" ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
+                    <input type="radio" name="scope" checked={aplicarScope === "todos"} onChange={() => setAplicarScope("todos")} className="mt-0.5 accent-[#0b315f]" />
+                    <div>
+                      <p className="font-bold text-sm text-gray-800">Todos los servicios del contrato</p>
+                      <p className="text-xs text-gray-500">{otrasReservas.length} servicio(s) · {minF ? fmtFecha(minF) : "—"} al {maxF ? fmtFecha(maxF) : "—"}</p>
+                    </div>
+                  </label>
+
+                  <label className={`flex items-start gap-3 p-3 rounded-xl cursor-pointer border-2 transition-all ${aplicarScope === "rango" ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
+                    <input type="radio" name="scope" checked={aplicarScope === "rango"} onChange={() => { setAplicarScope("rango"); setAplicarDesde(minF); setAplicarHasta(maxF); }} className="mt-0.5 accent-[#0b315f]" />
+                    <div className="flex-1">
+                      <p className="font-bold text-sm text-gray-800">Rango de fechas</p>
+                      <p className="text-xs text-gray-500 mb-2">Elige desde qué fecha hasta cuál</p>
+                      {aplicarScope === "rango" && (
+                        <div className="flex gap-2 flex-wrap">
+                          <div>
+                            <p className="text-[9px] font-black text-gray-400 uppercase mb-1">Desde</p>
+                            <input type="date" value={aplicarDesde} onChange={e => setAplicarDesde(e.target.value)} min={minF} max={maxF} className="border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-[#0b315f]" />
+                          </div>
+                          <div>
+                            <p className="text-[9px] font-black text-gray-400 uppercase mb-1">Hasta</p>
+                            <input type="date" value={aplicarHasta} onChange={e => setAplicarHasta(e.target.value)} min={minF} max={maxF} className="border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-[#0b315f]" />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </label>
+                </div>
+
+                {/* Preview conteo */}
+                <div className="rounded-xl px-4 py-2.5 text-xs font-bold flex items-center gap-2" style={{ background: "#e0f2fe", color: "#0369a1" }}>
+                  <span>📊</span>
+                  <span>Se actualizarán <b>{targets.length}</b> servicio(s) adicional(es)</span>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 pb-5 flex gap-3">
+                <button
+                  onClick={aplicarMasivo}
+                  disabled={aplicando || targets.length === 0}
+                  className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60"
+                  style={{ background: "#0b315f" }}
+                >
+                  {aplicando ? "Aplicando..." : `Aplicar a ${targets.length} servicio(s)`}
+                </button>
+                <button
+                  onClick={() => setModalAplicarMasivo(null)}
+                  disabled={aplicando}
+                  className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50 disabled:opacity-60"
+                >
+                  Solo este
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* MODAL LINKS DE COMPARTIR */}
       {modalLinksId !== null && (() => {
         const r = reservas.find(x => x.id === modalLinksId);
@@ -849,6 +1088,165 @@ export default function ReservasPage() {
         );
       })()}
 
+      {/* ── Modal: Asignar recurso en bloque ─────────────────────────────── */}
+      {modalAsignarBloque && (() => {
+        const { sinAsignar, todasLasFilas, cotizacionId } = modalAsignarBloque;
+        const targetsPreview: Reserva[] = bloqueScope === "pendientes"
+          ? sinAsignar
+          : todasLasFilas.filter(r =>
+              r.fecha_servicio &&
+              (!bloqueFechaDesde || r.fecha_servicio >= bloqueFechaDesde) &&
+              (!bloqueFechaHasta  || r.fecha_servicio <= bloqueFechaHasta)
+            );
+        const allDates = todasLasFilas.map(r => r.fecha_servicio).filter(Boolean).sort() as string[];
+        const minFB = allDates[0] || "";
+        const maxFB = allDates[allDates.length - 1] || "";
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4" style={{ background: "rgba(0,0,0,0.55)" }} onClick={() => setModalAsignarBloque(null)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col" style={{ maxHeight: "calc(100vh - 16px)" }} onClick={e => e.stopPropagation()}>
+
+              {/* Header */}
+              <div className="px-6 py-4 rounded-t-2xl shrink-0" style={{ background: "#0b315f" }}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center text-lg">🚌</div>
+                    <div>
+                      <h2 className="text-base font-black text-white">Programar en masa</h2>
+                      <p className="text-white/60 text-xs">
+                        {cotizacionId ? `Cot.#${cotizacionId} · ` : ""}{todasLasFilas.length} servicio(s) en el contrato
+                      </p>
+                    </div>
+                  </div>
+                  <button onClick={() => setModalAsignarBloque(null)} className="p-2 rounded-xl hover:bg-white/10 transition-colors shrink-0">
+                    <X size={18} className="text-white/70" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-6 space-y-5 overflow-y-auto flex-1">
+
+                {/* Selector de alcance */}
+                <div>
+                  <p className="text-[11px] font-black uppercase tracking-widest text-gray-400 mb-2">¿A qué servicios aplicar?</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className={`flex items-start gap-2.5 p-3 rounded-xl cursor-pointer border-2 transition-all ${bloqueScope === "pendientes" ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
+                      <input type="radio" name="bloqueScope" checked={bloqueScope === "pendientes"} onChange={() => setBloqueScope("pendientes")} className="mt-0.5 accent-[#0b315f]" />
+                      <div>
+                        <p className="font-bold text-sm text-gray-800">Sin asignar</p>
+                        <p className="text-[11px] text-gray-500">{sinAsignar.length} servicio(s) sin vehículo</p>
+                      </div>
+                    </label>
+                    <label className={`flex items-start gap-2.5 p-3 rounded-xl cursor-pointer border-2 transition-all ${bloqueScope === "rango" ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
+                      <input type="radio" name="bloqueScope" checked={bloqueScope === "rango"} onChange={() => setBloqueScope("rango")} className="mt-0.5 accent-[#0b315f]" />
+                      <div>
+                        <p className="font-bold text-sm text-gray-800">Rango de fechas</p>
+                        <p className="text-[11px] text-gray-500">Elige período específico</p>
+                      </div>
+                    </label>
+                  </div>
+
+                  {/* Pickers de fecha (solo en modo rango) */}
+                  {bloqueScope === "rango" && (
+                    <div className="mt-3 flex gap-3 flex-wrap">
+                      <div className="flex-1 min-w-[130px]">
+                        <p className="text-[9px] font-black uppercase text-gray-400 mb-1">Desde</p>
+                        <input
+                          type="date"
+                          value={bloqueFechaDesde}
+                          onChange={e => setBloqueFechaDesde(e.target.value)}
+                          min={minFB} max={maxFB}
+                          className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#0b315f]"
+                        />
+                      </div>
+                      <div className="flex-1 min-w-[130px]">
+                        <p className="text-[9px] font-black uppercase text-gray-400 mb-1">Hasta</p>
+                        <input
+                          type="date"
+                          value={bloqueFechaHasta}
+                          onChange={e => setBloqueFechaHasta(e.target.value)}
+                          min={minFB} max={maxFB}
+                          className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#0b315f]"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Asignación */}
+                <div>
+                  <p className="text-[11px] font-black uppercase tracking-widest text-gray-400 mb-2">Asignación</p>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Vehículo *</label>
+                      <select
+                        value={asignarVehId}
+                        onChange={e => setAsignarVehId(e.target.value)}
+                        className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f]"
+                      >
+                        <option value="">Seleccionar vehículo...</option>
+                        {vehiculos.filter(v => v.estado !== "inactivo").map(v => (
+                          <option key={v.id} value={v.id}>
+                            {v.placa} — {v.categoria || "Sin categoría"}{v.capacidad_pasajeros ? ` · ${v.capacidad_pasajeros} pax` : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Conductor <span className="text-gray-300 font-normal normal-case">(opcional)</span></label>
+                      <select
+                        value={asignarCondId}
+                        onChange={e => setAsignarCondId(e.target.value)}
+                        className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f]"
+                      >
+                        <option value="">Sin conductor por ahora</option>
+                        {conductores.filter(c => c.estado !== "inactivo").map(c => (
+                          <option key={c.id} value={c.id}>{c.nombre}{c.licencia ? ` · ${c.licencia}` : ""}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Preview */}
+                <div className="rounded-xl px-4 py-3 flex items-center gap-3" style={{ background: targetsPreview.length > 0 ? "#e0f2fe" : "#f3f4f6" }}>
+                  <span className="text-xl">📊</span>
+                  <div className="text-xs" style={{ color: targetsPreview.length > 0 ? "#0369a1" : "#9ca3af" }}>
+                    {targetsPreview.length > 0 ? (
+                      <>
+                        <b>{targetsPreview.length} servicio(s)</b> pasarán a <b>Programada</b> automáticamente.
+                        {targetsPreview.filter(r => r.estado !== "pendiente").length > 0 && (
+                          <span className="block mt-0.5 text-[10px] opacity-70">
+                            ({targetsPreview.filter(r => r.estado !== "pendiente").length} ya programados solo actualizan su recurso)
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      "No hay servicios en el rango seleccionado."
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="flex gap-3 px-6 py-4 border-t shrink-0" style={{ borderColor: "#e2e8f0" }}>
+                <button
+                  onClick={ejecutarAsignacionBloque}
+                  disabled={!asignarVehId || asignando || targetsPreview.length === 0}
+                  className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-40 transition-all"
+                  style={{ background: "#0b315f" }}
+                >
+                  {asignando ? "Programando..." : `Programar ${targetsPreview.length} servicio(s)`}
+                </button>
+                <button onClick={() => setModalAsignarBloque(null)} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {confirmEliminarId !== null && (() => {
         const r = reservas.find(x => x.id === confirmEliminarId);
         return (
@@ -895,6 +1293,8 @@ export default function ReservasPage() {
           destino={(reservaModal as any).destino || null}
           puntoRetorno={(reservaModal as any).punto_retorno || null}
           paradasJson={reservaModal.paradas_json || null}
+          cotizacionId={reservaModal.cotizacion_id}
+          vehiculoId={reservaModal.vehiculo_id}
           onClose={() => setModalReservaId(null)}
           onChange={async () => {
             await cargarOcupaciones();
@@ -1275,7 +1675,13 @@ export default function ReservasPage() {
                 const pendientesG  = filas.filter(r => r.estado === "pendiente").length;
                 const programadasG = filas.filter(r => r.estado === "programada").length;
                 const finalizadasG = filas.filter(r => r.estado === "finalizada").length;
-                const totalIngreso = filas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
+                const totalIngreso  = filas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
+                // Precio/día = ingreso total ÷ fechas únicas (correcto para multi-vehículo e IDA+RETORNO)
+                const fechasUnicas  = new Set(filas.map(r => r.fecha_servicio)).size;
+                const precioPorDia  = fechasUnicas > 0 ? totalIngreso / fechasUnicas : 0;
+                // Contar vehículos únicos: servicios IDA de un solo día
+                const primerDia     = filas.find(r => r.fecha_servicio)?.fecha_servicio;
+                const vehs          = primerDia ? filas.filter(r => r.fecha_servicio === primerDia && (r as any).direccion_servicio !== "retorno").length : 1;
 
                 return (
                   <div key={clave} className="border-t" style={{ borderColor: "#f1f5f9" }}>
@@ -1299,7 +1705,9 @@ export default function ReservasPage() {
                           </span>
                         </div>
                         <div className="flex items-center gap-3 mt-1.5 flex-wrap">
-                          <span className="text-[11px] text-gray-500">{filas.length} servicios en total</span>
+                          <span className="text-[11px] text-gray-500">{fechasUnicas} día{fechasUnicas !== 1 ? "s" : ""}</span>
+                          {vehs > 1 && <span className="text-[11px] text-gray-500">· {vehs} vehículos/día</span>}
+                          <span className="text-[11px] text-gray-500">· {filas.length} servicios en total</span>
                           {proxima && (
                             <span className="text-[11px] text-gray-500">
                               Próximo: <b>{fmtFecha(proxima.fecha_servicio)}</b>
@@ -1311,10 +1719,34 @@ export default function ReservasPage() {
                         </div>
                       </div>
 
-                      <div className="text-right shrink-0">
-                        <div className="font-bold text-gray-800 text-sm">{fmtSoles(Number(r0.precio_cliente || 0))}/día</div>
-                        <div className="text-[10px] text-gray-400 mt-0.5">
-                          {fmtSoles(totalIngreso)} ingreso total
+                      <div className="flex items-center gap-3 shrink-0">
+                        {/* Botón programar en masa (visible siempre que haya servicios activos) */}
+                        {filas.some(r => r.estado !== "cancelada" && r.estado !== "finalizada") && (
+                          <button
+                            onClick={e => {
+                              e.stopPropagation();
+                              const activas = filas.filter(r => r.estado !== "cancelada" && r.estado !== "finalizada");
+                              const sinAsig = filas.filter(r => !r.vehiculo_id && !r.empresa_tercerizada_id);
+                              const dates = activas.map(r => r.fecha_servicio).filter(Boolean).sort() as string[];
+                              setModalAsignarBloque({ cotizacionId: cotId, sinAsignar: sinAsig, todasLasFilas: activas });
+                              setBloqueScope("pendientes");
+                              setBloqueFechaDesde(dates[0] || "");
+                              setBloqueFechaHasta(dates[dates.length - 1] || "");
+                              setAsignarVehId("");
+                              setAsignarCondId("");
+                            }}
+                            className="flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-xl transition-all border"
+                            style={{ background: "#fff7ed", color: "#c2410c", borderColor: "#fed7aa" }}
+                            title="Programar en masa: asignar vehículo y conductor a varios servicios"
+                          >
+                            🚌 Programar en masa
+                          </button>
+                        )}
+                        <div className="text-right">
+                          <div className="font-bold text-gray-800 text-sm">{fmtSoles(precioPorDia)}/día</div>
+                          <div className="text-[10px] text-gray-400 mt-0.5">
+                            {fmtSoles(totalIngreso)} ingreso total
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -1341,8 +1773,16 @@ export default function ReservasPage() {
                               return (
                                 <tr key={r.id} className="border-t hover:bg-white transition-colors" style={{ borderColor: "#e2e8f0" }}>
                                   <td className="px-4 py-2.5">
-                                    <span className="font-medium text-gray-700">{fmtFecha(r.fecha_servicio)}</span>
-                                    {esHoyR && <span className="ml-1.5 text-[9px] font-bold text-orange-500">HOY</span>}
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="font-medium text-gray-700">{fmtFecha(r.fecha_servicio)}</span>
+                                      {esHoyR && <span className="text-[9px] font-bold text-orange-500">HOY</span>}
+                                      {r.direccion_servicio === "ida" && (
+                                        <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: "#dbeafe", color: "#1d4ed8" }}>IDA</span>
+                                      )}
+                                      {r.direccion_servicio === "retorno" && (
+                                        <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: "#ede9fe", color: "#6d28d9" }}>RETORNO</span>
+                                      )}
+                                    </div>
                                   </td>
                                   <td className="px-4 py-2.5 capitalize text-gray-500">{diaSem}</td>
                                   <td className="px-4 py-2.5 text-gray-500">{r.hora_servicio?.slice(0,5) || "-"}</td>
@@ -1359,7 +1799,7 @@ export default function ReservasPage() {
                                   <td className="px-4 py-2.5 text-gray-600 max-w-[160px]">
                                     <div className="truncate">
                                       {esTer
-                                        ? nombreEmpTer(r.empresa_tercerizada_id)
+                                        ? nombreEmpTer(r.empresa_tercerizada_id) + (r.vehiculo_tercero_id && nombreVehTercero(r.vehiculo_tercero_id) !== "-" ? " · " + nombreVehTercero(r.vehiculo_tercero_id) : "")
                                         : (nombreVehiculo(r.vehiculo_id) !== "-" ? nombreVehiculo(r.vehiculo_id) + " · " + nombreConductor(r.conductor_id) : "Sin asignar")}
                                     </div>
                                   </td>

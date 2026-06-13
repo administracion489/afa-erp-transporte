@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/lib/supabase";
+import { parsearManifiesto, descargarPlantilla } from "@/lib/manifiesto-csv";
 
 /* ══════════════════════════════════════════════
    TYPES
@@ -12,6 +13,16 @@ type EstadoSolicitud = "pendiente" | "en_revision" | "aprobada" | "rechazada";
 type Tab            = "clientes" | "solicitudes";
 type SortDir        = "asc" | "desc";
 type Toast          = { id: number; msg: string; type: "ok" | "error" | "info" };
+
+type PasajeroCliente = {
+  id: number;
+  nombre: string;
+  dni: string;
+  telefono: string | null;
+  empresa: string | null;
+  email: string | null;
+  pin_acceso: string | null;
+};
 
 type Contacto = {
   id?: number;
@@ -730,6 +741,15 @@ export default function ClientesPage() {
   const [docCategoria, setDocCategoria] = useState("Contratos");
   const [toDeleteDoc,  setToDeleteDoc]  = useState<{ id: number; nombre: string; storage_path: string } | null>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
+  const [nominaMap,        setNominaMap]        = useState<Record<number, PasajeroCliente[]>>({});
+  const [loadingNomina,    setLoadingNomina]    = useState(false);
+  const [importandoNomina, setImportandoNomina] = useState(false);
+  const [nominaExpandida,  setNominaExpandida]  = useState(false);
+  const [editandoPax,      setEditandoPax]      = useState<PasajeroCliente | null>(null);
+  const [formPax,          setFormPax]          = useState({ nombre: "", dni: "", telefono: "", empresa: "", email: "", pin_acceso: "" });
+  const [savingPax,        setSavingPax]        = useState(false);
+  const [enviandoCreds,    setEnviandoCreds]    = useState<Set<number>>(new Set());
+  const nominaInputRef = useRef<HTMLInputElement>(null);
 
   // Derivado: cliente actualmente expandido
   const accesoCliente = expandidoId ? (clientes.find(c => c.id === expandidoId) ?? null) : null;
@@ -774,6 +794,110 @@ export default function ClientesPage() {
     setToDeleteDoc(null);
   };
 
+  const cargarNomina = async (clienteId: number) => {
+    setLoadingNomina(true);
+    const { data } = await supabase
+      .from("pasajeros")
+      .select("id, nombre, dni, telefono, empresa, email, pin_acceso")
+      .eq("cliente_id", clienteId)
+      .is("reserva_id", null)
+      .order("nombre");
+    setNominaMap(prev => ({ ...prev, [clienteId]: (data || []) as PasajeroCliente[] }));
+    setLoadingNomina(false);
+  };
+
+  const handleNominaArchivo = async (file: File, clienteId: number) => {
+    setImportandoNomina(true);
+    try {
+      const resultado = await parsearManifiesto(file);
+      if (resultado.ok.length === 0) {
+        toast("El archivo no tiene pasajeros válidos" + (resultado.errores.length ? `: ${resultado.errores[0].motivo}` : ""), "error");
+        return;
+      }
+      // Diagnóstico: cuántos emails vienen en el archivo
+      const emailsEnArchivo = resultado.ok.filter(p => p.email).length;
+      if (emailsEnArchivo === 0) {
+        toast(`⚠ Sin columna "Email" reconocida. Cabeceras aceptadas: Email, correo, mail`, "error");
+        return;
+      }
+
+      // Upsert via API route (service role — evita RLS)
+      const res = await fetch("/api/pasajeros/upsert-nomina", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clienteId,
+          pasajeros: resultado.ok.map(p => ({
+            nombre: p.nombre, dni: p.dni, telefono: p.telefono,
+            empresa: p.empresa, email: p.email,
+          })),
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) { toast(json.error || "Error al guardar", "error"); return; }
+
+      const { insertados, actualizados, errores: erroresApi, mensajesError } = json;
+      const partes = [];
+      if (insertados)   partes.push(`${insertados} nuevo(s)`);
+      if (actualizados) partes.push(`${actualizados} actualizado(s) · ${emailsEnArchivo} con email`);
+      if (erroresApi)   partes.push(`⚠ ${erroresApi} error(es): ${mensajesError?.[0] || ""}`);
+      toast(partes.join(" · ") + (erroresApi ? "" : " ✓"), erroresApi ? "error" : "ok");
+      await cargarNomina(clienteId);
+    } finally {
+      setImportandoNomina(false);
+    }
+  };
+
+  const abrirEditarPax = (p: PasajeroCliente) => {
+    setEditandoPax(p);
+    setFormPax({ nombre: p.nombre, dni: p.dni, telefono: p.telefono || "", empresa: p.empresa || "", email: p.email || "", pin_acceso: p.pin_acceso || "" });
+  };
+
+  const guardarPax = async () => {
+    if (!editandoPax) return;
+    setSavingPax(true);
+    const res = await fetch("/api/pasajeros/upsert-nomina", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: editandoPax.id,
+        campos: {
+          nombre:     formPax.nombre.trim(),
+          dni:        formPax.dni.trim(),
+          telefono:   formPax.telefono.trim()   || null,
+          empresa:    formPax.empresa.trim()    || null,
+          email:      formPax.email.trim()      || null,
+          pin_acceso: formPax.pin_acceso.trim() || null,
+        },
+      }),
+    });
+    const json = await res.json();
+    if (!res.ok) { toast(json.error || "Error al guardar", "error"); }
+    else {
+      toast("Pasajero actualizado ✓", "ok");
+      setEditandoPax(null);
+      if (expandidoId) await cargarNomina(expandidoId);
+    }
+    setSavingPax(false);
+  };
+
+  const enviarCredenciales = async (ids: number[]) => {
+    setEnviandoCreds(new Set(ids));
+    try {
+      const res = await fetch("/api/pasajeros/credenciales", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pasajeroIds: ids }),
+      });
+      const json = await res.json();
+      if (!res.ok) { toast(json.error || "Error al enviar", "error"); return; }
+      const { enviados, sinEmail, errores } = json;
+      const msg = `${enviados} enviado(s)${sinEmail ? ` · ${sinEmail} sin email` : ""}${errores ? ` · ${errores} error(es)` : ""}`;
+      toast(msg, enviados > 0 ? "ok" : "info");
+    } finally {
+      setEnviandoCreds(new Set());
+    }
+  };
+
   const expandirCliente = (c: Cliente) => {
     const newId = expandidoId === c.id ? null : c.id;
     setExpandidoId(newId);
@@ -782,6 +906,7 @@ export default function ClientesPage() {
       setExpandDocs([]);
       cargarPortalUsers(newId);
       cargarDocumentos(newId);
+      cargarNomina(newId);
     }
   };
 
@@ -899,6 +1024,77 @@ export default function ClientesPage() {
       `}</style>
 
       <ToastStack toasts={toasts} remove={removeToast} />
+
+      {/* ── Modal editar pasajero ── */}
+      {editandoPax && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(15,23,42,0.55)" }}
+          onClick={() => setEditandoPax(null)}>
+          <div style={{ background: "white", borderRadius: 18, boxShadow: "0 20px 60px rgba(0,0,0,.18)", width: "100%", maxWidth: 480, overflow: "hidden" }}
+            onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div style={{ background: "#0b315f", padding: "18px 24px" }}>
+              <p style={{ color: "white", fontWeight: 800, fontSize: 15, margin: 0 }}>Editar pasajero</p>
+              <p style={{ color: "#93c5fd", fontSize: 12, margin: "2px 0 0" }}>DNI es el usuario de acceso · PIN para ingresar a la app</p>
+            </div>
+            {/* Body */}
+            <div style={{ padding: "20px 24px", display: "flex", flexDirection: "column", gap: 14 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 4px" }}>Nombre completo *</p>
+                  <input value={formPax.nombre} onChange={e => setFormPax(f => ({ ...f, nombre: e.target.value }))}
+                    style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 9, padding: "8px 12px", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+                </div>
+                <div>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 4px" }}>DNI *</p>
+                  <input value={formPax.dni} onChange={e => setFormPax(f => ({ ...f, dni: e.target.value }))}
+                    style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 9, padding: "8px 12px", fontSize: 13, fontFamily: "monospace", outline: "none", boxSizing: "border-box" }} />
+                </div>
+                <div>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 4px" }}>Teléfono</p>
+                  <input value={formPax.telefono} onChange={e => setFormPax(f => ({ ...f, telefono: e.target.value }))}
+                    style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 9, padding: "8px 12px", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+                </div>
+                <div>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 4px" }}>Empresa</p>
+                  <input value={formPax.empresa} onChange={e => setFormPax(f => ({ ...f, empresa: e.target.value }))}
+                    style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 9, padding: "8px 12px", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 4px" }}>Email (para enviar credenciales)</p>
+                  <input type="email" value={formPax.email} onChange={e => setFormPax(f => ({ ...f, email: e.target.value }))}
+                    placeholder="correo@empresa.com"
+                    style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 9, padding: "8px 12px", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+                </div>
+                <div>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 4px" }}>PIN de acceso (4 dígitos)</p>
+                  <input value={formPax.pin_acceso} onChange={e => setFormPax(f => ({ ...f, pin_acceso: e.target.value.replace(/\D/g, "").slice(0,4) }))}
+                    placeholder={`default: ${formPax.dni.slice(-4) || "últimos 4 del DNI"}`}
+                    maxLength={4}
+                    style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 9, padding: "8px 12px", fontSize: 16, fontFamily: "monospace", letterSpacing: 4, outline: "none", boxSizing: "border-box" }} />
+                  <p style={{ fontSize: 10, color: "#94a3b8", margin: "4px 0 0" }}>Vacío = últimos 4 dígitos del DNI como PIN</p>
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-end" }}>
+                  <button onClick={e => { e.stopPropagation(); if (editandoPax) enviarCredenciales([editandoPax.id]); }} disabled={!formPax.email || enviandoCreds.size > 0}
+                    style={{ width: "100%", padding: "8px 12px", borderRadius: 9, border: "1px solid #0b315f", background: "white", fontSize: 12, fontWeight: 700, cursor: formPax.email ? "pointer" : "not-allowed", color: formPax.email ? "#0b315f" : "#94a3b8", opacity: formPax.email ? 1 : 0.5 }}>
+                    {enviandoCreds.size > 0 ? "Enviando..." : "✉ Enviar credenciales"}
+                  </button>
+                </div>
+              </div>
+            </div>
+            {/* Footer */}
+            <div style={{ padding: "12px 24px 20px", display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button onClick={() => setEditandoPax(null)}
+                style={{ padding: "9px 20px", borderRadius: 10, border: "1px solid #e5e7eb", background: "white", fontSize: 13, fontWeight: 600, cursor: "pointer", color: "#374151" }}>
+                Cancelar
+              </button>
+              <button onClick={guardarPax} disabled={savingPax || !formPax.nombre.trim() || !formPax.dni.trim()}
+                style={{ padding: "9px 24px", borderRadius: 10, border: "none", background: savingPax ? "#94a3b8" : "#0b315f", color: "white", fontSize: 13, fontWeight: 700, cursor: savingPax ? "not-allowed" : "pointer" }}>
+                {savingPax ? "Guardando..." : "Guardar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {toDelete && (
         <ConfirmModal title="¿Eliminar cliente?" danger
@@ -1617,6 +1813,68 @@ export default function ClientesPage() {
                                   </div>
                                 )}
                               </div>
+
+                              {/* ── Nómina de pasajeros ── */}
+                              {(() => {
+                                const nomina = nominaMap[expandidoId!] || [];
+                                const conEmail = nomina.filter(p => p.email);
+                                return (
+                                  <div style={{ borderTop: "1px solid #e2e8f0", marginTop: 16, paddingTop: 16 }}>
+                                    {/* Header row */}
+                                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                                      <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#64748b", margin: 0, flex: 1 }}>
+                                        Nómina de pasajeros {loadingNomina ? "…" : `(${nomina.length})`}
+                                      </p>
+                                      {nomina.length > 0 && (
+                                        <button onClick={e => { e.stopPropagation(); setNominaExpandida(v => !v); }}
+                                          style={{ padding: "4px 10px", borderRadius: 7, border: "1px solid #e5e7eb", background: "white", fontSize: 10, fontWeight: 600, cursor: "pointer", color: "#374151" }}>
+                                          {nominaExpandida ? "⊖ Compactar" : "⊕ Expandir"}
+                                        </button>
+                                      )}
+                                      {conEmail.length > 0 && (
+                                        <button onClick={e => { e.stopPropagation(); enviarCredenciales(nomina.map(p => p.id)); }} disabled={enviandoCreds.size > 0}
+                                          style={{ padding: "4px 12px", borderRadius: 7, border: "none", background: enviandoCreds.size > 0 ? "#94a3b8" : "#16a34a", color: "white", fontSize: 10, fontWeight: 700, cursor: enviandoCreds.size > 0 ? "not-allowed" : "pointer" }}>
+                                          {enviandoCreds.size > 0 ? "Enviando..." : `✉ Enviar credenciales (${conEmail.length})`}
+                                        </button>
+                                      )}
+                                      <button onClick={e => { e.stopPropagation(); descargarPlantilla(); }}
+                                        style={{ padding: "4px 10px", borderRadius: 7, border: "1px solid #e5e7eb", background: "white", fontSize: 10, fontWeight: 600, cursor: "pointer", color: "#374151" }}>
+                                        ↓ Plantilla
+                                      </button>
+                                      <button onClick={e => { e.stopPropagation(); nominaInputRef.current?.click(); }} disabled={importandoNomina}
+                                        style={{ padding: "4px 12px", borderRadius: 7, border: "none", background: importandoNomina ? "#94a3b8" : "#0b315f", color: "white", fontSize: 10, fontWeight: 700, cursor: importandoNomina ? "not-allowed" : "pointer" }}>
+                                        {importandoNomina ? "Importando..." : "+ Subir Excel"}
+                                      </button>
+                                      <input ref={nominaInputRef} type="file" accept=".xls,.xlsx,.csv" style={{ display: "none" }}
+                                        onChange={e => { e.stopPropagation(); const file = e.target.files?.[0]; if (file && expandidoId) handleNominaArchivo(file, expandidoId); e.target.value = ""; }} />
+                                    </div>
+                                    {/* List */}
+                                    {loadingNomina ? (
+                                      <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>Cargando nómina...</p>
+                                    ) : nomina.length === 0 ? (
+                                      <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>Sin pasajeros. Usa "+ Subir Excel" para importar la nómina (mismo formato que el manifiesto).</p>
+                                    ) : (
+                                      <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: nominaExpandida ? "none" : 240, overflowY: nominaExpandida ? "visible" : "auto" }}>
+                                        {nomina.map(p => (
+                                          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 10px", background: "white", borderRadius: 8, border: "1px solid #f1f5f9" }}>
+                                            <span style={{ fontWeight: 700, fontSize: 11, color: "#0f172a", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.nombre}</span>
+                                            <span style={{ fontSize: 10, color: "#64748b", fontFamily: "monospace", flexShrink: 0 }}>{p.dni}</span>
+                                            {p.empresa && <span style={{ fontSize: 10, color: "#94a3b8", flexShrink: 0, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.empresa}</span>}
+                                            {p.email
+                                              ? <span style={{ fontSize: 10, color: "#16a34a", flexShrink: 0 }}>✓ email</span>
+                                              : <span style={{ fontSize: 10, color: "#f59e0b", flexShrink: 0 }}>sin email</span>}
+                                            <button onClick={e => { e.stopPropagation(); abrirEditarPax(p); }}
+                                              style={{ padding: "3px 8px", borderRadius: 6, border: "1px solid #e5e7eb", background: "white", fontSize: 10, fontWeight: 600, cursor: "pointer", color: "#374151", flexShrink: 0 }}>✎</button>
+                                            <button onClick={e => { e.stopPropagation(); enviarCredenciales([p.id]); }} disabled={!p.email || enviandoCreds.has(p.id)}
+                                              title={p.email ? "Enviar credenciales" : "Agrega un email primero"}
+                                              style={{ padding: "3px 8px", borderRadius: 6, border: "1px solid #e5e7eb", background: "white", fontSize: 10, fontWeight: 600, cursor: p.email ? "pointer" : "not-allowed", color: p.email ? "#0b315f" : "#cbd5e1", flexShrink: 0, opacity: p.email ? 1 : 0.5 }}>✉</button>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })()}
 
                               {/* ── Documentos ── */}
                               <div style={{ borderTop: "1px solid #e2e8f0", marginTop: 16, paddingTop: 16 }}>

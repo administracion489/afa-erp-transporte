@@ -45,8 +45,14 @@ function fmtFecha(f: string | null) {
   return new Date(f + "T00:00:00").toLocaleDateString("es-PE", { weekday: "long", day: "numeric", month: "long" });
 }
 
+const TIPOS_SERVICIO_FIJO = new Set([
+  "transporte_personal",
+  "fijo_solo_ida",
+  "fijo_multiparada",
+  "fijo_reten",
+]);
 function esEventual(r: Reserva): boolean {
-  return r.tipo_servicio_detalle !== "transporte_personal";
+  return !TIPOS_SERVICIO_FIJO.has(r.tipo_servicio_detalle || "");
 }
 
 function ModalReserva({ reserva, cliente, vehiculo, conductor, onCerrar, onCambiarEstado }: {

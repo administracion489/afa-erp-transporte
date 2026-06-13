@@ -100,7 +100,13 @@ function calcularEstadoVisual(r: Reserva): EstadoVisual {
   }
   return "programado";
 }
-function esEventual(r: Reserva): boolean { return r.tipo_servicio_detalle !== "transporte_personal"; }
+const TIPOS_SERVICIO_FIJO_SEG = new Set([
+  "transporte_personal",
+  "fijo_solo_ida",
+  "fijo_multiparada",
+  "fijo_reten",
+]);
+function esEventual(r: Reserva): boolean { return !TIPOS_SERVICIO_FIJO_SEG.has(r.tipo_servicio_detalle || ""); }
 function riesgoEmpresaDocs(docs: DocTer[], empresaId: number|null): boolean {
   if (!empresaId) return false;
   const OBL = ["SOAT","Revisión Técnica (CITV)","Habilitación SUTRAN","Permiso Operación MTC"];

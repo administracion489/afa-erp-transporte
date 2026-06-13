@@ -73,7 +73,21 @@
       "PowerShell(Get-Process -Name node -ErrorAction SilentlyContinue)",
       "PowerShell(Get-Content \".next\\\\dev\\\\logs\\\\next-development.log\" -Tail 80 | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.level -ne \"INFO\" -and $_.level -ne \"WARN\" -and $_.level -ne \"LOG\" } | Format-List)",
       "Bash(chmod +x .git/hooks/post-push)",
-      "Bash(rm .git/hooks/post-push)"
+      "Bash(rm .git/hooks/post-push)",
+      "Bash(taskkill /PID 6932 /F)",
+      "PowerShell(Stop-Process -Id 6932 -Force -ErrorAction SilentlyContinue)",
+      "Bash(xargs grep -l \"reserva\")",
+      "Bash(taskkill /PID 15800 /F)",
+      "PowerShell(Stop-Process -Id 15800 -Force -ErrorAction SilentlyContinue)",
+      "Bash(curl -s 'https://qakhcezrmpksxgiwzmvd.supabase.co/rest/v1/pasajeros?cliente_id=eq.0&limit=1' -H 'apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFha2hjZXpybXBrc3hnaXd6bXZkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzU2NzczMywiZXhwIjoyMDkzMTQzNzMzfQ.Sl3M6JfTDQ65fmi6L-OC0j6Ojecb3FnI4MWhECxtZfk' -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFha2hjZXpybXBrc3hnaXd6bXZkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzU2NzczMywiZXhwIjoyMDkzMTQzNzMzfQ.Sl3M6JfTDQ65fmi6L-OC0j6Ojecb3FnI4MWhECxtZfk')",
+      "Bash(curl -s 'https://qakhcezrmpksxgiwzmvd.supabase.co/rest/v1/pasajeros?reserva_id=is.null&limit=1&order=id.desc' -H 'apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFha2hjZXpybXBrc3hnaXd6bXZkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzU2NzczMywiZXhwIjoyMDkzMTQzNzMzfQ.Sl3M6JfTDQ65fmi6L-OC0j6Ojecb3FnI4MWhECxtZfk' -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFha2hjZXpybXBrc3hnaXd6bXZkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzU2NzczMywiZXhwIjoyMDkzMTQzNzMzfQ.Sl3M6JfTDQ65fmi6L-OC0j6Ojecb3FnI4MWhECxtZfk')",
+      "Bash(curl -s -X PATCH https://qakhcezrmpksxgiwzmvd.supabase.co/rest/v1/pasajeros?id=eq.76 -H 'apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFha2hjZXpybXBrc3hnaXd6bXZkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzU2NzczMywiZXhwIjoyMDkzMTQzNzMzfQ.Sl3M6JfTDQ65fmi6L-OC0j6Ojecb3FnI4MWhECxtZfk' -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFha2hjZXpybXBrc3hnaXd6bXZkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzU2NzczMywiZXhwIjoyMDkzMTQzNzMzfQ.Sl3M6JfTDQ65fmi6L-OC0j6Ojecb3FnI4MWhECxtZfk' -H 'Content-Type: application/json' -H 'Prefer: return=representation' -d '{\"email\":\"test@prueba.com\"}' -w '\\\\nHTTP_STATUS:%{http_code}\\\\n')",
+      "Bash(curl -s -X POST http://localhost:3000/api/pasajeros/upsert-nomina -H 'Content-Type: application/json' -d '{}' -w '\\\\nHTTP_STATUS:%{http_code}\\\\n' --max-time 10)",
+      "Bash(curl -s -X POST http://localhost:3000/api/pasajeros/upsert-nomina -H 'Content-Type: application/json' -d '{\"clienteId\":16,\"pasajeros\":[{\"nombre\":\"PEREGRINO GOICOCHEA INGRID GISELA\",\"dni\":\"48110688\",\"telefono\":\"918096316\",\"empresa\":\"SNACKS AMERICA LATINA S.R.L.\",\"email\":\"ingrid.test@snacks.com\"}]}' -w '\\\\nHTTP_STATUS:%{http_code}\\\\n' --max-time 15)",
+      "Bash(curl -s 'https://qakhcezrmpksxgiwzmvd.supabase.co/rest/v1/pasajeros?id=eq.76&select=id,nombre,email' -H 'apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFha2hjZXpybXBrc3hnaXd6bXZkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzU2NzczMywiZXhwIjoyMDkzMTQzNzMzfQ.Sl3M6JfTDQ65fmi6L-OC0j6Ojecb3FnI4MWhECxtZfk' -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFha2hjZXpybXBrc3hnaXd6bXZkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzU2NzczMywiZXhwIjoyMDkzMTQzNzMzfQ.Sl3M6JfTDQ65fmi6L-OC0j6Ojecb3FnI4MWhECxtZfk')",
+      "Bash(file public/Logoafapasajeros.png public/Logoafapasajeros3.png public/bussinfondo3.png public/icon-afa-pasajero.png)",
+      "Bash(ls -la public/Logoafapasajeros.png public/Logoafapasajeros3.png public/bussinfondo3.png public/icon-afa-pasajero.png)",
+      "Bash(dir public\\\\*.png)"
     ]
   }
 }
