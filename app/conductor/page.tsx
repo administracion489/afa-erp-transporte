@@ -304,7 +304,7 @@ export default function ConductorApp() {
 
   useEffect(() => {
     const saved = loadSession();
-    if (saved) { setConductor(saved); cargarDatos(saved.id); }
+    if (saved) { setConductor(saved); cargarDatos(saved.id, saved._tabla); }
     setIniting(false);
     return () => cleanup();
   }, []);
@@ -332,7 +332,7 @@ export default function ConductorApp() {
       if (!data.activo_app) { setLoginErr("Acceso no activado. Llama a central."); setLoginLoading(false); return; }
       if (data.pin_acceso !== pin) { setLoginErr("PIN incorrecto"); setLoginLoading(false); return; }
       const c = { ...data, _tabla: "conductores" as const };
-      saveSession(c); setConductor(c); await cargarDatos(c.id); setLoginLoading(false);
+      saveSession(c); setConductor(c); await cargarDatos(c.id, c._tabla); setLoginLoading(false);
       return;
     }
 
@@ -345,22 +345,25 @@ export default function ConductorApp() {
     if (!data2.activo_app) { setLoginErr("Acceso no activado. Llama a central."); setLoginLoading(false); return; }
     if (data2.pin_acceso !== pin) { setLoginErr("PIN incorrecto"); setLoginLoading(false); return; }
     const c2 = { ...data2, _tabla: "conductores_tercero" as const };
-    saveSession(c2); setConductor(c2); await cargarDatos(c2.id); setLoginLoading(false);
+    saveSession(c2); setConductor(c2); await cargarDatos(c2.id, c2._tabla); setLoginLoading(false);
   }
 
   // ─── Cargar datos ───────────────────────────────────────────────────────────
 
-  const cargarDatos = useCallback(async (cid: number) => {
+  const cargarDatos = useCallback(async (cid: number, tabla?: string) => {
     setCargando(true);
     const hoy = getFechaLocal();
     setDebugFecha(hoy);
+    const esTercero = tabla === "conductores_tercero";
+    const condField = esTercero ? "conductor_tercero_id" : "conductor_id";
 
-    const [vR, rR, dR, ckR] = await Promise.all([
+    const [vR, vTR, rR, dR, ckR] = await Promise.all([
       supabase.from("vehiculos").select("id,placa,categoria,marca").order("placa"),
+      supabase.from("vehiculos_tercero").select("id,placa,categoria,marca").order("placa"),
       supabase.from("reservas")
-        .select("id,origen,destino,fecha_servicio,hora_servicio,vehiculo_id")
+        .select("id,origen,destino,fecha_servicio,hora_servicio,vehiculo_id,vehiculo_tercero_id")
         .eq("fecha_servicio", hoy)
-        .eq("conductor_id", cid)
+        .eq(condField, cid)
         .order("hora_servicio"),
       supabase.from("documentos_conductor")
         .select("*")
@@ -374,12 +377,15 @@ export default function ConductorApp() {
     ]);
 
     const res: Reserva[] = rR.data || [];
-    // Solo mostrar vehículos asignados a las reservas de este conductor
-    const vehiculoIds = new Set(res.map(r => r.vehiculo_id).filter(Boolean));
-    setVehiculos((vR.data || []).filter(v => vehiculoIds.has(v.id)));
+    // Combinar vehículos propios y de tercero; usar el id correcto según el tipo de reserva
+    const vehiculoIds    = new Set(res.map(r => r.vehiculo_id).filter(Boolean));
+    const vehiculoTerIds = new Set(res.map(r => (r as any).vehiculo_tercero_id).filter(Boolean));
+    const propios  = ((vR.data  || []) as Vehiculo[]).filter(v => vehiculoIds.has(v.id));
+    const terceros = ((vTR.data || []) as Vehiculo[]).filter(v => vehiculoTerIds.has(v.id));
+    setVehiculos([...propios, ...terceros]);
     setReservasHoy(res);
     // Auto-seleccionar vehículo si todas las reservas usan el mismo
-    const vidsUnicos = [...vehiculoIds];
+    const vidsUnicos = [...new Set([...vehiculoIds, ...vehiculoTerIds])];
     if (vidsUnicos.length === 1) setVehiculoId(vidsUnicos[0] as number);
     setDocs(dR.data || []);
     if (ckR.data && ckR.data.length > 0) setCheckDone(true);
@@ -1401,7 +1407,7 @@ export default function ConductorApp() {
                   {debugFecha}
                 </p>
                 <SecondaryBtn
-                  onClick={() => conductor && cargarDatos(conductor.id)}
+                  onClick={() => conductor && cargarDatos(conductor.id, conductor._tabla)}
                   icon={<IconRefresh size={16} color="var(--c-ink)" />}
                   full={false}
                 >

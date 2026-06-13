@@ -84,6 +84,7 @@ const C = {
 };
 
 const ESTADO: Record<string, { bg: string; c: string; label: string; dot: string }> = {
+  programada: { bg: "#F1F5F9", c: "#475569", label: "Programada", dot: "#94A3B8" },
   pendiente:  { bg: "#FBEFD5", c: "#A65B0A", label: "Pendiente",  dot: "#D97706" },
   completado: { bg: "#EFEFEC", c: "#1F2433", label: "Completado", dot: "#6B6F7C" },
   realizado:  { bg: "#EFEFEC", c: "#1F2433", label: "Realizado",  dot: "#6B6F7C" },
@@ -227,6 +228,7 @@ export default function ClientePortal() {
   // Filtros historial
   const [filtroEstado,   setFiltroEstado]   = useState("todos");
   const [filtroBusqueda, setFiltroBusqueda] = useState("");
+  const [vistaAgenda,    setVistaAgenda]    = useState(false);
   const [reservaStats,   setReservaStats]   = useState<Record<number, { embarcados: number; esperados: number }>>({});
   const [loadingStats,   setLoadingStats]   = useState(false);
 
@@ -247,6 +249,15 @@ export default function ClientePortal() {
   const [vehiculosCliente,  setVehiculosCliente]  = useState<{id:number;placa:string}[]>([]);
   const [ubicacionesEnVivo, setUbicacionesEnVivo] = useState<{vehiculo_id:number;lat:number;lng:number;velocidad:number;timestamp:string}[]>([]);
   const [mapListoEnVivo,    setMapListoEnVivo]    = useState(false);
+  const [rutaSelId,         setRutaSelId]         = useState<number | null>(null);
+  const [rutasEnVivoMap,    setRutasEnVivoMap]    = useState<Record<number, [number,number][]>>({});
+  const [huellaGpsMap,      setHuellaGpsMap]      = useState<Record<number, {lat:number;lng:number;velocidad:number;ts:string|null}[]>>({});
+  const [paradasResueltasMap, setParadasResueltasMap] = useState<Record<number, Parada[]>>({});
+  const dibujoLayersRef  = useRef<string[]>([]);
+  const dibujoSourcesRef = useRef<string[]>([]);
+  const stopMarkersRef   = useRef<mapboxgl.Marker[]>([]);
+  const lastFitRef       = useRef<number | null>(null);
+  const serviciosHoyRef  = useRef<Reserva[]>([]);
 
   // ─── Init ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -427,16 +438,32 @@ export default function ClientePortal() {
       );
     }
 
+    const ra = r as any;
     if (r.conductor_id) {
+      // Propio: conductor desde tabla conductores
       tasks.push(
         supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", r.conductor_id).maybeSingle()
           .then(({ data }) => { if (data) setConductorInfo(data as ConductorInfo); })
       );
+    } else if (ra.conductor_tercero_id) {
+      // Tercerizado con conductor asignado (no revelar empresa al cliente)
+      tasks.push(
+        supabase.from("conductores_tercero").select("nombre,telefono").eq("id", ra.conductor_tercero_id).maybeSingle()
+          .then(({ data }) => { if (data) setConductorInfo({ nombre: (data as any).nombre, telefono: (data as any).telefono || "" } as ConductorInfo); })
+      );
+    } else if (ra.empresa_tercerizada_id) {
+      // Tercerizado sin conductor específico aún asignado
+      setConductorInfo({ nombre: "Conductor asignado", telefono: "" } as ConductorInfo);
     }
 
     if (r.vehiculo_id) {
       tasks.push(
         supabase.from("vehiculos").select("placa").eq("id", r.vehiculo_id).maybeSingle()
+          .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
+      );
+    } else if (ra.vehiculo_tercero_id) {
+      tasks.push(
+        supabase.from("vehiculos_tercero").select("placa").eq("id", ra.vehiculo_tercero_id).maybeSingle()
           .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
       );
     }
@@ -646,6 +673,11 @@ export default function ClientePortal() {
       if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
       Object.values(markersEnVivo.current).forEach(m => m.remove());
       markersEnVivo.current = {};
+      stopMarkersRef.current.forEach(m => m.remove());
+      stopMarkersRef.current = [];
+      dibujoLayersRef.current = [];
+      dibujoSourcesRef.current = [];
+      lastFitRef.current = null;
       setMapListoEnVivo(false);
       return;
     }
@@ -677,8 +709,9 @@ export default function ClientePortal() {
       const color = min <= 2 ? "#16a34a" : min <= 10 ? "#d97706" : "#dc2626";
       const label = min <= 2 ? "En línea" : min <= 10 ? `Hace ${min}m` : "Sin señal";
       const el = document.createElement("div");
-      el.style.cssText = `width:32px;height:32px;border-radius:50%;background:${color};border:2.5px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;cursor:pointer;`;
-      el.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>`;
+      el.style.cssText = `width:34px;height:34px;border-radius:9px;background:${color};border:2.5px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;cursor:pointer;`;
+      // Ícono de bus
+      el.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M4 16c0 .88.39 1.67 1 2.22V20a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1h8v1a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1.78c.61-.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8 .5-8 4v10zm3.5 1a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm9 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zM6 11V6h12v5H6z"/></svg>`;
       const popup = new mapboxgl.Popup({ offset: 28, closeButton: false }).setHTML(
         `<div style="font-family:system-ui,sans-serif;padding:2px 0"><b style="font-size:13px;color:#0a0e1a">${placa}</b><br><span style="font-size:12px;color:${color};font-weight:600">${label}</span><br><span style="font-size:11px;color:#6b6f7c">${u.velocidad} km/h</span></div>`
       );
@@ -688,6 +721,202 @@ export default function ClientePortal() {
         .addTo(mapRef.current!);
     });
   }, [ubicacionesEnVivo, vehiculosCliente, mapListoEnVivo]);
+
+  // ─── En vivo: limpiar selección si el servicio elegido ya no existe ───────
+  useEffect(() => {
+    setRutaSelId(prev => (prev != null && !serviciosHoyRef.current.some(r => r.id === prev) ? null : prev));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reservas.length]);
+
+  // ─── En vivo: cargar paradas de TODOS los servicios de hoy ──────────────
+  useEffect(() => {
+    if (tab !== "activos") return;
+    serviciosHoyRef.current.forEach(async r => {
+      if (paradas[r.id] !== undefined) return;
+      const { data } = await supabase.from("paradas").select("*").eq("reserva_id", r.id).order("orden");
+      // Siempre registrar (aunque sea []) para distinguir "sin paradas" de "no cargado"
+      setParadas(prev => ({ ...prev, [r.id]: (data || []) as Parada[] }));
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, reservas.length]);
+
+  // ─── En vivo: CAPA 1 — ruta planificada (geocodifica paradas → Google) ───
+  useEffect(() => {
+    if (tab !== "activos" || !mapListoEnVivo) return;
+    serviciosHoyRef.current.forEach(async r => {
+      if (rutasEnVivoMap[r.id] !== undefined) return; // ya intentado (puede ser [])
+      if (paradas[r.id] === undefined) return;        // esperar a que carguen las paradas
+
+      const tabla = [...(paradas[r.id] || [])].sort((a, b) => a.orden - b.orden);
+      const pjson = (r as any).paradas_json as any[] | null;
+
+      // 1. Construir lista base de paradas (preferir tabla, luego paradas_json, luego origen/destino)
+      let lista: Parada[] = [];
+      if (tabla.length > 0) {
+        lista = tabla;
+      } else if (pjson?.length) {
+        const ord = [...pjson.filter((p: any) => p.tipo === "inicio"), ...pjson.filter((p: any) => p.tipo === "intermedia"), ...pjson.filter((p: any) => p.tipo === "destino")];
+        const fuente = ord.length ? ord : pjson;
+        lista = fuente.map((p: any, i: number) => ({ id: -(i + 1), reserva_id: r.id, orden: i + 1, nombre: p.nombre, direccion: p.direccion || null, lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null, hora_estimada: p.hora || null, estado: "pendiente" }));
+      } else if (r.origen && r.destino) {
+        lista = [
+          { id: -1, reserva_id: r.id, orden: 1, nombre: r.origen,  direccion: null, lat: null, lng: null, hora_estimada: null, estado: "pendiente" },
+          { id: -2, reserva_id: r.id, orden: 2, nombre: r.destino, direccion: null, lat: null, lng: null, hora_estimada: null, estado: "pendiente" },
+        ];
+      } else { setRutasEnVivoMap(prev => ({ ...prev, [r.id]: [] })); return; }
+
+      // 2. Rellenar coords faltantes con las EXACTAS de paradas_json (datos de la cotización)
+      if (pjson?.length) {
+        const byNombre = new Map<string, { lat: number; lng: number }>();
+        pjson.forEach((p: any) => { if (p.lat && p.lng) byNombre.set(String(p.nombre || "").trim().toLowerCase(), { lat: Number(p.lat), lng: Number(p.lng) }); });
+        lista = lista.map(p => {
+          if (p.lat && p.lng) return p;
+          const c = byNombre.get(String(p.nombre || "").trim().toLowerCase());
+          return c ? { ...p, lat: c.lat, lng: c.lng } : p;
+        });
+      }
+
+      // 3. Geocodificar SOLO las que sigan sin coordenadas (último recurso)
+      const faltan = lista.filter(p => !p.lat || !p.lng);
+      if (faltan.length > 0) {
+        try {
+          const gr = await fetch("/api/geocodificar", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ paradas: faltan.map(p => ({ id: p.id, nombre: p.direccion || p.nombre })) }),
+          });
+          const gd = await gr.json();
+          if (gd.paradas) {
+            const m = new Map<number, { lat: number | null; lng: number | null }>(gd.paradas.map((p: any) => [p.id, { lat: p.lat, lng: p.lng }]));
+            lista = lista.map(p => { const c = m.get(p.id); return c && c.lat ? { ...p, lat: c.lat, lng: c.lng } : p; });
+          }
+        } catch {}
+      }
+
+      const conCoords = lista.filter(p => p.lat && p.lng);
+      // Guardar paradas resueltas (con coords) para los marcadores del mapa
+      setParadasResueltasMap(prev => ({ ...prev, [r.id]: conCoords }));
+
+      if (conCoords.length < 2) { setRutasEnVivoMap(prev => ({ ...prev, [r.id]: [] })); return; }
+
+      try {
+        const res = await fetch("/api/ruta", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            paradas: conCoords.map(p => ({
+              lat: typeof p.lat === "string" ? parseFloat(p.lat as any) : p.lat,
+              lng: typeof p.lng === "string" ? parseFloat(p.lng as any) : p.lng,
+              nombre: p.nombre,
+            })),
+          }),
+        });
+        const data = await res.json();
+        setRutasEnVivoMap(prev => ({ ...prev, [r.id]: data.coordenadas?.length ? data.coordenadas : [] }));
+      } catch { setRutasEnVivoMap(prev => ({ ...prev, [r.id]: [] })); }
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, mapListoEnVivo, JSON.stringify(Object.keys(paradas)), reservas.length]);
+
+  // ─── En vivo: CAPA 2 — huella GPS real del servicio SELECCIONADO ─────────
+  useEffect(() => {
+    if (tab !== "activos" || rutaSelId == null) return;
+    let cancel = false;
+    const cargarHuella = async (rid: number) => {
+      const { data } = await supabase.from("ubicaciones_gps")
+        .select("lat,lng,velocidad,created_at,timestamp")
+        .eq("reserva_id", rid)
+        .order("created_at", { ascending: true })
+        .limit(5000);
+      if (cancel) return;
+      const pts = (data || [])
+        .filter((p: any) => p.lat && p.lng)
+        .map((p: any) => ({ lat: Number(p.lat), lng: Number(p.lng), velocidad: Number(p.velocidad) || 0, ts: p.created_at || p.timestamp }));
+      setHuellaGpsMap(prev => ({ ...prev, [rid]: pts }));
+    };
+    cargarHuella(rutaSelId);
+    // Refresca cada 12s (para servicios en curso)
+    const iv = setInterval(() => { if (rutaSelId != null) cargarHuella(rutaSelId); }, 12000);
+    return () => { cancel = true; clearInterval(iv); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, rutaSelId]);
+
+  // ─── En vivo: dibujar las 3 capas en el mapa ─────────────────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapListoEnVivo || !map) return;
+
+    const COL = ["#0b315f", "#ea580c", "#16a34a", "#7c3aed"];
+    const svcs = serviciosHoyRef.current;
+
+    // Limpiar capas, sources y marcadores previos
+    dibujoLayersRef.current.forEach(lid => { try { if (map.getLayer(lid)) map.removeLayer(lid); } catch {} });
+    dibujoSourcesRef.current.forEach(sid => { try { if (map.getSource(sid)) map.removeSource(sid); } catch {} });
+    stopMarkersRef.current.forEach(mk => mk.remove());
+    dibujoLayersRef.current = []; dibujoSourcesRef.current = []; stopMarkersRef.current = [];
+
+    // Solo se dibuja la ruta del servicio SELECCIONADO. Sin selección → solo buses en vivo.
+    if (tab !== "activos" || rutaSelId == null) { lastFitRef.current = null; return; }
+    const sel = svcs.find(r => r.id === rutaSelId);
+    if (!sel) return;
+    const idx = svcs.findIndex(r => r.id === sel.id);
+    const color = COL[idx % COL.length];
+    const bounds = new mapboxgl.LngLatBounds();
+    let hasBounds = false;
+
+    // CAPA 1 — Ruta planificada (línea punteada)
+    const coords = rutasEnVivoMap[sel.id];
+    if (coords?.length) {
+      const sid = `plan-s-${sel.id}`, lid = `plan-l-${sel.id}`;
+      try {
+        map.addSource(sid, { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: coords } } });
+        map.addLayer({ id: lid, type: "line", source: sid, layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": color, "line-width": 4, "line-opacity": 0.9, "line-dasharray": [2, 1.6] } });
+        dibujoSourcesRef.current.push(sid); dibujoLayersRef.current.push(lid);
+        coords.forEach((c: [number, number]) => { bounds.extend(c); hasBounds = true; });
+      } catch {}
+    }
+
+    // CAPA 2 — Huella GPS real (segmentos coloreados por velocidad)
+    const huella = huellaGpsMap[sel.id] || [];
+    if (huella.length >= 2) {
+      const feats = [];
+      for (let i = 0; i < huella.length - 1; i++) {
+        const a = huella[i], b = huella[i + 1];
+        feats.push({ type: "Feature" as const, properties: { velocidad: (a.velocidad + b.velocidad) / 2 }, geometry: { type: "LineString" as const, coordinates: [[a.lng, a.lat], [b.lng, b.lat]] } });
+      }
+      const sid = `gps-s-${sel.id}`, lid = `gps-l-${sel.id}`;
+      try {
+        map.addSource(sid, { type: "geojson", data: { type: "FeatureCollection", features: feats } as any });
+        map.addLayer({ id: lid, type: "line", source: sid, layout: { "line-join": "round", "line-cap": "round" }, paint: {
+          "line-width": 5, "line-opacity": 0.95,
+          "line-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"] as any,
+        } });
+        dibujoSourcesRef.current.push(sid); dibujoLayersRef.current.push(lid);
+        huella.forEach(p => { bounds.extend([p.lng, p.lat]); hasBounds = true; });
+      } catch {}
+    }
+
+    // CAPA 3 — Marcadores de paradas (origen/intermedias/destino)
+    const stops = (paradasResueltasMap[sel.id] || paradas[sel.id] || []).filter(p => p.lat && p.lng).sort((a, b) => a.orden - b.orden);
+    stops.forEach((p, i) => {
+      const esOrigen = i === 0, esDestino = i === stops.length - 1;
+      const bg = esOrigen ? "#16a34a" : esDestino ? "#dc2626" : "#0b315f";
+      const txt = esOrigen ? "A" : esDestino ? "B" : String(i);
+      const el = document.createElement("div");
+      el.style.cssText = `width:24px;height:24px;border-radius:50%;background:${bg};border:2.5px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;color:white;font:700 11px system-ui,sans-serif;cursor:pointer;`;
+      el.textContent = txt;
+      const popup = new mapboxgl.Popup({ offset: 18, closeButton: false }).setHTML(
+        `<div style="font-family:system-ui,sans-serif;padding:1px 0"><b style="font-size:12px;color:#0a0e1a">${p.nombre}</b>${p.hora_estimada ? `<br><span style="font-size:11px;color:#0b315f;font-weight:600">${p.hora_estimada}</span>` : ""}</div>`
+      );
+      const mk = new mapboxgl.Marker({ element: el }).setLngLat([Number(p.lng), Number(p.lat)]).setPopup(popup).addTo(map);
+      stopMarkersRef.current.push(mk);
+      bounds.extend([Number(p.lng), Number(p.lat)]); hasBounds = true;
+    });
+
+    // Encuadrar al seleccionar (no en cada refresh GPS)
+    if (hasBounds && lastFitRef.current !== sel.id) {
+      try { map.fitBounds(bounds, { padding: 60, maxZoom: 14, duration: 700 }); lastFitRef.current = sel.id; } catch {}
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapListoEnVivo, rutasEnVivoMap, huellaGpsMap, paradasResueltasMap, paradas, rutaSelId, tab]);
 
   // ─── KPIs ─────────────────────────────────────────────────────────────────
   const hoy          = getHoyPeru();
@@ -730,8 +959,28 @@ export default function ClientePortal() {
     ...reservas.filter(r => esFuturo(r.fecha_servicio) && r.fecha_servicio !== mañana && (r.estado === "confirmado" || r.estado === "confirmada")).slice(0, 2).map(r => ({ id: r.id + 1000, tipo: "success" as const, titulo: "Servicio confirmado", desc: `${r.origen} → ${r.destino} · ${fmtFecha(r.fecha_servicio)}`, fecha: r.fecha_servicio || hoy })),
   ];
   const servicioHoy    = reservas.find(r => esHoy(r.fecha_servicio)); // cualquier estado
-  const servicioActivo = reservas.find(r => esHoy(r.fecha_servicio) && !esCancelado(r.estado));
-  const proximosSvcs   = reservas.filter(r => esFuturo(r.fecha_servicio) && !esCancelado(r.estado)).slice(0, 5).reverse();
+  const serviciosHoy   = reservas
+    .filter(r => esHoy(r.fecha_servicio) && !esCancelado(r.estado))
+    .sort((a, b) => (a.hora_servicio || "").localeCompare(b.hora_servicio || ""));
+  // Prioriza el servicio con GPS activo para la card principal
+  const servicioActivo = serviciosHoy.find(r => efectivoEstado(r) === "en_curso") || serviciosHoy[0] || null;
+  // Ref siempre actualizado (para efectos que no pueden incluir serviciosHoy en deps)
+  serviciosHoyRef.current = serviciosHoy;
+  const COLORES_RUTA = ["#0b315f", "#ea580c", "#16a34a", "#7c3aed"];
+  // Servicio cuya ruta está seleccionada (null = solo buses en vivo)
+  const servicioSel = rutaSelId != null ? serviciosHoy.find(r => r.id === rutaSelId) ?? null : null;
+  const selIdx = servicioSel ? serviciosHoy.findIndex(r => r.id === servicioSel.id) : -1;
+  // Para la card de cabecera: el seleccionado, o el activo/primero por defecto
+  const servicioEnVivoActivo = servicioSel ?? servicioActivo;
+  const busesEnVivo = ubicacionesEnVivo.length;
+  const proximosSvcs   = reservas
+    .filter(r => esFuturo(r.fecha_servicio) && !esCancelado(r.estado) && !esFinalizado(r.estado))
+    .sort((a, b) => {
+      if (a.fecha_servicio !== b.fecha_servicio) return (a.fecha_servicio || "").localeCompare(b.fecha_servicio || "");
+      return (a.hora_servicio || "").localeCompare(b.hora_servicio || "");
+    })
+    .slice(0, 5);
+  const ultimosSvcs    = reservas.filter(r => (r.fecha_servicio || "") < hoy && !esCancelado(r.estado)).slice(0, 6);
   const activosCount   = reservas.filter(r => esHoy(r.fecha_servicio) && !esCancelado(r.estado)).length;
   const prevM          = (() => { const d = new Date(hoy + "T00:00:00"); d.setMonth(d.getMonth() - 1); return d.toISOString().slice(0, 7); })();
   const serviciosPrevMes = reservas.filter(r => r.fecha_servicio?.startsWith(prevM)).length;
@@ -749,7 +998,44 @@ export default function ClientePortal() {
     const cumpleEstado   = filtroEstado === "todos" || efectivoEstado(r) === filtroEstado;
     const cumpleBusqueda = !filtroBusqueda || r.origen.toLowerCase().includes(filtroBusqueda.toLowerCase()) || r.destino.toLowerCase().includes(filtroBusqueda.toLowerCase()) || fmtFecha(r.fecha_servicio).includes(filtroBusqueda);
     return cumpleEstado && cumpleBusqueda;
+  }).sort((a, b) => {
+    const da = a.fecha_servicio || "9999-99-99";
+    const db = b.fecha_servicio || "9999-99-99";
+    const fa = da >= hoy, fb = db >= hoy;
+    if (fa && fb) {
+      if (da !== db) return da < db ? -1 : 1;
+      const ha = a.hora_servicio || "", hb = b.hora_servicio || "";
+      return ha !== hb ? ha.localeCompare(hb) : a.id - b.id;
+    }
+    if (!fa && !fb) {
+      if (da !== db) return db < da ? -1 : 1;
+      const ha = a.hora_servicio || "", hb = b.hora_servicio || "";
+      return ha !== hb ? ha.localeCompare(hb) : a.id - b.id;
+    }
+    return fa ? -1 : 1;
   });
+
+  const agendaGrupos = (() => {
+    const grupos = new Map<string, Reserva[]>();
+    reservasFiltradas.forEach(r => {
+      const key = r.fecha_servicio || "sin_fecha";
+      if (!grupos.has(key)) grupos.set(key, []);
+      grupos.get(key)!.push(r);
+    });
+    return Array.from(grupos.entries()).map(([fecha, filas]) => ({
+      fecha,
+      filas: [...filas].sort((a, b) => {
+        const ha = a.hora_servicio || "";
+        const hb = b.hora_servicio || "";
+        return ha !== hb ? ha.localeCompare(hb) : a.id - b.id;
+      }),
+      label: fecha === "sin_fecha" ? "Sin fecha" :
+        new Date(fecha + "T12:00:00").toLocaleDateString("es-PE", { weekday: "long", day: "numeric", month: "long", year: "numeric" }),
+      esHoy: fecha === hoy,
+      esFuturo: fecha !== "sin_fecha" && fecha > hoy,
+      esPasado: fecha !== "sin_fecha" && fecha < hoy,
+    }));
+  })();
 
   // ─── Reporte de embarque PDF ──────────────────────────────────────────────
   function generarReportePDF(r: Reserva) {
@@ -1546,6 +1832,9 @@ tbody tr:nth-child(even){background:#f9fafb}
           conductorTel={conductorInfo?.telefono || ""}
           clienteNombre={cliente.empresa || cliente.nombre}
           paradas={paradas[gpsModalRes.id] || []}
+          paradasJson={(gpsModalRes as any)?.paradas_json}
+          origen={gpsModalRes.origen}
+          destino={gpsModalRes.destino}
           onClose={() => { setGpsModalOpen(false); setGpsModalRes(null); }}
         />
       )}
@@ -1890,6 +2179,29 @@ tbody tr:nth-child(even){background:#f9fafb}
               </div>
             )}
 
+            {/* Otros turnos de hoy */}
+            {serviciosHoy.filter(r => r.id !== servicioActivo?.id).length > 0 && (
+              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ padding: "10px 18px", borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.navy, flexShrink: 0 }} />
+                  <p style={{ fontWeight: 800, color: C.ink, margin: 0, fontSize: 12 }}>Otros turnos de hoy</p>
+                  <span style={{ fontSize: 10, fontWeight: 700, background: C.navyTint, color: C.navy, padding: "1px 7px", borderRadius: 4, marginLeft: "auto" }}>{serviciosHoy.filter(r => r.id !== servicioActivo?.id).length}</span>
+                </div>
+                {serviciosHoy.filter(r => r.id !== servicioActivo?.id).map(r => (
+                  <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 18px", borderBottom: `1px solid ${C.line}` }}>
+                    <div style={{ fontFamily: C.fontMono, fontWeight: 700, fontSize: 13.5, color: C.navy, minWidth: 40, flexShrink: 0 }}>
+                      {r.hora_servicio?.slice(0,5) || "–"}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <p style={{ fontWeight: 700, color: C.ink, fontSize: 12.5, margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{r.origen} → {r.destino}</p>
+                    </div>
+                    <Badge estado={efectivoEstado(r)} />
+                    <button onClick={() => cargarDetalle(r)} style={{ padding: "4px 11px", borderRadius: 6, border: `1px solid ${C.line2}`, color: C.navy, fontSize: 11.5, fontWeight: 700, background: C.navyTint, cursor: "pointer", flexShrink: 0, fontFamily: "inherit" }}>Ver</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Próximos + Últimos servicios */}
             <div style={{ display: "grid", gridTemplateColumns: proximosSvcs.length > 0 ? "1fr 1fr" : "1fr", gap: 12 }}>
               {proximosSvcs.length > 0 && (
@@ -1926,21 +2238,21 @@ tbody tr:nth-child(even){background:#f9fafb}
                       <div style={{ height: 9, background: C.surfaceAlt, borderRadius: 4, width: "42%" }} />
                     </div>
                   ))
-                  : reservas.slice(0, 6).map(r => (
+                  : ultimosSvcs.map(r => (
                     <div key={r.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 18px", borderBottom: `1px solid ${C.line}`, gap: 10 }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <p style={{ fontWeight: 700, color: C.ink, fontSize: 12.5, margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{r.origen} → {r.destino}</p>
                         <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0", fontFamily: C.fontMono }}>{fmtFechaLrg(r.fecha_servicio)} · {r.hora_servicio?.slice(0,5) || "–"}</p>
                       </div>
-                      <Badge estado={r.estado} />
+                      <Badge estado={efectivoEstado(r)} />
                       {puedeVerMontos && <span style={{ color: C.navy, fontWeight: 700, fontSize: 12.5, flexShrink: 0, fontFamily: C.fontMono }}>{fmtSoles(Number(r.precio_cliente))}</span>}
                       <button onClick={() => cargarDetalle(r)} style={{ padding: "4px 11px", borderRadius: 6, border: `1px solid ${C.line2}`, color: C.navy, fontSize: 11.5, fontWeight: 700, background: C.navyTint, cursor: "pointer", flexShrink: 0, fontFamily: "inherit" }}>Ver</button>
                     </div>
                   ))
                 }
-                {!loading && reservas.length === 0 && (
+                {!loading && ultimosSvcs.length === 0 && (
                   <div style={{ padding: 36, textAlign: "center" as const }}>
-                    <p style={{ color: C.mute, fontWeight: 600, fontSize: 13 }}>Sin servicios registrados aún</p>
+                    <p style={{ color: C.mute, fontWeight: 600, fontSize: 13 }}>Sin servicios ejecutados aún</p>
                   </div>
                 )}
               </div>
@@ -2042,22 +2354,64 @@ tbody tr:nth-child(even){background:#f9fafb}
         {tab === "activos" && (
           <div style={{ display: "flex", flexDirection: "column" as const, gap: 12, animation: "fadeIn 0.3s ease" }}>
 
-            {/* Encabezado de servicio activo */}
-            {servicioActivo && (
-              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "16px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" as const, gap: 12 }}>
+            {/* Selector de servicios — toca uno para ver su ruta en el mapa */}
+            {serviciosHoy.length >= 1 && (
+              <div style={{ display: "flex", flexDirection: "column" as const, gap: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" as const }}>
+                  <p style={{ fontSize: 11, fontWeight: 700, color: C.mute, margin: 0 }}>
+                    {rutaSelId == null
+                      ? <>Mostrando <b style={{ color: C.navy }}>{busesEnVivo} bus{busesEnVivo !== 1 ? "es" : ""}</b> en vivo · toca un servicio para ver su ruta</>
+                      : <>Viendo ruta de <b style={{ color: C.navy }}>#{servicioSel?.id}</b></>}
+                  </p>
+                  {rutaSelId != null && (
+                    <button onClick={() => setRutaSelId(null)}
+                      style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4, padding: "3px 10px", borderRadius: 7, border: `1px solid ${C.line2}`, background: C.surface, color: C.ink2, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      Ver buses en vivo
+                    </button>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 6, overflowX: "auto" as const, paddingBottom: 2 }}>
+                  {serviciosHoy.map((r, i) => {
+                    const est = efectivoEstado(r);
+                    const color = COLORES_RUTA[i % COLORES_RUTA.length];
+                    const activo = r.id === rutaSelId;
+                    return (
+                      <button key={r.id} onClick={() => setRutaSelId(prev => prev === r.id ? null : r.id)}
+                        style={{ flexShrink: 0, padding: "8px 14px", borderRadius: 9, border: `2px solid ${activo ? color : C.line}`, background: activo ? color + "14" : C.surface, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 7, transition: "all 0.15s" }}>
+                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0, ...(est === "en_curso" ? { animation: "pcPulse 1.6s ease-out infinite" } : {}) }} />
+                        <span style={{ fontWeight: 800, fontSize: 12, color: activo ? color : C.ink }}>
+                          {r.hora_servicio?.slice(0, 5) || "–"} &nbsp;·&nbsp; #{r.id}
+                        </span>
+                        <span style={{ fontSize: 10.5, color: C.mute, fontWeight: 600, maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>
+                          {r.origen?.split(",")[0]}
+                        </span>
+                        <span style={{ fontSize: 10, fontWeight: 700, background: est === "en_curso" ? "#dcfce7" : C.navyTint, color: est === "en_curso" ? "#15803d" : C.navy, padding: "2px 7px", borderRadius: 4, flexShrink: 0 }}>
+                          {est === "en_curso" ? "En ruta" : est === "confirmada" || est === "confirmado" ? "Confirmado" : est === "programada" ? "Programado" : est}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Encabezado de servicio activo (En Vivo) */}
+            {servicioEnVivoActivo && (
+              <div style={{ background: C.surface, border: `1px solid ${servicioSel && selIdx >= 0 ? COLORES_RUTA[selIdx % COLORES_RUTA.length] + "55" : C.line}`, borderRadius: 10, padding: "16px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" as const, gap: 12 }}>
                 <div>
                   <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 6 }}>
-                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: efectivoEstado(servicioActivo) === "en_curso" ? C.success : C.info, display: "inline-block", animation: "pcPulse 1.6s ease-out infinite" }} />
-                    <p style={{ color: efectivoEstado(servicioActivo) === "en_curso" ? C.success : C.info, fontWeight: 800, margin: 0, fontSize: 11, textTransform: "uppercase" as const, letterSpacing: "1.2px" }}>
-                      {efectivoEstado(servicioActivo) === "en_curso" ? "En ruta" : esFinalizado(servicioActivo.estado) ? "Finalizado hoy" : "Confirmado · Hoy"}
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: efectivoEstado(servicioEnVivoActivo) === "en_curso" ? C.success : C.info, display: "inline-block", animation: "pcPulse 1.6s ease-out infinite" }} />
+                    <p style={{ color: efectivoEstado(servicioEnVivoActivo) === "en_curso" ? C.success : C.info, fontWeight: 800, margin: 0, fontSize: 11, textTransform: "uppercase" as const, letterSpacing: "1.2px" }}>
+                      {efectivoEstado(servicioEnVivoActivo) === "en_curso" ? "En ruta" : esFinalizado(servicioEnVivoActivo.estado) ? "Finalizado hoy" : "Confirmado · Hoy"}
                     </p>
-                    <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: 4 }}>#{servicioActivo.id}</span>
+                    <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: 4 }}>#{servicioEnVivoActivo.id}</span>
                   </div>
                   <p style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 18, letterSpacing: -0.4, margin: "0 0 3px", color: C.ink }}>
-                    {servicioActivo.origen} → {servicioActivo.destino}
+                    {servicioEnVivoActivo.origen} → {servicioEnVivoActivo.destino}
                   </p>
                   <p style={{ color: C.mute, fontSize: 12.5, margin: 0, fontFamily: C.fontMono }}>
-                    {servicioActivo.hora_servicio?.slice(0,5) || "–"} &nbsp;·&nbsp; {fmtFecha(servicioActivo.fecha_servicio)}
+                    {servicioEnVivoActivo.hora_servicio?.slice(0,5) || "–"} &nbsp;·&nbsp; {fmtFecha(servicioEnVivoActivo.fecha_servicio)}
                     {gpsActual && <span> &nbsp;·&nbsp; {gpsActual.velocidad} km/h &nbsp;·&nbsp; señal {fmtTs(gpsActual.timestamp)}</span>}
                   </p>
                 </div>
@@ -2078,7 +2432,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                     Actualizar
                   </button>
-                  <button onClick={() => abrirGps(servicioActivo)} style={{ padding: "9px 18px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 12.5, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>
+                  <button onClick={() => abrirGps(servicioEnVivoActivo)} style={{ padding: "9px 18px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 12.5, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
                     GPS EN VIVO
                   </button>
@@ -2087,7 +2441,7 @@ tbody tr:nth-child(even){background:#f9fafb}
             )}
 
             {/* Aviso compacto cuando no hay servicio hoy */}
-            {!servicioActivo && (
+            {!servicioEnVivoActivo && (
               <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "14px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" as const, gap: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <div style={{ width: 36, height: 36, borderRadius: 8, background: C.navyTint, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
@@ -2125,13 +2479,38 @@ tbody tr:nth-child(even){background:#f9fafb}
                   <p style={{ color: "rgba(255,255,255,0.4)", fontSize: 13, margin: 0 }}>Cargando mapa…</p>
                 </div>
               )}
-              {servicioActivo && gpsActual && (
+              {servicioEnVivoActivo && gpsActual && (
                 <div style={{ position: "absolute" as const, bottom: 14, left: 14 }}>
-                  <button onClick={() => abrirGps(servicioActivo)}
+                  <button onClick={() => abrirGps(servicioEnVivoActivo)}
                     style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 16px", borderRadius: 8, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 12.5, cursor: "pointer", boxShadow: "0 2px 12px rgba(0,0,0,0.35)", fontFamily: "inherit" }}>
                     <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#4ade80", animation: "pcPulse 1.6s ease-out infinite", display: "inline-block" }} />
                     Ver ruta GPS completa
                   </button>
+                </div>
+              )}
+              {/* Leyenda de capas: ruta planificada vs huella GPS + escala de velocidad (solo con ruta seleccionada) */}
+              {servicioSel && ((huellaGpsMap[servicioSel.id]?.length || 0) > 1 || (rutasEnVivoMap[servicioSel.id]?.length || 0) > 0) && (
+                <div style={{ position: "absolute" as const, bottom: 14, right: 14, background: "rgba(255,255,255,0.94)", borderRadius: 9, padding: "9px 12px", backdropFilter: "blur(6px)", boxShadow: "0 2px 10px rgba(0,0,0,0.2)", maxWidth: 190 }}>
+                  {(rutasEnVivoMap[servicioSel.id]?.length || 0) > 0 && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 6 }}>
+                      <span style={{ width: 22, height: 0, borderTop: `3px dashed ${COLORES_RUTA[(selIdx >= 0 ? selIdx : 0) % COLORES_RUTA.length]}`, flexShrink: 0 }} />
+                      <span style={{ fontSize: 10.5, fontWeight: 700, color: "#0a0e1a" }}>Ruta planificada</span>
+                    </div>
+                  )}
+                  {(huellaGpsMap[servicioSel.id]?.length || 0) > 1 && (
+                    <>
+                      <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 6 }}>
+                        <span style={{ width: 22, height: 4, borderRadius: 2, background: "linear-gradient(90deg,#dc2626,#eab308,#16a34a)", flexShrink: 0 }} />
+                        <span style={{ fontSize: 10.5, fontWeight: 700, color: "#0a0e1a" }}>Recorrido real GPS</span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
+                        <span style={{ fontSize: 9, fontWeight: 700, color: "#dc2626" }}>0</span>
+                        <span style={{ flex: 1, height: 5, borderRadius: 3, background: "linear-gradient(90deg,#dc2626,#f59e0b,#eab308,#16a34a)" }} />
+                        <span style={{ fontSize: 9, fontWeight: 700, color: "#16a34a" }}>55+</span>
+                        <span style={{ fontSize: 8.5, color: "#6b6f7c", fontWeight: 600 }}>km/h</span>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -2298,7 +2677,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                 />
               </div>
               <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
-                {(["todos","confirmado","en_curso","completado","pendiente","cancelado"] as const).map(e => {
+                {(["todos","programada","confirmado","en_curso","completado","pendiente","cancelado"] as const).map(e => {
                   const cnt = e === "todos" ? reservas.length : reservas.filter(r => efectivoEstado(r) === e).length;
                   const active = filtroEstado === e;
                   return (
@@ -2313,10 +2692,94 @@ tbody tr:nth-child(even){background:#f9fafb}
               <span style={{ fontSize: 11, color: C.mute2, fontWeight: 600, whiteSpace: "nowrap" as const }}>
                 {reservasFiltradas.length !== reservas.length ? `${reservasFiltradas.length} de ${reservas.length}` : `${reservas.length} servicios`}
               </span>
+              <button
+                onClick={() => setVistaAgenda(v => !v)}
+                title="Cambiar vista"
+                style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 12px", borderRadius: 9, border: `1.5px solid ${vistaAgenda ? C.navy : C.line2}`, background: vistaAgenda ? C.navyTint : C.surface, color: vistaAgenda ? C.navy : C.mute, fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans, transition: "all .12s", whiteSpace: "nowrap" as const }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                {vistaAgenda ? "Vista tabla" : "Vista agenda"}
+              </button>
             </div>
 
+            {/* VISTA AGENDA */}
+            {vistaAgenda && (
+              <div style={{ display: "flex", flexDirection: "column" as const, gap: 12 }}>
+                {agendaGrupos.length === 0 ? (
+                  <div style={{ background: C.surface, borderRadius: 16, border: `1px solid ${C.line}`, padding: "56px 20px", textAlign: "center" as const }}>
+                    <p style={{ fontSize: 32, margin: "0 0 10px" }}>📅</p>
+                    <p style={{ color: C.mute, fontSize: 14, fontWeight: 600, margin: 0 }}>Sin resultados para los filtros seleccionados</p>
+                  </div>
+                ) : agendaGrupos.map(({ fecha, filas, label, esHoy: esHoyGrupo, esPasado }) => (
+                  <div key={fecha} style={{ background: C.surface, borderRadius: 16, overflow: "hidden" as const, border: esHoyGrupo ? `2px solid ${C.info}` : `1px solid ${C.line}` }}>
+                    {/* cabecera fecha */}
+                    <div style={{ padding: "10px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", background: esHoyGrupo ? C.infoTint : esPasado ? C.gray50 : C.navyTint }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        {esHoyGrupo && <span style={{ fontSize: 9.5, fontWeight: 900, letterSpacing: "1px", textTransform: "uppercase" as const, background: C.info, color: "white", padding: "2px 8px", borderRadius: 20 }}>HOY</span>}
+                        {esPasado && <span style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: "1px", textTransform: "uppercase" as const, color: C.mute2 }}>pasado</span>}
+                        <span style={{ fontWeight: 700, textTransform: "capitalize" as const, color: esHoyGrupo ? C.info : esPasado ? C.mute : C.navy, fontSize: 13 }}>{label}</span>
+                      </div>
+                      <span style={{ fontSize: 10.5, fontWeight: 700, padding: "2px 10px", borderRadius: 20, background: esHoyGrupo ? "#bfdbfe" : C.surfaceAlt, color: esHoyGrupo ? C.info : C.mute }}>
+                        {filas.length} servicio{filas.length !== 1 ? "s" : ""}
+                      </span>
+                    </div>
+                    {/* filas */}
+                    <div>
+                      {filas.map((r, ri) => {
+                        const st = reservaStats[r.id];
+                        const sla = st && st.esperados > 0 ? Math.round((st.embarcados / st.esperados) * 100) : null;
+                        const slaColor = (pct: number) => pct >= 95 ? C.success : pct >= 85 ? C.warn : C.danger;
+                        const est = ESTADO[efectivoEstado(r)] || { bg: "#F1F5F9", c: "#475569", label: efectivoEstado(r), dot: "#94A3B8" };
+                        return (
+                          <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "11px 18px", borderTop: ri > 0 ? `1px solid ${C.line}` : undefined, background: efectivoEstado(r) === "en_curso" ? "#F0F7F3" : undefined }}>
+                            {/* hora + id */}
+                            <div style={{ minWidth: 48, textAlign: "right" as const, flexShrink: 0 }}>
+                              <div style={{ fontFamily: C.fontMono, fontWeight: 700, fontSize: 13, color: C.ink2 }}>{r.hora_servicio?.slice(0,5) || "–:–"}</div>
+                              <div style={{ fontFamily: C.fontMono, fontSize: 9.5, color: C.mute2 }}>#{r.id}</div>
+                            </div>
+                            {/* dot */}
+                            <div style={{ width: 3, height: 36, borderRadius: 2, background: est.dot, flexShrink: 0 }} />
+                            {/* ruta + estado */}
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const }}>
+                                <span style={{ fontWeight: 700, fontSize: 12.5, color: C.ink, overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>{r.origen}</span>
+                                <span style={{ color: C.mute2, fontSize: 11 }}>→</span>
+                                <span style={{ fontSize: 12, color: C.mute, overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>{r.destino}</span>
+                                <span style={{ fontSize: 9.5, fontWeight: 700, padding: "2px 7px", borderRadius: 20, background: est.bg, color: est.c, whiteSpace: "nowrap" as const }}>{est.label}</span>
+                              </div>
+                              {st && (
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 3 }}>
+                                  <span style={{ fontSize: 10.5, color: C.mute }}>{st.embarcados}/{st.esperados} pax</span>
+                                  {sla !== null && <span style={{ fontSize: 10, fontWeight: 700, color: slaColor(sla) }}>SLA {sla}%</span>}
+                                </div>
+                              )}
+                            </div>
+                            {/* monto */}
+                            {puedeVerMontos && <div style={{ fontFamily: C.fontMono, fontWeight: 700, fontSize: 12.5, color: C.navy, flexShrink: 0, whiteSpace: "nowrap" as const }}>{fmtSoles(Number(r.precio_cliente))}</div>}
+                            {/* acciones */}
+                            <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                              {(r.vehiculo_id || (r as any).vehiculo_tercero_id || (r as any).empresa_tercerizada_id) && (
+                                <button onClick={() => abrirGps(r)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 9px", borderRadius: 7, border: `1px solid ${C.navyTint2}`, background: C.navyTint, color: C.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                                  GPS
+                                </button>
+                              )}
+                              <button onClick={() => cargarDetalle(r)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 9px", borderRadius: 7, border: `1px solid ${C.line}`, background: C.surface, color: C.ink2, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                                Ver
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Table */}
-            <div style={{ background: C.surface, borderRadius: 16, overflow: "hidden" as const, border: `1px solid ${C.line}` }}>
+            {!vistaAgenda && <div style={{ background: C.surface, borderRadius: 16, overflow: "hidden" as const, border: `1px solid ${C.line}` }}>
               <div style={{ overflowX: "auto" as const }}>
                 <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 13 }}>
                   <thead>
@@ -2406,7 +2869,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                           </td>
                           {puedeVerMontos && <td style={{ padding: "10px 14px", fontFamily: C.fontMono, fontWeight: 700, color: C.navy, fontSize: 12.5, whiteSpace: "nowrap" as const }}>{fmtSoles(Number(r.precio_cliente))}</td>}
                           <td style={{ padding: "10px 14px" }}>
-                            {r.vehiculo_id ? (
+                            {(r.vehiculo_id || (r as any).vehiculo_tercero_id || (r as any).empresa_tercerizada_id) ? (
                               <button onClick={() => abrirGps(r)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 9px", borderRadius: 7, border: `1px solid ${C.navyTint2}`, background: C.navyTint, color: C.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans, whiteSpace: "nowrap" as const }}>
                                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
                                 GPS
@@ -2450,7 +2913,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                   )}
                 </table>
               </div>
-            </div>
+            </div>}
           </div>
           );
         })()}

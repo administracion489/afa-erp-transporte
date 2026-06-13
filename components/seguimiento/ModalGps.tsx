@@ -35,6 +35,7 @@ type Props = {
   vehiculoPlaca: string; conductorNombre: string;
   conductorTel: string; clienteNombre: string;
   paradas: Parada[];
+  paradasJson?: any[] | null;
   origen?: string | null;
   destino?: string | null;
   onClose: () => void;
@@ -42,7 +43,7 @@ type Props = {
 
 export default function ModalGps({
   reservaId, vehiculoId, vehiculoPlaca, conductorNombre,
-  conductorTel, clienteNombre, paradas, origen, destino, onClose,
+  conductorTel, clienteNombre, paradas, paradasJson, origen, destino, onClose,
 }: Props) {
   const mapRef    = useRef<HTMLDivElement>(null);
   const mapInst   = useRef<any>(null);
@@ -57,6 +58,7 @@ export default function ModalGps({
   const [cargandoRuta,      setCargandoRuta]      = useState(false);
   const [errorRuta,         setErrorRuta]         = useState<string | null>(null);
   const [paradasResueltas,  setParadasResueltas]  = useState<Parada[]>([]);
+  const [huella,            setHuella]            = useState<{lat:number;lng:number;velocidad:number}[]>([]);
   const stopMarkersRef = useRef<any[]>([]);
 
   // ── Geocodificación auxiliar (server-side vía /api/geocodificar) ─────────
@@ -98,6 +100,31 @@ export default function ModalGps({
 
   const cargarRuta = useCallback(async () => {
     let listaParadas = [...paradas].sort((a, b) => a.orden - b.orden);
+
+    // Rellenar coords faltantes (o construir lista) desde paradas_json de la cotización
+    if (paradasJson && paradasJson.length > 0) {
+      const byNombre = new Map<string, { lat: number; lng: number }>();
+      paradasJson.forEach((p: any) => {
+        if (p.lat && p.lng) byNombre.set(String(p.nombre || "").trim().toLowerCase(), { lat: Number(p.lat), lng: Number(p.lng) });
+      });
+      if (listaParadas.length > 0) {
+        listaParadas = listaParadas.map(p => {
+          if (!p.lat || !p.lng) {
+            const coords = byNombre.get(String(p.nombre || "").trim().toLowerCase());
+            if (coords) return { ...p, lat: coords.lat, lng: coords.lng };
+          }
+          return p;
+        });
+      } else {
+        listaParadas = (paradasJson as any[])
+          .filter((p: any) => p.nombre)
+          .map((p: any, i: number) => ({
+            id: -(i + 1), nombre: p.nombre,
+            lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
+            hora_estimada: p.hora || null, estado: "pendiente", orden: i + 1,
+          }));
+      }
+    }
 
     // Sin paradas: intentar con origen/destino de la reserva como fallback
     if (listaParadas.length === 0) {
@@ -188,7 +215,7 @@ export default function ModalGps({
     } finally {
       setCargandoRuta(false);
     }
-  }, [paradas, origen, destino, geocodificarParadas]); // eslint-disable-line
+  }, [paradas, paradasJson, origen, destino, geocodificarParadas]); // eslint-disable-line
 
   useEffect(() => { cargarRuta(); }, [cargarRuta]);
 
@@ -213,7 +240,7 @@ export default function ModalGps({
       });
       map.addLayer({
         id: "ruta-line", type: "line", source: "ruta-google",
-        paint: { "line-color": "#1d4ed8", "line-width": 5, "line-opacity": 0.9 },
+        paint: { "line-color": "#1d4ed8", "line-width": 4, "line-opacity": 0.85, "line-dasharray": [2, 1.6] },
       });
 
       const bounds = ruta.coordenadas.reduce(
@@ -225,6 +252,55 @@ export default function ModalGps({
       console.error("[ModalGps] Error dibujando ruta:", e);
     }
   }, [ruta, mapListo]);
+
+  // ── CAPA 2: Cargar historial GPS (huella) ─────────────────────────────────
+
+  useEffect(() => {
+    let cancel = false;
+    const cargar = async () => {
+      const { data } = await supabase
+        .from("ubicaciones_gps")
+        .select("lat,lng,velocidad,created_at")
+        .eq("reserva_id", reservaId)
+        .order("created_at", { ascending: true })
+        .limit(5000);
+      if (!cancel && data && data.length > 0) {
+        setHuella(data.map((d: any) => ({ lat: d.lat, lng: d.lng, velocidad: d.velocidad ?? 0 })));
+      }
+    };
+    cargar();
+    const iv = setInterval(cargar, 15000);
+    return () => { cancel = true; clearInterval(iv); };
+  }, [reservaId]); // eslint-disable-line
+
+  // ── CAPA 2: Dibujar huella GPS coloreada por velocidad ───────────────────
+
+  useEffect(() => {
+    if (!mapListo || !mapInst.current || huella.length < 2) return;
+    const map = mapInst.current;
+    try {
+      if (map.getLayer("huella-gps-line")) map.removeLayer("huella-gps-line");
+      if (map.getSource("huella-gps"))    map.removeSource("huella-gps");
+
+      const features: any[] = [];
+      for (let i = 0; i < huella.length - 1; i++) {
+        features.push({
+          type: "Feature",
+          properties: { velocidad: huella[i].velocidad ?? 0 },
+          geometry: { type: "LineString", coordinates: [[huella[i].lng, huella[i].lat], [huella[i + 1].lng, huella[i + 1].lat]] },
+        });
+      }
+
+      map.addSource("huella-gps", { type: "geojson", data: { type: "FeatureCollection", features } });
+      map.addLayer({
+        id: "huella-gps-line", type: "line", source: "huella-gps",
+        paint: {
+          "line-width": 5, "line-opacity": 0.9,
+          "line-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"],
+        },
+      });
+    } catch (e) { console.error("[ModalGps] Error dibujando huella GPS:", e); }
+  }, [huella, mapListo]);
 
   // ── Marcadores numerados con etiqueta de texto ────────────────────────────
 
@@ -246,31 +322,23 @@ export default function ModalGps({
       const isLast     = i === total - 1;
       const completada = p.estado === "completada";
 
-      const bg    = completada ? "#16a34a" : isFirst ? "#16a34a" : isLast ? "#dc2626" : "#0b315f";
-      const tag   = isFirst ? "ORIGEN" : isLast ? "DESTINO" : `PARADA ${i + 1}`;
-      const label = p.nombre.length > 22 ? p.nombre.slice(0, 20) + "…" : p.nombre;
-      const num   = completada ? "✓" : String(i + 1);
+      const bg  = completada ? "#16a34a" : isFirst ? "#16a34a" : isLast ? "#dc2626" : "#0b315f";
+      const tag = isFirst ? "ORIGEN" : isLast ? "DESTINO" : `PARADA ${i + 1}`;
+      const num = completada ? "✓" : String(i + 1);
 
-      // Wrapper contenedor (número + etiqueta)
+      // wrapper: ancla de Mapbox — NO aplicar transform aquí (conflicto con translate de Mapbox)
       const wrapper = document.createElement("div");
-      wrapper.style.cssText = "display:flex;flex-direction:column;align-items:center;cursor:pointer";
+      wrapper.style.cssText = "width:34px;height:34px;cursor:pointer";
 
-      // Círculo numerado
+      // circle: elemento visual hijo — el hover scale va aquí, no en wrapper
       const circle = document.createElement("div");
       circle.style.cssText = `width:34px;height:34px;border-radius:50%;background:${bg};border:3px solid white;box-shadow:0 3px 12px rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;color:white;font-size:13px;font-weight:900;transition:transform 0.15s`;
-      circle.innerHTML = num;
+      circle.textContent = num;
       circle.onmouseenter = () => { circle.style.transform = "scale(1.15)"; };
-      circle.onmouseleave = () => { circle.style.transform = "scale(1)"; };
-
-      // Etiqueta de texto
-      const etiqueta = document.createElement("div");
-      etiqueta.style.cssText = `background:white;color:#0b315f;font-family:system-ui;font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,0.22);margin-top:4px;white-space:nowrap;border:1px solid ${bg}20`;
-      etiqueta.innerHTML = `<span style="color:${bg};font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:0.5px">${tag}</span><br/><span style="color:#1e293b">${label}</span>`;
-
+      circle.onmouseleave = () => { circle.style.transform = ""; };
       wrapper.appendChild(circle);
-      wrapper.appendChild(etiqueta);
 
-      const popup = new window.mapboxgl.Popup({ offset: [0, -42], closeButton: false })
+      const popup = new window.mapboxgl.Popup({ offset: [0, -20], closeButton: false })
         .setHTML(`
           <div style="font-family:system-ui;padding:6px 2px;min-width:160px">
             <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
@@ -282,7 +350,7 @@ export default function ModalGps({
             ${completada ? `<p style="margin:4px 0 0;color:#16a34a;font-weight:700;font-size:11px">✓ Completada</p>` : ""}
           </div>`);
 
-      const marker = new window.mapboxgl.Marker({ element: wrapper, anchor: "bottom" })
+      const marker = new window.mapboxgl.Marker({ element: wrapper, anchor: "center" })
         .setLngLat([lng, lat])
         .setPopup(popup)
         .addTo(mapInst.current);
@@ -411,9 +479,10 @@ export default function ModalGps({
 
   // ── Derivados ─────────────────────────────────────────────────────────────
 
-  const proximaParada = paradas.find(p => p.estado !== "completada");
-  const paradasComp   = paradas.filter(p => p.estado === "completada").length;
-  const pct           = paradas.length > 0 ? Math.round((paradasComp / paradas.length) * 100) : 0;
+  const paradasDisplay = paradas.length > 0 ? paradas : paradasResueltas;
+  const proximaParada  = paradasDisplay.find(p => p.estado !== "completada");
+  const paradasComp    = paradas.filter(p => p.estado === "completada").length;
+  const pct            = paradas.length > 0 ? Math.round((paradasComp / paradas.length) * 100) : 0;
   const segsDesdeUlt  = ultimaActualiz ? Math.floor((Date.now() - ultimaActualiz.getTime()) / 1000) : null;
   const hayTrafico    = ruta?.tramos?.some(t => t.duracion_trafico_min > t.duracion_min + 2) ?? false;
 
@@ -488,14 +557,27 @@ export default function ModalGps({
             )}
 
             {!errorMapa && (
-              <div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur-sm rounded-xl shadow-lg px-3 py-2">
-                <p className="text-[8px] font-bold text-gray-400 uppercase mb-1">Tráfico en vivo</p>
-                <div className="flex items-center gap-2 text-[9px] font-bold text-gray-600">
-                  <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-green-400 inline-block"/>Libre</span>
-                  <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-yellow-400 inline-block"/>Moderado</span>
-                  <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-orange-500 inline-block"/>Pesado</span>
-                  <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-red-500 inline-block"/>Severo</span>
+              <div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur-sm rounded-xl shadow-lg px-3 py-2 space-y-1.5">
+                <div>
+                  <p className="text-[8px] font-bold text-gray-400 uppercase mb-1">Tráfico en vivo</p>
+                  <div className="flex items-center gap-2 text-[9px] font-bold text-gray-600">
+                    <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-green-400 inline-block"/>Libre</span>
+                    <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-yellow-400 inline-block"/>Moderado</span>
+                    <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-orange-500 inline-block"/>Pesado</span>
+                    <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-red-500 inline-block"/>Severo</span>
+                  </div>
                 </div>
+                {huella.length > 1 && (
+                  <div>
+                    <p className="text-[8px] font-bold text-gray-400 uppercase mb-1">Huella GPS · Velocidad</p>
+                    <div className="flex items-center gap-2 text-[9px] font-bold text-gray-600">
+                      <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-red-500 inline-block"/>Parado</span>
+                      <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-amber-400 inline-block"/>Lento</span>
+                      <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-yellow-300 inline-block"/>Moderado</span>
+                      <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-green-500 inline-block"/>Rápido</span>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -588,15 +670,15 @@ export default function ModalGps({
             <div className="bg-white rounded-xl border p-3" style={{ borderColor: "#e2e8f0" }}>
               <div className="flex justify-between mb-2">
                 <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400">Itinerario</p>
-                <p className="text-[9px] font-bold text-[#0b315f]">{paradasComp}/{paradas.length} · {pct}%</p>
+                <p className="text-[9px] font-bold text-[#0b315f]">{paradasComp}/{paradasDisplay.length} · {pct}%</p>
               </div>
               <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden mb-3">
                 <div className="h-full rounded-full bg-[#0b315f] transition-all" style={{ width: `${pct}%` }} />
               </div>
               <div className="space-y-1.5">
-                {paradas.map((p, i) => (
+                {paradasDisplay.map((p, i) => (
                   <div key={p.id} className="flex items-center gap-1.5">
-                    <div className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-black flex-shrink-0 text-white ${p.estado === "completada" ? "bg-green-500" : i === 0 ? "bg-green-600" : i === paradas.length - 1 ? "bg-red-500" : "bg-[#0b315f]"}`}>
+                    <div className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-black flex-shrink-0 text-white ${p.estado === "completada" ? "bg-green-500" : i === 0 ? "bg-green-600" : i === paradasDisplay.length - 1 ? "bg-red-500" : "bg-[#0b315f]"}`}>
                       {p.estado === "completada" ? "✓" : i + 1}
                     </div>
                     <span className={`flex-1 truncate text-xs ${p.estado === "completada" ? "text-green-600 line-through" : "text-gray-700 font-medium"}`}>{p.nombre}</span>

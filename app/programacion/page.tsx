@@ -269,6 +269,7 @@ export default function ReservasPage() {
   const [expandidoContrato,    setExpandidoContrato]    = useState<string | null>(null);
   const [modalLinksId,         setModalLinksId]         = useState<number | null>(null);
   const [confirmEliminarId,    setConfirmEliminarId]    = useState<number | null>(null);
+  const [modalFinalizar,       setModalFinalizar]       = useState<{ id: number; motivo: string } | null>(null);
   const [modalAsignarBloque,   setModalAsignarBloque]   = useState<{ cotizacionId: number | null; sinAsignar: Reserva[]; todasLasFilas: Reserva[] } | null>(null);
   const [asignarVehId,         setAsignarVehId]         = useState<string>("");
   const [asignarCondId,        setAsignarCondId]        = useState<string>("");
@@ -300,6 +301,7 @@ export default function ReservasPage() {
   const [aplicarDesde,         setAplicarDesde]         = useState("");
   const [aplicarHasta,         setAplicarHasta]         = useState("");
   const [aplicando,            setAplicando]            = useState(false);
+  const [sincCoords,           setSincCoords]           = useState<{ activo: boolean; msg: string }>({ activo: false, msg: "" });
 
   const f = (k: keyof typeof FORM_VACIO) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -336,6 +338,72 @@ export default function ReservasPage() {
     await cargarPasajerosAsignados(reservaId, paradaId);
     await cargarOcupaciones();
     alert(seleccionados.length + " pasajeros asignados");
+  };
+
+  // ── Sincronización masiva de coordenadas (cotización → tabla paradas) ──────
+  // Rellena lat/lng de las paradas usando las coords EXACTAS guardadas en la
+  // cotización vinculada (o en reservas.paradas_json), sin abrir cada servicio.
+  // Geocodifica solo las que no tengan fuente exacta.
+  const sincronizarCoordenadas = async () => {
+    if (sincCoords.activo) return;
+    if (!confirm("Sincronizar coordenadas de todas las paradas sin lat/lng desde la cotización. ¿Continuar?")) return;
+    setSincCoords({ activo: true, msg: "Buscando paradas sin coordenadas…" });
+
+    // 1. Paradas sin coordenadas
+    const { data: sinCoords, error: e1 } = await supabase
+      .from("paradas").select("id,reserva_id,nombre,orden").or("lat.is.null,lng.is.null");
+    if (e1) { alert("Error: " + e1.message); setSincCoords({ activo: false, msg: "" }); return; }
+    if (!sinCoords || sinCoords.length === 0) { alert("✅ Todas las paradas ya tienen coordenadas."); setSincCoords({ activo: false, msg: "" }); return; }
+
+    // 2. Agrupar por reserva
+    const porReserva = new Map<number, any[]>();
+    sinCoords.forEach((p: any) => { if (!porReserva.has(p.reserva_id)) porReserva.set(p.reserva_id, []); porReserva.get(p.reserva_id)!.push(p); });
+    const reservaIds = [...porReserva.keys()];
+
+    // 3. Cargar reservas (cotizacion_id + paradas_json propio)
+    const { data: resData } = await supabase.from("reservas").select("id,cotizacion_id,paradas_json").in("id", reservaIds);
+    const resMap = new Map<number, any>((resData || []).map((r: any) => [r.id, r]));
+
+    // 4. Cargar cotizaciones vinculadas
+    const cotIds = [...new Set((resData || []).map((r: any) => r.cotizacion_id).filter(Boolean))];
+    const cotMap = new Map<number, any>();
+    if (cotIds.length > 0) {
+      const { data: cots } = await supabase.from("cotizaciones").select("id,paradas_json,paradas_retorno_json").in("id", cotIds);
+      (cots || []).forEach((c: any) => cotMap.set(c.id, c));
+    }
+
+    // 5. Procesar reserva por reserva
+    let exactas = 0, geocod = 0, fallidas = 0, procesadas = 0;
+    for (const rid of reservaIds) {
+      procesadas++;
+      setSincCoords({ activo: true, msg: `Procesando ${procesadas}/${reservaIds.length} reservas… (${exactas} exactas, ${geocod} geocodificadas)` });
+      const r = resMap.get(rid);
+      const cot = r?.cotizacion_id ? cotMap.get(r.cotizacion_id) : null;
+
+      // Fuentes de coords exactas: cotización (ida + retorno) y paradas_json de la reserva
+      const fuentes: any[] = [];
+      if (cot?.paradas_json) fuentes.push(...cot.paradas_json);
+      if (cot?.paradas_retorno_json) fuentes.push(...cot.paradas_retorno_json);
+      if (r?.paradas_json) fuentes.push(...r.paradas_json);
+      const byNombre = new Map<string, { lat: number; lng: number }>();
+      fuentes.forEach((p: any) => { if (p.lat && p.lng) byNombre.set(String(p.nombre || "").trim().toLowerCase(), { lat: Number(p.lat), lng: Number(p.lng) }); });
+
+      for (const par of (porReserva.get(rid) || [])) {
+        const exacta = byNombre.get(String(par.nombre || "").trim().toLowerCase());
+        if (exacta) {
+          await supabase.from("paradas").update({ lat: exacta.lat, lng: exacta.lng }).eq("id", par.id);
+          exactas++;
+        } else {
+          const gc = await geocodificar(par.nombre);
+          if (gc) { await supabase.from("paradas").update({ lat: gc.lat, lng: gc.lng }).eq("id", par.id); geocod++; }
+          else fallidas++;
+        }
+      }
+    }
+
+    setSincCoords({ activo: false, msg: "" });
+    alert(`✅ Sincronización completa\n\n• ${exactas} desde cotización (exactas)\n• ${geocod} geocodificadas\n${fallidas > 0 ? `• ${fallidas} sin resolver (revisar nombre)` : ""}`);
+    cargarDatos();
   };
 
   const crearParadasDesdeJSON = async (reservaId: number, paradasJSON: any[]) => {
@@ -675,12 +743,20 @@ export default function ReservasPage() {
     let nuevoEstado = form.estado;
     const reservaActual = reservas.find(r => r.id === editandoId);
     if (reservaActual?.estado === "pendiente") {
-      if (form.tipo_asignacion === "propio" && form.vehiculo_id && form.conductor_id) nuevoEstado = "programada";
-      if (form.tipo_asignacion === "tercerizado" && form.empresa_tercerizada_id) nuevoEstado = "programada";
+      const esFijo = !esEventual(reservaActual);
+      // Fijo: auto-confirmado al asignar (el contrato es la confirmación)
+      // Eventual: queda en programada hasta que el cliente confirme manualmente
+      if (form.tipo_asignacion === "propio" && form.vehiculo_id && form.conductor_id)
+        nuevoEstado = esFijo ? "confirmada" : "programada";
+      if (form.tipo_asignacion === "tercerizado" && form.empresa_tercerizada_id) {
+        const tercerizadoCompleto = !!(form.vehiculo_tercero_id && form.conductor_tercero_id);
+        nuevoEstado = (esFijo && tercerizadoCompleto) ? "confirmada" : "programada";
+      }
     }
     if (form.estado !== "pendiente") nuevoEstado = form.estado;
 
     const asignPayload = {
+      hora_servicio:          form.hora_servicio,
       tipo:                   form.tipo_asignacion === "propio" ? "propia" : "tercerizada",
       tipo_asignacion:        form.tipo_asignacion,
       vehiculo_id:            form.tipo_asignacion === "propio" ? Number(form.vehiculo_id) : null,
@@ -703,15 +779,18 @@ export default function ReservasPage() {
 
     // ── Si es servicio FIJO con contrato, ofrecer aplicar a otros días ──
     if (reservaActual && !esEventual(reservaActual) && reservaActual.cotizacion_id) {
-      // Filtrar SOLO los servicios que ya tienen la misma placa/empresa asignada
-      // (para no sobrescribir otros vehículos del mismo contrato que corren en paralelo)
+      const horaOriginal = reservaActual.hora_servicio?.slice(0, 5) || "";
       const otrasReservas = reservas.filter(r => {
         if (r.cotizacion_id !== reservaActual.cotizacion_id) return false;
         if (r.id === editandoId) return false;
         if (r.estado === "cancelada" || r.estado === "finalizada") return false;
+        // Solo misma hora: evita contaminar rutas paralelas del mismo contrato
+        if (r.hora_servicio?.slice(0, 5) !== horaOriginal) return false;
         if (form.tipo_asignacion === "propio")
-          return r.vehiculo_id === Number(form.vehiculo_id);
-        // Tercerizado: misma empresa Y mismo vehículo tercero (si se especificó)
+          // Incluir sin asignar (pendiente) + misma placa ya asignada
+          return r.vehiculo_id === null || r.vehiculo_id === Number(form.vehiculo_id);
+        // Tercerizado: incluir sin empresa, o misma empresa (+ vehículo si se especificó)
+        if (r.empresa_tercerizada_id === null) return true;
         if (r.empresa_tercerizada_id !== Number(form.empresa_tercerizada_id)) return false;
         if (form.vehiculo_tercero_id && r.vehiculo_tercero_id !== Number(form.vehiculo_tercero_id)) return false;
         return true;
@@ -760,8 +839,12 @@ export default function ReservasPage() {
     const otrosIds     = targets.filter(r => r.estado !== "pendiente").map(r => r.id);
 
     const ops: Promise<any>[] = [];
-    if (pendienteIds.length > 0)
-      ops.push(supabase.from("reservas").update({ ...payload, estado: "programada" }).in("id", pendienteIds));
+    if (pendienteIds.length > 0) {
+      const propioCompleto = payload.tipo_asignacion === "propio" && !!payload.vehiculo_id && !!payload.conductor_id;
+      const tercerizadoCompleto = payload.tipo_asignacion === "tercerizado" && !!payload.empresa_tercerizada_id && !!payload.vehiculo_tercero_id && !!payload.conductor_tercero_id;
+      const estadoPendientes: EstadoReserva = (propioCompleto || tercerizadoCompleto) ? "confirmada" : "programada";
+      ops.push(supabase.from("reservas").update({ ...payload, estado: estadoPendientes }).in("id", pendienteIds));
+    }
     if (otrosIds.length > 0)
       ops.push(supabase.from("reservas").update(payload).in("id", otrosIds));
 
@@ -781,8 +864,32 @@ export default function ReservasPage() {
   };
 
   const cambiarEstadoRapido = async (id: number, estado: EstadoReserva) => {
+    if (estado === "en_curso") {
+      alert("El estado 'En curso' solo lo puede activar el conductor desde la app conductor.");
+      return;
+    }
+    if (estado === "finalizada") {
+      setModalFinalizar({ id, motivo: "" });
+      return;
+    }
     await supabase.from("reservas").update({ estado }).eq("id", id);
     setReservas(prev => prev.map(r => r.id === id ? { ...r, estado } : r));
+  };
+
+  const confirmarFinalizar = async () => {
+    if (!modalFinalizar) return;
+    if (!modalFinalizar.motivo.trim()) {
+      alert("Debes ingresar el motivo de cierre manual.");
+      return;
+    }
+    const reserva = reservas.find(r => r.id === modalFinalizar.id);
+    const obsActual = reserva?.observaciones ? reserva.observaciones + " | " : "";
+    await supabase.from("reservas").update({
+      estado: "finalizada",
+      observaciones: `${obsActual}[Cierre manual] ${modalFinalizar.motivo.trim()}`,
+    }).eq("id", modalFinalizar.id);
+    setReservas(prev => prev.map(r => r.id === modalFinalizar.id ? { ...r, estado: "finalizada" } : r));
+    setModalFinalizar(null);
   };
 
   const capacidadDe = (r: Reserva): number | null => {
@@ -866,7 +973,11 @@ export default function ReservasPage() {
     });
     return Array.from(grupos.entries()).map(([fecha, filas]) => ({
       fecha,
-      filas,
+      filas: [...filas].sort((a, b) => {
+        const ha = a.hora_servicio || "";
+        const hb = b.hora_servicio || "";
+        return ha !== hb ? ha.localeCompare(hb) : a.id - b.id;
+      }),
       label: fecha === "sin_fecha" ? "Sin fecha" :
         new Date(fecha + "T12:00:00").toLocaleDateString("es-PE", { weekday: "long", day: "numeric", month: "long", year: "numeric" }),
       esHoyGrupo: fecha === hoy,
@@ -1282,6 +1393,34 @@ export default function ReservasPage() {
         );
       })()}
 
+      {modalFinalizar && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setModalFinalizar(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6" onClick={e => e.stopPropagation()}>
+            <div className="w-12 h-12 rounded-full bg-purple-100 flex items-center justify-center mx-auto mb-4">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" strokeWidth="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            </div>
+            <h3 className="text-lg font-bold text-gray-900 text-center mb-1">Finalizar servicio manualmente</h3>
+            <p className="text-xs text-gray-500 text-center mb-4">Este estado normalmente lo cierra el conductor desde la app. Indica el motivo de cierre manual.</p>
+            <textarea
+              value={modalFinalizar.motivo}
+              onChange={e => setModalFinalizar(m => m ? { ...m, motivo: e.target.value } : m)}
+              placeholder="Ej: Conductor olvidó finalizar en app, servicio verificado por coordinador..."
+              className="w-full border rounded-xl px-3 py-2 text-sm resize-none focus:outline-none focus:border-purple-400 mb-4"
+              rows={3}
+              autoFocus
+            />
+            <div className="flex gap-3">
+              <button onClick={() => setModalFinalizar(null)} className="flex-1 py-2.5 rounded-xl font-bold text-sm border border-gray-200 text-gray-600 hover:bg-gray-50">
+                Cancelar
+              </button>
+              <button onClick={confirmarFinalizar} className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white" style={{ background: "#7c3aed" }}>
+                Confirmar cierre
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {reservaModal && (
         <ModalManifiesto
           reservaId={reservaModal.id}
@@ -1423,7 +1562,6 @@ export default function ReservasPage() {
                   <option value="pendiente">Pendiente</option>
                   <option value="programada">Programada</option>
                   <option value="confirmada">Confirmada</option>
-                  <option value="en_curso">En curso</option>
                   <option value="finalizada">Finalizada</option>
                   <option value="cancelada">Cancelada</option>
                 </select>
@@ -1638,12 +1776,29 @@ export default function ReservasPage() {
                 📅 Vista agenda
               </button>
             )}
+            <button
+              onClick={sincronizarCoordenadas}
+              disabled={sincCoords.activo}
+              title="Rellena lat/lng de las paradas desde la cotización vinculada, sin abrir cada servicio"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all disabled:opacity-60"
+              style={{ background: sincCoords.activo ? "#f0f9ff" : "white", borderColor: "#0ea5e9", color: "#0369a1" }}
+            >
+              📍 {sincCoords.activo ? "Sincronizando…" : "Sincronizar coordenadas"}
+            </button>
             <div className="flex items-center px-4 py-1.5 bg-gray-50 border rounded-xl text-sm text-gray-400">
               {filtradas.length} resultado{filtradas.length !== 1 ? "s" : ""}
             </div>
           </div>
         </div>
       </section>
+
+      {/* Toast de progreso de sincronización de coordenadas */}
+      {sincCoords.activo && sincCoords.msg && (
+        <div className="fixed bottom-5 right-5 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg text-white text-sm font-semibold" style={{ background: "#0369a1" }}>
+          <span className="inline-block w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+          {sincCoords.msg}
+        </div>
+      )}
 
       {/* VISTA AGRUPADA POR CONTRATO (solo cuando filtro = Fijos) */}
       {filtroServicio === "fijo" && (
@@ -1793,7 +1948,7 @@ export default function ReservasPage() {
                                       className="text-[11px] font-bold px-2 py-1 rounded-lg border-0 cursor-pointer"
                                       style={{ background: estCfg.bg, color: estCfg.color }}
                                     >
-                                      {Object.entries(ESTADO_CFG).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                                                      {Object.entries(ESTADO_CFG).filter(([k]) => k !== "en_curso").map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                                     </select>
                                   </td>
                                   <td className="px-4 py-2.5 text-gray-600 max-w-[160px]">
@@ -2064,7 +2219,7 @@ export default function ReservasPage() {
                           className="text-xs font-bold px-2 py-1 rounded-lg border-0 cursor-pointer"
                           style={{ background: estCfg.bg, color: estCfg.color }}
                         >
-                          {Object.entries(ESTADO_CFG).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                          {Object.entries(ESTADO_CFG).filter(([k]) => k !== "en_curso").map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                         </select>
                       </td>
 
