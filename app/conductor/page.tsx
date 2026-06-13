@@ -219,6 +219,7 @@ export default function ConductorApp() {
   const [docs,         setDocs]         = useState<DocCond[]>([]);
   const [cargando,     setCargando]     = useState(false);
   const [debugFecha,   setDebugFecha]   = useState("");
+  const [debugInfo,    setDebugInfo]    = useState("");
 
   // ── GPS ────────────────────────────────────────────────────────────────────
   const [enRuta,       setEnRuta]       = useState(false);
@@ -376,6 +377,18 @@ export default function ConductorApp() {
         .eq("fecha", hoy)
         .limit(1),
     ]);
+
+    // ── DEBUG temporal (diagnóstico WebView vs navegador) ───────────────────
+    const nat = typeof (globalThis as any).Capacitor !== "undefined"
+      && !!(globalThis as any).Capacitor?.isNativePlatform?.();
+    setDebugInfo(
+      `cid=${cid} campo=${condField} nativo=${nat}\n` +
+      `hoy=${hoy}\n` +
+      `reservas: n=${(rR.data || []).length} err=${(rR as any).error?.message ?? "ok"}\n` +
+      `veh: n=${(vR.data || []).length} err=${(vR as any).error?.message ?? "ok"}\n` +
+      `vehTer: n=${(vTR.data || []).length} err=${(vTR as any).error?.message ?? "ok"}\n` +
+      `docs err=${(dR as any).error?.message ?? "ok"} | chk err=${(ckR as any).error?.message ?? "ok"}`
+    );
 
     const res: Reserva[] = rR.data || [];
     // Combinar vehículos propios y de tercero; usar el id correcto según el tipo de reserva
@@ -1420,6 +1433,14 @@ export default function ConductorApp() {
                 <p style={{ color: "var(--c-mute)", fontSize: 12, margin: "6px 0 14px", fontFamily: FONT_MONO }}>
                   {debugFecha}
                 </p>
+                {debugInfo && (
+                  <pre style={{
+                    textAlign: "left", fontSize: 10, lineHeight: 1.5, color: "var(--c-mute)",
+                    background: "var(--c-soft)", padding: 10, borderRadius: 8,
+                    whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: "0 0 14px",
+                    fontFamily: FONT_MONO,
+                  }}>{debugInfo}</pre>
+                )}
                 <SecondaryBtn
                   onClick={() => conductor && cargarDatos(conductor.id, conductor._tabla)}
                   icon={<IconRefresh size={16} color="var(--c-ink)" />}
