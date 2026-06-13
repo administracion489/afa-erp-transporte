@@ -253,6 +253,11 @@ export default function ClientePortal() {
   const [rutasEnVivoMap,    setRutasEnVivoMap]    = useState<Record<number, [number,number][]>>({});
   const [huellaGpsMap,      setHuellaGpsMap]      = useState<Record<number, {lat:number;lng:number;velocidad:number;ts:string|null}[]>>({});
   const [paradasResueltasMap, setParadasResueltasMap] = useState<Record<number, Parada[]>>({});
+  // Dashboard — info enriquecida por servicio destacado
+  const [condInfoMap,   setCondInfoMap]   = useState<Record<number, {nombre: string; tel: string}>>({});
+  const [vehPlacaMap,   setVehPlacaMap]   = useState<Record<number, string>>({});
+  const [gpsCardMap,    setGpsCardMap]    = useState<Record<number, {lat:number;lng:number;velocidad:number} | null>>({});
+  const [etaDestinoMap, setEtaDestinoMap] = useState<Record<number, string | null>>({});
   const dibujoLayersRef  = useRef<string[]>([]);
   const dibujoSourcesRef = useRef<string[]>([]);
   const stopMarkersRef   = useRef<mapboxgl.Marker[]>([]);
@@ -728,9 +733,9 @@ export default function ClientePortal() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reservas.length]);
 
-  // ─── En vivo: cargar paradas de TODOS los servicios de hoy ──────────────
+  // ─── Dashboard + En vivo: cargar paradas de servicios de hoy ─────────────
   useEffect(() => {
-    if (tab !== "activos") return;
+    if (tab !== "activos" && tab !== "dashboard") return;
     serviciosHoyRef.current.forEach(async r => {
       if (paradas[r.id] !== undefined) return;
       const { data } = await supabase.from("paradas").select("*").eq("reserva_id", r.id).order("orden");
@@ -739,6 +744,95 @@ export default function ClientePortal() {
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, reservas.length]);
+
+  // ─── Dashboard: conductor / vehículo / GPS por servicio destacado ─────────
+  useEffect(() => {
+    if (tab !== "dashboard") return;
+    const hora = serviciosHoyRef.current.find(r => efectivoEstado(r) === "en_curso")?.hora_servicio
+              || serviciosHoyRef.current[0]?.hora_servicio;
+    if (!hora) return;
+    const destacados = serviciosHoyRef.current.filter(r => r.hora_servicio === hora);
+    destacados.forEach(async r => {
+      const ra = r as any;
+      // Conductor
+      if (!(r.id in condInfoMap)) {
+        let nombre = "", tel = "";
+        if (ra.conductor_id) {
+          const { data } = await supabase.from("conductores").select("nombre,telefono").eq("id", ra.conductor_id).maybeSingle();
+          if (data) { nombre = (data as any).nombre || ""; tel = (data as any).telefono || ""; }
+        } else if (ra.conductor_tercero_id) {
+          const { data } = await supabase.from("conductores_tercero").select("nombre,telefono").eq("id", ra.conductor_tercero_id).maybeSingle();
+          if (data) { nombre = (data as any).nombre || ""; tel = (data as any).telefono || ""; }
+        }
+        setCondInfoMap(prev => ({ ...prev, [r.id]: { nombre: nombre || "Conductor asignado", tel } }));
+      }
+      // Vehículo: vehiculo_id → tabla vehiculos; vehiculo_tercero_id → tabla vehiculos_tercero
+      if (!(r.id in vehPlacaMap)) {
+        if (r.vehiculo_id) {
+          const { data } = await supabase.from("vehiculos").select("placa").eq("id", r.vehiculo_id).maybeSingle();
+          if ((data as any)?.placa) setVehPlacaMap(prev => ({ ...prev, [r.id]: (data as any).placa }));
+        } else if (ra.vehiculo_tercero_id) {
+          const { data } = await supabase.from("vehiculos_tercero").select("placa").eq("id", ra.vehiculo_tercero_id).maybeSingle();
+          if ((data as any)?.placa) setVehPlacaMap(prev => ({ ...prev, [r.id]: (data as any).placa }));
+        }
+      }
+      // GPS más reciente de esta reserva
+      const { data: gd } = await supabase.from("ubicaciones_gps")
+        .select("lat,lng,velocidad").eq("reserva_id", r.id)
+        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      if ((gd as any)?.lat && (gd as any)?.lng) {
+        setGpsCardMap(prev => ({ ...prev, [r.id]: { lat: Number((gd as any).lat), lng: Number((gd as any).lng), velocidad: Number((gd as any).velocidad) || 0 } }));
+      } else {
+        setGpsCardMap(prev => ({ ...prev, [r.id]: null }));
+      }
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, reservas.length]);
+
+  // ─── Dashboard: ETA al destino con tráfico real (se ejecuta cuando llega GPS) ─
+  useEffect(() => {
+    const entries = Object.entries(gpsCardMap).filter(([, v]) => v !== null);
+    if (!entries.length) return;
+    entries.forEach(async ([idStr, gps]) => {
+      if (!gps) return;
+      const rid = Number(idStr);
+      if (rid in etaDestinoMap) return; // ya calculado
+      const r = serviciosHoyRef.current.find(x => x.id === rid);
+      if (!r) return;
+      const pjson = (r as any).paradas_json as any[] | null;
+      const ps = paradas[rid] || [];
+      const psAll: Parada[] = ps.length > 0 ? ps
+        : (pjson || []).filter((p: any) => p.nombre).map((p: any, i: number) => ({
+            id: -(i+1), reserva_id: rid, orden: i+1, nombre: p.nombre, direccion: null,
+            lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
+            hora_estimada: p.hora || null, estado: "pendiente",
+          } as Parada));
+      const destino = psAll[psAll.length - 1];
+      if (!destino?.lat || !destino?.lng) { setEtaDestinoMap(prev => ({ ...prev, [rid]: null })); return; }
+      try {
+        const res = await fetch("/api/ruta", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ paradas: [
+            { lat: gps.lat, lng: gps.lng, nombre: "Posición actual" },
+            { lat: destino.lat, lng: destino.lng, nombre: destino.nombre },
+          ]}),
+        });
+        const data = await res.json();
+        if (typeof data.total_min === "number") {
+          const llegada = new Date(Date.now() + data.total_min * 60 * 1000);
+          // Ajustar a hora Lima (UTC-5)
+          const limaMs = llegada.getTime() - 5 * 60 * 60 * 1000;
+          const limaDate = new Date(limaMs);
+          const h = String(limaDate.getUTCHours()).padStart(2, "0");
+          const m = String(limaDate.getUTCMinutes()).padStart(2, "0");
+          setEtaDestinoMap(prev => ({ ...prev, [rid]: `${h}:${m}` }));
+        } else {
+          setEtaDestinoMap(prev => ({ ...prev, [rid]: null }));
+        }
+      } catch { setEtaDestinoMap(prev => ({ ...prev, [rid]: null })); }
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(Object.keys(gpsCardMap))]);
 
   // ─── En vivo: CAPA 1 — ruta planificada (geocodifica paradas → Google) ───
   useEffect(() => {
@@ -964,6 +1058,10 @@ export default function ClientePortal() {
     .sort((a, b) => (a.hora_servicio || "").localeCompare(b.hora_servicio || ""));
   // Prioriza el servicio con GPS activo para la card principal
   const servicioActivo = serviciosHoy.find(r => efectivoEstado(r) === "en_curso") || serviciosHoy[0] || null;
+  // Todos los servicios de la misma hora que el servicio activo → aparecen como cards EN RUTA
+  const serviciosDestacados = servicioActivo
+    ? serviciosHoy.filter(r => r.hora_servicio === servicioActivo.hora_servicio)
+    : [];
   // Ref siempre actualizado (para efectos que no pueden incluir serviciosHoy en deps)
   serviciosHoyRef.current = serviciosHoy;
   const COLORES_RUTA = ["#0b315f", "#ea580c", "#16a34a", "#7c3aed"];
@@ -2115,79 +2213,169 @@ tbody tr:nth-child(even){background:#f9fafb}
               ))}
             </div>
 
-            {/* EN RUTA card con timeline de paradas */}
-            {servicioActivo && (
-              <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 0 }}>
-                  <div style={{ padding: "18px 20px" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                      <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.success, animation: "pcPulse 1.6s ease-out infinite", display: "inline-block", position: "relative" as const }} />
-                      <p style={{ color: C.success, fontWeight: 800, fontSize: 11, margin: 0, letterSpacing: "1.2px", textTransform: "uppercase" as const }}>En ruta · HOY</p>
-                      <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: "auto" }}>#{servicioActivo.id}</span>
+            {/* EN RUTA cards — todos los servicios activos (o el primero si ninguno en_curso) */}
+            {serviciosDestacados.map(r => {
+              const ps = paradas[r.id] || [];
+              const pjson = (r as any).paradas_json as any[] | null;
+              const psDisplay: Parada[] = ps.length > 0
+                ? ps
+                : (pjson || []).filter((p: any) => p.nombre).map((p: any, i: number) => ({
+                    id: -(i + 1), reserva_id: r.id, orden: i + 1,
+                    nombre: p.nombre, direccion: null,
+                    lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
+                    hora_estimada: p.hora || null, estado: "pendiente",
+                  } as Parada));
+              // Detectar parada actual: primera no-completada después de las completadas
+              const ultimaCompletadaIdx = psDisplay.reduce((acc: number, p: Parada, i: number) => p.estado === "completada" ? i : acc, -1);
+              const currentStopIdx = ultimaCompletadaIdx < psDisplay.length - 1 ? ultimaCompletadaIdx + 1 : 0;
+              const hayCompletadas = ultimaCompletadaIdx >= 0;
+              const gpsCard = gpsCardMap[r.id];
+              const condCard = condInfoMap[r.id];
+              const placaCard = vehPlacaMap[r.id];
+              const etaCard = etaDestinoMap[r.id];
+              const destinoDisplay = psDisplay[psDisplay.length - 1];
+              return (
+                <div key={r.id} style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+                  {/* Cabecera: info servicio + panel conductor/ETA */}
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 0 }}>
+                    {/* Panel izquierdo */}
+                    <div style={{ padding: "18px 20px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                        <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.success, animation: "pcPulse 1.6s ease-out infinite", display: "inline-block" }} />
+                        <p style={{ color: C.success, fontWeight: 800, fontSize: 11, margin: 0, letterSpacing: "1.2px", textTransform: "uppercase" as const }}>En ruta · HOY</p>
+                        <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: "auto" }}>#{r.id}</span>
+                      </div>
+                      <p style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 17, letterSpacing: -0.4, margin: "0 0 4px", color: C.ink }}>
+                        {r.origen} → {r.destino}
+                      </p>
+                      <p style={{ color: C.mute, fontSize: 12, margin: "0 0 12px" }}>
+                        Turno {r.hora_servicio?.slice(0,5) || "–"} &nbsp;·&nbsp; {fmtFecha(r.fecha_servicio)}
+                        {gpsCard && <span> &nbsp;·&nbsp; <span style={{ fontFamily: C.fontMono, fontWeight: 700, color: C.ink2 }}>{gpsCard.velocidad} km/h</span></span>}
+                      </p>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button onClick={() => abrirGps(r)} style={{ padding: "7px 14px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 12, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, fontFamily: "inherit" }}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                          Ver GPS
+                        </button>
+                        {condCard?.tel && (
+                          <a href={`tel:${condCard.tel}`} style={{ padding: "7px 14px", borderRadius: 7, border: `1px solid ${C.line2}`, background: "transparent", color: C.navy, fontWeight: 700, fontSize: 12, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none", fontFamily: "inherit" }}>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13.6a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.59 3h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 10.09a16 16 0 0 0 6 6l1.27-.97a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 17.19z"/></svg>
+                            Llamar
+                          </a>
+                        )}
+                      </div>
                     </div>
-                    <p style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 18, letterSpacing: -0.4, margin: "0 0 6px", color: C.ink }}>
-                      {servicioActivo.origen} → {servicioActivo.destino}
-                    </p>
-                    <p style={{ color: C.mute, fontSize: 12.5, margin: "0 0 14px" }}>
-                      Turno {servicioActivo.hora_servicio?.slice(0,5) || "–"} &nbsp;·&nbsp; {fmtFecha(servicioActivo.fecha_servicio)}
-                      {gpsActual && <span> &nbsp;·&nbsp; <span style={{ fontFamily: C.fontMono }}>{gpsActual.velocidad}</span> km/h</span>}
-                    </p>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <button onClick={() => setTab("activos")} style={{ padding: "8px 16px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 12.5, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-                        GPS en vivo
-                      </button>
-                      {conductorInfo?.telefono && (
-                        <a href={`tel:${conductorInfo.telefono}`} style={{ padding: "8px 16px", borderRadius: 7, border: `1px solid ${C.line2}`, background: C.surface, color: C.ink2, fontWeight: 600, fontSize: 12.5, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, textDecoration: "none", fontFamily: "inherit" }}>
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13.6a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.59 3h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 10.09a16 16 0 0 0 6 6l1.27-.97a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 17.19z"/></svg>
-                          Llamar
-                        </a>
+                    {/* Panel derecho — conductor / vehículo / ETA */}
+                    <div style={{ width: 190, borderLeft: `1px solid ${C.line}`, background: C.bg, display: "flex", flexDirection: "column" as const, padding: "14px 16px", gap: 10, justifyContent: "center" }}>
+                      {/* Conductor */}
+                      <div>
+                        <p style={{ fontSize: 8.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: "0 0 2px" }}>Conductor</p>
+                        <p style={{ fontWeight: 700, color: C.ink, fontSize: 12.5, margin: 0, lineHeight: 1.2 }}>{condCard?.nombre || "Cargando…"}</p>
+                      </div>
+                      {/* Vehículo */}
+                      {placaCard && (
+                        <div>
+                          <p style={{ fontSize: 8.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: "0 0 2px" }}>Placa</p>
+                          <p style={{ fontFamily: C.fontMono, fontWeight: 800, color: C.navy, fontSize: 13.5, margin: 0, letterSpacing: 1 }}>{placaCard}</p>
+                        </div>
+                      )}
+                      {/* Avance */}
+                      {psDisplay.length > 0 && (
+                        <div>
+                          <p style={{ fontSize: 8.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: "0 0 2px" }}>Avance</p>
+                          <p style={{ fontSize: 12, color: C.ink2, margin: 0 }}>
+                            Parada&nbsp;<span style={{ fontWeight: 800, color: C.navy }}>{hayCompletadas ? ultimaCompletadaIdx + 1 : 0}</span>&nbsp;de&nbsp;{psDisplay.length}
+                          </p>
+                        </div>
+                      )}
+                      {/* ETA destino */}
+                      {destinoDisplay && (
+                        <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
+                          <p style={{ fontSize: 8.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: "0 0 2px" }}>
+                            {etaCard ? "Llega ~" : "Planif. destino"}
+                          </p>
+                          <p style={{ fontFamily: C.fontMono, fontWeight: 800, fontSize: 19, color: etaCard ? C.success : C.navy, margin: 0, lineHeight: 1 }}>
+                            {etaCard || destinoDisplay.hora_estimada?.slice(0, 5) || "–"}
+                          </p>
+                          {etaCard && destinoDisplay.hora_estimada && (
+                            <p style={{ fontSize: 9, color: C.mute, margin: "3px 0 0" }}>plan {destinoDisplay.hora_estimada.slice(0, 5)}</p>
+                          )}
+                          {etaCard && <p style={{ fontSize: 8.5, color: C.mute, margin: "2px 0 0" }}>con tráfico real</p>}
+                        </div>
                       )}
                     </div>
                   </div>
-                  <div style={{ width: 180, background: C.navyDeep, position: "relative" as const, display: "flex", flexDirection: "column" as const, alignItems: "center", justifyContent: "center", gap: 6, padding: "18px 16px", cursor: "pointer" }} onClick={() => abrirGps(servicioActivo)}>
-                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="rgba(123,166,224,0.6)" strokeWidth="1.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-                    <p style={{ color: "rgba(255,255,255,0.7)", fontSize: 11.5, fontWeight: 700, margin: 0 }}>Ver mapa</p>
-                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#4ade80", animation: "pcPulse 1.6s ease-out infinite", display: "inline-block" }} />
-                      <p style={{ color: "#4ade80", fontSize: 10.5, fontWeight: 700, margin: 0 }}>EN VIVO</p>
-                    </div>
-                  </div>
-                </div>
-                {/* Timeline de paradas */}
-                {(paradas[servicioActivo.id] || []).length > 0 && (
-                  <div style={{ borderTop: `1px solid ${C.line}`, padding: "12px 20px", overflowX: "auto" }}>
-                    <p style={{ fontSize: 9.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: "0 0 10px" }}>
-                      Timeline del día · {(paradas[servicioActivo.id] || []).length} paradas
-                    </p>
-                    <div style={{ display: "flex", alignItems: "flex-start", minWidth: "max-content" }}>
-                      {(paradas[servicioActivo.id] || []).map((p, i, arr) => (
-                        <div key={p.id} style={{ display: "flex", alignItems: "flex-start" }}>
-                          <div style={{ display: "flex", flexDirection: "column" as const, alignItems: "center", gap: 4 }}>
-                            <div style={{ width: 20, height: 20, borderRadius: "50%", background: i === 0 ? C.navy : C.navyTint, border: `2px solid ${i === 0 ? C.navy : C.line2}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                              {i === 0 && <div style={{ width: 6, height: 6, borderRadius: "50%", background: "white" }} />}
+                  {/* Timeline de paradas */}
+                  {psDisplay.length > 0 && (
+                    <div style={{ borderTop: `1px solid ${C.line}`, padding: "14px 20px", overflowX: "auto" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                        <p style={{ fontSize: 9.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: 0 }}>
+                          Progreso del recorrido · {psDisplay.length} paradas
+                        </p>
+                        {etaCard && <span style={{ fontSize: 9, background: "rgba(21,128,61,0.1)", color: C.success, fontWeight: 700, padding: "1px 7px", borderRadius: 4 }}>ETA con tráfico real</span>}
+                      </div>
+                      <div style={{ display: "flex", alignItems: "flex-start", minWidth: "max-content" }}>
+                        {psDisplay.map((p, i, arr) => {
+                          const isCompleted = p.estado === "completada";
+                          const isCurrent   = !isCompleted && i === currentStopIdx && (hayCompletadas || i === 0);
+                          const isDestino   = i === arr.length - 1;
+                          const dotBg      = isCompleted ? C.success : isCurrent ? C.navy : C.navyTint;
+                          const dotBorder  = isCompleted ? C.success : isCurrent ? C.navy : C.line2;
+                          const lineColor  = isCompleted ? C.success : C.line2;
+                          return (
+                            <div key={p.id} style={{ display: "flex", alignItems: "flex-start" }}>
+                              <div style={{ display: "flex", flexDirection: "column" as const, alignItems: "center", gap: 3 }}>
+                                {/* Círculo de estado */}
+                                <div style={{ position: "relative" as const, width: 22, height: 22, flexShrink: 0 }}>
+                                  <div style={{ width: 22, height: 22, borderRadius: "50%", background: dotBg, border: `2px solid ${dotBorder}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                    {isCompleted
+                                      ? <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                      : isCurrent
+                                        ? <div style={{ width: 7, height: 7, borderRadius: "50%", background: "white" }} />
+                                        : <span style={{ fontSize: 7.5, color: isDestino ? C.navy : C.mute, fontWeight: 700 }}>{i + 1}</span>
+                                    }
+                                  </div>
+                                  {isCurrent && <span style={{ position: "absolute" as const, inset: -4, borderRadius: "50%", border: `2px solid ${C.navy}`, opacity: 0.25, animation: "pcPulse 1.6s ease-out infinite", pointerEvents: "none" as const }} />}
+                                </div>
+                                {/* Nombre parada */}
+                                <p style={{ fontSize: 8.5, color: isCompleted ? C.success : isCurrent ? C.navy : C.mute, maxWidth: 70, textAlign: "center" as const, margin: 0, lineHeight: 1.3, fontWeight: isCurrent ? 700 : 400 }}>
+                                  {p.nombre}
+                                </p>
+                                {/* Hora planificada */}
+                                {p.hora_estimada && (
+                                  <p style={{ fontFamily: C.fontMono, fontSize: 8, color: isCompleted ? C.success : C.mute, margin: 0, fontWeight: isCompleted ? 700 : 400 }}>
+                                    {isCompleted && "✓ "}{p.hora_estimada.slice(0, 5)}
+                                  </p>
+                                )}
+                                {/* ETA con tráfico — solo en destino */}
+                                {isDestino && etaCard && (
+                                  <p style={{ fontFamily: C.fontMono, fontSize: 9, color: C.success, margin: "1px 0 0", fontWeight: 800 }}>
+                                    ~{etaCard}
+                                  </p>
+                                )}
+                              </div>
+                              {i < arr.length - 1 && (
+                                <div style={{ height: 2, background: lineColor, width: 38, marginTop: 10, flexShrink: 0 }} />
+                              )}
                             </div>
-                            <p style={{ fontSize: 9, color: C.mute, maxWidth: 68, textAlign: "center" as const, margin: 0, lineHeight: 1.3 }}>{p.nombre}</p>
-                            {p.hora_estimada && <p style={{ fontFamily: C.fontMono, fontSize: 8.5, color: C.navy, margin: 0, fontWeight: 700 }}>{p.hora_estimada}</p>}
-                          </div>
-                          {i < arr.length - 1 && <div style={{ height: 2, background: C.line2, width: 36, marginTop: 9, flexShrink: 0 }} />}
-                        </div>
-                      ))}
+                          );
+                        })}
+                      </div>
                     </div>
-                  </div>
-                )}
-              </div>
-            )}
+                  )}
+                </div>
+              );
+            })}
 
-            {/* Otros turnos de hoy */}
-            {serviciosHoy.filter(r => r.id !== servicioActivo?.id).length > 0 && (
+            {/* Otros turnos de hoy — los que no están en la sección EN RUTA */}
+            {serviciosHoy.filter(r => !serviciosDestacados.some(s => s.id === r.id)).length > 0 && (
               <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
                 <div style={{ padding: "10px 18px", borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.navy, flexShrink: 0 }} />
                   <p style={{ fontWeight: 800, color: C.ink, margin: 0, fontSize: 12 }}>Otros turnos de hoy</p>
-                  <span style={{ fontSize: 10, fontWeight: 700, background: C.navyTint, color: C.navy, padding: "1px 7px", borderRadius: 4, marginLeft: "auto" }}>{serviciosHoy.filter(r => r.id !== servicioActivo?.id).length}</span>
+                  <span style={{ fontSize: 10, fontWeight: 700, background: C.navyTint, color: C.navy, padding: "1px 7px", borderRadius: 4, marginLeft: "auto" }}>{serviciosHoy.filter(r => !serviciosDestacados.some(s => s.id === r.id)).length}</span>
                 </div>
-                {serviciosHoy.filter(r => r.id !== servicioActivo?.id).map(r => (
+                {serviciosHoy.filter(r => !serviciosDestacados.some(s => s.id === r.id)).map(r => (
                   <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 18px", borderBottom: `1px solid ${C.line}` }}>
                     <div style={{ fontFamily: C.fontMono, fontWeight: 700, fontSize: 13.5, color: C.navy, minWidth: 40, flexShrink: 0 }}>
                       {r.hora_servicio?.slice(0,5) || "–"}
