@@ -132,3 +132,8 @@ export function geoDisponible(): boolean {
   if (esNativo()) return true;
   return typeof navigator !== "undefined" && !!navigator.geolocation;
 }
+
+/** true si corremos dentro de la app nativa (Capacitor), no en el navegador. */
+export function esAppNativa(): boolean {
+  return esNativo();
+}

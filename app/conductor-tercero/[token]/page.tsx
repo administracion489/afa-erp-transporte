@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import "mapbox-gl/dist/mapbox-gl.css";
+import { pedirPermisoUbicacion, obtenerUbicacion } from "@/lib/geo";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 type Parada = {
@@ -95,6 +96,9 @@ export default function ConductorTerceroPage() {
   const [ubicacion, setUbicacion]           = useState<{ lat: number; lng: number } | null>(null);
   const [etaMin, setEtaMin]                 = useState<number | null>(null);
   const [etaKm, setEtaKm]                  = useState<number | null>(null);
+
+  // ── Permiso de ubicación (web nativo del navegador) ──────────────────────────
+  const [errorGps, setErrorGps]                   = useState(false);   // GPS denegado/bloqueado por el navegador
 
   // ── Estado orientación / brújula ─────────────────────────────────────────────
   const [rumbo, setRumbo]                         = useState(0);       // 0-360, dirección actual del conductor
@@ -198,7 +202,7 @@ export default function ConductorTerceroPage() {
   }, []);
 
   const ejecutarFinalizar = useCallback(async () => {
-    setMostrarConfirmFinal(false); setMostrarConfirmManual(false);
+    setMostrarConfirmFinal(false);
     if (timerAutoFinalRef.current) clearTimeout(timerAutoFinalRef.current);
     if (intervaloCountdownRef.current) clearInterval(intervaloCountdownRef.current);
     detenerGPS(); liberarWakeLock(); borrarSesion(token);
@@ -294,6 +298,21 @@ export default function ConductorTerceroPage() {
     }
     setCargando(false);
   }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── 1b. Disparar el prompt NATIVO del navegador al ENTRAR (como BCP / Google Maps) ─
+  // Al abrir el enlace se pide la ubicación de inmediato; el navegador muestra su
+  // diálogo nativo sin pasos manuales. Si el conductor concede, al tocar INICIAR
+  // ya no hay fricción.
+  useEffect(() => {
+    if (cargando || fase !== "inicio") return;
+    void pedirPermisoUbicacion().then((p) => {
+      if (p === "granted") { setErrorGps(false); return; }
+      // Pre-calienta el permiso → fuerza el diálogo nativo del navegador.
+      obtenerUbicacion({ enableHighAccuracy: true, timeout: 10000 })
+        .then(() => setErrorGps(false))
+        .catch((e: any) => { if (e?.code === 1) setErrorGps(true); });
+    });
+  }, [cargando, fase]);
 
   // ── 2. GPS + Wake Lock al entrar en en_ruta ──────────────────────────────────
   useEffect(() => { if (fase !== "en_ruta") return; iniciarGPS(); solicitarWakeLock(); }, [fase]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -598,9 +617,8 @@ export default function ConductorTerceroPage() {
   const handleIniciarServicio = async () => {
     setCargando(true);
     try {
-      const posInicial = await new Promise<GeolocationPosition>((resolve, reject) =>
-        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 10000 })
-      );
+      const posInicial = await obtenerUbicacion({ enableHighAccuracy: true, timeout: 10000 });
+      setErrorGps(false);
       const { latitude: lat, longitude: lng } = posInicial.coords;
       const res = await fetch("/api/conductor-tercero/iniciar", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -615,10 +633,11 @@ export default function ConductorTerceroPage() {
       const idxF = idx === -1 ? ps.length : idx;
       setParadas(ps); paradasRef.current = ps; setParadaIdx(idxF); paradaIdxRef.current = idxF;
       setFase("en_ruta");
-    } catch (e: unknown) {
-      setErrorMsg(e instanceof GeolocationPositionError
-        ? "No se pudo obtener tu ubicación GPS. Activa el GPS e intenta nuevamente."
-        : "Error de red. Verifica tu conexión.");
+    } catch (e: any) {
+      // Denegación de ubicación → mostramos recuperación in-situ (no pantalla muerta).
+      if (e?.code === 1 /* PERMISSION_DENIED */) { setErrorGps(true); }
+      else if (e?.code === 2 || e?.code === 3) { setErrorGps(true); } // sin señal / timeout: reintentable
+      else { setErrorMsg("Error de red. Verifica tu conexión."); }
     } finally { setCargando(false); }
   };
 
@@ -689,6 +708,28 @@ export default function ConductorTerceroPage() {
         </p>
       </div>
       <div className="px-6 pb-12">
+        {errorGps && (
+          <div className="mb-4 rounded-2xl p-4 text-left" style={{ background: "rgba(255,255,255,.12)", border: "1px solid rgba(240,192,64,.4)" }}>
+            <p className="text-sm font-bold mb-2" style={{ color: C.dorado }}>📍 Activa tu ubicación</p>
+            <p className="text-xs leading-relaxed mb-3" style={{ color: "rgba(255,255,255,.8)" }}>
+              Tu navegador bloqueó la ubicación. Toca el ícono 🔒 (o ⓘ) junto a la
+              dirección web → <strong>Permisos</strong> → <strong>Ubicación</strong> →
+              <strong> Permitir</strong>, y luego toca Reintentar. Verifica también que el
+              GPS del teléfono esté encendido.
+            </p>
+            <button
+              onClick={() => {
+                setErrorGps(false);
+                void obtenerUbicacion({ enableHighAccuracy: true, timeout: 10000 })
+                  .then(() => setErrorGps(false))
+                  .catch((e: any) => { if (e?.code === 1) setErrorGps(true); });
+              }}
+              className="w-full py-2.5 rounded-xl text-sm font-bold active:scale-95 transition-all"
+              style={{ background: "rgba(255,255,255,.2)", color: C.blanco }}>
+              Reintentar activar ubicación
+            </button>
+          </div>
+        )}
         <button onClick={handleIniciarServicio}
           className="w-full py-5 rounded-2xl text-xl font-extrabold tracking-wide transition-all active:scale-95 shadow-xl"
           style={{ background: C.dorado, color: C.azulOscuro, boxShadow: `0 4px 24px rgba(240,192,64,.5)` }}>

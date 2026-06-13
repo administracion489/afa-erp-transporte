@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
-import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, geoDisponible, type GeoWatch } from "@/lib/geo";
+import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, geoDisponible, esAppNativa, type GeoWatch } from "@/lib/geo";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
@@ -299,20 +299,43 @@ const CSS = `
 // ─── MODAL GPS ─────────────────────────────────────────────────────────────────
 
 function ModalActivarGPS({ onReintentar, onCerrar }: { onReintentar: () => void; onCerrar: () => void }) {
-  const ios = esIOS();
-  const pasos = ios ? [
-    "Abre Configuración en tu iPhone",
-    "Toca Privacidad y seguridad → Localización",
-    "Asegúrate que la localización esté Activada",
-    "Busca Safari y ponlo en Al usar la app",
-    "Vuelve aquí y toca Reintentar",
-  ] : [
-    "Desliza desde arriba y toca el ícono de Ubicación para activarla",
-    "O ve a Ajustes → Ubicación → activa GPS",
-    "En el navegador, busca el ícono de candado en la barra de dirección",
-    "Toca Permisos → Ubicación → Permitir",
-    "Vuelve aquí y toca Reintentar",
-  ];
+  const ios    = esIOS();
+  const nativa = esAppNativa();
+  let pasos: string[];
+  if (nativa && ios) {
+    pasos = [
+      "Abre Configuración en tu iPhone",
+      "Baja y toca AFA Pasajero",
+      "Toca Ubicación",
+      "Elige Al usar la app",
+      "Vuelve aquí y toca Reintentar",
+    ];
+  } else if (nativa) {
+    // App nativa Android: hay que dar el permiso en los ajustes de la app.
+    pasos = [
+      "Ve a Ajustes → Aplicaciones",
+      "Busca y abre AFA Pasajero",
+      "Toca Permisos → Ubicación",
+      "Elige Permitir (mientras se usa la app)",
+      "Vuelve aquí y toca Reintentar",
+    ];
+  } else if (ios) {
+    pasos = [
+      "Abre Configuración en tu iPhone",
+      "Toca Privacidad y seguridad → Localización",
+      "Asegúrate que la localización esté Activada",
+      "Busca tu navegador y ponlo en Al usar la app",
+      "Vuelve aquí y toca Reintentar",
+    ];
+  } else {
+    pasos = [
+      "Desliza desde arriba y toca el ícono de Ubicación para activarla",
+      "O ve a Ajustes → Ubicación → activa GPS",
+      "En el navegador, toca el ícono de candado en la barra de dirección",
+      "Toca Permisos → Ubicación → Permitir",
+      "Vuelve aquí y toca Reintentar",
+    ];
+  }
   return (
     <div className="afa-modal-overlay" onClick={onCerrar}>
       <div className="afa-modal-sheet" onClick={e => e.stopPropagation()}>
@@ -440,7 +463,12 @@ export default function AppPasajero() {
   // ── SOLICITAR GPS DEL DISPOSITIVO ──────────────────────────────────────────
   // Se dispara automáticamente al loguearse. El navegador muestra la alerta nativa del OS.
 
-  const solicitarGPS = useCallback(async () => {
+  // manual = true cuando el usuario toca "Activar" a propósito. Solo en ese caso
+  // mostramos el modal grande de instrucciones si el permiso quedó denegado. El
+  // intento automático del login nunca abre el modal — para no interponerse con
+  // el diálogo nativo del sistema; deja solo el banner pequeño.
+  const solicitarGPS = useCallback(async (manual = false) => {
+    setMostrarModalGPS(false); // nunca competir con el diálogo nativo
     if (!geoDisponible()) {
       setGpsPermiso("unavailable");
       return;
@@ -450,7 +478,7 @@ export default function AppPasajero() {
     const permiso = await pedirPermisoUbicacion();
     if (permiso === "denied") {
       setGpsPermiso("denied");
-      setMostrarModalGPS(true);
+      if (manual) setMostrarModalGPS(true);
       return;
     }
     if (permiso === "unavailable") {
@@ -472,7 +500,7 @@ export default function AppPasajero() {
     } catch (err: any) {
       if (err?.code === 1 /* PERMISSION_DENIED */) {
         setGpsPermiso("denied");
-        setMostrarModalGPS(true); // Mostrar modal con instrucciones
+        if (manual) setMostrarModalGPS(true); // instrucciones solo si lo pidió a propósito
       } else {
         setGpsPermiso("unavailable");
       }
@@ -851,7 +879,7 @@ export default function AppPasajero() {
       {/* ── MODAL GPS DESACTIVADO ── */}
       {mostrarModalGPS && (
         <ModalActivarGPS
-          onReintentar={() => { setMostrarModalGPS(false); solicitarGPS(); }}
+          onReintentar={() => { setMostrarModalGPS(false); void solicitarGPS(true); }}
           onCerrar={() => setMostrarModalGPS(false)}
         />
       )}
@@ -1112,7 +1140,7 @@ export default function AppPasajero() {
               <div style={{ position: "absolute", top: alerta5min && !alertaDismiss ? 144 : 78, left: 14, right: 14, zIndex: 3, background: "var(--warn-tint)", borderRadius: 14, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, border: "1px solid rgba(180,83,9,0.2)" }}>
                 <IconPin sz={16} c="var(--warn)" />
                 <p style={{ flex: 1, margin: 0, fontSize: 12, color: "var(--warn)", fontWeight: 600 }}>GPS desactivado — actívalo para ver tu posición</p>
-                <button onClick={() => setMostrarModalGPS(true)} style={{ background: "var(--warn)", border: "none", borderRadius: 8, padding: "4px 10px", color: "white", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>Activar</button>
+                <button onClick={() => void solicitarGPS(true)} style={{ background: "var(--warn)", border: "none", borderRadius: 8, padding: "4px 10px", color: "white", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>Activar</button>
               </div>
             )}
 
@@ -1477,7 +1505,7 @@ export default function AppPasajero() {
                 <div style={{ marginTop: 12, background: "var(--warn-tint)", borderRadius: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, border: "1px solid rgba(180,83,9,0.2)" }}>
                   <IconPin sz={18} c="var(--warn)" />
                   <p style={{ margin: 0, flex: 1, fontSize: 13, color: "var(--warn)", fontWeight: 600 }}>GPS desactivado — actívalo para calcular distancia</p>
-                  <button onClick={solicitarGPS} style={{ background: "var(--warn)", border: "none", borderRadius: 8, padding: "6px 12px", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)" }}>Activar</button>
+                  <button onClick={() => void solicitarGPS(true)} style={{ background: "var(--warn)", border: "none", borderRadius: 8, padding: "6px 12px", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)" }}>Activar</button>
                 </div>
               )}
             </div>
