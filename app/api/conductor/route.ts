@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
           admin.from("vehiculos").select("id,placa,categoria,marca").order("placa"),
           admin.from("vehiculos_tercero").select("id,placa,categoria,marca").order("placa"),
           admin.from("reservas")
-            .select("id,origen,destino,fecha_servicio,hora_servicio,vehiculo_id,vehiculo_tercero_id")
+            .select("id,origen,destino,fecha_servicio,hora_servicio,vehiculo_id,vehiculo_tercero_id,estado")
             .eq("fecha_servicio", hoy).eq(condField, cid).order("hora_servicio"),
           admin.from("documentos_conductor").select("*").eq("conductor_id", cid).order("created_at", { ascending: false }),
           admin.from("checklist_conductor").select("id").eq("conductor_id", cid).eq("fecha", hoy).limit(1),
@@ -120,6 +120,17 @@ export async function POST(req: NextRequest) {
         const { data, error } = await admin.from("documentos_conductor").insert(documento).select().single();
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ ok: true, documento: data });
+      }
+
+      // ── Actualizar estado de reserva ────────────────────────────────────────
+      case "actualizar_estado": {
+        const { reservaId, estado } = body;
+        if (!reservaId || !estado) return NextResponse.json({ error: "reservaId y estado requeridos" }, { status: 400 });
+        const estadosValidos = ["pendiente", "programada", "confirmada", "en_curso", "finalizada", "cancelada"];
+        if (!estadosValidos.includes(estado)) return NextResponse.json({ error: "estado inválido" }, { status: 400 });
+        const { error } = await admin.from("reservas").update({ estado }).eq("id", reservaId);
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ ok: true });
       }
 
       // ── Cambiar PIN de acceso ────────────────────────────────────────────────

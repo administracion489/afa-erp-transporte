@@ -27,7 +27,7 @@ type Conductor = {
   _tabla?: "conductores" | "conductores_tercero";
 };
 type Vehiculo  = { id: number; placa: string; categoria: string | null; marca?: string | null; };
-type Reserva   = { id: number; origen: string; destino: string; fecha_servicio: string | null; hora_servicio?: string | null; vehiculo_id?: number | null; };
+type Reserva   = { id: number; origen: string; destino: string; fecha_servicio: string | null; hora_servicio?: string | null; vehiculo_id?: number | null; estado?: string | null; };
 type Parada    = { id: number; reserva_id: number; orden: number; nombre: string; direccion: string | null; lat: number | null; lng: number | null; hora_estimada: string | null; estado: string; };
 type Pasajero  = { id: number; nombre: string; dni: string | null; empresa: string | null; qr_code: string | null; foto_url: string | null; };
 type PasajeroParada = { id: number; parada_id: number; pasajero_id: number; estado: string; pasajero?: Pasajero; };
@@ -306,6 +306,10 @@ export default function ConductorApp() {
   // ── Sub-vistas nuevas ──────────────────────────────────────────────────────
   const [showManifiesto, setShowManifiesto] = useState(false);
   const [showFinViaje,   setShowFinViaje]   = useState(false);
+  const [showFinOverlay, setShowFinOverlay] = useState(false);
+  const [datosFinViaje,  setDatosFinViaje]  = useState<{
+    duracion: string; paradasTotales: number; embarcados: number; envios: number; origen: string; destino: string;
+  } | null>(null);
 
   // ── Incidencia ─────────────────────────────────────────────────────────────
   const [showIncidencia, setShowIncidencia] = useState(false);
@@ -565,6 +569,9 @@ export default function ConductorApp() {
     setIniciando(false);
     setTab("paradas");
     saveServicio({ reservaId: reserva.id, vehiculoId: vehiculoId!, paradaIdx: 0, inicioViaje: ahora.toISOString() });
+    // Marcar en_curso en DB (best-effort, no bloquea la UI).
+    condApi("actualizar_estado", { reservaId: reserva.id, estado: "en_curso" }).catch(() => {});
+    setReservasHoy(prev => prev.map(r => r.id === reserva.id ? { ...r, estado: "en_curso" } : r));
     // Posición inicial best-effort, en segundo plano (no bloquea la UI).
     obtenerUbicacion({ enableHighAccuracy: true, timeout: 12000 })
       .then((pos) => { posRef.current = pos; setPosActual(pos); enviarUbicacion(pos); })
@@ -572,9 +579,13 @@ export default function ConductorApp() {
   }
 
   function finalizarRecorridoConfirmado() {
+    const rId = reservaActiva?.id;
     if (posRef.current) enviarUbicacion(posRef.current, "finalizado");
-    // GPS continúa activo en background desde el login
-    clearServicio();   // eliminar servicio guardado al finalizar correctamente
+    if (rId) {
+      condApi("actualizar_estado", { reservaId: rId, estado: "finalizada" }).catch(() => {});
+      setReservasHoy(prev => prev.map(r => r.id === rId ? { ...r, estado: "finalizada" } : r));
+    }
+    clearServicio();
     setEnRuta(false); setReservaActiva(null); setParadas([]); setPasajeros([]);
     setParadaIdx(0); setVelocidad(0); setTotalEnvios(0); setTab("ruta");
     setShowFinViaje(false);
@@ -596,8 +607,35 @@ export default function ConductorApp() {
         inicioViaje: inicioViaje?.toISOString() ?? new Date().toISOString(),
       });
     } else {
-      setShowFinViaje(true);
+      // Último paradero → finalizar de una sola acción.
+      await finalizarUltimaParada();
     }
+  }
+
+  async function finalizarUltimaParada() {
+    const rId = reservaActiva?.id;
+    // Capturar estadísticas ANTES de limpiar el estado.
+    const stats = {
+      duracion:       inicioViaje ? fmtDuracion(Date.now() - inicioViaje.getTime()) : "—",
+      paradasTotales: paradas.length,
+      embarcados:     pasajeros.filter(p => p.estado === "embarcado").length,
+      envios:         totalEnvios,
+      origen:         reservaActiva?.origen || "",
+      destino:        reservaActiva?.destino || "",
+    };
+    if (posRef.current) enviarUbicacion(posRef.current, "finalizado");
+    if (rId) {
+      try { await condApi("actualizar_estado", { reservaId: rId, estado: "finalizada" }); }
+      catch (e: any) { console.error("[finalizar] Error al actualizar estado:", e?.message); }
+      setReservasHoy(prev => prev.map(r => r.id === rId ? { ...r, estado: "finalizada" } : r));
+    }
+    clearServicio();
+    setDatosFinViaje(stats);
+    setShowFinOverlay(true);
+    setEnRuta(false); setReservaActiva(null); setParadas([]); setPasajeros([]);
+    setParadaIdx(0); setVelocidad(0); setTotalEnvios(0); setTab("ruta");
+    setInicioViaje(null);
+    setTimeout(() => { setShowFinOverlay(false); setDatosFinViaje(null); }, 5000);
   }
 
   // ─── SOS ─────────────────────────────────────────────────────────────────────
@@ -968,6 +1006,10 @@ export default function ConductorApp() {
   const checkFallas   = checks.filter(c => c.ok === false).length;
   const categorias    = Array.from(new Set(CHECKLIST_ITEMS.map(i => i.categoria)));
   const docsBadge     = docs.filter(d => docEstado(d.vencimiento) === "vencido").length;
+
+  const reservasEnRutaSection   = reservasHoy.filter(r => r.id === reservaActiva?.id);
+  const reservasFinalizadasSection = reservasHoy.filter(r => r.estado === "finalizada" && r.id !== reservaActiva?.id);
+  const reservasPendientesSection  = reservasHoy.filter(r => r.estado !== "finalizada" && r.id !== reservaActiva?.id);
 
   const proximaReserva = !enRuta ? reservasHoy.find(r => (minutosAlServicio(r.hora_servicio) ?? -1) >= 0) : null;
   const minsHastaProx  = proximaReserva ? minutosAlServicio(proximaReserva.hora_servicio) : null;
@@ -1510,8 +1552,6 @@ export default function ConductorApp() {
             )}
 
             {/* Lista de servicios */}
-            <Eyebrow style={{ marginBottom: 10 }}>Servicios programados</Eyebrow>
-
             {cargando ? (
               <div style={{
                 background: "var(--c-surface)", border: "1px solid var(--c-line)",
@@ -1552,55 +1592,95 @@ export default function ConductorApp() {
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {reservasHoy.map(r => {
-                  const esActiva = reservaActiva?.id === r.id;
-                  return (
-                    <div
-                      key={r.id}
-                      style={{
-                        background: "var(--c-surface)",
-                        border: esActiva ? "2px solid var(--c-navy)" : "1px solid var(--c-line)",
-                        borderRadius: 16, padding: 14,
-                        boxShadow: esActiva ? "0 4px 14px rgba(11,49,95,0.12)" : "0 1px 3px rgba(0,0,0,0.03)",
-                      }}
-                    >
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-                        <div>
-                          <p style={{ margin: 0, fontWeight: 800, fontSize: 16, letterSpacing: -0.3 }}>
-                            {r.origen}
-                          </p>
-                          <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--c-mute)" }}>
-                            → {r.destino}
-                          </p>
-                        </div>
-                        {esActiva ? (
-                          <Chip color="#fff" bg="var(--c-navy)" sw>EN RUTA</Chip>
-                        ) : r.hora_servicio ? (
-                          <Chip color="var(--c-navy)" bg="var(--c-navy-tint)" mono sw>
-                            {r.hora_servicio.slice(0, 5)}
-                          </Chip>
-                        ) : null}
-                      </div>
 
-                      {esActiva ? (
-                        <PrimaryBtn
-                          onClick={() => setTab("paradas")}
-                          icon={<IconRoute size={16} color="#fff" />}
-                        >
+                {/* ── EN RUTA ── */}
+                {reservasEnRutaSection.length > 0 && (
+                  <>
+                    <Eyebrow style={{ marginBottom: 6, color: "var(--c-navy)" }}>En ruta ahora</Eyebrow>
+                    {reservasEnRutaSection.map(r => (
+                      <div key={r.id} style={{
+                        background: "var(--c-navy-tint)", border: "2px solid var(--c-navy)",
+                        borderRadius: 16, padding: 14,
+                        boxShadow: "0 4px 14px rgba(11,49,95,0.12)",
+                      }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                          <div>
+                            <p style={{ margin: 0, fontWeight: 800, fontSize: 16, letterSpacing: -0.3 }}>{r.origen}</p>
+                            <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--c-mute)" }}>→ {r.destino}</p>
+                          </div>
+                          <Chip color="#fff" bg="var(--c-navy)" sw>EN RUTA</Chip>
+                        </div>
+                        <PrimaryBtn onClick={() => setTab("paradas")} icon={<IconRoute size={16} color="#fff" />}>
                           Ver recorrido
                         </PrimaryBtn>
-                      ) : (
+                      </div>
+                    ))}
+                  </>
+                )}
+
+                {/* ── PENDIENTES ── */}
+                {reservasPendientesSection.length > 0 && (
+                  <>
+                    <Eyebrow style={{ marginTop: reservasEnRutaSection.length > 0 ? 14 : 0, marginBottom: 6 }}>
+                      {reservasEnRutaSection.length > 0 ? "Pendientes" : "Servicios del día"}
+                    </Eyebrow>
+                    {reservasPendientesSection.map(r => (
+                      <div key={r.id} style={{
+                        background: "var(--c-surface)", border: "1px solid var(--c-line)",
+                        borderRadius: 16, padding: 14,
+                        boxShadow: "0 1px 3px rgba(0,0,0,0.03)",
+                      }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                          <div>
+                            <p style={{ margin: 0, fontWeight: 800, fontSize: 16, letterSpacing: -0.3 }}>{r.origen}</p>
+                            <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--c-mute)" }}>→ {r.destino}</p>
+                          </div>
+                          {r.hora_servicio && (
+                            <Chip color="var(--c-navy)" bg="var(--c-navy-tint)" mono sw>
+                              {r.hora_servicio.slice(0, 5)}
+                            </Chip>
+                          )}
+                        </div>
                         <PrimaryBtn
                           onClick={() => iniciarRecorrido(r)}
-                          disabled={iniciando}
+                          disabled={iniciando || !!reservaActiva}
                           icon={<IconPlay size={15} color="#fff" />}
                         >
                           {iniciando ? "Iniciando…" : "Iniciar recorrido"}
                         </PrimaryBtn>
-                      )}
-                    </div>
-                  );
-                })}
+                      </div>
+                    ))}
+                  </>
+                )}
+
+                {/* ── FINALIZADOS ── */}
+                {reservasFinalizadasSection.length > 0 && (
+                  <>
+                    <Eyebrow style={{ marginTop: 14, marginBottom: 6, color: "var(--c-mute)" }}>Finalizados hoy</Eyebrow>
+                    {reservasFinalizadasSection.map(r => (
+                      <div key={r.id} style={{
+                        background: "var(--c-soft)", border: "1px solid var(--c-line)",
+                        borderRadius: 16, padding: 14, opacity: 0.75,
+                      }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                          <div>
+                            <p style={{ margin: 0, fontWeight: 700, fontSize: 15, letterSpacing: -0.3, color: "var(--c-mute)" }}>{r.origen}</p>
+                            <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--c-mute)" }}>→ {r.destino}</p>
+                          </div>
+                          <Chip color="var(--c-success)" bg="var(--c-success-tint)" sw>FINALIZADO</Chip>
+                        </div>
+                      </div>
+                    ))}
+                  </>
+                )}
+
+                {/* Todos los servicios del día ya finalizados */}
+                {reservasPendientesSection.length === 0 && !reservaActiva && reservasFinalizadasSection.length > 0 && (
+                  <p style={{ textAlign: "center", color: "var(--c-mute)", fontSize: 13, margin: "8px 0 0" }}>
+                    Todos los servicios del día completados
+                  </p>
+                )}
+
               </div>
             )}
 
@@ -2976,6 +3056,59 @@ export default function ConductorApp() {
                 </PrimaryBtn>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {/* OVERLAY SERVICIO COMPLETADO (último paradero → finalización directa) */}
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {showFinOverlay && datosFinViaje && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 200,
+          background: "rgba(11,31,58,0.92)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          padding: 24, animation: "sheetIn 0.3s ease-out",
+        }}>
+          <div style={{
+            background: "var(--c-paper)", borderRadius: 28, padding: 28,
+            width: "100%", maxWidth: 400, textAlign: "center",
+            boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+          }}>
+            <div style={{
+              width: 72, height: 72, borderRadius: 22,
+              background: "var(--c-success-tint)",
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              marginBottom: 16,
+            }}>
+              <IconFlag size={34} color="var(--c-success)" />
+            </div>
+            <h2 style={{ margin: "0 0 4px", fontSize: 22, fontWeight: 800, letterSpacing: -0.5, color: "var(--c-ink)" }}>
+              Servicio completado
+            </h2>
+            <p style={{ margin: "0 0 22px", color: "var(--c-mute)", fontSize: 13 }}>
+              {datosFinViaje.origen} → {datosFinViaje.destino}
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 20 }}>
+              {[
+                { lbl: "Duración",   val: datosFinViaje.duracion,                    color: "var(--c-navy)" },
+                { lbl: "Paradas",    val: String(datosFinViaje.paradasTotales),       color: "var(--c-navy)" },
+                { lbl: "A bordo",    val: String(datosFinViaje.embarcados),           color: "var(--c-success)" },
+                { lbl: "Envíos GPS", val: String(datosFinViaje.envios),               color: "var(--c-navy)" },
+              ].map(s => (
+                <div key={s.lbl} style={{
+                  background: "var(--c-soft)", borderRadius: 14, padding: "12px 14px",
+                }}>
+                  <p style={{ margin: 0, fontSize: 10, fontWeight: 700, letterSpacing: 1.2, textTransform: "uppercase", color: "var(--c-mute)" }}>
+                    {s.lbl}
+                  </p>
+                  <p style={{ margin: "4px 0 0", fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800, color: s.color }}>
+                    {s.val}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <p style={{ color: "var(--c-mute)", fontSize: 12, margin: 0 }}>Cerrando automáticamente en 5 s…</p>
           </div>
         </div>
       )}
