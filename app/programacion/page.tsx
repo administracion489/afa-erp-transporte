@@ -406,21 +406,63 @@ export default function ReservasPage() {
     cargarDatos();
   };
 
-  const crearParadasDesdeJSON = async (reservaId: number, paradasJSON: any[]) => {
-    if (!paradasJSON || paradasJSON.length === 0) return;
+  // Resuelve la lista COMPLETA de paraderos de una reserva: prioriza la cotización
+  // (ida + retorno) y, si no hay, usa el paradas_json propio de la reserva.
+  // Ordenada inicio → intermedia → destino.
+  const resolverParadasJSON = async (reservaId: number): Promise<any[]> => {
+    const sortLeg = (arr: any[]) => [
+      ...arr.filter((p: any) => p.tipo === "inicio"),
+      ...arr.filter((p: any) => p.tipo === "intermedia"),
+      ...arr.filter((p: any) => p.tipo === "destino"),
+      ...arr.filter((p: any) => !["inicio", "intermedia", "destino"].includes(p.tipo)),
+    ];
+    const { data: rRow } = await supabase.from("reservas")
+      .select("paradas_json, cotizacion_id").eq("id", reservaId).maybeSingle();
+    let out: any[] = [];
+    if (rRow?.cotizacion_id) {
+      const { data: cot } = await supabase.from("cotizaciones")
+        .select("paradas_json, paradas_retorno_json").eq("id", rRow.cotizacion_id).maybeSingle();
+      if (Array.isArray(cot?.paradas_json)) out = sortLeg(cot.paradas_json);
+      if (Array.isArray(cot?.paradas_retorno_json) && cot.paradas_retorno_json.length > 0)
+        out = [...out, ...sortLeg(cot.paradas_retorno_json)];
+    }
+    if (out.length === 0 && Array.isArray(rRow?.paradas_json)) out = sortLeg(rRow.paradas_json);
+    return out;
+  };
+
+  // Crea/rehace las paradas de la reserva desde los paraderos de la cotización.
+  const crearParadasDesdeJSON = async (reservaId: number) => {
+    const todas = await resolverParadasJSON(reservaId);
+    if (todas.length === 0) { alert("Esta reserva no tiene paraderos en su cotización."); return; }
     const { data: ex } = await supabase.from("paradas").select("id").eq("reserva_id", reservaId);
     if (ex && ex.length > 0) {
-      if (!confirm("Ya tiene paradas. Reemplazarlas?")) return;
+      if (!confirm(`Esta reserva ya tiene ${ex.length} parada(s). ¿Reemplazarlas por los ${todas.length} paraderos de la cotización?`)) return;
       await supabase.from("paradas").delete().eq("reserva_id", reservaId);
     }
-    const todas = [...paradasJSON.filter((p: any) => p.tipo === "inicio"), ...paradasJSON.filter((p: any) => p.tipo === "intermedia"), ...paradasJSON.filter((p: any) => p.tipo === "destino")];
     await supabase.from("paradas").insert(todas.map((p: any, i: number) => ({
       reserva_id: reservaId, orden: i + 1, nombre: p.nombre, direccion: p.direccion || null,
       lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
       hora_estimada: p.hora || null, estado: "pendiente",
     })));
     const { data: nuevas } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
+    // Geocodificar las que falten
+    if (nuevas && nuevas.length > 0) {
+      for (const parada of nuevas) {
+        if (!parada.lat || !parada.lng) {
+          const coords = await geocodificar(parada.nombre);
+          if (coords) {
+            await supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
+            parada.lat = coords.lat; parada.lng = coords.lng;
+          }
+        }
+      }
+    }
     setParadasMap(prev => ({ ...prev, [reservaId]: nuevas || [] }));
+    if (nuevas && nuevas.length > 0) {
+      const o = nuevas[0].nombre, d = nuevas[nuevas.length - 1].nombre;
+      await supabase.from("reservas").update({ origen: o, destino: d }).eq("id", reservaId);
+      setReservas(prev => prev.map(r => r.id === reservaId ? { ...r, origen: o, destino: d } as any : r));
+    }
     alert(todas.length + " paradas creadas correctamente");
   };
 
@@ -429,7 +471,41 @@ export default function ReservasPage() {
     const { data } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
 
     if (!data || data.length === 0) {
-      // Auto-crear paradas desde origen / destino / punto_retorno si existen
+      // ── 1) PREFERIR los paraderos completos del JSON (cotización / reserva) ──
+      // Antes se auto-creaban solo origen+destino, perdiendo los paraderos
+      // intermedios configurados en la cotización.
+      const jsonParadas = await resolverParadasJSON(reservaId);
+
+      if (jsonParadas.length > 0) {
+        await supabase.from("paradas").insert(jsonParadas.map((p: any, i: number) => ({
+          reserva_id: reservaId, orden: i + 1, nombre: p.nombre, direccion: p.direccion || null,
+          lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
+          hora_estimada: p.hora || null, estado: "pendiente",
+        })));
+        const { data: creadas } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
+        // Geocodificar las que vengan sin coordenadas
+        if (creadas && creadas.length > 0) {
+          for (const parada of creadas) {
+            if (!parada.lat || !parada.lng) {
+              const coords = await geocodificar(parada.nombre);
+              if (coords) {
+                await supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
+                parada.lat = coords.lat; parada.lng = coords.lng;
+              }
+            }
+          }
+        }
+        setParadasMap(prev => ({ ...prev, [reservaId]: creadas || [] }));
+        if (creadas && creadas.length > 0) {
+          const o = creadas[0].nombre, d = creadas[creadas.length - 1].nombre;
+          await supabase.from("reservas").update({ origen: o, destino: d }).eq("id", reservaId);
+          setReservas(prev => prev.map(r => r.id === reservaId ? { ...r, origen: o, destino: d } as any : r));
+        }
+        setCargandoPar(prev => ({ ...prev, [reservaId]: false }));
+        return;
+      }
+
+      // ── 2) Fallback: auto-crear desde origen / destino / punto_retorno ───────
       const reserva = reservas.find(r => r.id === reservaId);
       const origen       = (reserva as any)?.origen?.trim();
       const destino      = (reserva as any)?.destino?.trim();
@@ -2262,9 +2338,9 @@ export default function ReservasPage() {
                                     )}
                                   </p>
                                   <div className="flex gap-2">
-                                    {tieneJSON && paradasR.length === 0 && (
-                                      <button onClick={() => crearParadasDesdeJSON(r.id, r.paradas_json!)} className="text-xs font-bold px-3 py-1.5 rounded-lg text-white" style={{ background: "#be185d" }}>
-                                        Desde cotización ({r.paradas_json!.length})
+                                    {(tieneJSON || r.cotizacion_id) && (
+                                      <button onClick={() => crearParadasDesdeJSON(r.id)} className="text-xs font-bold px-3 py-1.5 rounded-lg text-white" style={{ background: "#be185d" }}>
+                                        {paradasR.length === 0 ? "Desde cotización" : "Rehacer desde cotización"}
                                       </button>
                                     )}
                                     <button onClick={() => setModalReservaId(r.id)} className="text-xs font-bold px-3 py-1.5 rounded-lg border hover:bg-blue-50" style={{ borderColor: "#0b315f", color: "#0b315f" }}>
