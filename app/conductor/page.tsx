@@ -615,7 +615,25 @@ export default function ConductorApp() {
       return;
     }
     let stopped = false;
-    import("html5-qrcode").then(({ Html5Qrcode }) => {
+    import("html5-qrcode").then(async ({ Html5Qrcode }) => {
+      if (stopped) return;
+      // En la app nativa, pedir el permiso de CÁMARA con el plugin nativo ANTES de
+      // getUserMedia. Sin esto, html5-qrcode falla con "No se pudo acceder a la cámara".
+      try {
+        const { Capacitor } = await import("@capacitor/core");
+        if (Capacitor.isNativePlatform()) {
+          const { Camera } = await import("@capacitor/camera");
+          const estado = await Camera.checkPermissions();
+          if (estado.camera !== "granted") {
+            const req = await Camera.requestPermissions({ permissions: ["camera"] });
+            if (req.camera !== "granted") {
+              setEscanear(false);
+              alert("Concede el permiso de Cámara para escanear el QR. Ajustes → AFA Conductor → Permisos → Cámara.");
+              return;
+            }
+          }
+        }
+      } catch (e) { console.warn("[QR] permiso cámara:", e); }
       if (stopped) return;
       const container = document.getElementById("qr-container");
       if (!container) return;
