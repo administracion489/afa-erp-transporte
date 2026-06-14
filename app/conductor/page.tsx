@@ -230,9 +230,12 @@ export default function ConductorApp() {
   const [pasajeros,    setPasajeros]    = useState<PasajeroParada[]>([]);
   const [paradaIdx,    setParadaIdx]    = useState(0);
   const [docs,         setDocs]         = useState<DocCond[]>([]);
-  const [cargando,     setCargando]     = useState(false);
-  const [debugFecha,   setDebugFecha]   = useState("");
-  const [debugInfo,    setDebugInfo]    = useState("");
+  const [cargando,          setCargando]          = useState(false);
+  const [debugFecha,        setDebugFecha]        = useState("");
+  const [debugInfo,         setDebugInfo]         = useState("");
+  const [fechaVista,        setFechaVista]        = useState<string>(getFechaLocal());
+  const [reservasOtraFecha, setReservasOtraFecha] = useState<Reserva[] | null>(null);
+  const [cargandoOtraFecha, setCargandoOtraFecha] = useState(false);
 
   // ── GPS ────────────────────────────────────────────────────────────────────
   const [enRuta,       setEnRuta]       = useState(false);
@@ -436,6 +439,36 @@ export default function ConductorApp() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function cargarOtraFecha(fecha: string) {
+    if (!conductor) return;
+    setCargandoOtraFecha(true);
+    try {
+      const data = await condApi("inicio", { cid: conductor.id, tabla: conductor._tabla ?? "conductores", hoy: fecha });
+      setReservasOtraFecha(data.reservas || []);
+    } catch {
+      setReservasOtraFecha([]);
+    }
+    setCargandoOtraFecha(false);
+  }
+
+  function cambiarFecha(delta: number) {
+    const d = new Date(fechaVista + "T12:00:00");
+    d.setDate(d.getDate() + delta);
+    const nueva = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const hoy = getFechaLocal();
+    setFechaVista(nueva);
+    if (nueva === hoy) {
+      setReservasOtraFecha(null);
+    } else {
+      cargarOtraFecha(nueva);
+    }
+  }
+
+  function irAHoy() {
+    setFechaVista(getFechaLocal());
+    setReservasOtraFecha(null);
+  }
 
   async function cargarParadas(reservaId: number) {
     // Usa el API endpoint que auto-crea paradas desde origen/destino si no existen
@@ -1007,9 +1040,11 @@ export default function ConductorApp() {
   const categorias    = Array.from(new Set(CHECKLIST_ITEMS.map(i => i.categoria)));
   const docsBadge     = docs.filter(d => docEstado(d.vencimiento) === "vencido").length;
 
-  const reservasEnRutaSection   = reservasHoy.filter(r => r.id === reservaActiva?.id);
-  const reservasFinalizadasSection = reservasHoy.filter(r => r.estado === "finalizada" && r.id !== reservaActiva?.id);
-  const reservasPendientesSection  = reservasHoy.filter(r => r.estado !== "finalizada" && r.id !== reservaActiva?.id);
+  const hoyLocal         = getFechaLocal();
+  const esModoOtraFecha  = fechaVista !== hoyLocal;
+  const reservasMostrar  = esModoOtraFecha ? (reservasOtraFecha ?? []) : reservasHoy;
+  const reservasFinalizadasSection = reservasMostrar.filter(r => r.estado === "finalizada" && r.id !== reservaActiva?.id);
+  const reservasPendientesSection  = reservasMostrar.filter(r => r.estado !== "finalizada" && r.id !== reservaActiva?.id);
 
   const proximaReserva = !enRuta ? reservasHoy.find(r => (minutosAlServicio(r.hora_servicio) ?? -1) >= 0) : null;
   const minsHastaProx  = proximaReserva ? minutosAlServicio(proximaReserva.hora_servicio) : null;
@@ -1551,8 +1586,56 @@ export default function ConductorApp() {
               </div>
             )}
 
+            {/* ── Barra de navegación de fechas ── */}
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              background: "var(--c-surface)", border: "1px solid var(--c-line)",
+              borderRadius: 14, padding: "8px 10px", marginBottom: 12,
+            }}>
+              <button
+                onClick={() => cambiarFecha(-1)}
+                style={{ width: 36, height: 36, borderRadius: 10, border: "1px solid var(--c-line)", background: "var(--c-soft)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+              >
+                <IconArrowLeft size={16} color="var(--c-ink)" />
+              </button>
+
+              <div style={{ textAlign: "center", flex: 1 }}>
+                <label style={{ cursor: "pointer" }}>
+                  <p style={{ margin: 0, fontWeight: 800, fontSize: 14, letterSpacing: -0.2, color: "var(--c-ink)" }}>
+                    {new Date(fechaVista + "T12:00:00").toLocaleDateString("es-PE", { weekday: "short", day: "numeric", month: "short" }).toUpperCase()}
+                  </p>
+                  {esModoOtraFecha ? (
+                    <span style={{ fontSize: 10, fontWeight: 700, color: "var(--c-navy)", letterSpacing: 0.5, cursor: "pointer" }}
+                      onClick={irAHoy}>
+                      volver a HOY
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: "var(--c-success)" }}>HOY</span>
+                  )}
+                  <input
+                    type="date" value={fechaVista}
+                    onChange={e => {
+                      const v = e.target.value;
+                      if (!v) return;
+                      setFechaVista(v);
+                      if (v === hoyLocal) { setReservasOtraFecha(null); }
+                      else { cargarOtraFecha(v); }
+                    }}
+                    style={{ position: "absolute", opacity: 0, pointerEvents: "none", width: 0, height: 0 }}
+                  />
+                </label>
+              </div>
+
+              <button
+                onClick={() => cambiarFecha(+1)}
+                style={{ width: 36, height: 36, borderRadius: 10, border: "1px solid var(--c-line)", background: "var(--c-soft)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+              >
+                <IconArrowRight size={16} color="var(--c-ink)" />
+              </button>
+            </div>
+
             {/* Lista de servicios */}
-            {cargando ? (
+            {(esModoOtraFecha ? cargandoOtraFecha : cargando) ? (
               <div style={{
                 background: "var(--c-surface)", border: "1px solid var(--c-line)",
                 borderRadius: 16, padding: 24, textAlign: "center",
@@ -1560,75 +1643,50 @@ export default function ConductorApp() {
                 <div style={{ width: 28, height: 28, border: "3px solid var(--c-line)", borderTop: "3px solid var(--c-navy)", borderRadius: "50%", animation: "spin 1s linear infinite", margin: "0 auto 10px" }} />
                 <p style={{ color: "var(--c-mute)", fontSize: 13, margin: 0 }}>Cargando servicios…</p>
               </div>
-            ) : reservasHoy.length === 0 ? (
+            ) : reservasMostrar.length === 0 ? (
               <div style={{
                 background: "var(--c-surface)", border: "1.5px dashed var(--c-line)",
                 borderRadius: 16, padding: 28, textAlign: "center",
               }}>
                 <div style={{
-                  width: 56, height: 56, borderRadius: 18,
-                  background: "var(--c-navy-tint)",
-                  display: "inline-flex", alignItems: "center", justifyContent: "center",
-                  marginBottom: 12,
+                  width: 56, height: 56, borderRadius: 18, background: "var(--c-navy-tint)",
+                  display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 12,
                 }}>
                   <IconCalendar size={26} color="var(--c-navy)" />
                 </div>
                 <p style={{ color: "var(--c-ink)", fontWeight: 800, fontSize: 15, margin: 0 }}>
-                  Sin servicios programados hoy
+                  Sin servicios para este día
                 </p>
                 <p style={{ color: "var(--c-mute)", fontSize: 12, margin: "6px 0 14px", fontFamily: FONT_MONO }}>
-                  {debugFecha}
+                  {fechaVista}
                 </p>
-                {debugInfo && (
+                {!esModoOtraFecha && debugInfo && (
                   <p style={{ color: "var(--c-danger)", fontSize: 12, margin: "0 0 14px" }}>{debugInfo}</p>
                 )}
-                <SecondaryBtn
-                  onClick={() => conductor && cargarDatos(conductor.id, conductor._tabla)}
-                  icon={<IconRefresh size={16} color="var(--c-ink)" />}
-                  full={false}
-                >
-                  Actualizar
-                </SecondaryBtn>
+                {!esModoOtraFecha && (
+                  <SecondaryBtn
+                    onClick={() => conductor && cargarDatos(conductor.id, conductor._tabla)}
+                    icon={<IconRefresh size={16} color="var(--c-ink)" />}
+                    full={false}
+                  >
+                    Actualizar
+                  </SecondaryBtn>
+                )}
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
 
-                {/* ── EN RUTA ── */}
-                {reservasEnRutaSection.length > 0 && (
-                  <>
-                    <Eyebrow style={{ marginBottom: 6, color: "var(--c-navy)" }}>En ruta ahora</Eyebrow>
-                    {reservasEnRutaSection.map(r => (
-                      <div key={r.id} style={{
-                        background: "var(--c-navy-tint)", border: "2px solid var(--c-navy)",
-                        borderRadius: 16, padding: 14,
-                        boxShadow: "0 4px 14px rgba(11,49,95,0.12)",
-                      }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-                          <div>
-                            <p style={{ margin: 0, fontWeight: 800, fontSize: 16, letterSpacing: -0.3 }}>{r.origen}</p>
-                            <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--c-mute)" }}>→ {r.destino}</p>
-                          </div>
-                          <Chip color="#fff" bg="var(--c-navy)" sw>EN RUTA</Chip>
-                        </div>
-                        <PrimaryBtn onClick={() => setTab("paradas")} icon={<IconRoute size={16} color="#fff" />}>
-                          Ver recorrido
-                        </PrimaryBtn>
-                      </div>
-                    ))}
-                  </>
-                )}
-
-                {/* ── PENDIENTES ── */}
+                {/* ── PENDIENTES / PROGRAMADOS ── */}
                 {reservasPendientesSection.length > 0 && (
                   <>
-                    <Eyebrow style={{ marginTop: reservasEnRutaSection.length > 0 ? 14 : 0, marginBottom: 6 }}>
-                      {reservasEnRutaSection.length > 0 ? "Pendientes" : "Servicios del día"}
+                    <Eyebrow style={{ marginBottom: 6 }}>
+                      {esModoOtraFecha ? "Programados" : "Servicios del día"}
                     </Eyebrow>
                     {reservasPendientesSection.map(r => (
                       <div key={r.id} style={{
                         background: "var(--c-surface)", border: "1px solid var(--c-line)",
-                        borderRadius: 16, padding: 14,
-                        boxShadow: "0 1px 3px rgba(0,0,0,0.03)",
+                        borderRadius: 16, padding: 14, boxShadow: "0 1px 3px rgba(0,0,0,0.03)",
+                        opacity: esModoOtraFecha ? 0.85 : 1,
                       }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
                           <div>
@@ -1641,13 +1699,23 @@ export default function ConductorApp() {
                             </Chip>
                           )}
                         </div>
-                        <PrimaryBtn
-                          onClick={() => iniciarRecorrido(r)}
-                          disabled={iniciando || !!reservaActiva}
-                          icon={<IconPlay size={15} color="#fff" />}
-                        >
-                          {iniciando ? "Iniciando…" : "Iniciar recorrido"}
-                        </PrimaryBtn>
+                        {esModoOtraFecha ? (
+                          <div style={{
+                            padding: "10px 14px", borderRadius: 12,
+                            background: "var(--c-soft)", border: "1px solid var(--c-line)",
+                            textAlign: "center", color: "var(--c-mute)", fontSize: 13, fontWeight: 600,
+                          }}>
+                            Solo lectura — los servicios solo se inician el mismo día
+                          </div>
+                        ) : (
+                          <PrimaryBtn
+                            onClick={() => iniciarRecorrido(r)}
+                            disabled={iniciando || !!reservaActiva}
+                            icon={<IconPlay size={15} color="#fff" />}
+                          >
+                            {iniciando ? "Iniciando…" : "Iniciar recorrido"}
+                          </PrimaryBtn>
+                        )}
                       </div>
                     ))}
                   </>
@@ -1656,7 +1724,9 @@ export default function ConductorApp() {
                 {/* ── FINALIZADOS ── */}
                 {reservasFinalizadasSection.length > 0 && (
                   <>
-                    <Eyebrow style={{ marginTop: 14, marginBottom: 6, color: "var(--c-mute)" }}>Finalizados hoy</Eyebrow>
+                    <Eyebrow style={{ marginTop: reservasPendientesSection.length > 0 ? 14 : 0, marginBottom: 6, color: "var(--c-mute)" }}>
+                      Finalizados
+                    </Eyebrow>
                     {reservasFinalizadasSection.map(r => (
                       <div key={r.id} style={{
                         background: "var(--c-soft)", border: "1px solid var(--c-line)",
@@ -1675,7 +1745,7 @@ export default function ConductorApp() {
                 )}
 
                 {/* Todos los servicios del día ya finalizados */}
-                {reservasPendientesSection.length === 0 && !reservaActiva && reservasFinalizadasSection.length > 0 && (
+                {reservasPendientesSection.length === 0 && !esModoOtraFecha && !reservaActiva && reservasFinalizadasSection.length > 0 && (
                   <p style={{ textAlign: "center", color: "var(--c-mute)", fontSize: 13, margin: "8px 0 0" }}>
                     Todos los servicios del día completados
                   </p>
