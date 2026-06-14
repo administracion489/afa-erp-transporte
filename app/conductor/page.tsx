@@ -1033,6 +1033,7 @@ export default function ConductorApp() {
 
   const vehSel        = vehiculos.find(v => v.id === vehiculoId);
   const paradaActual  = paradas[paradaIdx];
+  const esUltimaParada = enRuta && paradas.length > 0 && paradaIdx === paradas.length - 1;
   const pasParada     = pasajeros.filter(p => p.parada_id === paradaActual?.id);
   const embarcados    = pasParada.filter(p => p.estado === "embarcado").length;
   const checkPct      = Math.round((checks.filter(c => c.ok !== null).length / checks.length) * 100);
@@ -2098,14 +2099,16 @@ export default function ConductorApp() {
                   )}
                 </div>
 
-                {/* Finalizar */}
-                <SecondaryBtn
-                  onClick={() => setShowFinViaje(true)}
-                  icon={<IconStop size={14} color="var(--c-danger)" />}
-                  style={{ borderColor: "var(--c-danger)", color: "var(--c-danger)" }}
-                >
-                  Finalizar recorrido
-                </SecondaryBtn>
+                {/* Terminar anticipadamente — solo cuando NO es la última parada */}
+                {!esUltimaParada && (
+                  <SecondaryBtn
+                    onClick={() => setShowFinViaje(true)}
+                    icon={<IconStop size={14} color="var(--c-danger)" />}
+                    style={{ borderColor: "var(--c-danger)", color: "var(--c-danger)" }}
+                  >
+                    Terminar anticipadamente
+                  </SecondaryBtn>
+                )}
               </>
             )}
           </section>
@@ -3209,13 +3212,27 @@ export default function ConductorApp() {
               <div style={{ position: "absolute", right: -8, top: -8, opacity: 0.12 }}>
                 <IconFlag size={100} color="#fff" />
               </div>
-              <Eyebrow color="rgba(255,255,255,0.7)">Viaje finalizado</Eyebrow>
+              <Eyebrow color="rgba(255,255,255,0.7)">
+                {paradaIdx < paradas.length - 1 ? "Cierre anticipado" : "Viaje finalizado"}
+              </Eyebrow>
               <h2 style={{ margin: "4px 0 0", fontSize: 22, fontWeight: 800, letterSpacing: -0.6 }}>
                 {reservaActiva?.origen} → {reservaActiva?.destino}
               </h2>
             </div>
 
             <div style={{ padding: "0 22px" }}>
+              {paradaIdx < paradas.length - 1 && (
+                <div style={{
+                  background: "var(--c-warn-tint)", border: "1px solid var(--c-warn)",
+                  borderRadius: 14, padding: "12px 14px", marginBottom: 14,
+                  display: "flex", alignItems: "center", gap: 10,
+                }}>
+                  <IconAlert size={16} color="var(--c-warn)" />
+                  <p style={{ margin: 0, color: "#92400E", fontSize: 13, fontWeight: 600 }}>
+                    Quedan {paradas.length - 1 - paradaIdx} parada{paradas.length - 1 - paradaIdx > 1 ? "s" : ""} sin completar
+                  </p>
+                </div>
+              )}
               <div style={{
                 display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14,
               }}>
