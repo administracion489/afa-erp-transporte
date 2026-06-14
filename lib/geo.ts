@@ -44,11 +44,12 @@ export async function pedirPermisoUbicacion(): Promise<GeoPermiso> {
   if (esNativo()) {
     try {
       const Geolocation = await plugin();
-      const actual = await Geolocation.checkPermissions();
+      // Timeout duro: en algunos aparatos checkPermissions/requestPermissions se cuelga.
+      const actual = await conTimeout(Geolocation.checkPermissions(), 6000);
       if (actual.location === "granted" || actual.coarseLocation === "granted") {
         return "granted";
       }
-      const res = await Geolocation.requestPermissions({ permissions: ["location"] });
+      const res = await conTimeout(Geolocation.requestPermissions({ permissions: ["location"] }), 60000);
       const ok = res.location === "granted" || res.coarseLocation === "granted";
       return ok ? "granted" : "denied";
     } catch {

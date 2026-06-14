@@ -531,19 +531,19 @@ export default function ConductorApp() {
     };
 
     (async () => {
-      // En la app nativa esto dispara el diálogo de permisos del sistema
-      // (igual que Maps/inDrive). En web el permiso se pide al leer la posición.
-      const permiso = await pedirPermisoUbicacion();
-      setGpsDebug(`permiso=${permiso}`);
-      if (permiso === "denied")      { setGpsError("Permiso de ubicación denegado"); return; }
-      if (permiso === "unavailable") { setGpsError("GPS no disponible en este dispositivo"); return; }
-      if (cancelado) return;
-      // 1) Intentar GPS de alta precisión (satélite).
+      // Arrancar el watch de INMEDIATO. El permiso nativo ya se concede al arranque
+      // (v15) y navigator.geolocation usa el proveedor del sistema (como Google Maps).
+      // NO bloquear esperando al plugin: en algunos aparatos checkPermissions() se cuelga.
+      setGpsDebug("iniciando GPS…");
       await arrancarWatch(true);
-      // 2) Si en 15 s no hubo fix (p.ej. tablets sin GPS satelital), caer a ubicación por RED.
+      // Si en 15 s no hubo fix (p.ej. sin GPS satelital), caer a ubicación por RED.
       fallbackTimer = setTimeout(() => {
         if (!recibioPos && !cancelado) arrancarWatch(false);
       }, 15000);
+      // En paralelo (sin bloquear), confirmar el permiso; si está denegado, avisar.
+      pedirPermisoUbicacion()
+        .then((p) => { if (p === "denied" && !recibioPos) setGpsError("Permiso de ubicación denegado"); })
+        .catch(() => {});
     })();
 
     // Enviar ubicación cada 15 s (sin vehículo → 🧑 persona; con vehículo → 🚌 bus)
