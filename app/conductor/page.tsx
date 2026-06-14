@@ -367,42 +367,52 @@ export default function ConductorApp() {
   // ─── Cargar datos ───────────────────────────────────────────────────────────
 
   const cargarDatos = useCallback(async (cid: number, tabla?: string) => {
-    setCargando(true);
     const hoy = getFechaLocal();
     setDebugFecha(hoy);
 
+    // Aplica un bundle "inicio" al estado y devuelve las reservas.
+    const aplicarInicio = (d: any): Reserva[] => {
+      const r: Reserva[] = d.reservas || [];
+      const vIds  = new Set(r.map(x => x.vehiculo_id).filter(Boolean));
+      const vtIds = new Set(r.map(x => (x as any).vehiculo_tercero_id).filter(Boolean));
+      const propios  = ((d.vehiculos        || []) as Vehiculo[]).filter(v => vIds.has(v.id));
+      const terceros = ((d.vehiculosTercero || []) as Vehiculo[]).filter(v => vtIds.has(v.id));
+      setVehiculos([...propios, ...terceros]);
+      setReservasHoy(r);
+      const unicos = [...new Set([...vIds, ...vtIds])];
+      if (unicos.length === 1) setVehiculoId(unicos[0] as number);
+      setDocs(d.docs || []);
+      if (d.checklistHecho) setCheckDone(true);
+      return r;
+    };
+
+    // 1) Stale-while-revalidate: mostrar la caché de HOY al instante (Uber-style).
+    const cacheKey = `afa_cond_inicio_${cid}`;
+    let teniaCache = false;
+    try {
+      const raw = localStorage.getItem(cacheKey);
+      if (raw) {
+        const c = JSON.parse(raw);
+        if (c?.hoy === hoy && c?.data) { aplicarInicio(c.data); teniaCache = true; }
+      }
+    } catch {}
+    setCargando(!teniaCache); // con caché no mostramos spinner
+
+    // 2) Refrescar desde el servidor en segundo plano.
     let data: any;
     const t0 = (typeof performance !== "undefined" ? performance.now() : 0);
     try {
-      // Via service_role (saltea RLS) — el conductor es anónimo.
       data = await condApi("inicio", { cid, tabla: tabla ?? "conductores", hoy });
-      // DEBUG temporal: medir API vs carga de página para diagnosticar lentitud.
       const apiMs = Math.round((typeof performance !== "undefined" ? performance.now() : 0) - t0);
-      let pageMs = 0;
-      try {
-        const nav: any = performance.getEntriesByType?.("navigation")?.[0];
-        if (nav?.duration) pageMs = Math.round(nav.duration);
-      } catch {}
-      setDebugInfo(`API ${apiMs}ms · página ${pageMs}ms`);
+      setDebugInfo(`API ${apiMs}ms${teniaCache ? " (caché)" : ""}`);
+      try { localStorage.setItem(cacheKey, JSON.stringify({ hoy, data })); } catch {}
     } catch (e: any) {
-      setDebugInfo(`Error al cargar servicios: ${e?.message ?? "desconocido"}`);
       setCargando(false);
-      return;
+      if (!teniaCache) setDebugInfo(`Error al cargar servicios: ${e?.message ?? "desconocido"}`);
+      return; // si había caché, se queda mostrada
     }
 
-    const res: Reserva[] = data.reservas || [];
-    // Combinar vehículos propios y de tercero; usar el id correcto según el tipo de reserva
-    const vehiculoIds    = new Set(res.map(r => r.vehiculo_id).filter(Boolean));
-    const vehiculoTerIds = new Set(res.map(r => (r as any).vehiculo_tercero_id).filter(Boolean));
-    const propios  = ((data.vehiculos        || []) as Vehiculo[]).filter(v => vehiculoIds.has(v.id));
-    const terceros = ((data.vehiculosTercero || []) as Vehiculo[]).filter(v => vehiculoTerIds.has(v.id));
-    setVehiculos([...propios, ...terceros]);
-    setReservasHoy(res);
-    // Auto-seleccionar vehículo si todas las reservas usan el mismo
-    const vidsUnicos = [...new Set([...vehiculoIds, ...vehiculoTerIds])];
-    if (vidsUnicos.length === 1) setVehiculoId(vidsUnicos[0] as number);
-    setDocs(data.docs || []);
-    if (data.checklistHecho) setCheckDone(true);
+    const res = aplicarInicio(data);
     setCargando(false);
 
     // ── Restaurar servicio activo si la sesión fue interrumpida ───────────
