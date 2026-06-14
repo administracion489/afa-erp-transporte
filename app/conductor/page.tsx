@@ -513,21 +513,25 @@ export default function ConductorApp() {
   async function iniciarRecorrido(reserva: Reserva) {
     if (!checkDone) { alert("Debes completar el pre-viaje antes de iniciar el recorrido"); setTab("checklist"); return; }
     if (!vehiculoId) { alert("Selecciona el vehículo primero"); return; }
-    if (!geoDisponible()) { alert("GPS no disponible en este dispositivo"); return; }
     setIniciando(true);
-    setReservaActiva(reserva);
     await cargarParadas(reserva.id);
+    // Posición inicial best-effort: el watchPosition desde el login ya rastrea, así
+    // que un fallo de UNA lectura GPS NO debe impedir iniciar/ver el recorrido.
     try {
       const pos = await obtenerUbicacion({ enableHighAccuracy: true, timeout: 15000 });
-      posRef.current = pos; setPosActual(pos); enviarUbicacion(pos);
-      setEnRuta(true); setIniciando(false); setTab("paradas");
-      const ahora = new Date();
-      setInicioViaje(ahora);
-      saveServicio({ reservaId: reserva.id, vehiculoId: vehiculoId!, paradaIdx: 0, inicioViaje: ahora.toISOString() });
-      // GPS watchPosition ya está activo desde el login — no reiniciar
+      posRef.current = pos; setPosActual(pos);
     } catch (e: any) {
-      setIniciando(false); alert(`GPS: ${e?.message ?? "no se pudo obtener la ubicación"}`);
+      console.warn("[iniciarRecorrido] sin GPS inicial:", e?.message);
     }
+    if (posRef.current) enviarUbicacion(posRef.current);
+    // Estado consistente: reservaActiva + enRuta se setean JUNTOS al iniciar.
+    const ahora = new Date();
+    setReservaActiva(reserva);
+    setEnRuta(true);
+    setInicioViaje(ahora);
+    setIniciando(false);
+    setTab("paradas");
+    saveServicio({ reservaId: reserva.id, vehiculoId: vehiculoId!, paradaIdx: 0, inicioViaje: ahora.toISOString() });
   }
 
   function finalizarRecorridoConfirmado() {
