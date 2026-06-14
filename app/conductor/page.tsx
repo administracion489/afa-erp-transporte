@@ -1262,6 +1262,39 @@ export default function ConductorApp() {
               </div>
             )}
 
+            {/* Estado GPS — visible si hay error de ubicación (permiso/aparato) */}
+            {gpsError && (
+              <div style={{
+                background: "var(--c-warn-tint)", border: "1px solid var(--c-warn)",
+                borderRadius: 14, padding: "12px 14px", marginBottom: 14,
+                display: "flex", alignItems: "center", gap: 10,
+              }}>
+                <IconPin size={18} color="var(--c-warn)" />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{ margin: 0, color: "var(--c-warn)", fontWeight: 800, fontSize: 13 }}>Ubicación: {gpsError}</p>
+                  <p style={{ margin: "2px 0 0", color: "#92400E", fontSize: 11 }}>
+                    Activa el GPS del teléfono y concede el permiso de ubicación.
+                  </p>
+                </div>
+                <button
+                  onClick={async () => {
+                    setGpsError(null);
+                    const p = await pedirPermisoUbicacion();
+                    if (p === "granted") {
+                      try {
+                        const pos = await obtenerUbicacion({ enableHighAccuracy: true, timeout: 15000 });
+                        posRef.current = pos; setPosActual(pos); enviarUbicacion(pos);
+                      } catch (e: any) { setGpsError(e?.message ?? "No se pudo obtener la ubicación"); }
+                    } else {
+                      setGpsError(p === "denied" ? "Permiso denegado" : "GPS no disponible");
+                    }
+                  }}
+                  style={{ flexShrink: 0, background: "var(--c-warn)", border: "none", borderRadius: 10, padding: "8px 12px", color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
+                  Activar
+                </button>
+              </div>
+            )}
+
             {/* Hero card — próximo viaje (si no está en ruta) */}
             {!enRuta && proximaReserva && (
               <div style={{
