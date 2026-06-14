@@ -46,6 +46,18 @@ function loadSession(): Pasajero | null {
   try { const r = localStorage.getItem(SK); if(!r) return null; const {p,exp}=JSON.parse(r); if(Date.now()>exp){localStorage.removeItem(SK);return null;} return p; } catch{return null;}
 }
 function clearSession() { localStorage.removeItem(SK); }
+// Llama al endpoint con service_role del pasajero (saltea RLS — el pasajero es
+// anónimo porque usa DNI+PIN, no sesión Supabase). Lanza Error con el mensaje del server.
+async function paxApi(accion: string, params: Record<string, any> = {}) {
+  const res = await fetch("/api/pasajero", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ accion, ...params }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || "Error de red");
+  return json;
+}
 function dist(lat1:number,lng1:number,lat2:number,lng2:number): number {
   const R=6371000,φ1=lat1*Math.PI/180,φ2=lat2*Math.PI/180,Δφ=(lat2-lat1)*Math.PI/180,Δλ=(lng2-lng1)*Math.PI/180;
   const a=Math.sin(Δφ/2)**2+Math.cos(φ1)*Math.cos(φ2)*Math.sin(Δλ/2)**2;
@@ -624,14 +636,21 @@ export default function AppPasajero() {
     }
   }, [rutaParadas, mapListo]);
 
-  // Realtime GPS bus
+  // Posición del bus en vivo — polling vía API (Realtime no funciona para anónimo
+  // con RLS activo). El conductor envía ubicación cada ~15 s; consultamos cada 8 s.
   useEffect(() => {
     if (!miParada?.reserva?.vehiculo_id) return;
     const vid = miParada.reserva.vehiculo_id;
-    const ch = supabase.channel(`bus-pax-${vid}`)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "ubicaciones_gps", filter: `vehiculo_id=eq.${vid}` }, (p: any) => setBusPosicion(p.new as UbicacionBus))
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
+    let activo = true;
+    const tick = async () => {
+      try {
+        const { busPosicion } = await paxApi("bus_posicion", { vehiculoId: vid });
+        if (activo && busPosicion) setBusPosicion(busPosicion as UbicacionBus);
+      } catch { /* reintentará en el próximo tick */ }
+    };
+    tick();
+    const id = setInterval(tick, 8000);
+    return () => { activo = false; clearInterval(id); };
   }, [miParada]);
 
   // ── FUNCIONES ───────────────────────────────────────────────────────────────
@@ -640,7 +659,11 @@ export default function AppPasajero() {
     if (dniInput.length < 7) { setLoginErr("Ingresa tu DNI completo"); return; }
     if (pinInput.length < 4) { setLoginErr("Ingresa tu PIN de 4 dígitos"); return; }
     setLoginErr(""); setLoginLoad(true);
-    const { data } = await supabase.from("pasajeros").select("*").eq("dni", dniInput.trim()).single();
+    let data: any = null;
+    try {
+      const r = await paxApi("login", { dni: dniInput.trim() });
+      data = r.pasajero;
+    } catch (e: any) { setLoginErr(`Error: ${e?.message ?? "no se pudo conectar"}`); setLoginLoad(false); return; }
     if (!data) { setLoginErr("DNI no registrado. Contacta a tu empresa o a AFA Tours."); setLoginLoad(false); return; }
     // Validar PIN — si no tiene PIN asignado, usar últimos 4 dígitos del DNI como default
     const pinEsperado = data.pin_acceso || dniInput.trim().slice(-4);
@@ -650,30 +673,21 @@ export default function AppPasajero() {
 
   const cargarMiRuta = useCallback(async (pid: number) => {
     const hoy = getFechaLocal();
-    const { data: pp } = await supabase.from("pasajeros_parada").select(`*, parada:paradas(*, reserva:reservas(*))`).eq("pasajero_id", pid);
-    if (!pp?.length) return;
-    const hoyPP = pp.filter((x: any) => x.parada?.reserva?.fecha_servicio === hoy);
-    let miPP: any = hoyPP.length > 0 ? hoyPP[0] : pp.filter((x: any) => x.parada?.reserva?.fecha_servicio >= hoy).sort((a: any, b: any) => new Date(a.parada?.reserva?.fecha_servicio || 0).getTime() - new Date(b.parada?.reserva?.fecha_servicio || 0).getTime())[0] || pp[0];
-    if (!miPP?.parada) return;
-    setMiParada(miPP.parada); setMiEstado(miPP.estado || "esperando");
-    const rId = miPP.parada?.reserva_id;
-    if (!rId) return;
-    const { data: ps } = await supabase.from("paradas").select("*").eq("reserva_id", rId).order("orden");
-    setRutaParadas(ps || []);
-    const vId = miPP.parada?.reserva?.vehiculo_id;
-    if (vId) {
-      const [vR, uR] = await Promise.all([
-        supabase.from("vehiculos").select("id,placa,categoria").eq("id", vId).single(),
-        supabase.from("ubicaciones_gps").select("*").eq("vehiculo_id", vId).order("created_at", { ascending: false }).limit(1),
-      ]);
-      if (vR.data) setVehiculo(vR.data);
-      if (uR.data?.[0]) setBusPosicion(uR.data[0]);
-      const { data: uGPS } = await supabase.from("ubicaciones_gps").select("conductor_id").eq("vehiculo_id", vId).order("created_at", { ascending: false }).limit(1);
-      if (uGPS?.[0]?.conductor_id) {
-        const { data: cond } = await supabase.from("conductores").select("id,nombre,telefono").eq("id", uGPS[0].conductor_id).single();
-        if (cond) setConductor(cond);
-      }
+    let r: any;
+    try {
+      // Via service_role (saltea RLS) — el pasajero es anónimo.
+      r = await paxApi("ruta", { pid, hoy });
+    } catch (e: any) {
+      console.error("[cargarMiRuta]", e?.message);
+      return;
     }
+    if (!r || r.ruta === null || !r.miParada) return;
+    setMiParada(r.miParada);
+    setMiEstado(r.miEstado || "esperando");
+    setRutaParadas(r.rutaParadas || []);
+    if (r.vehiculo)    setVehiculo(r.vehiculo);
+    if (r.busPosicion) setBusPosicion(r.busPosicion);
+    if (r.conductor)   setConductor(r.conductor);
   }, []);
 
   function abrirWaze() {
@@ -719,8 +733,7 @@ export default function AppPasajero() {
       const { error: upErr } = await supabase.storage.from("pasajeros-fotos").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
       if (upErr) throw upErr;
       const { data: { publicUrl } } = supabase.storage.from("pasajeros-fotos").getPublicUrl(path);
-      const { error: dbErr } = await supabase.from("pasajeros").update({ foto_url: publicUrl }).eq("id", pasajero.id);
-      if (dbErr) throw dbErr;
+      await paxApi("foto", { pid: pasajero.id, fotoUrl: publicUrl });
       const updated = { ...pasajero, foto_url: publicUrl }; setPasajero(updated); saveSession(updated);
     } catch (e: any) {
       setFotoErr(e?.message || "Error al subir la foto.");
@@ -731,13 +744,18 @@ export default function AppPasajero() {
     const texto = reporteMensaje.trim() || reporteTipo;
     if (!texto) return;
     setReporteEnviando(true);
-    await supabase.from("mensajes_pasajero").insert({
-      pasajero_id: pasajero.id,
-      reserva_id:  miParada.reserva_id,
-      parada_id:   miParada.id,
-      tipo:        reporteTipo || "novedad",
-      mensaje:     texto,
-    });
+    try {
+      await paxApi("mensaje", { mensaje: {
+        pasajero_id: pasajero.id,
+        reserva_id:  miParada.reserva_id,
+        parada_id:   miParada.id,
+        tipo:        reporteTipo || "novedad",
+        mensaje:     texto,
+      } });
+    } catch (e: any) {
+      setReporteEnviando(false);
+      return; // no marcar como enviado si falló
+    }
     setReporteEnviando(false);
     setReporteEnviado(true);
     setReporteMensaje("");
