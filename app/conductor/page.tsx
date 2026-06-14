@@ -322,6 +322,10 @@ export default function ConductorApp() {
     const saved = loadSession();
     if (saved) { setConductor(saved); cargarDatos(saved.id, saved._tabla); }
     setIniting(false);
+    // Service Worker: cachea el shell para arranques instantáneos y resistencia a red.
+    if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
     return () => cleanup();
   }, []);
 
