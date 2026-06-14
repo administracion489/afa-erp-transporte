@@ -91,6 +91,19 @@ function diasPara(f: string | null) {
   return Math.ceil((new Date(f + "T00:00:00").getTime() - Date.now()) / 86400000);
 }
 
+// Llama al endpoint con service_role del conductor (saltea RLS — el conductor es
+// anónimo porque usa PIN, no sesión Supabase). Lanza Error con el mensaje del server.
+async function condApi(accion: string, params: Record<string, any> = {}) {
+  const res = await fetch("/api/conductor", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ accion, ...params }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || "Error de red");
+  return json;
+}
+
 function docEstado(f: string | null): "ok" | "pronto" | "vencido" | "sin" {
   const d = diasPara(f); if (d === null) return "sin";
   if (d < 0) return "vencido"; if (d <= 30) return "pronto"; return "ok";
@@ -356,53 +369,31 @@ export default function ConductorApp() {
     setCargando(true);
     const hoy = getFechaLocal();
     setDebugFecha(hoy);
-    const esTercero = tabla === "conductores_tercero";
-    const condField = esTercero ? "conductor_tercero_id" : "conductor_id";
 
-    const [vR, vTR, rR, dR, ckR] = await Promise.all([
-      supabase.from("vehiculos").select("id,placa,categoria,marca").order("placa"),
-      supabase.from("vehiculos_tercero").select("id,placa,categoria,marca").order("placa"),
-      supabase.from("reservas")
-        .select("id,origen,destino,fecha_servicio,hora_servicio,vehiculo_id,vehiculo_tercero_id")
-        .eq("fecha_servicio", hoy)
-        .eq(condField, cid)
-        .order("hora_servicio"),
-      supabase.from("documentos_conductor")
-        .select("*")
-        .eq("conductor_id", cid)
-        .order("created_at", { ascending: false }),
-      supabase.from("checklist_conductor")
-        .select("id")
-        .eq("conductor_id", cid)
-        .eq("fecha", hoy)
-        .limit(1),
-    ]);
+    let data: any;
+    try {
+      // Via service_role (saltea RLS) — el conductor es anónimo.
+      data = await condApi("inicio", { cid, tabla: tabla ?? "conductores", hoy });
+      setDebugInfo("");
+    } catch (e: any) {
+      setDebugInfo(`Error al cargar servicios: ${e?.message ?? "desconocido"}`);
+      setCargando(false);
+      return;
+    }
 
-    // ── DEBUG temporal (diagnóstico WebView vs navegador) ───────────────────
-    const nat = typeof (globalThis as any).Capacitor !== "undefined"
-      && !!(globalThis as any).Capacitor?.isNativePlatform?.();
-    setDebugInfo(
-      `cid=${cid} campo=${condField} nativo=${nat}\n` +
-      `hoy=${hoy}\n` +
-      `reservas: n=${(rR.data || []).length} err=${(rR as any).error?.message ?? "ok"}\n` +
-      `veh: n=${(vR.data || []).length} err=${(vR as any).error?.message ?? "ok"}\n` +
-      `vehTer: n=${(vTR.data || []).length} err=${(vTR as any).error?.message ?? "ok"}\n` +
-      `docs err=${(dR as any).error?.message ?? "ok"} | chk err=${(ckR as any).error?.message ?? "ok"}`
-    );
-
-    const res: Reserva[] = rR.data || [];
+    const res: Reserva[] = data.reservas || [];
     // Combinar vehículos propios y de tercero; usar el id correcto según el tipo de reserva
     const vehiculoIds    = new Set(res.map(r => r.vehiculo_id).filter(Boolean));
     const vehiculoTerIds = new Set(res.map(r => (r as any).vehiculo_tercero_id).filter(Boolean));
-    const propios  = ((vR.data  || []) as Vehiculo[]).filter(v => vehiculoIds.has(v.id));
-    const terceros = ((vTR.data || []) as Vehiculo[]).filter(v => vehiculoTerIds.has(v.id));
+    const propios  = ((data.vehiculos        || []) as Vehiculo[]).filter(v => vehiculoIds.has(v.id));
+    const terceros = ((data.vehiculosTercero || []) as Vehiculo[]).filter(v => vehiculoTerIds.has(v.id));
     setVehiculos([...propios, ...terceros]);
     setReservasHoy(res);
     // Auto-seleccionar vehículo si todas las reservas usan el mismo
     const vidsUnicos = [...new Set([...vehiculoIds, ...vehiculoTerIds])];
     if (vidsUnicos.length === 1) setVehiculoId(vidsUnicos[0] as number);
-    setDocs(dR.data || []);
-    if (ckR.data && ckR.data.length > 0) setCheckDone(true);
+    setDocs(data.docs || []);
+    if (data.checklistHecho) setCheckDone(true);
     setCargando(false);
 
     // ── Restaurar servicio activo si la sesión fue interrumpida ───────────
@@ -433,11 +424,12 @@ export default function ConductorApp() {
     const listaParadas: Parada[] = json.paradas || [];
     setParadas(listaParadas);
     if (listaParadas.length > 0) {
-      const { data: pp, error: errPp } = await supabase.from("pasajeros_parada")
-        .select("*, pasajero:pasajeros(*)")
-        .in("parada_id", listaParadas.map((p: Parada) => p.id));
-      if (errPp) console.error("[Pasajeros parada]", errPp.message);
-      setPasajeros(pp || []);
+      try {
+        const { pasajeros: pp } = await condApi("pasajeros", { paradaIds: listaParadas.map((p: Parada) => p.id) });
+        setPasajeros(pp || []);
+      } catch (e: any) {
+        console.error("[Pasajeros parada]", e?.message);
+      }
     }
   }
 
@@ -469,10 +461,13 @@ export default function ConductorApp() {
       estado:       estadoFinal,
       created_at:   new Date().toISOString(),
     };
-    const { error } = await supabase.from("ubicaciones_gps").insert(payload);
-    if (error) console.error("[GPS] Error al enviar ubicación:", error.message);
-    setUltimoEnvio(new Date());
-    setTotalEnvios(p => p + 1);
+    try {
+      await condApi("ubicacion", { payload });
+      setUltimoEnvio(new Date());
+      setTotalEnvios(p => p + 1);
+    } catch (e: any) {
+      console.error("[GPS] Error al enviar ubicación:", e?.message);
+    }
     setVelocidad(pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -546,8 +541,9 @@ export default function ConductorApp() {
   }
 
   async function marcarParadaCompletada(paradaId: number) {
-    const { error } = await supabase.from("paradas").update({ estado: "completada" }).eq("id", paradaId);
-    if (error) { alert(`Error al marcar parada: ${error.message}`); return; }
+    try {
+      await condApi("marcar_parada", { paradaId });
+    } catch (e: any) { alert(`Error al marcar parada: ${e?.message}`); return; }
     setParadas(prev => prev.map(p => p.id === paradaId ? { ...p, estado: "completada" } : p));
     if (paradaIdx < paradas.length - 1) {
       const nuevaIdx = paradaIdx + 1;
@@ -648,12 +644,12 @@ export default function ConductorApp() {
   }, [escanear]);
 
   async function procesarQR(qrCode: string) {
-    const { data: pasajero, error } = await supabase
-      .from("pasajeros")
-      .select("*")
-      .eq("qr_code", qrCode)
-      .single();
-    if (error || !pasajero) {
+    let pasajero: Pasajero | null = null;
+    try {
+      const r = await condApi("buscar_pasajero", { qrCode });
+      pasajero = r.pasajero;
+    } catch { /* tratado como no encontrado abajo */ }
+    if (!pasajero) {
       playBeep("error");
       setBoardingMsg({ ok: false, msg: "QR no reconocido. Pasajero no encontrado en el sistema." });
       setTimeout(() => setBoardingMsg(null), 4000);
@@ -683,10 +679,11 @@ export default function ConductorApp() {
 
     // Pasajero en lista → marcar como embarcado
     if (pp) {
-      const { error: errEmb } = await supabase.from("pasajeros_parada").update({ estado: "embarcado" }).eq("id", pp.id);
-      if (errEmb) {
+      try {
+        await condApi("embarcar", { ppId: pp.id });
+      } catch (e: any) {
         playBeep("error");
-        setBoardingMsg({ ok: false, msg: `Error al registrar embarque: ${errEmb.message}` });
+        setBoardingMsg({ ok: false, msg: `Error al registrar embarque: ${e?.message}` });
         setTimeout(() => setBoardingMsg(null), 4000);
         return;
       }
@@ -778,25 +775,27 @@ export default function ConductorApp() {
     const retrasoTxt = incRetraso ? ` (retraso estimado: ${Number(incRetraso)} min)` : "";
     const paradaNombre = paradas[paradaIdx]?.nombre || null;
 
-    const { error } = await supabase.from("incidencias").insert({
-      conductor_id: conductor.id,
-      vehiculo_id:  vehiculoId,
-      reserva_id:   reservaActiva?.id || null,
-      tipo:         incTipo,
-      severidad:    incSev,
-      descripcion:  desc + retrasoTxt,
-      ubicacion:    paradaNombre,
-      lat:          posRef.current?.coords.latitude || null,
-      lng:          posRef.current?.coords.longitude || null,
-      // estado: usa default 'reportado'
-      // id: auto-generado INC-YYYY-NNNN
-    });
-    setIncSaving(false);
-    if (error) {
-      setBoardingMsg({ ok: false, msg: `Error: ${error.message}` });
+    try {
+      await condApi("incidencia", { incidencia: {
+        conductor_id: conductor.id,
+        vehiculo_id:  vehiculoId,
+        reserva_id:   reservaActiva?.id || null,
+        tipo:         incTipo,
+        severidad:    incSev,
+        descripcion:  desc + retrasoTxt,
+        ubicacion:    paradaNombre,
+        lat:          posRef.current?.coords.latitude || null,
+        lng:          posRef.current?.coords.longitude || null,
+        // estado: usa default 'reportado'
+        // id: auto-generado INC-YYYY-NNNN
+      } });
+    } catch (e: any) {
+      setIncSaving(false);
+      setBoardingMsg({ ok: false, msg: `Error: ${e?.message}` });
       setTimeout(() => setBoardingMsg(null), 4000);
       return;
     }
+    setIncSaving(false);
     setShowIncidencia(false);
     setIncTipo(null); setIncSev("medio"); setIncDesc(""); setIncRetraso("");
     setBoardingMsg({ ok: true, msg: "Incidencia reportada a operaciones" });
@@ -837,17 +836,21 @@ export default function ConductorApp() {
       alert(`Faltan ${checks.filter(c => c.ok === null).length} ítems por completar`); return;
     }
     setCheckSaving(true);
-    const { error } = await supabase.from("checklist_conductor").insert({
-      conductor_id: conductor.id,
-      vehiculo_id:  vehiculoId,
-      fecha:        getFechaLocal(),
-      items_json:   checks,
-      km_inicio:    kmInicio ? Number(kmInicio) : null,
-      observaciones: checkObs,
-      estado:       checks.some(c => c.ok === false) ? "con_fallas" : "ok",
-    });
+    try {
+      await condApi("checklist", { checklist: {
+        conductor_id: conductor.id,
+        vehiculo_id:  vehiculoId,
+        fecha:        getFechaLocal(),
+        items_json:   checks,
+        km_inicio:    kmInicio ? Number(kmInicio) : null,
+        observaciones: checkObs,
+        estado:       checks.some(c => c.ok === false) ? "con_fallas" : "ok",
+      } });
+    } catch (e: any) {
+      setCheckSaving(false);
+      alert(`Error al guardar checklist: ${e?.message}`); return;
+    }
     setCheckSaving(false);
-    if (error) { alert(`Error al guardar checklist: ${error.message}`); return; }
     setCheckDone(true);
   }
 
@@ -857,15 +860,21 @@ export default function ConductorApp() {
     if (!conductor) return;
     if (!docUrl.trim()) { alert("Ingresa la URL del documento antes de registrar"); return; }
     setDocSaving(true);
-    const { data, error } = await supabase.from("documentos_conductor").insert({
-      conductor_id: conductor.id,
-      tipo:         docTipo,
-      url:          docUrl.trim(),
-      nombre:       docTipo,
-      vencimiento:  docVenc || null,
-    }).select().single();
+    let data: any = null;
+    try {
+      const r = await condApi("documento", { documento: {
+        conductor_id: conductor.id,
+        tipo:         docTipo,
+        url:          docUrl.trim(),
+        nombre:       docTipo,
+        vencimiento:  docVenc || null,
+      } });
+      data = r.documento;
+    } catch (e: any) {
+      setDocSaving(false);
+      alert(`Error al registrar documento: ${e?.message}`); return;
+    }
     setDocSaving(false);
-    if (error) { alert(`Error al registrar documento: ${error.message}`); return; }
     if (data) setDocs(prev => [data, ...prev]);
     setDocUrl(""); setDocVenc("");
   }
@@ -875,9 +884,9 @@ export default function ConductorApp() {
   async function cambiarPin() {
     if (pinNuevo.length < 4 || pinNuevo !== pinConfirm) { setPinMsg("PINs no coinciden"); return; }
     if (!conductor) return;
-    const tabla = conductor._tabla || "conductores";
-    const { error } = await supabase.from(tabla).update({ pin_acceso: pinNuevo }).eq("id", conductor.id);
-    if (error) { setPinMsg(`Error: ${error.message}`); setTimeout(() => setPinMsg(""), 4000); return; }
+    try {
+      await condApi("cambiar_pin", { cid: conductor.id, tabla: conductor._tabla, pin: pinNuevo });
+    } catch (e: any) { setPinMsg(`Error: ${e?.message}`); setTimeout(() => setPinMsg(""), 4000); return; }
     const upd = { ...conductor, pin_acceso: pinNuevo };
     saveSession(upd); setConductor(upd);
     setPinMsg("PIN cambiado"); setPinNuevo(""); setPinConfirm("");
