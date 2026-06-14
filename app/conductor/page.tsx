@@ -485,9 +485,28 @@ export default function ConductorApp() {
     if (!conductor) return;
     if (!geoDisponible()) { setGpsError("GPS no disponible en este dispositivo"); return; }
     let cancelado = false;
+    let recibioPos = false;
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
     // Limpiar instancias previas por si acaso
     if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
     if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+
+    const arrancarWatch = async (alta: boolean) => {
+      if (cancelado) return;
+      if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
+      const w = await observarUbicacion(
+        (pos) => {
+          const primera = !recibioPos;
+          recibioPos = true;
+          posRef.current = pos; setPosActual(pos); setGpsError(null);
+          if (primera) enviarUbicacion(pos); // primer envío inmediato
+        },
+        (e) => { if (!recibioPos) setGpsError(e.message); },
+        { enableHighAccuracy: alta, maximumAge: alta ? 5000 : 20000, timeout: alta ? 12000 : 25000 }
+      );
+      if (cancelado) { w.clear(); return; }
+      watchIdRef.current = w;
+    };
 
     (async () => {
       // En la app nativa esto dispara el diálogo de permisos del sistema
@@ -496,14 +515,12 @@ export default function ConductorApp() {
       if (permiso === "denied")      { setGpsError("Permiso de ubicación denegado"); return; }
       if (permiso === "unavailable") { setGpsError("GPS no disponible en este dispositivo"); return; }
       if (cancelado) return;
-      // Arrancar watchPosition continuo
-      const w = await observarUbicacion(
-        (pos) => { posRef.current = pos; setPosActual(pos); setGpsError(null); },
-        (e)   => setGpsError(e.message),
-        { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
-      );
-      if (cancelado) { w.clear(); return; }
-      watchIdRef.current = w;
+      // 1) Intentar GPS de alta precisión (satélite).
+      await arrancarWatch(true);
+      // 2) Si en 15 s no hubo fix (p.ej. tablets sin GPS satelital), caer a ubicación por RED.
+      fallbackTimer = setTimeout(() => {
+        if (!recibioPos && !cancelado) arrancarWatch(false);
+      }, 15000);
     })();
 
     // Enviar ubicación cada 15 s (sin vehículo → 🧑 persona; con vehículo → 🚌 bus)
@@ -512,6 +529,7 @@ export default function ConductorApp() {
     }, 15000);
     return () => {
       cancelado = true;
+      if (fallbackTimer) clearTimeout(fallbackTimer);
       if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
       if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
     };
