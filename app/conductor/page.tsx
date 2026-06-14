@@ -1443,12 +1443,7 @@ export default function ConductorApp() {
                   {debugFecha}
                 </p>
                 {debugInfo && (
-                  <pre style={{
-                    textAlign: "left", fontSize: 10, lineHeight: 1.5, color: "var(--c-mute)",
-                    background: "var(--c-soft)", padding: 10, borderRadius: 8,
-                    whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: "0 0 14px",
-                    fontFamily: FONT_MONO,
-                  }}>{debugInfo}</pre>
+                  <p style={{ color: "var(--c-danger)", fontSize: 12, margin: "0 0 14px" }}>{debugInfo}</p>
                 )}
                 <SecondaryBtn
                   onClick={() => conductor && cargarDatos(conductor.id, conductor._tabla)}
