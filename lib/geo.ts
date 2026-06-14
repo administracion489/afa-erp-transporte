@@ -68,6 +68,22 @@ export async function pedirPermisoUbicacion(): Promise<GeoPermiso> {
 
 const OPC_DEFAULT = { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 };
 
+// Timeout duro: el plugin nativo de Capacitor a veces NO respeta su propio timeout
+// (p.ej. si el GPS del aparato está apagado), dejando la promesa colgada para
+// siempre. Esto garantiza que SIEMPRE resuelva o rechace.
+function conTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(
+      () => reject(Object.assign(new Error("Tiempo de espera de GPS agotado"), { code: 3 })),
+      ms
+    );
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
+    );
+  });
+}
+
 /** Obtiene la posición actual una sola vez. */
 export async function obtenerUbicacion(
   opts: PositionOptions = OPC_DEFAULT
@@ -79,11 +95,15 @@ export async function obtenerUbicacion(
     if (perm !== "granted") {
       throw Object.assign(new Error("Permiso de ubicación denegado"), { code: 1 });
     }
-    const p = await Geolocation.getCurrentPosition({
-      enableHighAccuracy: opts.enableHighAccuracy ?? true,
-      timeout: opts.timeout ?? 10000,
-      maximumAge: opts.maximumAge ?? 0,
-    });
+    const to = opts.timeout ?? 10000;
+    const p = await conTimeout(
+      Geolocation.getCurrentPosition({
+        enableHighAccuracy: opts.enableHighAccuracy ?? true,
+        timeout: to,
+        maximumAge: opts.maximumAge ?? 0,
+      }),
+      to + 2000 // margen sobre el timeout del plugin
+    );
     return { coords: p.coords, timestamp: p.timestamp };
   }
   return new Promise<GeoPos>((resolve, reject) => {

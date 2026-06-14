@@ -515,16 +515,9 @@ export default function ConductorApp() {
     if (!vehiculoId) { alert("Selecciona el vehículo primero"); return; }
     setIniciando(true);
     await cargarParadas(reserva.id);
-    // Posición inicial best-effort: el watchPosition desde el login ya rastrea, así
-    // que un fallo de UNA lectura GPS NO debe impedir iniciar/ver el recorrido.
-    try {
-      const pos = await obtenerUbicacion({ enableHighAccuracy: true, timeout: 15000 });
-      posRef.current = pos; setPosActual(pos);
-    } catch (e: any) {
-      console.warn("[iniciarRecorrido] sin GPS inicial:", e?.message);
-    }
-    if (posRef.current) enviarUbicacion(posRef.current);
-    // Estado consistente: reservaActiva + enRuta se setean JUNTOS al iniciar.
+    // Transición INMEDIATA a la ruta — NO esperar al GPS (el watchPosition desde el
+    // login ya rastrea). Bloquear aquí dejaba el botón colgado en "Obteniendo GPS…"
+    // si el aparato no tenía señal.
     const ahora = new Date();
     setReservaActiva(reserva);
     setEnRuta(true);
@@ -532,6 +525,10 @@ export default function ConductorApp() {
     setIniciando(false);
     setTab("paradas");
     saveServicio({ reservaId: reserva.id, vehiculoId: vehiculoId!, paradaIdx: 0, inicioViaje: ahora.toISOString() });
+    // Posición inicial best-effort, en segundo plano (no bloquea la UI).
+    obtenerUbicacion({ enableHighAccuracy: true, timeout: 12000 })
+      .then((pos) => { posRef.current = pos; setPosActual(pos); enviarUbicacion(pos); })
+      .catch((e: any) => console.warn("[iniciarRecorrido] sin GPS inicial:", e?.message));
   }
 
   function finalizarRecorridoConfirmado() {
@@ -1370,7 +1367,7 @@ export default function ConductorApp() {
                   }}
                 >
                   {iniciando
-                    ? <>Obteniendo GPS…</>
+                    ? <>Iniciando…</>
                     : !checkDone
                       ? <><IconShield size={17} color="var(--c-navy)" /> Iniciar pre-viaje</>
                       : <><IconPlay size={16} color="var(--c-navy)" /> Iniciar recorrido</>}
@@ -1535,7 +1532,7 @@ export default function ConductorApp() {
                           disabled={iniciando}
                           icon={<IconPlay size={15} color="#fff" />}
                         >
-                          {iniciando ? "Obteniendo GPS…" : "Iniciar recorrido"}
+                          {iniciando ? "Iniciando…" : "Iniciar recorrido"}
                         </PrimaryBtn>
                       )}
                     </div>
