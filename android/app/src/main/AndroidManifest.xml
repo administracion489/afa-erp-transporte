@@ -47,5 +47,9 @@
     <!-- Notificaciones (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Cámara: escaneo de QR de pasajeros -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
     <uses-feature android:name="android.hardware.location.gps" android:required="false" />
 </manifest>

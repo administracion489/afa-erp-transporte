@@ -29,6 +29,12 @@ public class MainActivity extends BridgeActivity {
             permisos.add(Manifest.permission.ACCESS_COARSE_LOCATION);
         }
 
+        // Cámara: requerida para escanear el QR del pasajero
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            permisos.add(Manifest.permission.CAMERA);
+        }
+
         // Android 13+ requiere permiso explícito para notificaciones
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
