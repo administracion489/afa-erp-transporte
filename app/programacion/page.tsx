@@ -406,8 +406,10 @@ export default function ReservasPage() {
     cargarDatos();
   };
 
-  // Resuelve la lista COMPLETA de paraderos de una reserva: prioriza la cotización
-  // (ida + retorno) y, si no hay, usa el paradas_json propio de la reserva.
+  // Resuelve los paraderos de una reserva PARA SU TRAMO (ida o retorno).
+  // La programación masiva crea 2 reservas (ida y retorno), cada una con su propio
+  // paradas_json por tramo → se usa ese primero. Si falta, se reconstruye desde la
+  // cotización según direccion_servicio. NUNCA se combinan ambos tramos.
   // Ordenada inicio → intermedia → destino.
   const resolverParadasJSON = async (reservaId: number): Promise<any[]> => {
     const sortLeg = (arr: any[]) => [
@@ -417,17 +419,25 @@ export default function ReservasPage() {
       ...arr.filter((p: any) => !["inicio", "intermedia", "destino"].includes(p.tipo)),
     ];
     const { data: rRow } = await supabase.from("reservas")
-      .select("paradas_json, cotizacion_id").eq("id", reservaId).maybeSingle();
-    let out: any[] = [];
+      .select("paradas_json, cotizacion_id, direccion_servicio").eq("id", reservaId).maybeSingle();
+
+    // 1) El paradas_json propio de la reserva ya viene por tramo (ida o retorno).
+    if (Array.isArray(rRow?.paradas_json) && rRow.paradas_json.length > 0)
+      return sortLeg(rRow.paradas_json);
+
+    // 2) Fallback: reconstruir desde la cotización según el tramo de la reserva.
     if (rRow?.cotizacion_id) {
       const { data: cot } = await supabase.from("cotizaciones")
         .select("paradas_json, paradas_retorno_json").eq("id", rRow.cotizacion_id).maybeSingle();
-      if (Array.isArray(cot?.paradas_json)) out = sortLeg(cot.paradas_json);
-      if (Array.isArray(cot?.paradas_retorno_json) && cot.paradas_retorno_json.length > 0)
-        out = [...out, ...sortLeg(cot.paradas_retorno_json)];
+      if (rRow.direccion_servicio === "retorno") {
+        const ret = Array.isArray(cot?.paradas_retorno_json) && cot.paradas_retorno_json.length > 0
+          ? cot.paradas_retorno_json : cot?.paradas_json;
+        if (Array.isArray(ret)) return sortLeg(ret);
+      } else if (Array.isArray(cot?.paradas_json)) {
+        return sortLeg(cot.paradas_json);
+      }
     }
-    if (out.length === 0 && Array.isArray(rRow?.paradas_json)) out = sortLeg(rRow.paradas_json);
-    return out;
+    return [];
   };
 
   // Crea/rehace las paradas de la reserva desde los paraderos de la cotización.
