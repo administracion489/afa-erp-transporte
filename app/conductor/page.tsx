@@ -371,10 +371,18 @@ export default function ConductorApp() {
     setDebugFecha(hoy);
 
     let data: any;
+    const t0 = (typeof performance !== "undefined" ? performance.now() : 0);
     try {
       // Via service_role (saltea RLS) — el conductor es anónimo.
       data = await condApi("inicio", { cid, tabla: tabla ?? "conductores", hoy });
-      setDebugInfo("");
+      // DEBUG temporal: medir API vs carga de página para diagnosticar lentitud.
+      const apiMs = Math.round((typeof performance !== "undefined" ? performance.now() : 0) - t0);
+      let pageMs = 0;
+      try {
+        const nav: any = performance.getEntriesByType?.("navigation")?.[0];
+        if (nav?.duration) pageMs = Math.round(nav.duration);
+      } catch {}
+      setDebugInfo(`API ${apiMs}ms · página ${pageMs}ms`);
     } catch (e: any) {
       setDebugInfo(`Error al cargar servicios: ${e?.message ?? "desconocido"}`);
       setCargando(false);
@@ -1206,6 +1214,9 @@ export default function ConductorApp() {
                 {enRuta ? "En servicio" : "Disponible"}
               </span>
             </div>
+            {debugInfo && debugInfo.includes("ms") && (
+              <p style={{ margin: "3px 0 0", fontSize: 9, color: "var(--c-mute-2)", fontFamily: FONT_MONO }}>{debugInfo}</p>
+            )}
           </div>
         </div>
 
