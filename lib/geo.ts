@@ -124,27 +124,43 @@ export async function observarUbicacion(
   onError?: (err: { code?: number; message: string }) => void,
   opts: PositionOptions = { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
 ): Promise<GeoWatch> {
+  const limpiar: Array<() => void> = [];
+
+  // 1) navigator.geolocation — usa el proveedor del SISTEMA (igual que Google Maps).
+  //    En muchos dispositivos (p.ej. tablets) entrega ubicación cuando el plugin no.
+  try {
+    if (typeof navigator !== "undefined" && navigator.geolocation) {
+      const id = navigator.geolocation.watchPosition(
+        (pos) => onPos(pos as GeoPos),
+        (err) => onError?.(err),
+        opts
+      );
+      limpiar.push(() => { try { navigator.geolocation.clearWatch(id); } catch {} });
+    }
+  } catch { /* ignore */ }
+
+  // 2) En nativo, ADEMÁS el plugin Capacitor (redundancia: el que entregue, gana).
   if (esNativo()) {
-    const Geolocation = await plugin();
-    const id = await Geolocation.watchPosition(
-      {
-        enableHighAccuracy: opts.enableHighAccuracy ?? true,
-        timeout: opts.timeout ?? 15000,
-        maximumAge: opts.maximumAge ?? 5000,
-      },
-      (p, err) => {
-        if (err) { onError?.({ message: err.message }); return; }
-        if (p) onPos({ coords: p.coords, timestamp: p.timestamp });
-      }
-    );
-    return { clear: () => { void Geolocation.clearWatch({ id }); } };
+    try {
+      const Geolocation = await plugin();
+      const id = await Geolocation.watchPosition(
+        {
+          enableHighAccuracy: opts.enableHighAccuracy ?? true,
+          timeout: opts.timeout ?? 15000,
+          maximumAge: opts.maximumAge ?? 5000,
+        },
+        (p, err) => {
+          if (err) { onError?.({ message: err.message }); return; }
+          if (p) onPos({ coords: p.coords, timestamp: p.timestamp });
+        }
+      );
+      limpiar.push(() => { try { void Geolocation.clearWatch({ id }); } catch {} });
+    } catch (e: any) {
+      onError?.({ message: `plugin: ${e?.message ?? e}` });
+    }
   }
-  const id = navigator.geolocation.watchPosition(
-    (pos) => onPos(pos as GeoPos),
-    (err) => onError?.(err),
-    opts
-  );
-  return { clear: () => navigator.geolocation.clearWatch(id) };
+
+  return { clear: () => limpiar.forEach((f) => f()) };
 }
 
 /** true si hay alguna forma de geolocalización disponible. */

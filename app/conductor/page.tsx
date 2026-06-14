@@ -1258,6 +1258,11 @@ export default function ConductorApp() {
             {debugInfo && debugInfo.includes("ms") && (
               <p style={{ margin: "3px 0 0", fontSize: 9, color: "var(--c-mute-2)", fontFamily: FONT_MONO }}>{debugInfo}</p>
             )}
+            {(gpsDebug || gpsError) && (
+              <p style={{ margin: "2px 0 0", fontSize: 9, color: gpsError ? "var(--c-danger)" : "var(--c-mute-2)", fontFamily: FONT_MONO, maxWidth: 220, wordBreak: "break-word" }}>
+                GPS: {gpsError ? `⚠ ${gpsError}` : gpsDebug}
+              </p>
+            )}
           </div>
         </div>
 
