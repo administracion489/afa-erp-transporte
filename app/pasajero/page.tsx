@@ -465,6 +465,20 @@ export default function AppPasajero() {
   const paradaMk     = useRef<mapboxgl.Marker | null>(null);
   const meMk         = useRef<mapboxgl.Marker | null>(null);  // marcador pasajero
   const [mapListo,   setMapListo]           = useState(false);
+  const [qrDataUrl,  setQrDataUrl]          = useState<string | null>(null);
+
+  // Genera el QR localmente (sin llamadas a APIs externas) cada vez que cambia qr_code.
+  useEffect(() => {
+    if (!pasajero?.qr_code) { setQrDataUrl(null); return; }
+    const code = pasajero.qr_code;
+    import("qrcode").then(({ default: QRCode }) => {
+      QRCode.toDataURL(code, {
+        width: 200, margin: 2,
+        color: { dark: "#0b315f", light: "#ffffff" },
+        errorCorrectionLevel: "M",
+      }).then(url => setQrDataUrl(url)).catch(console.error);
+    }).catch(console.error);
+  }, [pasajero?.qr_code]);
 
   useEffect(() => {
     const saved = loadSession();
@@ -1358,11 +1372,16 @@ export default function AppPasajero() {
                   </Chip>
                 </div>
 
-                {/* QR */}
+                {/* QR — generado localmente sin API externa */}
                 <div style={{ padding: "22px 20px 8px", display: "flex", justifyContent: "center" }}>
-                  {pasajero.qr_code ? (
+                  {qrDataUrl ? (
                     <div style={{ padding: 14, background: "var(--surface)", border: "2px solid var(--navy)", borderRadius: 18 }}>
-                      <img src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(pasajero.qr_code)}&bgcolor=ffffff&color=0b315f&qzone=2&margin=0`} alt="QR" style={{ display: "block", width: 200, height: 200 }} />
+                      <img src={qrDataUrl} alt="QR" style={{ display: "block", width: 200, height: 200 }} />
+                    </div>
+                  ) : pasajero.qr_code ? (
+                    <div style={{ width: 200, height: 200, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "var(--navy-tint)", borderRadius: 18 }}>
+                      <div style={{ width: 28, height: 28, border: "3px solid var(--navy)", borderTop: "3px solid transparent", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+                      <p style={{ margin: "10px 0 0", fontSize: 12, fontWeight: 700, color: "var(--navy)" }}>Generando…</p>
                     </div>
                   ) : (
                     <div style={{ width: 200, height: 200, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "var(--navy-tint)", borderRadius: 18 }}>
