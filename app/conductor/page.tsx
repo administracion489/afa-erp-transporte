@@ -588,6 +588,7 @@ export default function ConductorApp() {
   }, [conductor?.id]);
 
   async function iniciarRecorrido(reserva: Reserva) {
+    if (reservaActiva) { alert("Hay un servicio en curso. Finalízalo antes de iniciar otro."); return; }
     if (!checkDone) { alert("Debes completar el pre-viaje antes de iniciar el recorrido"); setTab("checklist"); return; }
     if (!vehiculoId) { alert("Selecciona el vehículo primero"); return; }
     setIniciando(true);
@@ -1710,11 +1711,17 @@ export default function ConductorApp() {
                           </div>
                         ) : (
                           <PrimaryBtn
-                            onClick={() => iniciarRecorrido(r)}
-                            disabled={iniciando || !!reservaActiva}
-                            icon={<IconPlay size={15} color="#fff" />}
+                            onClick={() => !checkDone ? setTab("checklist") : iniciarRecorrido(r)}
+                            disabled={iniciando}
+                            icon={!checkDone
+                              ? <IconShield size={15} color="#fff" />
+                              : <IconPlay size={15} color="#fff" />}
                           >
-                            {iniciando ? "Iniciando…" : "Iniciar recorrido"}
+                            {iniciando
+                              ? "Iniciando…"
+                              : !checkDone
+                                ? "Completar pre-viaje primero"
+                                : "Iniciar recorrido"}
                           </PrimaryBtn>
                         )}
                       </div>

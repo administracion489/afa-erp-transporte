@@ -1536,7 +1536,6 @@ export default function AppPasajero() {
                       <p style={{ margin: 0, fontSize: 10.5, color: "var(--mute)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>{it.label}</p>
                       <p style={{ margin: "2px 0 0", fontSize: 14, color: "var(--ink)", fontWeight: 700, letterSpacing: -0.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.value}</p>
                     </div>
-                    <IconChevronRight sz={16} c="var(--mute2)" />
                   </div>
                 ))}
               </div>

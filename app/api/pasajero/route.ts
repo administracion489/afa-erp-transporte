@@ -44,13 +44,21 @@ export async function POST(req: NextRequest) {
         if (ppErr) return NextResponse.json({ error: ppErr.message }, { status: 500 });
         if (!pp?.length) return NextResponse.json({ ruta: null });
 
-        const hoyPP = pp.filter((x: any) => x.parada?.reserva?.fecha_servicio === hoy);
-        const miPP: any = hoyPP.length > 0
-          ? hoyPP[0]
-          : pp.filter((x: any) => x.parada?.reserva?.fecha_servicio >= hoy)
-              .sort((a: any, b: any) =>
-                new Date(a.parada?.reserva?.fecha_servicio || 0).getTime() -
-                new Date(b.parada?.reserva?.fecha_servicio || 0).getTime())[0] || pp[0];
+        // Solo servicios vigentes: en curso (sin importar fecha) o futuros con estado activo.
+        // Nunca retroceder a un servicio viejo como fallback.
+        const vigentes = pp.filter((x: any) => {
+          const r = x.parada?.reserva;
+          if (!r) return false;
+          if (r.estado === "en_curso") return true;
+          return r.fecha_servicio >= hoy && ["pendiente", "confirmada"].includes(r.estado);
+        }).sort((a: any, b: any) => {
+          const rA = a.parada?.reserva;
+          const rB = b.parada?.reserva;
+          const dA = `${rA?.fecha_servicio ?? ""}T${rA?.hora_servicio ?? ""}`;
+          const dB = `${rB?.fecha_servicio ?? ""}T${rB?.hora_servicio ?? ""}`;
+          return dA.localeCompare(dB);
+        });
+        const miPP: any = vigentes[0] ?? null;
 
         if (!miPP?.parada) return NextResponse.json({ ruta: null });
 
