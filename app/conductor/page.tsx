@@ -241,6 +241,7 @@ export default function ConductorApp() {
   const [totalEnvios,  setTotalEnvios]  = useState(0);
   const [ultimoEnvio,  setUltimoEnvio]  = useState<Date | null>(null);
   const [gpsError,     setGpsError]     = useState<string | null>(null);
+  const [gpsDebug,     setGpsDebug]     = useState<string>("");
   const [iniciando,          setIniciando]          = useState(false);
   const [inicioViaje,        setInicioViaje]        = useState<Date | null>(null);
   const [restaurandoServicio,setRestaurandoServicio] = useState(false);
@@ -494,24 +495,32 @@ export default function ConductorApp() {
     const arrancarWatch = async (alta: boolean) => {
       if (cancelado) return;
       if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
-      const w = await observarUbicacion(
-        (pos) => {
-          const primera = !recibioPos;
-          recibioPos = true;
-          posRef.current = pos; setPosActual(pos); setGpsError(null);
-          if (primera) enviarUbicacion(pos); // primer envío inmediato
-        },
-        (e) => { if (!recibioPos) setGpsError(e.message); },
-        { enableHighAccuracy: alta, maximumAge: alta ? 5000 : 20000, timeout: alta ? 12000 : 25000 }
-      );
-      if (cancelado) { w.clear(); return; }
-      watchIdRef.current = w;
+      setGpsDebug(`watch(alta=${alta}) iniciando…`);
+      try {
+        const w = await observarUbicacion(
+          (pos) => {
+            const primera = !recibioPos;
+            recibioPos = true;
+            posRef.current = pos; setPosActual(pos); setGpsError(null);
+            setGpsDebug(`pos ok ±${Math.round(pos.coords.accuracy)}m (alta=${alta})`);
+            if (primera) enviarUbicacion(pos); // primer envío inmediato
+          },
+          (e) => { setGpsDebug(`watch err: ${e.message}`); if (!recibioPos) setGpsError(e.message); },
+          { enableHighAccuracy: alta, maximumAge: alta ? 5000 : 20000, timeout: alta ? 12000 : 25000 }
+        );
+        if (cancelado) { w.clear(); return; }
+        watchIdRef.current = w;
+        setGpsDebug(`watch(alta=${alta}) activo, esperando posición…`);
+      } catch (err: any) {
+        setGpsDebug(`watch EXCEPCIÓN: ${err?.message ?? err}`);
+      }
     };
 
     (async () => {
       // En la app nativa esto dispara el diálogo de permisos del sistema
       // (igual que Maps/inDrive). En web el permiso se pide al leer la posición.
       const permiso = await pedirPermisoUbicacion();
+      setGpsDebug(`permiso=${permiso}`);
       if (permiso === "denied")      { setGpsError("Permiso de ubicación denegado"); return; }
       if (permiso === "unavailable") { setGpsError("GPS no disponible en este dispositivo"); return; }
       if (cancelado) return;
@@ -1595,6 +1604,11 @@ export default function ConductorApp() {
                 border: "1px solid var(--c-line)", borderRadius: 16, padding: 14,
               }}>
                 <Eyebrow style={{ marginBottom: 10 }}>Sesión GPS</Eyebrow>
+                {(gpsDebug || gpsError) && (
+                  <p style={{ margin: "0 0 10px", fontSize: 11, color: gpsError ? "var(--c-danger)" : "var(--c-mute)", fontFamily: FONT_MONO, wordBreak: "break-word" }}>
+                    {gpsError ? `⚠ ${gpsError}` : gpsDebug}
+                  </p>
+                )}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                   {[
                     { lbl: "Velocidad",    val: `${velocidad}`, suf: "km/h", mono: true, color: "var(--c-navy)" },
