@@ -241,7 +241,6 @@ export default function ConductorApp() {
   const [totalEnvios,  setTotalEnvios]  = useState(0);
   const [ultimoEnvio,  setUltimoEnvio]  = useState<Date | null>(null);
   const [gpsError,     setGpsError]     = useState<string | null>(null);
-  const [gpsDebug,     setGpsDebug]     = useState<string>("");
   const [iniciando,          setIniciando]          = useState(false);
   const [inicioViaje,        setInicioViaje]        = useState<Date | null>(null);
   const [restaurandoServicio,setRestaurandoServicio] = useState(false);
@@ -404,11 +403,9 @@ export default function ConductorApp() {
 
     // 2) Refrescar desde el servidor en segundo plano.
     let data: any;
-    const t0 = (typeof performance !== "undefined" ? performance.now() : 0);
     try {
       data = await condApi("inicio", { cid, tabla: tabla ?? "conductores", hoy });
-      const apiMs = Math.round((typeof performance !== "undefined" ? performance.now() : 0) - t0);
-      setDebugInfo(`API ${apiMs}ms${teniaCache ? " (caché)" : ""}`);
+      setDebugInfo("");
       try { localStorage.setItem(cacheKey, JSON.stringify({ hoy, data })); } catch {}
     } catch (e: any) {
       setCargando(false);
@@ -509,32 +506,26 @@ export default function ConductorApp() {
     const arrancarWatch = async (alta: boolean) => {
       if (cancelado) return;
       if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
-      setGpsDebug(`watch(alta=${alta}) iniciando…`);
       try {
         const w = await observarUbicacion(
           (pos) => {
             const primera = !recibioPos;
             recibioPos = true;
             posRef.current = pos; setPosActual(pos); setGpsError(null);
-            setGpsDebug(`pos ok ±${Math.round(pos.coords.accuracy)}m (alta=${alta})`);
             if (primera) enviarUbicacion(pos); // primer envío inmediato
           },
-          (e) => { setGpsDebug(`watch err: ${e.message}`); if (!recibioPos) setGpsError(e.message); },
+          (e) => { if (!recibioPos) setGpsError(e.message); },
           { enableHighAccuracy: alta, maximumAge: alta ? 5000 : 20000, timeout: alta ? 12000 : 25000 }
         );
         if (cancelado) { w.clear(); return; }
         watchIdRef.current = w;
-        setGpsDebug(`watch(alta=${alta}) activo, esperando posición…`);
-      } catch (err: any) {
-        setGpsDebug(`watch EXCEPCIÓN: ${err?.message ?? err}`);
-      }
+      } catch { /* el otro proveedor o el fallback cubren */ }
     };
 
     (async () => {
       // Arrancar el watch de INMEDIATO. El permiso nativo ya se concede al arranque
       // (v15) y navigator.geolocation usa el proveedor del sistema (como Google Maps).
       // NO bloquear esperando al plugin: en algunos aparatos checkPermissions() se cuelga.
-      setGpsDebug("iniciando GPS…");
       await arrancarWatch(true);
       // Si en 15 s no hubo fix (p.ej. sin GPS satelital), caer a ubicación por RED.
       fallbackTimer = setTimeout(() => {
@@ -1255,12 +1246,9 @@ export default function ConductorApp() {
                 {enRuta ? "En servicio" : "Disponible"}
               </span>
             </div>
-            {debugInfo && debugInfo.includes("ms") && (
-              <p style={{ margin: "3px 0 0", fontSize: 9, color: "var(--c-mute-2)", fontFamily: FONT_MONO }}>{debugInfo}</p>
-            )}
-            {(gpsDebug || gpsError) && (
-              <p style={{ margin: "2px 0 0", fontSize: 9, color: gpsError ? "var(--c-danger)" : "var(--c-mute-2)", fontFamily: FONT_MONO, maxWidth: 220, wordBreak: "break-word" }}>
-                GPS: {gpsError ? `⚠ ${gpsError}` : gpsDebug}
+            {gpsError && (
+              <p style={{ margin: "2px 0 0", fontSize: 9, color: "var(--c-danger)", fontFamily: FONT_MONO, maxWidth: 220, wordBreak: "break-word" }}>
+                GPS: ⚠ {gpsError}
               </p>
             )}
           </div>
@@ -1623,9 +1611,9 @@ export default function ConductorApp() {
                 border: "1px solid var(--c-line)", borderRadius: 16, padding: 14,
               }}>
                 <Eyebrow style={{ marginBottom: 10 }}>Sesión GPS</Eyebrow>
-                {(gpsDebug || gpsError) && (
-                  <p style={{ margin: "0 0 10px", fontSize: 11, color: gpsError ? "var(--c-danger)" : "var(--c-mute)", fontFamily: FONT_MONO, wordBreak: "break-word" }}>
-                    {gpsError ? `⚠ ${gpsError}` : gpsDebug}
+                {gpsError && (
+                  <p style={{ margin: "0 0 10px", fontSize: 11, color: "var(--c-danger)", fontFamily: FONT_MONO, wordBreak: "break-word" }}>
+                    ⚠ {gpsError}
                   </p>
                 )}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
