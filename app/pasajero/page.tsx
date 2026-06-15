@@ -548,9 +548,9 @@ export default function AppPasajero() {
     };
   }, [pasajero, solicitarGPS]);
 
-  // Mapbox init
+  // Mapbox init — se destruye y recrea al salir/volver al tab ruta
   useEffect(() => {
-    if (!mapContainer.current || map.current || !pasajero) return;
+    if (tab !== "ruta" || !mapContainer.current || !pasajero || map.current) return;
     map.current = new mapboxgl.Map({
       container: mapContainer.current,
       style: "mapbox://styles/mapbox/light-v11",
@@ -559,8 +559,13 @@ export default function AppPasajero() {
     });
     map.current.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right");
     map.current.on("load", () => setMapListo(true));
-    return () => { map.current?.remove(); map.current = null; };
-  }, [pasajero]);
+    return () => {
+      map.current?.remove(); map.current = null;
+      if (meMk.current) { meMk.current.remove(); meMk.current = null; }
+      if (busMarker.current) { busMarker.current.remove(); busMarker.current = null; }
+      setMapListo(false);
+    };
+  }, [pasajero, tab]);
 
   // ── MARCADOR UBICACIÓN PROPIA (punto azul) ──────────────────────────────────
   useEffect(() => {

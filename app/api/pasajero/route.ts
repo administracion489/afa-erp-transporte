@@ -77,9 +77,10 @@ export async function POST(req: NextRequest) {
 
         let vehiculo: any = null, busPosicion: any = null, conductor: any = null;
         const reserva = miParada.reserva;
-        const vId    = reserva?.vehiculo_id;
-        const vtId   = reserva?.vehiculo_tercero_id;
-        const condId = reserva?.conductor_id;
+        const vId       = reserva?.vehiculo_id;
+        const vtId      = reserva?.vehiculo_tercero_id;
+        const condId    = reserva?.conductor_id;
+        const condTerId = reserva?.conductor_tercero_id;
 
         // Buscar vehículo: primero flota propia, luego tercerizado
         const fetchVehiculo = vId
@@ -88,10 +89,12 @@ export async function POST(req: NextRequest) {
             ? admin.from("vehiculos_tercero").select("id,placa,categoria,marca,modelo").eq("id", vtId).maybeSingle()
             : null;
 
-        // Buscar conductor asignado en la reserva (no depende de GPS activo)
+        // Buscar conductor: propio → tercerizado
         const fetchConductor = condId
           ? admin.from("conductores").select("id,nombre,telefono").eq("id", condId).maybeSingle()
-          : null;
+          : condTerId
+            ? admin.from("conductores_tercero").select("id,nombre,telefono").eq("id", condTerId).maybeSingle()
+            : null;
 
         // Buscar GPS del vehículo propio para posición en vivo
         const fetchGPS = vId
