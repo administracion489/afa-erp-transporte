@@ -22,7 +22,9 @@ export type DatosNotificacion = {
   paradaDireccion?: string;
   conductorNombre?: string;
   vehiculoPlaca?:   string;
+  vehiculoColor?:   string;
   empresa:          string;
+  empresaCliente?:  string;
 };
 
 export type ResultadoPasajero = {
@@ -138,77 +140,176 @@ export async function enviarSMS({
 // ─── TEMPLATES ────────────────────────────────────────────────────────────────
 
 export function htmlEmailSincronizacion(d: DatosNotificacion): string {
+  const row = (emoji: string, label: string, value: string) =>
+    `<p style="margin:0 0 10px;font-size:13px;color:#374151;">${emoji} <span style="color:#64748b;">${label}:</span> <strong>${value}</strong></p>`;
+
+  const empresaHeader = d.empresaCliente
+    ? `<p style="color:#93c5fd;font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;margin:0 0 8px;">${d.empresaCliente}</p>`
+    : "";
+  const empresaIntro = d.empresaCliente
+    ? ` contratado por <strong>${d.empresaCliente}</strong>`
+    : "";
+
   return `<!DOCTYPE html>
 <html lang="es">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="font-family:Arial,sans-serif;background:#f8fafc;margin:0;padding:20px;">
-  <div style="max-width:500px;margin:0 auto;background:white;border-radius:16px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1);">
-    <div style="background:#0b315f;padding:24px;text-align:center;">
-      <img src="https://qakhcezrmpksxgiwzmvd.supabase.co/storage/v1/object/public/assets/logoafacotizacion.jpg" alt="AFA Transportes" style="height:60px;width:auto;margin-bottom:10px;border-radius:6px;" />
-      <h1 style="color:white;margin:0;font-size:20px;">Confirmación de Servicio</h1>
+<body style="font-family:Arial,sans-serif;background:#eef2f7;margin:0;padding:24px 16px;">
+<div style="max-width:560px;margin:0 auto;">
+
+  <div style="background:#0b315f;border-radius:16px 16px 0 0;padding:28px 24px;text-align:center;">
+    <img src="https://qakhcezrmpksxgiwzmvd.supabase.co/storage/v1/object/public/assets/logoafacotizacion.jpg"
+         alt="AFA Transportes" style="height:56px;width:auto;border-radius:8px;margin-bottom:14px;" />
+    ${empresaHeader}
+    <h1 style="color:white;margin:0;font-size:20px;font-weight:700;">Confirmación de Servicio</h1>
+  </div>
+
+  <div style="background:white;padding:28px 24px;">
+    <p style="color:#1e293b;font-size:15px;margin:0 0 8px;">Hola <strong>${d.pasajeroNombre}</strong>,</p>
+    <p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 22px;">
+      Tu servicio de transporte corporativo${empresaIntro} ha sido confirmado de manera exitosa. A continuación te compartimos todos los detalles de tu viaje:
+    </p>
+
+    <div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:12px;padding:20px;margin-bottom:20px;">
+      <p style="color:#0b315f;font-size:13px;font-weight:700;margin:0 0 14px;padding-bottom:10px;border-bottom:2px solid #e2e8f0;">📋 Detalles del Servicio</p>
+      ${d.empresaCliente ? row("🏢", "Empresa", d.empresaCliente) : ""}
+      ${row("📅", "Fecha", d.fecha)}
+      ${row("⏰", "Hora de recojo", d.hora)}
+      ${row("📍", "Tu parada", d.paradaNombre)}
+      ${d.paradaDireccion ? `<p style="margin:-4px 0 10px;font-size:12px;color:#64748b;padding-left:20px;">${d.paradaDireccion}</p>` : ""}
+      ${d.conductorNombre ? row("👤", "Conductor", d.conductorNombre) : ""}
+      ${d.vehiculoPlaca   ? row("🚍", "Placa del vehículo", d.vehiculoPlaca) : ""}
+      ${d.vehiculoColor   ? row("🎨", "Color del vehículo", d.vehiculoColor) : ""}
     </div>
-    <div style="padding:24px;">
-      <p style="color:#374151;font-size:15px;">Hola <strong>${d.pasajeroNombre}</strong>,</p>
-      <p style="color:#6b7280;font-size:14px;">Tu servicio de transporte ha sido confirmado:</p>
-      <div style="background:#f0f9ff;border-left:4px solid #0b315f;border-radius:8px;padding:16px;margin:16px 0;">
-        <p style="margin:0 0 8px;font-size:13px;">📅 Fecha: <strong>${d.fecha}</strong></p>
-        <p style="margin:0 0 8px;font-size:13px;">🕐 Hora: <strong>${d.hora}</strong></p>
-        <p style="margin:0 0 8px;font-size:13px;">📍 Tu parada: <strong>${d.paradaNombre}</strong></p>
-        ${d.paradaDireccion ? `<p style="margin:0 0 8px;font-size:13px;color:#6b7280;">${d.paradaDireccion}</p>` : ""}
-        ${d.conductorNombre ? `<p style="margin:0 0 8px;font-size:13px;">👤 Conductor: <strong>${d.conductorNombre}</strong></p>` : ""}
-        ${d.vehiculoPlaca   ? `<p style="margin:0;font-size:13px;">🚌 Vehículo: <strong>${d.vehiculoPlaca}</strong></p>` : ""}
+
+    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:20px;margin-bottom:20px;">
+      <p style="color:#1e40af;font-size:13px;font-weight:700;margin:0 0 10px;">📲 ¡Monitorea tu viaje en tiempo real!</p>
+      <p style="color:#374151;font-size:13px;line-height:1.6;margin:0 0 16px;">
+        Descarga nuestra <strong>App Pasajero</strong> para ver la ubicación en vivo de tu unidad, recibir notificaciones de llegada y gestionar tus próximos viajes:
+      </p>
+      <div style="text-align:center;margin-bottom:12px;">
+        <a href="https://play.google.com/store/apps/details?id=com.transportesafa.pasajero"
+           style="display:inline-block;background:#0b315f;color:white;text-decoration:none;font-size:13px;font-weight:600;padding:12px 28px;border-radius:8px;">
+          🤖 Descargar para Android
+        </a>
       </div>
-      <p style="color:#6b7280;font-size:13px;">Por favor esté en su punto de abordaje <strong>5 minutos antes</strong> de la hora indicada.</p>
+      <p style="color:#64748b;font-size:11px;text-align:center;margin:0 0 16px;">🍏 Próximamente disponible en App Store (iPhone)</p>
+      <div style="background:white;border-radius:8px;padding:12px 16px;border:1px solid #bfdbfe;">
+        <p style="color:#1e40af;font-size:12px;font-weight:700;margin:0 0 8px;">🔑 Datos de acceso a la App:</p>
+        <p style="color:#374151;font-size:12px;margin:0 0 4px;">• <strong>Usuario:</strong> Tu número de DNI</p>
+        <p style="color:#374151;font-size:12px;margin:0;">• <strong>Contraseña:</strong> Los últimos 4 dígitos de tu DNI</p>
+      </div>
     </div>
-    <div style="background:#f8fafc;padding:16px;text-align:center;">
-      <p style="color:#9ca3af;font-size:11px;margin:0;">Mensaje automático de ${d.empresa} · No responder</p>
+
+    <div style="background:#fefce8;border-left:4px solid #eab308;border-radius:8px;padding:14px 16px;">
+      <p style="color:#854d0e;font-size:13px;font-weight:700;margin:0 0 4px;">⚠️ Nota importante</p>
+      <p style="color:#713f12;font-size:13px;margin:0;line-height:1.5;">
+        Por favor, <strong>estate en tu punto de abordaje 5 minutos antes</strong> de la hora indicada para evitar contratiempos. Nuestro conductor te estará esperando.
+      </p>
     </div>
   </div>
+
+  <div style="background:#f1f5f9;border-radius:0 0 16px 16px;padding:16px;text-align:center;">
+    <p style="color:#94a3b8;font-size:11px;margin:0;">Mensaje automático de ${d.empresa} · No responder</p>
+  </div>
+
+</div>
 </body>
 </html>`;
 }
 
 export function htmlEmailRecordatorio(d: DatosNotificacion): string {
+  const row = (emoji: string, label: string, value: string) =>
+    `<p style="margin:0 0 10px;font-size:13px;color:#374151;">${emoji} <span style="color:#64748b;">${label}:</span> <strong>${value}</strong></p>`;
+
+  const empresaHeader = d.empresaCliente
+    ? `<p style="color:#fde68a;font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;margin:0 0 8px;">${d.empresaCliente}</p>`
+    : "";
+  const empresaIntro = d.empresaCliente ? ` con <strong>${d.empresaCliente}</strong>` : "";
+
   return `<!DOCTYPE html>
 <html lang="es">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="font-family:Arial,sans-serif;background:#f8fafc;margin:0;padding:20px;">
-  <div style="max-width:500px;margin:0 auto;background:white;border-radius:16px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1);">
-    <div style="background:#d97706;padding:24px;text-align:center;">
-      <img src="https://qakhcezrmpksxgiwzmvd.supabase.co/storage/v1/object/public/assets/logoafacotizacion.jpg" alt="AFA Transportes" style="height:60px;width:auto;margin-bottom:10px;border-radius:6px;" />
-      <h1 style="color:white;margin:0;font-size:20px;">⏰ Recordatorio de Mañana</h1>
+<body style="font-family:Arial,sans-serif;background:#eef2f7;margin:0;padding:24px 16px;">
+<div style="max-width:560px;margin:0 auto;">
+
+  <div style="background:#92400e;border-radius:16px 16px 0 0;padding:28px 24px;text-align:center;">
+    <img src="https://qakhcezrmpksxgiwzmvd.supabase.co/storage/v1/object/public/assets/logoafacotizacion.jpg"
+         alt="AFA Transportes" style="height:56px;width:auto;border-radius:8px;margin-bottom:14px;" />
+    ${empresaHeader}
+    <h1 style="color:white;margin:0;font-size:20px;font-weight:700;">⏰ Recordatorio para Mañana</h1>
+  </div>
+
+  <div style="background:white;padding:28px 24px;">
+    <p style="color:#1e293b;font-size:15px;margin:0 0 8px;">Hola <strong>${d.pasajeroNombre}</strong>,</p>
+    <p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 22px;">
+      Te recordamos que mañana tienes servicio de transporte${empresaIntro}. Aquí están los detalles para que te prepares:
+    </p>
+
+    <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:12px;padding:20px;margin-bottom:20px;">
+      <p style="color:#92400e;font-size:13px;font-weight:700;margin:0 0 14px;padding-bottom:10px;border-bottom:2px solid #fde68a;">📋 Detalles del Servicio</p>
+      ${d.empresaCliente ? row("🏢", "Empresa", d.empresaCliente) : ""}
+      ${row("📅", "Fecha", d.fecha)}
+      ${row("⏰", "Hora de recojo", d.hora)}
+      ${row("📍", "Tu parada", d.paradaNombre)}
+      ${d.paradaDireccion ? `<p style="margin:-4px 0 10px;font-size:12px;color:#64748b;padding-left:20px;">${d.paradaDireccion}</p>` : ""}
+      ${d.conductorNombre ? row("👤", "Conductor", d.conductorNombre) : ""}
+      ${d.vehiculoPlaca   ? row("🚍", "Placa del vehículo", d.vehiculoPlaca) : ""}
+      ${d.vehiculoColor   ? row("🎨", "Color del vehículo", d.vehiculoColor) : ""}
     </div>
-    <div style="padding:24px;">
-      <p style="color:#374151;font-size:15px;">Hola <strong>${d.pasajeroNombre}</strong>,</p>
-      <p style="color:#6b7280;font-size:14px;">Te recordamos que mañana tienes servicio de transporte:</p>
-      <div style="background:#fffbeb;border-left:4px solid #d97706;border-radius:8px;padding:16px;margin:16px 0;">
-        <p style="margin:0 0 8px;font-size:13px;">📅 Fecha: <strong>${d.fecha}</strong></p>
-        <p style="margin:0 0 8px;font-size:13px;">🕐 Hora: <strong>${d.hora}</strong></p>
-        <p style="margin:0 0 8px;font-size:13px;">📍 Tu parada: <strong>${d.paradaNombre}</strong></p>
-        ${d.paradaDireccion ? `<p style="margin:0;font-size:13px;color:#6b7280;">${d.paradaDireccion}</p>` : ""}
+
+    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:20px;margin-bottom:20px;">
+      <p style="color:#1e40af;font-size:13px;font-weight:700;margin:0 0 10px;">📲 Sigue tu unidad en tiempo real</p>
+      <p style="color:#374151;font-size:13px;line-height:1.6;margin:0 0 16px;">
+        Si aún no tienes nuestra <strong>App Pasajero</strong>, descárgala para monitorear la ubicación de tu unidad:
+      </p>
+      <div style="text-align:center;margin-bottom:12px;">
+        <a href="https://play.google.com/store/apps/details?id=com.transportesafa.pasajero"
+           style="display:inline-block;background:#0b315f;color:white;text-decoration:none;font-size:13px;font-weight:600;padding:12px 28px;border-radius:8px;">
+          🤖 Descargar para Android
+        </a>
       </div>
-      <p style="color:#6b7280;font-size:13px;">¡Te esperamos puntual! 🚌</p>
+      <p style="color:#64748b;font-size:11px;text-align:center;margin:0 0 16px;">🍏 Próximamente disponible en App Store (iPhone)</p>
+      <div style="background:white;border-radius:8px;padding:12px 16px;border:1px solid #bfdbfe;">
+        <p style="color:#1e40af;font-size:12px;font-weight:700;margin:0 0 8px;">🔑 Datos de acceso a la App:</p>
+        <p style="color:#374151;font-size:12px;margin:0 0 4px;">• <strong>Usuario:</strong> Tu número de DNI</p>
+        <p style="color:#374151;font-size:12px;margin:0;">• <strong>Contraseña:</strong> Los últimos 4 dígitos de tu DNI</p>
+      </div>
     </div>
-    <div style="background:#f8fafc;padding:16px;text-align:center;">
-      <p style="color:#9ca3af;font-size:11px;margin:0;">Mensaje automático de ${d.empresa} · No responder</p>
+
+    <div style="background:#fefce8;border-left:4px solid #eab308;border-radius:8px;padding:14px 16px;">
+      <p style="color:#854d0e;font-size:13px;font-weight:700;margin:0 0 4px;">⚠️ Recuerda</p>
+      <p style="color:#713f12;font-size:13px;margin:0;line-height:1.5;">
+        <strong>Estate en tu punto de abordaje 5 minutos antes</strong> de la hora indicada. ¡Te esperamos puntual!
+      </p>
     </div>
   </div>
+
+  <div style="background:#f1f5f9;border-radius:0 0 16px 16px;padding:16px;text-align:center;">
+    <p style="color:#94a3b8;font-size:11px;margin:0;">Mensaje automático de ${d.empresa} · No responder</p>
+  </div>
+
+</div>
 </body>
 </html>`;
 }
 
 export function textoWhatsApp(d: DatosNotificacion, esRecordatorio = false): string {
-  const header = esRecordatorio
-    ? `⏰ *Recordatorio - ${d.empresa}*\n\nHola *${d.pasajeroNombre}*, mañana tienes transporte:`
-    : `✅ *Servicio Confirmado - ${d.empresa}*\n\nHola *${d.pasajeroNombre}*, tu transporte está confirmado:`;
+  const etiqueta = d.empresaCliente || d.empresa;
+  const header   = esRecordatorio
+    ? `⏰ *Recordatorio - ${etiqueta}*\n\nHola *${d.pasajeroNombre}*, mañana tienes transporte:`
+    : `✅ *Servicio Confirmado - ${etiqueta}*\n\nHola *${d.pasajeroNombre}*, tu transporte está confirmado:`;
 
   return `${header}
 
-📅 *${d.fecha}*
-🕐 Hora: *${d.hora}*
-📍 Tu parada: *${d.paradaNombre}*${d.paradaDireccion ? `\n   _${d.paradaDireccion}_` : ""}${d.conductorNombre ? `\n👤 Conductor: *${d.conductorNombre}*` : ""}${d.vehiculoPlaca ? `\n🚌 Vehículo: *${d.vehiculoPlaca}*` : ""}
+${d.empresaCliente ? `🏢 Empresa: *${d.empresaCliente}*\n` : ""}📅 *${d.fecha}*
+⏰ Hora de recojo: *${d.hora}*
+📍 Tu parada: *${d.paradaNombre}*${d.paradaDireccion ? `\n   _${d.paradaDireccion}_` : ""}${d.conductorNombre ? `\n👤 Conductor: *${d.conductorNombre}*` : ""}${d.vehiculoPlaca ? `\n🚍 Placa: *${d.vehiculoPlaca}*` : ""}${d.vehiculoColor ? `\n🎨 Color: *${d.vehiculoColor}*` : ""}
 
-Por favor esté 5 minutos antes en su parada 🙏`;
+📲 *App Pasajero (Android):*
+https://play.google.com/store/apps/details?id=com.transportesafa.pasajero
+🔑 Usuario: tu DNI | Contraseña: últimos 4 dígitos
+
+Por favor estate 5 minutos antes en tu parada 🙏`;
 }
 
 // ─── FUNCIÓN PRINCIPAL ────────────────────────────────────────────────────────
@@ -234,7 +335,8 @@ export async function notificarReserva(
     .select(`
       id, fecha_servicio, hora_servicio,
       conductor_id, vehiculo_id, empresa_tercerizada_id,
-      vehiculo_tercero_id, tipo_asignacion
+      vehiculo_tercero_id, tipo_asignacion,
+      cliente_id, cliente:clientes(nombre,empresa)
     `)
     .eq("id", reservaId)
     .single();
@@ -243,7 +345,8 @@ export async function notificarReserva(
 
   // 2. Conductor y vehículo
   let conductorNombre: string | undefined;
-  let vehiculoPlaca: string | undefined;
+  let vehiculoPlaca:   string | undefined;
+  let vehiculoColor:   string | undefined;
 
   if (reserva.tipo_asignacion === "propio") {
     if (reserva.conductor_id) {
@@ -251,12 +354,14 @@ export async function notificarReserva(
       conductorNombre = c?.nombre;
     }
     if (reserva.vehiculo_id) {
-      const { data: v } = await supabaseAdmin.from("vehiculos").select("placa").eq("id", reserva.vehiculo_id).single();
+      const { data: v } = await supabaseAdmin.from("vehiculos").select("placa, color").eq("id", reserva.vehiculo_id).single();
       vehiculoPlaca = v?.placa;
+      vehiculoColor = v?.color;
     }
   } else if (reserva.vehiculo_tercero_id) {
-    const { data: v } = await supabaseAdmin.from("vehiculos_tercero").select("placa").eq("id", reserva.vehiculo_tercero_id).single();
+    const { data: v } = await supabaseAdmin.from("vehiculos_tercero").select("placa, color").eq("id", reserva.vehiculo_tercero_id).single();
     vehiculoPlaca = v?.placa;
+    vehiculoColor = v?.color;
   }
 
   // 3. Paradas de esta reserva
@@ -294,8 +399,10 @@ export async function notificarReserva(
     if (!pasajeroParada[a.pasajero_id]) pasajeroParada[a.pasajero_id] = a.parada_id;
   }
 
-  const empresa    = process.env.EMPRESA_NOMBRE ?? "AFA Transporte";
-  const fechaTexto = reserva.fecha_servicio ? formatFecha(reserva.fecha_servicio) : "-";
+  const empresa        = process.env.EMPRESA_NOMBRE ?? "AFA Transporte";
+  const clienteJoin: any = Array.isArray(reserva.cliente) ? reserva.cliente[0] : reserva.cliente;
+  const empresaCliente = clienteJoin?.empresa || clienteJoin?.nombre || undefined;
+  const fechaTexto     = reserva.fecha_servicio ? formatFecha(reserva.fecha_servicio) : "-";
   const horaTexto  = reserva.hora_servicio?.slice(0, 5) ?? "-";
   const esRecordatorio = trigger === "cron_recordatorio";
 
@@ -322,7 +429,9 @@ export async function notificarReserva(
       paradaDireccion: parada?.direccion ?? undefined,
       conductorNombre,
       vehiculoPlaca,
+      vehiculoColor,
       empresa,
+      empresaCliente,
     };
 
     let envioPorWhatsApp = false;
@@ -331,9 +440,10 @@ export async function notificarReserva(
     if (pas.email && process.env.RESEND_API_KEY) {
       try {
         const html    = esRecordatorio ? htmlEmailRecordatorio(datosN) : htmlEmailSincronizacion(datosN);
+        const prefijo = datosN.empresaCliente ? `${datosN.empresaCliente} · ` : "";
         const subject = esRecordatorio
-          ? `⏰ Recordatorio mañana – ${datosN.fecha}`
-          : `✅ Servicio confirmado – ${datosN.fecha}`;
+          ? `⏰ ${prefijo}Recordatorio mañana — ${datosN.fecha}`
+          : `🚌 ${prefijo}Confirmación de servicio — AFA Transportes`;
         await enviarEmail({ to: pas.email, subject, html });
         resultado.canales.push({ tipo: "email", estado: "enviado" });
         enviados++;
