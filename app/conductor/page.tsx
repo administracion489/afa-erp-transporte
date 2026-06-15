@@ -612,6 +612,33 @@ export default function ConductorApp() {
       .catch((e: any) => console.warn("[iniciarRecorrido] sin GPS inicial:", e?.message));
   }
 
+  // Confirma antes de arrancar para que el conductor no inicie el servicio equivocado.
+  function confirmarEIniciar(reserva: Reserva) {
+    const hora = reserva.hora_servicio?.slice(0, 5);
+    const ok = window.confirm(
+      `¿Iniciar este servicio?\n\n${reserva.origen} → ${reserva.destino}` +
+      (hora ? `\nHora: ${hora}` : "")
+    );
+    if (ok) iniciarRecorrido(reserva);
+  }
+
+  // Recuperación: el conductor inició un servicio por error o aún no está listo.
+  // Lo devuelve a la lista de pendientes SIN registrarlo como finalizado.
+  function volverAPendientes() {
+    const rId = reservaActiva?.id;
+    if (!rId) return;
+    const ok = window.confirm(
+      "¿Salir de este servicio?\n\nVolverá a tu lista de pendientes para que lo inicies cuando estés listo. NO se registra como finalizado."
+    );
+    if (!ok) return;
+    clearServicio();
+    condApi("actualizar_estado", { reservaId: rId, estado: "programada" }).catch(() => {});
+    setReservasHoy(prev => prev.map(r => r.id === rId ? { ...r, estado: "programada" } : r));
+    setEnRuta(false); setReservaActiva(null); setParadas([]); setPasajeros([]);
+    setParadaIdx(0); setVelocidad(0); setTotalEnvios(0); setInicioViaje(null);
+    setTab("ruta");
+  }
+
   function finalizarRecorridoConfirmado() {
     const rId = reservaActiva?.id;
     if (posRef.current) enviarUbicacion(posRef.current, "finalizado");
@@ -1048,7 +1075,13 @@ export default function ConductorApp() {
   const reservasFinalizadasSection = reservasMostrar.filter(r => r.estado === "finalizada" && r.id !== reservaActiva?.id);
   const reservasPendientesSection  = reservasMostrar.filter(r => r.estado !== "finalizada" && r.id !== reservaActiva?.id);
 
-  const proximaReserva = !enRuta ? reservasHoy.find(r => (minutosAlServicio(r.hora_servicio) ?? -1) >= 0) : null;
+  // Orden cronológico: solo se puede iniciar el servicio más temprano del día que
+  // aún no esté cerrado (finalizado o cancelado). Los servicios posteriores quedan
+  // bloqueados hasta completarlo (evita iniciar el retorno antes que la ida).
+  // reservasHoy ya viene ordenado por hora_servicio desde el API.
+  const esServicioCerrado = (e?: string | null) => e === "finalizada" || e === "cancelada";
+  const primeraIniciable = esModoOtraFecha ? null : reservasHoy.find(r => !esServicioCerrado(r.estado));
+  const proximaReserva = !enRuta ? reservasHoy.find(r => !esServicioCerrado(r.estado) && (minutosAlServicio(r.hora_servicio) ?? -1) >= 0) : null;
   const minsHastaProx  = proximaReserva ? minutosAlServicio(proximaReserva.hora_servicio) : null;
   void tick; // forzar re-render con el setInterval del minuto
 
@@ -1495,25 +1528,36 @@ export default function ConductorApp() {
                   ))}
                 </div>
 
-                <button
-                  onClick={() => !checkDone ? setTab("checklist") : iniciarRecorrido(proximaReserva)}
-                  disabled={iniciando}
-                  style={{
-                    width: "100%", padding: "14px 0", borderRadius: 14, border: "none",
-                    background: "#fff", color: "var(--c-navy)",
-                    fontFamily: FONT_SANS, fontWeight: 800, fontSize: 15,
-                    cursor: iniciando ? "not-allowed" : "pointer",
-                    opacity: iniciando ? 0.5 : 1,
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                    letterSpacing: -0.2,
-                  }}
-                >
-                  {iniciando
-                    ? <>Iniciando…</>
-                    : !checkDone
-                      ? <><IconShield size={17} color="var(--c-navy)" /> Iniciar pre-viaje</>
-                      : <><IconPlay size={16} color="var(--c-navy)" /> Iniciar recorrido</>}
-                </button>
+                {primeraIniciable && proximaReserva.id !== primeraIniciable.id ? (
+                  <div style={{
+                    width: "100%", padding: "13px 14px", borderRadius: 14,
+                    background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.18)",
+                    textAlign: "center", color: "rgba(255,255,255,0.85)",
+                    fontSize: 13, fontWeight: 700, boxSizing: "border-box",
+                  }}>
+                    🔒 Primero termina el servicio de las {primeraIniciable.hora_servicio?.slice(0, 5) ?? "—"}
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => !checkDone ? setTab("checklist") : confirmarEIniciar(proximaReserva)}
+                    disabled={iniciando}
+                    style={{
+                      width: "100%", padding: "14px 0", borderRadius: 14, border: "none",
+                      background: "#fff", color: "var(--c-navy)",
+                      fontFamily: FONT_SANS, fontWeight: 800, fontSize: 15,
+                      cursor: iniciando ? "not-allowed" : "pointer",
+                      opacity: iniciando ? 0.5 : 1,
+                      display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                      letterSpacing: -0.2,
+                    }}
+                  >
+                    {iniciando
+                      ? <>Iniciando…</>
+                      : !checkDone
+                        ? <><IconShield size={17} color="var(--c-navy)" /> Iniciar pre-viaje</>
+                        : <><IconPlay size={16} color="var(--c-navy)" /> Iniciar recorrido</>}
+                  </button>
+                )}
               </div>
             )}
 
@@ -1545,6 +1589,17 @@ export default function ConductorApp() {
                     Ver paradas
                   </SecondaryBtn>
                 </div>
+                <button
+                  onClick={volverAPendientes}
+                  style={{
+                    width: "100%", marginTop: 10, padding: "9px 14px",
+                    background: "transparent", border: "1px solid rgba(255,255,255,0.22)",
+                    borderRadius: 12, cursor: "pointer",
+                    fontFamily: FONT_SANS, fontWeight: 700, fontSize: 12.5, color: "rgba(255,255,255,0.8)",
+                  }}
+                >
+                  Aún no estoy listo · volver a pendientes
+                </button>
               </div>
             )}
 
@@ -1690,15 +1745,18 @@ export default function ConductorApp() {
                         borderRadius: 16, padding: 14, boxShadow: "0 1px 3px rgba(0,0,0,0.03)",
                         opacity: esModoOtraFecha ? 0.85 : 1,
                       }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-                          <div>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
+                          <div style={{ minWidth: 0 }}>
                             <p style={{ margin: 0, fontWeight: 800, fontSize: 16, letterSpacing: -0.3 }}>{r.origen}</p>
                             <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--c-mute)" }}>→ {r.destino}</p>
                           </div>
                           {r.hora_servicio && (
-                            <Chip color="var(--c-navy)" bg="var(--c-navy-tint)" mono sw>
-                              {r.hora_servicio.slice(0, 5)}
-                            </Chip>
+                            <div style={{ textAlign: "right", flexShrink: 0 }}>
+                              <p style={{ margin: 0, fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: "var(--c-mute)" }}>Hora</p>
+                              <p style={{ margin: "1px 0 0", fontFamily: FONT_MONO, fontSize: 28, fontWeight: 800, letterSpacing: -1.5, lineHeight: 1, color: "var(--c-navy)" }}>
+                                {r.hora_servicio.slice(0, 5)}
+                              </p>
+                            </div>
                           )}
                         </div>
                         {esModoOtraFecha ? (
@@ -1709,9 +1767,17 @@ export default function ConductorApp() {
                           }}>
                             Solo lectura — los servicios solo se inician el mismo día
                           </div>
+                        ) : primeraIniciable && r.id !== primeraIniciable.id ? (
+                          <div style={{
+                            padding: "10px 14px", borderRadius: 12,
+                            background: "var(--c-soft)", border: "1px solid var(--c-line)",
+                            textAlign: "center", color: "var(--c-mute)", fontSize: 13, fontWeight: 600,
+                          }}>
+                            🔒 Disponible al terminar el servicio de las {primeraIniciable.hora_servicio?.slice(0, 5) ?? "—"}
+                          </div>
                         ) : (
                           <PrimaryBtn
-                            onClick={() => !checkDone ? setTab("checklist") : iniciarRecorrido(r)}
+                            onClick={() => !checkDone ? setTab("checklist") : confirmarEIniciar(r)}
                             disabled={iniciando}
                             icon={!checkDone
                               ? <IconShield size={15} color="#fff" />
@@ -1854,6 +1920,20 @@ export default function ConductorApp() {
                     Manifiesto
                   </button>
                 </div>
+
+                {/* Recuperación: inició el servicio por error o aún no está listo.
+                    Lo devuelve a pendientes sin marcarlo finalizado. */}
+                <button
+                  onClick={volverAPendientes}
+                  style={{
+                    width: "100%", marginBottom: 12, padding: "11px 14px",
+                    background: "transparent", border: "1px dashed var(--c-line)",
+                    borderRadius: 12, cursor: "pointer",
+                    fontFamily: FONT_SANS, fontWeight: 700, fontSize: 13, color: "var(--c-mute)",
+                  }}
+                >
+                  Aún no estoy listo · volver a pendientes
+                </button>
 
                 {/* Progreso */}
                 <div style={{
