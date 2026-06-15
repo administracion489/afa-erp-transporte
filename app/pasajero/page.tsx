@@ -507,7 +507,7 @@ export default function AppPasajero() {
         navigator.serviceWorker.register("/sw.js").catch(() => {});
       }
     })();
-  }, [cargarMiRuta]);
+  }, []);
 
   // ── SOLICITAR GPS DEL DISPOSITIVO ──────────────────────────────────────────
   // Se dispara automáticamente al loguearse. El navegador muestra la alerta nativa del OS.
