@@ -137,6 +137,8 @@ export async function enviarSMS({
   }
 }
 
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "";
+
 // ─── TEMPLATES ────────────────────────────────────────────────────────────────
 
 export function htmlEmailSincronizacion(d: DatosNotificacion): string {
@@ -157,8 +159,8 @@ export function htmlEmailSincronizacion(d: DatosNotificacion): string {
 <div style="max-width:560px;margin:0 auto;">
 
   <div style="background:#0b315f;border-radius:16px 16px 0 0;padding:28px 24px;text-align:center;">
-    <img src="https://qakhcezrmpksxgiwzmvd.supabase.co/storage/v1/object/public/assets/logoafacotizacion.jpg"
-         alt="AFA Transportes" style="height:56px;width:auto;border-radius:8px;margin-bottom:14px;" />
+    <img src="${APP_URL}/logoafacotizacion-removebg-preview.png"
+         alt="AFA Transportes" style="height:56px;width:auto;margin-bottom:14px;" />
     ${empresaHeader}
     <h1 style="color:white;margin:0;font-size:20px;font-weight:700;">Confirmación de Servicio</h1>
   </div>
@@ -188,8 +190,8 @@ export function htmlEmailSincronizacion(d: DatosNotificacion): string {
       </p>
       <div style="text-align:center;margin-bottom:12px;">
         <a href="https://play.google.com/store/apps/details?id=com.transportesafa.pasajero"
-           style="display:inline-block;background:#0b315f;color:white;text-decoration:none;font-size:13px;font-weight:600;padding:12px 28px;border-radius:8px;">
-          🤖 Descargar para Android
+           style="display:inline-block;background:#0b315f;color:white;text-decoration:none;font-size:13px;font-weight:600;padding:12px 28px;border-radius:8px;line-height:1;">
+          <img src="${APP_URL}/logo_android-removebg-preview.png" alt="" style="width:20px;height:20px;vertical-align:middle;margin-right:8px;" />Descargar para Android
         </a>
       </div>
       <p style="color:#64748b;font-size:11px;text-align:center;margin:0 0 16px;">🍏 Próximamente disponible en App Store (iPhone)</p>
@@ -203,7 +205,7 @@ export function htmlEmailSincronizacion(d: DatosNotificacion): string {
     <div style="background:#fefce8;border-left:4px solid #eab308;border-radius:8px;padding:14px 16px;">
       <p style="color:#854d0e;font-size:13px;font-weight:700;margin:0 0 4px;">⚠️ Nota importante</p>
       <p style="color:#713f12;font-size:13px;margin:0;line-height:1.5;">
-        Por favor, <strong>estate en tu punto de abordaje 5 minutos antes</strong> de la hora indicada para evitar contratiempos. Nuestro conductor te estará esperando.
+        Por favor, <strong>espera en tu punto de abordaje 5 minutos antes</strong> de la hora indicada para evitar contratiempos. Nuestro conductor te estará esperando.
       </p>
     </div>
   </div>
@@ -233,8 +235,8 @@ export function htmlEmailRecordatorio(d: DatosNotificacion): string {
 <div style="max-width:560px;margin:0 auto;">
 
   <div style="background:#92400e;border-radius:16px 16px 0 0;padding:28px 24px;text-align:center;">
-    <img src="https://qakhcezrmpksxgiwzmvd.supabase.co/storage/v1/object/public/assets/logoafacotizacion.jpg"
-         alt="AFA Transportes" style="height:56px;width:auto;border-radius:8px;margin-bottom:14px;" />
+    <img src="${APP_URL}/logoafacotizacion-removebg-preview.png"
+         alt="AFA Transportes" style="height:56px;width:auto;margin-bottom:14px;" />
     ${empresaHeader}
     <h1 style="color:white;margin:0;font-size:20px;font-weight:700;">⏰ Recordatorio para Mañana</h1>
   </div>
@@ -264,8 +266,8 @@ export function htmlEmailRecordatorio(d: DatosNotificacion): string {
       </p>
       <div style="text-align:center;margin-bottom:12px;">
         <a href="https://play.google.com/store/apps/details?id=com.transportesafa.pasajero"
-           style="display:inline-block;background:#0b315f;color:white;text-decoration:none;font-size:13px;font-weight:600;padding:12px 28px;border-radius:8px;">
-          🤖 Descargar para Android
+           style="display:inline-block;background:#0b315f;color:white;text-decoration:none;font-size:13px;font-weight:600;padding:12px 28px;border-radius:8px;line-height:1;">
+          <img src="${APP_URL}/logo_android-removebg-preview.png" alt="" style="width:20px;height:20px;vertical-align:middle;margin-right:8px;" />Descargar para Android
         </a>
       </div>
       <p style="color:#64748b;font-size:11px;text-align:center;margin:0 0 16px;">🍏 Próximamente disponible en App Store (iPhone)</p>
@@ -279,7 +281,7 @@ export function htmlEmailRecordatorio(d: DatosNotificacion): string {
     <div style="background:#fefce8;border-left:4px solid #eab308;border-radius:8px;padding:14px 16px;">
       <p style="color:#854d0e;font-size:13px;font-weight:700;margin:0 0 4px;">⚠️ Recuerda</p>
       <p style="color:#713f12;font-size:13px;margin:0;line-height:1.5;">
-        <strong>Estate en tu punto de abordaje 5 minutos antes</strong> de la hora indicada. ¡Te esperamos puntual!
+        <strong>Espera en tu punto de abordaje 5 minutos antes</strong> de la hora indicada. ¡Te esperamos puntual!
       </p>
     </div>
   </div>
@@ -309,7 +311,7 @@ ${d.empresaCliente ? `🏢 Empresa: *${d.empresaCliente}*\n` : ""}📅 *${d.fech
 https://play.google.com/store/apps/details?id=com.transportesafa.pasajero
 🔑 Usuario: tu DNI | Contraseña: últimos 4 dígitos
 
-Por favor estate 5 minutos antes en tu parada 🙏`;
+Por favor espera 5 minutos antes en tu parada 🙏`;
 }
 
 // ─── FUNCIÓN PRINCIPAL ────────────────────────────────────────────────────────
