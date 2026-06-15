@@ -144,6 +144,45 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
+      // ── Cambiar paradero en todos los servicios vigentes ─────────────────────
+      case "cambiar_paradero": {
+        const { pid, nombreParada, hoy } = body;
+        if (!pid || !nombreParada || !hoy) return NextResponse.json({ error: "pid, nombreParada y hoy requeridos" }, { status: 400 });
+
+        const { data: pp, error: ppErr } = await admin
+          .from("pasajeros_parada")
+          .select("id, parada_id, parada:paradas(id, nombre, reserva_id, reserva:reservas(id, fecha_servicio, estado))")
+          .eq("pasajero_id", pid);
+        if (ppErr) return NextResponse.json({ error: ppErr.message }, { status: 500 });
+
+        const vigentes = (pp || []).filter((x: any) => {
+          const r = x.parada?.reserva;
+          if (!r) return false;
+          if (r.estado === "en_curso") return true;
+          return r.fecha_servicio >= hoy && ["pendiente", "programada", "confirmada"].includes(r.estado);
+        });
+
+        let actualizados = 0;
+        for (const ppRow of vigentes) {
+          const reservaId = ppRow.parada?.reserva_id;
+          if (!reservaId) continue;
+          const { data: candidatas } = await admin
+            .from("paradas")
+            .select("id")
+            .eq("reserva_id", reservaId)
+            .eq("nombre", nombreParada)
+            .limit(1);
+          if (candidatas?.length && candidatas[0].id !== ppRow.parada_id) {
+            const { error: updErr } = await admin
+              .from("pasajeros_parada")
+              .update({ parada_id: candidatas[0].id })
+              .eq("id", ppRow.id);
+            if (!updErr) actualizados++;
+          }
+        }
+        return NextResponse.json({ ok: true, actualizados });
+      }
+
       default:
         return NextResponse.json({ error: `Acción desconocida: ${accion}` }, { status: 400 });
     }

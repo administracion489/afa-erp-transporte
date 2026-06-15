@@ -46,6 +46,12 @@ function loadSession(): Pasajero | null {
   try { const r = localStorage.getItem(SK); if(!r) return null; const {p,exp}=JSON.parse(r); if(Date.now()>exp){localStorage.removeItem(SK);return null;} return p; } catch{return null;}
 }
 function clearSession() { localStorage.removeItem(SK); }
+function loadParaderoOk(): boolean {
+  try { const r = localStorage.getItem(SK); if (!r) return false; return !!JSON.parse(r).paraderoOk; } catch { return false; }
+}
+function saveParaderoOk() {
+  try { const r = localStorage.getItem(SK); if (!r) return; localStorage.setItem(SK, JSON.stringify({ ...JSON.parse(r), paraderoOk: true })); } catch {}
+}
 // Llama al endpoint con service_role del pasajero (saltea RLS — el pasajero es
 // anónimo porque usa DNI+PIN, no sesión Supabase). Lanza Error con el mensaje del server.
 async function paxApi(accion: string, params: Record<string, any> = {}) {
@@ -440,6 +446,13 @@ export default function AppPasajero() {
   const [uploading,      setUploading]      = useState(false);
   const [fotoErr,        setFotoErr]        = useState("");
 
+  // ── CONFIRMAR PARADERO ──────────────────────────────────────────────────────
+  const [mostrarConfirmarParadero, setMostrarConfirmarParadero] = useState(false);
+  const [paraderoConfirmado,       setParaderoConfirmado]       = useState(false);
+  const [paraderoPostpuesto,       setParaderoPostpuesto]       = useState(false);
+  const [paraderoModalSel,         setParaderoModalSel]         = useState<Parada | null>(null);
+  const [cambioParaderoLoad,       setCambioParaderoLoad]       = useState(false);
+
   // ── GPS PROPIO DEL PASAJERO ─────────────────────────────────────────────────
   const [gpsPermiso,     setGpsPermiso]     = useState<GpsPermiso>("unknown");
   const [gpsPropio,      setGpsPropio]      = useState<{ lat: number; lng: number } | null>(null);
@@ -482,7 +495,7 @@ export default function AppPasajero() {
 
   useEffect(() => {
     const saved = loadSession();
-    if (saved) { setPasajero(saved); cargarMiRuta(saved.id); }
+    if (saved) { setPasajero(saved); setParaderoConfirmado(loadParaderoOk()); cargarMiRuta(saved.id); }
     setIniting(false);
     // Service Worker: cachea el shell para arranques instantáneos y resistencia a red.
     if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
@@ -513,6 +526,7 @@ export default function AppPasajero() {
     }
     if (permiso === "unavailable") {
       setGpsPermiso("unavailable");
+      if (manual) setMostrarModalGPS(true);
       return;
     }
     try {
@@ -530,9 +544,10 @@ export default function AppPasajero() {
     } catch (err: any) {
       if (err?.code === 1 /* PERMISSION_DENIED */) {
         setGpsPermiso("denied");
-        if (manual) setMostrarModalGPS(true); // instrucciones solo si lo pidió a propósito
+        if (manual) setMostrarModalGPS(true);
       } else {
         setGpsPermiso("unavailable");
+        if (manual) setMostrarModalGPS(true);
       }
     }
   }, []);
@@ -658,6 +673,14 @@ export default function AppPasajero() {
       map.current.addLayer({ id: "ruta-line", type: "line", source: "ruta", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#3B82F6", "line-width": 3, "line-dasharray": [2, 2], "line-opacity": 0.7 } });
     }
   }, [rutaParadas, mapListo]);
+
+  // Mostrar modal de confirmación de paradero cuando carga la ruta por primera vez
+  useEffect(() => {
+    if (miParada && miEstado === "esperando" && !paraderoConfirmado && !paraderoPostpuesto) {
+      setParaderoModalSel(miParada);
+      setMostrarConfirmarParadero(true);
+    }
+  }, [miParada, miEstado, paraderoConfirmado, paraderoPostpuesto]);
 
   // Posición del bus en vivo — polling vía API (Realtime no funciona para anónimo
   // con RLS activo). El conductor envía ubicación cada ~15 s; consultamos cada 8 s.
@@ -789,11 +812,43 @@ export default function AppPasajero() {
     }, 2500);
   }
 
+  function confirmarParadero() {
+    saveParaderoOk();
+    setParaderoConfirmado(true);
+    setMostrarConfirmarParadero(false);
+  }
+
+  function posponerParadero() {
+    setParaderoPostpuesto(true);
+    setMostrarConfirmarParadero(false);
+  }
+
+  async function cambiarParadero() {
+    if (!pasajero || !paraderoModalSel) return;
+    setCambioParaderoLoad(true);
+    try {
+      await paxApi("cambiar_paradero", {
+        pid: pasajero.id,
+        nombreParada: paraderoModalSel.nombre,
+        hoy: getFechaLocal(),
+      });
+    } catch (e: any) {
+      console.error("[cambiarParadero]", e?.message);
+    } finally {
+      saveParaderoOk();
+      setParaderoConfirmado(true);
+      setMostrarConfirmarParadero(false);
+      setCambioParaderoLoad(false);
+      await cargarMiRuta(pasajero.id);
+    }
+  }
+
   function salir() {
     clearSession(); setPasajero(null); setMiParada(null); setBusPosicion(null); setRutaParadas([]);
     setVehiculo(null); setConductor(null); setGpsPropio(null); setGpsPermiso("unknown");
     setDniInput(""); setPinInput("");
     alertaRef.current = false; setAlerta5min(false); setTab("ruta");
+    setParaderoConfirmado(false); setParaderoPostpuesto(false); setMostrarConfirmarParadero(false);
   }
 
   // Derivados
@@ -1132,6 +1187,99 @@ export default function AppPasajero() {
                 <div style={{ height: 8 }} />
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ── MODAL CONFIRMAR PARADERO ── */}
+      {mostrarConfirmarParadero && miParada && rutaParadas.length > 0 && (
+        <div className="afa-modal-overlay" onClick={posponerParadero}>
+          <div className="afa-para-sheet" onClick={e => e.stopPropagation()}>
+            <div className="afa-modal-handle" />
+
+            {/* Header */}
+            <div style={{ padding: "0 20px 14px", borderBottom: "1px solid var(--line2)" }}>
+              <p style={{ margin: "0 0 5px", fontWeight: 800, fontSize: 19, color: "var(--ink)", letterSpacing: -0.4 }}>
+                ¿Es este tu paradero?
+              </p>
+              <p style={{ margin: 0, fontSize: 13, color: "var(--mute)", lineHeight: 1.5 }}>
+                Tu empresa te asignó este punto de recogida. Confírmalo o elige uno diferente para actualizar todos tus próximos servicios.
+              </p>
+            </div>
+
+            {/* Lista de paradas */}
+            <div className="afa-para-scroll" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {rutaParadas.map((p, i) => {
+                const esAsignado  = p.id === miParada.id;
+                const esSel       = p.id === paraderoModalSel?.id;
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => setParaderoModalSel(p)}
+                    style={{
+                      width: "100%", textAlign: "left", cursor: "pointer", fontFamily: "var(--f)",
+                      background: esSel ? "var(--navy-tint)" : "var(--surface)",
+                      border: "none",
+                      outline: esSel ? "2px solid var(--navy)" : "1.5px solid var(--line2)",
+                      borderRadius: 14, padding: "12px 14px",
+                      display: "flex", alignItems: "center", gap: 12,
+                    }}
+                  >
+                    <div style={{
+                      width: 28, height: 28, borderRadius: "50%", flexShrink: 0,
+                      background: esSel ? "var(--navy)" : "var(--soft)",
+                      color: esSel ? "white" : "var(--mute2)",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: 11, fontWeight: 800,
+                    }}>{i + 1}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <p style={{ margin: 0, fontWeight: 700, fontSize: 13.5, color: esSel ? "var(--navy)" : "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {p.nombre}
+                      </p>
+                      {p.direccion && (
+                        <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--mute2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.direccion}</p>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+                      {p.hora_estimada && (
+                        <span style={{ fontFamily: "var(--m)", fontSize: 12, fontWeight: 700, color: esSel ? "var(--navy)" : "var(--mute)" }}>{p.hora_estimada}</span>
+                      )}
+                      {esAsignado && (
+                        <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--navy)", background: "var(--navy-tint)", padding: "2px 7px", borderRadius: 999, letterSpacing: 0.3 }}>
+                          ASIGNADO
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Botones */}
+            <div style={{ padding: "14px 20px", borderTop: "1px solid var(--line2)", display: "flex", flexDirection: "column", gap: 10 }}>
+              {paraderoModalSel?.id !== miParada.id ? (
+                <button
+                  onClick={cambiarParadero}
+                  disabled={cambioParaderoLoad}
+                  style={{ width: "100%", padding: "14px", borderRadius: 14, border: "none", background: "var(--navy)", color: "white", fontFamily: "var(--f)", fontWeight: 700, fontSize: 15, cursor: "pointer", opacity: cambioParaderoLoad ? 0.65 : 1 }}
+                >
+                  {cambioParaderoLoad ? "Actualizando…" : "Cambiar a este paradero"}
+                </button>
+              ) : (
+                <button
+                  onClick={confirmarParadero}
+                  style={{ width: "100%", padding: "14px", borderRadius: 14, border: "none", background: "var(--navy)", color: "white", fontFamily: "var(--f)", fontWeight: 700, fontSize: 15, cursor: "pointer" }}
+                >
+                  Confirmar este paradero
+                </button>
+              )}
+              <button
+                onClick={posponerParadero}
+                style={{ width: "100%", padding: "12px", borderRadius: 14, border: "1.5px solid var(--line)", background: "var(--surface)", color: "var(--mute)", fontFamily: "var(--f)", fontWeight: 600, fontSize: 14, cursor: "pointer" }}
+              >
+                Decidir después
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1546,11 +1694,17 @@ export default function AppPasajero() {
               </div>
 
               {/* GPS status */}
-              {gpsPermiso === "denied" && (
+              {(gpsPermiso === "denied" || gpsPermiso === "unavailable") && (
                 <div style={{ marginTop: 12, background: "var(--warn-tint)", borderRadius: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, border: "1px solid rgba(180,83,9,0.2)" }}>
                   <IconPin sz={18} c="var(--warn)" />
-                  <p style={{ margin: 0, flex: 1, fontSize: 13, color: "var(--warn)", fontWeight: 600 }}>GPS denegado — actívalo en ajustes para calcular distancia</p>
-                  <button onClick={() => void solicitarGPS(true)} style={{ background: "var(--warn)", border: "none", borderRadius: 8, padding: "6px 12px", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)" }}>Activar</button>
+                  <p style={{ margin: 0, flex: 1, fontSize: 13, color: "var(--warn)", fontWeight: 600 }}>
+                    {gpsPermiso === "denied"
+                      ? "GPS denegado — ve a Ajustes para activarlo"
+                      : "Sin acceso a ubicación — toca para activarlo"}
+                  </p>
+                  <button onClick={() => void solicitarGPS(true)} style={{ background: "var(--warn)", border: "none", borderRadius: 8, padding: "6px 12px", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>
+                    {gpsPermiso === "denied" ? "Ajustes" : "Activar"}
+                  </button>
                 </div>
               )}
             </div>

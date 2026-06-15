@@ -349,27 +349,28 @@ export default function ReservasPage() {
   };
 
   // ── Sincronización masiva de coordenadas (cotización → tabla paradas) ──────
-  // Rellena lat/lng de las paradas usando las coords EXACTAS guardadas en la
-  // cotización vinculada (o en reservas.paradas_json), sin abrir cada servicio.
-  // Geocodifica solo las que no tengan fuente exacta.
+  // Rellena o actualiza lat/lng usando las coords EXACTAS de la cotización vinculada.
+  // Match 1°: por nombre exacto. Match 2°: por orden (posición) cuando el nombre cambió.
+  // Geocodifica solo cuando no hay fuente exacta ni coincidencia por orden.
   const sincronizarCoordenadas = async () => {
     if (sincCoords.activo) return;
-    if (!confirm("Sincronizar coordenadas de todas las paradas sin lat/lng desde la cotización. ¿Continuar?")) return;
-    setSincCoords({ activo: true, msg: "Buscando paradas sin coordenadas…" });
+    if (!confirm("Sincronizar coordenadas de todas las paradas desde la cotización vinculada.\n\nActualiza también paradas cuyos coords cambiaron en la cotización. ¿Continuar?")) return;
+    setSincCoords({ activo: true, msg: "Buscando paradas…" });
 
-    // 1. Paradas sin coordenadas
-    const { data: sinCoords, error: e1 } = await supabase
-      .from("paradas").select("id,reserva_id,nombre,orden").or("lat.is.null,lng.is.null");
+    // 1. TODAS las paradas (no solo las sin coords, para detectar cambios en la cotización)
+    const { data: todasParadas, error: e1 } = await supabase
+      .from("paradas").select("id,reserva_id,nombre,orden,lat,lng");
     if (e1) { alert("Error: " + e1.message); setSincCoords({ activo: false, msg: "" }); return; }
-    if (!sinCoords || sinCoords.length === 0) { alert("✅ Todas las paradas ya tienen coordenadas."); setSincCoords({ activo: false, msg: "" }); return; }
+    if (!todasParadas || todasParadas.length === 0) { alert("No hay paradas."); setSincCoords({ activo: false, msg: "" }); return; }
 
     // 2. Agrupar por reserva
     const porReserva = new Map<number, any[]>();
-    sinCoords.forEach((p: any) => { if (!porReserva.has(p.reserva_id)) porReserva.set(p.reserva_id, []); porReserva.get(p.reserva_id)!.push(p); });
+    todasParadas.forEach((p: any) => { if (!porReserva.has(p.reserva_id)) porReserva.set(p.reserva_id, []); porReserva.get(p.reserva_id)!.push(p); });
     const reservaIds = [...porReserva.keys()];
 
-    // 3. Cargar reservas (cotizacion_id + paradas_json propio)
-    const { data: resData } = await supabase.from("reservas").select("id,cotizacion_id,paradas_json").in("id", reservaIds);
+    // 3. Cargar reservas (cotizacion_id + paradas_json propio + dirección para elegir tramo)
+    const { data: resData } = await supabase
+      .from("reservas").select("id,cotizacion_id,paradas_json,direccion_servicio").in("id", reservaIds);
     const resMap = new Map<number, any>((resData || []).map((r: any) => [r.id, r]));
 
     // 4. Cargar cotizaciones vinculadas
@@ -380,15 +381,23 @@ export default function ReservasPage() {
       (cots || []).forEach((c: any) => cotMap.set(c.id, c));
     }
 
+    // Helper: ordena paradas_json igual que resolverParadasJSON
+    const sortLeg = (arr: any[]) => [
+      ...arr.filter((p: any) => p.tipo === "inicio"),
+      ...arr.filter((p: any) => p.tipo === "intermedia"),
+      ...arr.filter((p: any) => p.tipo === "destino"),
+      ...arr.filter((p: any) => !["inicio", "intermedia", "destino"].includes(p.tipo)),
+    ];
+
     // 5. Procesar reserva por reserva
-    let exactas = 0, geocod = 0, fallidas = 0, procesadas = 0;
+    let exactas = 0, actualizadas = 0, geocod = 0, fallidas = 0, procesadas = 0;
     for (const rid of reservaIds) {
       procesadas++;
-      setSincCoords({ activo: true, msg: `Procesando ${procesadas}/${reservaIds.length} reservas… (${exactas} exactas, ${geocod} geocodificadas)` });
+      setSincCoords({ activo: true, msg: `Procesando ${procesadas}/${reservaIds.length} reservas…` });
       const r = resMap.get(rid);
       const cot = r?.cotizacion_id ? cotMap.get(r.cotizacion_id) : null;
 
-      // Fuentes de coords exactas: cotización (ida + retorno) y paradas_json de la reserva
+      // Mapa nombre → coords (todas las fuentes, para match 1°)
       const fuentes: any[] = [];
       if (cot?.paradas_json) fuentes.push(...cot.paradas_json);
       if (cot?.paradas_retorno_json) fuentes.push(...cot.paradas_retorno_json);
@@ -396,21 +405,76 @@ export default function ReservasPage() {
       const byNombre = new Map<string, { lat: number; lng: number }>();
       fuentes.forEach((p: any) => { if (p.lat && p.lng) byNombre.set(String(p.nombre || "").trim().toLowerCase(), { lat: Number(p.lat), lng: Number(p.lng) }); });
 
+      // Lista ordenada del tramo correcto (para match 2° por posición/orden)
+      let fuenteOrdenada: any[] = [];
+      if (Array.isArray(r?.paradas_json) && r.paradas_json.length > 0) {
+        fuenteOrdenada = sortLeg(r.paradas_json);
+      } else if (cot) {
+        if (r?.direccion_servicio === "retorno") {
+          const ret = Array.isArray(cot.paradas_retorno_json) && cot.paradas_retorno_json.length > 0
+            ? cot.paradas_retorno_json : cot.paradas_json;
+          if (Array.isArray(ret)) fuenteOrdenada = sortLeg(ret);
+        } else if (Array.isArray(cot.paradas_json)) {
+          fuenteOrdenada = sortLeg(cot.paradas_json);
+        }
+      }
+
       for (const par of (porReserva.get(rid) || [])) {
-        const exacta = byNombre.get(String(par.nombre || "").trim().toLowerCase());
-        if (exacta) {
-          await supabase.from("paradas").update({ lat: exacta.lat, lng: exacta.lng }).eq("id", par.id);
-          exactas++;
-        } else {
+        // Match 1°: por nombre exacto
+        let srcCoords = byNombre.get(String(par.nombre || "").trim().toLowerCase());
+        let srcNombre: string | null = null;
+
+        // Match 2°: por orden (posición en la lista ordenada del tramo)
+        if (!srcCoords && fuenteOrdenada.length > 0) {
+          const cotPar = fuenteOrdenada[par.orden - 1]; // orden es 1-based
+          if (cotPar?.lat && cotPar?.lng) {
+            srcCoords = { lat: Number(cotPar.lat), lng: Number(cotPar.lng) };
+            srcNombre = cotPar.nombre || null; // también actualizar nombre si cambió
+          }
+        }
+
+        if (srcCoords) {
+          const tieneCoords = par.lat != null && par.lng != null;
+          const dLat = tieneCoords ? Math.abs(Number(par.lat) - srcCoords.lat) : Infinity;
+          const dLng = tieneCoords ? Math.abs(Number(par.lng) - srcCoords.lng) : Infinity;
+          const coordsCambiaron = dLat > 0.0001 || dLng > 0.0001;
+
+          if (!tieneCoords) {
+            // Sin coords: rellenar
+            const upd: any = { lat: srcCoords.lat, lng: srcCoords.lng };
+            if (srcNombre) upd.nombre = srcNombre;
+            await supabase.from("paradas").update(upd).eq("id", par.id);
+            exactas++;
+          } else if (coordsCambiaron) {
+            // Coords desactualizadas respecto a la cotización: actualizar
+            const upd: any = { lat: srcCoords.lat, lng: srcCoords.lng };
+            if (srcNombre) upd.nombre = srcNombre;
+            await supabase.from("paradas").update(upd).eq("id", par.id);
+            actualizadas++;
+          }
+          // else: coords coinciden → sin cambio
+        } else if (!par.lat || !par.lng) {
+          // Sin fuente exacta y sin coords: geocodificar por nombre
           const gc = await geocodificar(par.nombre);
           if (gc) { await supabase.from("paradas").update({ lat: gc.lat, lng: gc.lng }).eq("id", par.id); geocod++; }
           else fallidas++;
         }
+        // Con coords pero sin fuente: se respeta (edición manual)
       }
     }
 
     setSincCoords({ activo: false, msg: "" });
-    alert(`✅ Sincronización completa\n\n• ${exactas} desde cotización (exactas)\n• ${geocod} geocodificadas\n${fallidas > 0 ? `• ${fallidas} sin resolver (revisar nombre)` : ""}`);
+    const partes = [
+      "✅ Sincronización completa",
+      "",
+      exactas > 0    ? `• ${exactas} paradas rellenadas desde cotización` : null,
+      actualizadas > 0 ? `• ${actualizadas} coordenadas actualizadas (habían cambiado en la cotización)` : null,
+      geocod > 0     ? `• ${geocod} geocodificadas` : null,
+      fallidas > 0   ? `• ${fallidas} sin resolver (revisar nombre)` : null,
+      (exactas === 0 && actualizadas === 0 && geocod === 0 && fallidas === 0)
+        ? "• Todas las paradas ya están al día" : null,
+    ].filter(Boolean).join("\n");
+    alert(partes);
     cargarDatos();
   };
 
