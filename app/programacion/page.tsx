@@ -163,6 +163,14 @@ function fmtSoles(n: number) {
   return "S/ " + n.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// Fecha en zona horaria Lima (UTC-5 fijo — Perú no usa horario de verano).
+// NO usar Intl.DateTimeFormat("en-CA") sin opciones explícitas: el formato varía por versión
+// de Node/browser y puede devolver la fecha incorrecta.
+function fechaLima(offsetDias = 0): string {
+  const ms = Date.now() - 5 * 3600 * 1000 + offsetDias * 86400000;
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
 function fmtFecha(f: string | null) {
   if (!f) return "-";
   return new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
@@ -175,9 +183,9 @@ function diasPara(f: string | null): number | null {
 
 function urgenciaBadge(fecha: string | null, estado: EstadoReserva): { label: string; color: string } | null {
   if (!fecha || estado === "finalizada" || estado === "cancelada") return null;
-  const hS = new Date().toISOString().split("T")[0];
-  const mS = new Date(Date.now() + 86400000).toISOString().split("T")[0];
-  const e7 = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
+  const hS = fechaLima();
+  const mS = fechaLima(1);
+  const e7 = fechaLima(7);
   if (fecha < hS)  return { label: "ATRASADO",  color: "#6b7280" };
   if (fecha === hS) return { label: "HOY",       color: "#ef4444" };
   if (fecha === mS) return { label: "MAÑANA",    color: "#f97316" };
@@ -187,9 +195,9 @@ function urgenciaBadge(fecha: string | null, estado: EstadoReserva): { label: st
 
 function urgenciaFila(fecha: string | null, estado: EstadoReserva): string | undefined {
   if (!fecha || estado === "finalizada" || estado === "cancelada") return undefined;
-  const hS = new Date().toISOString().split("T")[0];
-  const mS = new Date(Date.now() + 86400000).toISOString().split("T")[0];
-  const e7 = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
+  const hS = fechaLima();
+  const mS = fechaLima(1);
+  const e7 = fechaLima(7);
   if (fecha < hS)   return "inset 3px 0 0 #9ca3af";
   if (fecha === hS) return "inset 3px 0 0 #ef4444";
   if (fecha === mS) return "inset 3px 0 0 #f97316";
@@ -772,21 +780,24 @@ export default function ReservasPage() {
 
   const setRangoRapido = (tipo: "hoy" | "semana" | "7dias" | "mes" | "limpiar") => {
     if (tipo === "limpiar") { setFiltroDesde(""); setFiltroHasta(""); return; }
-    const h = new Date().toISOString().split("T")[0];
+    const h = fechaLima();
     if (tipo === "hoy")   { setFiltroDesde(h); setFiltroHasta(h); return; }
-    if (tipo === "7dias") { setFiltroDesde(h); setFiltroHasta(new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0]); return; }
+    if (tipo === "7dias") { setFiltroDesde(h); setFiltroHasta(fechaLima(7)); return; }
     if (tipo === "semana") {
-      const d = new Date(); const dow = d.getDay() || 7;
+      const d = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Lima" }));
+      const dow = d.getDay() || 7;
       const lun = new Date(d); lun.setDate(d.getDate() - dow + 1);
       const dom = new Date(lun); dom.setDate(lun.getDate() + 6);
-      setFiltroDesde(lun.toISOString().split("T")[0]);
-      setFiltroHasta(dom.toISOString().split("T")[0]);
+      const fmt = (x: Date) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
+      setFiltroDesde(fmt(lun));
+      setFiltroHasta(fmt(dom));
       return;
     }
     if (tipo === "mes") {
-      const d = new Date();
-      setFiltroDesde(new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split("T")[0]);
-      setFiltroHasta(new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().split("T")[0]);
+      const d = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Lima" }));
+      const fmt = (x: Date) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
+      setFiltroDesde(fmt(new Date(d.getFullYear(), d.getMonth(), 1)));
+      setFiltroHasta(fmt(new Date(d.getFullYear(), d.getMonth() + 1, 0)));
     }
   };
 
@@ -983,7 +994,7 @@ export default function ReservasPage() {
     return vehiculos.find(v => v.id === r.vehiculo_id)?.capacidad_pasajeros ?? null;
   };
 
-  const hoy          = new Date().toISOString().split("T")[0];
+  const hoy          = fechaLima();
   const totalRes     = reservas.length;
   const pendientes   = reservas.filter(r => r.estado === "pendiente").length;
   const programadas  = reservas.filter(r => r.estado === "programada").length;
@@ -995,7 +1006,7 @@ export default function ReservasPage() {
   const margenTotal  = reservas.reduce((s, r) => s + Number(r.margen || 0), 0);
   const conSobrecupo = Object.values(ocupacionMap).filter(o => o.sobrecupo).length;
   const sincronizadas = reservas.filter(r => r.sincronizado_app).length;
-  const en7d          = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
+  const en7d          = fechaLima(7);
   const proximos7d    = reservas.filter(r => r.fecha_servicio && r.fecha_servicio >= hoy && r.fecha_servicio <= en7d && r.estado !== "cancelada" && r.estado !== "finalizada").length;
 
   const filtradas = useMemo(() => {

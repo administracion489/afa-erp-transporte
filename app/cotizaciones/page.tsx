@@ -806,6 +806,8 @@ export default function CotizacionesPage(){
   const [modalEnvio,setModalEnvio]=useState<Cotizacion|null>(null);
   const [rolUsuario,setRolUsuario]=useState<string>("operador");
   const [modalEliminar,setModalEliminar]=useState<Cotizacion|null>(null);
+  const [modalPropagar,setModalPropagar]=useState<{cotId:number;reservas:{id:number;direccion_servicio:string|null}[];paradasIda:ParadaTP[];paradasRet:ParadaTP[]}|null>(null);
+  const [propagando,setPropagando]=useState(false);
   const [vehExpandido,setVehExpandido]=useState(false);
   const [pendDespacho,setPendDespacho]=useState(0);
   const [fechasMultidia,setFechasMultidia]=useState<FechaMultidia[]>([]);
@@ -1046,11 +1048,25 @@ export default function CotizacionesPage(){
     const payload={...buildPayload(form.estado==="borrador"?"pendiente":undefined),creado_por:nombreCreador||null};
     const{error}=editandoId?await supabase.from("cotizaciones").update(payload).eq("id",editandoId):await supabase.from("cotizaciones").insert(payload);
     if(error){alert(error.message);setGuardando(false);return;}
+    // Capturar antes de limpiar() para la propagación
+    const cotIdGuardado=editandoId;
+    const paradasGuardadas=[...paradas];
+    const paradasRetornoGuardadas=[...paradasRetorno];
     const tarifaEnc=buscarTarifa();const vehParam=paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo);
     const costoCalc=vehParam?calcCostoVeh(vehParam,preciosDB,kmNum>0?kmNum:1,diasCond,peajesF,pernocteF,viaticosF):null;
     const precioDiaNum=esFijo?Number(form.precio_dia)||costoCalc?.diaEstIGV:null;
     if(guardarTar&&form.tipo_vehiculo&&form.tipo_servicio&&form.equipamiento&&subtotal>0){await supabase.from("tarifario").upsert({origen:form.origen.trim().toUpperCase(),destino:form.destino.trim().toUpperCase(),tipo_vehiculo:form.tipo_vehiculo,equipamiento:form.equipamiento,tipo_servicio:form.tipo_servicio,modo:form.modo_servicio,precio:esFijo?(precioDiaNum||subtotal)/1.18:subtotal,moneda:"PEN",confidencial:["full_day","multi_dia"].includes(form.tipo_servicio),incluye_guia:false,incluye_peajes:false,incluye_alimentacion:false,notas:`Cotización ${form.numero_cotizacion||""}`.trim(),activo:true},{onConflict:"origen,destino,tipo_vehiculo,equipamiento,tipo_servicio"});}
+    // Detectar servicios futuros no ejecutados para ofrecer propagación (solo en fijos editados)
+    let reservasParaPropagar:{id:number;direccion_servicio:string|null}[]=[];
+    if(esFijo&&cotIdGuardado&&(paradasGuardadas.length>0||paradasRetornoGuardadas.length>0)){
+      const todayPeru=new Date(Date.now()-5*60*60*1000).toISOString().split("T")[0];
+      const{data:afect}=await supabase.from("reservas").select("id,direccion_servicio").eq("cotizacion_id",cotIdGuardado).gte("fecha_servicio",todayPeru).neq("estado","en_curso").neq("estado","finalizada").neq("estado","cancelada");
+      reservasParaPropagar=afect||[];
+    }
     limpiar();cargar();setGuardando(false);
+    if(reservasParaPropagar.length>0){
+      setModalPropagar({cotId:cotIdGuardado!,reservas:reservasParaPropagar,paradasIda:paradasGuardadas,paradasRet:paradasRetornoGuardadas});
+    }
   };
 
   const cambiarEstado=async(cot:Cotizacion,nEst:EstadoCot)=>{
@@ -1070,6 +1086,45 @@ export default function CotizacionesPage(){
     setModalEnvio(null);cargar();
   };
   const confirmarAprob=async(tipo:string,numero:string)=>{if(!modalAprob)return;await supabase.from("cotizaciones").update({estado:"aprobado",tipo_aprobacion:tipo,numero_aprobacion:numero}).eq("id",modalAprob.id);if(modalAprob.tipo_vehiculo&&modalAprob.tipo_servicio&&modalAprob.equipamiento){const esFijo=modalAprob.modo_servicio==="fijo";await supabase.from("tarifario").upsert({origen:modalAprob.origen.toUpperCase(),destino:modalAprob.destino.toUpperCase(),tipo_vehiculo:modalAprob.tipo_vehiculo,equipamiento:modalAprob.equipamiento,tipo_servicio:modalAprob.tipo_servicio,modo:modalAprob.modo_servicio||"eventual",precio:esFijo?(Number(modalAprob.precio_dia||0)/1.18):Math.round(Number(modalAprob.precio_cliente)/1.18*100)/100,moneda:"PEN",confidencial:false,incluye_guia:false,incluye_peajes:false,incluye_alimentacion:false,notas:`Aprobada #${modalAprob.numero_cotizacion||modalAprob.id}`,activo:true},{onConflict:"origen,destino,tipo_vehiculo,equipamiento,tipo_servicio"});}setModalAprob(null);cargar();};
+  const confirmarPropagar=async()=>{
+    if(!modalPropagar||propagando)return;
+    setPropagando(true);
+    const{reservas,paradasIda,paradasRet}=modalPropagar;
+    const todosIds=reservas.map(r=>r.id);
+    const BATCH=100;
+
+    // 1 query: qué reservas ya tienen paradas escaneadas
+    const{data:conActividad}=await supabase.from("paradas").select("reserva_id").in("reserva_id",todosIds).eq("estado","completada");
+    const idsConActividad=new Set((conActividad||[]).map((p:any)=>p.reserva_id));
+    const reservasAfectar=reservas.filter(r=>!idsConActividad.has(r.id));
+    const saltadas=reservas.length-reservasAfectar.length;
+
+    if(reservasAfectar.length===0){
+      setModalPropagar(null);setPropagando(false);
+      alert("Sin cambios — todos los servicios ya tienen actividad registrada.");return;
+    }
+
+    const tramoRet=paradasRet.length>0?paradasRet:paradasIda;
+    const idsIda=reservasAfectar.filter(r=>r.direccion_servicio!=="retorno").map(r=>r.id);
+    const idsRet=reservasAfectar.filter(r=>r.direccion_servicio==="retorno").map(r=>r.id);
+
+    // Actualizar paradas_json en reservas (batch)
+    for(let i=0;i<idsIda.length;i+=BATCH)await supabase.from("reservas").update({paradas_json:paradasIda}).in("id",idsIda.slice(i,i+BATCH));
+    for(let i=0;i<idsRet.length;i+=BATCH)await supabase.from("reservas").update({paradas_json:tramoRet}).in("id",idsRet.slice(i,i+BATCH));
+
+    // Borrar paradas existentes (batch)
+    const idsAfectar=reservasAfectar.map(r=>r.id);
+    for(let i=0;i<idsAfectar.length;i+=BATCH)await supabase.from("paradas").delete().in("reserva_id",idsAfectar.slice(i,i+BATCH));
+
+    // Insertar nuevas paradas (batch de 200 filas)
+    const filasIda=idsIda.flatMap(rid=>paradasIda.map((p,i)=>({reserva_id:rid,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));
+    const filasRet=idsRet.flatMap(rid=>tramoRet.map((p,i)=>({reserva_id:rid,orden:i+1,nombre:p.nombre,direccion:p.direccion||null,lat:p.lat?Number(p.lat):null,lng:p.lng?Number(p.lng):null,hora_estimada:p.hora||null,estado:"pendiente"})));
+    const todasFilas=[...filasIda,...filasRet];
+    for(let i=0;i<todasFilas.length;i+=200)await supabase.from("paradas").insert(todasFilas.slice(i,i+200));
+
+    setModalPropagar(null);setPropagando(false);
+    alert(`✅ Propagación completada\n• ${reservasAfectar.length} servicio${reservasAfectar.length!==1?"s":""} actualizado${reservasAfectar.length!==1?"s":""}${saltadas>0?`\n• ${saltadas} saltado${saltadas!==1?"s":""} (ya tienen actividad registrada)`:""}`);
+  };
   const eliminarCotizacion=async(pass:string):Promise<string|null>=>{
     if(!modalEliminar)return null;
     const{data:{session}}=await supabase.auth.getSession();
@@ -1155,6 +1210,29 @@ export default function CotizacionesPage(){
       {modalAprob&&<ModalAprobacion cot={modalAprob} onConfirmar={confirmarAprob} onCancelar={()=>setModalAprob(null)}/>}
       {modalPlantilla&&<ModalPlantilla cot={modalPlantilla} plantillaActual={plantillaElegida} onElegir={setPlantillaElegida} onGenerar={()=>abrirPDF(modalPlantilla,plantillaElegida)} onCancelar={()=>setModalPlantilla(null)}/>}
       {modalEliminar&&<ModalEliminar cot={modalEliminar} onConfirmar={eliminarCotizacion} onCancelar={()=>setModalEliminar(null)}/>}
+      {modalPropagar&&(
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center text-xl shrink-0">📡</div>
+              <div>
+                <h2 className="text-base font-bold text-gray-900">Propagar cambios de paraderos</h2>
+                <p className="text-sm text-gray-500 mt-1">La cotización se guardó correctamente. Se encontraron <span className="font-bold text-[#0b315f]">{modalPropagar.reservas.length} servicio{modalPropagar.reservas.length!==1?"s":""} futuro{modalPropagar.reservas.length!==1?"s":""}</span> pendientes vinculados a esta cotización.</p>
+              </div>
+            </div>
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-800 space-y-1">
+              <p className="font-bold">¿Aplicar los nuevos paraderos a esos servicios?</p>
+              <p>• Los servicios <strong>ya ejecutados o en curso</strong> NO serán modificados.</p>
+              <p>• Los servicios con <strong>paradas ya escaneadas</strong> tampoco se tocarán.</p>
+              <p>• Esta acción reemplaza las paradas de cada servicio futuro.</p>
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button onClick={()=>setModalPropagar(null)} className="flex-1 py-2.5 px-4 rounded-xl border border-gray-200 text-sm font-semibold text-gray-600 hover:bg-gray-50">Solo esta cotización</button>
+              <button onClick={confirmarPropagar} disabled={propagando} className="flex-1 py-2.5 px-4 rounded-xl text-sm font-bold text-white disabled:opacity-60" style={{background:"#0b315f"}}>{propagando?"Actualizando...":"Propagar a futuros ("+modalPropagar.reservas.length+")"}</button>
+            </div>
+          </div>
+        </div>
+      )}
       <main className="p-3 md:p-6 space-y-4 md:space-y-5 max-w-7xl mx-auto">
         <div className="flex items-start justify-between flex-wrap gap-3">
           <div><h1 className="text-xl md:text-3xl font-bold text-gray-900">Cotizaciones</h1><p className="text-sm text-gray-400 mt-1">EVENTUAL · FIJO · {paramsDB.length} vehículos desde Supabase{pendDesc>0&&<span className="ml-2 text-orange-600 font-bold bg-orange-50 px-2 py-0.5 rounded-full text-xs">🙋 {pendDesc} descuento{pendDesc>1?"s":""} pendiente{pendDesc>1?"s":""}</span>}{pendDespacho>0&&<span className="ml-2 text-purple-700 font-bold bg-purple-50 px-2 py-0.5 rounded-full text-xs border border-purple-200">⚡ {pendDespacho} sin cotizar (Despachador)</span>}</p></div>

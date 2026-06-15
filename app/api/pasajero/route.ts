@@ -50,7 +50,7 @@ export async function POST(req: NextRequest) {
           const r = x.parada?.reserva;
           if (!r) return false;
           if (r.estado === "en_curso") return true;
-          return r.fecha_servicio >= hoy && ["pendiente", "confirmada"].includes(r.estado);
+          return r.fecha_servicio >= hoy && ["pendiente", "programada", "confirmada"].includes(r.estado);
         }).sort((a: any, b: any) => {
           const rA = a.parada?.reserva;
           const rB = b.parada?.reserva;
