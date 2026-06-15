@@ -27,9 +27,12 @@ export async function POST(req: NextRequest) {
       case "login": {
         const { dni } = body;
         if (!dni) return NextResponse.json({ error: "dni requerido" }, { status: 400 });
-        const { data, error } = await admin.from("pasajeros").select("*").eq("dni", String(dni).trim()).maybeSingle();
+        // Usar limit(1) en lugar de maybeSingle() para tolerar DNIs duplicados en BD.
+        const { data: rows, error } = await admin
+          .from("pasajeros").select("*").eq("dni", String(dni).trim())
+          .order("id", { ascending: false }).limit(1);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-        return NextResponse.json({ pasajero: data ?? null });
+        return NextResponse.json({ pasajero: rows?.[0] ?? null });
       }
 
       // ── Ruta del pasajero (resuelve todo el bundle del seguimiento) ──────────
@@ -73,18 +76,37 @@ export async function POST(req: NextRequest) {
         }
 
         let vehiculo: any = null, busPosicion: any = null, conductor: any = null;
-        const vId = miParada.reserva?.vehiculo_id;
-        if (vId) {
-          const [vR, uR] = await Promise.all([
-            admin.from("vehiculos").select("id,placa,categoria").eq("id", vId).maybeSingle(),
-            admin.from("ubicaciones_gps").select("*").eq("vehiculo_id", vId).order("created_at", { ascending: false }).limit(1),
-          ]);
-          vehiculo = vR.data ?? null;
-          busPosicion = uR.data?.[0] ?? null;
-          if (busPosicion?.conductor_id) {
-            const { data: cond } = await admin.from("conductores").select("id,nombre,telefono").eq("id", busPosicion.conductor_id).maybeSingle();
-            conductor = cond ?? null;
-          }
+        const reserva = miParada.reserva;
+        const vId    = reserva?.vehiculo_id;
+        const vtId   = reserva?.vehiculo_tercero_id;
+        const condId = reserva?.conductor_id;
+
+        // Buscar vehículo: primero flota propia, luego tercerizado
+        const fetchVehiculo = vId
+          ? admin.from("vehiculos").select("id,placa,categoria,marca,modelo").eq("id", vId).maybeSingle()
+          : vtId
+            ? admin.from("vehiculos_tercero").select("id,placa,categoria,marca,modelo").eq("id", vtId).maybeSingle()
+            : null;
+
+        // Buscar conductor asignado en la reserva (no depende de GPS activo)
+        const fetchConductor = condId
+          ? admin.from("conductores").select("id,nombre,telefono").eq("id", condId).maybeSingle()
+          : null;
+
+        // Buscar GPS del vehículo propio para posición en vivo
+        const fetchGPS = vId
+          ? admin.from("ubicaciones_gps").select("*").eq("vehiculo_id", vId).order("created_at", { ascending: false }).limit(1)
+          : null;
+
+        const [vR, cR, uR] = await Promise.all([fetchVehiculo, fetchConductor, fetchGPS]);
+        vehiculo   = vR?.data   ?? null;
+        conductor  = cR?.data   ?? null;
+        busPosicion = uR?.data?.[0] ?? null;
+
+        // Si el GPS activo tiene un conductor diferente al asignado, prevalece el de reserva
+        if (!conductor && busPosicion?.conductor_id) {
+          const { data: cond } = await admin.from("conductores").select("id,nombre,telefono").eq("id", busPosicion.conductor_id).maybeSingle();
+          conductor = cond ?? null;
         }
 
         return NextResponse.json({ miParada, miEstado, rutaParadas, vehiculo, busPosicion, conductor });
