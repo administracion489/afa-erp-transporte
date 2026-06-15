@@ -480,9 +480,9 @@ export default function AppPasajero() {
   const [mapListo,   setMapListo]           = useState(false);
   const [qrDataUrl,  setQrDataUrl]          = useState<string | null>(null);
 
-  // Genera el QR localmente (sin llamadas a APIs externas) cada vez que cambia qr_code.
+  // Genera el QR solo cuando abres la tab (lazy-load para no ralentizar startup)
   useEffect(() => {
-    if (!pasajero?.qr_code) { setQrDataUrl(null); return; }
+    if (tab !== "qr" || !pasajero?.qr_code) { setQrDataUrl(null); return; }
     const code = pasajero.qr_code;
     import("qrcode").then(({ default: QRCode }) => {
       QRCode.toDataURL(code, {
@@ -491,17 +491,23 @@ export default function AppPasajero() {
         errorCorrectionLevel: "M",
       }).then(url => setQrDataUrl(url)).catch(console.error);
     }).catch(console.error);
-  }, [pasajero?.qr_code]);
+  }, [tab, pasajero?.qr_code]);
 
   useEffect(() => {
-    const saved = loadSession();
-    if (saved) { setPasajero(saved); setParaderoConfirmado(loadParaderoOk()); cargarMiRuta(saved.id); }
-    setIniting(false);
-    // Service Worker: cachea el shell para arranques instantáneos y resistencia a red.
-    if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(() => {});
-    }
-  }, []);
+    (async () => {
+      const saved = loadSession();
+      if (saved) {
+        setPasajero(saved);
+        setParaderoConfirmado(loadParaderoOk());
+        await cargarMiRuta(saved.id);
+      }
+      setIniting(false);
+      // Service Worker: cachea el shell para arranques instantáneos y resistencia a red.
+      if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+        navigator.serviceWorker.register("/sw.js").catch(() => {});
+      }
+    })();
+  }, [cargarMiRuta]);
 
   // ── SOLICITAR GPS DEL DISPOSITIVO ──────────────────────────────────────────
   // Se dispara automáticamente al loguearse. El navegador muestra la alerta nativa del OS.
@@ -552,29 +558,63 @@ export default function AppPasajero() {
     }
   }, []);
 
-  // Pedir GPS cuando el pasajero se loguea
+  // Pedir GPS cuando el pasajero se loguea (en background, sin bloquear)
   useEffect(() => {
     if (!pasajero) return;
-    // Pequeño delay para que el mapa cargue primero
-    const t = setTimeout(() => { void solicitarGPS(); }, 1500);
+    // Después que la app está lista, intenta GPS en background sin mostrar diálogos
+    const t = setTimeout(() => {
+      (async () => {
+        if (!geoDisponible()) return;
+        try {
+          const permiso = await pedirPermisoUbicacion();
+          if (permiso === "granted") {
+            const pos = await obtenerUbicacion({ enableHighAccuracy: true, timeout: 5000, maximumAge: 0 });
+            setGpsPermiso("granted");
+            setGpsPropio({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+            if (watchRef.current) watchRef.current.clear();
+            watchRef.current = await observarUbicacion(
+              (p) => setGpsPropio({ lat: p.coords.latitude, lng: p.coords.longitude }),
+              () => {},
+              { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
+            );
+          } else {
+            setGpsPermiso(permiso);
+          }
+        } catch {}
+      })();
+    }, 2000);
     return () => {
       clearTimeout(t);
       if (watchRef.current) { watchRef.current.clear(); watchRef.current = null; }
     };
-  }, [pasajero, solicitarGPS]);
+  }, [pasajero]);
 
   // Mapbox init — se destruye y recrea al salir/volver al tab ruta
   useEffect(() => {
     if (tab !== "ruta" || !mapContainer.current || !pasajero || map.current) return;
-    map.current = new mapboxgl.Map({
-      container: mapContainer.current,
-      style: "mapbox://styles/mapbox/light-v11",
-      center: [-77.0428, -12.0464],
-      zoom: 13,
-    });
-    map.current.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right");
-    map.current.on("load", () => setMapListo(true));
+    let activo = true;
+    const timeout = setTimeout(() => {
+      if (activo) setMapListo(true); // Fallback si Mapbox tarda > 4s
+    }, 4000);
+
+    try {
+      map.current = new mapboxgl.Map({
+        container: mapContainer.current,
+        style: "mapbox://styles/mapbox/light-v11",
+        center: [-77.0428, -12.0464],
+        zoom: 13,
+      });
+      map.current.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right");
+      map.current.on("load", () => {
+        if (activo) { clearTimeout(timeout); setMapListo(true); }
+      });
+    } catch (e) {
+      if (activo) setMapListo(true);
+    }
+
     return () => {
+      activo = false;
+      clearTimeout(timeout);
       map.current?.remove(); map.current = null;
       if (meMk.current) { meMk.current.remove(); meMk.current = null; }
       if (busMarker.current) { busMarker.current.remove(); busMarker.current = null; }
