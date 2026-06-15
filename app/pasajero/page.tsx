@@ -1546,10 +1546,10 @@ export default function AppPasajero() {
               </div>
 
               {/* GPS status */}
-              {gpsPermiso !== "granted" && (
+              {gpsPermiso === "denied" && (
                 <div style={{ marginTop: 12, background: "var(--warn-tint)", borderRadius: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, border: "1px solid rgba(180,83,9,0.2)" }}>
                   <IconPin sz={18} c="var(--warn)" />
-                  <p style={{ margin: 0, flex: 1, fontSize: 13, color: "var(--warn)", fontWeight: 600 }}>GPS desactivado — actívalo para calcular distancia</p>
+                  <p style={{ margin: 0, flex: 1, fontSize: 13, color: "var(--warn)", fontWeight: 600 }}>GPS denegado — actívalo en ajustes para calcular distancia</p>
                   <button onClick={() => void solicitarGPS(true)} style={{ background: "var(--warn)", border: "none", borderRadius: 8, padding: "6px 12px", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)" }}>Activar</button>
                 </div>
               )}
