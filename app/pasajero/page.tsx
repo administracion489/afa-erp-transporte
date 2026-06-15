@@ -494,19 +494,17 @@ export default function AppPasajero() {
   }, [tab, pasajero?.qr_code]);
 
   useEffect(() => {
-    (async () => {
-      const saved = loadSession();
-      if (saved) {
-        setPasajero(saved);
-        setParaderoConfirmado(loadParaderoOk());
-        await cargarMiRuta(saved.id);
-      }
-      setIniting(false);
-      // Service Worker: cachea el shell para arranques instantáneos y resistencia a red.
-      if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-        navigator.serviceWorker.register("/sw.js").catch(() => {});
-      }
-    })();
+    const saved = loadSession();
+    if (saved) {
+      setPasajero(saved);
+      setParaderoConfirmado(loadParaderoOk());
+      void cargarMiRuta(saved.id);
+    }
+    setIniting(false);
+    // Service Worker: cachea el shell para arranques instantáneos y resistencia a red.
+    if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
   }, []);
 
   // ── SOLICITAR GPS DEL DISPOSITIVO ──────────────────────────────────────────
