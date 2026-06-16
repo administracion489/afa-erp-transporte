@@ -1,5 +1,5 @@
 diff --git a/node_modules/@capgo/background-geolocation/android/src/main/java/com/capgo/capacitor_background_geolocation/BackgroundGeolocationService.java b/node_modules/@capgo/background-geolocation/android/src/main/java/com/capgo/capacitor_background_geolocation/BackgroundGeolocationService.java
-index 97ff3a8..34e7ac3 100644
+index 97ff3a8..c681a57 100644
 --- a/node_modules/@capgo/background-geolocation/android/src/main/java/com/capgo/capacitor_background_geolocation/BackgroundGeolocationService.java
 +++ b/node_modules/@capgo/background-geolocation/android/src/main/java/com/capgo/capacitor_background_geolocation/BackgroundGeolocationService.java
 @@ -1,6 +1,8 @@
@@ -11,7 +11,7 @@ index 97ff3a8..34e7ac3 100644
  import android.app.PendingIntent;
  import android.app.Service;
  import android.content.Context;
-@@ -55,6 +57,92 @@ public class BackgroundGeolocationService extends Service {
+@@ -55,6 +57,100 @@ public class BackgroundGeolocationService extends Service {
          return binder;
      }
  
@@ -67,6 +67,14 @@ index 97ff3a8..34e7ac3 100644
 +    // (p.ej. Redmi Pad SE) FUSED/NETWORK entregan posición por red/WiFi. El proveedor
 +    // que el dispositivo tenga entrega; el resto se ignora sin romper nada. El plugin
 +    // original sólo escuchaba GPS_PROVIDER, por eso daba 0 fixes en equipos sin GPS.
++    // Heartbeat por TIEMPO (no por distancia): entrega una posición cada ~10 s AUNQUE
++    // el vehículo esté detenido, en primer y segundo plano, para que el despachador
++    // siempre vea al conductor (paradero, tráfico, Waze encima). minDistance=0 evita
++    // que GMS bloquee entregas "too close" al estar quieto (el distanceFilter del JS
++    // se ignora a propósito a favor del heartbeat). Con fixes regulares, además, el
++    // watchdog de 60 s nunca dispara.
++    private static final long HEARTBEAT_INTERVAL_MS = 10000;
++
 +    private void requestLocationUpdatesMultiProvider(float distanceFilter) {
 +        if (client == null || locationCallback == null) {
 +            return;
@@ -83,7 +91,7 @@ index 97ff3a8..34e7ac3 100644
 +        for (String provider : providers) {
 +            try {
 +                if (client.isProviderEnabled(provider)) {
-+                    client.requestLocationUpdates(provider, 1000, distanceFilter, locationCallback);
++                    client.requestLocationUpdates(provider, HEARTBEAT_INTERVAL_MS, 0f, locationCallback);
 +                    requested = true;
 +                    // En API 31+ basta FUSED; evita duplicar fixes pidiendo a varios.
 +                    if (Build.VERSION.SDK_INT >= 31 && LocationManager.FUSED_PROVIDER.equals(provider)) {
@@ -104,7 +112,7 @@ index 97ff3a8..34e7ac3 100644
      // Some devices allow a foreground service to outlive the application's main
      // activity, leading to nasty crashes as reported in issue #59. If we learn
      // that the application has been killed, all watchers are stopped and the
-@@ -139,11 +227,7 @@ public class BackgroundGeolocationService extends Service {
+@@ -139,11 +235,7 @@ public class BackgroundGeolocationService extends Service {
              if (client == null || locationCallback == null) {
                  return;
              }
@@ -117,7 +125,7 @@ index 97ff3a8..34e7ac3 100644
              startWatchdog();
          };
          watchdogHandler.postDelayed(restartRunnable, 10000);
-@@ -213,13 +297,8 @@ public class BackgroundGeolocationService extends Service {
+@@ -213,13 +305,8 @@ public class BackgroundGeolocationService extends Service {
  
              locationCallback = createLocationListener(BackgroundGeolocationService.this);
  
