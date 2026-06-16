@@ -916,6 +916,16 @@ export default function ReservasPage() {
     }
     if (form.estado !== "pendiente") nuevoEstado = form.estado;
 
+    // Evitar degradar accidentalmente a "pendiente" desde un estado superior
+    const ORDEN_ESTADO: Record<string, number> = { pendiente: 0, programada: 1, confirmada: 2, en_curso: 3, finalizada: 4, cancelada: 4 };
+    const estadoActualOrd  = ORDEN_ESTADO[reservaActual?.estado || "pendiente"] ?? 0;
+    const nuevoEstadoOrd   = ORDEN_ESTADO[nuevoEstado] ?? 0;
+    if (estadoActualOrd > 0 && nuevoEstadoOrd === 0) {
+      const lblActual = ESTADO_CFG[reservaActual!.estado]?.label ?? reservaActual!.estado;
+      const ok = confirm(`La reserva está en estado "${lblActual}". ¿Deseas cambiarla a Pendiente?`);
+      if (!ok) { setGuardando(false); return; }
+    }
+
     const asignPayload = {
       hora_servicio:          form.hora_servicio,
       tipo:                   form.tipo_asignacion === "propio" ? "propia" : "tercerizada",

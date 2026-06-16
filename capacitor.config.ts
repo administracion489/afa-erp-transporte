@@ -8,11 +8,10 @@ const config: CapacitorConfig = {
     url: 'https://www.transportesafa.com/conductor',
     cleartext: false,
   },
-  android: {
-    // Requerido por @capgo/background-geolocation: sin el bridge legacy, Android
-    // suspende el WebView en segundo plano (~5 min) y el rastreo se corta.
-    useLegacyBridge: true,
-  },
+  // NOTA: NO usar `useLegacyBridge: true`. Con el server.url remoto bloqueaba el
+  // hilo principal y causaba ANR ("AFA Conductor no responde") en el login. El
+  // throttling de red en segundo plano se resuelve con CapacitorHttp (HTTP nativo)
+  // en condApi(), que NO depende del bridge.
 };
 
 export default config;

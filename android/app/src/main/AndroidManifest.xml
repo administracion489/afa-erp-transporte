@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <application
         android:allowBackup="true"
@@ -55,5 +56,15 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
-    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" tools:replace="android:required" />
+
+    <!-- Deshabilitar el receptor de arranque del plugin background-geolocation.
+         En Android 15 / MIUI HyperOS, cuando se instala o actualiza la app este
+         receiver intenta iniciar BackgroundGeolocationService inmediatamente (via
+         MY_PACKAGE_REPLACED / BOOT_COMPLETED). MIUI bloquea el servicio antes de
+         que pueda llamar startForeground() dentro del límite de 5 s → ANR.
+         El GPS de segundo plano se inicia solo desde nuestro código JS, que ya
+         tiene su propio guard de permisos y el delay de 4 s. -->
+    <receiver android:name="com.capgo.capacitor_background_geolocation.GeofenceBootReceiver"
+        tools:node="remove" />
 </manifest>

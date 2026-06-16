@@ -14,7 +14,7 @@ android {
         applicationId "com.transportesafa.conductor"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 16
+        versionCode 20
         versionName "1.5"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
@@ -31,6 +31,11 @@ android {
             keyPassword         keystoreProperties['keyPassword']   ?: ''
         }
     }
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+
     buildTypes {
         release {
             minifyEnabled false

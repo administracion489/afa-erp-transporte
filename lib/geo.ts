@@ -181,12 +181,35 @@ export async function observarUbicacionBackground(
 ): Promise<GeoWatch> {
   if (esNativo()) {
     try {
+      // Verificar que el permiso de ubicación ya fue concedido ANTES de iniciar el
+      // foreground service. En Android 15 / MIUI, llamar startForegroundService() sin
+      // permiso previo hace que el servicio no pueda llamar startForeground() a tiempo
+      // → ANR. Si no hay permiso, caemos al GPS de primer plano sin crashear.
+      const Geolocation = await plugin();
+      const perm = await conTimeout(Geolocation.checkPermissions(), 3000).catch(() => null);
+      const tienePermiso = perm && (perm.location === "granted" || perm.coarseLocation === "granted");
+      if (!tienePermiso) {
+        _bgActivo = false;
+        return observarUbicacion(onPos, onError);
+      }
+
+      // Arrancar GPS en PRIMER PLANO de inmediato para no perder cobertura.
+      // En paralelo esperamos 4 s antes de iniciar el foreground service:
+      // en MIUI / HyperOS Android 15 el sistema suspende servicios que se lanzan
+      // en los primeros segundos (battery optimization). Pasados ~4 s la app está
+      // "activa en pantalla" y MIUI permite startForeground() → sin ANR.
+      // En celulares normales el GPS de fondo arranca a los 4 s; durante ese tiempo
+      // el GPS de primer plano ya entregó posiciones sin ningún hueco.
+      const fgWatch = await observarUbicacion(onPos, onError);
+      await new Promise<void>((r) => setTimeout(r, 4000));
+      fgWatch.clear();
+
       const { BackgroundGeolocation } = await import("@capgo/background-geolocation");
       await BackgroundGeolocation.start(
         {
           backgroundTitle: "AFA · rastreo activo",
           backgroundMessage: "Enviando tu ubicación durante el viaje",
-          requestPermissions: true,
+          requestPermissions: false,
           stale: false,
           distanceFilter: 30,
         },
