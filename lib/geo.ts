@@ -181,29 +181,20 @@ export async function observarUbicacionBackground(
 ): Promise<GeoWatch> {
   if (esNativo()) {
     try {
-      // Verificar que el permiso de ubicación ya esté concedido antes de iniciar el
-      // servicio de segundo plano. Si aún no lo está, usamos primer plano (que además
-      // dispara el diálogo de permiso) y el siguiente arranque ya iniciará el plugin.
-      const Geolocation = await plugin();
-      const perm = await conTimeout(Geolocation.checkPermissions(), 3000).catch(() => null);
-      const tienePermiso = perm && (perm.location === "granted" || perm.coarseLocation === "granted");
-      if (!tienePermiso) {
-        _bgActivo = false;
-        return observarUbicacion(onPos, onError);
-      }
-
-      // El servicio nativo (parcheado en node_modules/@capgo/background-geolocation)
-      // ahora llama startForeground() de INMEDIATO en onStartCommand → ya NO hay ANR
-      // "did not then call Service.startForeground()" y no hace falta ningún delay.
-      // Además escucha FUSED/GPS/NETWORK (no sólo GPS), así que también entrega
-      // posición en tablets WiFi-only sin chip GPS. stale:true devuelve la última
-      // ubicación conocida al instante (primer envío inmediato, verificable en pantalla).
+      // NO pre-chequear el permiso con @capacitor/geolocation: en MIUI/HyperOS su
+      // checkPermissions() se cuelga o devuelve "no concedido" AUNQUE el permiso SÍ
+      // esté concedido, y eso hacía que NUNCA se llamara a start() (el servicio nunca
+      // arrancaba → ENVÍOS GPS: 0). Llamamos al plugin DIRECTO: él hace su propio
+      // chequeo nativo (rápido y fiable) y, con requestPermissions:true, pide el permiso
+      // si falta. El servicio nativo está parcheado (startForeground inmediato en
+      // onStartCommand → sin ANR; escucha FUSED/GPS/NETWORK → funciona en WiFi-only).
+      // stale:true devuelve la última ubicación conocida al instante (primer envío rápido).
       const { BackgroundGeolocation } = await import("@capgo/background-geolocation");
       await BackgroundGeolocation.start(
         {
           backgroundTitle: "AFA · rastreo activo",
           backgroundMessage: "Enviando tu ubicación durante el viaje",
-          requestPermissions: false,
+          requestPermissions: true,
           stale: true,
           distanceFilter: 20,
         },
