@@ -1,0 +1,135 @@
+diff --git a/node_modules/@capgo/background-geolocation/android/src/main/java/com/capgo/capacitor_background_geolocation/BackgroundGeolocationService.java b/node_modules/@capgo/background-geolocation/android/src/main/java/com/capgo/capacitor_background_geolocation/BackgroundGeolocationService.java
+index 97ff3a8..34e7ac3 100644
+--- a/node_modules/@capgo/background-geolocation/android/src/main/java/com/capgo/capacitor_background_geolocation/BackgroundGeolocationService.java
++++ b/node_modules/@capgo/background-geolocation/android/src/main/java/com/capgo/capacitor_background_geolocation/BackgroundGeolocationService.java
+@@ -1,6 +1,8 @@
+ package com.capgo.capacitor_background_geolocation;
+ 
+ import android.app.Notification;
++import android.app.NotificationChannel;
++import android.app.NotificationManager;
+ import android.app.PendingIntent;
+ import android.app.Service;
+ import android.content.Context;
+@@ -55,6 +57,92 @@ public class BackgroundGeolocationService extends Service {
+         return binder;
+     }
+ 
++    // FIX ANR Android 14/15 + MIUI/HyperOS:
++    // startForegroundService() arma un plazo del sistema (~10 s) que EXIGE que el
++    // servicio llame startForeground() cuanto antes, en el hilo principal. El diseño
++    // original del plugin difería startForeground() detrás de un bindService()
++    // asíncrono; con el hilo principal ocupado (el WebView cargando el JS remoto) la
++    // llamada llegaba tarde -> ANR "did not then call Service.startForeground()".
++    // Aquí cumplimos el contrato DE INMEDIATO. LocalBinder.start() vuelve a llamar
++    // startForeground() con el título/mensaje reales (startForeground es idempotente).
++    @Override
++    public int onStartCommand(Intent intent, int flags, int startId) {
++        try {
++            ensureNotificationChannel();
++            Notification notification = createBackgroundNotification("Ubicación activa", "Rastreo en segundo plano");
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
++            } else {
++                startForeground(NOTIFICATION_ID, notification);
++            }
++        } catch (Exception exception) {
++            Logger.error("onStartCommand: no se pudo iniciar el servicio en primer plano", exception);
++        }
++        return START_NOT_STICKY;
++    }
++
++    // Crea el canal de notificación si aún no existe (necesario para startForeground
++    // en onStartCommand, que puede ejecutarse antes de que el plugin cree el canal).
++    private void ensureNotificationChannel() {
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
++            NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
++            if (manager == null) {
++                return;
++            }
++            String channelId = BackgroundGeolocationService.class.getPackage().getName();
++            if (manager.getNotificationChannel(channelId) == null) {
++                NotificationChannel channel = new NotificationChannel(
++                    channelId,
++                    getAppString("capacitor_background_geolocation_notification_channel_name", "Background Tracking", getApplicationContext()),
++                    NotificationManager.IMPORTANCE_DEFAULT
++                );
++                channel.enableLights(false);
++                channel.enableVibration(false);
++                channel.setSound(null, null);
++                manager.createNotificationChannel(channel);
++            }
++        }
++    }
++
++    // Pide actualizaciones de ubicación de los proveedores disponibles. En celulares con
++    // chip GPS, FUSED/GPS dan la mejor precisión; en tablets WiFi-only SIN chip GPS
++    // (p.ej. Redmi Pad SE) FUSED/NETWORK entregan posición por red/WiFi. El proveedor
++    // que el dispositivo tenga entrega; el resto se ignora sin romper nada. El plugin
++    // original sólo escuchaba GPS_PROVIDER, por eso daba 0 fixes en equipos sin GPS.
++    private void requestLocationUpdatesMultiProvider(float distanceFilter) {
++        if (client == null || locationCallback == null) {
++            return;
++        }
++        java.util.List<String> providers = new java.util.ArrayList<>();
++        if (Build.VERSION.SDK_INT >= 31) {
++            // FUSED_PROVIDER (API 31+) fusiona GPS + red + WiFi.
++            providers.add(LocationManager.FUSED_PROVIDER);
++        }
++        providers.add(LocationManager.GPS_PROVIDER);
++        providers.add(LocationManager.NETWORK_PROVIDER);
++
++        boolean requested = false;
++        for (String provider : providers) {
++            try {
++                if (client.isProviderEnabled(provider)) {
++                    client.requestLocationUpdates(provider, 1000, distanceFilter, locationCallback);
++                    requested = true;
++                    // En API 31+ basta FUSED; evita duplicar fixes pidiendo a varios.
++                    if (Build.VERSION.SDK_INT >= 31 && LocationManager.FUSED_PROVIDER.equals(provider)) {
++                        return;
++                    }
++                }
++            } catch (SecurityException ignore) {
++                // Permisos: se gestionan en el lado JS antes de start().
++            } catch (IllegalArgumentException ignore) {
++                // El proveedor no existe en este dispositivo.
++            }
++        }
++        if (!requested) {
++            Logger.info("No hay proveedor de ubicación habilitado (GPS/NETWORK/FUSED)");
++        }
++    }
++
+     // Some devices allow a foreground service to outlive the application's main
+     // activity, leading to nasty crashes as reported in issue #59. If we learn
+     // that the application has been killed, all watchers are stopped and the
+@@ -139,11 +227,7 @@ public class BackgroundGeolocationService extends Service {
+             if (client == null || locationCallback == null) {
+                 return;
+             }
+-            try {
+-                client.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, currentDistanceFilter, locationCallback);
+-            } catch (SecurityException ignore) {
+-                // Permission issues are handled in the start() method
+-            }
++            requestLocationUpdatesMultiProvider(currentDistanceFilter);
+             startWatchdog();
+         };
+         watchdogHandler.postDelayed(restartRunnable, 10000);
+@@ -213,13 +297,8 @@ public class BackgroundGeolocationService extends Service {
+ 
+             locationCallback = createLocationListener(BackgroundGeolocationService.this);
+ 
+-            try {
+-                client.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, distanceFilter, locationCallback);
+-            } catch (SecurityException ignore) {
+-                // According to Android Studio, this method can throw a Security Exception if
+-                // permissions are not yet granted. Rather than check the permissions, which is fiddly,
+-                // we simply ignore the exception.
+-            }
++            // Escuchar TODOS los proveedores disponibles (FUSED/GPS/NETWORK), no sólo GPS.
++            requestLocationUpdatesMultiProvider(distanceFilter);
+ 
+             // Promote the service to the foreground if necessary.
+             // Ideally we would only call 'startForeground' if the service is not already

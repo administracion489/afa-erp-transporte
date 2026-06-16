@@ -181,10 +181,9 @@ export async function observarUbicacionBackground(
 ): Promise<GeoWatch> {
   if (esNativo()) {
     try {
-      // Verificar que el permiso de ubicación ya fue concedido ANTES de iniciar el
-      // foreground service. En Android 15 / MIUI, llamar startForegroundService() sin
-      // permiso previo hace que el servicio no pueda llamar startForeground() a tiempo
-      // → ANR. Si no hay permiso, caemos al GPS de primer plano sin crashear.
+      // Verificar que el permiso de ubicación ya esté concedido antes de iniciar el
+      // servicio de segundo plano. Si aún no lo está, usamos primer plano (que además
+      // dispara el diálogo de permiso) y el siguiente arranque ya iniciará el plugin.
       const Geolocation = await plugin();
       const perm = await conTimeout(Geolocation.checkPermissions(), 3000).catch(() => null);
       const tienePermiso = perm && (perm.location === "granted" || perm.coarseLocation === "granted");
@@ -193,25 +192,20 @@ export async function observarUbicacionBackground(
         return observarUbicacion(onPos, onError);
       }
 
-      // Arrancar GPS en PRIMER PLANO de inmediato para no perder cobertura.
-      // En paralelo esperamos 4 s antes de iniciar el foreground service:
-      // en MIUI / HyperOS Android 15 el sistema suspende servicios que se lanzan
-      // en los primeros segundos (battery optimization). Pasados ~4 s la app está
-      // "activa en pantalla" y MIUI permite startForeground() → sin ANR.
-      // En celulares normales el GPS de fondo arranca a los 4 s; durante ese tiempo
-      // el GPS de primer plano ya entregó posiciones sin ningún hueco.
-      const fgWatch = await observarUbicacion(onPos, onError);
-      await new Promise<void>((r) => setTimeout(r, 4000));
-      fgWatch.clear();
-
+      // El servicio nativo (parcheado en node_modules/@capgo/background-geolocation)
+      // ahora llama startForeground() de INMEDIATO en onStartCommand → ya NO hay ANR
+      // "did not then call Service.startForeground()" y no hace falta ningún delay.
+      // Además escucha FUSED/GPS/NETWORK (no sólo GPS), así que también entrega
+      // posición en tablets WiFi-only sin chip GPS. stale:true devuelve la última
+      // ubicación conocida al instante (primer envío inmediato, verificable en pantalla).
       const { BackgroundGeolocation } = await import("@capgo/background-geolocation");
       await BackgroundGeolocation.start(
         {
           backgroundTitle: "AFA · rastreo activo",
           backgroundMessage: "Enviando tu ubicación durante el viaje",
           requestPermissions: false,
-          stale: false,
-          distanceFilter: 30,
+          stale: true,
+          distanceFilter: 20,
         },
         (location, error) => {
           if (error) { onError?.({ message: error.message || "Error de GPS en segundo plano", code: (error as any).code }); return; }
