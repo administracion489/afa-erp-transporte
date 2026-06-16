@@ -96,17 +96,27 @@ export async function POST(req: NextRequest) {
             ? admin.from("conductores_tercero").select("id,nombre,telefono").eq("id", condTerId).maybeSingle()
             : null;
 
-        // Buscar GPS del vehículo propio para posición en vivo
-        const fetchGPS = vId
-          ? admin.from("ubicaciones_gps").select("*").eq("vehiculo_id", vId).order("created_at", { ascending: false }).limit(1)
-          : null;
+        // Buscar GPS por reserva_id (no ambiguo): funciona igual para flota propia
+        // y tercerizada, y tolera puntos viejos (id de tercero en vehiculo_id) y
+        // nuevos (en vehiculo_tercero_id). Fallback a vehiculo_id propio si no hay reserva.
+        const fetchGPS = rId
+          ? admin.from("ubicaciones_gps").select("*").eq("reserva_id", rId).order("created_at", { ascending: false }).limit(1)
+          : vId
+            ? admin.from("ubicaciones_gps").select("*").eq("vehiculo_id", vId).order("created_at", { ascending: false }).limit(1)
+            : null;
 
         const [vR, cR, uR] = await Promise.all([fetchVehiculo, fetchConductor, fetchGPS]);
         vehiculo   = vR?.data   ?? null;
         conductor  = cR?.data   ?? null;
         busPosicion = uR?.data?.[0] ?? null;
 
-        // Si el GPS activo tiene un conductor diferente al asignado, prevalece el de reserva
+        // Si no hubo conductor por reserva, resolver desde el punto GPS activo.
+        // Priorizar conductor_tercero_id (→ conductores_tercero) sobre conductor_id (→ conductores),
+        // ya que los IDs se solapan entre ambas tablas.
+        if (!conductor && busPosicion?.conductor_tercero_id) {
+          const { data: cond } = await admin.from("conductores_tercero").select("id,nombre,telefono").eq("id", busPosicion.conductor_tercero_id).maybeSingle();
+          conductor = cond ?? null;
+        }
         if (!conductor && busPosicion?.conductor_id) {
           const { data: cond } = await admin.from("conductores").select("id,nombre,telefono").eq("id", busPosicion.conductor_id).maybeSingle();
           conductor = cond ?? null;
@@ -117,11 +127,18 @@ export async function POST(req: NextRequest) {
 
       // ── Posición del bus en vivo (polling, reemplaza Realtime) ───────────────
       case "bus_posicion": {
-        const { vehiculoId } = body;
-        if (!vehiculoId) return NextResponse.json({ busPosicion: null });
-        const { data, error } = await admin
-          .from("ubicaciones_gps").select("*").eq("vehiculo_id", vehiculoId)
-          .order("created_at", { ascending: false }).limit(1);
+        const { reservaId, vehiculoId, esTercero } = body;
+        // Preferir reserva_id (no ambiguo). Si solo llega vehiculoId, usar el flag
+        // esTercero para elegir vehiculo_tercero_id vs vehiculo_id (los IDs se solapan).
+        let q = admin.from("ubicaciones_gps").select("*");
+        if (reservaId) {
+          q = q.eq("reserva_id", reservaId);
+        } else if (vehiculoId) {
+          q = q.eq(esTercero ? "vehiculo_tercero_id" : "vehiculo_id", vehiculoId);
+        } else {
+          return NextResponse.json({ busPosicion: null });
+        }
+        const { data, error } = await q.order("created_at", { ascending: false }).limit(1);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ busPosicion: data?.[0] ?? null });
       }

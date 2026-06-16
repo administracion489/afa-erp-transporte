@@ -164,6 +164,68 @@ export async function observarUbicacion(
   return { clear: () => limpiar.forEach((f) => f()) };
 }
 
+/**
+ * Observa la ubicación en SEGUNDO PLANO (sigue enviando con Waze encima o pantalla
+ * bloqueada) usando el plugin nativo @capgo/background-geolocation, que levanta un
+ * foreground service con notificación persistente. Si el plugin NO está disponible en
+ * el build nativo actual (p.ej. un APK viejo aún sin recompilar), cae de forma
+ * transparente a observarUbicacion() para NO romper el rastreo en primer plano.
+ */
+let _bgActivo = false;
+/** true sólo si el plugin nativo de background está corriendo (APK recompilado). */
+export function backgroundGpsActivo(): boolean { return _bgActivo; }
+
+export async function observarUbicacionBackground(
+  onPos: (pos: GeoPos) => void,
+  onError?: (err: { code?: number; message: string }) => void,
+): Promise<GeoWatch> {
+  if (esNativo()) {
+    try {
+      const { BackgroundGeolocation } = await import("@capgo/background-geolocation");
+      await BackgroundGeolocation.start(
+        {
+          backgroundTitle: "AFA · rastreo activo",
+          backgroundMessage: "Enviando tu ubicación durante el viaje",
+          requestPermissions: true,
+          stale: false,
+          distanceFilter: 30,
+        },
+        (location, error) => {
+          if (error) { onError?.({ message: error.message || "Error de GPS en segundo plano", code: (error as any).code }); return; }
+          if (!location) return;
+          onPos({
+            coords: {
+              latitude: location.latitude,
+              longitude: location.longitude,
+              accuracy: location.accuracy ?? 0,
+              speed: location.speed ?? null,
+              heading: location.bearing ?? null,
+            },
+            timestamp: location.time ?? undefined,
+          });
+        },
+      );
+      _bgActivo = true;
+      return { clear: () => { _bgActivo = false; void BackgroundGeolocation.stop().catch(() => {}); } };
+    } catch (e: any) {
+      // Plugin nativo ausente en este build → fallback a primer plano (sin romper nada).
+      _bgActivo = false;
+      console.warn("[geo] background-geolocation no disponible, fallback a primer plano:", e?.message);
+      return observarUbicacion(onPos, onError);
+    }
+  }
+  return observarUbicacion(onPos, onError);
+}
+
+/** Abre los ajustes de la app para conceder "Permitir todo el tiempo" (Android 11+). */
+export async function abrirAjustesUbicacion(): Promise<void> {
+  if (!esNativo()) return;
+  try {
+    const { BackgroundGeolocation } = await import("@capgo/background-geolocation");
+    await BackgroundGeolocation.openSettings();
+  } catch { /* noop */ }
+}
+
 /** true si hay alguna forma de geolocalización disponible. */
 export function geoDisponible(): boolean {
   if (esNativo()) return true;

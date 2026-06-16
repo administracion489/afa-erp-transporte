@@ -103,16 +103,26 @@ export async function GET(req: NextRequest) {
   if (ubPorReserva) {
     ultimaUbicacion = ubPorReserva;
   } else {
-    // Fallback: conductor propio puede no tener reserva_id en el registro GPS
-    const vehiculoId = reserva.vehiculo_id ?? reserva.vehiculo_tercero_id;
-    if (vehiculoId) {
-      const { data: ubPorVehiculo } = await supabase
-        .from("ubicaciones_gps")
-        .select("lat, lng, velocidad, rumbo, estado, created_at")
-        .eq("vehiculo_id", vehiculoId)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+    // Fallback: el registro GPS puede no tener reserva_id. Ramificar por columna
+    // correcta — los IDs se solapan entre vehiculos y vehiculos_tercero, así que
+    // un id de tercero NO debe buscarse dentro de la columna vehiculo_id.
+    let query = supabase
+      .from("ubicaciones_gps")
+      .select("lat, lng, velocidad, rumbo, estado, created_at")
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    let aplicaFallback = true;
+    if (reserva.vehiculo_tercero_id) {
+      query = query.eq("vehiculo_tercero_id", reserva.vehiculo_tercero_id);
+    } else if (reserva.vehiculo_id) {
+      query = query.eq("vehiculo_id", reserva.vehiculo_id);
+    } else {
+      aplicaFallback = false;
+    }
+
+    if (aplicaFallback) {
+      const { data: ubPorVehiculo } = await query.maybeSingle();
       ultimaUbicacion = ubPorVehiculo;
     }
   }

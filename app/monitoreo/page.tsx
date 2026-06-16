@@ -9,6 +9,8 @@ mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || '';
 
 type UbicacionGPS = {
   id: number; vehiculo_id: number | null; conductor_id: number | null;
+  conductor_tercero_id: number | null; vehiculo_tercero_id: number | null;
+  reserva_id: number | null;
   lat: number; lng: number; velocidad: number; rumbo: number;
   estado: string; timestamp: string;
 };
@@ -18,6 +20,8 @@ type AlertaSOS = {
 };
 type Vehiculo  = { id: number; placa: string; categoria: string | null; };
 type Conductor = { id: number; nombre: string; telefono: string | null; };
+type VehiculoTercero  = { id: number; placa: string | null; };
+type ConductorTercero = { id: number; nombre: string | null; telefono: string | null; };
 type ReservaHoy = {
   id: number; vehiculo_id: number | null; vehiculo_tercero_id: number | null;
   tipo_servicio_detalle: string | null;
@@ -37,6 +41,18 @@ function estadoLabel(min: number): string {
   return "Sin senal";
 }
 
+// Llave compuesta NO ambigua para asociar puntos GPS a un movil/conductor en vivo.
+// Prioriza reserva_id; luego conductor_tercero_id -> conductor_id -> vehiculo_tercero_id -> vehiculo_id.
+// Importante: los IDs se solapan entre tablas AFA y _tercero, por eso el prefijo distingue el origen.
+function keyGps(u: { reserva_id?: number | null; conductor_tercero_id?: number | null; conductor_id?: number | null; vehiculo_tercero_id?: number | null; vehiculo_id?: number | null; id?: number }): string {
+  if (u.reserva_id != null) return `r${u.reserva_id}`;
+  if (u.conductor_tercero_id != null) return `ct${u.conductor_tercero_id}`;
+  if (u.conductor_id != null) return `c${u.conductor_id}`;
+  if (u.vehiculo_tercero_id != null) return `vt${u.vehiculo_tercero_id}`;
+  if (u.vehiculo_id != null) return `v${u.vehiculo_id}`;
+  return `id${u.id}`;
+}
+
 function esVehiculoEventual(vehiculoId: number, reservasHoy: ReservaHoy[]): boolean | null {
   const res = reservasHoy.find(r => r.vehiculo_id === vehiculoId || r.vehiculo_tercero_id === vehiculoId);
   if (!res) return null;
@@ -51,6 +67,8 @@ export default function MonitoreoPage() {
   const [ubicaciones,  setUbicaciones]  = useState<UbicacionGPS[]>([]);
   const [vehiculos,    setVehiculos]    = useState<Vehiculo[]>([]);
   const [conductores,  setConductores]  = useState<Conductor[]>([]);
+  const [vehiculosTercero,  setVehiculosTercero]  = useState<VehiculoTercero[]>([]);
+  const [conductoresTercero, setConductoresTercero] = useState<ConductorTercero[]>([]);
   const [alertasSOS,   setAlertasSOS]   = useState<AlertaSOS[]>([]);
   const [reservasHoy,  setReservasHoy]  = useState<ReservaHoy[]>([]);
   const [mapListo,     setMapListo]     = useState(false);
@@ -81,11 +99,10 @@ export default function MonitoreoPage() {
       .order("timestamp", { ascending: false })
       .limit(500);
     if (!data) return;
-    // Clave: conductor_id preferido (estable aunque cambie de vehículo), fallback vehiculo_id
+    // Clave compuesta NO ambigua (reserva_id -> ct/c/vt/v). Ver keyGps().
     const latest: Record<string, UbicacionGPS> = {};
     data.forEach(u => {
-      const key = u.conductor_id != null ? `c${u.conductor_id}` : u.vehiculo_id != null ? `v${u.vehiculo_id}` : null;
-      if (!key) return;
+      const key = keyGps(u);
       if (!latest[key] || new Date(u.timestamp) > new Date(latest[key].timestamp)) {
         latest[key] = u;
       }
@@ -96,14 +113,18 @@ export default function MonitoreoPage() {
 
   const cargarDatos = async () => {
     const hoy = new Date().toISOString().split("T")[0];
-    const [vRes, cRes, rRes] = await Promise.all([
+    const [vRes, cRes, rRes, vtRes, ctRes] = await Promise.all([
       supabase.from("vehiculos").select("id,placa,categoria"),
       supabase.from("conductores").select("id,nombre,telefono"),
       supabase.from("reservas").select("id,vehiculo_id,vehiculo_tercero_id,tipo_servicio_detalle").eq("fecha_servicio", hoy).in("estado", ["programada", "confirmada", "en_curso"]),
+      supabase.from("vehiculos_tercero").select("id,placa"),
+      supabase.from("conductores_tercero").select("id,nombre,telefono"),
     ]);
     setVehiculos(vRes.data || []);
     setConductores(cRes.data || []);
     setReservasHoy(rRes.data || []);
+    setVehiculosTercero(vtRes.data || []);
+    setConductoresTercero(ctRes.data || []);
     await actualizarUbicaciones();
   };
 
@@ -128,8 +149,10 @@ export default function MonitoreoPage() {
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "ubicaciones_gps" },
         (payload) => {
           const nueva = payload.new as UbicacionGPS;
+          // Dedup por llave compuesta (NO por vehiculo_id: con null colisiona todo).
+          const keyNueva = keyGps(nueva);
           setUbicaciones(prev => {
-            const sin = prev.filter(u => u.vehiculo_id !== nueva.vehiculo_id);
+            const sin = prev.filter(u => keyGps(u) !== keyNueva);
             return [...sin, nueva];
           });
           setUltimaAct(new Date());
@@ -162,14 +185,21 @@ export default function MonitoreoPage() {
   useEffect(() => {
     if (!mapListo || !map.current) return;
     ubicaciones.forEach(u => {
-      const veh      = vehiculos.find(v => v.id === u.vehiculo_id);
-      const cond     = conductores.find(c => c.id === u.conductor_id);
+      // Resolver placa/nombre/telefono priorizando tablas _tercero cuando el punto es de un tercero.
+      // Los IDs AFA y _tercero se solapan, por eso NO se busca en vehiculos/conductores AFA con un id de tercero.
+      const vehT     = u.vehiculo_tercero_id != null ? vehiculosTercero.find(v => v.id === u.vehiculo_tercero_id) : null;
+      const condT    = u.conductor_tercero_id != null ? conductoresTercero.find(c => c.id === u.conductor_tercero_id) : null;
+      const vehAfa   = u.vehiculo_id != null ? vehiculos.find(v => v.id === u.vehiculo_id) : null;
+      const condAfa  = u.conductor_id != null ? conductores.find(c => c.id === u.conductor_id) : null;
+      const placa    = vehT?.placa || vehAfa?.placa || null;
+      const nombre   = condT?.nombre || condAfa?.nombre || null;
+      const telefono = condT?.telefono || condAfa?.telefono || null;
       const min      = minutosDesde(u.timestamp);
       const color    = estadoColor(min);
       const esSOS    = u.estado === "sos";
-      const sinVeh   = u.vehiculo_id == null;
-      // Clave estable: conductor_id si existe, sino vehiculo_id
-      const key = u.conductor_id != null ? `c${u.conductor_id}` : `v${u.vehiculo_id}`;
+      const sinVeh   = u.vehiculo_id == null && u.vehiculo_tercero_id == null;
+      // Clave compuesta NO ambigua (reserva_id -> ct/c/vt/v). Ver keyGps().
+      const key = keyGps(u);
 
       // Crear elemento del marcador
       const el = document.createElement("div");
@@ -183,8 +213,8 @@ export default function MonitoreoPage() {
       }
 
       const popupHtml = sinVeh
-        ? "<div style='font-family:sans-serif;min-width:160px;padding:4px'><div style='font-weight:900;font-size:14px;color:#0b315f;margin-bottom:4px'>" + (cond?.nombre || "Conductor") + "</div><div style='font-size:11px;color:#9ca3af;margin-bottom:4px'>Sin vehículo asignado</div><div style='font-size:11px;font-weight:700;color:" + color + ";'>" + estadoLabel(min) + "</div>" + (cond?.telefono ? "<a href='tel:" + cond.telefono + "' style='display:block;margin-top:8px;background:#0b315f;color:white;text-align:center;padding:6px;border-radius:8px;font-size:11px;text-decoration:none;'>" + cond.telefono + "</a>" : "") + "</div>"
-        : "<div style='font-family:sans-serif;min-width:180px;padding:4px'><div style='font-weight:900;font-size:14px;color:#0b315f;margin-bottom:4px'>" + (veh?.placa || "#" + u.vehiculo_id) + (esSOS ? " ⚠ SOS" : "") + "</div><div style='font-size:12px;color:#374151;margin-bottom:4px'>" + (cond?.nombre || "-") + "</div><div style='font-size:12px;color:#374151;margin-bottom:4px'>" + (u.velocidad || 0) + " km/h</div><div style='font-size:11px;font-weight:700;color:" + color + ";'>" + estadoLabel(min) + "</div>" + (cond?.telefono ? "<a href='tel:" + cond.telefono + "' style='display:block;margin-top:8px;background:#0b315f;color:white;text-align:center;padding:6px;border-radius:8px;font-size:11px;text-decoration:none;'>" + cond.telefono + "</a>" : "") + "</div>";
+        ? "<div style='font-family:sans-serif;min-width:160px;padding:4px'><div style='font-weight:900;font-size:14px;color:#0b315f;margin-bottom:4px'>" + (nombre || "Conductor") + "</div><div style='font-size:11px;color:#9ca3af;margin-bottom:4px'>Sin vehículo asignado</div><div style='font-size:11px;font-weight:700;color:" + color + ";'>" + estadoLabel(min) + "</div>" + (telefono ? "<a href='tel:" + telefono + "' style='display:block;margin-top:8px;background:#0b315f;color:white;text-align:center;padding:6px;border-radius:8px;font-size:11px;text-decoration:none;'>" + telefono + "</a>" : "") + "</div>"
+        : "<div style='font-family:sans-serif;min-width:180px;padding:4px'><div style='font-weight:900;font-size:14px;color:#0b315f;margin-bottom:4px'>" + (placa || "#" + (u.vehiculo_tercero_id ?? u.vehiculo_id)) + (esSOS ? " ⚠ SOS" : "") + "</div><div style='font-size:12px;color:#374151;margin-bottom:4px'>" + (nombre || "-") + "</div><div style='font-size:12px;color:#374151;margin-bottom:4px'>" + (u.velocidad || 0) + " km/h</div><div style='font-size:11px;font-weight:700;color:" + color + ";'>" + estadoLabel(min) + "</div>" + (telefono ? "<a href='tel:" + telefono + "' style='display:block;margin-top:8px;background:#0b315f;color:white;text-align:center;padding:6px;border-radius:8px;font-size:11px;text-decoration:none;'>" + telefono + "</a>" : "") + "</div>";
 
       if (markers.current[key]) {
         markers.current[key].setLngLat([Number(u.lng), Number(u.lat)]);
@@ -197,7 +227,7 @@ export default function MonitoreoPage() {
         markers.current[key] = marker;
       }
     });
-  }, [ubicaciones, vehiculos, conductores, mapListo]);
+  }, [ubicaciones, vehiculos, conductores, vehiculosTercero, conductoresTercero, mapListo]);
 
   useEffect(() => {
     if (!mapListo || !map.current) return;
@@ -217,7 +247,7 @@ export default function MonitoreoPage() {
     if (!u || !map.current) return;
     setSelVehiculo(vid);
     map.current.flyTo({ center: [Number(u.lng), Number(u.lat)], zoom: 15, duration: 1200 });
-    const key = u.conductor_id != null ? `c${u.conductor_id}` : `v${vid}`;
+    const key = keyGps(u);
     markers.current[key]?.togglePopup();
   };
 

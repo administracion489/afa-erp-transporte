@@ -179,6 +179,7 @@ export default function ClientePortal() {
   const [ppList,         setPPList]         = useState<Record<number, PasajeroParada[]>>({});
   const [gpsActual,      setGpsActual]      = useState<GPS | null>(null);
   const [vehiculoActivo, setVehiculoActivo] = useState<number | null>(null);
+  const [reservaActivaId, setReservaActivaId] = useState<number | null>(null);
   const [loading,        setLoading]        = useState(false);
   const [reservaSel,     setReservaSel]     = useState<Reserva | null>(null);
   const [conductorInfo,  setConductorInfo]  = useState<ConductorInfo | null>(null);
@@ -247,7 +248,7 @@ export default function ClientePortal() {
   const mapRef          = useRef<mapboxgl.Map | null>(null);
   const markersEnVivo   = useRef<Record<string, mapboxgl.Marker>>({});
   const [vehiculosCliente,  setVehiculosCliente]  = useState<{id:number;placa:string}[]>([]);
-  const [ubicacionesEnVivo, setUbicacionesEnVivo] = useState<{vehiculo_id:number;lat:number;lng:number;velocidad:number;timestamp:string}[]>([]);
+  const [ubicacionesEnVivo, setUbicacionesEnVivo] = useState<{vehiculo_id:number|null;vehiculo_tercero_id?:number|null;reserva_id?:number|null;conductor_id?:number|null;conductor_tercero_id?:number|null;lat:number;lng:number;velocidad:number;timestamp:string}[]>([]);
   const [mapListoEnVivo,    setMapListoEnVivo]    = useState(false);
   const [rutaSelId,         setRutaSelId]         = useState<number | null>(null);
   const [rutasEnVivoMap,    setRutasEnVivoMap]    = useState<Record<number, [number,number][]>>({});
@@ -358,10 +359,20 @@ export default function ClientePortal() {
     setReservas(rList);
     const hoy = getHoyPeru();
     const activo = rList.find(r => r.fecha_servicio?.startsWith(hoy) && !["cancelado","cancelada"].includes(r.estado));
-    if (activo?.vehiculo_id) {
-      setVehiculoActivo(activo.vehiculo_id);
-      supabase.from("ubicaciones_gps").select("*").eq("vehiculo_id", activo.vehiculo_id).order("timestamp", { ascending: false }).limit(1)
-        .then(({ data: gps }) => { if (gps?.[0]) setGpsActual(gps[0]); });
+    setReservaActivaId(activo?.id ?? null);
+    if (activo) {
+      const av = activo as any;
+      if (av.vehiculo_id) setVehiculoActivo(av.vehiculo_id);
+      // GPS del servicio activo. reserva_id es la llave NO ambigua (terceros y AFA
+      // solapan ids de vehiculo). Para reservas de tercero usar reserva_id o
+      // vehiculo_tercero_id; las propias siguen por vehiculo_id.
+      const qGps = supabase.from("ubicaciones_gps").select("*").order("timestamp", { ascending: false }).limit(1);
+      const gpsFiltrado = av.vehiculo_tercero_id
+        ? qGps.eq("reserva_id", activo.id)
+        : av.vehiculo_id
+          ? qGps.eq("vehiculo_id", av.vehiculo_id)
+          : qGps.eq("reserva_id", activo.id);
+      gpsFiltrado.then(({ data: gps }) => { if (gps?.[0]) setGpsActual(gps[0]); });
     }
     if (activo?.conductor_id) {
       supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", activo.conductor_id).maybeSingle()
@@ -554,23 +565,45 @@ export default function ClientePortal() {
 
   // ─── Vehículos del cliente para mapa En vivo ──────────────────────────────
   const cargarVehiculosCliente = useCallback(async (cid: number) => {
+    // Reservas del cliente: vehículos propios (vehiculo_id) y de tercero (vehiculo_tercero_id).
+    // Los ids se solapan entre tablas, por eso se consultan/dedupean por separado.
     const { data: resData } = await supabase.from("reservas")
-      .select("vehiculo_id").eq("cliente_id", cid).not("vehiculo_id", "is", null);
-    const vIds = [...new Set((resData || []).map((r: any) => r.vehiculo_id).filter(Boolean))] as number[];
-    if (vIds.length === 0) { setVehiculosCliente([]); setUbicacionesEnVivo([]); return; }
+      .select("vehiculo_id,vehiculo_tercero_id").eq("cliente_id", cid);
+    const vIds  = [...new Set((resData || []).map((r: any) => r.vehiculo_id).filter(Boolean))] as number[];
+    const vtIds = [...new Set((resData || []).map((r: any) => r.vehiculo_tercero_id).filter(Boolean))] as number[];
+    if (vIds.length === 0 && vtIds.length === 0) { setVehiculosCliente([]); setUbicacionesEnVivo([]); return; }
 
-    const { data: vData } = await supabase.from("vehiculos").select("id,placa").in("id", vIds);
+    const { data: vData } = vIds.length
+      ? await supabase.from("vehiculos").select("id,placa").in("id", vIds)
+      : { data: [] };
     setVehiculosCliente((vData || []) as {id:number;placa:string}[]);
 
-    const { data: gpsData } = await supabase.from("ubicaciones_gps")
-      .select("vehiculo_id,lat,lng,velocidad,timestamp")
-      .in("vehiculo_id", vIds)
-      .order("timestamp", { ascending: false })
-      .limit(vIds.length * 20);
-    const latest: Record<number, any> = {};
-    (gpsData || []).forEach((g: any) => {
-      if (!latest[g.vehiculo_id] || new Date(g.timestamp) > new Date(latest[g.vehiculo_id].timestamp)) {
-        latest[g.vehiculo_id] = g;
+    // GPS: propios por vehiculo_id, terceros por vehiculo_tercero_id. Se unen y
+    // dedupean con una KEY COMPUESTA (vt{id} prioriza sobre v{id}) para evitar
+    // que un tercero y un vehículo propio con el mismo id se pisen.
+    const totalIds = vIds.length + vtIds.length;
+    const [gpsProp, gpsTerc] = await Promise.all([
+      vIds.length
+        ? supabase.from("ubicaciones_gps").select("reserva_id,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,lat,lng,velocidad,timestamp")
+            .in("vehiculo_id", vIds).order("timestamp", { ascending: false }).limit(totalIds * 20)
+        : Promise.resolve({ data: [] }),
+      vtIds.length
+        ? supabase.from("ubicaciones_gps").select("reserva_id,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,lat,lng,velocidad,timestamp")
+            .in("vehiculo_tercero_id", vtIds).order("timestamp", { ascending: false }).limit(totalIds * 20)
+        : Promise.resolve({ data: [] }),
+    ]);
+    const gpsData = [ ...((gpsProp as any).data || []), ...((gpsTerc as any).data || []) ];
+    const keyDe = (g: any) =>
+      g.conductor_tercero_id != null ? `ct${g.conductor_tercero_id}`
+      : g.conductor_id != null        ? `c${g.conductor_id}`
+      : g.vehiculo_tercero_id != null ? `vt${g.vehiculo_tercero_id}`
+      : g.vehiculo_id != null         ? `v${g.vehiculo_id}`
+      : g.reserva_id != null          ? `r${g.reserva_id}` : "?";
+    const latest: Record<string, any> = {};
+    gpsData.forEach((g: any) => {
+      const k = keyDe(g);
+      if (!latest[k] || new Date(g.timestamp) > new Date(latest[k].timestamp)) {
+        latest[k] = g;
       }
     });
     setUbicacionesEnVivo(Object.values(latest));
@@ -625,14 +658,21 @@ export default function ClientePortal() {
   }, [cliente, cargarDatos]);
 
   // ─── Realtime GPS ─────────────────────────────────────────────────────────
+  // postgres_changes NO soporta OR de columnas. Para servicios de tercero el GPS
+  // puede llegar con vehiculo_id null (y vehiculo_tercero_id seteado) o con el id
+  // de tercero dentro de vehiculo_id (puntos viejos): por eso suscribimos por
+  // reserva_id (llave no ambigua) cuando hay reserva activa, y por vehiculo_id
+  // como fallback para los servicios propios sin reserva conocida.
   useEffect(() => {
-    if (!vehiculoActivo) return;
-    const ch = supabase.channel(`cliente-gps-${vehiculoActivo}`)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "ubicaciones_gps", filter: `vehiculo_id=eq.${vehiculoActivo}` },
+    if (!reservaActivaId && !vehiculoActivo) return;
+    const usarReserva = reservaActivaId != null;
+    const filter = usarReserva ? `reserva_id=eq.${reservaActivaId}` : `vehiculo_id=eq.${vehiculoActivo}`;
+    const ch = supabase.channel(`cliente-gps-${usarReserva ? `r${reservaActivaId}` : `v${vehiculoActivo}`}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "ubicaciones_gps", filter },
         (payload: any) => setGpsActual(payload.new as GPS))
       .subscribe();
     return () => { supabase.removeChannel(ch); };
-  }, [vehiculoActivo]);
+  }, [reservaActivaId, vehiculoActivo]);
 
   // ─── Realtime reservas (cambios de estado en tiempo real) ─────────────────
   useEffect(() => {
@@ -645,6 +685,8 @@ export default function ClientePortal() {
           // Si el servicio activo ahora tiene conductor/vehículo, cargarlos
           const hoy = getHoyPeru();
           if (updated.fecha_servicio?.startsWith(hoy) && !["cancelado","cancelada"].includes(updated.estado)) {
+            // reserva_id es la llave no ambigua para el GPS en vivo (también terceros)
+            setReservaActivaId(updated.id);
             if (updated.conductor_id) {
               supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", updated.conductor_id).maybeSingle()
                 .then(({ data }) => { if (data) setConductorInfo(data as ConductorInfo); });
@@ -707,9 +749,17 @@ export default function ClientePortal() {
     Object.values(markersEnVivo.current).forEach(m => m.remove());
     markersEnVivo.current = {};
     ubicacionesEnVivo.forEach(u => {
-      const key = `v${u.vehiculo_id}`;
-      const v = vehiculosCliente.find(x => x.id === u.vehiculo_id);
-      const placa = v?.placa || `V${u.vehiculo_id}`;
+      // Key compuesta: prioriza conductor/vehículo de tercero sobre los propios.
+      // Evita colisiones cuando vehiculo_id es null (puntos de tercero) o cuando
+      // ids de tercero y propios se solapan.
+      const key =
+        (u as any).conductor_tercero_id != null ? `ct${(u as any).conductor_tercero_id}`
+        : u.conductor_id != null                ? `c${u.conductor_id}`
+        : u.vehiculo_tercero_id != null         ? `vt${u.vehiculo_tercero_id}`
+        : u.vehiculo_id != null                 ? `v${u.vehiculo_id}`
+        : `r${u.reserva_id}`;
+      const v = u.vehiculo_id != null ? vehiculosCliente.find(x => x.id === u.vehiculo_id) : undefined;
+      const placa = v?.placa || (u.vehiculo_tercero_id != null ? "Vehículo (tercero)" : `V${u.vehiculo_id ?? ""}`);
       const min = Math.floor((Date.now() - new Date(u.timestamp).getTime()) / 60000);
       const color = min <= 2 ? "#16a34a" : min <= 10 ? "#d97706" : "#dc2626";
       const label = min <= 2 ? "En línea" : min <= 10 ? `Hace ${min}m` : "Sin señal";

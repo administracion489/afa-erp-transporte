@@ -16,17 +16,18 @@ export async function POST(req: NextRequest) {
 
   const { data: reserva } = await supabase
     .from("reservas")
-    .select("id, vehiculo_id, vehiculo_tercero_id, conductor_id, token_expira_at")
+    .select("id, vehiculo_id, vehiculo_tercero_id, conductor_id, conductor_tercero_id, token_expira_at")
     .eq("token_conductor_tercero", token)
     .single();
 
   if (!reserva) return NextResponse.json({ error: "Token inválido" }, { status: 404 });
 
-  const vehiculoId = reserva.vehiculo_tercero_id ?? reserva.vehiculo_id;
-  if (lat != null && lng != null && vehiculoId) {
+  if (lat != null && lng != null) {
     await supabase.from("ubicaciones_gps").insert({
-      vehiculo_id: vehiculoId,
-      conductor_id: reserva.conductor_id,
+      vehiculo_id:          reserva.vehiculo_tercero_id != null ? null : (reserva.vehiculo_id ?? null),
+      vehiculo_tercero_id:  reserva.vehiculo_tercero_id ?? null,
+      conductor_id:         reserva.conductor_tercero_id != null ? null : (reserva.conductor_id ?? null),
+      conductor_tercero_id: reserva.conductor_tercero_id ?? null,
       reserva_id: reserva.id,
       lat, lng, velocidad: 0, rumbo: 0, precision_m: 0,
       estado: "finalizado",

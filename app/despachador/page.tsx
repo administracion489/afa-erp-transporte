@@ -29,8 +29,23 @@ type VehiculoTercero = {
 };
 type UbicGPS = {
   vehiculo_id: number | null; conductor_id: number | null;
+  vehiculo_tercero_id: number | null; conductor_tercero_id: number | null;
   lat: number; lng: number; velocidad: number; estado: string; timestamp: string;
 };
+
+// KEY COMPUESTA no ambigua para un punto GPS.
+// Prioriza ids de tercero (ct/vt) sobre propios (c/v) para no colisionar:
+// los ids se solapan entre tablas propias y de tercero.
+function keyGps(u: {
+  conductor_tercero_id?: number | null; conductor_id?: number | null;
+  vehiculo_tercero_id?: number | null;  vehiculo_id?: number | null;
+}): string | null {
+  if (u.conductor_tercero_id != null) return `ct${u.conductor_tercero_id}`;
+  if (u.conductor_id != null)         return `c${u.conductor_id}`;
+  if (u.vehiculo_tercero_id != null)  return `vt${u.vehiculo_tercero_id}`;
+  if (u.vehiculo_id != null)          return `v${u.vehiculo_id}`;
+  return null;
+}
 type ServicioDesp = {
   id: number; origen: string | null; destino: string | null;
   hora_servicio: string | null; estado: string;
@@ -179,6 +194,7 @@ export default function DespachadorPage() {
   const [conductores,     setConductores]     = useState<Conductor[]>([]);
   const [vehiculos,       setVehiculos]       = useState<Vehiculo[]>([]);
   const [vehiculosTercero, setVehiculosTercero] = useState<VehiculoTercero[]>([]);
+  const [conductoresTercero, setConductoresTercero] = useState<Conductor[]>([]);
   const [serviciosHoy,    setServiciosHoy]    = useState<ServicioDesp[]>([]);
   const [ubicaciones,     setUbicaciones]     = useState<UbicGPS[]>([]);
 
@@ -224,14 +240,21 @@ export default function DespachadorPage() {
     if (!mapListo || !map.current) return;
 
     ubicaciones.forEach((u: UbicGPS) => {
-      const veh    = vehiculos.find(v => v.id === u.vehiculo_id);
-      const cond   = conductores.find(c => c.id === u.conductor_id);
+      // Resolver contra la tabla correcta: si el punto trae ids _tercero,
+      // buscar en vehiculosTercero/conductoresTercero (ids se solapan con propios).
+      const veh    = u.vehiculo_tercero_id != null
+        ? vehiculosTercero.find(v => v.id === u.vehiculo_tercero_id)
+        : vehiculos.find(v => v.id === u.vehiculo_id);
+      const cond   = u.conductor_tercero_id != null
+        ? conductoresTercero.find(c => c.id === u.conductor_tercero_id)
+        : conductores.find(c => c.id === u.conductor_id && c._tipo === "propio");
       const mins   = minDesde(u.timestamp);
       const activo = mins <= 10;
       const color  = activo ? "#0b315f" : "#9ca3af";
-      const sinVeh = u.vehiculo_id == null;
-      // Clave estable por conductor_id, sino vehiculo_id
-      const key = u.conductor_id != null ? `c${u.conductor_id}` : `v${u.vehiculo_id}`;
+      const sinVeh = u.vehiculo_id == null && u.vehiculo_tercero_id == null;
+      // Clave estable: KEY COMPUESTA no ambigua (ct/c/vt/v)
+      const key = keyGps(u);
+      if (!key) return;
 
       // Si ya existe el marcador, solo actualizamos posición
       if (markers.current[key]) {
@@ -269,7 +292,7 @@ export default function DespachadorPage() {
             <p style="font-size:11px;color:#9ca3af;margin:0">${mins <= 0 ? "Ahora" : `Hace ${mins}m`}</p>
           </div>`
         : `<div style="font-family:sans-serif;padding:4px 2px">
-            <p style="font-weight:800;margin:0 0 3px;font-size:13px">${veh?.placa || "#" + u.vehiculo_id}</p>
+            <p style="font-weight:800;margin:0 0 3px;font-size:13px">${veh?.placa || "#" + (u.vehiculo_tercero_id ?? u.vehiculo_id)}</p>
             <p style="font-size:12px;color:#4b5563;margin:0 0 2px">${cond?.nombre || "Sin conductor"}</p>
             <p style="font-size:11px;color:#9ca3af;margin:0">${Number(u.velocidad).toFixed(0)} km/h · ${mins <= 0 ? "Ahora" : `Hace ${mins}m`}</p>
           </div>`;
@@ -281,21 +304,22 @@ export default function DespachadorPage() {
         .setPopup(popup)
         .addTo(map.current!);
     });
-  }, [mapListo, ubicaciones, conductores, vehiculos]);
+  }, [mapListo, ubicaciones, conductores, vehiculos, conductoresTercero, vehiculosTercero]);
 
   // ─── Carga de datos ────────────────────────────────────────────────────────
 
   const actualizarGPS = useCallback(async () => {
     const { data } = await supabase
       .from("ubicaciones_gps")
-      .select("vehiculo_id,conductor_id,lat,lng,velocidad,estado,timestamp")
+      .select("vehiculo_id,conductor_id,vehiculo_tercero_id,conductor_tercero_id,lat,lng,velocidad,estado,timestamp")
       .order("timestamp", { ascending: false })
       .limit(400);
     if (!data) return;
-    // Clave por conductor_id (estable aunque cambie vehículo), fallback vehiculo_id
+    // Dedup por KEY COMPUESTA (ct/c/vt/v): los ids se solapan entre tablas
+    // propias y de tercero, así que conductor_id/vehiculo_id solos son ambiguos.
     const latest: Record<string, UbicGPS> = {};
     data.forEach((u: UbicGPS) => {
-      const key = u.conductor_id != null ? `c${u.conductor_id}` : u.vehiculo_id != null ? `v${u.vehiculo_id}` : null;
+      const key = keyGps(u);
       if (!key) return;
       if (!latest[key] || new Date(u.timestamp) > new Date(latest[key].timestamp))
         latest[key] = u;
@@ -319,14 +343,16 @@ export default function DespachadorPage() {
     ]);
 
     // Combinar flota propia + tercerizados, marcando origen
+    const condTer: Conductor[] = (condTerR.data || []).map((c: any) => ({ ...c, _tipo: "tercero" as const }));
     const cs: Conductor[] = [
       ...(condR.data || []).map((c: any) => ({ ...c, _tipo: "propio"   as const })),
-      ...(condTerR.data || []).map((c: any) => ({ ...c, _tipo: "tercero" as const })),
+      ...condTer,
     ].sort((a, b) => a.nombre.localeCompare(b.nombre));
     const vs: Vehiculo[]         = vR.data    || [];
     const vts: VehiculoTercero[] = vTerR.data || [];
     const cls: Cliente[]         = clR.data   || [];
     setConductores(cs);
+    setConductoresTercero(condTer);
     setVehiculos(vs);
     setVehiculosTercero(vts);
     setClientes(cls);

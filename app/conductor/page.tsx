@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
 import { supabase } from "@/lib/supabase";
-import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, geoDisponible, type GeoPos, type GeoWatch } from "@/lib/geo";
+import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, esAppNativa, backgroundGpsActivo, geoDisponible, type GeoPos, type GeoWatch } from "@/lib/geo";
 import {
   CondorMark,
   IconActivity, IconAlert, IconArrowLeft, IconArrowRight, IconBell, IconBus,
@@ -94,10 +94,34 @@ function diasPara(f: string | null) {
 // Llama al endpoint con service_role del conductor (saltea RLS — el conductor es
 // anónimo porque usa PIN, no sesión Supabase). Lanza Error con el mensaje del server.
 async function condApi(accion: string, params: Record<string, any> = {}) {
+  const bodyObj = { accion, ...params };
+  // HTTP nativo (CapacitorHttp) SOLO para los envíos de GPS y SOLO cuando el plugin
+  // de background está activo (APK recompilado): NO se throttlea en segundo plano
+  // como el fetch del WebView. En todo lo demás y en APK viejos → fetch (probado).
+  if (accion === "ubicacion" && esAppNativa() && backgroundGpsActivo()) {
+    try {
+      const { CapacitorHttp } = await import("@capacitor/core");
+      if ((CapacitorHttp as any)?.post) {
+        const base = typeof window !== "undefined" ? window.location.origin : "";
+        const resp: any = await CapacitorHttp.post({
+          url: `${base}/api/conductor`,
+          headers: { "Content-Type": "application/json" },
+          data: bodyObj,
+        });
+        const parsed = typeof resp?.data === "string"
+          ? (() => { try { return JSON.parse(resp.data); } catch { return {}; } })()
+          : (resp?.data ?? {});
+        if (resp.status < 200 || resp.status >= 300) throw new Error(parsed.error || `HTTP ${resp.status}`);
+        return parsed;
+      }
+    } catch {
+      // CapacitorHttp falló/ausente → cae a fetch (el punto no llegó al server, reintento seguro).
+    }
+  }
   const res = await fetch("/api/conductor", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ accion, ...params }),
+    body: JSON.stringify(bodyObj),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(json.error || "Error de red");
@@ -207,6 +231,22 @@ function loadServicio(): ServicioGuardado | null {
 }
 function clearServicio() { localStorage.removeItem(SK_SRV); }
 
+// ─── COLA OFFLINE DE GPS (no perder puntos cuando se cae la señal) ─────────────
+const SK_COLA = "afa_gps_cola_v1";
+type PuntoGps = Record<string, any> & { _qid: string };
+function leerCola(): PuntoGps[] {
+  try { const raw = localStorage.getItem(SK_COLA); return raw ? (JSON.parse(raw) as PuntoGps[]) : []; }
+  catch { return []; }
+}
+function guardarCola(arr: PuntoGps[]) {
+  try { localStorage.setItem(SK_COLA, JSON.stringify(arr.slice(-300))); } catch {}
+}
+function encolar(p: PuntoGps) { const c = leerCola(); c.push(p); guardarCola(c); }
+function nuevoQid(): string {
+  try { return crypto.randomUUID(); }
+  catch { return `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
+}
+
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 export default function ConductorApp() {
@@ -244,6 +284,8 @@ export default function ConductorApp() {
   const [totalEnvios,  setTotalEnvios]  = useState(0);
   const [ultimoEnvio,  setUltimoEnvio]  = useState<Date | null>(null);
   const [gpsError,     setGpsError]     = useState<string | null>(null);
+  const [envioError,   setEnvioError]   = useState<string | null>(null);
+  const [pendientes,   setPendientes]   = useState(0);
   const [iniciando,          setIniciando]          = useState(false);
   const [inicioViaje,        setInicioViaje]        = useState<Date | null>(null);
   const [restaurandoServicio,setRestaurandoServicio] = useState(false);
@@ -251,6 +293,12 @@ export default function ConductorApp() {
   const watchIdRef       = useRef<GeoWatch | null>(null);
   const intervalRef      = useRef<NodeJS.Timeout | null>(null);
   const posRef           = useRef<GeoPos | null>(null);
+  // Cola/reintentos de envío GPS
+  const drenandoRef      = useRef(false);
+  const reintentoRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const intentosRef      = useRef(0);
+  const lastSentRef      = useRef(0);
+  const drenarColaRef    = useRef<() => void>(() => {});
   // Refs estables para GPS (evitan closures obsoletos en setInterval)
   const vehiculoIdRef    = useRef<number | null>(null);
   const conductorRef     = useRef<Conductor | null>(null);
@@ -308,6 +356,7 @@ export default function ConductorApp() {
 
   // ── Sub-vistas nuevas ──────────────────────────────────────────────────────
   const [showManifiesto, setShowManifiesto] = useState(false);
+  const [mostrarDivulgacion, setMostrarDivulgacion] = useState(false);
   const [showFinViaje,   setShowFinViaje]   = useState(false);
   const [showFinOverlay, setShowFinOverlay] = useState(false);
   const [datosFinViaje,  setDatosFinViaje]  = useState<{
@@ -499,33 +548,76 @@ export default function ConductorApp() {
 
   // ─── GPS + TRACKING ──────────────────────────────────────────────────────────
 
-  // Usa refs → nunca tiene closures obsoletos aunque el intervalo se cree antes del render
-  const enviarUbicacion = useCallback(async (pos: GeoPos, estado = "") => {
+  // Drena la cola de puntos GPS hacia el backend en lotes. Guard SÍNCRONO (useRef)
+  // para evitar carreras si online/visibilitychange/fix disparan a la vez.
+  const drenarCola = useCallback(async () => {
+    if (drenandoRef.current) return;
+    drenandoRef.current = true;
+    try {
+      while (true) {
+        const cola = leerCola();
+        if (cola.length === 0) break;
+        const lote = cola.slice(0, 50);
+        const payload = lote.map(({ _qid, ...rest }) => rest);
+        await condApi("ubicacion", { payload });
+        const enviados = new Set(lote.map(p => p._qid));
+        const restante = leerCola().filter(p => !enviados.has(p._qid)); // la cola pudo crecer
+        guardarCola(restante);
+        setTotalEnvios(p => p + lote.length);
+        setUltimoEnvio(new Date());
+        setEnvioError(null);
+        setPendientes(restante.length);
+        intentosRef.current = 0;
+      }
+    } catch (e: any) {
+      setEnvioError(e?.message || "Sin conexión");
+      setPendientes(leerCola().length);
+      const delay = Math.min(30000, 1000 * 2 ** intentosRef.current);
+      intentosRef.current = Math.min(intentosRef.current + 1, 6);
+      if (reintentoRef.current) clearTimeout(reintentoRef.current);
+      reintentoRef.current = setTimeout(() => { drenarColaRef.current(); }, delay);
+    } finally {
+      drenandoRef.current = false;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  drenarColaRef.current = drenarCola;
+
+  // Construye el punto, lo ENCOLA (sobrevive a un cierre del proceso) y dispara el
+  // drenado. Usa refs → sin closures obsoletos. El payload se resuelve AQUÍ, así el
+  // tramo final conserva reserva/vehículo aunque finalizar ya haya limpiado las refs.
+  const enviarUbicacion = useCallback((pos: GeoPos, estado = "") => {
     const vid  = vehiculoIdRef.current;
     const cond = conductorRef.current;
     const res  = reservaActivaRef.current;
     if (!cond) return;                        // sólo necesitamos el conductor
+    const vel = pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0;
+    setVelocidad(vel);
+    // Throttle: máx. 1 punto cada 10 s, salvo el envío de cierre ("finalizado").
+    const ahora = Date.now();
+    if (estado !== "finalizado" && ahora - lastSentRef.current < 10000) return;
+    lastSentRef.current = ahora;
     const estadoFinal = estado || (vid ? "en_ruta" : "disponible");
-    const payload = {
-      vehiculo_id:  vid || null,              // null hasta que seleccione vehículo
-      conductor_id: cond.id,
-      reserva_id:   res?.id || null,
+    // Rutear por TABLA (no por id: los ids de AFA y tercero se solapan). El tercero
+    // va en columnas _tercero; deja vehiculo_id/conductor_id en null, y viceversa.
+    const esTercero = cond._tabla === "conductores_tercero";
+    encolar({
+      _qid:                 nuevoQid(),
+      vehiculo_id:          esTercero ? null : (vid || null),  // null hasta que seleccione vehículo
+      vehiculo_tercero_id:  esTercero ? (vid || null) : null,
+      conductor_id:         esTercero ? null : cond.id,
+      conductor_tercero_id: esTercero ? cond.id : null,
+      reserva_id:           res?.id || null,
       lat:          pos.coords.latitude,
       lng:          pos.coords.longitude,
-      velocidad:    pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0,
+      velocidad:    vel,
       rumbo:        pos.coords.heading || 0,
       precision_m:  pos.coords.accuracy,
       estado:       estadoFinal,
       created_at:   new Date().toISOString(),
-    };
-    try {
-      await condApi("ubicacion", { payload });
-      setUltimoEnvio(new Date());
-      setTotalEnvios(p => p + 1);
-    } catch (e: any) {
-      console.error("[GPS] Error al enviar ubicación:", e?.message);
-    }
-    setVelocidad(pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0);
+    });
+    setPendientes(leerCola().length);
+    drenarColaRef.current();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -540,50 +632,90 @@ export default function ConductorApp() {
     if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
     if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
 
-    const arrancarWatch = async (alta: boolean) => {
-      if (cancelado) return;
-      if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
-      try {
-        const w = await observarUbicacion(
-          (pos) => {
-            const primera = !recibioPos;
-            recibioPos = true;
-            posRef.current = pos; setPosActual(pos); setGpsError(null);
-            if (primera) enviarUbicacion(pos); // primer envío inmediato
-          },
-          (e) => { if (!recibioPos) setGpsError(e.message); },
-          { enableHighAccuracy: alta, maximumAge: alta ? 5000 : 20000, timeout: alta ? 12000 : 25000 }
-        );
-        if (cancelado) { w.clear(); return; }
-        watchIdRef.current = w;
-      } catch { /* el otro proveedor o el fallback cubren */ }
-    };
-
-    (async () => {
-      // Arrancar el watch de INMEDIATO. El permiso nativo ya se concede al arranque
-      // (v15) y navigator.geolocation usa el proveedor del sistema (como Google Maps).
-      // NO bloquear esperando al plugin: en algunos aparatos checkPermissions() se cuelga.
-      await arrancarWatch(true);
-      // Si en 15 s no hubo fix (p.ej. sin GPS satelital), caer a ubicación por RED.
-      fallbackTimer = setTimeout(() => {
-        if (!recibioPos && !cancelado) arrancarWatch(false);
-      }, 15000);
-      // En paralelo (sin bloquear), confirmar el permiso; si está denegado, avisar.
+    if (esAppNativa()) {
+      // App nativa: rastreo en SEGUNDO PLANO (sigue con Waze encima o pantalla
+      // bloqueada). Si el plugin no está en este build, cae a primer plano solo.
+      observarUbicacionBackground(
+        (pos) => { recibioPos = true; posRef.current = pos; setPosActual(pos); setGpsError(null); enviarUbicacion(pos); },
+        (e) => { if (!recibioPos) setGpsError(e.message); },
+      )
+        .then((w) => { if (cancelado) w.clear(); else watchIdRef.current = w; })
+        .catch(() => {});
       pedirPermisoUbicacion()
         .then((p) => { if (p === "denied" && !recibioPos) setGpsError("Permiso de ubicación denegado"); })
         .catch(() => {});
-    })();
+      // Sin setInterval en nativo: el plugin entrega updates y el SO regula la
+      // frecuencia; el interval no corre con el WebView suspendido en background.
+    } else {
+      const arrancarWatch = async (alta: boolean) => {
+        if (cancelado) return;
+        if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
+        try {
+          const w = await observarUbicacion(
+            (pos) => {
+              const primera = !recibioPos;
+              recibioPos = true;
+              posRef.current = pos; setPosActual(pos); setGpsError(null);
+              if (primera) enviarUbicacion(pos); // primer envío inmediato
+            },
+            (e) => { if (!recibioPos) setGpsError(e.message); },
+            { enableHighAccuracy: alta, maximumAge: alta ? 5000 : 20000, timeout: alta ? 12000 : 25000 }
+          );
+          if (cancelado) { w.clear(); return; }
+          watchIdRef.current = w;
+        } catch { /* el otro proveedor o el fallback cubren */ }
+      };
 
-    // Enviar ubicación cada 15 s (sin vehículo → 🧑 persona; con vehículo → 🚌 bus)
-    intervalRef.current = setInterval(() => {
-      if (posRef.current) enviarUbicacion(posRef.current);
-    }, 15000);
+      (async () => {
+        await arrancarWatch(true);
+        // Si en 15 s no hubo fix (p.ej. sin GPS satelital), caer a ubicación por RED.
+        fallbackTimer = setTimeout(() => {
+          if (!recibioPos && !cancelado) arrancarWatch(false);
+        }, 15000);
+        pedirPermisoUbicacion()
+          .then((p) => { if (p === "denied" && !recibioPos) setGpsError("Permiso de ubicación denegado"); })
+          .catch(() => {});
+      })();
+
+      // Enviar ubicación cada 15 s (sin vehículo → 🧑 persona; con vehículo → 🚌 bus)
+      intervalRef.current = setInterval(() => {
+        if (posRef.current) enviarUbicacion(posRef.current);
+      }, 15000);
+    }
+
+    // Drenar lo que haya quedado en cola de una sesión previa.
+    drenarColaRef.current();
+    setPendientes(leerCola().length);
+
     return () => {
       cancelado = true;
       if (fallbackTimer) clearTimeout(fallbackTimer);
       if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
       if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+      if (reintentoRef.current) { clearTimeout(reintentoRef.current); reintentoRef.current = null; }
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conductor?.id]);
+
+  // Drenar la cola cuando vuelve la conexión o el app vuelve a primer plano (de Waze).
+  useEffect(() => {
+    if (!conductor) return;
+    const drenar = () => drenarColaRef.current();
+    const onVis = () => { if (typeof document !== "undefined" && document.visibilityState === "visible") drenar(); };
+    window.addEventListener("online", drenar);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("online", drenar);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conductor?.id]);
+
+  // Divulgación destacada de ubicación en segundo plano (requisito de Google Play):
+  // se muestra UNA vez, antes de que el plugin pida el permiso de background.
+  useEffect(() => {
+    if (!conductor || !esAppNativa()) return;
+    try { if (!localStorage.getItem("afa_bg_disclosure_v1")) setMostrarDivulgacion(true); } catch {}
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conductor?.id]);
 
@@ -1363,6 +1495,11 @@ export default function ConductorApp() {
                 GPS: ⚠ {gpsError}
               </p>
             )}
+            {envioError && (
+              <p style={{ margin: "2px 0 0", fontSize: 9, fontWeight: 800, color: "var(--c-danger)", fontFamily: FONT_MONO, maxWidth: 220, wordBreak: "break-word" }}>
+                Envío ⚠ {envioError}{pendientes > 0 ? ` · ${pendientes} en cola` : ""}
+              </p>
+            )}
           </div>
         </div>
 
@@ -1465,6 +1602,22 @@ export default function ConductorApp() {
                   Activar
                 </button>
               </div>
+            )}
+
+            {/* En la app nativa: atajo a Ajustes para conceder "Permitir todo el tiempo"
+                (requisito de Android 11+ para rastrear con Waze/pantalla bloqueada). */}
+            {esAppNativa() && (
+              <button
+                onClick={() => abrirAjustesUbicacion()}
+                style={{
+                  width: "100%", marginBottom: 14, padding: "9px 14px",
+                  background: "transparent", border: "1px dashed var(--c-line)",
+                  borderRadius: 12, color: "var(--c-mute)", fontWeight: 700, fontSize: 12,
+                  cursor: "pointer", fontFamily: FONT_SANS,
+                }}
+              >
+                ¿No rastrea con la pantalla bloqueada? Permitir ubicación “Todo el tiempo”
+              </button>
             )}
 
             {/* Hero card — próximo viaje (si no está en ruta) */}
@@ -1846,6 +1999,7 @@ export default function ConductorApp() {
                     { lbl: "Envíos GPS",   val: String(totalEnvios), mono: true, color: "var(--c-success)" },
                     { lbl: "Último envío", val: ultimoEnvio?.toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" }) || "—", mono: true },
                     { lbl: "Precisión",    val: posActual ? `±${Math.round(posActual.coords.accuracy)}` : "—", suf: "m", mono: true },
+                    { lbl: "En cola",      val: String(pendientes), mono: true, color: pendientes > 0 ? "var(--c-danger)" : "var(--c-mute)" },
                   ].map(s => (
                     <div key={s.lbl} style={{ background: "var(--c-soft)", borderRadius: 12, padding: "10px 12px" }}>
                       <p style={{ margin: 0, fontSize: 10, fontWeight: 700, letterSpacing: 1.2, textTransform: "uppercase", color: "var(--c-mute)" }}>
@@ -2063,44 +2217,29 @@ export default function ConductorApp() {
 
                             {pp.length > 0 && (
                               <div style={{
-                                background: "var(--c-surface)", borderRadius: 12,
-                                border: "1px solid var(--c-line-2)", padding: 10, marginBottom: 12,
+                                display: "flex", alignItems: "center", gap: 6,
+                                marginBottom: 12, flexWrap: "wrap",
                               }}>
-                                <Eyebrow style={{ marginBottom: 8 }}>Esperan en esta parada</Eyebrow>
-                                {pp.map(x => {
-                                  const onBoard = x.estado === "embarcado";
-                                  return (
-                                    <div key={x.id} style={{
-                                      display: "flex", alignItems: "center", gap: 10,
-                                      padding: "8px 0",
-                                      borderBottom: "1px solid var(--c-line-2)",
-                                    }}>
-                                      <div style={{
-                                        width: 32, height: 32, borderRadius: 10,
-                                        background: onBoard ? "var(--c-success-tint)" : "var(--c-soft)",
-                                        color: onBoard ? "var(--c-success)" : "var(--c-mute)",
-                                        display: "flex", alignItems: "center", justifyContent: "center",
-                                        fontFamily: FONT_SANS, fontWeight: 800, fontSize: 12,
-                                        flexShrink: 0,
-                                      }}>
-                                        {x.pasajero?.nombre ? ini(x.pasajero.nombre) : "?"}
-                                      </div>
-                                      <div style={{ flex: 1, minWidth: 0 }}>
-                                        <p style={{ margin: 0, fontSize: 13, fontWeight: 700, letterSpacing: -0.1 }}>
-                                          {x.pasajero?.nombre || `Pasajero #${x.pasajero_id}`}
-                                        </p>
-                                        {x.pasajero?.dni && (
-                                          <p style={{ margin: "2px 0 0", fontFamily: FONT_MONO, fontSize: 10, color: "var(--c-mute)", fontWeight: 600 }}>
-                                            DNI {x.pasajero.dni}
-                                          </p>
-                                        )}
-                                      </div>
-                                      {onBoard
-                                        ? <Chip color="var(--c-success)" bg="var(--c-success-tint)" sw>A bordo</Chip>
-                                        : <Chip color="var(--c-warn)" bg="var(--c-warn-tint)" sw>Esperando</Chip>}
-                                    </div>
-                                  );
-                                })}
+                                <Chip color="var(--c-success)" bg="var(--c-success-tint)" sw>
+                                  {emb} A bordo
+                                </Chip>
+                                <Chip color="var(--c-warn)" bg="var(--c-warn-tint)" sw>
+                                  {pp.filter(x => x.estado === "esperando").length} Esperando
+                                </Chip>
+                                <Chip color="var(--c-mute)" bg="var(--c-soft)" sw>
+                                  {pp.filter(x => x.estado === "no_show").length} No show
+                                </Chip>
+                                <button
+                                  onClick={() => setShowManifiesto(true)}
+                                  style={{
+                                    marginLeft: "auto", background: "none", border: "none",
+                                    color: "var(--c-navy)", fontSize: 12, fontWeight: 700,
+                                    cursor: "pointer", padding: "4px 0",
+                                    fontFamily: FONT_SANS, textDecoration: "underline",
+                                  }}
+                                >
+                                  Ver lista →
+                                </button>
                               </div>
                             )}
 
@@ -2713,6 +2852,43 @@ export default function ConductorApp() {
       </main>
 
       <TabBar tabs={TABS} active={tab} onChange={setTab} />
+
+      {/* Divulgación destacada de ubicación en segundo plano (Google Play) */}
+      {mostrarDivulgacion && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 130, background: "rgba(11,49,95,0.6)",
+          display: "flex", alignItems: "flex-end", justifyContent: "center", padding: 16,
+        }}>
+          <div style={{
+            background: "var(--c-surface)", borderRadius: 20, padding: 22,
+            maxWidth: 420, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.35)",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+              <IconPin size={22} color="var(--c-navy)" />
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, letterSpacing: -0.4 }}>Uso de tu ubicación</h2>
+            </div>
+            <p style={{ margin: "0 0 10px", fontSize: 14, lineHeight: 1.5, color: "var(--c-ink)" }}>
+              AFA Conductores recopila tu ubicación <strong>en segundo plano</strong>, incluso cuando la app
+              está cerrada o no la estás usando, para el <strong>seguimiento del viaje en tiempo real</strong>:
+              central despacha y los pasajeros ven el ETA del bus.
+            </p>
+            <p style={{ margin: "0 0 16px", fontSize: 13, lineHeight: 1.5, color: "var(--c-mute)" }}>
+              Solo se comparte mientras hay un servicio activo, con una notificación visible. Para que funcione
+              con la pantalla bloqueada, concede “Permitir todo el tiempo”.
+            </p>
+            <button
+              onClick={() => { try { localStorage.setItem("afa_bg_disclosure_v1", "1"); } catch {} setMostrarDivulgacion(false); }}
+              style={{
+                width: "100%", padding: "13px 0", borderRadius: 14, border: "none",
+                background: "var(--c-navy)", color: "#fff", fontWeight: 800, fontSize: 15,
+                cursor: "pointer", fontFamily: FONT_SANS,
+              }}
+            >
+              Entendido, continuar
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ═══════════════════════════════════════════════════════════════════ */}
       {/* MANIFIESTO SUB-VISTA                                                */}

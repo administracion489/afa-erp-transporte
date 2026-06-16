@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
   // Solo columnas que existen en la tabla reservas
   const { data: reserva, error: errR } = await supabase
     .from("reservas")
-    .select("id, estado, token_expira_at, vehiculo_id, vehiculo_tercero_id, conductor_id")
+    .select("id, estado, token_expira_at, vehiculo_id, vehiculo_tercero_id, conductor_id, conductor_tercero_id")
     .eq("token_conductor_tercero", token)
     .single();
 
@@ -41,8 +41,11 @@ export async function POST(req: NextRequest) {
   const vehiculoId = reserva.vehiculo_tercero_id ?? reserva.vehiculo_id ?? null;
   if (lat && lng) {
     const { error: gpsErr } = await supabase.from("ubicaciones_gps").insert({
-      vehiculo_id: vehiculoId,
-      conductor_id: reserva.conductor_id ?? null,
+      // Rutear a las columnas correctas: terceros NO van en vehiculo_id/conductor_id.
+      vehiculo_id:          reserva.vehiculo_tercero_id != null ? null : (reserva.vehiculo_id ?? null),
+      vehiculo_tercero_id:  reserva.vehiculo_tercero_id ?? null,
+      conductor_id:         reserva.conductor_tercero_id != null ? null : (reserva.conductor_id ?? null),
+      conductor_tercero_id: reserva.conductor_tercero_id ?? null,
       reserva_id: reserva.id,
       lat, lng, velocidad: 0, rumbo: 0, precision_m: 0,
       estado: "en_ruta",

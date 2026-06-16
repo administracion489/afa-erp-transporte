@@ -43,6 +43,10 @@
          y para que el plugin @capacitor/geolocation muestre el diálogo nativo. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Rastreo en segundo plano (Waze/pantalla bloqueada). FOREGROUND_SERVICE,
+         FOREGROUND_SERVICE_LOCATION y el <service> los aporta el merge del plugin
+         @capgo/background-geolocation; aquí solo va el permiso de background. -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
     <!-- Notificaciones (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

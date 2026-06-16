@@ -68,13 +68,24 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ pasajero: data ?? null });
       }
 
-      // ── Enviar ubicación GPS ─────────────────────────────────────────────────
+      // ── Enviar ubicación GPS (acepta 1 punto o un lote para drenar la cola) ───
       case "ubicacion": {
         const { payload } = body;
-        if (!payload?.conductor_id) return NextResponse.json({ error: "payload inválido" }, { status: 400 });
-        const { error } = await admin.from("ubicaciones_gps").insert(payload);
+        const COLS = [
+          "conductor_id", "vehiculo_id", "conductor_tercero_id", "vehiculo_tercero_id",
+          "reserva_id", "lat", "lng", "velocidad", "rumbo", "precision_m", "estado", "created_at",
+        ];
+        const sanitizar = (p: any) => {
+          const o: Record<string, any> = {};
+          for (const k of COLS) if (p?.[k] !== undefined) o[k] = p[k];
+          return o;
+        };
+        const filasRaw = Array.isArray(payload) ? payload : [payload];
+        const filas = filasRaw.filter((p) => p && p.lat != null && p.lng != null).map(sanitizar);
+        if (filas.length === 0) return NextResponse.json({ error: "payload inválido" }, { status: 400 });
+        const { error } = await admin.from("ubicaciones_gps").insert(filas);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-        return NextResponse.json({ ok: true });
+        return NextResponse.json({ ok: true, insertados: filas.length });
       }
 
       // ── Marcar parada completada ─────────────────────────────────────────────
