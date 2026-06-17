@@ -248,7 +248,10 @@ export default function ClientePortal() {
   const mapRef          = useRef<mapboxgl.Map | null>(null);
   const markersEnVivo   = useRef<Record<string, mapboxgl.Marker>>({});
   const [vehiculosCliente,  setVehiculosCliente]  = useState<{id:number;placa:string}[]>([]);
-  const [ubicacionesEnVivo, setUbicacionesEnVivo] = useState<{vehiculo_id:number|null;vehiculo_tercero_id?:number|null;reserva_id?:number|null;conductor_id?:number|null;conductor_tercero_id?:number|null;lat:number;lng:number;velocidad:number;timestamp:string}[]>([]);
+  // Placas de vehículos de tercero: se muestran igual que las propias para que el
+  // cliente NUNCA distinga un servicio tercerizado de uno propio.
+  const [vehiculosTerceroCliente, setVehiculosTerceroCliente] = useState<{id:number;placa:string}[]>([]);
+  const [ubicacionesEnVivo, setUbicacionesEnVivo] = useState<{vehiculo_id:number|null;vehiculo_tercero_id?:number|null;reserva_id?:number|null;conductor_id?:number|null;conductor_tercero_id?:number|null;lat:number;lng:number;velocidad:number;rumbo?:number|null;timestamp:string}[]>([]);
   const [mapListoEnVivo,    setMapListoEnVivo]    = useState(false);
   const [rutaSelId,         setRutaSelId]         = useState<number | null>(null);
   const [rutasEnVivoMap,    setRutasEnVivoMap]    = useState<Record<number, [number,number][]>>({});
@@ -262,15 +265,23 @@ export default function ClientePortal() {
   const dibujoLayersRef  = useRef<string[]>([]);
   const dibujoSourcesRef = useRef<string[]>([]);
   const stopMarkersRef   = useRef<mapboxgl.Marker[]>([]);
-  const lastFitRef       = useRef<number | null>(null);
-  const serviciosHoyRef  = useRef<Reserva[]>([]);
+  const lastFitRef           = useRef<number | null>(null);
+  const serviciosHoyRef      = useRef<Reserva[]>([]);
+  const autocentradoRef      = useRef(false);
+  const ubicacionesEnVivoRef = useRef<typeof ubicacionesEnVivo>([]);
 
   // ─── Init ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     supabase.from("empresa_perfil").select("nombre,logo_url,color_primario,telefono,email,slogan").eq("id", 1).maybeSingle()
       .then(({ data }) => { if (data) setEmpresa(data as EmpresaPerfil); });
     const saved = loadSession();
-    if (saved) { setCliente(saved.c); setPortalUsuario(saved.u); cargarDatos(saved.c.id); }
+    if (saved) {
+      setCliente(saved.c); setPortalUsuario(saved.u);
+      cargarDatos(saved.c.id);
+      // Precarga GPS en vivo desde el montaje (no solo al abrir la pestaña En vivo),
+      // para que tras un F5 los buses ya estén listos al entrar a la sección.
+      cargarVehiculosCliente(saved.c.id);
+    }
     setIniting(false);
   }, []);
 
@@ -297,7 +308,7 @@ export default function ClientePortal() {
       const tempUser: PortalUsuario = { id: 0, cliente_id: (clienteData as any).id, nombre: (clienteData as any).nombre, dni: dniInput.trim(), cargo: null, rol: "admin", email: (clienteData as any).email, codigo_acceso: "", activo: true, created_at: "" };
       saveSession(clienteData as Cliente, tempUser);
       setCliente(clienteData as Cliente); setPortalUsuario(tempUser);
-      await cargarDatos((clienteData as any).id); setLoginLoad(false); return;
+      await cargarDatos((clienteData as any).id); cargarVehiculosCliente((clienteData as any).id); setLoginLoad(false); return;
     }
     const usuario = usuarios.find(u => u.dni === dniInput.trim());
     if (!usuario) { setLoginErr(`${tipoIdInput === "Celular" ? "Celular" : tipoIdInput} no registrado para este cliente.`); setLoginLoad(false); return; }
@@ -306,7 +317,7 @@ export default function ClientePortal() {
     }
     saveSession(clienteData as Cliente, usuario);
     setCliente(clienteData as Cliente); setPortalUsuario(usuario);
-    await cargarDatos((clienteData as any).id); setLoginLoad(false);
+    await cargarDatos((clienteData as any).id); cargarVehiculosCliente((clienteData as any).id); setLoginLoad(false);
   }
 
   // ─── Reset de contraseña — paso 1: solicitar código ──────────────────────
@@ -356,23 +367,21 @@ export default function ClientePortal() {
     setLoading(true);
     const { data: res } = await supabase.from("reservas").select("*").eq("cliente_id", cid).order("fecha_servicio", { ascending: false });
     const rList = (res || []) as Reserva[];
-    setReservas(rList);
+    // No borrar reservas existentes si la consulta devuelve vacío (falla transitoria).
+    setReservas(prev => rList.length > 0 ? rList : prev.length > 0 ? prev : rList);
     const hoy = getHoyPeru();
     const activo = rList.find(r => r.fecha_servicio?.startsWith(hoy) && !["cancelado","cancelada"].includes(r.estado));
     setReservaActivaId(activo?.id ?? null);
     if (activo) {
       const av = activo as any;
       if (av.vehiculo_id) setVehiculoActivo(av.vehiculo_id);
-      // GPS del servicio activo. reserva_id es la llave NO ambigua (terceros y AFA
-      // solapan ids de vehiculo). Para reservas de tercero usar reserva_id o
-      // vehiculo_tercero_id; las propias siguen por vehiculo_id.
-      const qGps = supabase.from("ubicaciones_gps").select("*").order("timestamp", { ascending: false }).limit(1);
-      const gpsFiltrado = av.vehiculo_tercero_id
-        ? qGps.eq("reserva_id", activo.id)
-        : av.vehiculo_id
-          ? qGps.eq("vehiculo_id", av.vehiculo_id)
-          : qGps.eq("reserva_id", activo.id);
-      gpsFiltrado.then(({ data: gps }) => { if (gps?.[0]) setGpsActual(gps[0]); });
+      // GPS del servicio activo vía endpoint service_role (sin RLS). Los puntos de
+      // tercero llegan con reserva_id null y solo vehiculo_tercero_id, por eso la
+      // consulta directa por reserva_id fallaba. El endpoint resuelve la cascada.
+      fetch("/api/cliente/gps", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reservaId: activo.id, vehiculoId: av.vehiculo_id ?? null, vehiculoTerceroId: av.vehiculo_tercero_id ?? null }),
+      }).then(r => r.json()).then(j => { if (j?.ubicacion) setGpsActual(j.ubicacion as GPS); }).catch(() => {});
     }
     if (activo?.conductor_id) {
       supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", activo.conductor_id).maybeSingle()
@@ -567,46 +576,61 @@ export default function ClientePortal() {
   const cargarVehiculosCliente = useCallback(async (cid: number) => {
     // Reservas del cliente: vehículos propios (vehiculo_id) y de tercero (vehiculo_tercero_id).
     // Los ids se solapan entre tablas, por eso se consultan/dedupean por separado.
-    const { data: resData } = await supabase.from("reservas")
+    const { data: resData, error: resErr } = await supabase.from("reservas")
       .select("vehiculo_id,vehiculo_tercero_id").eq("cliente_id", cid);
-    const vIds  = [...new Set((resData || []).map((r: any) => r.vehiculo_id).filter(Boolean))] as number[];
-    const vtIds = [...new Set((resData || []).map((r: any) => r.vehiculo_tercero_id).filter(Boolean))] as number[];
-    if (vIds.length === 0 && vtIds.length === 0) { setVehiculosCliente([]); setUbicacionesEnVivo([]); return; }
+    // Si la consulta falla o devuelve vacío, conserva el estado actual (falla transitoria).
+    if (resErr || !resData || resData.length === 0) return;
+    const vIds  = [...new Set(resData.map((r: any) => r.vehiculo_id).filter(Boolean))] as number[];
+    const vtIds = [...new Set(resData.map((r: any) => r.vehiculo_tercero_id).filter(Boolean))] as number[];
+    if (vIds.length === 0 && vtIds.length === 0) return;
 
-    const { data: vData } = vIds.length
-      ? await supabase.from("vehiculos").select("id,placa").in("id", vIds)
-      : { data: [] };
-    setVehiculosCliente((vData || []) as {id:number;placa:string}[]);
-
-    // GPS: propios por vehiculo_id, terceros por vehiculo_tercero_id. Se unen y
-    // dedupean con una KEY COMPUESTA (vt{id} prioriza sobre v{id}) para evitar
-    // que un tercero y un vehículo propio con el mismo id se pisen.
-    const totalIds = vIds.length + vtIds.length;
-    const [gpsProp, gpsTerc] = await Promise.all([
+    // Vehículos y GPS en paralelo: así todos los setState se ejecutan en el mismo
+    // render de React 18 y el efecto de marcadores nunca ve un estado intermedio
+    // donde los vehículos ya llegaron pero el GPS aún no (flash "0 buses").
+    const [{ data: vData }, { data: vtData }, gpsJson] = await Promise.all([
       vIds.length
-        ? supabase.from("ubicaciones_gps").select("reserva_id,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,lat,lng,velocidad,timestamp")
-            .in("vehiculo_id", vIds).order("timestamp", { ascending: false }).limit(totalIds * 20)
+        ? supabase.from("vehiculos").select("id,placa").in("id", vIds)
         : Promise.resolve({ data: [] }),
       vtIds.length
-        ? supabase.from("ubicaciones_gps").select("reserva_id,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,lat,lng,velocidad,timestamp")
-            .in("vehiculo_tercero_id", vtIds).order("timestamp", { ascending: false }).limit(totalIds * 20)
+        ? supabase.from("vehiculos_tercero").select("id,placa").in("id", vtIds)
         : Promise.resolve({ data: [] }),
+      fetch("/api/cliente/gps", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vehiculoIds: vIds, vehiculoTerceroIds: vtIds }),
+      }).then(r => r.json()).catch(() => ({})),
     ]);
-    const gpsData = [ ...((gpsProp as any).data || []), ...((gpsTerc as any).data || []) ];
+    setVehiculosCliente((vData || []) as {id:number;placa:string}[]);
+    setVehiculosTerceroCliente((vtData || []) as {id:number;placa:string}[]);
+
+    const gpsLista = Array.isArray((gpsJson as any)?.ubicaciones) ? (gpsJson as any).ubicaciones : [];
     const keyDe = (g: any) =>
       g.conductor_tercero_id != null ? `ct${g.conductor_tercero_id}`
       : g.conductor_id != null        ? `c${g.conductor_id}`
       : g.vehiculo_tercero_id != null ? `vt${g.vehiculo_tercero_id}`
       : g.vehiculo_id != null         ? `v${g.vehiculo_id}`
       : g.reserva_id != null          ? `r${g.reserva_id}` : "?";
-    const latest: Record<string, any> = {};
-    gpsData.forEach((g: any) => {
-      const k = keyDe(g);
-      if (!latest[k] || new Date(g.timestamp) > new Date(latest[k].timestamp)) {
-        latest[k] = g;
-      }
+    // tiempo del punto: created_at o timestamp (lo más reciente de ambos)
+    const tMs = (g: any) => Math.max(
+      g?.created_at ? new Date(g.created_at).getTime() : 0,
+      g?.timestamp  ? new Date(g.timestamp).getTime()  : 0,
+    );
+    // STICKY (igual que /seguimiento): conserva la última posición conocida de cada
+    // vehículo. Un refresco que devuelve vacío o que omite un vehículo NUNCA borra
+    // su marcador — solo se actualiza cuando llega un punto más reciente. Esto evita
+    // que el bus "desaparezca" tras un F5 o un fetch transitorio vacío. Se descartan
+    // puntos con más de 6 h de antigüedad para no arrastrar buses de servicios viejos.
+    const MAX_EDAD_MS = 6 * 60 * 60 * 1000;
+    setUbicacionesEnVivo(prev => {
+      const merged: Record<string, any> = {};
+      (prev as any[]).forEach(p => { merged[keyDe(p)] = p; });
+      gpsLista.forEach((g: any) => {
+        const k = keyDe(g);
+        if (!merged[k] || tMs(g) >= tMs(merged[k])) merged[k] = g;
+      });
+      const ahora = Date.now();
+      return Object.values(merged).filter((g: any) => ahora - tMs(g) <= MAX_EDAD_MS);
     });
-    setUbicacionesEnVivo(Object.values(latest));
   }, []);
 
   // ─── Cargar colabs cuando se abre la sección de usuarios ──────────────────
@@ -725,6 +749,7 @@ export default function ClientePortal() {
       dibujoLayersRef.current = [];
       dibujoSourcesRef.current = [];
       lastFitRef.current = null;
+      autocentradoRef.current = false;
       setMapListoEnVivo(false);
       return;
     }
@@ -758,24 +783,94 @@ export default function ClientePortal() {
         : u.vehiculo_tercero_id != null         ? `vt${u.vehiculo_tercero_id}`
         : u.vehiculo_id != null                 ? `v${u.vehiculo_id}`
         : `r${u.reserva_id}`;
-      const v = u.vehiculo_id != null ? vehiculosCliente.find(x => x.id === u.vehiculo_id) : undefined;
-      const placa = v?.placa || (u.vehiculo_tercero_id != null ? "Vehículo (tercero)" : `V${u.vehiculo_id ?? ""}`);
+      // Placa: propia o de tercero (indistinguibles para el cliente). Nunca se
+      // muestra "(tercero)" ni nada que delate un servicio tercerizado.
+      const v = u.vehiculo_id != null
+        ? vehiculosCliente.find(x => x.id === u.vehiculo_id)
+        : u.vehiculo_tercero_id != null
+          ? vehiculosTerceroCliente.find(x => x.id === u.vehiculo_tercero_id)
+          : undefined;
+      const placa = v?.placa || "Vehículo en ruta";
       const min = Math.floor((Date.now() - new Date(u.timestamp).getTime()) / 60000);
       const color = min <= 2 ? "#16a34a" : min <= 10 ? "#d97706" : "#dc2626";
       const label = min <= 2 ? "En línea" : min <= 10 ? `Hace ${min}m` : "Sin señal";
+
+      // CSS de los anillos de pulso (igual que la página de seguimiento), una sola vez.
+      if (!document.getElementById("afa-bus-css")) {
+        const s = document.createElement("style");
+        s.id = "afa-bus-css";
+        s.textContent = `
+          @keyframes afaBusPulse {
+            0%   { transform:scale(1);   opacity:.5; }
+            65%  { transform:scale(2.6); opacity:0;  }
+            100% { transform:scale(2.6); opacity:0;  }
+          }
+          @keyframes afaBusPulse2 {
+            0%   { transform:scale(1);   opacity:.3; }
+            65%  { transform:scale(2.6); opacity:0;  }
+            100% { transform:scale(2.6); opacity:0;  }
+          }
+          .afa-pulse1 { position:absolute; border-radius:50%;
+            animation:afaBusPulse  2s ease-out infinite; pointer-events:none; }
+          .afa-pulse2 { position:absolute; border-radius:50%;
+            animation:afaBusPulse2 2s ease-out .7s infinite; pointer-events:none; }
+        `;
+        document.head.appendChild(s);
+      }
+
+      // Marcador del bus: mismo ícono 3D y anillos de pulso que la vista de
+      // seguimiento. El color de los anillos refleja el estado de la señal GPS.
       const el = document.createElement("div");
-      el.style.cssText = `width:34px;height:34px;border-radius:9px;background:${color};border:2.5px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;cursor:pointer;`;
-      // Ícono de bus
-      el.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M4 16c0 .88.39 1.67 1 2.22V20a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1h8v1a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1.78c.61-.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8 .5-8 4v10zm3.5 1a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm9 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zM6 11V6h12v5H6z"/></svg>`;
+      el.style.cssText = "position:relative;width:74px;height:74px;cursor:pointer;";
+      el.innerHTML = `
+        <div style="position:absolute;top:50%;left:50%;width:42px;height:42px;margin:-21px 0 0 -21px;">
+          <div class="afa-pulse1" style="inset:0;background:${color};"></div>
+          <div class="afa-pulse2" style="inset:0;background:${color};"></div>
+        </div>
+        <img src="/bussinfondo3.png"
+          style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2;width:44px;height:74px;object-fit:contain;filter:drop-shadow(0 5px 14px rgba(6,14,40,.85));"
+          alt="bus"/>
+      `;
       const popup = new mapboxgl.Popup({ offset: 28, closeButton: false }).setHTML(
         `<div style="font-family:system-ui,sans-serif;padding:2px 0"><b style="font-size:13px;color:#0a0e1a">${placa}</b><br><span style="font-size:12px;color:${color};font-weight:600">${label}</span><br><span style="font-size:11px;color:#6b6f7c">${u.velocidad} km/h</span></div>`
       );
-      markersEnVivo.current[key] = new mapboxgl.Marker({ element: el })
+      markersEnVivo.current[key] = new mapboxgl.Marker({
+        element: el,
+        rotation: Number(u.rumbo) || 0,
+        rotationAlignment: "map",
+        anchor: "center",
+      })
         .setLngLat([u.lng, u.lat])
         .setPopup(popup)
         .addTo(mapRef.current!);
     });
-  }, [ubicacionesEnVivo, vehiculosCliente, mapListoEnVivo]);
+    // Mantener ref actualizada para el efecto de chip-click
+    ubicacionesEnVivoRef.current = ubicacionesEnVivo;
+    // Auto-centrar una sola vez al llegar el primer lote de GPS
+    if (!autocentradoRef.current && ubicacionesEnVivo.length > 0 && mapRef.current) {
+      autocentradoRef.current = true;
+      if (ubicacionesEnVivo.length === 1) {
+        mapRef.current.flyTo({ center: [ubicacionesEnVivo[0].lng, ubicacionesEnVivo[0].lat], zoom: 14, duration: 900 });
+      } else {
+        const b = new mapboxgl.LngLatBounds();
+        ubicacionesEnVivo.forEach(u => b.extend([u.lng, u.lat]));
+        try { mapRef.current.fitBounds(b, { padding: 80, maxZoom: 15, duration: 900 }); } catch {}
+      }
+    }
+  }, [ubicacionesEnVivo, vehiculosCliente, vehiculosTerceroCliente, mapListoEnVivo]);
+
+  // ─── En vivo: centrar en el bus del chip seleccionado ────────────────────
+  useEffect(() => {
+    if (!rutaSelId || !mapListoEnVivo || !mapRef.current) return;
+    const sel = serviciosHoyRef.current.find(r => r.id === rutaSelId);
+    if (!sel) return;
+    const gps = ubicacionesEnVivoRef.current.find(u =>
+      (sel.vehiculo_id != null && u.vehiculo_id === sel.vehiculo_id) ||
+      ((sel as any).vehiculo_tercero_id != null && u.vehiculo_tercero_id === (sel as any).vehiculo_tercero_id)
+    );
+    if (!gps) return;
+    mapRef.current.flyTo({ center: [gps.lng, gps.lat], zoom: 14, duration: 900 });
+  }, [rutaSelId, mapListoEnVivo]);
 
   // ─── En vivo: limpiar selección si el servicio elegido ya no existe ───────
   useEffect(() => {
@@ -1121,6 +1216,30 @@ export default function ClientePortal() {
   // Para la card de cabecera: el seleccionado, o el activo/primero por defecto
   const servicioEnVivoActivo = servicioSel ?? servicioActivo;
   const busesEnVivo = ubicacionesEnVivo.length;
+  // Vehículos asignados a los servicios de HOY (propios + terceros, indistinguibles
+  // para el cliente). Se listan TODOS: los que transmiten van "en vivo", el resto
+  // como "esperando señal" (aún no aparecen en el mapa porque no tienen ubicación).
+  const vehiculosHoyEstado = (() => {
+    const out: { key: string; placa: string; live: boolean; minAgo: number | null }[] = [];
+    const visto = new Set<string>();
+    serviciosHoy.forEach(r => {
+      const ra = r as any;
+      const esTer = ra.vehiculo_tercero_id != null;
+      const vKey = esTer ? `vt${ra.vehiculo_tercero_id}` : r.vehiculo_id != null ? `v${r.vehiculo_id}` : null;
+      if (!vKey || visto.has(vKey)) return;
+      visto.add(vKey);
+      const placa = esTer
+        ? (vehiculosTerceroCliente.find(x => x.id === ra.vehiculo_tercero_id)?.placa || "Vehículo")
+        : (vehiculosCliente.find(x => x.id === r.vehiculo_id)?.placa || "Vehículo");
+      const u = ubicacionesEnVivo.find(p =>
+        (esTer && p.vehiculo_tercero_id === ra.vehiculo_tercero_id) ||
+        (!esTer && r.vehiculo_id != null && p.vehiculo_id === r.vehiculo_id));
+      const minAgo = u ? Math.floor((Date.now() - new Date(u.timestamp).getTime()) / 60000) : null;
+      out.push({ key: vKey, placa, live: minAgo != null && minAgo <= 10, minAgo });
+    });
+    return out;
+  })();
+  const vehiculosHoyLive = vehiculosHoyEstado.filter(v => v.live).length;
   const proximosSvcs   = reservas
     .filter(r => esFuturo(r.fecha_servicio) && !esCancelado(r.estado) && !esFinalizado(r.estado))
     .sort((a, b) => {
@@ -1975,6 +2094,7 @@ tbody tr:nth-child(even){background:#f9fafb}
         <ModalGps
           reservaId={gpsModalRes.id}
           vehiculoId={gpsModalRes.vehiculo_id}
+          vehiculoTerceroId={(gpsModalRes as any).vehiculo_tercero_id ?? null}
           vehiculoPlaca={vehiculoInfo?.placa || "–"}
           conductorNombre={conductorInfo?.nombre || "–"}
           conductorTel={conductorInfo?.telefono || ""}
@@ -2631,6 +2751,25 @@ tbody tr:nth-child(even){background:#f9fafb}
                     );
                   })}
                 </div>
+              </div>
+            )}
+
+            {/* Vehículos del día: TODOS los asignados. En vivo (transmitiendo) o esperando señal. */}
+            {vehiculosHoyEstado.length > 0 && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const, alignItems: "center" }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: C.mute }}>
+                  Vehículos de hoy ({vehiculosHoyLive}/{vehiculosHoyEstado.length} en vivo):
+                </span>
+                {vehiculosHoyEstado.map(v => (
+                  <div key={v.key} title={v.live ? "Enviando ubicación" : "Aún no envía ubicación GPS"}
+                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 11px", borderRadius: 8, border: `1px solid ${v.live ? "#bbf7d0" : C.line}`, background: v.live ? "#f0fdf4" : C.surfaceAlt }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: v.live ? C.success : C.mute, flexShrink: 0, ...(v.live ? { animation: "pcPulse 1.6s ease-out infinite" } : {}) }} />
+                    <span style={{ fontFamily: C.fontMono, fontWeight: 800, fontSize: 12, color: C.ink }}>{v.placa}</span>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: v.live ? "#15803d" : C.mute }}>
+                      {v.live ? "En vivo" : "Esperando señal"}
+                    </span>
+                  </div>
+                ))}
               </div>
             )}
 

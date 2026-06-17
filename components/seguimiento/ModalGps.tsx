@@ -32,6 +32,7 @@ type RutaData = {
 
 type Props = {
   reservaId: number; vehiculoId: number | null;
+  vehiculoTerceroId?: number | null;
   vehiculoPlaca: string; conductorNombre: string;
   conductorTel: string; clienteNombre: string;
   paradas: Parada[];
@@ -41,13 +42,27 @@ type Props = {
   onClose: () => void;
 };
 
+// ── Helpers de formato (mismos que la página de seguimiento) ─────────────────
+const fmtHoraLlegada = (min: number) => {
+  const d = new Date(Date.now() + min * 60000);
+  return d.toLocaleTimeString("es-PE", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/Lima" });
+};
+const fmtTiempo = (min: number) => {
+  if (min < 1) return "menos de 1 min";
+  if (min < 60) return `${Math.round(min)} min`;
+  const h = Math.floor(min / 60); const m = Math.round(min % 60);
+  return m === 0 ? `${h}h` : `${h}h ${m}min`;
+};
+const fmtDistancia = (m: number) => (m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(1)} km`);
+
 export default function ModalGps({
-  reservaId, vehiculoId, vehiculoPlaca, conductorNombre,
+  reservaId, vehiculoId, vehiculoTerceroId = null, vehiculoPlaca, conductorNombre,
   conductorTel, clienteNombre, paradas, paradasJson, origen, destino, onClose,
 }: Props) {
   const mapRef    = useRef<HTMLDivElement>(null);
   const mapInst   = useRef<any>(null);
   const markerRef = useRef<any>(null);
+  const ubicRef   = useRef<UbicGps | null>(null);
 
   const [ubic,           setUbic]           = useState<UbicGps | null>(null);
   const [errorMapa,      setErrorMapa]      = useState(false);
@@ -60,6 +75,12 @@ export default function ModalGps({
   const [paradasResueltas,  setParadasResueltas]  = useState<Parada[]>([]);
   const [huella,            setHuella]            = useState<{lat:number;lng:number;velocidad:number}[]>([]);
   const stopMarkersRef = useRef<any[]>([]);
+  // ETA dinámica: posición actual del vehículo → próxima parada (Google Directions)
+  const [etaMin, setEtaMin] = useState<number | null>(null);
+  const [etaKm,  setEtaKm]  = useState<number | null>(null);
+  // Control de cámara: si el usuario arrastra el mapa, dejamos de recentrar al vehículo
+  const [mapDescentrado, setMapDescentrado] = useState(false);
+  const mapDescentradoRef = useRef(false);
 
   // ── Geocodificación auxiliar (server-side vía /api/geocodificar) ─────────
 
@@ -257,21 +278,26 @@ export default function ModalGps({
 
   useEffect(() => {
     let cancel = false;
+    // Estela vía endpoint service_role (sin RLS) — para terceros los puntos no tienen
+    // reserva_id, así que el endpoint cae a vehiculo_tercero_id acotado a las últimas 12 h.
     const cargar = async () => {
-      const { data } = await supabase
-        .from("ubicaciones_gps")
-        .select("lat,lng,velocidad,created_at")
-        .eq("reserva_id", reservaId)
-        .order("created_at", { ascending: true })
-        .limit(5000);
-      if (!cancel && data && data.length > 0) {
-        setHuella(data.map((d: any) => ({ lat: d.lat, lng: d.lng, velocidad: d.velocidad ?? 0 })));
-      }
+      try {
+        const res = await fetch("/api/cliente/gps", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ huella: true, reservaId, vehiculoId, vehiculoTerceroId }),
+        });
+        const json = await res.json();
+        const arr = Array.isArray(json?.huella) ? json.huella : [];
+        if (!cancel && arr.length > 0) {
+          setHuella(arr.map((d: any) => ({ lat: d.lat, lng: d.lng, velocidad: d.velocidad ?? 0 })));
+        }
+      } catch { /* conservar estela previa */ }
     };
     cargar();
     const iv = setInterval(cargar, 15000);
     return () => { cancel = true; clearInterval(iv); };
-  }, [reservaId]); // eslint-disable-line
+  }, [reservaId, vehiculoId, vehiculoTerceroId]); // eslint-disable-line
 
   // ── CAPA 2: Dibujar huella GPS coloreada por velocidad ───────────────────
 
@@ -361,69 +387,126 @@ export default function ModalGps({
 
   // ── GPS: última posición ──────────────────────────────────────────────────
 
+  // Lee la última posición vía endpoint service_role (sin RLS) — igual que /seguimiento.
+  // Así el GPS aparece al instante al abrir el modal, sin esperar el primer realtime.
   const cargarUbicacion = useCallback(async () => {
-    let q = supabase
-      .from("ubicaciones_gps")
-      .select("lat,lng,velocidad,rumbo,precision_m,estado,created_at,timestamp")
-      .order("created_at", { ascending: false })
-      .limit(1);
-    if (reservaId)       q = q.eq("reserva_id",  reservaId);
-    else if (vehiculoId) q = q.eq("vehiculo_id",  vehiculoId);
-
-    const { data } = await q;
-    if (data && data[0]) {
-      const d = data[0] as UbicGps;
-      setUbic(d); setUltimaActualiz(new Date());
-      const fechaRef = d.created_at || d.timestamp;
-      setSinSenal(!fechaRef || (Date.now() - new Date(fechaRef).getTime()) / 1000 > 60);
-    } else if (!ubic) {
-      // Solo marcar sin señal si NO hay datos históricos ni de Realtime
-      setSinSenal(true);
+    try {
+      const res = await fetch("/api/cliente/gps", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reservaId, vehiculoId, vehiculoTerceroId }),
+      });
+      const json = await res.json();
+      const d = (json?.ubicacion ?? null) as UbicGps | null;
+      if (d) {
+        ubicRef.current = d;
+        setUbic(d); setUltimaActualiz(new Date());
+        const fechaRef = d.created_at || d.timestamp;
+        setSinSenal(!fechaRef || (Date.now() - new Date(fechaRef).getTime()) / 1000 > 60);
+      } else if (!ubicRef.current) {
+        // Sin datos y sin nada previo (ni realtime): recién ahí marcamos sin señal.
+        setSinSenal(true);
+      }
+    } catch {
+      // Error de red: conservar lo que ya se mostraba, no marcar sin señal.
     }
-  }, [reservaId, vehiculoId]);
+  }, [reservaId, vehiculoId, vehiculoTerceroId]);
 
-  // Cargar ubicación inicial al abrir modal; después updates vienen solo de Realtime
-  useEffect(() => { cargarUbicacion(); }, [cargarUbicacion]);
+  // Carga inicial inmediata + reintento corto cada 10s como red de seguridad
+  // (por si se pierde un evento realtime o el conductor reconecta).
+  useEffect(() => {
+    cargarUbicacion();
+    const iv = setInterval(cargarUbicacion, 10000);
+    return () => clearInterval(iv);
+  }, [cargarUbicacion]);
 
   // Realtime
   useEffect(() => {
     const ch = supabase.channel("modal-gps-" + reservaId)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "ubicaciones_gps" }, (payload) => {
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "ubicaciones_gps" }, (payload: any) => {
         const d = payload.new as any;
-        if (d.reserva_id !== reservaId && d.vehiculo_id !== vehiculoId) return;
-        setUbic({
+        // Solo aceptar puntos del vehículo correcto. Cada condición exige id NO nulo:
+        // así un servicio tercerizado (vehiculoId null) ya no engancha la señal de OTRO
+        // bus que también tenga vehiculo_id null.
+        const match =
+          (vehiculoTerceroId != null && d.vehiculo_tercero_id === vehiculoTerceroId) ||
+          (vehiculoId != null && d.vehiculo_id === vehiculoId) ||
+          (vehiculoTerceroId == null && vehiculoId == null && reservaId != null && d.reserva_id === reservaId);
+        if (!match) return;
+        const nueva: UbicGps = {
           lat: d.lat, lng: d.lng, velocidad: d.velocidad, rumbo: d.rumbo,
           precision_m: d.precision_m, estado: d.estado,
           created_at: d.created_at ?? null, timestamp: d.timestamp ?? null,
-        });
+        };
+        ubicRef.current = nueva;
+        setUbic(nueva);
         setUltimaActualiz(new Date()); setSinSenal(false);
       }).subscribe();
     return () => { supabase.removeChannel(ch); };
-  }, [reservaId, vehiculoId]);
+  }, [reservaId, vehiculoId, vehiculoTerceroId]);
 
   // ── Marcador del bus ──────────────────────────────────────────────────────
 
   useEffect(() => {
     if (!ubic || !mapListo || !mapInst.current) return;
     const lngLat: [number, number] = [ubic.lng, ubic.lat];
+    const rot = Number(ubic.rumbo) || 0;
+    // Color del pulso según antigüedad de la señal (igual que el mapa "En vivo").
+    const fechaRef = ubic.created_at || ubic.timestamp;
+    const edadS = fechaRef ? (Date.now() - new Date(fechaRef).getTime()) / 1000 : 9999;
+    const color = edadS <= 60 ? "#16a34a" : edadS <= 600 ? "#d97706" : "#dc2626";
+
     if (markerRef.current) {
       markerRef.current.setLngLat(lngLat);
-      if (ubic.rumbo !== undefined) markerRef.current.setRotation(ubic.rumbo);
+      if (ubic.rumbo !== undefined && ubic.rumbo !== null) markerRef.current.setRotation(rot);
+      // Mantener el color del pulso en sync con el estado de señal.
+      const elc = markerRef.current.getElement();
+      const p1 = elc?.querySelector(".afa-pulse1") as HTMLElement | null;
+      const p2 = elc?.querySelector(".afa-pulse2") as HTMLElement | null;
+      if (p1) p1.style.background = color;
+      if (p2) p2.style.background = color;
+      // Recentrar suave SOLO si el usuario no arrastró el mapa manualmente.
+      if (!mapDescentradoRef.current) mapInst.current.easeTo({ center: lngLat, duration: 1500 });
     } else if (window.mapboxgl) {
+      // CSS de los anillos de pulso (igual que /seguimiento y "En vivo"), una sola vez.
+      if (!document.getElementById("afa-bus-css")) {
+        const s = document.createElement("style");
+        s.id = "afa-bus-css";
+        s.textContent = `
+          @keyframes afaBusPulse  { 0%{transform:scale(1);opacity:.5} 65%{transform:scale(2.6);opacity:0} 100%{transform:scale(2.6);opacity:0} }
+          @keyframes afaBusPulse2 { 0%{transform:scale(1);opacity:.3} 65%{transform:scale(2.6);opacity:0} 100%{transform:scale(2.6);opacity:0} }
+          .afa-pulse1 { position:absolute; border-radius:50%; animation:afaBusPulse  2s ease-out infinite; pointer-events:none; }
+          .afa-pulse2 { position:absolute; border-radius:50%; animation:afaBusPulse2 2s ease-out .7s infinite; pointer-events:none; }
+        `;
+        document.head.appendChild(s);
+      }
+      // Contenedor CUADRADO (80x80) con la imagen centrada: la rotación por rumbo
+      // pivota en el centro exacto y el ícono no se desplaza al hacer zoom.
       const el = document.createElement("div");
-      el.style.cssText = "width:44px;height:44px;border-radius:50%;background:#0b315f;border:3px solid white;box-shadow:0 3px 14px rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;font-size:22px;cursor:pointer";
-      el.innerHTML = "🚌";
-      markerRef.current = new window.mapboxgl.Marker({ element: el, rotation: ubic.rumbo || 0 })
+      el.style.cssText = "position:relative;width:80px;height:80px;cursor:pointer;";
+      el.innerHTML = `
+        <div style="position:absolute;top:50%;left:50%;width:46px;height:46px;margin:-23px 0 0 -23px;">
+          <div class="afa-pulse1" style="inset:0;background:${color};"></div>
+          <div class="afa-pulse2" style="inset:0;background:${color};"></div>
+        </div>
+        <img src="/bussinfondo3.png"
+          style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2;width:48px;height:80px;object-fit:contain;filter:drop-shadow(0 5px 14px rgba(6,14,40,.85));"
+          alt="bus"/>
+      `;
+      markerRef.current = new window.mapboxgl.Marker({
+        element: el, rotation: rot, rotationAlignment: "map", anchor: "center",
+      })
         .setLngLat(lngLat)
-        .setPopup(new window.mapboxgl.Popup({ offset: 28 }).setHTML(
+        .setPopup(new window.mapboxgl.Popup({ offset: 28, closeButton: false }).setHTML(
           `<div style="font-family:system-ui;padding:4px">
             <p style="font-weight:900;margin:0;color:#0b315f;font-size:15px">${vehiculoPlaca}</p>
             <p style="margin:4px 0 0;color:#475569;font-size:12px">${conductorNombre}</p>
             <p style="margin:6px 0 0;color:#16a34a;font-weight:700;font-size:16px">${ubic.velocidad} km/h</p>
           </div>`
         )).addTo(mapInst.current);
+      // Primera vez: salto directo al vehículo (como /seguimiento), no animación lenta desde Lima.
+      mapInst.current.flyTo({ center: lngLat, zoom: 15, duration: 900 });
     }
-    mapInst.current.easeTo({ center: lngLat, duration: 1500 });
   }, [ubic, mapListo, vehiculoPlaca, conductorNombre]);
 
   // ── Init Mapbox ───────────────────────────────────────────────────────────
@@ -444,18 +527,18 @@ export default function ModalGps({
         map.addControl(new window.mapboxgl.NavigationControl(), "top-right");
         mapInst.current = map;
 
-        map.on("load", () => {
-          // Tráfico
-          map.addSource("mapbox-traffic", { type: "vector", url: "mapbox://mapbox.mapbox-traffic-v1" });
-          map.addLayer({
-            id: "traffic-flow", type: "line", source: "mapbox-traffic", "source-layer": "traffic",
-            paint: {
-              "line-width": 3,
-              "line-color": ["match", ["get", "congestion"], "low", "#4ade80", "moderate", "#fbbf24", "heavy", "#f97316", "severe", "#ef4444", "#94a3b8"],
-              "line-opacity": 0.7,
-            },
-          });
+        // Si el usuario arrastra el mapa, dejamos de seguir al vehículo y mostramos
+        // el botón "Centrar vehículo". e.originalEvent distingue el arrastre humano
+        // del easeTo/flyTo programático.
+        map.on("dragstart", (e: any) => { if (e.originalEvent) { mapDescentradoRef.current = true; setMapDescentrado(true); } });
 
+        // El contenedor del modal puede seguir dimensionándose al abrir: forzar resize
+        // evita que el mapa salga gris o cortado.
+        setTimeout(() => { try { map.resize(); } catch {} }, 150);
+        setTimeout(() => { try { map.resize(); } catch {} }, 450);
+
+        // Sin capa de tráfico: tapaba demasiado el mapa.
+        map.on("load", () => {
           setMapListo(true);
         });
       } catch (e) { console.error("[ModalGps]", e); setErrorMapa(true); }
@@ -485,6 +568,44 @@ export default function ModalGps({
   const pct            = paradas.length > 0 ? Math.round((paradasComp / paradas.length) * 100) : 0;
   const segsDesdeUlt  = ultimaActualiz ? Math.floor((Date.now() - ultimaActualiz.getTime()) / 1000) : null;
   const hayTrafico    = ruta?.tramos?.some(t => t.duracion_trafico_min > t.duracion_min + 2) ?? false;
+
+  // ── ETA dinámica: posición actual del vehículo → próxima parada ────────────
+  // Igual que /seguimiento: Google Directions vía /api/ruta. Recalcula cada 60s
+  // (y al cambiar de parada o al llegar la primera señal), no en cada poll GPS.
+  useEffect(() => {
+    let cancel = false;
+    const calcular = async () => {
+      const lista = paradas.length > 0 ? paradas : paradasResueltas;
+      const prox = lista.find(p => p.estado !== "completada");
+      const u = ubicRef.current;
+      if (!prox || !u) { if (!cancel) { setEtaMin(null); setEtaKm(null); } return; }
+      // La próxima parada puede venir sin coords en `paradas`: resolverlas desde paradasResueltas.
+      let plat = prox.lat, plng = prox.lng;
+      if (plat == null || plng == null) {
+        const r = paradasResueltas.find(x => x.id === prox.id || x.nombre === prox.nombre);
+        if (r) { plat = r.lat; plng = r.lng; }
+      }
+      if (plat == null || plng == null) { if (!cancel) { setEtaMin(null); setEtaKm(null); } return; }
+      try {
+        const res = await fetch("/api/ruta", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ paradas: [
+            { lat: u.lat, lng: u.lng, nombre: "Vehículo" },
+            { lat: Number(plat), lng: Number(plng), nombre: prox.nombre },
+          ] }),
+        });
+        const data = await res.json();
+        if (!cancel && res.ok && data) {
+          setEtaMin(typeof data.total_min === "number" ? data.total_min : null);
+          setEtaKm(typeof data.total_km === "number" ? data.total_km : null);
+        }
+      } catch { /* conservar ETA previa */ }
+    };
+    calcular();
+    const iv = setInterval(calcular, 60000);
+    return () => { cancel = true; clearInterval(iv); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proximaParada?.id, proximaParada?.nombre, !!ubic, paradasResueltas]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 md:p-4" style={{ background: "rgba(15,23,42,0.65)" }}>
@@ -556,34 +677,71 @@ export default function ModalGps({
               </div>
             )}
 
-            {!errorMapa && (
-              <div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur-sm rounded-xl shadow-lg px-3 py-2 space-y-1.5">
-                <div>
-                  <p className="text-[8px] font-bold text-gray-400 uppercase mb-1">Tráfico en vivo</p>
-                  <div className="flex items-center gap-2 text-[9px] font-bold text-gray-600">
-                    <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-green-400 inline-block"/>Libre</span>
-                    <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-yellow-400 inline-block"/>Moderado</span>
-                    <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-orange-500 inline-block"/>Pesado</span>
-                    <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-red-500 inline-block"/>Severo</span>
-                  </div>
+            {!errorMapa && huella.length > 1 && (
+              <div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur-sm rounded-xl shadow-lg px-3 py-2">
+                <p className="text-[8px] font-bold text-gray-400 uppercase mb-1">Huella GPS · Velocidad</p>
+                <div className="flex items-center gap-2 text-[9px] font-bold text-gray-600">
+                  <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-red-500 inline-block"/>Parado</span>
+                  <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-amber-400 inline-block"/>Lento</span>
+                  <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-yellow-300 inline-block"/>Moderado</span>
+                  <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-green-500 inline-block"/>Rápido</span>
                 </div>
-                {huella.length > 1 && (
-                  <div>
-                    <p className="text-[8px] font-bold text-gray-400 uppercase mb-1">Huella GPS · Velocidad</p>
-                    <div className="flex items-center gap-2 text-[9px] font-bold text-gray-600">
-                      <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-red-500 inline-block"/>Parado</span>
-                      <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-amber-400 inline-block"/>Lento</span>
-                      <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-yellow-300 inline-block"/>Moderado</span>
-                      <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-green-500 inline-block"/>Rápido</span>
-                    </div>
-                  </div>
-                )}
               </div>
+            )}
+
+            {mapDescentrado && ubic && !errorMapa && (
+              <button
+                onClick={() => {
+                  if (mapInst.current && ubic) {
+                    mapDescentradoRef.current = false;
+                    setMapDescentrado(false);
+                    mapInst.current.easeTo({ center: [ubic.lng, ubic.lat], zoom: 15, duration: 800 });
+                  }
+                }}
+                className="absolute bottom-5 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 px-4 py-2 rounded-full text-white text-sm font-semibold shadow-lg"
+                style={{ background: "#0b315f" }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3"/>
+                  <line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/>
+                  <line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/>
+                </svg>
+                Centrar vehículo
+              </button>
             )}
           </div>
 
           {/* PANEL DERECHO */}
           <div className="w-64 flex-shrink-0 overflow-y-auto p-3 space-y-3" style={{ background: "#f8fafc", borderLeft: "1px solid #e2e8f0" }}>
+
+            {proximaParada && (
+              <div className="rounded-xl p-4 text-white" style={{ background: "linear-gradient(135deg, #0b315f 0%, #1d4ed8 100%)" }}>
+                <p className="text-[10px] font-bold uppercase tracking-wider opacity-80 mb-1">
+                  {proximaParada.id === paradasDisplay[0]?.id ? "Vehículo en camino a"
+                    : proximaParada.id === paradasDisplay[paradasDisplay.length - 1]?.id ? "Destino final"
+                    : "Próxima parada"}
+                </p>
+                <p className="text-lg font-bold leading-tight mb-2">{proximaParada.nombre}</p>
+                <div className="flex items-center gap-3 pt-2 border-t border-white/20">
+                  {etaMin != null ? (
+                    <>
+                      <div className="flex-1">
+                        <p className="text-[10px] uppercase opacity-70">Llega a las</p>
+                        <p className="text-xl font-bold leading-tight">{fmtHoraLlegada(etaMin)}</p>
+                        <p className="text-[11px] opacity-60 mt-0.5">en {fmtTiempo(etaMin)}</p>
+                      </div>
+                      {etaKm != null && (
+                        <div className="text-right">
+                          <p className="text-[10px] uppercase opacity-70">Distancia</p>
+                          <p className="text-base font-bold">{etaKm < 1 ? fmtDistancia(etaKm * 1000) : `${etaKm.toFixed(1)} km`}</p>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <p className="text-sm opacity-80">Calculando tiempo estimado…</p>
+                  )}
+                </div>
+              </div>
+            )}
 
             <div className="bg-white rounded-xl border p-3" style={{ borderColor: "#e2e8f0" }}>
               <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-2">Conductor</p>
@@ -656,14 +814,6 @@ export default function ModalGps({
                   className="w-full mt-3 py-1.5 rounded-lg text-[10px] font-bold text-[#0b315f] bg-blue-50 hover:bg-blue-100 transition-colors disabled:opacity-50">
                   {cargandoRuta ? "Actualizando..." : "🔄 Recalcular con tráfico actual"}
                 </button>
-              </div>
-            )}
-
-            {proximaParada && (
-              <div className="bg-white rounded-xl border p-3" style={{ borderColor: "#e2e8f0" }}>
-                <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-2">Próxima Parada</p>
-                <p className="text-gray-900 font-bold text-sm leading-tight">{proximaParada.nombre}</p>
-                {proximaParada.hora_estimada && <p className="text-gray-400 text-xs mt-1">⏰ {proximaParada.hora_estimada.slice(0,5)}</p>}
               </div>
             )}
 

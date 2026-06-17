@@ -1106,6 +1106,7 @@ export default function SeguimientoPage() {
         <ModalGps
           reservaId={gpsModal.reserva.id}
           vehiculoId={gpsModal.reserva.vehiculo_id ?? null}
+          vehiculoTerceroId={gpsModal.reserva.vehiculo_tercero_id ?? null}
           vehiculoPlaca={gpsModal.vehiculo_placa}
           conductorNombre={gpsModal.conductor_nombre}
           conductorTel={gpsModal.conductor_tel}

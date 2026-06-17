@@ -42,6 +42,11 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
             signingConfig signingConfigs.release
         }
+        debug {
+            // Build de prueba para verificar el heartbeat de GPS en vivo SIN tocar la
+            // app de release (Play). Se instala junto a ella con su propio applicationId.
+            applicationIdSuffix ".debug"
+        }
     }
 }
 
