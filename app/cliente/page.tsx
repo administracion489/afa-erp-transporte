@@ -86,11 +86,13 @@ const C = {
 const ESTADO: Record<string, { bg: string; c: string; label: string; dot: string }> = {
   programada: { bg: "#F1F5F9", c: "#475569", label: "Programada", dot: "#94A3B8" },
   pendiente:  { bg: "#FBEFD5", c: "#A65B0A", label: "Pendiente",  dot: "#D97706" },
-  completado: { bg: "#EFEFEC", c: "#1F2433", label: "Completado", dot: "#6B6F7C" },
-  realizado:  { bg: "#EFEFEC", c: "#1F2433", label: "Realizado",  dot: "#6B6F7C" },
-  cancelado:  { bg: "#FCE5E2", c: "#B91C1C", label: "Cancelado",  dot: "#B91C1C" },
-  confirmado: { bg: "#E1E9FB", c: "#1d4ed8", label: "Confirmado", dot: "#3b82f6" },
-  en_curso:   { bg: "#E3F1E6", c: "#15803d", label: "En ruta",    dot: "#15803d" },
+  // "completado"/"realizado"/"finalizado" se unifican en una sola etiqueta: "Finalizada"
+  completado: { bg: "#EFEFEC", c: "#1F2433", label: "Finalizada", dot: "#6B6F7C" },
+  realizado:  { bg: "#EFEFEC", c: "#1F2433", label: "Finalizada", dot: "#6B6F7C" },
+  finalizado: { bg: "#EFEFEC", c: "#1F2433", label: "Finalizada", dot: "#6B6F7C" },
+  cancelado:  { bg: "#FCE5E2", c: "#B91C1C", label: "Cancelada",  dot: "#B91C1C" },
+  confirmado: { bg: "#E1E9FB", c: "#1d4ed8", label: "Confirmada", dot: "#3b82f6" },
+  en_curso:   { bg: "#E3F1E6", c: "#15803d", label: "En curso",   dot: "#15803d" },
 };
 
 // ─── SESSION ──────────────────────────────────────────────────────────────
@@ -106,12 +108,15 @@ const fmtFechaLrg = (f: string | null) => f ? new Date(f + "T00:00:00").toLocale
 const fmtTs       = (ts: string) => new Date(ts).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" });
 const fmtSoles    = (n: number) => `S/ ${Number(n || 0).toLocaleString("es-PE", { minimumFractionDigits: 2 })}`;
 
+// Todas las variantes de "servicio realizado" caen en UNA sola clave interna ("completado"),
+// que es la que usan el chip de filtro y el mapa ESTADO (etiqueta visible: "Finalizada").
 const ESTADO_NORM: Record<string, string> = {
+  pendiente:  "programada", // estado interno: el cliente ve "Programada"
   confirmada: "confirmado",
   cancelada:  "cancelado",
   completada: "completado",
-  realizada:  "realizado",
-  finalizada: "realizado",
+  realizada:  "completado",
+  finalizada: "completado",
   en_ruta:    "en_curso",
 };
 function normEstado(e: string) { return ESTADO_NORM[e] || e; }
@@ -138,7 +143,7 @@ const FAQ_ITEMS = [
   { q: "¿Con qué frecuencia se actualiza el GPS?", a: "La posición del vehículo se actualiza en tiempo real cada 10 segundos cuando el conductor tiene activa la app y señal de datos." },
   { q: "¿Cómo descargo el manifiesto oficial?", a: "En la pestaña 'Reporte', selecciona el servicio y presiona 'Manifiesto MTC'. El documento sigue el formato R.D. 1946-2009-MTC-15 exigido por SUTRAN." },
   { q: "¿Puedo programar un nuevo servicio desde aquí?", a: "Para programar un nuevo servicio, comunícate con nuestro equipo al 966707225 o escríbenos por WhatsApp." },
-  { q: "¿Qué significa cada estado del servicio?", a: "Pendiente: aún no confirmado. Confirmado: aprobado y asignado. En curso: el bus está en ruta hoy. Completado/Realizado: servicio finalizado. Cancelado: servicio anulado." },
+  { q: "¿Qué significa cada estado del servicio?", a: "Programada: reserva recibida y en proceso. Confirmada: aprobada y con recursos asignados. En curso: el bus está en ruta hoy. Finalizada: el servicio ya se realizó. Cancelada: servicio anulado." },
   { q: "¿Puedo agregar o editar pasajeros yo mismo?", a: "Sí. En el Historial de servicios, selecciona un servicio pendiente o confirmado y presiona 'Editar manifiesto'. Podrás agregar pasajeros por nombre/DNI, eliminarlos o subir una lista completa en formato Excel/CSV." },
 ];
 
@@ -2412,7 +2417,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                     <div style={{ padding: "18px 20px" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
                         <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.success, animation: "pcPulse 1.6s ease-out infinite", display: "inline-block" }} />
-                        <p style={{ color: C.success, fontWeight: 800, fontSize: 11, margin: 0, letterSpacing: "1.2px", textTransform: "uppercase" as const }}>En ruta · HOY</p>
+                        <p style={{ color: C.success, fontWeight: 800, fontSize: 11, margin: 0, letterSpacing: "1.2px", textTransform: "uppercase" as const }}>En curso · HOY</p>
                         <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: "auto" }}>#{r.id}</span>
                       </div>
                       <p style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 17, letterSpacing: -0.4, margin: "0 0 4px", color: C.ink }}>
@@ -2745,7 +2750,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                           {r.origen?.split(",")[0]}
                         </span>
                         <span style={{ fontSize: 10, fontWeight: 700, background: est === "en_curso" ? "#dcfce7" : C.navyTint, color: est === "en_curso" ? "#15803d" : C.navy, padding: "2px 7px", borderRadius: 4, flexShrink: 0 }}>
-                          {est === "en_curso" ? "En ruta" : est === "confirmada" || est === "confirmado" ? "Confirmado" : est === "programada" ? "Programado" : est}
+                          {ESTADO[normEstado(est)]?.label ?? est}
                         </span>
                       </button>
                     );
@@ -2780,7 +2785,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                   <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 6 }}>
                     <span style={{ width: 7, height: 7, borderRadius: "50%", background: efectivoEstado(servicioEnVivoActivo) === "en_curso" ? C.success : C.info, display: "inline-block", animation: "pcPulse 1.6s ease-out infinite" }} />
                     <p style={{ color: efectivoEstado(servicioEnVivoActivo) === "en_curso" ? C.success : C.info, fontWeight: 800, margin: 0, fontSize: 11, textTransform: "uppercase" as const, letterSpacing: "1.2px" }}>
-                      {efectivoEstado(servicioEnVivoActivo) === "en_curso" ? "En ruta" : esFinalizado(servicioEnVivoActivo.estado) ? "Finalizado hoy" : "Confirmado · Hoy"}
+                      {efectivoEstado(servicioEnVivoActivo) === "en_curso" ? "En curso" : esFinalizado(servicioEnVivoActivo.estado) ? "Finalizada hoy" : "Confirmada · Hoy"}
                     </p>
                     <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: 4 }}>#{servicioEnVivoActivo.id}</span>
                   </div>
@@ -3054,7 +3059,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                 />
               </div>
               <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
-                {(["todos","programada","confirmado","en_curso","completado","pendiente","cancelado"] as const).map(e => {
+                {(["todos","programada","confirmado","en_curso","completado","cancelado"] as const).map(e => {
                   const cnt = e === "todos" ? reservas.length : reservas.filter(r => efectivoEstado(r) === e).length;
                   const active = filtroEstado === e;
                   return (

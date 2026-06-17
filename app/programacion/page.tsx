@@ -3,6 +3,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { Calendar, FileText, Pencil, Trash2, X } from "lucide-react";
+import {
+  ESTADOS_RESERVA, ESTADOS_RESERVA_LISTA, ORDEN_ESTADO,
+  ESTADOS_ADMIN, ESTADOS_ADMIN_LISTA, aplicaAdmin, ESTADO_ADMIN_INICIAL, etiquetaAdmin, siguienteAdmin,
+} from "@/lib/estados";
+import type { EstadoReserva, EstadoAdmin } from "@/lib/estados";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
 import ModalGenerarPrograma from "@/components/programacion/ModalGenerarPrograma";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
@@ -78,7 +83,7 @@ type ParadaTP = {
   nombre: string; direccion: string; lat: string; lng: string; hora: string;
 };
 
-type EstadoReserva = "pendiente" | "programada" | "confirmada" | "en_curso" | "finalizada" | "cancelada";
+// EstadoReserva, ESTADOS_RESERVA, ORDEN_ESTADO, dimensión administrativa, etc. → @/lib/estados (fuente única)
 
 type Cliente            = { id: number; nombre: string; empresa?: string; tipo?: string; };
 type Vehiculo           = { id: number; placa: string; categoria?: string; estado?: string; estado_operativo?: string; capacidad_pasajeros?: number; };
@@ -91,7 +96,7 @@ type DocumentoTercero   = { id: number; empresa_id: number; tipo: string; fecha_
 type Reserva = {
   id: number; cliente_id: number | null; cotizacion_id: number | null;
   vehiculo_id: number | null; conductor_id: number | null;
-  tipo: string; estado: EstadoReserva;
+  tipo: string; estado: EstadoReserva; estado_admin: EstadoAdmin | null;
   fecha_servicio: string | null; hora_servicio: string | null;
   precio_cliente: number; costo_proveedor: number; margen: number;
   observaciones: string | null; created_at: string;
@@ -120,23 +125,8 @@ type Ocupacion = {
   ocupacion_pct: number | null;
 };
 
-const ESTADO_CFG: Record<EstadoReserva, { label: string; bg: string; color: string; dot: string }> = {
-  pendiente:  { label: "Pendiente",  bg: "#fef9c3", color: "#854d0e", dot: "#eab308" },
-  programada: { label: "Programada", bg: "#e0f2fe", color: "#0369a1", dot: "#0284c7" },
-  confirmada: { label: "Confirmada", bg: "#dcfce7", color: "#166534", dot: "#16a34a" },
-  en_curso:   { label: "En curso",   bg: "#dbeafe", color: "#1d4ed8", dot: "#2563eb" },
-  finalizada: { label: "Finalizada", bg: "#ede9fe", color: "#6d28d9", dot: "#7c3aed" },
-  cancelada:  { label: "Cancelada",  bg: "#fee2e2", color: "#991b1b", dot: "#dc2626" },
-};
-
-const FLUJO_ESTADO: Record<EstadoReserva, string> = {
-  pendiente:  "Sin asignacion",
-  programada: "Asignado",
-  confirmada: "Cliente confirmo",
-  en_curso:   "En ejecucion",
-  finalizada: "Completado",
-  cancelada:  "Cancelado",
-};
+// Alias local a la fuente única (lib/estados.ts). NO redefinir colores/etiquetas aquí.
+const ESTADO_CFG = ESTADOS_RESERVA;
 
 const FORM_VACIO = {
   fecha_servicio: "", hora_servicio: "", tipo_asignacion: "propio",
@@ -916,8 +906,7 @@ export default function ReservasPage() {
     }
     if (form.estado !== "pendiente") nuevoEstado = form.estado;
 
-    // Evitar degradar accidentalmente a "pendiente" desde un estado superior
-    const ORDEN_ESTADO: Record<string, number> = { pendiente: 0, programada: 1, confirmada: 2, en_curso: 3, finalizada: 4, cancelada: 4 };
+    // Evitar degradar accidentalmente a "pendiente" desde un estado superior (ORDEN_ESTADO viene de lib/estados)
     const estadoActualOrd  = ORDEN_ESTADO[reservaActual?.estado || "pendiente"] ?? 0;
     const nuevoEstadoOrd   = ORDEN_ESTADO[nuevoEstado] ?? 0;
     if (estadoActualOrd > 0 && nuevoEstadoOrd === 0) {
@@ -938,8 +927,14 @@ export default function ReservasPage() {
       costo_proveedor:        costo,
     };
 
+    // Puente A→B: si el servicio pasa a "finalizada" y aún no tiene estado administrativo,
+    // arranca en "por_liquidar".
+    const adminPayload = (nuevoEstado === "finalizada" && !reservaActual?.estado_admin)
+      ? { estado_admin: ESTADO_ADMIN_INICIAL }
+      : {};
     const { error } = await supabase.from("reservas").update({
       ...asignPayload,
+      ...adminPayload,
       fecha_servicio:  form.fecha_servicio,
       hora_servicio:   form.hora_servicio,
       estado:          nuevoEstado,
@@ -1055,12 +1050,25 @@ export default function ReservasPage() {
     }
     const reserva = reservas.find(r => r.id === modalFinalizar.id);
     const obsActual = reserva?.observaciones ? reserva.observaciones + " | " : "";
+    // Puente A→B: al finalizar, el estado administrativo arranca en "por_liquidar".
+    const adminCierre: EstadoAdmin = reserva?.estado_admin || ESTADO_ADMIN_INICIAL;
     await supabase.from("reservas").update({
       estado: "finalizada",
+      estado_admin: adminCierre,
       observaciones: `${obsActual}[Cierre manual] ${modalFinalizar.motivo.trim()}`,
     }).eq("id", modalFinalizar.id);
-    setReservas(prev => prev.map(r => r.id === modalFinalizar.id ? { ...r, estado: "finalizada" } : r));
+    setReservas(prev => prev.map(r => r.id === modalFinalizar.id ? { ...r, estado: "finalizada", estado_admin: adminCierre } : r));
     setModalFinalizar(null);
+  };
+
+  // Avanza el estado administrativo (dimensión B): por_liquidar → liquidada → facturada → cobrada
+  const avanzarAdmin = async (r: Reserva) => {
+    const actual = (r.estado_admin || ESTADO_ADMIN_INICIAL) as EstadoAdmin;
+    const sig = siguienteAdmin(actual);
+    if (!sig) return;
+    if (!confirm(`Avanzar estado administrativo de "${ESTADOS_ADMIN[actual].label}" a "${ESTADOS_ADMIN[sig].label}"?`)) return;
+    await supabase.from("reservas").update({ estado_admin: sig }).eq("id", r.id);
+    setReservas(prev => prev.map(x => x.id === r.id ? { ...x, estado_admin: sig } : x));
   };
 
   const capacidadDe = (r: Reserva): number | null => {
@@ -1074,6 +1082,11 @@ export default function ReservasPage() {
   const programadas  = reservas.filter(r => r.estado === "programada").length;
   const confirmadas  = reservas.filter(r => r.estado === "confirmada").length;
   const enCurso      = reservas.filter(r => r.estado === "en_curso").length;
+  // Dimensión B · cierre administrativo (solo servicios finalizados tienen estado_admin)
+  const porLiquidar  = reservas.filter(r => r.estado_admin === "por_liquidar").length;
+  const liquidadas   = reservas.filter(r => r.estado_admin === "liquidada").length;
+  const facturadas   = reservas.filter(r => r.estado_admin === "facturada").length;
+  const cobradas     = reservas.filter(r => r.estado_admin === "cobrada").length;
   const hoyCount     = reservas.filter(r => r.fecha_servicio === hoy).length;
   const ventas       = reservas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
   const costos       = reservas.reduce((s, r) => s + Number(r.costo_proveedor || 0), 0);
@@ -1644,8 +1657,9 @@ export default function ReservasPage() {
       <div className="bg-white rounded-2xl border shadow-sm px-5 py-4">
         <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-3">Flujo de estados</p>
         <div className="flex items-center gap-1 flex-wrap">
-          {(Object.entries(FLUJO_ESTADO) as [EstadoReserva, string][]).map(([est, desc], i, arr) => {
+          {ESTADOS_RESERVA_LISTA.map((est, i, arr) => {
             const cfg   = ESTADO_CFG[est];
+            const desc  = cfg.descripcion;
             const count = reservas.filter(r => r.estado === est).length;
             return (
               <React.Fragment key={est}>
@@ -1694,6 +1708,30 @@ export default function ReservasPage() {
             <p className="text-2xl font-black mt-0.5" style={{ color: k.color }}>{k.valor}</p>
           </div>
         ))}
+      </section>
+
+      {/* CIERRE ADMINISTRATIVO (Dimensión B) — familia violeta + contorno, distinto a propósito del ciclo operativo */}
+      <section className="rounded-2xl border px-5 py-4" style={{ borderColor: "#ddd6fe", background: "#faf5ff" }}>
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-[10px] font-black uppercase tracking-widest" style={{ color: "#6d28d9" }}>🧾 Cierre administrativo</span>
+          <span className="text-[10px] text-purple-400">· solo servicios finalizados</span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {([
+            { est: "por_liquidar" as EstadoAdmin, valor: porLiquidar },
+            { est: "liquidada"    as EstadoAdmin, valor: liquidadas },
+            { est: "facturada"    as EstadoAdmin, valor: facturadas },
+            { est: "cobrada"      as EstadoAdmin, valor: cobradas },
+          ]).map(k => {
+            const cfg = ESTADOS_ADMIN[k.est];
+            return (
+              <div key={k.est} className="rounded-xl px-3 py-2.5 bg-white border" style={{ borderColor: cfg.color + "55" }}>
+                <p className="text-[10px] font-bold uppercase tracking-wide" style={{ color: cfg.color }}>{cfg.label}</p>
+                <p className="text-2xl font-black mt-0.5" style={{ color: cfg.color }}>{k.valor}</p>
+              </div>
+            );
+          })}
+        </div>
       </section>
 
       {/* FORMULARIO PROGRAMACION */}
@@ -2083,7 +2121,7 @@ export default function ReservasPage() {
                         <table className="w-full text-xs">
                           <thead>
                             <tr style={{ borderBottom: "1px solid #e2e8f0" }}>
-                              {["Fecha", "Día", "Hora", "Estado", "Recurso", "Ingreso", "Acciones"].map(h => (
+                              {["Fecha", "Día", "Hora", "Estado", "Admin", "Recurso", "Ingreso", "Acciones"].map(h => (
                                 <th key={h} className="px-4 py-2 text-left text-[10px] font-bold text-gray-400 uppercase tracking-wide whitespace-nowrap">{h}</th>
                               ))}
                             </tr>
@@ -2121,6 +2159,21 @@ export default function ReservasPage() {
                                     >
                                                       {Object.entries(ESTADO_CFG).filter(([k]) => k !== "en_curso").map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                                     </select>
+                                  </td>
+                                  <td className="px-4 py-2.5">
+                                    {aplicaAdmin(r.estado) ? (() => {
+                                      const ad  = (r.estado_admin || ESTADO_ADMIN_INICIAL) as EstadoAdmin;
+                                      const cfg = ESTADOS_ADMIN[ad];
+                                      const sig = siguienteAdmin(ad);
+                                      return (
+                                        <button onClick={() => avanzarAdmin(r)} disabled={!sig}
+                                          title={sig ? `Avanzar a "${ESTADOS_ADMIN[sig].label}"` : "Cobrada · estado final"}
+                                          className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-white disabled:cursor-default"
+                                          style={{ border: `1.5px solid ${cfg.color}`, color: cfg.color }}>
+                                          🧾 {cfg.label}{sig ? " ›" : ""}
+                                        </button>
+                                      );
+                                    })() : <span className="text-gray-300">—</span>}
                                   </td>
                                   <td className="px-4 py-2.5 text-gray-600 max-w-[160px]">
                                     <div className="truncate">
@@ -2225,6 +2278,11 @@ export default function ReservasPage() {
                           <span className="font-bold text-gray-800 truncate">{nombreCliente(r.cliente_id)}</span>
                           {badge && <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: badge.color + "20", color: badge.color }}>{badge.label}</span>}
                           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: estCfg.bg, color: estCfg.color }}>{estCfg.label}</span>
+                          {aplicaAdmin(r.estado) && (() => {
+                            const ad  = (r.estado_admin || ESTADO_ADMIN_INICIAL) as EstadoAdmin;
+                            const cfg = ESTADOS_ADMIN[ad];
+                            return <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-white" style={{ border: `1.5px solid ${cfg.color}`, color: cfg.color }}>🧾 {cfg.label}</span>;
+                          })()}
                           {sob && <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">SOBRECUPO</span>}
                         </div>
                         <div className="text-xs text-gray-400 mt-0.5 truncate">{(r as any).origen || "-"} → {(r as any).destino || "-"}</div>
@@ -2258,21 +2316,21 @@ export default function ReservasPage() {
             <thead>
               <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
                 <th className="p-3 w-8"></th>
-                {["ID", "Cliente", "Ruta", "Fecha", "Recurso", "Ocupacion", "Estado", "Acciones"].map(h => (
+                {["ID", "Cliente", "Ruta", "Fecha", "Recurso", "Ocupacion", "Estado", "Administrativo", "Acciones"].map(h => (
                   <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={9} className="p-10 text-center text-gray-400">
+                <tr><td colSpan={10} className="p-10 text-center text-gray-400">
                   <div className="flex items-center justify-center gap-2">
                     <div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />
                     Cargando...
                   </div>
                 </td></tr>
               ) : filtradas.length === 0 ? (
-                <tr><td colSpan={9} className="p-10 text-center text-gray-400">
+                <tr><td colSpan={10} className="p-10 text-center text-gray-400">
                   <p className="text-3xl mb-2">🎫</p>
                   <p className="font-medium">No hay reservas</p>
                 </td></tr>
@@ -2301,7 +2359,7 @@ export default function ReservasPage() {
                   <React.Fragment key={r.id}>
                     {idx === sepIdx && (
                       <tr>
-                        <td colSpan={9} className="px-4 py-2">
+                        <td colSpan={10} className="px-4 py-2">
                           <div className="flex items-center gap-3">
                             <div className="flex-1 h-px" style={{ background: "#bbf7d0" }} />
                             <span className="text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full border" style={{ color: "#166534", background: "#f0fdf4", borderColor: "#bbf7d0" }}>
@@ -2394,6 +2452,26 @@ export default function ReservasPage() {
                         </select>
                       </td>
 
+                      {/* Dimensión B · estado administrativo (contorno + violeta + 🧾, distinto del operativo) */}
+                      <td className="p-3" onClick={e => e.stopPropagation()}>
+                        {aplicaAdmin(r.estado) ? (() => {
+                          const ad  = (r.estado_admin || ESTADO_ADMIN_INICIAL) as EstadoAdmin;
+                          const cfg = ESTADOS_ADMIN[ad];
+                          const sig = siguienteAdmin(ad);
+                          return (
+                            <button
+                              onClick={() => avanzarAdmin(r)}
+                              disabled={!sig}
+                              title={sig ? `Avanzar a "${ESTADOS_ADMIN[sig].label}"` : "Cobrada · estado final"}
+                              className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-full bg-white transition-colors disabled:cursor-default"
+                              style={{ border: `1.5px solid ${cfg.color}`, color: cfg.color }}
+                            >
+                              🧾 {cfg.label}{sig ? " ›" : ""}
+                            </button>
+                          );
+                        })() : <span className="text-gray-300 text-xs">—</span>}
+                      </td>
+
                       <td className="p-3" onClick={e => e.stopPropagation()}>
                         <div className="flex gap-1.5 flex-wrap">
                           <button onClick={() => setModalReservaId(r.id)} className="flex items-center gap-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
@@ -2415,7 +2493,7 @@ export default function ReservasPage() {
 
                     {expandido && (
                       <tr style={{ background: "#f8fafc" }} className="border-t">
-                        <td colSpan={9} className="px-6 py-5">
+                        <td colSpan={10} className="px-6 py-5">
                           {(() => {
                             const paradasR = paradasMap[r.id] || [];
                             const tieneJSON = r.paradas_json && r.paradas_json.length > 0;

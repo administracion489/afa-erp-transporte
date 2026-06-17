@@ -40,13 +40,14 @@ const AFA = {
   rojo:        "#dc2626",
 };
 
+// Etiquetas canónicas (ver lib/estados). Colores propios de la marca AFA para el pasajero.
 const ESTADOS: Record<string, { label: string; color: string }> = {
   pendiente:   { label: "Pendiente",   color: AFA.grisMedio },
-  programada:  { label: "Programado",  color: AFA.azulClaro },
-  confirmada:  { label: "Confirmado",  color: AFA.azulMedio },
-  en_curso:    { label: "En camino",   color: AFA.azulOscuro },
-  finalizada:  { label: "Finalizado",  color: AFA.verde },
-  cancelada:   { label: "Cancelado",   color: AFA.rojo },
+  programada:  { label: "Programada",  color: AFA.azulClaro },
+  confirmada:  { label: "Confirmada",  color: AFA.azulMedio },
+  en_curso:    { label: "En curso",    color: AFA.azulOscuro },
+  finalizada:  { label: "Finalizada",  color: AFA.verde },
+  cancelada:   { label: "Cancelada",   color: AFA.rojo },
 };
 
 // ─── UTILIDADES ───────────────────────────────────────────────────────────────

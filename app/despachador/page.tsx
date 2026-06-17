@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
+import { etiquetaEstado } from "@/lib/estados";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
@@ -805,7 +806,7 @@ export default function DespachadorPage() {
                           s.estado === "finalizada" ? "bg-gray-100 text-gray-500" :
                           "bg-amber-100 text-amber-700"
                         }`}>
-                          {s.estado}
+                          {etiquetaEstado(s.estado)}
                         </span>
                         {s.precio_cliente > 0 && (
                           <span className="text-[10px] font-mono text-gray-500">

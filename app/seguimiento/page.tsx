@@ -5,6 +5,7 @@ import Link from "next/link";
 import ModalGps from "@/components/seguimiento/ModalGps";
 import PanelMensajesPasajeros from "@/components/seguimiento/PanelMensajesPasajeros";
 import { supabase } from "@/lib/supabase";
+import { ESTADOS_RESERVA, ESTADO_ADMIN_INICIAL } from "@/lib/estados";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TIPOS
@@ -49,12 +50,14 @@ type ServicioView = {
 // CONSTANTES
 // ══════════════════════════════════════════════════════════════════════════════
 
+// Etiquetas alineadas con la fuente única (lib/estados). "programado" y "alerta"
+// son agrupaciones visuales propias del tablero de seguimiento, no estados de BD.
 const ESTADO_VIS = {
-  programado: { label: "Programado", color: "#6366f1", bg: "#eef2ff", dot: "#6366f1" },
-  en_ruta:    { label: "En Ruta",    color: "#16a34a", bg: "#dcfce7", dot: "#16a34a" },
-  finalizado: { label: "Finalizado", color: "#64748b", bg: "#f1f5f9", dot: "#94a3b8" },
-  alerta:     { label: "⚠ Alerta",   color: "#dc2626", bg: "#fef2f2", dot: "#dc2626" },
-  cancelado:  { label: "Cancelado",  color: "#991b1b", bg: "#fee2e2", dot: "#991b1b" },
+  programado: { label: "Programado",                     color: "#6366f1", bg: "#eef2ff", dot: "#6366f1" },
+  en_ruta:    { label: ESTADOS_RESERVA.en_curso.label,   color: "#16a34a", bg: "#dcfce7", dot: "#16a34a" },
+  finalizado: { label: ESTADOS_RESERVA.finalizada.label, color: "#64748b", bg: "#f1f5f9", dot: "#94a3b8" },
+  alerta:     { label: "⚠ Alerta",                       color: "#dc2626", bg: "#fef2f2", dot: "#dc2626" },
+  cancelado:  { label: ESTADOS_RESERVA.cancelada.label,  color: "#991b1b", bg: "#fee2e2", dot: "#991b1b" },
 } as const;
 
 const CHECKLIST_ITEMS = [
@@ -420,6 +423,8 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
     const { error } = await supabase.from("reservas").update({
       hora_real_inicio: horaInicio || null, hora_real_fin: horaFin || null,
       estado: (horaFin ? "finalizada" : r.estado) as EstadoReserva,
+      // Puente A→B: al finalizar por primera vez, arranca el cierre administrativo.
+      ...(horaFin && r.estado !== "finalizada" ? { estado_admin: ESTADO_ADMIN_INICIAL } : {}),
     }).eq("id", r.id);
     if (error) { alert("Error: " + error.message); return; }
     onRefresh();
