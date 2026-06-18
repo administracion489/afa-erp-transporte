@@ -1,6 +1,6 @@
 // POST /api/portal/manifiesto
 // Gestión de pasajeros del manifiesto desde el portal cliente.
-// Acciones: add | remove | bulk | assign_parada
+// Acciones: add | remove | bulk | assign_parada | actualizar_config
 // Seguridad: verifica que reservas.cliente_id === cliente_id y que el servicio sea editable.
 
 import { NextRequest, NextResponse } from "next/server";
@@ -237,6 +237,20 @@ export async function POST(req: NextRequest) {
       }
 
       return NextResponse.json({ ok: true, added, skipped, errores });
+    }
+
+    // ── ACTUALIZAR_CONFIG: nombre de ruta y toggles de autoselección ────────────
+    if (action === "actualizar_config") {
+      const { ruta_nombre, permite_autoseleccion, permite_cambio_paradero } = body;
+      const patch: Record<string, unknown> = {};
+      if (ruta_nombre !== undefined)             patch.ruta_nombre             = ruta_nombre || null;
+      if (permite_autoseleccion !== undefined)   patch.permite_autoseleccion   = Boolean(permite_autoseleccion);
+      if (permite_cambio_paradero !== undefined) patch.permite_cambio_paradero = Boolean(permite_cambio_paradero);
+      if (Object.keys(patch).length === 0) return NextResponse.json({ ok: true });
+
+      const { error } = await supabaseAdmin.from("reservas").update(patch).eq("id", reserva_id);
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ ok: true });
     }
 
     return NextResponse.json({ error: "Acción no reconocida" }, { status: 400 });

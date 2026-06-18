@@ -71,7 +71,7 @@ export type Props = {
   clienteId:  number;
   readonly:   boolean;
   onClose:    () => void;
-  onChanged?: () => void;  // callback para refrescar stats en la tabla
+  onChanged?: () => void;
 };
 
 const ESTADOS_EDITABLES = ["pendiente","confirmado","confirmada","por_confirmar","programada"];
@@ -99,6 +99,13 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
   const [importando,  setImportando]  = useState(false);
   const [mostrarForm, setMostrarForm] = useState(false);
 
+  // ── Config de ruta ────────────────────────────────────────────────────────
+  const [mostrarConfig,         setMostrarConfig]         = useState(false);
+  const [rutaNombre,            setRutaNombre]            = useState("");
+  const [permiteAutoseleccion,  setPermiteAutoseleccion]  = useState(false);
+  const [permiteCambioParadero, setPermiteCambioParadero] = useState(false);
+  const [configGuardando,       setConfigGuardando]       = useState(false);
+
   const fileRef = useRef<HTMLInputElement>(null);
 
   const emptyForm: AddForm = { nombre: "", dni: "", empresa: "", telefono: "", parada_id: "" };
@@ -108,6 +115,18 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
   const cargar = useCallback(async () => {
     setLoading(true);
     try {
+      // 0. Config de la reserva (ruta_nombre + toggles)
+      const { data: resData } = await supabase
+        .from("reservas")
+        .select("ruta_nombre,permite_autoseleccion,permite_cambio_paradero")
+        .eq("id", reservaId)
+        .maybeSingle();
+      if (resData) {
+        setRutaNombre(resData.ruta_nombre || "");
+        setPermiteAutoseleccion(!!resData.permite_autoseleccion);
+        setPermiteCambioParadero(!!resData.permite_cambio_paradero);
+      }
+
       // 1. Paradas del servicio
       const { data: parData } = await supabase
         .from("paradas")
@@ -319,6 +338,16 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
     }
   }
 
+  // ── Guardar config de ruta ────────────────────────────────────────────────
+  async function guardarConfig(patch: { ruta_nombre?: string; permite_autoseleccion?: boolean; permite_cambio_paradero?: boolean }) {
+    setConfigGuardando(true);
+    try {
+      await callApi({ action: "actualizar_config", cliente_id: clienteId, reserva_id: reservaId, ...patch });
+    } finally {
+      setConfigGuardando(false);
+    }
+  }
+
   // ── Descarga plantilla ─────────────────────────────────────────────────────
   function descargarPlantilla() {
     descargarPlantillaPortal(paradas.map(p => ({ orden: p.orden, nombre: p.nombre })));
@@ -426,6 +455,15 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
               Plantilla Excel
             </button>
 
+            {/* Configurar ruta */}
+            <button
+              onClick={() => { setMostrarConfig(v => !v); setMensaje(null); }}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 14px", borderRadius: 9, border: `1.5px solid ${mostrarConfig ? C.navy : C.line2}`, background: mostrarConfig ? C.navyTint : C.surface, color: mostrarConfig ? C.navy : C.ink2, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: C.fontSans }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+              Configurar ruta
+            </button>
+
             {/* Búsqueda */}
             <div style={{ flex: 1, minWidth: 160 }}>
               <input
@@ -447,6 +485,60 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
               placeholder="Buscar nombre, DNI o empresa…"
               style={{ width: "100%", maxWidth: 320, padding: "7px 12px", borderRadius: 9, border: `1px solid ${C.line2}`, fontSize: 12, fontFamily: C.fontSans, outline: "none", boxSizing: "border-box", background: C.surface, color: C.ink2 }}
             />
+          </div>
+        )}
+
+        {/* ── Panel configuración de ruta ── */}
+        {mostrarConfig && !readonly && (
+          <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.line}`, background: C.navyTint, flexShrink: 0 }}>
+            <p style={{ fontFamily: C.fontMono, fontSize: 9.5, fontWeight: 700, color: C.navy, textTransform: "uppercase", letterSpacing: "0.1em", margin: "0 0 12px" }}>
+              Configuración de ruta {configGuardando && <span style={{ fontWeight: 400, opacity: 0.6 }}>· guardando…</span>}
+            </p>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+              {/* Nombre de ruta */}
+              <div style={{ flex: "1 1 220px" }}>
+                <p style={{ fontSize: 9.5, fontWeight: 700, color: C.navy, textTransform: "uppercase", letterSpacing: "0.05em", margin: "0 0 4px" }}>Nombre de ruta</p>
+                <input
+                  value={rutaNombre}
+                  onChange={e => setRutaNombre(e.target.value)}
+                  onBlur={e => guardarConfig({ ruta_nombre: e.target.value.trim() })}
+                  placeholder="Ej. RUTA A CHORRILLOS - CALLAO"
+                  style={{ width: "100%", padding: "7px 10px", borderRadius: 8, border: `1px solid ${C.navyTint2}`, fontSize: 12, fontFamily: C.fontSans, outline: "none", boxSizing: "border-box", background: C.surface }}
+                />
+                <p style={{ fontSize: 10, color: C.mute, margin: "3px 0 0" }}>Visible al pasajero al elegir su bus</p>
+              </div>
+
+              {/* Toggles */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, flex: "1 1 200px" }}>
+                {/* Toggle autoselección */}
+                <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                  <div
+                    onClick={() => { const v = !permiteAutoseleccion; setPermiteAutoseleccion(v); guardarConfig({ permite_autoseleccion: v }); }}
+                    style={{ width: 38, height: 22, borderRadius: 11, background: permiteAutoseleccion ? C.navy : C.line2, position: "relative", transition: "background 0.2s", flexShrink: 0, cursor: "pointer" }}
+                  >
+                    <div style={{ position: "absolute", top: 3, left: permiteAutoseleccion ? 19 : 3, width: 16, height: 16, borderRadius: "50%", background: "white", transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
+                  </div>
+                  <div>
+                    <p style={{ margin: 0, fontWeight: 700, fontSize: 12, color: C.ink2 }}>Permitir que pasajeros elijan su paradero</p>
+                    <p style={{ margin: "1px 0 0", fontSize: 10, color: C.mute }}>Pasajeros sin paradero asignado podrán seleccionar uno</p>
+                  </div>
+                </label>
+
+                {/* Toggle cambio de paradero */}
+                <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                  <div
+                    onClick={() => { const v = !permiteCambioParadero; setPermiteCambioParadero(v); guardarConfig({ permite_cambio_paradero: v }); }}
+                    style={{ width: 38, height: 22, borderRadius: 11, background: permiteCambioParadero ? C.navy : C.line2, position: "relative", transition: "background 0.2s", flexShrink: 0, cursor: "pointer" }}
+                  >
+                    <div style={{ position: "absolute", top: 3, left: permiteCambioParadero ? 19 : 3, width: 16, height: 16, borderRadius: "50%", background: "white", transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
+                  </div>
+                  <div>
+                    <p style={{ margin: 0, fontWeight: 700, fontSize: 12, color: C.ink2 }}>Permitir cambio de paradero</p>
+                    <p style={{ margin: "1px 0 0", fontSize: 10, color: C.mute }}>Pasajeros con paradero asignado podrán modificarlo</p>
+                  </div>
+                </label>
+              </div>
+            </div>
           </div>
         )}
 

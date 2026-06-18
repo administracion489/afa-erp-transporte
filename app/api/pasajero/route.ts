@@ -168,7 +168,7 @@ export async function POST(req: NextRequest) {
 
         const { data: pp, error: ppErr } = await admin
           .from("pasajeros_parada")
-          .select("id, parada_id, parada:paradas(id, nombre, reserva_id, reserva:reservas(id, fecha_servicio, estado))")
+          .select("id, parada_id, parada_id_original, parada:paradas(id, nombre, reserva_id, reserva:reservas(id, fecha_servicio, estado, permite_cambio_paradero))")
           .eq("pasajero_id", pid);
         if (ppErr) return NextResponse.json({ error: ppErr.message }, { status: 500 });
 
@@ -181,7 +181,10 @@ export async function POST(req: NextRequest) {
 
         let actualizados = 0;
         for (const ppRow of vigentes) {
-          const reservaId = ppRow.parada?.reserva_id;
+          const reserva = (ppRow as any).parada?.reserva;
+          // Respeta el toggle: si no está habilitado, no cambia silenciosamente
+          if (!reserva?.permite_cambio_paradero) continue;
+          const reservaId = (ppRow as any).parada?.reserva_id;
           if (!reservaId) continue;
           const { data: candidatas } = await admin
             .from("paradas")
@@ -192,12 +195,152 @@ export async function POST(req: NextRequest) {
           if (candidatas?.length && candidatas[0].id !== ppRow.parada_id) {
             const { error: updErr } = await admin
               .from("pasajeros_parada")
-              .update({ parada_id: candidatas[0].id })
+              .update({
+                parada_id: candidatas[0].id,
+                parada_id_original: (ppRow as any).parada_id_original ?? ppRow.parada_id,
+                cambio_parada_en: new Date().toISOString(),
+              })
               .eq("id", ppRow.id);
             if (!updErr) actualizados++;
           }
         }
         return NextResponse.json({ ok: true, actualizados });
+      }
+
+      // ── Reservas disponibles para autoselección ───────────────────────────
+      case "reservas_disponibles": {
+        const { pid, hoy } = body;
+        if (!pid || !hoy) return NextResponse.json({ error: "pid y hoy requeridos" }, { status: 400 });
+
+        const { data: pax } = await admin
+          .from("pasajeros").select("cliente_id").eq("id", pid).maybeSingle();
+        if (!pax?.cliente_id) return NextResponse.json({ reservas: [] });
+
+        const { data: reservas, error: rErr } = await admin
+          .from("reservas")
+          .select("id, ruta_nombre, origen, destino, fecha_servicio, hora_servicio, vehiculo_id, vehiculo_tercero_id, paradas(*)")
+          .eq("cliente_id", pax.cliente_id)
+          .eq("permite_autoseleccion", true)
+          .gte("fecha_servicio", hoy)
+          .in("estado", ["pendiente", "programada", "confirmada"]);
+        if (rErr) return NextResponse.json({ error: rErr.message }, { status: 500 });
+        if (!reservas?.length) return NextResponse.json({ reservas: [] });
+
+        const paradaIds = reservas.flatMap((r: any) => (r.paradas || []).map((p: any) => p.id));
+
+        // Mapa parada_id → reserva_id (evita nested selects)
+        const paradaToReserva = new Map<number, number>();
+        reservas.forEach((r: any) => {
+          (r.paradas || []).forEach((p: any) => paradaToReserva.set(p.id, r.id));
+        });
+
+        const yaAsignados = new Set<number>();
+        const ocupacion = new Map<number, number>(); // reserva_id → total pasajeros
+
+        if (paradaIds.length > 0) {
+          const [ppPax, ppTodos] = await Promise.all([
+            admin.from("pasajeros_parada").select("parada_id").eq("pasajero_id", pid).in("parada_id", paradaIds),
+            admin.from("pasajeros_parada").select("parada_id").in("parada_id", paradaIds),
+          ]);
+          (ppPax.data || []).forEach((pp: any) => {
+            const rId = paradaToReserva.get(pp.parada_id);
+            if (rId) yaAsignados.add(rId);
+          });
+          (ppTodos.data || []).forEach((pp: any) => {
+            const rId = paradaToReserva.get(pp.parada_id);
+            if (rId) ocupacion.set(rId, (ocupacion.get(rId) || 0) + 1);
+          });
+        }
+
+        // Obtener capacidades de vehículos
+        const vIds  = [...new Set(reservas.filter((r: any) => r.vehiculo_id).map((r: any) => r.vehiculo_id as number))];
+        const vtIds = [...new Set(reservas.filter((r: any) => r.vehiculo_tercero_id).map((r: any) => r.vehiculo_tercero_id as number))];
+        const [vRes, vtRes] = await Promise.all([
+          vIds.length  > 0 ? admin.from("vehiculos").select("id,capacidad_pasajeros").in("id", vIds)         : Promise.resolve({ data: [] as any[] }),
+          vtIds.length > 0 ? admin.from("vehiculos_tercero").select("id,capacidad").in("id", vtIds)          : Promise.resolve({ data: [] as any[] }),
+        ]);
+        const capPropia   = new Map((vRes.data  || []).map((v: any) => [v.id, v.capacidad_pasajeros as number | null]));
+        const capTercera  = new Map((vtRes.data || []).map((v: any) => [v.id, v.capacidad           as number | null]));
+
+        const disponibles = reservas
+          .filter((r: any) => !yaAsignados.has(r.id))
+          .map((r: any) => {
+            const cap: number | null = r.vehiculo_id
+              ? (capPropia.get(r.vehiculo_id)   ?? null)
+              : (capTercera.get(r.vehiculo_tercero_id) ?? null);
+            const ocup = ocupacion.get(r.id) || 0;
+            return { ...r, capacidad: cap, ocupacion: ocup };
+          })
+          // Solo buses con lugar disponible (sin capacidad definida = sin límite)
+          .filter((r: any) => r.capacidad === null || r.ocupacion < r.capacidad);
+
+        return NextResponse.json({ reservas: disponibles });
+      }
+
+      // ── Autoseleccionar paradero ──────────────────────────────────────────
+      case "autoseleccionar": {
+        const { pid, parada_id } = body;
+        if (!pid || !parada_id) return NextResponse.json({ error: "pid y parada_id requeridos" }, { status: 400 });
+
+        // Obtener cliente_id del pasajero
+        const { data: pax } = await admin
+          .from("pasajeros").select("cliente_id").eq("id", pid).maybeSingle();
+        if (!pax?.cliente_id) return NextResponse.json({ error: "Pasajero no encontrado" }, { status: 404 });
+
+        // Verificar que la parada pertenece a una reserva de la empresa con autoselección activa
+        const { data: parada } = await admin
+          .from("paradas")
+          .select("id, reserva_id, reserva:reservas(id, cliente_id, permite_autoseleccion, estado, vehiculo_id, vehiculo_tercero_id)")
+          .eq("id", parada_id)
+          .maybeSingle();
+        const reserva = (parada as any)?.reserva;
+        if (!parada || !reserva) return NextResponse.json({ error: "Parada no encontrada" }, { status: 404 });
+        if (Number(reserva.cliente_id) !== Number(pax.cliente_id))
+          return NextResponse.json({ error: "No autorizado" }, { status: 403 });
+        if (!reserva.permite_autoseleccion)
+          return NextResponse.json({ error: "No autorizado" }, { status: 403 });
+        if (!["pendiente", "programada", "confirmada"].includes(reserva.estado))
+          return NextResponse.json({ error: "Servicio no disponible" }, { status: 400 });
+
+        // Verificar que el pasajero no esté ya asignado en esta reserva
+        const { data: paradaIds } = await admin
+          .from("paradas").select("id").eq("reserva_id", reserva.id);
+        const ids = (paradaIds || []).map((p: any) => p.id);
+        if (ids.length > 0) {
+          const { data: existing } = await admin
+            .from("pasajeros_parada").select("id")
+            .eq("pasajero_id", pid).in("parada_id", ids).maybeSingle();
+          if (existing) return NextResponse.json({ error: "Ya tienes una parada asignada en este servicio" }, { status: 409 });
+        }
+
+        // Validar capacidad (protege race conditions)
+        if (ids.length > 0) {
+          const capRes = reserva.vehiculo_id
+            ? await admin.from("vehiculos").select("capacidad_pasajeros").eq("id", reserva.vehiculo_id).maybeSingle()
+            : reserva.vehiculo_tercero_id
+              ? await admin.from("vehiculos_tercero").select("capacidad").eq("id", reserva.vehiculo_tercero_id).maybeSingle()
+              : null;
+          const capacidad: number | null = reserva.vehiculo_id
+            ? (capRes?.data as any)?.capacidad_pasajeros ?? null
+            : (capRes?.data as any)?.capacidad ?? null;
+          if (capacidad !== null) {
+            const { count } = await admin
+              .from("pasajeros_parada")
+              .select("id", { count: "exact", head: true })
+              .in("parada_id", ids);
+            if ((count || 0) >= capacidad)
+              return NextResponse.json({ error: "Este servicio ya está lleno" }, { status: 409 });
+          }
+        }
+
+        // Crear la asignación
+        const { error: insErr } = await admin.from("pasajeros_parada").insert({
+          pasajero_id: Number(pid),
+          parada_id:   Number(parada_id),
+          estado_abordaje: "Pendiente",
+        });
+        if (insErr) return NextResponse.json({ error: insErr.message }, { status: 500 });
+        return NextResponse.json({ ok: true });
       }
 
       default:

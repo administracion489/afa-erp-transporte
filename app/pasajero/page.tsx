@@ -453,6 +453,12 @@ export default function AppPasajero() {
   const [paraderoModalSel,         setParaderoModalSel]         = useState<Parada | null>(null);
   const [cambioParaderoLoad,       setCambioParaderoLoad]       = useState(false);
 
+  // ── AUTOSELECCIÓN DE RUTA ───────────────────────────────────────────────────
+  const [reservasDisp,     setReservasDisp]     = useState<any[]>([]);
+  const [selRutaId,        setSelRutaId]        = useState<number | null>(null);
+  const [selParadaId,      setSelParadaId]      = useState<number | null>(null);
+  const [autoseleccionando, setAutoseleccionando] = useState(false);
+
   // ── GPS PROPIO DEL PASAJERO ─────────────────────────────────────────────────
   const [gpsPermiso,     setGpsPermiso]     = useState<GpsPermiso>("unknown");
   const [gpsPropio,      setGpsPropio]      = useState<{ lat: number; lng: number } | null>(null);
@@ -765,7 +771,17 @@ export default function AppPasajero() {
       console.error("[cargarMiRuta]", e?.message);
       return;
     }
-    if (!r || r.ruta === null || !r.miParada) return;
+    if (!r || r.ruta === null || !r.miParada) {
+      // Sin ruta asignada: buscar reservas disponibles para autoselección
+      try {
+        const { reservas } = await paxApi("reservas_disponibles", { pid, hoy });
+        setReservasDisp(reservas || []);
+      } catch { /* silencioso */ }
+      return;
+    }
+    setReservasDisp([]);
+    setSelRutaId(null);
+    setSelParadaId(null);
     setMiParada(r.miParada);
     setMiEstado(r.miEstado || "esperando");
     setRutaParadas(r.rutaParadas || []);
@@ -878,6 +894,22 @@ export default function AppPasajero() {
       setMostrarConfirmarParadero(false);
       setCambioParaderoLoad(false);
       await cargarMiRuta(pasajero.id);
+    }
+  }
+
+  async function elegirParadero() {
+    if (!pasajero || !selParadaId) return;
+    setAutoseleccionando(true);
+    try {
+      await paxApi("autoseleccionar", { pid: pasajero.id, parada_id: selParadaId });
+      setSelRutaId(null);
+      setSelParadaId(null);
+      setReservasDisp([]);
+      await cargarMiRuta(pasajero.id);
+    } catch (e: any) {
+      console.error("[elegirParadero]", e?.message);
+    } finally {
+      setAutoseleccionando(false);
     }
   }
 
@@ -1245,57 +1277,73 @@ export default function AppPasajero() {
               </p>
             </div>
 
-            {/* Lista de paradas */}
-            <div className="afa-para-scroll" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {rutaParadas.map((p, i) => {
-                const esAsignado  = p.id === miParada.id;
-                const esSel       = p.id === paraderoModalSel?.id;
-                return (
-                  <button
-                    key={p.id}
-                    onClick={() => setParaderoModalSel(p)}
-                    style={{
-                      width: "100%", textAlign: "left", cursor: "pointer", fontFamily: "var(--f)",
-                      background: esSel ? "var(--navy-tint)" : "var(--surface)",
-                      border: "none",
-                      outline: esSel ? "2px solid var(--navy)" : "1.5px solid var(--line2)",
-                      borderRadius: 14, padding: "12px 14px",
-                      display: "flex", alignItems: "center", gap: 12,
-                    }}
-                  >
-                    <div style={{
-                      width: 28, height: 28, borderRadius: "50%", flexShrink: 0,
-                      background: esSel ? "var(--navy)" : "var(--soft)",
-                      color: esSel ? "white" : "var(--mute2)",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      fontSize: 11, fontWeight: 800,
-                    }}>{i + 1}</div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <p style={{ margin: 0, fontWeight: 700, fontSize: 13.5, color: esSel ? "var(--navy)" : "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {p.nombre}
-                      </p>
-                      {p.direccion && (
-                        <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--mute2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.direccion}</p>
-                      )}
-                    </div>
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
-                      {p.hora_estimada && (
-                        <span style={{ fontFamily: "var(--m)", fontSize: 12, fontWeight: 700, color: esSel ? "var(--navy)" : "var(--mute)" }}>{p.hora_estimada}</span>
-                      )}
-                      {esAsignado && (
-                        <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--navy)", background: "var(--navy-tint)", padding: "2px 7px", borderRadius: 999, letterSpacing: 0.3 }}>
-                          ASIGNADO
-                        </span>
-                      )}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+            {/* Lista de paradas — solo visible si el operador permite cambio */}
+            {(miParada.reserva as any)?.permite_cambio_paradero ? (
+              <div className="afa-para-scroll" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {rutaParadas.map((p, i) => {
+                  const esAsignado  = p.id === miParada.id;
+                  const esSel       = p.id === paraderoModalSel?.id;
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => setParaderoModalSel(p)}
+                      style={{
+                        width: "100%", textAlign: "left", cursor: "pointer", fontFamily: "var(--f)",
+                        background: esSel ? "var(--navy-tint)" : "var(--surface)",
+                        border: "none",
+                        outline: esSel ? "2px solid var(--navy)" : "1.5px solid var(--line2)",
+                        borderRadius: 14, padding: "12px 14px",
+                        display: "flex", alignItems: "center", gap: 12,
+                      }}
+                    >
+                      <div style={{
+                        width: 28, height: 28, borderRadius: "50%", flexShrink: 0,
+                        background: esSel ? "var(--navy)" : "var(--soft)",
+                        color: esSel ? "white" : "var(--mute2)",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 11, fontWeight: 800,
+                      }}>{i + 1}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <p style={{ margin: 0, fontWeight: 700, fontSize: 13.5, color: esSel ? "var(--navy)" : "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {p.nombre}
+                        </p>
+                        {p.direccion && (
+                          <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--mute2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.direccion}</p>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+                        {p.hora_estimada && (
+                          <span style={{ fontFamily: "var(--m)", fontSize: 12, fontWeight: 700, color: esSel ? "var(--navy)" : "var(--mute)" }}>{p.hora_estimada}</span>
+                        )}
+                        {esAsignado && (
+                          <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--navy)", background: "var(--navy-tint)", padding: "2px 7px", borderRadius: 999, letterSpacing: 0.3 }}>
+                            ASIGNADO
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              /* Sin cambio permitido: muestra solo el paradero asignado */
+              <div className="afa-para-scroll">
+                <div style={{ padding: "12px 14px", borderRadius: 14, outline: "2px solid var(--navy)", background: "var(--navy-tint)", display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--navy)", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, flexShrink: 0 }}>
+                    {rutaParadas.findIndex(p => p.id === miParada.id) + 1 || "·"}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ margin: 0, fontWeight: 700, fontSize: 13.5, color: "var(--navy)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{miParada.nombre}</p>
+                    {miParada.direccion && <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--mute2)" }}>{miParada.direccion}</p>}
+                  </div>
+                  {miParada.hora_estimada && <span style={{ fontFamily: "var(--m)", fontSize: 12, fontWeight: 700, color: "var(--navy)", flexShrink: 0 }}>{miParada.hora_estimada}</span>}
+                </div>
+              </div>
+            )}
 
             {/* Botones */}
             <div style={{ padding: "14px 20px", borderTop: "1px solid var(--line2)", display: "flex", flexDirection: "column", gap: 10 }}>
-              {paraderoModalSel?.id !== miParada.id ? (
+              {(miParada.reserva as any)?.permite_cambio_paradero && paraderoModalSel?.id !== miParada.id ? (
                 <button
                   onClick={cambiarParadero}
                   disabled={cambioParaderoLoad}
@@ -1385,26 +1433,114 @@ export default function AppPasajero() {
               {!miParada ? (
                 /* ── EMPTY: sin ruta hoy ── */
                 <div style={{ padding: "20px 20px 16px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
-                    <StatusDot color="var(--mute2)" size={7} pulse={false} />
-                    <Eyebrow color="var(--mute2)">Sin servicio hoy</Eyebrow>
-                  </div>
-                  <div style={{ background: "var(--surface)", border: "1px dashed var(--line)", borderRadius: 20, padding: "28px 18px", textAlign: "center", position: "relative", overflow: "hidden" }}>
-                    <div style={{ position: "absolute", inset: 0, opacity: 0.03, backgroundImage: `radial-gradient(var(--navy) 1px, transparent 1px)`, backgroundSize: "14px 14px" }} />
-                    <div style={{ width: 80, height: 80, margin: "0 auto 14px", borderRadius: 24, background: "var(--navy-tint)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      <IconRoute sz={36} c="var(--navy)" />
-                    </div>
-                    <h3 style={{ margin: 0, fontWeight: 800, fontSize: 17, letterSpacing: -0.4, color: "var(--ink)" }}>No tienes ruta asignada hoy</h3>
-                    <p style={{ margin: "8px auto 18px", fontSize: 13, color: "var(--mute)", maxWidth: 260, lineHeight: 1.5 }}>Tu empresa aún no registró tu paradero. Suele actualizarse a partir de las 5:30 a.m.</p>
-                    <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-                      <button onClick={() => cargarMiRuta(pasajero.id)} style={{ padding: "10px 16px", borderRadius: 12, border: "1px solid var(--line)", background: "var(--surface)", color: "var(--ink)", fontWeight: 700, fontSize: 13, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "var(--f)" }}>
-                        <IconBell sz={14} c="var(--navy)" /> Actualizar
-                      </button>
-                      <a href="tel:013453707" style={{ padding: "10px 16px", borderRadius: 12, border: "none", background: "var(--navy)", color: "white", fontWeight: 700, fontSize: 13, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "var(--f)", textDecoration: "none" }}>
-                        <IconPhone sz={14} c="white" /> Llamar
-                      </a>
-                    </div>
-                  </div>
+                  {reservasDisp.length > 0 ? (
+                    /* ── AUTOSELECCIÓN: hay buses disponibles ── */
+                    selRutaId === null ? (
+                      /* Paso 1: elegir bus/ruta */
+                      <>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                          <StatusDot color="var(--navy)" size={7} pulse />
+                          <Eyebrow color="var(--navy)">Elige tu bus de hoy</Eyebrow>
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                          {reservasDisp.map((r: any) => (
+                            <button
+                              key={r.id}
+                              onClick={() => { setSelRutaId(r.id); setSelParadaId(null); }}
+                              style={{ textAlign: "left", padding: "14px 16px", borderRadius: 16, border: "1.5px solid var(--line2)", background: "var(--surface)", cursor: "pointer", fontFamily: "var(--f)", display: "flex", alignItems: "center", gap: 14 }}
+                            >
+                              <div style={{ width: 44, height: 44, borderRadius: 12, background: "var(--navy-tint)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                                <IconBus sz={22} c="var(--navy)" />
+                              </div>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <p style={{ margin: 0, fontWeight: 800, fontSize: 14, color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {r.ruta_nombre || `${r.origen} → ${r.destino}`}
+                                </p>
+                                <p style={{ margin: "3px 0 0", fontSize: 12, color: "var(--mute)" }}>
+                                  {r.hora_servicio || "—"} · {(r.paradas || []).length} paraderos
+                                </p>
+                              </div>
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--mute2)" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
+                            </button>
+                          ))}
+                        </div>
+                        <button onClick={() => cargarMiRuta(pasajero.id)} style={{ marginTop: 14, width: "100%", padding: "10px", borderRadius: 12, border: "1px solid var(--line)", background: "transparent", color: "var(--mute)", fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "var(--f)" }}>
+                          Actualizar
+                        </button>
+                      </>
+                    ) : (
+                      /* Paso 2: elegir paradero */
+                      (() => {
+                        const ruta = reservasDisp.find((r: any) => r.id === selRutaId);
+                        const paradas: any[] = (ruta?.paradas || []).slice().sort((a: any, b: any) => a.orden - b.orden);
+                        return (
+                          <>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                              <button onClick={() => { setSelRutaId(null); setSelParadaId(null); }} style={{ background: "none", border: "none", cursor: "pointer", padding: "2px 6px 2px 0", display: "flex", alignItems: "center", color: "var(--mute)" }}>
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+                              </button>
+                              <Eyebrow color="var(--navy)">Elige tu paradero</Eyebrow>
+                            </div>
+                            <p style={{ margin: "0 0 12px", fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>
+                              {ruta?.ruta_nombre || `${ruta?.origen} → ${ruta?.destino}`}
+                            </p>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+                              {paradas.map((p: any, i: number) => {
+                                const sel = p.id === selParadaId;
+                                return (
+                                  <button
+                                    key={p.id}
+                                    onClick={() => setSelParadaId(p.id)}
+                                    style={{ textAlign: "left", padding: "12px 14px", borderRadius: 14, border: "none", outline: sel ? "2px solid var(--navy)" : "1.5px solid var(--line2)", background: sel ? "var(--navy-tint)" : "var(--surface)", cursor: "pointer", fontFamily: "var(--f)", display: "flex", alignItems: "center", gap: 12 }}
+                                  >
+                                    <div style={{ width: 28, height: 28, borderRadius: "50%", background: sel ? "var(--navy)" : "var(--soft)", color: sel ? "white" : "var(--mute2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, flexShrink: 0 }}>
+                                      {i + 1}
+                                    </div>
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      <p style={{ margin: 0, fontWeight: 700, fontSize: 13.5, color: sel ? "var(--navy)" : "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.nombre}</p>
+                                      {p.direccion && <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--mute2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.direccion}</p>}
+                                    </div>
+                                    {p.hora_estimada && <span style={{ fontFamily: "var(--m)", fontSize: 12, fontWeight: 700, color: sel ? "var(--navy)" : "var(--mute)", flexShrink: 0 }}>{p.hora_estimada}</span>}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            <button
+                              onClick={elegirParadero}
+                              disabled={!selParadaId || autoseleccionando}
+                              style={{ width: "100%", padding: "14px", borderRadius: 14, border: "none", background: selParadaId ? "var(--navy)" : "var(--line2)", color: "white", fontFamily: "var(--f)", fontWeight: 700, fontSize: 15, cursor: selParadaId && !autoseleccionando ? "pointer" : "not-allowed", opacity: autoseleccionando ? 0.65 : 1 }}
+                            >
+                              {autoseleccionando ? "Asignando…" : "Confirmar este paradero"}
+                            </button>
+                          </>
+                        );
+                      })()
+                    )
+                  ) : (
+                    /* Sin buses disponibles: mensaje original */
+                    <>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+                        <StatusDot color="var(--mute2)" size={7} pulse={false} />
+                        <Eyebrow color="var(--mute2)">Sin servicio hoy</Eyebrow>
+                      </div>
+                      <div style={{ background: "var(--surface)", border: "1px dashed var(--line)", borderRadius: 20, padding: "28px 18px", textAlign: "center", position: "relative", overflow: "hidden" }}>
+                        <div style={{ position: "absolute", inset: 0, opacity: 0.03, backgroundImage: `radial-gradient(var(--navy) 1px, transparent 1px)`, backgroundSize: "14px 14px" }} />
+                        <div style={{ width: 80, height: 80, margin: "0 auto 14px", borderRadius: 24, background: "var(--navy-tint)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <IconRoute sz={36} c="var(--navy)" />
+                        </div>
+                        <h3 style={{ margin: 0, fontWeight: 800, fontSize: 17, letterSpacing: -0.4, color: "var(--ink)" }}>No tienes ruta asignada hoy</h3>
+                        <p style={{ margin: "8px auto 18px", fontSize: 13, color: "var(--mute)", maxWidth: 260, lineHeight: 1.5 }}>Tu empresa aún no registró tu paradero. Suele actualizarse a partir de las 5:30 a.m.</p>
+                        <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                          <button onClick={() => cargarMiRuta(pasajero.id)} style={{ padding: "10px 16px", borderRadius: 12, border: "1px solid var(--line)", background: "var(--surface)", color: "var(--ink)", fontWeight: 700, fontSize: 13, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "var(--f)" }}>
+                            <IconBell sz={14} c="var(--navy)" /> Actualizar
+                          </button>
+                          <a href="tel:013453707" style={{ padding: "10px 16px", borderRadius: 12, border: "none", background: "var(--navy)", color: "white", fontWeight: 700, fontSize: 13, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, fontFamily: "var(--f)", textDecoration: "none" }}>
+                            <IconPhone sz={14} c="white" /> Llamar
+                          </a>
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               ) : estadoBus === "sin_señal" ? (
                 /* ── NO GPS ── */

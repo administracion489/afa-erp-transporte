@@ -47,6 +47,7 @@ type Props = {
   paradasJson?: any[] | null;
   cotizacionId?: number | null;
   vehiculoId?: number | null;
+  vehiculoTerceroId?: number | null;
   onClose: () => void;
   onChange?: () => void;
 };
@@ -84,7 +85,7 @@ async function geocodearDireccion(
 
 export default function ModalManifiesto(props: Props) {
   const { reservaId, clienteId, capacidad, sincronizadoApp, fechaSincronizacion,
-    origen, destino, puntoRetorno, paradasJson, cotizacionId, vehiculoId, onClose, onChange } = props;
+    origen, destino, puntoRetorno, paradasJson, cotizacionId, vehiculoId, vehiculoTerceroId, onClose, onChange } = props;
 
   const [tab, setTab] = useState<Tab>("pasajeros");
   const [pasajeros, setPasajeros] = useState<PasajeroManifiesto[]>([]);
@@ -108,6 +109,22 @@ export default function ModalManifiesto(props: Props) {
   const [copiarDesde, setCopiarDesde] = useState("");
   const [copiarHasta, setCopiarHasta] = useState("");
   const [copiando, setCopiando] = useState(false);
+
+  // ── Config de ruta ───────────────────────────────────────────────────────
+  const [mostrarConfigRuta,     setMostrarConfigRuta]     = useState(false);
+  const [rutaNombre,            setRutaNombre]            = useState("");
+  const [permiteAutoseleccion,  setPermiteAutoseleccion]  = useState(false);
+  const [permiteCambioParadero, setPermiteCambioParadero] = useState(false);
+  const [configGuardando,       setConfigGuardando]       = useState(false);
+  const [fechaServicio,         setFechaServicio]         = useState("");
+
+  // ── Aplicar config a rango de fechas ────────────────────────────────────
+  const [modalConfigRango, setModalConfigRango] = useState(false);
+  const [configDesde,      setConfigDesde]      = useState("");
+  const [configHasta,      setConfigHasta]      = useState("");
+  const [incluirActual,    setIncluirActual]    = useState(true);
+  const [aplicandoConfig,  setAplicandoConfig]  = useState(false);
+  const [previewIds,       setPreviewIds]       = useState<number[]>([]);
 
   const autoCrearParadasIniciales = async (): Promise<number> => {
     // Prioridad 1: paradas_json de la cotización (ya trae coordenadas de Google Maps)
@@ -303,6 +320,39 @@ export default function ModalManifiesto(props: Props) {
   };
 
   useEffect(() => { cargar(); /* eslint-disable-next-line */ }, [reservaId]);
+
+  // Carga los 3 campos de config + fecha_servicio al abrir el modal
+  useEffect(() => {
+    supabase.from("reservas")
+      .select("ruta_nombre,permite_autoseleccion,permite_cambio_paradero,fecha_servicio")
+      .eq("id", reservaId).maybeSingle()
+      .then((res: any) => {
+        const cfg = res.data;
+        if (!cfg) return;
+        setRutaNombre(cfg.ruta_nombre || "");
+        setPermiteAutoseleccion(!!cfg.permite_autoseleccion);
+        setPermiteCambioParadero(!!cfg.permite_cambio_paradero);
+        setFechaServicio(cfg.fecha_servicio || "");
+      });
+  }, [reservaId]);
+
+  // Preview: cuenta reservas afectadas al cambiar fechas o el checkbox
+  useEffect(() => {
+    const vidActivo = vehiculoId || vehiculoTerceroId;
+    if (!modalConfigRango || !cotizacionId || !vidActivo || !configDesde || !configHasta) {
+      setPreviewIds([]); return;
+    }
+    const campo = vehiculoId ? "vehiculo_id" : "vehiculo_tercero_id";
+    supabase.from("reservas").select("id")
+      .eq("cotizacion_id", cotizacionId).eq(campo, vidActivo)
+      .gte("fecha_servicio", configDesde).lte("fecha_servicio", configHasta)
+      .not("estado", "in", "(cancelada,finalizada)")
+      .then((res: any) => {
+        let ids = ((res.data || []) as any[]).map((r: any) => r.id as number);
+        if (!incluirActual) ids = ids.filter((id: number) => id !== reservaId);
+        setPreviewIds(ids);
+      });
+  }, [modalConfigRango, cotizacionId, vehiculoId, vehiculoTerceroId, configDesde, configHasta, incluirActual, reservaId]);
 
   const total = pasajeros.length;
   const abordados = useMemo(() => Object.values(asignaciones).filter((a) => a.estado_abordaje === "Abordado").length, [asignaciones]);
@@ -617,6 +667,32 @@ export default function ModalManifiesto(props: Props) {
     lng: p.lng ?? null,
   }));
 
+  const guardarConfig = async (patch: Partial<{ ruta_nombre: string | null; permite_autoseleccion: boolean; permite_cambio_paradero: boolean }>) => {
+    setConfigGuardando(true);
+    try { await supabase.from("reservas").update(patch).eq("id", reservaId); }
+    finally { setConfigGuardando(false); }
+  };
+
+  const aplicarConfigRango = async () => {
+    if (!previewIds.length) return;
+    setAplicandoConfig(true);
+    try {
+      const { error } = await supabase.from("reservas").update({
+        ruta_nombre:             rutaNombre.trim() || null,
+        permite_autoseleccion:   permiteAutoseleccion,
+        permite_cambio_paradero: permiteCambioParadero,
+      }).in("id", previewIds);
+      if (error) throw error;
+      setMensaje({ tipo: "ok", texto: `Config aplicada a ${previewIds.length} servicio(s) ✓` });
+      setModalConfigRango(false);
+      setConfigDesde(""); setConfigHasta("");
+    } catch (e: any) {
+      setMensaje({ tipo: "err", texto: e?.message || "Error al aplicar" });
+    } finally {
+      setAplicandoConfig(false);
+    }
+  };
+
   const ejecutarCopiar = async () => {
     if (!cotizacionId || !vehiculoId || !copiarDesde || !copiarHasta) return;
     setCopiando(true);
@@ -651,12 +727,14 @@ export default function ModalManifiesto(props: Props) {
         paradasOrigen.map((p: any) => [p.id, p.orden])
       );
 
-      // 3. Find target reservas: same cotizacion_id + vehiculo_id, in date range
+      // 3. Find target reservas: same cotizacion_id + vehiculo, in date range
+      const campoVehiculo = vehiculoId ? "vehiculo_id" : "vehiculo_tercero_id";
+      const vidCopiar = (vehiculoId || vehiculoTerceroId)!;
       const { data: reservasDestino } = await supabase
         .from("reservas")
         .select("id, fecha_servicio")
         .eq("cotizacion_id", cotizacionId)
-        .eq("vehiculo_id", vehiculoId)
+        .eq(campoVehiculo, vidCopiar)
         .neq("id", reservaId)
         .gte("fecha_servicio", copiarDesde)
         .lte("fecha_servicio", copiarHasta)
@@ -837,7 +915,7 @@ export default function ModalManifiesto(props: Props) {
 
               <button onClick={descargarPlantilla} className="px-3 py-2 rounded-xl font-bold text-xs border hover:bg-gray-50 text-gray-600">Plantilla pax</button>
 
-              {cotizacionId && vehiculoId && (
+              {cotizacionId && (vehiculoId || vehiculoTerceroId) && (
                 <button
                   onClick={() => setModalCopiar(true)}
                   className="px-3 py-2 rounded-xl font-bold text-xs border transition-colors"
@@ -846,7 +924,96 @@ export default function ModalManifiesto(props: Props) {
                   📋 Copiar a días futuros
                 </button>
               )}
+
+              <button
+                onClick={() => { setMostrarConfigRuta(v => !v); setMensaje(null); }}
+                className="px-3 py-2 rounded-xl font-bold text-xs border transition-colors"
+                style={{
+                  borderColor: mostrarConfigRuta ? "#0b315f" : "#e2e8f0",
+                  background:  mostrarConfigRuta ? "#eaeff6" : "white",
+                  color:       mostrarConfigRuta ? "#0b315f" : "#374151",
+                }}
+              >
+                ⚙ Configurar ruta
+              </button>
             </div>
+
+            {/* Panel config de ruta */}
+            {mostrarConfigRuta && (
+              <div className="mx-6 mt-3 rounded-xl border p-4" style={{ borderColor: "#bfdbfe", background: "#eaeff6" }}>
+                <p className="text-[10px] font-bold uppercase tracking-widest mb-3" style={{ color: "#0b315f" }}>
+                  Configuración de ruta
+                  {configGuardando && <span className="ml-2 font-normal opacity-60">· guardando…</span>}
+                </p>
+                <div className="flex gap-4 flex-wrap items-start">
+
+                  {/* Nombre de ruta */}
+                  <div className="flex-[1_1_220px]">
+                    <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Nombre de ruta</p>
+                    <input
+                      value={rutaNombre}
+                      onChange={e => setRutaNombre(e.target.value)}
+                      onBlur={e => guardarConfig({ ruta_nombre: e.target.value.trim() || null })}
+                      placeholder="Ej. RUTA A CHORRILLOS - CALLAO"
+                      className="w-full border rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 bg-white"
+                      style={{ borderColor: "#bfdbfe" }}
+                    />
+                    <p className="text-[10px] text-gray-400 mt-1">Visible al pasajero al elegir su bus</p>
+                  </div>
+
+                  {/* Toggles */}
+                  <div className="flex flex-col gap-3 flex-[1_1_200px]">
+                    {/* Toggle autoselección */}
+                    <label className="flex items-center gap-3 cursor-pointer select-none">
+                      <button
+                        type="button"
+                        onClick={() => { const v = !permiteAutoseleccion; setPermiteAutoseleccion(v); guardarConfig({ permite_autoseleccion: v }); }}
+                        className="relative flex-shrink-0 transition-colors rounded-full"
+                        style={{ width: 36, height: 20, background: permiteAutoseleccion ? "#0b315f" : "#cbd5e1" }}
+                      >
+                        <span className="absolute top-1 transition-all rounded-full bg-white"
+                          style={{ width: 14, height: 14, left: permiteAutoseleccion ? 18 : 3, boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
+                      </button>
+                      <div>
+                        <p className="text-xs font-bold text-gray-700">Permitir que pasajeros elijan su paradero</p>
+                        <p className="text-[10px] text-gray-400">Pasajeros sin paradero asignado podrán seleccionar uno</p>
+                      </div>
+                    </label>
+
+                    {/* Toggle cambio de paradero */}
+                    <label className="flex items-center gap-3 cursor-pointer select-none">
+                      <button
+                        type="button"
+                        onClick={() => { const v = !permiteCambioParadero; setPermiteCambioParadero(v); guardarConfig({ permite_cambio_paradero: v }); }}
+                        className="relative flex-shrink-0 transition-colors rounded-full"
+                        style={{ width: 36, height: 20, background: permiteCambioParadero ? "#0b315f" : "#cbd5e1" }}
+                      >
+                        <span className="absolute top-1 transition-all rounded-full bg-white"
+                          style={{ width: 14, height: 14, left: permiteCambioParadero ? 18 : 3, boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
+                      </button>
+                      <div>
+                        <p className="text-xs font-bold text-gray-700">Permitir cambio de paradero</p>
+                        <p className="text-[10px] text-gray-400">Pasajeros con paradero asignado podrán modificarlo</p>
+                      </div>
+                    </label>
+                  </div>
+
+                  {/* Aplicar a rango */}
+                  {cotizacionId && (vehiculoId || vehiculoTerceroId) && (
+                    <div className="flex-[0_0_auto] flex flex-col justify-end">
+                      <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Aplicar en lote</p>
+                      <button
+                        onClick={() => setModalConfigRango(true)}
+                        className="px-3 py-2 rounded-xl font-bold text-xs border transition-colors whitespace-nowrap"
+                        style={{ borderColor: "#0b315f", background: "white", color: "#0b315f" }}
+                      >
+                        📅 Aplicar a rango de fechas
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Formulario agregar 1 pasajero */}
             {mostrarFormAdd && (
@@ -1023,6 +1190,130 @@ export default function ModalManifiesto(props: Props) {
             ) : null}
           </div>
         ) : null}
+
+        {/* Modal aplicar config a rango de fechas */}
+        {modalConfigRango && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center" style={{ background: "rgba(15,23,42,0.5)" }}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden">
+              <div className="px-6 py-4" style={{ background: "#0b315f" }}>
+                <p className="text-white font-bold text-sm">Aplicar config a rango de fechas</p>
+                <p className="text-blue-200 text-xs mt-0.5">
+                  Aplica el nombre de ruta y los toggles al mismo vehículo en el rango seleccionado.
+                </p>
+              </div>
+              <div className="px-6 py-5 flex flex-col gap-4">
+
+                {/* Resumen de config a aplicar */}
+                <div className="rounded-xl border p-3 text-xs" style={{ borderColor: "#bfdbfe", background: "#eaeff6" }}>
+                  <p className="font-bold text-gray-600 mb-1">Config que se aplicará:</p>
+                  <p className="text-gray-700">
+                    <span className="font-bold">Ruta:</span> {rutaNombre.trim() || <span className="italic text-gray-400">sin nombre</span>}
+                  </p>
+                  <p className="text-gray-700">
+                    <span className="font-bold">Autoselección:</span> {permiteAutoseleccion ? "Activo" : "Inactivo"}
+                  </p>
+                  <p className="text-gray-700">
+                    <span className="font-bold">Cambio paradero:</span> {permiteCambioParadero ? "Activo" : "Inactivo"}
+                  </p>
+                </div>
+
+                {/* Accesos rápidos */}
+                <div>
+                  <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Selección rápida</p>
+                  <div className="flex gap-2 flex-wrap">
+                    {(() => {
+                      const ref  = fechaServicio || (() => {
+                        const hoy = new Date();
+                        return `${hoy.getFullYear()}-${String(hoy.getMonth()+1).padStart(2,"0")}-${String(hoy.getDate()).padStart(2,"0")}`;
+                      })();
+                      const [yyyy, mm] = ref.split("-");
+                      const lastDay = String(new Date(Number(yyyy), Number(mm), 0).getDate()).padStart(2, "0");
+                      const refPlusFn = () => {
+                        const d = new Date(ref + "T00:00:00");
+                        d.setDate(d.getDate() + 14);
+                        return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+                      };
+                      const options = [
+                        { label: "Este servicio en adelante", desde: ref,               hasta: "2099-12-31",   incl: true },
+                        { label: "Próximas 2 semanas",        desde: ref,               hasta: refPlusFn(),    incl: true },
+                        { label: "Este mes",                  desde: `${yyyy}-${mm}-01`, hasta: `${yyyy}-${mm}-${lastDay}`, incl: true },
+                      ];
+                      return options.map(o => {
+                        const activo = configDesde === o.desde && configHasta === o.hasta && incluirActual === o.incl;
+                        return (
+                          <button key={o.label} type="button"
+                            onClick={() => { setConfigDesde(o.desde); setConfigHasta(o.hasta); setIncluirActual(o.incl); }}
+                            className="px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-colors"
+                            style={{
+                              borderColor: activo ? "#0b315f" : "#e2e8f0",
+                              background:  activo ? "#eaeff6" : "white",
+                              color:       activo ? "#0b315f" : "#6b7280",
+                            }}
+                          >
+                            {o.label}
+                          </button>
+                        );
+                      });
+                    })()}
+                  </div>
+                </div>
+
+                {/* Rango de fechas personalizado */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Desde</p>
+                    <input type="date" value={configDesde} onChange={e => setConfigDesde(e.target.value)}
+                      className="w-full border rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20" />
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Hasta</p>
+                    <input type="date" value={configHasta} onChange={e => setConfigHasta(e.target.value)}
+                      className="w-full border rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20" />
+                  </div>
+                </div>
+
+                {/* Checkbox incluir actual */}
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={incluirActual}
+                    onChange={e => setIncluirActual(e.target.checked)}
+                    className="w-4 h-4 rounded accent-[#0b315f]"
+                  />
+                  <span className="text-xs text-gray-600">Incluir este servicio (#{reservaId})</span>
+                </label>
+
+                {/* Preview count */}
+                {configDesde && configHasta && (
+                  <p className="text-xs font-bold rounded-xl px-3 py-2 text-center"
+                    style={{ background: previewIds.length ? "#dcfce7" : "#fef9c3", color: previewIds.length ? "#166534" : "#854d0e" }}>
+                    {previewIds.length
+                      ? `Se actualizarán ${previewIds.length} servicio(s)`
+                      : "No se encontraron servicios del mismo vehículo en ese rango"}
+                  </p>
+                )}
+              </div>
+
+              <div className="px-6 pb-5 flex gap-2 justify-end">
+                <button
+                  onClick={() => { setModalConfigRango(false); setConfigDesde(""); setConfigHasta(""); setPreviewIds([]); }}
+                  className="px-4 py-2 rounded-xl font-bold text-xs border text-gray-500 hover:bg-gray-50"
+                  style={{ borderColor: "#e2e8f0" }}
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={aplicarConfigRango}
+                  disabled={aplicandoConfig || !previewIds.length}
+                  className="px-5 py-2 rounded-xl font-bold text-xs text-white disabled:opacity-50"
+                  style={{ background: aplicandoConfig ? "#6b7280" : "#0b315f" }}
+                >
+                  {aplicandoConfig ? "Aplicando..." : `Aplicar a ${previewIds.length || 0} servicio(s)`}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Modal copiar a días futuros */}
         {modalCopiar && (

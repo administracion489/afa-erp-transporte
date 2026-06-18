@@ -1618,6 +1618,7 @@ export default function ReservasPage() {
           paradasJson={reservaModal.paradas_json || null}
           cotizacionId={reservaModal.cotizacion_id}
           vehiculoId={reservaModal.vehiculo_id}
+          vehiculoTerceroId={(reservaModal as any).vehiculo_tercero_id ?? null}
           onClose={() => setModalReservaId(null)}
           onChange={async () => {
             await cargarOcupaciones();
