@@ -72,6 +72,10 @@ function dist(lat1:number,lng1:number,lat2:number,lng2:number): number {
 function calcETA(d:number,v:number): number { return Math.ceil((d/1000)/(v>5?v:25)*60); }
 function fmtETA(m:number): string { if(m<=0) return "¡Llegando!"; if(m<60) return `${m} min`; return `${Math.floor(m/60)}h ${m%60}m`; }
 function fmtDist(m:number): string { return m>=1000?`${(m/1000).toFixed(1)} km`:`${Math.round(m)} m`; }
+function fmtHoraLlegada(m:number): string {
+  const d = new Date(Date.now() + m * 60 * 1000);
+  return d.toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Lima" });
+}
 function ini(n:string): string { return n.split(" ").slice(0,2).map(w=>w[0]).join("").toUpperCase(); }
 
 // Detectar si es iOS
@@ -435,6 +439,7 @@ export default function AppPasajero() {
   const [conductor,      setConductor]      = useState<Conductor | null>(null);
   const [busPosicion,    setBusPosicion]    = useState<UbicacionBus | null>(null);
   const [etaMin,         setEtaMin]         = useState<number | null>(null);
+  const [etaGoogle,      setEtaGoogle]      = useState<number | null>(null);
   const [distM,          setDistM]          = useState<number | null>(null);
   const [estadoBus,      setEstadoBus]      = useState<EstadoBus>("no_iniciado");
   const [miEstado,       setMiEstado]       = useState("esperando");
@@ -442,6 +447,7 @@ export default function AppPasajero() {
   const [alerta5min,     setAlerta5min]     = useState(false);
   const [alertaDismiss,  setAlertaDismiss]  = useState(false);
   const [agoMin,         setAgoMin]         = useState<number>(0); // minutos desde última señal del bus
+  const [avisadoSinSenal, setAvisadoSinSenal] = useState(false);
   const [copiado,        setCopiado]        = useState(false);
   const [uploading,      setUploading]      = useState(false);
   const [fotoErr,        setFotoErr]        = useState("");
@@ -481,7 +487,8 @@ export default function AppPasajero() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map          = useRef<mapboxgl.Map | null>(null);
   const busMarker    = useRef<mapboxgl.Marker | null>(null);
-  const paradaMk     = useRef<mapboxgl.Marker | null>(null);
+  const paradaMks    = useRef<mapboxgl.Marker[]>([]);
+  const busPosicionRef = useRef<UbicacionBus | null>(null);
   const meMk         = useRef<mapboxgl.Marker | null>(null);  // marcador pasajero
   const [mapListo,   setMapListo]           = useState(false);
   const [qrDataUrl,  setQrDataUrl]          = useState<string | null>(null);
@@ -619,9 +626,11 @@ export default function AppPasajero() {
     return () => {
       activo = false;
       clearTimeout(timeout);
-      map.current?.remove(); map.current = null;
+      paradaMks.current.forEach(m => { try { m.remove(); } catch {} });
+      paradaMks.current = [];
       if (meMk.current) { meMk.current.remove(); meMk.current = null; }
       if (busMarker.current) { busMarker.current.remove(); busMarker.current = null; }
+      map.current?.remove(); map.current = null;
       setMapListo(false);
     };
   }, [pasajero, tab]);
@@ -651,17 +660,34 @@ export default function AppPasajero() {
       const el = busMarker.current.getElement();
       if (el) el.style.opacity = estadoBus === "sin_señal" ? "0.45" : "1";
     } else {
+      // Inyectar CSS de animación pulsante una sola vez
+      if (!document.getElementById("afa-bus-pulse-css")) {
+        const s = document.createElement("style");
+        s.id = "afa-bus-pulse-css";
+        s.textContent = `
+          @keyframes afaBusPulse  { 0%{transform:scale(1);opacity:.5} 65%{transform:scale(2.6);opacity:0} 100%{transform:scale(2.6);opacity:0} }
+          @keyframes afaBusPulse2 { 0%{transform:scale(1);opacity:.3} 65%{transform:scale(2.6);opacity:0} 100%{transform:scale(2.6);opacity:0} }
+          .afa-bpulse1{position:absolute;border-radius:50%;background:#3b82f6;animation:afaBusPulse 2s ease-out infinite;pointer-events:none;}
+          .afa-bpulse2{position:absolute;border-radius:50%;background:#93c5fd;animation:afaBusPulse2 2s ease-out .7s infinite;pointer-events:none;}
+        `;
+        document.head.appendChild(s);
+      }
       const el = document.createElement("div");
-      el.className = "afa-bus-mk";
+      el.style.cssText = "position:relative;width:48px;height:80px;cursor:pointer;";
       el.style.opacity = estadoBus === "sin_señal" ? "0.45" : "1";
-      el.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6v6"/><path d="M16 6v6"/><path d="M2 12h20"/><path d="M4 19h2a1 1 0 0 0 1-1v-2h10v2a1 1 0 0 0 1 1h2"/><path d="M4 18V8a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v10"/><circle cx="8" cy="16" r="1" fill="white" stroke="none"/><circle cx="16" cy="16" r="1" fill="white" stroke="none"/></svg>`;
-      busMarker.current = new mapboxgl.Marker({ element: el })
+      el.innerHTML = `
+        <div style="position:absolute;top:50%;left:50%;width:46px;height:46px;margin:-23px 0 0 -23px;">
+          <div class="afa-bpulse1" style="inset:0;"></div>
+          <div class="afa-bpulse2" style="inset:0;"></div>
+        </div>
+        <img src="/bussinfondo3.png" style="position:relative;z-index:2;width:48px;height:80px;object-fit:contain;filter:drop-shadow(0 5px 14px rgba(6,14,40,.85));" alt="bus"/>
+      `;
+      busMarker.current = new mapboxgl.Marker({ element: el, anchor: "center" })
         .setLngLat([Number(busPosicion.lng), Number(busPosicion.lat)])
-        .setPopup(new mapboxgl.Popup({ offset: 30 }).setHTML(
+        .setPopup(new mapboxgl.Popup({ offset: 44 }).setHTML(
           `<div style="font-family:'DM Sans',sans-serif;padding:4px">
             <p style="font-weight:800;color:#0B1F3A;margin:0 0 4px">${vehiculo?.placa || "Bus AFA"}</p>
-            <p style="color:#555;font-size:12px;margin:0">🚀 ${busPosicion.velocidad} km/h</p>
-            ${conductor ? `<p style="color:#555;font-size:12px;margin:4px 0 0">👤 ${conductor.nombre}</p>` : ""}
+            ${conductor ? `<p style="color:#555;font-size:12px;margin:0">👤 ${conductor.nombre}</p>` : ""}
           </div>`
         )).addTo(map.current!);
     }
@@ -686,36 +712,87 @@ export default function AppPasajero() {
     }
   }, [busPosicion, mapListo, miParada, vehiculo, conductor, miEstado]);
 
-  // Parada marker
+  // Marcadores de TODOS los paraderos de la ruta
   useEffect(() => {
-    if (!mapListo || !map.current || !miParada?.lat || paradaMk.current) return;
-    const el = document.createElement("div");
-    el.className = "afa-stop-mk";
-    const pulse = document.createElement("div"); pulse.className = "afa-pulse"; el.appendChild(pulse);
-    const ico = document.createElement("div"); ico.style.cssText = "display:flex;align-items:center;"; ico.innerHTML = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#0b315f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></svg>`; el.appendChild(ico);
-    paradaMk.current = new mapboxgl.Marker({ element: el })
-      .setLngLat([Number(miParada.lng), Number(miParada.lat)])
-      .setPopup(new mapboxgl.Popup({ offset: 30 }).setHTML(
-        `<div style="font-family:'DM Sans',sans-serif;padding:4px">
-          <p style="font-weight:800;color:#0B1F3A;margin:0 0 4px">Tu paradero</p>
-          <p style="color:#555;font-size:12px;margin:0">${miParada.nombre}</p>
-          ${miParada.hora_estimada ? `<p style="color:#555;font-size:11px;margin:4px 0 0">🕐 ${miParada.hora_estimada}</p>` : ""}
-        </div>`
-      )).addTo(map.current!);
-    map.current.flyTo({ center: [Number(miParada.lng), Number(miParada.lat)], zoom: 14, duration: 1500 });
-  }, [miParada, mapListo]);
+    if (!mapListo || !map.current) return;
+    // Limpiar marcadores anteriores
+    paradaMks.current.forEach(m => { try { m.remove(); } catch {} });
+    paradaMks.current = [];
+    if (!rutaParadas.length) return;
 
-  // Línea ruta
+    rutaParadas.forEach((p, i) => {
+      if (!p.lat || !p.lng) return;
+      const lat = Number(p.lat); const lng = Number(p.lng);
+      if (isNaN(lat) || isNaN(lng)) return;
+
+      const esMia   = p.id === miParada?.id;
+      const isFirst = i === 0;
+      const isLast  = i === rutaParadas.length - 1;
+      const bg = isFirst ? "#16a34a" : isLast ? "#dc2626" : "#0b315f";
+
+      const el = document.createElement("div");
+      el.style.cssText = `width:28px;height:28px;border-radius:50%;background:${bg};border:2.5px solid white;box-shadow:0 2px 8px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:white;font-size:11px;font-weight:900;cursor:pointer;`;
+      if (esMia) {
+        el.style.width  = "34px";
+        el.style.height = "34px";
+        el.style.boxShadow = `0 0 0 3px ${bg}, 0 2px 10px rgba(0,0,0,.4)`;
+        el.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3" fill="white" stroke="none"/></svg>`;
+      } else {
+        el.innerText = String(i + 1);
+      }
+
+      const marker = new mapboxgl.Marker({ element: el })
+        .setLngLat([lng, lat])
+        .setPopup(new mapboxgl.Popup({ offset: 16 }).setHTML(
+          `<div style="font-family:'DM Sans',sans-serif;padding:4px">
+            <p style="font-weight:800;color:#0B1F3A;margin:0 0 2px">${p.nombre}</p>
+            ${p.direccion ? `<p style="color:#555;font-size:12px;margin:0">${p.direccion}</p>` : ""}
+            ${p.hora_estimada ? `<p style="color:#1d4ed8;font-size:11px;font-weight:700;margin:4px 0 0">🕐 ${p.hora_estimada}</p>` : ""}
+            ${esMia ? `<p style="color:#0b315f;font-size:11px;font-weight:800;margin:4px 0 0">📍 Tu paradero</p>` : ""}
+          </div>`
+        ))
+        .addTo(map.current!);
+      paradaMks.current.push(marker);
+    });
+
+    // Centrar en paradero propio si existe
+    if (miParada?.lat && miParada?.lng) {
+      map.current.flyTo({ center: [Number(miParada.lng), Number(miParada.lat)], zoom: 14, duration: 1500 });
+    }
+  }, [mapListo, rutaParadas, miParada?.id]);
+
+  // Línea de ruta — fallback inmediato con coords directas, mejora con Google Directions
   useEffect(() => {
     if (!mapListo || !map.current || rutaParadas.length < 2) return;
-    const coords = rutaParadas.filter(p => p.lat && p.lng).map(p => [Number(p.lng), Number(p.lat)]);
+    const coords = rutaParadas.filter(p => p.lat && p.lng);
     if (coords.length < 2) return;
-    if (map.current.getSource("ruta")) {
-      (map.current.getSource("ruta") as mapboxgl.GeoJSONSource).setData({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: coords } });
-    } else {
-      map.current.addSource("ruta", { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: coords } } });
-      map.current.addLayer({ id: "ruta-line", type: "line", source: "ruta", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#3B82F6", "line-width": 3, "line-dasharray": [2, 2], "line-opacity": 0.7 } });
-    }
+
+    const drawRuta = (coordenadas: [number, number][]) => {
+      if (!map.current) return;
+      try { if (map.current.getLayer("ruta-sombra")) map.current.removeLayer("ruta-sombra"); } catch {}
+      try { if (map.current.getLayer("ruta-line"))   map.current.removeLayer("ruta-line"); } catch {}
+      try { if (map.current.getSource("ruta"))        map.current.removeSource("ruta"); } catch {}
+      try { if (map.current.getSource("ruta-google")) map.current.removeSource("ruta-google"); } catch {}
+      try {
+        map.current.addSource("ruta-google", { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: coordenadas } } });
+        map.current.addLayer({ id: "ruta-sombra", type: "line", source: "ruta-google", paint: { "line-color": "#0b315f", "line-width": 12, "line-opacity": 0.10, "line-blur": 6 } });
+        map.current.addLayer({ id: "ruta-line", type: "line", source: "ruta-google", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#1d4ed8", "line-width": 5, "line-opacity": 0.88 } });
+      } catch {}
+    };
+
+    // Trazar con coordenadas directas de inmediato (sin tráfico)
+    drawRuta(coords.map(p => [Number(p.lng), Number(p.lat)]) as [number, number][]);
+
+    // Mejorar con ruta real de Google Directions
+    let cancelled = false;
+    fetch("/api/ruta", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paradas: coords.map(p => ({ lat: Number(p.lat), lng: Number(p.lng), nombre: p.nombre })) }),
+    }).then(r => r.json()).then(data => {
+      if (!cancelled && data.coordenadas?.length > 0) drawRuta(data.coordenadas);
+    }).catch(() => {});
+
+    return () => { cancelled = true; };
   }, [rutaParadas, mapListo]);
 
   // Mostrar modal de confirmación de paradero cuando carga la ruta por primera vez
@@ -727,7 +804,7 @@ export default function AppPasajero() {
   }, [miParada, miEstado, paraderoConfirmado, paraderoPostpuesto]);
 
   // Posición del bus en vivo — polling vía API (Realtime no funciona para anónimo
-  // con RLS activo). El conductor envía ubicación cada ~15 s; consultamos cada 8 s.
+  // con RLS activo). El conductor envía ubicación cada ~10 s; consultamos cada 5 s.
   useEffect(() => {
     if (!miParada?.reserva?.vehiculo_id) return;
     const vid = miParada.reserva.vehiculo_id;
@@ -739,9 +816,39 @@ export default function AppPasajero() {
       } catch { /* reintentará en el próximo tick */ }
     };
     tick();
-    const id = setInterval(tick, 8000);
+    const id = setInterval(tick, 5000);
     return () => { activo = false; clearInterval(id); };
   }, [miParada]);
+
+  // Mantener ref sincronizada con el último GPS (para leerlo dentro de intervalos sin dep)
+  useEffect(() => { busPosicionRef.current = busPosicion; }, [busPosicion]);
+
+  // ETA vía Google Directions — recalcular cada 60 s cuando el bus está activo
+  useEffect(() => {
+    if (!miParada?.lat || !miParada?.lng || !busPosicion || estadoBus === "finalizado" || estadoBus === "sin_señal") {
+      setEtaGoogle(null); return;
+    }
+    let cancelled = false;
+    const calcular = async () => {
+      const bp = busPosicionRef.current;
+      if (!bp || cancelled) return;
+      try {
+        const res = await fetch("/api/ruta", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ paradas: [
+            { lat: Number(bp.lat), lng: Number(bp.lng), nombre: "Bus" },
+            { lat: Number(miParada.lat), lng: Number(miParada.lng), nombre: miParada.nombre },
+          ]}),
+        });
+        const d = await res.json();
+        if (!cancelled && d?.total_min != null) setEtaGoogle(Math.round(Number(d.total_min)));
+      } catch {}
+    };
+    calcular();
+    const id = setInterval(calcular, 60000);
+    return () => { cancelled = true; clearInterval(id); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [miParada?.id, miParada?.lat, miParada?.lng, estadoBus, busPosicion ? "on" : "off"]);
 
   // ── FUNCIONES ───────────────────────────────────────────────────────────────
 
@@ -775,7 +882,15 @@ export default function AppPasajero() {
       // Sin ruta asignada: buscar reservas disponibles para autoselección
       try {
         const { reservas } = await paxApi("reservas_disponibles", { pid, hoy });
-        setReservasDisp(reservas || []);
+        const disponibles: any[] = reservas || [];
+        // Dedup defensivo por id en el cliente
+        const unicos = Array.from(new Map(disponibles.map((r: any) => [r.id, r])).values());
+        // Si solo hay una opción, ir directo al paso 2 (elegir paradero)
+        if (unicos.length === 1) {
+          setSelRutaId(unicos[0].id);
+          setSelParadaId(null);
+        }
+        setReservasDisp(unicos);
       } catch { /* silencioso */ }
       return;
     }
@@ -870,6 +985,21 @@ export default function AppPasajero() {
     saveParaderoOk();
     setParaderoConfirmado(true);
     setMostrarConfirmarParadero(false);
+  }
+
+  async function avisarOperadorSinSenal() {
+    if (!pasajero || !miParada || avisadoSinSenal) return;
+    try {
+      await paxApi("mensaje", { mensaje: {
+        pasajero_id: pasajero.id,
+        reserva_id:  miParada.reserva_id,
+        parada_id:   miParada.id,
+        tipo:        "incidencia",
+        mensaje:     `GPS sin señal hace ${agoMin} min. Bus: ${vehiculo?.placa || "—"}. Solicito confirmación del servicio.`,
+      }});
+      setAvisadoSinSenal(true);
+      setTimeout(() => setAvisadoSinSenal(false), 8000);
+    } catch { /* reintentará si el usuario toca de nuevo */ }
   }
 
   function posponerParadero() {
@@ -1457,7 +1587,7 @@ export default function AppPasajero() {
                                   {r.ruta_nombre || `${r.origen} → ${r.destino}`}
                                 </p>
                                 <p style={{ margin: "3px 0 0", fontSize: 12, color: "var(--mute)" }}>
-                                  {r.hora_servicio || "—"} · {(r.paradas || []).length} paraderos
+                                  Hoy · {(r.hora_servicio || "—").slice(0, 5)} · {(r.paradas || []).length} paraderos
                                 </p>
                               </div>
                               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--mute2)" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
@@ -1569,7 +1699,12 @@ export default function AppPasajero() {
                     </div>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                    {conductor?.telefono && <a href={`tel:${conductor.telefono}`} style={{ padding: "12px 14px", borderRadius: 14, background: "var(--ink)", color: "white", border: "none", fontFamily: "var(--f)", fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, textDecoration: "none" }}><IconPhone sz={17} c="white" /> Conductor</a>}
+                    <button
+                      onClick={avisarOperadorSinSenal}
+                      disabled={avisadoSinSenal}
+                      style={{ padding: "12px 14px", borderRadius: 14, background: avisadoSinSenal ? "var(--success)" : "var(--navy)", color: "white", border: "none", fontFamily: "var(--f)", fontWeight: 700, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, cursor: avisadoSinSenal ? "default" : "pointer", transition: "background 0.3s" }}>
+                      {avisadoSinSenal ? <><IconCheck sz={16} c="white" sw={2.5} /> Operador avisado</> : <><IconMessageCircle sz={16} c="white" /> Avisar operador</>}
+                    </button>
                     <button onClick={centrarMapa} style={{ padding: "12px 14px", borderRadius: 14, background: "var(--surface)", color: "var(--ink)", border: "1px solid var(--line)", cursor: "pointer", fontFamily: "var(--f)", fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}><IconCrosshair sz={17} c="var(--navy)" /> Ver mapa</button>
                   </div>
                 </div>
@@ -1596,10 +1731,14 @@ export default function AppPasajero() {
                       <p style={{ margin: "2px 0 0", fontSize: 12, color: "var(--mute)" }}>{distM !== null ? fmtDist(distM) : miParada.reserva?.hora_servicio ? `Sale: ${miParada.reserva.hora_servicio}` : ""}</p>
                     </div>
                     <div style={{ flex: 1 }} />
-                    {/* Arrival time chip */}
-                    <div style={{ background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 12, padding: "8px 12px", alignSelf: "flex-end" }}>
-                      <p style={{ margin: 0, fontSize: 10, fontWeight: 700, color: "var(--mute)", letterSpacing: 0.6, textTransform: "uppercase" }}>{miEstado === "embarcado" ? "Llega destino" : "Llega a las"}</p>
-                      <p style={{ margin: "2px 0 0", fontFamily: "var(--m)", fontSize: 18, fontWeight: 700, color: "var(--ink)", letterSpacing: -0.5 }}>{miParada.hora_estimada || miParada.reserva?.hora_servicio || "—"}</p>
+                    {/* Arrival time chip — En vivo con Google cuando bus conectado */}
+                    <div style={{ background: etaGoogle !== null ? "var(--navy)" : "var(--surface)", border: `1px solid ${etaGoogle !== null ? "transparent" : "var(--line)"}`, borderRadius: 12, padding: "8px 12px", alignSelf: "flex-end", transition: "background 0.4s" }}>
+                      <p style={{ margin: 0, fontSize: 9, fontWeight: 700, color: etaGoogle !== null ? "rgba(255,255,255,0.7)" : "var(--mute)", letterSpacing: 0.6, textTransform: "uppercase" }}>
+                        {miEstado === "embarcado" ? "Llega destino" : etaGoogle !== null ? "En vivo · llega" : "Programado"}
+                      </p>
+                      <p style={{ margin: "2px 0 0", fontFamily: "var(--m)", fontSize: 18, fontWeight: 700, color: etaGoogle !== null ? "white" : "var(--ink)", letterSpacing: -0.5 }}>
+                        {etaGoogle !== null ? fmtHoraLlegada(etaGoogle) : (miParada.hora_estimada || miParada.reserva?.hora_servicio || "—")}
+                      </p>
                     </div>
                   </div>
 
@@ -1629,11 +1768,6 @@ export default function AppPasajero() {
                       <p style={{ margin: "4px 0 0", fontSize: 12.5, color: "var(--mute)", letterSpacing: -0.1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{conductor?.nombre || "Conductor AFA"}</p>
                     </div>
                     <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                      {conductor?.telefono && (
-                        <a href={`tel:${conductor.telefono}`} style={{ width: 38, height: 38, borderRadius: 12, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", textDecoration: "none" }}>
-                          <IconPhone sz={18} c="var(--navy)" />
-                        </a>
-                      )}
                       <button onClick={compartir} style={{ width: 38, height: 38, borderRadius: 12, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
                         <IconShare sz={18} c="var(--navy)" />
                       </button>
@@ -1652,8 +1786,8 @@ export default function AppPasajero() {
 
                   {/* Contact & report */}
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingBottom: 4 }}>
-                    <a href="tel:966707225" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--line2)", textDecoration: "none", color: "var(--ink)", fontWeight: 600, fontSize: 13, fontFamily: "var(--f)" }}>
-                      <IconPhone sz={15} c="var(--navy)" /> Central AFA · 966 707 225
+                    <a href="tel:013453707" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--line2)", textDecoration: "none", color: "var(--ink)", fontWeight: 600, fontSize: 13, fontFamily: "var(--f)" }}>
+                      <IconPhone sz={15} c="var(--navy)" /> Central AFA · 01 345 3707
                     </a>
                     <button onClick={() => setMostrarReporte(true)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--line2)", cursor: "pointer", color: "var(--mute)", fontWeight: 600, fontSize: 13, fontFamily: "var(--f)" }}>
                       <IconMessageCircle sz={15} c="var(--mute)" /> Enviar mensaje al operador

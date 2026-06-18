@@ -213,18 +213,23 @@ export async function POST(req: NextRequest) {
         if (!pid || !hoy) return NextResponse.json({ error: "pid y hoy requeridos" }, { status: 400 });
 
         const { data: pax } = await admin
-          .from("pasajeros").select("cliente_id").eq("id", pid).maybeSingle();
+          .from("pasajeros").select("cliente_id, reserva_id").eq("id", pid).maybeSingle();
         if (!pax?.cliente_id) return NextResponse.json({ reservas: [] });
 
-        const { data: reservas, error: rErr } = await admin
+        const { data: reservasRaw, error: rErr } = await admin
           .from("reservas")
           .select("id, ruta_nombre, origen, destino, fecha_servicio, hora_servicio, vehiculo_id, vehiculo_tercero_id, paradas(*)")
           .eq("cliente_id", pax.cliente_id)
           .eq("permite_autoseleccion", true)
-          .gte("fecha_servicio", hoy)
+          .eq("fecha_servicio", hoy)          // solo servicios de hoy exacto
           .in("estado", ["pendiente", "programada", "confirmada"]);
         if (rErr) return NextResponse.json({ error: rErr.message }, { status: 500 });
-        if (!reservas?.length) return NextResponse.json({ reservas: [] });
+        if (!reservasRaw?.length) return NextResponse.json({ reservas: [] });
+
+        // Dedup por reserva.id por si la query devolviera duplicados
+        const reservas: any[] = Array.from(
+          new Map(reservasRaw.map((r: any) => [r.id, r])).values()
+        );
 
         const paradaIds = reservas.flatMap((r: any) => (r.paradas || []).map((p: any) => p.id));
 
@@ -256,23 +261,60 @@ export async function POST(req: NextRequest) {
         const vIds  = [...new Set(reservas.filter((r: any) => r.vehiculo_id).map((r: any) => r.vehiculo_id as number))];
         const vtIds = [...new Set(reservas.filter((r: any) => r.vehiculo_tercero_id).map((r: any) => r.vehiculo_tercero_id as number))];
         const [vRes, vtRes] = await Promise.all([
-          vIds.length  > 0 ? admin.from("vehiculos").select("id,capacidad_pasajeros").in("id", vIds)         : Promise.resolve({ data: [] as any[] }),
-          vtIds.length > 0 ? admin.from("vehiculos_tercero").select("id,capacidad").in("id", vtIds)          : Promise.resolve({ data: [] as any[] }),
+          vIds.length  > 0 ? admin.from("vehiculos").select("id,capacidad_pasajeros").in("id", vIds)    : Promise.resolve({ data: [] as any[] }),
+          vtIds.length > 0 ? admin.from("vehiculos_tercero").select("id,capacidad").in("id", vtIds)     : Promise.resolve({ data: [] as any[] }),
         ]);
-        const capPropia   = new Map((vRes.data  || []).map((v: any) => [v.id, v.capacidad_pasajeros as number | null]));
-        const capTercera  = new Map((vtRes.data || []).map((v: any) => [v.id, v.capacidad           as number | null]));
+        const capPropia  = new Map((vRes.data  || []).map((v: any) => [v.id, v.capacidad_pasajeros as number | null]));
+        const capTercera = new Map((vtRes.data || []).map((v: any) => [v.id, v.capacidad           as number | null]));
 
-        const disponibles = reservas
-          .filter((r: any) => !yaAsignados.has(r.id))
-          .map((r: any) => {
-            const cap: number | null = r.vehiculo_id
-              ? (capPropia.get(r.vehiculo_id)   ?? null)
-              : (capTercera.get(r.vehiculo_tercero_id) ?? null);
-            const ocup = ocupacion.get(r.id) || 0;
-            return { ...r, capacidad: cap, ocupacion: ocup };
-          })
-          // Solo buses con lugar disponible (sin capacidad definida = sin límite)
-          .filter((r: any) => r.capacidad === null || r.ocupacion < r.capacidad);
+        // Añadir capacidad y ocupación a cada reserva
+        const conCap = reservas.map((r: any) => {
+          const cap: number | null = r.vehiculo_id
+            ? (capPropia.get(r.vehiculo_id)          ?? null)
+            : (capTercera.get(r.vehiculo_tercero_id) ?? null);
+          return { ...r, capacidad: cap, ocupacion: ocupacion.get(r.id) || 0 };
+        });
+
+        // Si el operador pre-asignó al pasajero a una reserva específica de hoy,
+        // mostrar solo esa reserva sin consolidación. Así su elección de paradero
+        // actualiza directamente el manifiesto del bus correcto.
+        if (pax.reserva_id) {
+          const preAsignada = conCap.find((r: any) =>
+            r.id === pax.reserva_id &&
+            !yaAsignados.has(r.id) &&
+            (r.capacidad === null || r.ocupacion < r.capacidad)
+          );
+          if (preAsignada) return NextResponse.json({ reservas: [preAsignada] });
+        }
+
+        // Sin pre-asignación: agrupar por hora de salida + secuencia exacta de coordenadas
+        // Mismo grupo = mismo servicio (misma hora, mismos paraderos en el mismo orden)
+        const claveRuta = (r: any): string => {
+          const ps = [...(r.paradas || [])].sort((a: any, b: any) => (a.orden ?? 0) - (b.orden ?? 0));
+          return `${r.hora_servicio}|${ps.map((p: any) => `${p.lat},${p.lng}`).join("|")}`;
+        };
+
+        const grupos = new Map<string, any[]>();
+        conCap.forEach((r: any) => {
+          const k = claveRuta(r);
+          if (!grupos.has(k)) grupos.set(k, []);
+          grupos.get(k)!.push(r);
+        });
+
+        // Por cada grupo: si el pasajero ya está asignado, omitir.
+        // Si no, mostrar solo el vehículo de mayor capacidad que no esté lleno (100%).
+        const disponibles: any[] = [];
+        for (const grupo of grupos.values()) {
+          if (grupo.some((r: any) => yaAsignados.has(r.id))) continue;
+          // Mayor capacidad primero (null = sin límite = se trata como Infinity)
+          const ordenado = [...grupo].sort((a: any, b: any) => {
+            const ca = a.capacidad ?? Infinity;
+            const cb = b.capacidad ?? Infinity;
+            return cb - ca;
+          });
+          const elegido = ordenado.find((r: any) => r.capacidad === null || r.ocupacion < r.capacidad);
+          if (elegido) disponibles.push(elegido);
+        }
 
         return NextResponse.json({ reservas: disponibles });
       }
