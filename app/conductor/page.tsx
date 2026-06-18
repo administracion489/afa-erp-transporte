@@ -247,6 +247,74 @@ function nuevoQid(): string {
   catch { return `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
 }
 
+// ─── Deslizable "Conectarse" (estilo Uber/Cabify) ──────────────────────────────
+// Gesto DELIBERADO (arrastrar el botón hasta el final) para conectarse y empezar a
+// compartir GPS. El gesto explícito evita conexiones accidentales y satisface el
+// requisito de Google Play de que el rastreo en segundo plano lo inicie una acción
+// clara del usuario (no el simple login).
+function SlideToConnect({ onConnect }: { onConnect: () => void }) {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const [dragX, setDragX] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const startXRef = useRef(0);
+  const maxRef = useRef(0);
+  const KNOB = 52;
+
+  const begin = (clientX: number) => {
+    const track = trackRef.current; if (!track) return;
+    maxRef.current = Math.max(0, track.clientWidth - KNOB - 14); // 7px de padding a cada lado
+    startXRef.current = clientX - dragX;
+    setDragging(true);
+  };
+  const move = (clientX: number) => {
+    if (!dragging) return;
+    setDragX(Math.max(0, Math.min(maxRef.current, clientX - startXRef.current)));
+  };
+  const end = () => {
+    if (!dragging) return;
+    setDragging(false);
+    if (dragX >= maxRef.current * 0.9) { setDragX(maxRef.current); onConnect(); }
+    else setDragX(0);
+  };
+
+  return (
+    <div
+      ref={trackRef}
+      onPointerDown={(e) => { try { (e.target as HTMLElement).setPointerCapture?.(e.pointerId); } catch {} begin(e.clientX); }}
+      onPointerMove={(e) => move(e.clientX)}
+      onPointerUp={end}
+      onPointerCancel={end}
+      style={{
+        position: "relative", background: "var(--c-navy)", borderRadius: 18, padding: 7,
+        overflow: "hidden", touchAction: "none", userSelect: "none", cursor: "grab",
+      }}
+    >
+      {/* relleno verde que crece con el arrastre */}
+      <div style={{
+        position: "absolute", left: 0, top: 0, bottom: 0, width: dragX + KNOB + 14,
+        background: "var(--c-success)", opacity: 0.22,
+        transition: dragging ? "none" : "width .2s ease",
+      }} />
+      {/* botón (knob) */}
+      <div style={{
+        position: "absolute", left: 7 + dragX, top: 7, bottom: 7, width: KNOB,
+        background: "var(--c-success)", borderRadius: 13, zIndex: 2,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        transition: dragging ? "none" : "left .2s ease",
+      }}>
+        <IconArrowRight size={22} color="#fff" />
+      </div>
+      <div style={{
+        textAlign: "center", padding: "14px 12px 14px 52px", position: "relative", zIndex: 1,
+        color: "rgba(255,255,255,0.88)", fontSize: 14, fontWeight: 800, fontFamily: FONT_SANS,
+        letterSpacing: -0.2, pointerEvents: "none",
+      }}>
+        Desliza para conectarte
+      </div>
+    </div>
+  );
+}
+
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 export default function ConductorApp() {
@@ -279,6 +347,12 @@ export default function ConductorApp() {
 
   // ── GPS ────────────────────────────────────────────────────────────────────
   const [enRuta,       setEnRuta]       = useState(false);
+  // "Conectarse" (estilo Uber/Cabify): el conductor comparte su GPS aun SIN servicio,
+  // para ser visible en el ERP (monitoreo/despachador) y recibir asignaciones.
+  const [conectado,    setConectado]    = useState(false);
+  // El rastreo se comparte si el conductor se CONECTÓ o si hay un SERVICIO activo —
+  // NUNCA por el solo login (cumple la política de ubicación de Google Play).
+  const compartiendo = conectado || enRuta;
   const [posActual,    setPosActual]    = useState<GeoPos | null>(null);
   const [velocidad,    setVelocidad]    = useState(0);
   const [totalEnvios,  setTotalEnvios]  = useState(0);
@@ -357,6 +431,11 @@ export default function ConductorApp() {
   // ── Sub-vistas nuevas ──────────────────────────────────────────────────────
   const [showManifiesto, setShowManifiesto] = useState(false);
   const [mostrarDivulgacion, setMostrarDivulgacion] = useState(false);
+  // GPS se habilita solo después de que el conductor confirma el disclosure (primera vez).
+  // En sesiones siguientes arranca inmediatamente porque el key ya está en localStorage.
+  const [gpsHabilitado, setGpsHabilitado] = useState<boolean>(() => {
+    try { return !!localStorage.getItem("afa_bg_disclosure_v1"); } catch { return true; }
+  });
   const [showFinViaje,   setShowFinViaje]   = useState(false);
   const [showFinOverlay, setShowFinOverlay] = useState(false);
   const [datosFinViaje,  setDatosFinViaje]  = useState<{
@@ -539,11 +618,11 @@ export default function ConductorApp() {
     }
   }
 
-  // ─── Restaurar servicio desde localStorage (el GPS ya corre desde login) ────
+  // ─── Restaurar servicio desde localStorage ──────────────────────────────────
+  // Al restaurar se setea enRuta=true (arriba), así que el effect de GPS arranca solo.
   useEffect(() => {
     if (!restaurandoServicio) return;
     setRestaurandoServicio(false);
-    // GPS watchPosition ya está activo desde el useEffect de login — no reiniciar
   }, [restaurandoServicio]);
 
   // ─── GPS + TRACKING ──────────────────────────────────────────────────────────
@@ -597,7 +676,8 @@ export default function ConductorApp() {
     const ahora = Date.now();
     if (estado !== "finalizado" && ahora - lastSentRef.current < 10000) return;
     lastSentRef.current = ahora;
-    const estadoFinal = estado || (vid ? "en_ruta" : "disponible");
+    // "en_ruta" sólo si hay SERVICIO activo (res); conectado-libre → "disponible".
+    const estadoFinal = estado || (res ? "en_ruta" : "disponible");
     // Rutear por TABLA (no por id: los ids de AFA y tercero se solapan). El tercero
     // va en columnas _tercero; deja vehiculo_id/conductor_id en null, y viceversa.
     const esTercero = cond._tabla === "conductores_tercero";
@@ -621,9 +701,11 @@ export default function ConductorApp() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ─── GPS desde login: activo en todo momento mientras el conductor esté logueado ─
+  // ─── GPS: activo SÓLO mientras el conductor esté CONECTADO o EN SERVICIO ───────
+  // (no por el login). Al desconectar/finalizar, el cleanup detiene el servicio nativo
+  // (BackgroundGeolocation.stop() → quita notificación y deja de acceder a la ubicación).
   useEffect(() => {
-    if (!conductor) return;
+    if (!conductor || !gpsHabilitado || !compartiendo) return;
     if (!geoDisponible()) { setGpsError("GPS no disponible en este dispositivo"); return; }
     let cancelado = false;
     let recibioPos = false;
@@ -695,7 +777,7 @@ export default function ConductorApp() {
       if (reintentoRef.current) { clearTimeout(reintentoRef.current); reintentoRef.current = null; }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conductor?.id]);
+  }, [conductor?.id, gpsHabilitado, compartiendo]);
 
   // Drenar la cola cuando vuelve la conexión o el app vuelve a primer plano (de Waze).
   useEffect(() => {
@@ -725,10 +807,11 @@ export default function ConductorApp() {
     if (!vehiculoId) { alert("Selecciona el vehículo primero"); return; }
     setIniciando(true);
     await cargarParadas(reserva.id);
-    // Transición INMEDIATA a la ruta — NO esperar al GPS (el watchPosition desde el
-    // login ya rastrea). Bloquear aquí dejaba el botón colgado en "Obteniendo GPS…"
-    // si el aparato no tenía señal.
+    // Transición INMEDIATA a la ruta — NO esperar al GPS. El servicio AUTO-CONECTA el
+    // rastreo (setConectado) y el effect de GPS arranca solo; bloquear aquí dejaba el
+    // botón colgado en "Obteniendo GPS…" si el aparato no tenía señal.
     const ahora = new Date();
+    setConectado(true);     // auto-desliza "Conectarse" al iniciar un servicio
     setReservaActiva(reserva);
     setEnRuta(true);
     setInicioViaje(ahora);
@@ -1184,9 +1267,9 @@ export default function ConductorApp() {
   }
 
   function cerrarSesion() {
-    if (enRuta && !confirm("Tienes un recorrido activo. ¿Salir igual?")) return;
+    if ((enRuta || conectado) && !confirm("Estás compartiendo tu ubicación. ¿Cerrar sesión igual?")) return;
     cleanup(); clearSession(); setConductor(null);
-    setEnRuta(false); setDni(""); setPin(""); setTab("ruta");
+    setEnRuta(false); setConectado(false); setDni(""); setPin(""); setTab("ruta");
   }
 
   // ─── DERIVADOS ──────────────────────────────────────────────────────────────
@@ -1485,9 +1568,9 @@ export default function ConductorApp() {
               {conductor.nombre.split(" ").slice(0, 2).join(" ")}
             </p>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
-              <StatusDot color={enRuta ? "var(--c-success)" : "var(--c-mute-2)"} pulse={enRuta} size={6} />
+              <StatusDot color={compartiendo ? "var(--c-success)" : "var(--c-mute-2)"} pulse={compartiendo} size={6} />
               <span style={{ fontSize: 11, fontWeight: 600, color: "var(--c-mute)" }}>
-                {enRuta ? "En servicio" : "Disponible"}
+                {enRuta ? "En servicio" : conectado ? "Conectado" : "Disponible"}
               </span>
             </div>
             {gpsError && (
@@ -1530,6 +1613,50 @@ export default function ConductorApp() {
             }}>
               {titulo.fecha}
             </h1>
+
+            {/* ── Conectarse / estado de rastreo (estilo Uber/Cabify) ───────────── */}
+            {!enRuta && !conectado && (
+              <div style={{ marginBottom: 16 }}>
+                <SlideToConnect onConnect={() => setConectado(true)} />
+                <p style={{ margin: "8px 4px 0", fontSize: 11, lineHeight: 1.5, color: "var(--c-mute)" }}>
+                  Conéctate para que la central te vea y te asigne servicios. Compartimos tu ubicación con una notificación visible.
+                </p>
+              </div>
+            )}
+            {!enRuta && conectado && (
+              <button
+                onClick={() => {
+                  if (window.confirm("¿Desconectarte?\n\nDejarás de compartir tu ubicación y la central no podrá verte hasta que te conectes de nuevo.")) setConectado(false);
+                }}
+                style={{
+                  width: "100%", marginBottom: 16, padding: "12px 15px", borderRadius: 16,
+                  background: "var(--c-success-tint)", border: "1px solid var(--c-success)",
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  cursor: "pointer", fontFamily: FONT_SANS,
+                }}
+              >
+                <span style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--c-success)", fontWeight: 800, fontSize: 14 }}>
+                  <IconActivity size={16} color="var(--c-success)" />
+                  Conectado · GPS activo
+                </span>
+                <span style={{ color: "var(--c-mute)", fontSize: 11, fontWeight: 700 }}>Toca para desconectar</span>
+              </button>
+            )}
+            {enRuta && (
+              <div style={{
+                width: "100%", marginBottom: 16, padding: "12px 15px", borderRadius: 16,
+                background: "var(--c-success-tint)", border: "1px solid var(--c-success)",
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+              }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--c-success)", fontWeight: 800, fontSize: 14 }}>
+                  <IconBus size={16} color="var(--c-success)" />
+                  En servicio · GPS activo
+                </span>
+                <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--c-success)", fontSize: 11, fontWeight: 700 }}>
+                  <IconShield size={13} color="var(--c-success)" /> Bloqueado
+                </span>
+              </div>
+            )}
 
             {/* Banner pre-viaje pendiente */}
             {!checkDone && (
@@ -2868,16 +2995,25 @@ export default function ConductorApp() {
               <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, letterSpacing: -0.4 }}>Uso de tu ubicación</h2>
             </div>
             <p style={{ margin: "0 0 10px", fontSize: 14, lineHeight: 1.5, color: "var(--c-ink)" }}>
-              AFA Conductores recopila tu ubicación <strong>en segundo plano</strong>, incluso cuando la app
-              está cerrada o no la estás usando, para el <strong>seguimiento del viaje en tiempo real</strong>:
-              central despacha y los pasajeros ven el ETA del bus.
+              AFA Conductores comparte tu ubicación <strong>en segundo plano</strong>, incluso con la app
+              cerrada o la pantalla bloqueada, cuando te <strong>conectas</strong> o tienes un{" "}
+              <strong>servicio activo</strong>: la central te asigna y guía servicios, y los pasajeros
+              ven el ETA del bus.
             </p>
             <p style={{ margin: "0 0 16px", fontSize: 13, lineHeight: 1.5, color: "var(--c-mute)" }}>
-              Solo se comparte mientras hay un servicio activo, con una notificación visible. Para que funcione
-              con la pantalla bloqueada, concede “Permitir todo el tiempo”.
+              Solo se comparte mientras estás conectado o en servicio, siempre con una notificación
+              visible. Tú decides cuándo: desconéctate o cierra sesión para dejar de compartir. En la
+              siguiente pantalla selecciona <strong>Permitir todo el tiempo</strong>.
             </p>
             <button
-              onClick={() => { try { localStorage.setItem("afa_bg_disclosure_v1", "1"); } catch {} setMostrarDivulgacion(false); }}
+              onClick={async () => {
+                try { localStorage.setItem("afa_bg_disclosure_v1", "1"); } catch {}
+                setMostrarDivulgacion(false);
+                // Pedir permiso AQUÍ — diálogo Android aparece DESPUÉS de nuestro
+                // aviso, cumpliendo el requisito de Google Play.
+                await pedirPermisoUbicacion().catch(() => {});
+                setGpsHabilitado(true);
+              }}
               style={{
                 width: "100%", padding: "13px 0", borderRadius: 14, border: "none",
                 background: "var(--c-navy)", color: "#fff", fontWeight: 800, fontSize: 15,

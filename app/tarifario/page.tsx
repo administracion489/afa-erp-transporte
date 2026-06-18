@@ -595,8 +595,10 @@ export default function TarifarioPage() {
       confidencial: ["full_day", "multi_dia"].includes(servActivo),
       incluye_guia: false, incluye_peajes: false, incluye_alimentacion: false, activo: true,
     };
-    if (id) await supabase.from("tarifario").update({ precio }).eq("id", id);
-    else     await supabase.from("tarifario").insert(payload);
+    const res = id
+      ? await supabase.from("tarifario").update({ precio }).eq("id", id)
+      : await supabase.from("tarifario").upsert(payload, { onConflict: "origen,destino,tipo_vehiculo,equipamiento,tipo_servicio" });
+    if (res.error) { alert("Error al guardar tarifa: " + res.error.message); return; }
     cargar();
   }
 

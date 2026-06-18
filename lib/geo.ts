@@ -194,7 +194,7 @@ export async function observarUbicacionBackground(
         {
           backgroundTitle: "AFA · rastreo activo",
           backgroundMessage: "Enviando tu ubicación durante el viaje",
-          requestPermissions: true,
+          requestPermissions: false,
           stale: true,
           distanceFilter: 20,
         },
