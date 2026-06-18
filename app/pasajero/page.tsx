@@ -728,16 +728,24 @@ export default function AppPasajero() {
       const esMia   = p.id === miParada?.id;
       const isFirst = i === 0;
       const isLast  = i === rutaParadas.length - 1;
-      const bg = isFirst ? "#16a34a" : isLast ? "#dc2626" : "#0b315f";
+      const navy    = "#0b315f";
 
       const el = document.createElement("div");
-      el.style.cssText = `width:28px;height:28px;border-radius:50%;background:${bg};border:2.5px solid white;box-shadow:0 2px 8px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:white;font-size:11px;font-weight:900;cursor:pointer;`;
       if (esMia) {
-        el.style.width  = "34px";
-        el.style.height = "34px";
-        el.style.boxShadow = `0 0 0 3px ${bg}, 0 2px 10px rgba(0,0,0,.4)`;
+        // Paradero propio: pin navy con anillo
+        el.style.cssText = `width:34px;height:34px;border-radius:50%;background:${navy};border:2.5px solid white;box-shadow:0 0 0 3px ${navy},0 2px 10px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;cursor:pointer;`;
         el.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3" fill="white" stroke="none"/></svg>`;
+      } else if (isFirst) {
+        // Inicio: blanco con borde navy — "vacío = partida"
+        el.style.cssText = `width:28px;height:28px;border-radius:50%;background:white;border:2.5px solid ${navy};box-shadow:0 2px 8px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;color:${navy};font-size:11px;font-weight:900;cursor:pointer;`;
+        el.innerText = "1";
+      } else if (isLast) {
+        // Fin: navy con banderita blanca — "destino"
+        el.style.cssText = `width:28px;height:28px;border-radius:50%;background:${navy};border:2.5px solid white;box-shadow:0 2px 8px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;cursor:pointer;`;
+        el.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="white"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>`;
       } else {
+        // Intermedios: navy con número blanco
+        el.style.cssText = `width:28px;height:28px;border-radius:50%;background:${navy};border:2.5px solid white;box-shadow:0 2px 8px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:white;font-size:11px;font-weight:900;cursor:pointer;`;
         el.innerText = String(i + 1);
       }
 
