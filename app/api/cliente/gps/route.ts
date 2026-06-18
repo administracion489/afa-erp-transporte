@@ -115,7 +115,10 @@ export async function POST(req: NextRequest) {
       ubic = data;
     }
     if (!ubic && (vehiculoTerceroId != null || vehiculoId != null)) {
+      // Fallback por vehículo: solo puntos "en_ruta" para que el cliente no vea
+      // al conductor en modo conectado-libre (antes/después de su servicio).
       let q = supabase.from("ubicaciones_gps").select(COLS)
+        .eq("estado", "en_ruta")
         .order("created_at", { ascending: false }).limit(1);
       if (vehiculoTerceroId != null) q = q.eq("vehiculo_tercero_id", vehiculoTerceroId);
       else                            q = q.eq("vehiculo_id", vehiculoId);

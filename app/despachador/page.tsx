@@ -239,7 +239,14 @@ export default function DespachadorPage() {
 
   useEffect(() => {
     if (!mapListo || !map.current) return;
-
+    // Quitar marcadores de entidades que ya no aparecen en el resultado (desconectadas)
+    const keysActuales = new Set(ubicaciones.map(u => keyGps(u)));
+    Object.keys(markers.current).forEach(key => {
+      if (!keysActuales.has(key)) {
+        markers.current[key].remove();
+        delete markers.current[key];
+      }
+    });
     ubicaciones.forEach((u: UbicGPS) => {
       // Resolver contra la tabla correcta: si el punto trae ids _tercero,
       // buscar en vehiculosTercero/conductoresTercero (ids se solapan con propios).
@@ -310,9 +317,11 @@ export default function DespachadorPage() {
   // ─── Carga de datos ────────────────────────────────────────────────────────
 
   const actualizarGPS = useCallback(async () => {
+    const hace30min = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     const { data } = await supabase
       .from("ubicaciones_gps")
       .select("vehiculo_id,conductor_id,vehiculo_tercero_id,conductor_tercero_id,lat,lng,velocidad,estado,timestamp")
+      .gte("timestamp", hace30min)
       .order("timestamp", { ascending: false })
       .limit(400);
     if (!data) return;

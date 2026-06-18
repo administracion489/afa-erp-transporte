@@ -104,6 +104,13 @@ export default function ModalManifiesto(props: Props) {
   const [formAdd, setFormAdd] = useState({ nombre: "", dni: "", empresa: "", telefono: "", parada_id: "" });
   const [savingAdd, setSavingAdd] = useState(false);
 
+  // ── Panel "Agregar desde nómina" ─────────────────────────────────────────
+  const [mostrarNomina,  setMostrarNomina]  = useState(false);
+  const [nominaBusq,     setNominaBusq]     = useState("");
+  const [nomina,         setNomina]         = useState<PasajeroManifiesto[]>([]);
+  const [loadingNomina,  setLoadingNomina]  = useState(false);
+  const [agregandoPaxId, setAgregandoPaxId] = useState<number | null>(null);
+
   // ── Copiar paraderos a días futuros ─────────────────────────────────────
   const [modalCopiar, setModalCopiar] = useState(false);
   const [copiarDesde, setCopiarDesde] = useState("");
@@ -274,24 +281,18 @@ export default function ModalManifiesto(props: Props) {
 
     const paradaIds = par.map((p) => p.id);
 
-    let pasajerosCliente: PasajeroManifiesto[] = [];
-    let pasajerosReserva: PasajeroManifiesto[] = [];
-
-    if (clienteId) {
-      const resp = await supabase
-        .from("pasajeros")
-        .select("id, reserva_id, cliente_id, nombre, dni, telefono, empresa")
-        .eq("cliente_id", clienteId);
-      pasajerosCliente = (resp.data || []) as PasajeroManifiesto[];
-    }
-
+    // 1. Pasajeros ad-hoc de esta reserva específica
     const respAdhoc = await supabase
       .from("pasajeros")
       .select("id, reserva_id, cliente_id, nombre, dni, telefono, empresa")
       .eq("reserva_id", reservaId);
-    pasajerosReserva = (respAdhoc.data || []) as PasajeroManifiesto[];
+    const pasajerosReserva = (respAdhoc.data || []) as PasajeroManifiesto[];
+    const idsReserva = new Set(pasajerosReserva.map((p) => p.id));
 
+    // 2. Asignaciones parada ↔ pasajero para las paradas de esta reserva
     const asig: Record<number, AsignacionParada> = {};
+    const globalPaxIds: number[] = [];
+
     if (paradaIds.length > 0) {
       const ppResp = await supabase
         .from("pasajeros_parada")
@@ -299,22 +300,32 @@ export default function ModalManifiesto(props: Props) {
         .in("parada_id", paradaIds);
       (ppResp.data || []).forEach((row: any) => {
         asig[row.pasajero_id] = {
-          pasajero_id: row.pasajero_id,
-          parada_id: row.parada_id,
+          pasajero_id:     row.pasajero_id,
+          parada_id:       row.parada_id,
           estado_abordaje: row.estado_abordaje || "Pendiente",
-          hora_abordaje: row.hora_abordaje,
-          asiento: row.asiento,
+          hora_abordaje:   row.hora_abordaje,
+          asiento:         row.asiento,
         };
+        // Pasajeros globales (nómina) explícitamente asignados a una parada de este servicio
+        if (!idsReserva.has(row.pasajero_id)) {
+          globalPaxIds.push(row.pasajero_id);
+        }
       });
     }
 
-    const idsReserva = new Set(pasajerosReserva.map((p) => p.id));
-    const merged: PasajeroManifiesto[] = [
-      ...pasajerosReserva,
-      ...pasajerosCliente.filter((p) => !idsReserva.has(p.id)),
-    ];
+    // 3. Cargar datos de pasajeros globales asignados a paradas de este servicio
+    let pasajerosGlobal: PasajeroManifiesto[] = [];
+    const uniqueGlobalIds = [...new Set(globalPaxIds)];
+    if (uniqueGlobalIds.length > 0) {
+      const { data: paxGlobal } = await supabase
+        .from("pasajeros")
+        .select("id, reserva_id, cliente_id, nombre, dni, telefono, empresa")
+        .in("id", uniqueGlobalIds);
+      pasajerosGlobal = (paxGlobal || []) as PasajeroManifiesto[];
+    }
 
-    setPasajeros(merged);
+    // 4. Merge: ad-hoc primero, luego globales explícitamente asignados a paradas
+    setPasajeros([...pasajerosReserva, ...pasajerosGlobal]);
     setAsignaciones(asig);
     setLoading(false);
   };
@@ -419,12 +430,34 @@ export default function ModalManifiesto(props: Props) {
       }
 
       const cuantos = insResp.data?.length || 0;
+
+      // Auto-registrar en nómina los pasajeros nuevos que no estaban
+      let registradosNomina = 0;
+      if (clienteId && insResp.data && cuantos > 0) {
+        const { data: nominaExiste } = await supabase
+          .from("pasajeros").select("dni")
+          .eq("cliente_id", clienteId).is("reserva_id", null);
+        const dnisNomina = new Set((nominaExiste || []).map((p: any) => p.dni));
+        const paraNomina = insResp.data.filter((p: any) => p.dni && !dnisNomina.has(p.dni));
+        if (paraNomina.length > 0) {
+          await supabase.from("pasajeros").insert(
+            paraNomina.map((p: any) => ({
+              cliente_id: clienteId, reserva_id: null,
+              nombre: p.nombre, dni: p.dni,
+              empresa: p.empresa || null, telefono: p.telefono || null, activo: true,
+            }))
+          );
+          registradosNomina = paraNomina.length;
+        }
+      }
+
       const partes = [
         cuantos + " pasajero(s) cargado(s)",
+        registradosNomina > 0 ? registradosNomina + " nuevo(s) en nómina" : "",
         duplicados > 0 ? duplicados + " duplicado(s) omitido(s)" : "",
         resultado.errores.length > 0 ? resultado.errores.length + " fila(s) con error" : "",
       ].filter(Boolean);
-      setMensaje({ tipo: "ok", texto: partes.join(" - ") });
+      setMensaje({ tipo: "ok", texto: partes.join(" · ") });
 
       await cargar();
       if (onChange) onChange();
@@ -550,13 +583,67 @@ export default function ModalManifiesto(props: Props) {
         });
       }
 
-      setMensaje({ tipo: "ok", texto: `${formAdd.nombre.trim()} agregado al manifiesto ✓` });
+      // Auto-registrar en nómina si no existe aún (por DNI)
+      let registradoEnNomina = false;
+      if (clienteId) {
+        const { data: existeNomina } = await supabase
+          .from("pasajeros").select("id")
+          .eq("cliente_id", clienteId).is("reserva_id", null)
+          .eq("dni", formAdd.dni.trim()).maybeSingle();
+        if (!existeNomina) {
+          await supabase.from("pasajeros").insert({
+            cliente_id: clienteId, reserva_id: null,
+            nombre: formAdd.nombre.trim(), dni: formAdd.dni.trim(),
+            empresa: formAdd.empresa.trim() || null,
+            telefono: formAdd.telefono.trim() || null, activo: true,
+          });
+          registradoEnNomina = true;
+        }
+      }
+
+      setMensaje({ tipo: "ok", texto: `${formAdd.nombre.trim()} agregado al manifiesto${registradoEnNomina ? " y a la nómina" : ""} ✓` });
       setFormAdd({ nombre: "", dni: "", empresa: "", telefono: "", parada_id: "" });
       setMostrarFormAdd(false);
       await cargar();
       if (onChange) onChange();
     } finally {
       setSavingAdd(false);
+    }
+  };
+
+  // ── Panel nómina: carga y agrega ────────────────────────────────────────────
+  const cargarNominaPanel = async () => {
+    if (!clienteId) return;
+    setLoadingNomina(true);
+    const { data } = await supabase
+      .from("pasajeros")
+      .select("id, reserva_id, cliente_id, nombre, dni, telefono, empresa")
+      .eq("cliente_id", clienteId)
+      .is("reserva_id", null)
+      .order("nombre");
+    setNomina((data || []) as PasajeroManifiesto[]);
+    setLoadingNomina(false);
+  };
+
+  const agregarDesdeNomina = async (pax: PasajeroManifiesto) => {
+    setAgregandoPaxId(pax.id);
+    setMensaje(null);
+    try {
+      const { error } = await supabase.from("pasajeros").insert({
+        reserva_id: reservaId,
+        cliente_id: clienteId,
+        nombre:     pax.nombre,
+        dni:        pax.dni,
+        empresa:    pax.empresa || null,
+        telefono:   pax.telefono || null,
+        activo:     true,
+      });
+      if (error) { setMensaje({ tipo: "err", texto: error.message }); return; }
+      setNomina(prev => prev.filter(p => p.id !== pax.id));
+      await cargar();
+      if (onChange) onChange();
+    } finally {
+      setAgregandoPaxId(null);
     }
   };
 
@@ -646,6 +733,17 @@ export default function ModalManifiesto(props: Props) {
   const syncColor = sincronizadoApp ? "#065f46" : "#9a3412";
 
   const dnisExistentes = new Set(pasajeros.map((p) => p.dni).filter(Boolean));
+
+  const nominaFiltrada = useMemo(() => {
+    const disponibles = nomina.filter(p => !dnisExistentes.has(p.dni));
+    const q = nominaBusq.toLowerCase().trim();
+    if (!q) return disponibles;
+    return disponibles.filter(p =>
+      p.nombre.toLowerCase().includes(q) ||
+      p.dni.toLowerCase().includes(q) ||
+      (p.empresa || "").toLowerCase().includes(q)
+    );
+  }, [nomina, dnisExistentes, nominaBusq]);
 
   const paradasGestion = paradas.map((p) => ({
     id: p.id,
@@ -883,7 +981,7 @@ export default function ModalManifiesto(props: Props) {
 
               {/* Agregar 1 pasajero */}
               <button
-                onClick={() => { setMostrarFormAdd(v => !v); setMensaje(null); }}
+                onClick={() => { const v = !mostrarFormAdd; setMostrarFormAdd(v); if (v) setMostrarNomina(false); setMensaje(null); }}
                 className="px-3 py-2 rounded-xl font-bold text-xs border transition-colors"
                 style={{
                   borderColor: mostrarFormAdd ? "#0b315f" : "#e2e8f0",
@@ -893,6 +991,26 @@ export default function ModalManifiesto(props: Props) {
               >
                 {mostrarFormAdd ? "✕ Cancelar" : "+ Agregar 1 pasajero"}
               </button>
+
+              {/* Agregar desde nómina */}
+              {clienteId && (
+                <button
+                  onClick={() => {
+                    const v = !mostrarNomina;
+                    setMostrarNomina(v);
+                    if (v) { setMostrarFormAdd(false); cargarNominaPanel(); }
+                    setMensaje(null);
+                  }}
+                  className="px-3 py-2 rounded-xl font-bold text-xs border transition-colors"
+                  style={{
+                    borderColor: mostrarNomina ? "#0b315f" : "#e2e8f0",
+                    background:  mostrarNomina ? "#eaeff6" : "white",
+                    color:       mostrarNomina ? "#0b315f" : "#374151",
+                  }}
+                >
+                  {mostrarNomina ? "✕ Cerrar nómina" : "📋 Desde nómina"}
+                </button>
+              )}
 
               <CargadorUnificado
                 reservaId={reservaId}
@@ -1089,6 +1207,67 @@ export default function ModalManifiesto(props: Props) {
                     {savingAdd ? "Guardando..." : "Agregar"}
                   </button>
                 </div>
+                {capacidad !== null && total >= capacidad && (
+                  <p className="text-[10px] font-bold mt-2" style={{ color: "#991b1b" }}>
+                    ⚠ Capacidad llena ({total}/{capacidad}). Este pasajero creará sobrecupo.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Panel Agregar desde nómina */}
+            {mostrarNomina && clienteId && (
+              <div className="mx-6 mt-3 rounded-xl border p-4" style={{ borderColor: "#bfdbfe", background: "#eaeff6" }}>
+                <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+                  <p className="text-[10px] font-bold uppercase tracking-widest" style={{ color: "#0b315f" }}>
+                    Agregar desde nómina
+                    {capacidad !== null && (
+                      <span className="ml-2 font-normal" style={{ color: capacidad - total > 0 ? "#065f46" : "#991b1b" }}>
+                        · {capacidad - total > 0 ? `${capacidad - total} lugar(es) disponible(s)` : "LLENO"}
+                      </span>
+                    )}
+                  </p>
+                  <input
+                    value={nominaBusq}
+                    onChange={e => setNominaBusq(e.target.value)}
+                    placeholder="Buscar en nómina…"
+                    className="border rounded-xl px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 bg-white"
+                    style={{ minWidth: 180 }}
+                  />
+                </div>
+                {loadingNomina ? (
+                  <p className="text-xs text-gray-400">Cargando nómina…</p>
+                ) : nominaFiltrada.length === 0 ? (
+                  <p className="text-xs text-gray-400">
+                    {nomina.length === 0
+                      ? "La nómina de este cliente está vacía."
+                      : "Todos los pasajeros de la nómina ya están en este servicio."}
+                  </p>
+                ) : (
+                  <div className="max-h-52 overflow-y-auto flex flex-col gap-1.5 pr-1">
+                    {nominaFiltrada.map(p => (
+                      <div key={p.id} className="flex items-center justify-between rounded-lg px-3 py-2 bg-white border" style={{ borderColor: "#e2e8f0" }}>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-bold flex-shrink-0" style={{ background: "#0b315f" }}>
+                            {p.nombre.charAt(0)}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-xs font-bold text-gray-800 truncate">{p.nombre}</p>
+                            <p className="text-[10px] text-gray-400 font-mono">{p.dni}{p.empresa ? ` · ${p.empresa}` : ""}</p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => agregarDesdeNomina(p)}
+                          disabled={agregandoPaxId === p.id}
+                          className="ml-3 px-3 py-1 rounded-lg font-bold text-[11px] text-white flex-shrink-0 disabled:opacity-50"
+                          style={{ background: "#0b315f" }}
+                        >
+                          {agregandoPaxId === p.id ? "…" : "+ Agregar"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 

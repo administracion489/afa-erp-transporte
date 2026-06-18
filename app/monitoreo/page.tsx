@@ -93,9 +93,11 @@ export default function MonitoreoPage() {
   }, []);
 
   const actualizarUbicaciones = async () => {
+    const hace30min = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     const { data } = await supabase
       .from("ubicaciones_gps")
       .select("*")
+      .gte("created_at", hace30min)
       .order("timestamp", { ascending: false })
       .limit(500);
     if (!data) return;
@@ -184,6 +186,14 @@ export default function MonitoreoPage() {
 
   useEffect(() => {
     if (!mapListo || !map.current) return;
+    // Quitar marcadores de entidades que ya no aparecen en el resultado (desconectadas)
+    const keysActuales = new Set(ubicaciones.map(u => keyGps(u)));
+    Object.keys(markers.current).forEach(key => {
+      if (!keysActuales.has(key)) {
+        markers.current[key].remove();
+        delete markers.current[key];
+      }
+    });
     ubicaciones.forEach(u => {
       // Resolver placa/nombre/telefono priorizando tablas _tercero cuando el punto es de un tercero.
       // Los IDs AFA y _tercero se solapan, por eso NO se busca en vehiculos/conductores AFA con un id de tercero.
