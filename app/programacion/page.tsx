@@ -1111,6 +1111,7 @@ export default function ReservasPage() {
         passPorAsignar;
     });
     // Próximos primero: futuros ascendentes, luego pasados descendentes (más reciente primero)
+    // Desempate por hora_servicio: mismo día → la hora más próxima arriba
     return [...base].sort((a, b) => {
       const fa = a.fecha_servicio;
       const fb = b.fecha_servicio;
@@ -1119,8 +1120,16 @@ export default function ReservasPage() {
       if (!fb) return -1;
       const aFut = fa >= hoy;
       const bFut = fb >= hoy;
-      if (aFut && bFut)   return fa.localeCompare(fb);
-      if (!aFut && !bFut) return fb.localeCompare(fa);
+      if (aFut && bFut) {
+        const d = fa.localeCompare(fb);
+        if (d !== 0) return d;
+        return (a.hora_servicio || "").localeCompare(b.hora_servicio || "");
+      }
+      if (!aFut && !bFut) {
+        const d = fb.localeCompare(fa);
+        if (d !== 0) return d;
+        return (b.hora_servicio || "").localeCompare(a.hora_servicio || "");
+      }
       return aFut ? -1 : 1;
     });
   }, [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, filtroDesde, filtroHasta, filtroPorAsignar, clientes, hoy]);
@@ -1135,7 +1144,11 @@ export default function ReservasPage() {
       grupos.get(key)!.push(r);
     });
     return Array.from(grupos.entries()).map(([clave, filas]) => {
-      const sorted = [...filas].sort((a, b) => (a.fecha_servicio || "").localeCompare(b.fecha_servicio || ""));
+      const sorted = [...filas].sort((a, b) => {
+        const d = (a.fecha_servicio || "").localeCompare(b.fecha_servicio || "");
+        if (d !== 0) return d;
+        return (a.hora_servicio || "").localeCompare(b.hora_servicio || "");
+      });
       const proxima = sorted.find(r => r.fecha_servicio && r.fecha_servicio >= hoy) || sorted[0];
       return { clave, cotId: filas[0].cotizacion_id, filas: sorted, proxima };
     });
