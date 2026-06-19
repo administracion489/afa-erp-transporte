@@ -128,33 +128,16 @@ export async function POST(req: NextRequest) {
         const { ppId, paradaIdReal, pasajeroId, reservaId } = body;
         if (!ppId) return NextResponse.json({ error: "ppId requerido" }, { status: 400 });
         const ahora = new Date().toISOString();
-        // Escribir AMBAS columnas de estado: `estado` (que lee la app del conductor) y
-        // `estado_abordaje`/`hora_abordaje` (que lee el manifiesto del admin). Antes solo se
-        // escribía `estado`, por eso el admin seguía mostrando "Pendiente" tras escanear el QR.
-        const patch: Record<string, any> = {
-          estado: "embarcado", estado_abordaje: "Abordado", hora_abordaje: ahora,
-        };
-        // Si el pasajero subió en una parada distinta a la asignada, actualizar su
-        // paradero REAL (parada_id) conservando el planificado en parada_id_original.
-        // Así el reporte refleja dónde subió de verdad sin perder dónde estaba asignado.
-        let movido = false;
-        let paradaOriginalId: number | null = null;
-        if (paradaIdReal) {
-          const { data: row } = await admin.from("pasajeros_parada")
-            .select("parada_id, parada_id_original").eq("id", ppId).maybeSingle();
-          if (row && row.parada_id !== paradaIdReal) {
-            paradaOriginalId = row.parada_id_original ?? row.parada_id;
-            patch.parada_id = paradaIdReal;
-            patch.parada_id_original = paradaOriginalId;
-            patch.cambio_parada_en = ahora;
-            movido = true;
-          }
-        }
-        const { error } = await admin.from("pasajeros_parada").update(patch).eq("id", ppId);
+        // Acción legacy (back-compat APKs viejos): solo marca abordado. Escribe AMBAS
+        // columnas de estado — `estado` (app conductor) y `estado_abordaje`/`hora_abordaje`
+        // (manifiesto admin). El movimiento entre paradas/buses lo maneja `embarcar_qr`.
+        const { error } = await admin.from("pasajeros_parada")
+          .update({ estado: "embarcado", estado_abordaje: "Abordado", hora_abordaje: ahora })
+          .eq("id", ppId);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         // Bitácora real de abordaje (la lee el reporte del portal cliente).
         await logBoarding(pasajeroId ?? null, paradaIdReal ?? null, reservaId ?? null);
-        return NextResponse.json({ ok: true, movido, paradaOriginalId });
+        return NextResponse.json({ ok: true });
       }
 
       // ── Embarcar por QR (autoritativo) ───────────────────────────────────────
@@ -216,10 +199,11 @@ export async function POST(req: NextRequest) {
         (paradasSlot || []).forEach((p: any) => reservaDeParada.set(p.id, p.reserva_id));
 
         // 4) Filas del pasajero en este horario (en cualquier bus del horario).
+        //    Solo columnas garantizadas (parada_id_original/cambio_parada_en pueden no existir).
         let filas: any[] = [];
         if (paradaIdsSlot.length > 0) {
           const { data } = await admin.from("pasajeros_parada")
-            .select("id, parada_id, parada_id_original, estado")
+            .select("id, parada_id, estado")
             .eq("pasajero_id", pasajeroId).in("parada_id", paradaIdsSlot);
           filas = data || [];
         }
@@ -254,19 +238,21 @@ export async function POST(req: NextRequest) {
         const otroBus = reservaPrevia !== null && reservaPrevia !== reservaId;
         const movido = target.parada_id !== paradaId;
         const yaEmbarcado = target.estado === "embarcado" && !movido;
-        const paradaOriginalId = target.parada_id_original ?? target.parada_id;
+        const paradaOriginalId = target.parada_id;
 
+        // Columnas core (existen siempre).
         const patch: Record<string, any> = { estado: "embarcado", estado_abordaje: "Abordado", hora_abordaje: ahora };
-        if (movido) {
-          patch.parada_id = paradaId;
-          patch.parada_id_original = paradaOriginalId;
-          patch.cambio_parada_en = ahora;
+        if (movido) patch.parada_id = paradaId;
+        // Columnas opcionales que pueden no existir en la BD (parada_id_original,
+        // cambio_parada_en, reserva_id). Se intentan; si no existen, se reintenta sin ellas.
+        const opcional: Record<string, any> = {};
+        if (movido) { opcional.parada_id_original = paradaOriginalId; opcional.cambio_parada_en = ahora; }
+        if (otroBus) opcional.reserva_id = reservaId;
+        let { error: eUpd } = await admin.from("pasajeros_parada")
+          .update({ ...patch, ...opcional }).eq("id", target.id);
+        if (eUpd && /does not exist|parada_id_original|cambio_parada_en|reserva_id/i.test(eUpd.message)) {
+          ({ error: eUpd } = await admin.from("pasajeros_parada").update(patch).eq("id", target.id));
         }
-        // Si viene de otro bus del mismo horario, reapuntar reserva_id (si la columna existe).
-        const actualizar = async (extra: Record<string, any> = {}) =>
-          admin.from("pasajeros_parada").update({ ...patch, ...extra }).eq("id", target.id);
-        let { error: eUpd } = otroBus ? await actualizar({ reserva_id: reservaId }) : await actualizar();
-        if (eUpd && otroBus && eUpd.message.includes("reserva_id")) ({ error: eUpd } = await actualizar());
         if (eUpd) return NextResponse.json({ error: eUpd.message }, { status: 500 });
 
         // 6) Eliminar filas sobrantes del MISMO horario (consolidar a una sola).
