@@ -516,8 +516,11 @@ export default function ModalManifiesto(props: Props) {
       return;
     }
     const hora = estado === "Abordado" ? new Date().toISOString() : null;
+    // Espejear a la columna `estado` que lee la app del conductor (binario embarcado/esperando),
+    // para que un cambio manual del admin también se refleje en el teléfono del conductor.
+    const estadoConductor = estado === "Abordado" ? "embarcado" : "esperando";
     const resp = await supabase.from("pasajeros_parada")
-      .update({ estado_abordaje: estado, hora_abordaje: hora })
+      .update({ estado_abordaje: estado, hora_abordaje: hora, estado: estadoConductor })
       .eq("pasajero_id", pasajeroId)
       .eq("parada_id", a.parada_id);
     if (resp.error) {

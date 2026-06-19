@@ -12,6 +12,19 @@ const supabaseAdmin = createClient(
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
+// Bitácora de abordaje real (tabla boarding_log). Best-effort: si falla, no debe
+// bloquear el embarque. La lee el reporte del portal cliente por reserva_id.
+async function logBoarding(pasajero_id: number, parada_id: number, reserva_id: number | null) {
+  try {
+    await supabaseAdmin.from("boarding_log").insert({
+      pasajero_id, parada_id, reserva_id: reserva_id ?? null,
+      metodo: "qr_conductor", created_at: new Date().toISOString(),
+    });
+  } catch (e: any) {
+    console.warn("[conductor-alerta] boarding_log no registrado:", e?.message);
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -33,16 +46,17 @@ export async function POST(req: NextRequest) {
         .maybeSingle();
 
       if (existe) {
-        if (existe.estado === "embarcado") {
-          return NextResponse.json({ ok: true, ya_embarcado: true, id: existe.id });
-        }
-        // Existe pero no embarcado → actualizar
+        const eraEmbarcado = existe.estado === "embarcado";
+        // Siempre escribir ambas columnas (estado + estado_abordaje/hora_abordaje) — incluso si
+        // ya estaba "embarcado", para reparar filas viejas con estado_abordaje desfasado en un re-escaneo.
         const { error: errUpd } = await supabaseAdmin
           .from("pasajeros_parada")
-          .update({ estado: "embarcado" })
+          .update({ estado: "embarcado", estado_abordaje: "Abordado", hora_abordaje: new Date().toISOString() })
           .eq("id", existe.id);
         if (errUpd) return NextResponse.json({ error: errUpd.message }, { status: 500 });
-        return NextResponse.json({ ok: true, id: existe.id });
+        // Solo registrar en bitácora si es un abordaje nuevo (evita inflar el reporte en re-escaneos).
+        if (!eraEmbarcado) await logBoarding(pasajero_id, parada_id, reserva_id ?? null);
+        return NextResponse.json({ ok: true, id: existe.id, ya_embarcado: eraEmbarcado });
       }
 
       // No existe → insertar. Intentar primero solo con columnas base (parada_id, pasajero_id, estado).
@@ -50,7 +64,7 @@ export async function POST(req: NextRequest) {
       const insertar = async (extra: Record<string, any> = {}) =>
         supabaseAdmin
           .from("pasajeros_parada")
-          .insert({ parada_id, pasajero_id, estado: "embarcado", ...extra })
+          .insert({ parada_id, pasajero_id, estado: "embarcado", estado_abordaje: "Abordado", hora_abordaje: new Date().toISOString(), ...extra })
           .select("id")
           .single();
 
@@ -67,6 +81,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: errIns.message }, { status: 500 });
       }
 
+      await logBoarding(pasajero_id, parada_id, reserva_id ?? null);
       return NextResponse.json({ ok: true, id: nuevo?.id, creado: true });
     }
 

@@ -436,20 +436,50 @@ function LectorContent() {
 
   // ── SCAN HANDLER ──────────────────────────────────────────────────────────
   async function handleScan(qrText: string) {
-    const ctx   = audioCtxRef.current;
-    const lista = pasajerosRef.current;
-    const found = lista.find(pp => pp.pasajero?.qr_code === qrText);
+    const ctx = audioCtxRef.current;
+    const par = paradaRef.current;
+    const res = reservaRef.current;
 
-    if (!found) {
+    if (!par?.id || !res?.id) {
+      if (ctx) soundErr(ctx);
+      setResultPax(null);
+      setEstado("no_autorizado");
+      setTimeout(() => setEstado("espera"), 1500);
+      return;
+    }
+
+    // Misma lógica autoritativa que la app del conductor (regla "un asiento por horario
+    // de salida"): resuelve el QR, mueve/registra/consolida y escribe boarding_log en el
+    // servidor. /api/conductor usa service_role, igual que el resto del flujo del conductor.
+    let resp: any = {};
+    try {
+      const r = await fetch("/api/conductor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accion: "embarcar_qr", qrCode: qrText, paradaId: par.id, reservaId: res.id }),
+      });
+      resp = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(resp?.error || "error");
+    } catch {
+      if (ctx) soundErr(ctx);
+      setResultPax(null);
+      setEstado("no_autorizado");
+      setTimeout(() => setEstado("espera"), 1500);
+      return;
+    }
+
+    // QR no reconocido
+    if (resp?.noEncontrado || !resp?.ok) {
       if (ctx) soundErr(ctx);                // 200 Hz × 2 pulsos
       setResultPax(null);
       setEstado("no_autorizado");
       setTimeout(() => setEstado("espera"), 1500);
       return;
     }
-    if (found.estado === "embarcado") {
-      // ── Silencio intencional, solo visual ──
-      setResultPax(found.pasajero);
+
+    // Ya estaba embarcado en esta parada → solo visual, sin sonido
+    if (resp?.yaEmbarcado) {
+      setResultPax(resp.pasajero ?? null);
       setEstado("ya_registrado");
       setTimeout(() => setEstado("espera"), 1500);
       return;
@@ -457,28 +487,10 @@ function LectorContent() {
 
     // ✅ Autorizado
     if (ctx) soundOk(ctx);                  // 880 Hz, 0.15 s
-    setResultPax(found.pasajero);
+    setResultPax(resp.pasajero ?? null);
     setEstado("autorizado");
-
-    setPasajeros(prev =>
-      prev.map(pp => pp.pasajero_id === found.pasajero_id ? { ...pp, estado: "embarcado" } : pp)
-    );
-    setEmbarcados(prev => prev + 1);
-
-    const par = paradaRef.current;
-    const res = reservaRef.current;
-
-    await supabase
-      .from("pasajeros_parada")
-      .update({ estado: "embarcado" })
-      .eq("pasajero_id", found.pasajero_id)
-      .eq("parada_id", par?.id);
-
-    supabase.from("boarding_log").insert({
-      pasajero_id: found.pasajero_id, parada_id: par?.id,
-      reserva_id: res?.id, metodo: "qr_lector",
-      created_at: new Date().toISOString(),
-    }).then(() => {}).catch(() => {});
+    // Refrescar lista/conteo real de la parada actual (el pax pudo moverse aquí desde otra)
+    loadPasajeros(par.id);
 
     setTimeout(() => setEstado("espera"), 2000);
   }

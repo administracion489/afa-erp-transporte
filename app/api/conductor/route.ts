@@ -15,6 +15,24 @@ const admin = createClient(
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
+// Bitácora de abordaje real (tabla boarding_log). Best-effort: si falla, no debe
+// bloquear el embarque. La lee el reporte del portal cliente por reserva_id.
+async function logBoarding(
+  pasajero_id: number | null,
+  parada_id: number | null,
+  reserva_id: number | null,
+) {
+  if (!pasajero_id || !parada_id) return;
+  try {
+    await admin.from("boarding_log").insert({
+      pasajero_id, parada_id, reserva_id: reserva_id ?? null,
+      metodo: "qr_conductor", created_at: new Date().toISOString(),
+    });
+  } catch (e: any) {
+    console.warn("[api/conductor] boarding_log no registrado:", e?.message);
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -99,11 +117,141 @@ export async function POST(req: NextRequest) {
 
       // ── Embarcar pasajero en lista ───────────────────────────────────────────
       case "embarcar": {
-        const { ppId } = body;
+        const { ppId, paradaIdReal, pasajeroId, reservaId } = body;
         if (!ppId) return NextResponse.json({ error: "ppId requerido" }, { status: 400 });
-        const { error } = await admin.from("pasajeros_parada").update({ estado: "embarcado" }).eq("id", ppId);
+        const ahora = new Date().toISOString();
+        // Escribir AMBAS columnas de estado: `estado` (que lee la app del conductor) y
+        // `estado_abordaje`/`hora_abordaje` (que lee el manifiesto del admin). Antes solo se
+        // escribía `estado`, por eso el admin seguía mostrando "Pendiente" tras escanear el QR.
+        const patch: Record<string, any> = {
+          estado: "embarcado", estado_abordaje: "Abordado", hora_abordaje: ahora,
+        };
+        // Si el pasajero subió en una parada distinta a la asignada, actualizar su
+        // paradero REAL (parada_id) conservando el planificado en parada_id_original.
+        // Así el reporte refleja dónde subió de verdad sin perder dónde estaba asignado.
+        let movido = false;
+        let paradaOriginalId: number | null = null;
+        if (paradaIdReal) {
+          const { data: row } = await admin.from("pasajeros_parada")
+            .select("parada_id, parada_id_original").eq("id", ppId).maybeSingle();
+          if (row && row.parada_id !== paradaIdReal) {
+            paradaOriginalId = row.parada_id_original ?? row.parada_id;
+            patch.parada_id = paradaIdReal;
+            patch.parada_id_original = paradaOriginalId;
+            patch.cambio_parada_en = ahora;
+            movido = true;
+          }
+        }
+        const { error } = await admin.from("pasajeros_parada").update(patch).eq("id", ppId);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-        return NextResponse.json({ ok: true });
+        // Bitácora real de abordaje (la lee el reporte del portal cliente).
+        await logBoarding(pasajeroId ?? null, paradaIdReal ?? null, reservaId ?? null);
+        return NextResponse.json({ ok: true, movido, paradaOriginalId });
+      }
+
+      // ── Embarcar por QR (autoritativo) ───────────────────────────────────────
+      // Regla: "un asiento por horario de salida". Un horario = fecha_servicio +
+      // hora_servicio. Un pasajero NO puede estar en dos buses del mismo horario,
+      // así que al escanearlo se MUEVE su registro al bus/parada real donde subió y
+      // se eliminan las filas sobrantes del mismo horario. Sus servicios de OTRO
+      // horario (ida/retorno/etc.) nunca se tocan. Esta lógica vive en el servidor
+      // porque la app solo conoce su propio bus.
+      case "embarcar_qr": {
+        let { pasajeroId } = body;
+        const { qrCode, paradaId, reservaId } = body;
+        // El lector pasa el QR directamente: resolverlo a pasajero (service_role, sin RLS).
+        let pasajeroInfo: any = null;
+        if (!pasajeroId && qrCode) {
+          const { data: px } = await admin.from("pasajeros")
+            .select("id, nombre, empresa, dni, qr_code, foto_url").eq("qr_code", qrCode).maybeSingle();
+          if (!px) return NextResponse.json({ ok: false, noEncontrado: true });
+          pasajeroId = px.id;
+          pasajeroInfo = px;
+        }
+        if (!pasajeroId || !paradaId || !reservaId) {
+          return NextResponse.json({ error: "pasajeroId (o qrCode), paradaId y reservaId requeridos" }, { status: 400 });
+        }
+        const ahora = new Date().toISOString();
+
+        // 1) Horario de salida del bus actual (fecha + hora).
+        const { data: rsv, error: eR } = await admin.from("reservas")
+          .select("fecha_servicio, hora_servicio").eq("id", reservaId).maybeSingle();
+        if (eR) return NextResponse.json({ error: eR.message }, { status: 500 });
+
+        // 2) Reservas del MISMO horario (misma fecha y misma hora exactas).
+        //    Si faltara la hora, se limita al bus actual (no se remueve de otros).
+        let reservaIdsSlot: number[] = [reservaId];
+        if (rsv?.fecha_servicio && rsv?.hora_servicio) {
+          const { data: rs } = await admin.from("reservas").select("id")
+            .eq("fecha_servicio", rsv.fecha_servicio).eq("hora_servicio", rsv.hora_servicio);
+          reservaIdsSlot = (rs || []).map((r: any) => r.id);
+          if (!reservaIdsSlot.includes(reservaId)) reservaIdsSlot.push(reservaId);
+        }
+
+        // 3) Paradas de esas reservas (con su reserva, para saber de qué bus viene cada fila).
+        const { data: paradasSlot } = await admin.from("paradas")
+          .select("id, reserva_id").in("reserva_id", reservaIdsSlot);
+        const paradaIdsSlot = (paradasSlot || []).map((p: any) => p.id);
+        const reservaDeParada = new Map<number, number>();
+        (paradasSlot || []).forEach((p: any) => reservaDeParada.set(p.id, p.reserva_id));
+
+        // 4) Filas del pasajero en este horario (en cualquier bus del horario).
+        let filas: any[] = [];
+        if (paradaIdsSlot.length > 0) {
+          const { data } = await admin.from("pasajeros_parada")
+            .select("id, parada_id, parada_id_original, estado")
+            .eq("pasajero_id", pasajeroId).in("parada_id", paradaIdsSlot);
+          filas = data || [];
+        }
+
+        // 5a) Caminante: no estaba asignado en este horario → insertar en el bus actual.
+        if (filas.length === 0) {
+          const insertar = async (extra: Record<string, any> = {}) =>
+            admin.from("pasajeros_parada")
+              .insert({ parada_id: paradaId, pasajero_id: pasajeroId, estado: "embarcado",
+                        estado_abordaje: "Abordado", hora_abordaje: ahora, ...extra })
+              .select("id").single();
+          let { data: nuevo, error: eIns } = await insertar({ reserva_id: reservaId });
+          if (eIns && eIns.message.includes("reserva_id")) ({ data: nuevo, error: eIns } = await insertar());
+          if (eIns) return NextResponse.json({ error: eIns.message }, { status: 500 });
+          await logBoarding(pasajeroId, paradaId, reservaId);
+          return NextResponse.json({ ok: true, id: nuevo?.id, creado: true, pasajero: pasajeroInfo });
+        }
+
+        // 5b) Tiene asignación en este horario → elegir fila objetivo y mover/abordar.
+        const target = filas.find((f) => f.parada_id === paradaId) ?? filas[0];
+        const reservaPrevia = reservaDeParada.get(target.parada_id) ?? null;
+        const otroBus = reservaPrevia !== null && reservaPrevia !== reservaId;
+        const movido = target.parada_id !== paradaId;
+        const yaEmbarcado = target.estado === "embarcado" && !movido;
+        const paradaOriginalId = target.parada_id_original ?? target.parada_id;
+
+        const patch: Record<string, any> = { estado: "embarcado", estado_abordaje: "Abordado", hora_abordaje: ahora };
+        if (movido) {
+          patch.parada_id = paradaId;
+          patch.parada_id_original = paradaOriginalId;
+          patch.cambio_parada_en = ahora;
+        }
+        // Si viene de otro bus del mismo horario, reapuntar reserva_id (si la columna existe).
+        const actualizar = async (extra: Record<string, any> = {}) =>
+          admin.from("pasajeros_parada").update({ ...patch, ...extra }).eq("id", target.id);
+        let { error: eUpd } = otroBus ? await actualizar({ reserva_id: reservaId }) : await actualizar();
+        if (eUpd && otroBus && eUpd.message.includes("reserva_id")) ({ error: eUpd } = await actualizar());
+        if (eUpd) return NextResponse.json({ error: eUpd.message }, { status: 500 });
+
+        // 6) Eliminar filas sobrantes del MISMO horario (consolidar a una sola).
+        const sobrantes = filas.filter((f) => f.id !== target.id).map((f) => f.id);
+        let eliminados = 0;
+        if (sobrantes.length > 0) {
+          const { error: eDel } = await admin.from("pasajeros_parada").delete().in("id", sobrantes);
+          if (!eDel) eliminados = sobrantes.length;
+          else console.warn("[embarcar_qr] no se pudieron eliminar sobrantes:", eDel.message);
+        }
+
+        // 7) Bitácora solo si es un abordaje nuevo (evita inflar el reporte en re-escaneos).
+        if (!yaEmbarcado) await logBoarding(pasajeroId, paradaId, reservaId);
+
+        return NextResponse.json({ ok: true, id: target.id, movido, otroBus, paradaOriginalId, eliminados, yaEmbarcado, pasajero: pasajeroInfo });
       }
 
       // ── Reportar incidencia ──────────────────────────────────────────────────
