@@ -12,7 +12,8 @@ type Estado =
   | "espera"
   | "autorizado"
   | "ya_registrado"
-  | "no_autorizado";
+  | "no_autorizado"
+  | "otra_empresa";
 
 type GpsEstado = "buscando" | "ok" | "sin_gps";
 
@@ -485,6 +486,16 @@ function LectorContent() {
       return;
     }
 
+    // Pasajero de otra empresa → se registró igual, pero hay que alertar
+    if (resp?.empresaAjena) {
+      if (ctx) soundErr(ctx);
+      setResultPax(resp.pasajero ?? null);
+      setEstado("otra_empresa");
+      loadPasajeros(par.id);
+      setTimeout(() => setEstado("espera"), 2500);
+      return;
+    }
+
     // ✅ Autorizado
     if (ctx) soundOk(ctx);                  // 880 Hz, 0.15 s
     setResultPax(resp.pasajero ?? null);
@@ -669,12 +680,13 @@ function LectorContent() {
 
   // ── PANTALLA ESCÁNER + OVERLAYS ───────────────────────────────────────────
   const total          = pasajeros.length;
-  const overlayVisible = estado === "autorizado" || estado === "ya_registrado" || estado === "no_autorizado";
+  const overlayVisible = estado === "autorizado" || estado === "ya_registrado" || estado === "no_autorizado" || estado === "otra_empresa";
 
   const overlayCfg: Record<string, { bg: string; icon: string; titulo: string; sub: string }> = {
     autorizado:    { bg: "#16a34a", icon: "✅", titulo: resultPax?.nombre || "Autorizado",   sub: resultPax?.empresa || "" },
     ya_registrado: { bg: "#1e40af", icon: "⚠️", titulo: "Ya embarcado",                      sub: resultPax?.nombre  || "" },
-    no_autorizado: { bg: "#dc2626", icon: "❌", titulo: "No autorizado",                     sub: "Pasajero no encontrado en esta parada" },
+    no_autorizado: { bg: "#dc2626", icon: "❌", titulo: "No autorizado",                     sub: "Pasajero no encontrado" },
+    otra_empresa:  { bg: "#dc2626", icon: "⛔", titulo: "Otra empresa",                       sub: `${resultPax?.empresa || "Pasajero"} — no es de este servicio (registrado)` },
   };
   const oCfg = overlayVisible ? overlayCfg[estado] : null;
 

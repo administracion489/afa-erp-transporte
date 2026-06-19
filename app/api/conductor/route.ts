@@ -161,22 +161,34 @@ export async function POST(req: NextRequest) {
         const { qrCode, paradaId, reservaId } = body;
         // El lector pasa el QR directamente: resolverlo a pasajero (service_role, sin RLS).
         let pasajeroInfo: any = null;
+        let paxClienteId: number | null = null;
+        let paxReservaId: number | null = null;
         if (!pasajeroId && qrCode) {
           const { data: px } = await admin.from("pasajeros")
-            .select("id, nombre, empresa, dni, qr_code, foto_url").eq("qr_code", qrCode).maybeSingle();
+            .select("id, nombre, empresa, dni, qr_code, foto_url, cliente_id, reserva_id").eq("qr_code", qrCode).maybeSingle();
           if (!px) return NextResponse.json({ ok: false, noEncontrado: true });
           pasajeroId = px.id;
           pasajeroInfo = px;
+          paxClienteId = px.cliente_id ?? null;
+          paxReservaId = px.reserva_id ?? null;
         }
         if (!pasajeroId || !paradaId || !reservaId) {
           return NextResponse.json({ error: "pasajeroId (o qrCode), paradaId y reservaId requeridos" }, { status: 400 });
         }
+        // Si vino por pasajeroId directo (app conductor), traer su empresa para validar.
+        if (!pasajeroInfo) {
+          const { data: px2 } = await admin.from("pasajeros")
+            .select("cliente_id, reserva_id").eq("id", pasajeroId).maybeSingle();
+          paxClienteId = px2?.cliente_id ?? null;
+          paxReservaId = px2?.reserva_id ?? null;
+        }
         const ahora = new Date().toISOString();
 
-        // 1) Horario de salida del bus actual (fecha + hora).
+        // 1) Datos del bus actual: horario de salida (fecha + hora) y empresa cliente.
         const { data: rsv, error: eR } = await admin.from("reservas")
-          .select("fecha_servicio, hora_servicio").eq("id", reservaId).maybeSingle();
+          .select("fecha_servicio, hora_servicio, cliente_id").eq("id", reservaId).maybeSingle();
         if (eR) return NextResponse.json({ error: eR.message }, { status: 500 });
+        const reservaClienteId = rsv?.cliente_id ?? null;
 
         // 2) Reservas del MISMO horario (misma fecha y misma hora exactas).
         //    Si faltara la hora, se limita al bus actual (no se remueve de otros).
@@ -204,6 +216,16 @@ export async function POST(req: NextRequest) {
           filas = data || [];
         }
 
+        // Red de seguridad: ¿el pasajero pertenece a la empresa de este servicio?
+        // Pertenece si ya está en algún manifiesto del horario, o es de la misma empresa
+        // cliente, o es un pasajero ad-hoc de esta misma reserva. Si no → empresa ajena
+        // (igual se registra, pero se avisa para que oficina lo revise).
+        const empresaAjena = !(
+          filas.length > 0 ||
+          (paxClienteId != null && reservaClienteId != null && paxClienteId === reservaClienteId) ||
+          (paxReservaId != null && paxReservaId === reservaId)
+        );
+
         // 5a) Caminante: no estaba asignado en este horario → insertar en el bus actual.
         if (filas.length === 0) {
           const insertar = async (extra: Record<string, any> = {}) =>
@@ -215,7 +237,7 @@ export async function POST(req: NextRequest) {
           if (eIns && eIns.message.includes("reserva_id")) ({ data: nuevo, error: eIns } = await insertar());
           if (eIns) return NextResponse.json({ error: eIns.message }, { status: 500 });
           await logBoarding(pasajeroId, paradaId, reservaId);
-          return NextResponse.json({ ok: true, id: nuevo?.id, creado: true, pasajero: pasajeroInfo });
+          return NextResponse.json({ ok: true, id: nuevo?.id, creado: true, empresaAjena, pasajero: pasajeroInfo });
         }
 
         // 5b) Tiene asignación en este horario → elegir fila objetivo y mover/abordar.
@@ -251,7 +273,7 @@ export async function POST(req: NextRequest) {
         // 7) Bitácora solo si es un abordaje nuevo (evita inflar el reporte en re-escaneos).
         if (!yaEmbarcado) await logBoarding(pasajeroId, paradaId, reservaId);
 
-        return NextResponse.json({ ok: true, id: target.id, movido, otroBus, paradaOriginalId, eliminados, yaEmbarcado, pasajero: pasajeroInfo });
+        return NextResponse.json({ ok: true, id: target.id, movido, otroBus, paradaOriginalId, eliminados, yaEmbarcado, empresaAjena, pasajero: pasajeroInfo });
       }
 
       // ── Reportar incidencia ──────────────────────────────────────────────────

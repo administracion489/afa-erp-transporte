@@ -400,7 +400,7 @@ export default function ConductorApp() {
   // ── QR Scanner ─────────────────────────────────────────────────────────────
   const [escanear,          setEscanear]          = useState(false);
   const [validando,         setValidando]         = useState<Pasajero | null>(null); // kept for TS compat, unused after redesign
-  const [resultadoEmbarque, setResultadoEmbarque] = useState<{ pasajero: Pasajero; fueraLista: boolean; otroBus?: boolean; cambioParada?: boolean; paradaOriginalNombre?: string | null } | null>(null);
+  const [resultadoEmbarque, setResultadoEmbarque] = useState<{ pasajero: Pasajero; fueraLista: boolean; otroBus?: boolean; cambioParada?: boolean; empresaAjena?: boolean; paradaOriginalNombre?: string | null } | null>(null);
   const [resultProgreso,    setResultProgreso]    = useState(0);
   const [boardingMsg,       setBoardingMsg]       = useState<{ok: boolean; msg: string} | null>(null);
   const qrRef               = useRef<any>(null);
@@ -1069,6 +1069,7 @@ export default function ConductorApp() {
     const creado       = !!resp?.creado;                 // no estaba asignado (caminante)
     const otroBus      = !!resp?.otroBus;                // venía de otro bus del mismo horario
     const cambioParada = !!resp?.movido && !otroBus;     // movido a otra parada del mismo bus
+    const empresaAjena = !!resp?.empresaAjena;           // QR de otra empresa (red de seguridad)
     const fueraLista   = creado;
     const paradaOriginalNombre = cambioParada
       ? (paradas.find(p => p.id === resp?.paradaOriginalId)?.nombre ?? null)
@@ -1086,11 +1087,11 @@ export default function ConductorApp() {
       }];
     });
 
-    playBeep(fueraLista || otroBus ? "warn" : "ok");
+    playBeep(empresaAjena || fueraLista || otroBus ? "warn" : "ok");
 
     // Mostrar tarjeta resultado con barra de progreso (3 s)
     if (resultIntervalRef.current) clearInterval(resultIntervalRef.current);
-    setResultadoEmbarque({ pasajero, fueraLista, otroBus, cambioParada, paradaOriginalNombre });
+    setResultadoEmbarque({ pasajero, fueraLista, otroBus, cambioParada, empresaAjena, paradaOriginalNombre });
     setResultProgreso(0);
     let prog = 0;
     resultIntervalRef.current = setInterval(() => {
@@ -3273,22 +3274,27 @@ export default function ConductorApp() {
       {/* TARJETA RESULTADO EMBARQUE (auto-dismiss 3 s, toca para cerrar)    */}
       {/* ═══════════════════════════════════════════════════════════════════ */}
       {resultadoEmbarque && (() => {
-        const { pasajero: p, fueraLista, otroBus, cambioParada, paradaOriginalNombre } = resultadoEmbarque;
-        const alerta = fueraLista || otroBus;
-        const color  = alerta ? "var(--c-warn)"      : "var(--c-success)";
-        const tint   = alerta ? "var(--c-warn-tint)" : "var(--c-success-tint)";
-        const titulo = fueraLista
-          ? "⚠️ EMBARCADO — FUERA DE LISTA"
-          : otroBus
-            ? "⚠️ EMBARCADO — CAMBIÓ DE BUS"
-            : cambioParada ? "✅ EMBARCADO — CAMBIÓ DE PARADERO" : "✅ EMBARCADO";
-        const sub    = fueraLista
-          ? "No estaba asignado · registrado en este bus"
-          : otroBus
-            ? "Estaba en otro bus del mismo horario · movido aquí"
-            : cambioParada
-              ? `Subió aquí · asignado en ${paradaOriginalNombre ?? "otra parada"}`
-              : "Embarque registrado correctamente";
+        const { pasajero: p, fueraLista, otroBus, cambioParada, empresaAjena, paradaOriginalNombre } = resultadoEmbarque;
+        const color  = empresaAjena ? "var(--c-danger)"
+          : (fueraLista || otroBus) ? "var(--c-warn)" : "var(--c-success)";
+        const tint   = empresaAjena ? "var(--c-danger-tint)"
+          : (fueraLista || otroBus) ? "var(--c-warn-tint)" : "var(--c-success-tint)";
+        const titulo = empresaAjena
+          ? "⛔ OTRA EMPRESA — REVISAR"
+          : fueraLista
+            ? "⚠️ EMBARCADO — FUERA DE LISTA"
+            : otroBus
+              ? "⚠️ EMBARCADO — CAMBIÓ DE BUS"
+              : cambioParada ? "✅ EMBARCADO — CAMBIÓ DE PARADERO" : "✅ EMBARCADO";
+        const sub    = empresaAjena
+          ? `${p.empresa ?? "Otra empresa"} — no es de este servicio. Quedó registrado; avisar a oficina.`
+          : fueraLista
+            ? "No estaba asignado · registrado en este bus"
+            : otroBus
+              ? "Estaba en otro bus del mismo horario · movido aquí"
+              : cambioParada
+                ? `Subió aquí · asignado en ${paradaOriginalNombre ?? "otra parada"}`
+                : "Embarque registrado correctamente";
         const cerrar = () => {
           if (resultIntervalRef.current) { clearInterval(resultIntervalRef.current); resultIntervalRef.current = null; }
           setResultadoEmbarque(null); setResultProgreso(0);
