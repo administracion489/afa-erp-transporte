@@ -91,6 +91,15 @@ function diasPara(f: string | null) {
   return Math.ceil((new Date(f + "T00:00:00").getTime() - Date.now()) / 86400000);
 }
 
+// Llave de acceso a /api/conductor. La manda la app sola en cada llamada (el conductor
+// no escribe nada). El servidor la exige solo si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está seteada.
+const AFA_KEY = process.env.NEXT_PUBLIC_AFA_CONDUCTOR_KEY || "";
+
+// Un pasajero está "a bordo" si su estado es "abordado" (valor canónico que produce el
+// trigger sync_estados_pasajero_parada de la BD) o "embarcado" (valor legacy en datos
+// viejos). Tolerar ambos evita falsos "no subió" tras el cambio de valor canónico.
+const esAbordado = (e?: string | null) => e === "abordado" || e === "embarcado";
+
 // Llama al endpoint con service_role del conductor (saltea RLS — el conductor es
 // anónimo porque usa PIN, no sesión Supabase). Lanza Error con el mensaje del server.
 async function condApi(accion: string, params: Record<string, any> = {}) {
@@ -105,7 +114,7 @@ async function condApi(accion: string, params: Record<string, any> = {}) {
         const base = typeof window !== "undefined" ? window.location.origin : "";
         const resp: any = await CapacitorHttp.post({
           url: `${base}/api/conductor`,
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
           data: bodyObj,
         });
         const parsed = typeof resp?.data === "string"
@@ -120,7 +129,7 @@ async function condApi(accion: string, params: Record<string, any> = {}) {
   }
   const res = await fetch("/api/conductor", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
     body: JSON.stringify(bodyObj),
   });
   const json = await res.json().catch(() => ({}));
@@ -400,7 +409,7 @@ export default function ConductorApp() {
   // ── QR Scanner ─────────────────────────────────────────────────────────────
   const [escanear,          setEscanear]          = useState(false);
   const [validando,         setValidando]         = useState<Pasajero | null>(null); // kept for TS compat, unused after redesign
-  const [resultadoEmbarque, setResultadoEmbarque] = useState<{ pasajero: Pasajero; fueraLista: boolean } | null>(null);
+  const [resultadoEmbarque, setResultadoEmbarque] = useState<{ pasajero: Pasajero; fueraLista: boolean; otroBus?: boolean; cambioParada?: boolean; empresaAjena?: boolean; paradaOriginalNombre?: string | null } | null>(null);
   const [resultProgreso,    setResultProgreso]    = useState(0);
   const [boardingMsg,       setBoardingMsg]       = useState<{ok: boolean; msg: string} | null>(null);
   const qrRef               = useRef<any>(null);
@@ -600,7 +609,7 @@ export default function ConductorApp() {
 
   async function cargarParadas(reservaId: number) {
     // Usa el API endpoint que auto-crea paradas desde origen/destino si no existen
-    const res = await fetch(`/api/conductor-paradas?reservaId=${reservaId}`);
+    const res = await fetch(`/api/conductor-paradas?reservaId=${reservaId}`, { headers: { "x-afa-key": AFA_KEY } });
     const json = await res.json();
     if (!res.ok) {
       alert(`No se pudieron cargar las paradas: ${json.error ?? "Error desconocido"}`);
@@ -894,7 +903,7 @@ export default function ConductorApp() {
     const stats = {
       duracion:       inicioViaje ? fmtDuracion(Date.now() - inicioViaje.getTime()) : "—",
       paradasTotales: paradas.length,
-      embarcados:     pasajeros.filter(p => p.estado === "embarcado").length,
+      embarcados:     pasajeros.filter(p => esAbordado(p.estado)).length,
       envios:         totalEnvios,
       origen:         reservaActiva?.origen || "",
       destino:        reservaActiva?.destino || "",
@@ -934,7 +943,7 @@ export default function ConductorApp() {
       }
       const sosRes = await fetch("/api/conductor-alerta", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
         body: JSON.stringify({
           reserva_id: reservaActiva?.id ?? null,
           lat:        posRef.current.coords.latitude,
@@ -1040,69 +1049,58 @@ export default function ConductorApp() {
       return;
     }
 
-    const pp = pasajeros.find(p => p.pasajero_id === pasajero.id && p.parada_id === paradaActual.id);
-
-    // Pasajero ya embarcado → advertencia y salir
-    if (pp?.estado === "embarcado") {
+    // Re-escaneo: si ya está abordado en este servicio, avisar y salir sin tocar el server.
+    const local = pasajeros.find(p => p.pasajero_id === pasajero.id);
+    if (esAbordado(local?.estado)) {
       playBeep("warn");
-      setBoardingMsg({ ok: false, msg: `${pasajero.nombre} ya está registrado en esta parada.` });
+      setBoardingMsg({ ok: false, msg: `${pasajero.nombre} ya está registrado en este servicio.` });
       setTimeout(() => setBoardingMsg(null), 4000);
       return;
     }
 
-    // Pasajero en lista → marcar como embarcado
-    if (pp) {
-      try {
-        await condApi("embarcar", { ppId: pp.id });
-      } catch (e: any) {
-        playBeep("error");
-        setBoardingMsg({ ok: false, msg: `Error al registrar embarque: ${e?.message}` });
-        setTimeout(() => setBoardingMsg(null), 4000);
-        return;
-      }
-      setPasajeros(prev => prev.map(p => p.id === pp.id ? { ...p, estado: "embarcado" } : p));
+    // Una sola llamada autoritativa al servidor: mueve / registra / consolida según el
+    // "horario de salida" (fecha + hora). Resuelve subir en otra parada o en otro bus.
+    let resp: any;
+    try {
+      resp = await condApi("embarcar_qr", {
+        pasajeroId: pasajero.id,
+        paradaId:   paradaActual.id,
+        reservaId:  reservaActiva?.id ?? null,
+      });
+    } catch (e: any) {
+      playBeep("error");
+      setBoardingMsg({ ok: false, msg: `Error al registrar embarque: ${e?.message}` });
+      setTimeout(() => setBoardingMsg(null), 4000);
+      return;
     }
 
-    // Pasajero fuera de lista → registrar en pasajeros_parada vía API (service_role)
-    const fueraLista = !pp;
-    if (fueraLista) {
-      // Actualizar estado local INMEDIATAMENTE (optimista) — con id temporal 0
-      const tempEntry: PasajeroParada = {
-        id: 0, parada_id: paradaActual.id, pasajero_id: pasajero.id,
-        estado: "embarcado", pasajero,
-      };
-      setPasajeros(prev => [...prev, tempEntry]);
+    // Clasificar el resultado desde la respuesta del servidor (es la autoridad).
+    const creado       = !!resp?.creado;                 // no estaba asignado (caminante)
+    const otroBus      = !!resp?.otroBus;                // venía de otro bus del mismo horario
+    const cambioParada = !!resp?.movido && !otroBus;     // movido a otra parada del mismo bus
+    const empresaAjena = !!resp?.empresaAjena;           // QR de otra empresa (red de seguridad)
+    const fueraLista   = creado;
+    const paradaOriginalNombre = cambioParada
+      ? (paradas.find(p => p.id === resp?.paradaOriginalId)?.nombre ?? null)
+      : null;
 
-      // Persistir en DB vía API
-      try {
-        const res = await fetch("/api/conductor-alerta", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            tipo:        "embarque",
-            parada_id:   paradaActual.id,
-            pasajero_id: pasajero.id,
-            reserva_id:  reservaActiva?.id ?? null,
-          }),
-        });
-        const json = await res.json().catch(() => ({}));
-        if (res.ok && json.id) {
-          // Actualizar el id temporal con el real
-          setPasajeros(prev => prev.map(p =>
-            p.id === 0 && p.pasajero_id === pasajero.id ? { ...p, id: json.id } : p
-          ));
-        } else if (!res.ok) {
-          alert(`⚠️ Pasajero visible localmente pero no se pudo guardar en servidor: ${json.error ?? "error desconocido"}`);
-        }
-      } catch (e: any) {
-        alert(`⚠️ Error de red al registrar embarque: ${e.message}`);
-      }
-    }
-    playBeep(fueraLista ? "warn" : "ok");
+    // Estado local: dejar UNA sola fila para el pasajero, en la parada real, embarcado.
+    setPasajeros(prev => {
+      const sinPax = prev.filter(p => p.pasajero_id !== pasajero.id);
+      return [...sinPax, {
+        id:          resp?.id ?? 0,
+        parada_id:   paradaActual.id,
+        pasajero_id: pasajero.id,
+        estado:      "abordado",
+        pasajero,
+      }];
+    });
+
+    playBeep(empresaAjena || fueraLista || otroBus ? "warn" : "ok");
 
     // Mostrar tarjeta resultado con barra de progreso (3 s)
     if (resultIntervalRef.current) clearInterval(resultIntervalRef.current);
-    setResultadoEmbarque({ pasajero, fueraLista });
+    setResultadoEmbarque({ pasajero, fueraLista, otroBus, cambioParada, empresaAjena, paradaOriginalNombre });
     setResultProgreso(0);
     let prog = 0;
     resultIntervalRef.current = setInterval(() => {
@@ -1121,7 +1119,7 @@ export default function ConductorApp() {
     if (!reservaActiva) { alert("No hay reserva activa"); return; }
     const res = await fetch("/api/conductor-alerta", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
       body: JSON.stringify({
         reserva_id: reservaActiva.id,
         lat:        posRef.current?.coords.latitude  ?? null,
@@ -1278,7 +1276,7 @@ export default function ConductorApp() {
   const paradaActual  = paradas[paradaIdx];
   const esUltimaParada = enRuta && paradas.length > 0 && paradaIdx === paradas.length - 1;
   const pasParada     = pasajeros.filter(p => p.parada_id === paradaActual?.id);
-  const embarcados    = pasParada.filter(p => p.estado === "embarcado").length;
+  const embarcados    = pasParada.filter(p => esAbordado(p.estado)).length;
   const checkPct      = Math.round((checks.filter(c => c.ok !== null).length / checks.length) * 100);
   const checkFallas   = checks.filter(c => c.ok === false).length;
   const categorias    = Array.from(new Set(CHECKLIST_ITEMS.map(i => i.categoria)));
@@ -1301,7 +1299,7 @@ export default function ConductorApp() {
   void tick; // forzar re-render con el setInterval del minuto
 
   const totalReservados = pasajeros.length;
-  const totalEmbarcados = pasajeros.filter(p => p.estado === "embarcado").length;
+  const totalEmbarcados = pasajeros.filter(p => esAbordado(p.estado)).length;
   const totalEsperando  = pasajeros.filter(p => p.estado === "esperando" || !p.estado).length;
   const totalNoShow     = pasajeros.filter(p => p.estado === "no_show").length;
 
@@ -2246,7 +2244,7 @@ export default function ConductorApp() {
                     const esActual = i === paradaIdx;
                     const completada = p.estado === "completada";
                     const pp = pasajeros.filter(x => x.parada_id === p.id);
-                    const emb = pp.filter(x => x.estado === "embarcado").length;
+                    const emb = pp.filter(x => esAbordado(x.estado)).length;
                     return (
                       <div
                         key={p.id}
@@ -3139,7 +3137,7 @@ export default function ConductorApp() {
                     borderRadius: 14, overflow: "hidden",
                   }}>
                     {ppList.map((x, idx) => {
-                      const onBoard = x.estado === "embarcado";
+                      const onBoard = esAbordado(x.estado);
                       const noShow = x.estado === "no_show";
                       return (
                         <div
@@ -3285,11 +3283,27 @@ export default function ConductorApp() {
       {/* TARJETA RESULTADO EMBARQUE (auto-dismiss 3 s, toca para cerrar)    */}
       {/* ═══════════════════════════════════════════════════════════════════ */}
       {resultadoEmbarque && (() => {
-        const { pasajero: p, fueraLista } = resultadoEmbarque;
-        const color  = fueraLista ? "var(--c-warn)"         : "var(--c-success)";
-        const tint   = fueraLista ? "var(--c-warn-tint)"    : "var(--c-success-tint)";
-        const titulo = fueraLista ? "⚠️ EMBARCADO — FUERA DE LISTA" : "✅ EMBARCADO";
-        const sub    = fueraLista ? "Pasajero no estaba asignado a esta parada" : "Embarque registrado correctamente";
+        const { pasajero: p, fueraLista, otroBus, cambioParada, empresaAjena, paradaOriginalNombre } = resultadoEmbarque;
+        const color  = empresaAjena ? "var(--c-danger)"
+          : (fueraLista || otroBus) ? "var(--c-warn)" : "var(--c-success)";
+        const tint   = empresaAjena ? "var(--c-danger-tint)"
+          : (fueraLista || otroBus) ? "var(--c-warn-tint)" : "var(--c-success-tint)";
+        const titulo = empresaAjena
+          ? "⛔ OTRA EMPRESA — REVISAR"
+          : fueraLista
+            ? "⚠️ EMBARCADO — FUERA DE LISTA"
+            : otroBus
+              ? "⚠️ EMBARCADO — CAMBIÓ DE BUS"
+              : cambioParada ? "✅ EMBARCADO — CAMBIÓ DE PARADERO" : "✅ EMBARCADO";
+        const sub    = empresaAjena
+          ? `${p.empresa ?? "Otra empresa"} — no es de este servicio. Quedó registrado; avisar a oficina.`
+          : fueraLista
+            ? "No estaba asignado · registrado en este bus"
+            : otroBus
+              ? "Estaba en otro bus del mismo horario · movido aquí"
+              : cambioParada
+                ? `Subió aquí · asignado en ${paradaOriginalNombre ?? "otra parada"}`
+                : "Embarque registrado correctamente";
         const cerrar = () => {
           if (resultIntervalRef.current) { clearInterval(resultIntervalRef.current); resultIntervalRef.current = null; }
           setResultadoEmbarque(null); setResultProgreso(0);

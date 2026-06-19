@@ -516,6 +516,8 @@ export default function ModalManifiesto(props: Props) {
       return;
     }
     const hora = estado === "Abordado" ? new Date().toISOString() : null;
+    // El trigger sync_estados_pasajero_parada de la BD sincroniza la columna `estado`
+    // a partir de estado_abordaje (Abordado→abordado, etc.), así que no la escribimos aquí.
     const resp = await supabase.from("pasajeros_parada")
       .update({ estado_abordaje: estado, hora_abordaje: hora })
       .eq("pasajero_id", pasajeroId)

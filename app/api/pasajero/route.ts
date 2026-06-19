@@ -19,20 +19,37 @@ const admin = createClient(
 
 export async function POST(req: NextRequest) {
   try {
+    // Mismo gate que /api/conductor: exige x-afa-key si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está
+    // seteada (fail-open si no). La app del pasajero lo manda sola.
+    const KEY = process.env.NEXT_PUBLIC_AFA_CONDUCTOR_KEY;
+    if (KEY && req.headers.get("x-afa-key") !== KEY) {
+      return NextResponse.json({ error: "No autorizado" }, { status: 401 });
+    }
+
     const body = await req.json();
     const accion = body.accion as string;
 
     switch (accion) {
       // ── Login por DNI (el PIN se valida en el cliente con la fila devuelta) ───
       case "login": {
-        const { dni } = body;
+        const { dni, pin } = body;
         if (!dni) return NextResponse.json({ error: "dni requerido" }, { status: 400 });
         // Usar limit(1) en lugar de maybeSingle() para tolerar DNIs duplicados en BD.
         const { data: rows, error } = await admin
           .from("pasajeros").select("*").eq("dni", String(dni).trim())
           .order("id", { ascending: false }).limit(1);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-        return NextResponse.json({ pasajero: rows?.[0] ?? null });
+        const row: any = rows?.[0] ?? null;
+        if (!row) return NextResponse.json({ pasajero: null });
+        // Validar el PIN EN EL SERVIDOR. Antes se validaba en el cliente, lo que obligaba a
+        // devolver la fila completa (incl. pin_acceso) a cualquiera con un DNI = fuga de datos.
+        // Regla: pin_acceso si existe; si no, los últimos 4 dígitos del DNI.
+        const pinEsperado = row.pin_acceso || String(dni).trim().slice(-4);
+        if (!pin || String(pin) !== String(pinEsperado)) {
+          return NextResponse.json({ pinIncorrecto: true });
+        }
+        delete row.pin_acceso;  // nunca devolver el PIN al cliente
+        return NextResponse.json({ pasajero: row });
       }
 
       // ── Ruta del pasajero (resuelve todo el bundle del seguimiento) ──────────
@@ -66,7 +83,10 @@ export async function POST(req: NextRequest) {
         if (!miPP?.parada) return NextResponse.json({ ruta: null });
 
         const miParada = miPP.parada;
-        const miEstado = miPP.estado || "esperando";
+        // El valor canónico de la BD para "a bordo" es "abordado"; la app del pasajero
+        // usa "embarcado". Normalizamos aquí para no tocar la UI del pasajero.
+        const rawEstado = miPP.estado || "esperando";
+        const miEstado = rawEstado === "abordado" ? "embarcado" : rawEstado;
         const rId = miParada.reserva_id;
 
         let rutaParadas: any[] = [];

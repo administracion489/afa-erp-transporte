@@ -27,6 +27,14 @@ async function geocodificar(nombre: string): Promise<{ lat: number; lng: number 
 }
 
 export async function GET(req: NextRequest) {
+  // Mismo gate que /api/conductor: exige x-afa-key si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está
+  // seteada (fail-open si no). Este endpoint usa service_role, auto-crea paradas y gasta
+  // cuota de Google Maps, así que no debe quedar abierto cuando se cierra el flujo conductor.
+  const KEY = process.env.NEXT_PUBLIC_AFA_CONDUCTOR_KEY;
+  if (KEY && req.headers.get("x-afa-key") !== KEY) {
+    return NextResponse.json({ error: "No autorizado" }, { status: 401 });
+  }
+
   const { searchParams } = new URL(req.url);
   const reservaId = Number(searchParams.get("reservaId"));
   if (!reservaId) return NextResponse.json({ error: "reservaId requerido" }, { status: 400 });
