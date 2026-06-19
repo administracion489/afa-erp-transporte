@@ -33,6 +33,16 @@ async function logBoarding(
   }
 }
 
+// ¿El error de Supabase/PostgREST es por una columna que NO existe en la tabla?
+// PGRST204 = no está en el schema cache; 42703 = undefined_column. Se usa para que los
+// reintentos de fallback NO confundan un error real de FK/constraint (que puede mencionar
+// el nombre de la columna) con "columna ausente".
+function esColumnaInexistente(err: any): boolean {
+  if (!err) return false;
+  if (err.code === "PGRST204" || err.code === "42703") return true;
+  return /could not find the .* column|column .* does not exist/i.test(err.message || "");
+}
+
 export async function POST(req: NextRequest) {
   try {
     // Gate de acceso: si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está configurada, exigir el header
@@ -214,7 +224,7 @@ export async function POST(req: NextRequest) {
         // (igual se registra, pero se avisa para que oficina lo revise).
         const empresaAjena = !(
           filas.length > 0 ||
-          (paxClienteId != null && reservaClienteId != null && paxClienteId === reservaClienteId) ||
+          (paxClienteId != null && reservaClienteId != null && Number(paxClienteId) === Number(reservaClienteId)) ||
           (paxReservaId != null && paxReservaId === reservaId)
         );
 
@@ -226,7 +236,7 @@ export async function POST(req: NextRequest) {
                         estado_abordaje: "Abordado", hora_abordaje: ahora, ...extra })
               .select("id").single();
           let { data: nuevo, error: eIns } = await insertar({ reserva_id: reservaId });
-          if (eIns && eIns.message.includes("reserva_id")) ({ data: nuevo, error: eIns } = await insertar());
+          if (eIns && esColumnaInexistente(eIns)) ({ data: nuevo, error: eIns } = await insertar());
           if (eIns) return NextResponse.json({ error: eIns.message }, { status: 500 });
           await logBoarding(pasajeroId, paradaId, reservaId);
           return NextResponse.json({ ok: true, id: nuevo?.id, creado: true, empresaAjena, pasajero: pasajeroInfo });
@@ -250,7 +260,7 @@ export async function POST(req: NextRequest) {
         if (otroBus) opcional.reserva_id = reservaId;
         let { error: eUpd } = await admin.from("pasajeros_parada")
           .update({ ...patch, ...opcional }).eq("id", target.id);
-        if (eUpd && /does not exist|parada_id_original|cambio_parada_en|reserva_id/i.test(eUpd.message)) {
+        if (eUpd && esColumnaInexistente(eUpd)) {
           ({ error: eUpd } = await admin.from("pasajeros_parada").update(patch).eq("id", target.id));
         }
         if (eUpd) return NextResponse.json({ error: eUpd.message }, { status: 500 });

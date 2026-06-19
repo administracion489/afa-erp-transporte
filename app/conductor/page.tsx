@@ -609,7 +609,7 @@ export default function ConductorApp() {
 
   async function cargarParadas(reservaId: number) {
     // Usa el API endpoint que auto-crea paradas desde origen/destino si no existen
-    const res = await fetch(`/api/conductor-paradas?reservaId=${reservaId}`);
+    const res = await fetch(`/api/conductor-paradas?reservaId=${reservaId}`, { headers: { "x-afa-key": AFA_KEY } });
     const json = await res.json();
     if (!res.ok) {
       alert(`No se pudieron cargar las paradas: ${json.error ?? "Error desconocido"}`);

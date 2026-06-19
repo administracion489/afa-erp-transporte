@@ -78,8 +78,9 @@ export async function POST(req: NextRequest) {
       // Intento 1: con reserva_id
       let { data: nuevo, error: errIns } = await insertar({ reserva_id: reserva_id ?? null });
 
-      // Intento 2: sin reserva_id (columna puede no existir)
-      if (errIns && errIns.message.includes("reserva_id")) {
+      // Intento 2: sin reserva_id, solo si el error es por columna inexistente (PGRST204 /
+      // 42703). No reintentar ante un FK/constraint real que mencione 'reserva_id'.
+      if (errIns && (errIns.code === "PGRST204" || errIns.code === "42703" || /could not find the .* column/i.test(errIns.message || ""))) {
         ({ data: nuevo, error: errIns } = await insertar());
       }
 
