@@ -574,32 +574,49 @@ export default function ClientePortal() {
   //   (A) pasajeros ad-hoc de la reserva           → pasajeros.reserva_id
   //   (B) pasajeros asignados a una parada         → pasajeros_parada → paradas
   // Se dedupe por pasajero_id (un pasajero con paradero existe en ambas tablas).
-  // Antes solo se contaba (B): los pasajeros agregados "Sin asignar" salían como 0.
+  //
+  // IMPORTANTE: Supabase limita a 1000 filas por consulta. Con cientos de servicios
+  // (cada uno con ~10 paradas) la antigua consulta de paradas .in() se truncaba a 1000
+  // de 3000+ filas, y como no tenía orden fijo, qué servicios entraban variaba en cada
+  // carga → muchos servicios mostraban manifiesto/pasajeros = 0 de forma intermitente.
+  // Solución: (1) leer pasajeros_parada con join a paradas(reserva_id) para no traer las
+  // paradas, y (2) paginar con orden estable para superar el tope de 1000.
   const cargarHistorialStats = useCallback(async (reservaIds: number[]) => {
     if (reservaIds.length === 0) return;
     setLoadingStats(true);
-    const [{ data: boardingData }, { data: paradasData }, { data: paxAdhocData }] = await Promise.all([
-      supabase.from("boarding_log").select("reserva_id").in("reserva_id", reservaIds),
-      supabase.from("paradas").select("id, reserva_id").in("reserva_id", reservaIds),
-      supabase.from("pasajeros").select("id, reserva_id").in("reserva_id", reservaIds),
+
+    const fetchAll = async (build: (from: number, to: number) => any): Promise<any[]> => {
+      const PAGE = 1000;
+      let from = 0;
+      const all: any[] = [];
+      for (;;) {
+        const { data, error } = await build(from, from + PAGE - 1);
+        if (error || !data) break;
+        all.push(...data);
+        if (data.length < PAGE) break;
+        from += PAGE;
+      }
+      return all;
+    };
+
+    const [ppData, paxAdhocData, boardingData] = await Promise.all([
+      // (B) por paradero: join a paradas para obtener reserva_id sin traer todas las paradas
+      fetchAll((f, t) => supabase.from("pasajeros_parada").select("pasajero_id, paradas!inner(reserva_id)").in("paradas.reserva_id", reservaIds).order("id").range(f, t)),
+      // (A) ad-hoc de la reserva
+      fetchAll((f, t) => supabase.from("pasajeros").select("id, reserva_id").in("reserva_id", reservaIds).order("id").range(f, t)),
+      // embarcados (boarding_log)
+      fetchAll((f, t) => supabase.from("boarding_log").select("reserva_id").in("reserva_id", reservaIds).order("id").range(f, t)),
     ]);
-    const paradaMap: Record<number, number> = {};
-    const paradaIds: number[] = [];
-    (paradasData || []).forEach((p: any) => { paradaMap[p.id] = p.reserva_id; paradaIds.push(p.id); });
-    let ppData: any[] = [];
-    if (paradaIds.length > 0) {
-      const { data } = await supabase.from("pasajeros_parada").select("parada_id, pasajero_id").in("parada_id", paradaIds);
-      ppData = data || [];
-    }
+
     // Conjunto de pasajeros distintos por reserva (unión A ∪ B)
     const paxPorReserva: Record<number, Set<number>> = {};
     reservaIds.forEach(id => { paxPorReserva[id] = new Set(); });
-    (paxAdhocData || []).forEach((p: any) => { paxPorReserva[p.reserva_id]?.add(p.id); });
-    ppData.forEach((pp: any) => { const rid = paradaMap[pp.parada_id]; if (rid) paxPorReserva[rid]?.add(pp.pasajero_id); });
+    paxAdhocData.forEach((p: any) => { paxPorReserva[p.reserva_id]?.add(p.id); });
+    ppData.forEach((pp: any) => { const rid = pp.paradas?.reserva_id; if (rid) paxPorReserva[rid]?.add(pp.pasajero_id); });
 
     const stats: Record<number, { embarcados: number; esperados: number }> = {};
     reservaIds.forEach(id => { stats[id] = { embarcados: 0, esperados: paxPorReserva[id]?.size || 0 }; });
-    (boardingData || []).forEach((b: any) => { if (stats[b.reserva_id]) stats[b.reserva_id].embarcados++; });
+    boardingData.forEach((b: any) => { if (stats[b.reserva_id]) stats[b.reserva_id].embarcados++; });
     setReservaStats(stats);
     setLoadingStats(false);
   }, []);
