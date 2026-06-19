@@ -91,6 +91,10 @@ function diasPara(f: string | null) {
   return Math.ceil((new Date(f + "T00:00:00").getTime() - Date.now()) / 86400000);
 }
 
+// Llave de acceso a /api/conductor. La manda la app sola en cada llamada (el conductor
+// no escribe nada). El servidor la exige solo si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está seteada.
+const AFA_KEY = process.env.NEXT_PUBLIC_AFA_CONDUCTOR_KEY || "";
+
 // Llama al endpoint con service_role del conductor (saltea RLS — el conductor es
 // anónimo porque usa PIN, no sesión Supabase). Lanza Error con el mensaje del server.
 async function condApi(accion: string, params: Record<string, any> = {}) {
@@ -105,7 +109,7 @@ async function condApi(accion: string, params: Record<string, any> = {}) {
         const base = typeof window !== "undefined" ? window.location.origin : "";
         const resp: any = await CapacitorHttp.post({
           url: `${base}/api/conductor`,
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
           data: bodyObj,
         });
         const parsed = typeof resp?.data === "string"
@@ -120,7 +124,7 @@ async function condApi(accion: string, params: Record<string, any> = {}) {
   }
   const res = await fetch("/api/conductor", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
     body: JSON.stringify(bodyObj),
   });
   const json = await res.json().catch(() => ({}));
@@ -934,7 +938,7 @@ export default function ConductorApp() {
       }
       const sosRes = await fetch("/api/conductor-alerta", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
         body: JSON.stringify({
           reserva_id: reservaActiva?.id ?? null,
           lat:        posRef.current.coords.latitude,
@@ -1110,7 +1114,7 @@ export default function ConductorApp() {
     if (!reservaActiva) { alert("No hay reserva activa"); return; }
     const res = await fetch("/api/conductor-alerta", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
       body: JSON.stringify({
         reserva_id: reservaActiva.id,
         lat:        posRef.current?.coords.latitude  ?? null,

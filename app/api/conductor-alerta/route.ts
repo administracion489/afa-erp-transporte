@@ -27,6 +27,13 @@ async function logBoarding(pasajero_id: number, parada_id: number, reserva_id: n
 
 export async function POST(req: NextRequest) {
   try {
+    // Gate de acceso: si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está configurada, exigir el header
+    // x-afa-key (lo manda la app sola). Sin configurar → abierto, para no romper producción.
+    const KEY = process.env.NEXT_PUBLIC_AFA_CONDUCTOR_KEY;
+    if (KEY && req.headers.get("x-afa-key") !== KEY) {
+      return NextResponse.json({ error: "No autorizado" }, { status: 401 });
+    }
+
     const body = await req.json();
     const { tipo = "alerta" } = body;
 

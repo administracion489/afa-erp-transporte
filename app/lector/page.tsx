@@ -39,6 +39,10 @@ type ParadaItem = {
 // • No autorizado→ 200 Hz, 0.15 s × 2 pulsos          (buzz-buzz de alerta)
 // • Ya embarcado → SIN sonido, solo visual
 
+// Llave de acceso a /api/conductor. La manda la app sola; el servidor la exige solo si
+// NEXT_PUBLIC_AFA_CONDUCTOR_KEY está configurada.
+const AFA_KEY = process.env.NEXT_PUBLIC_AFA_CONDUCTOR_KEY || "";
+
 function tonoCtx(
   ctx: AudioContext,
   freq: number,
@@ -456,7 +460,7 @@ function LectorContent() {
     try {
       const r = await fetch("/api/conductor", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
         body: JSON.stringify({ accion: "embarcar_qr", qrCode: qrText, paradaId: par.id, reservaId: res.id }),
       });
       resp = await r.json().catch(() => ({}));
