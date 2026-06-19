@@ -111,6 +111,12 @@ export default function ModalManifiesto(props: Props) {
   const [loadingNomina,  setLoadingNomina]  = useState(false);
   const [agregandoPaxId, setAgregandoPaxId] = useState<number | null>(null);
 
+  // ── Mover pasajero a otro servicio ──────────────────────────────────────
+  const [moverPaxId,       setMoverPaxId]       = useState<number | null>(null);
+  const [serviciosDestino, setServiciosDestino] = useState<any[]>([]);
+  const [cargandoDestinos, setCargandoDestinos] = useState(false);
+  const [moviendoPax,      setMoviendoPax]      = useState(false);
+
   // ── Copiar paraderos a días futuros ─────────────────────────────────────
   const [modalCopiar, setModalCopiar] = useState(false);
   const [copiarDesde, setCopiarDesde] = useState("");
@@ -542,6 +548,61 @@ export default function ModalManifiesto(props: Props) {
       await asignarParada(pasajeroId, null);
     }
     await cargar();
+    if (onChange) onChange();
+  };
+
+  const abrirMoverPax = async (pasajeroId: number) => {
+    setMoverPaxId(pasajeroId);
+    setCargandoDestinos(true);
+    const { data } = await supabase
+      .from("reservas")
+      .select("id, hora_servicio, vehiculo_id, vehiculo_tercero_id, vehiculos(placa, modelo), vehiculos_tercero(placa, modelo)")
+      .eq("fecha_servicio", fechaServicio)
+      .eq("cliente_id", clienteId)
+      .neq("id", reservaId)
+      .neq("estado", "cancelada")
+      .neq("estado", "finalizada")
+      .order("hora_servicio");
+    setServiciosDestino(data || []);
+    setCargandoDestinos(false);
+  };
+
+  const confirmarMover = async (destinoId: number) => {
+    if (!moverPaxId) return;
+    setMoviendoPax(true);
+    const p = pasajeros.find((x) => x.id === moverPaxId)!;
+    const a = asignaciones[moverPaxId];
+
+    if (a) {
+      await supabase.from("pasajeros_parada")
+        .delete()
+        .eq("pasajero_id", moverPaxId)
+        .eq("parada_id", a.parada_id);
+    }
+
+    if (p.reserva_id === reservaId) {
+      await supabase.from("pasajeros").update({ reserva_id: destinoId }).eq("id", moverPaxId);
+    } else {
+      const { data: primerParada } = await supabase
+        .from("paradas").select("id").eq("reserva_id", destinoId).order("orden").limit(1).maybeSingle();
+      if (!primerParada) {
+        setMensaje({ tipo: "err", texto: "El servicio destino no tiene paradas configuradas. Configúralas primero." });
+        setMoviendoPax(false);
+        return;
+      }
+      await supabase.from("pasajeros_parada").insert({
+        pasajero_id: moverPaxId, parada_id: primerParada.id,
+        estado: "esperando", estado_abordaje: "Pendiente",
+      });
+    }
+
+    const pid = moverPaxId;
+    setPasajeros((prev) => prev.filter((x) => x.id !== pid));
+    setAsignaciones((prev) => { const n = { ...prev }; delete n[pid]; return n; });
+    setMoverPaxId(null);
+    setServiciosDestino([]);
+    setMoviendoPax(false);
+    setMensaje({ tipo: "ok", texto: "Pasajero movido al servicio destino." });
     if (onChange) onChange();
   };
 
@@ -1331,7 +1392,15 @@ export default function ModalManifiesto(props: Props) {
                           </td>
                           <td className="p-2 text-gray-500 text-[10px]">{a?.hora_abordaje ? new Date(a.hora_abordaje).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" }) : "-"}</td>
                           <td className="p-2 font-mono text-gray-700">{a?.asiento || "-"}</td>
-                          <td className="p-2 text-right">
+                          <td className="p-2 text-right whitespace-nowrap">
+                            <button
+                              onClick={() => abrirMoverPax(p.id)}
+                              disabled={estado === "Abordado" || !fechaServicio}
+                              title="Mover a otro servicio"
+                              className="text-blue-500 hover:bg-blue-50 px-2 py-1 rounded-lg mr-1 disabled:opacity-25 disabled:cursor-not-allowed"
+                            >
+                              ⇄
+                            </button>
                             <button onClick={() => eliminarPasajero(p.id)} className="text-red-500 hover:bg-red-50 px-2 py-1 rounded-lg font-bold">X</button>
                           </td>
                         </tr>
@@ -1533,6 +1602,54 @@ export default function ModalManifiesto(props: Props) {
                   {copiando ? "Copiando..." : "Copiar"}
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Mini-modal: Mover pasajero a otro servicio ── */}
+        {moverPaxId !== null && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/30 rounded-2xl">
+            <div className="bg-white rounded-xl shadow-xl p-5 w-80 mx-4">
+              <p className="font-bold text-sm text-gray-800 mb-1">Mover a otro servicio</p>
+              <p className="text-[11px] text-gray-500 mb-3 truncate">
+                {pasajeros.find((x) => x.id === moverPaxId)?.nombre}
+              </p>
+              {cargandoDestinos ? (
+                <div className="text-xs text-gray-400 text-center py-6">Cargando servicios...</div>
+              ) : serviciosDestino.length === 0 ? (
+                <div className="text-xs text-gray-400 text-center py-6">
+                  No hay otros servicios disponibles para este día y empresa.
+                </div>
+              ) : (
+                <div className="flex flex-col gap-1.5 max-h-56 overflow-y-auto">
+                  {serviciosDestino.map((s: any) => {
+                    const veh = s.vehiculos || s.vehiculos_tercero;
+                    return (
+                      <button
+                        key={s.id}
+                        disabled={moviendoPax}
+                        onClick={() => confirmarMover(s.id)}
+                        className="text-left border rounded-lg px-3 py-2 hover:bg-blue-50 text-xs disabled:opacity-50 transition-colors"
+                        style={{ borderColor: "#e2e8f0" }}
+                      >
+                        <span className="font-bold text-gray-800">{s.hora_servicio || "Sin hora"}</span>
+                        {veh && (
+                          <span className="text-gray-500 ml-2">
+                            {veh.placa}{veh.modelo ? ` · ${veh.modelo}` : ""}
+                          </span>
+                        )}
+                        <span className="text-gray-400 ml-1 text-[10px]">#{s.id}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              <button
+                onClick={() => { setMoverPaxId(null); setServiciosDestino([]); }}
+                className="mt-3 w-full text-xs text-gray-500 hover:text-gray-700 py-1"
+              >
+                Cancelar
+              </button>
             </div>
           </div>
         )}
