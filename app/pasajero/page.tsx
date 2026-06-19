@@ -54,10 +54,14 @@ function saveParaderoOk() {
 }
 // Llama al endpoint con service_role del pasajero (saltea RLS — el pasajero es
 // anónimo porque usa DNI+PIN, no sesión Supabase). Lanza Error con el mensaje del server.
+// Llave de acceso a /api/pasajero. La manda la app sola; el servidor la exige solo si
+// NEXT_PUBLIC_AFA_CONDUCTOR_KEY está configurada.
+const AFA_KEY = process.env.NEXT_PUBLIC_AFA_CONDUCTOR_KEY || "";
+
 async function paxApi(accion: string, params: Record<string, any> = {}) {
   const res = await fetch("/api/pasajero", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
     body: JSON.stringify({ accion, ...params }),
   });
   const json = await res.json().catch(() => ({}));
@@ -864,15 +868,14 @@ export default function AppPasajero() {
     if (dniInput.length < 7) { setLoginErr("Ingresa tu DNI completo"); return; }
     if (pinInput.length < 4) { setLoginErr("Ingresa tu PIN de 4 dígitos"); return; }
     setLoginErr(""); setLoginLoad(true);
-    let data: any = null;
+    let r: any = null;
     try {
-      const r = await paxApi("login", { dni: dniInput.trim() });
-      data = r.pasajero;
+      // El PIN se valida EN EL SERVIDOR (ya no se descarga la fila completa por DNI).
+      r = await paxApi("login", { dni: dniInput.trim(), pin: pinInput });
     } catch (e: any) { setLoginErr(`Error: ${e?.message ?? "no se pudo conectar"}`); setLoginLoad(false); return; }
+    if (r?.pinIncorrecto) { setLoginErr("PIN incorrecto. Intenta con los últimos 4 dígitos de tu DNI."); setLoginLoad(false); return; }
+    const data = r?.pasajero;
     if (!data) { setLoginErr("DNI no registrado. Contacta a tu empresa o a AFA Tours."); setLoginLoad(false); return; }
-    // Validar PIN — si no tiene PIN asignado, usar últimos 4 dígitos del DNI como default
-    const pinEsperado = data.pin_acceso || dniInput.trim().slice(-4);
-    if (pinInput !== pinEsperado) { setLoginErr("PIN incorrecto. Intenta con los últimos 4 dígitos de tu DNI."); setLoginLoad(false); return; }
     saveSession(data); setPasajero(data); await cargarMiRuta(data.id); setLoginLoad(false);
   }
 
