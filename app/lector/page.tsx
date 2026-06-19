@@ -43,6 +43,9 @@ type ParadaItem = {
 // NEXT_PUBLIC_AFA_CONDUCTOR_KEY está configurada.
 const AFA_KEY = process.env.NEXT_PUBLIC_AFA_CONDUCTOR_KEY || "";
 
+// "a bordo" = "abordado" (valor canónico de la BD) o "embarcado" (legacy en datos viejos).
+const esAbordado = (e?: string | null) => e === "abordado" || e === "embarcado";
+
 function tonoCtx(
   ctx: AudioContext,
   freq: number,
@@ -285,7 +288,7 @@ function LectorContent() {
       .eq("parada_id", paradaId);
     const lista: PaxParada[] = (data as any) || [];
     setPasajeros(lista);
-    setEmbarcados(lista.filter(p => p.estado === "embarcado").length);
+    setEmbarcados(lista.filter(p => esAbordado(p.estado)).length);
   }
 
   // ── CAMBIAR PARADA ────────────────────────────────────────────────────────

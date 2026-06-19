@@ -132,7 +132,7 @@ export async function POST(req: NextRequest) {
         // columnas de estado — `estado` (app conductor) y `estado_abordaje`/`hora_abordaje`
         // (manifiesto admin). El movimiento entre paradas/buses lo maneja `embarcar_qr`.
         const { error } = await admin.from("pasajeros_parada")
-          .update({ estado: "embarcado", estado_abordaje: "Abordado", hora_abordaje: ahora })
+          .update({ estado: "abordado", estado_abordaje: "Abordado", hora_abordaje: ahora })
           .eq("id", ppId);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         // Bitácora real de abordaje (la lee el reporte del portal cliente).
@@ -222,7 +222,7 @@ export async function POST(req: NextRequest) {
         if (filas.length === 0) {
           const insertar = async (extra: Record<string, any> = {}) =>
             admin.from("pasajeros_parada")
-              .insert({ parada_id: paradaId, pasajero_id: pasajeroId, estado: "embarcado",
+              .insert({ parada_id: paradaId, pasajero_id: pasajeroId, estado: "abordado",
                         estado_abordaje: "Abordado", hora_abordaje: ahora, ...extra })
               .select("id").single();
           let { data: nuevo, error: eIns } = await insertar({ reserva_id: reservaId });
@@ -237,11 +237,11 @@ export async function POST(req: NextRequest) {
         const reservaPrevia = reservaDeParada.get(target.parada_id) ?? null;
         const otroBus = reservaPrevia !== null && reservaPrevia !== reservaId;
         const movido = target.parada_id !== paradaId;
-        const yaEmbarcado = target.estado === "embarcado" && !movido;
+        const yaEmbarcado = (target.estado === "abordado" || target.estado === "embarcado") && !movido;
         const paradaOriginalId = target.parada_id;
 
         // Columnas core (existen siempre).
-        const patch: Record<string, any> = { estado: "embarcado", estado_abordaje: "Abordado", hora_abordaje: ahora };
+        const patch: Record<string, any> = { estado: "abordado", estado_abordaje: "Abordado", hora_abordaje: ahora };
         if (movido) patch.parada_id = paradaId;
         // Columnas opcionales que pueden no existir en la BD (parada_id_original,
         // cambio_parada_en, reserva_id). Se intentan; si no existen, se reintenta sin ellas.

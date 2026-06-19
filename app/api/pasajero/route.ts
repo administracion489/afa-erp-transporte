@@ -66,7 +66,10 @@ export async function POST(req: NextRequest) {
         if (!miPP?.parada) return NextResponse.json({ ruta: null });
 
         const miParada = miPP.parada;
-        const miEstado = miPP.estado || "esperando";
+        // El valor canónico de la BD para "a bordo" es "abordado"; la app del pasajero
+        // usa "embarcado". Normalizamos aquí para no tocar la UI del pasajero.
+        const rawEstado = miPP.estado || "esperando";
+        const miEstado = rawEstado === "abordado" ? "embarcado" : rawEstado;
         const rId = miParada.reserva_id;
 
         let rutaParadas: any[] = [];

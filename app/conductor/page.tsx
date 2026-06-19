@@ -95,6 +95,11 @@ function diasPara(f: string | null) {
 // no escribe nada). El servidor la exige solo si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está seteada.
 const AFA_KEY = process.env.NEXT_PUBLIC_AFA_CONDUCTOR_KEY || "";
 
+// Un pasajero está "a bordo" si su estado es "abordado" (valor canónico que produce el
+// trigger sync_estados_pasajero_parada de la BD) o "embarcado" (valor legacy en datos
+// viejos). Tolerar ambos evita falsos "no subió" tras el cambio de valor canónico.
+const esAbordado = (e?: string | null) => e === "abordado" || e === "embarcado";
+
 // Llama al endpoint con service_role del conductor (saltea RLS — el conductor es
 // anónimo porque usa PIN, no sesión Supabase). Lanza Error con el mensaje del server.
 async function condApi(accion: string, params: Record<string, any> = {}) {
@@ -898,7 +903,7 @@ export default function ConductorApp() {
     const stats = {
       duracion:       inicioViaje ? fmtDuracion(Date.now() - inicioViaje.getTime()) : "—",
       paradasTotales: paradas.length,
-      embarcados:     pasajeros.filter(p => p.estado === "embarcado").length,
+      embarcados:     pasajeros.filter(p => esAbordado(p.estado)).length,
       envios:         totalEnvios,
       origen:         reservaActiva?.origen || "",
       destino:        reservaActiva?.destino || "",
@@ -1044,9 +1049,9 @@ export default function ConductorApp() {
       return;
     }
 
-    // Re-escaneo: si ya está embarcado en este servicio, avisar y salir sin tocar el server.
+    // Re-escaneo: si ya está abordado en este servicio, avisar y salir sin tocar el server.
     const local = pasajeros.find(p => p.pasajero_id === pasajero.id);
-    if (local?.estado === "embarcado") {
+    if (esAbordado(local?.estado)) {
       playBeep("warn");
       setBoardingMsg({ ok: false, msg: `${pasajero.nombre} ya está registrado en este servicio.` });
       setTimeout(() => setBoardingMsg(null), 4000);
@@ -1086,7 +1091,7 @@ export default function ConductorApp() {
         id:          resp?.id ?? 0,
         parada_id:   paradaActual.id,
         pasajero_id: pasajero.id,
-        estado:      "embarcado",
+        estado:      "abordado",
         pasajero,
       }];
     });
@@ -1271,7 +1276,7 @@ export default function ConductorApp() {
   const paradaActual  = paradas[paradaIdx];
   const esUltimaParada = enRuta && paradas.length > 0 && paradaIdx === paradas.length - 1;
   const pasParada     = pasajeros.filter(p => p.parada_id === paradaActual?.id);
-  const embarcados    = pasParada.filter(p => p.estado === "embarcado").length;
+  const embarcados    = pasParada.filter(p => esAbordado(p.estado)).length;
   const checkPct      = Math.round((checks.filter(c => c.ok !== null).length / checks.length) * 100);
   const checkFallas   = checks.filter(c => c.ok === false).length;
   const categorias    = Array.from(new Set(CHECKLIST_ITEMS.map(i => i.categoria)));
@@ -1294,7 +1299,7 @@ export default function ConductorApp() {
   void tick; // forzar re-render con el setInterval del minuto
 
   const totalReservados = pasajeros.length;
-  const totalEmbarcados = pasajeros.filter(p => p.estado === "embarcado").length;
+  const totalEmbarcados = pasajeros.filter(p => esAbordado(p.estado)).length;
   const totalEsperando  = pasajeros.filter(p => p.estado === "esperando" || !p.estado).length;
   const totalNoShow     = pasajeros.filter(p => p.estado === "no_show").length;
 
@@ -2239,7 +2244,7 @@ export default function ConductorApp() {
                     const esActual = i === paradaIdx;
                     const completada = p.estado === "completada";
                     const pp = pasajeros.filter(x => x.parada_id === p.id);
-                    const emb = pp.filter(x => x.estado === "embarcado").length;
+                    const emb = pp.filter(x => esAbordado(x.estado)).length;
                     return (
                       <div
                         key={p.id}
@@ -3132,7 +3137,7 @@ export default function ConductorApp() {
                     borderRadius: 14, overflow: "hidden",
                   }}>
                     {ppList.map((x, idx) => {
-                      const onBoard = x.estado === "embarcado";
+                      const onBoard = esAbordado(x.estado);
                       const noShow = x.estado === "no_show";
                       return (
                         <div

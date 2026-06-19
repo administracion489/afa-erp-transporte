@@ -53,12 +53,12 @@ export async function POST(req: NextRequest) {
         .maybeSingle();
 
       if (existe) {
-        const eraEmbarcado = existe.estado === "embarcado";
+        const eraEmbarcado = existe.estado === "abordado" || existe.estado === "embarcado";
         // Siempre escribir ambas columnas (estado + estado_abordaje/hora_abordaje) — incluso si
         // ya estaba "embarcado", para reparar filas viejas con estado_abordaje desfasado en un re-escaneo.
         const { error: errUpd } = await supabaseAdmin
           .from("pasajeros_parada")
-          .update({ estado: "embarcado", estado_abordaje: "Abordado", hora_abordaje: new Date().toISOString() })
+          .update({ estado: "abordado", estado_abordaje: "Abordado", hora_abordaje: new Date().toISOString() })
           .eq("id", existe.id);
         if (errUpd) return NextResponse.json({ error: errUpd.message }, { status: 500 });
         // Solo registrar en bitácora si es un abordaje nuevo (evita inflar el reporte en re-escaneos).
@@ -71,7 +71,7 @@ export async function POST(req: NextRequest) {
       const insertar = async (extra: Record<string, any> = {}) =>
         supabaseAdmin
           .from("pasajeros_parada")
-          .insert({ parada_id, pasajero_id, estado: "embarcado", estado_abordaje: "Abordado", hora_abordaje: new Date().toISOString(), ...extra })
+          .insert({ parada_id, pasajero_id, estado: "abordado", estado_abordaje: "Abordado", hora_abordaje: new Date().toISOString(), ...extra })
           .select("id")
           .single();
 
