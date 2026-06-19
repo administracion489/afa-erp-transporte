@@ -410,8 +410,9 @@ export default function ClientePortal() {
       .then(({ data }) => { setDocs((data || []) as DocPortal[]); });
   }, []);
 
-  // ─── Cargar detalles (paradas + boarding + pasajeros + conductor + vehiculo) 
-  const cargarDetalle = useCallback(async (r: Reserva) => {
+  // ─── Cargar detalles (paradas + boarding + pasajeros + conductor + vehiculo)
+  // force=true salta la caché (se usa al editar el manifiesto con el detalle abierto).
+  const cargarDetalle = useCallback(async (r: Reserva, force = false) => {
     setReservaSel(r);
     setTab("historial");
     setConductorInfo(null);
@@ -419,19 +420,33 @@ export default function ClientePortal() {
 
     const tasks: Promise<any>[] = [];
 
-    if (!paradas[r.id]) {
+    // Se condiciona a ppList (no a paradas): GPS, dashboard y la carga inicial llenan
+    // paradas[r.id] sin tocar ppList[r.id]. Si el guard fuera por paradas, abrir GPS y
+    // luego "Ver" cortocircuitaría esta carga y el detalle quedaría sin roster ("Esperados: 0").
+    if (force || !ppList[r.id]) {
       tasks.push(
         Promise.all([
           supabase.from("paradas").select("*").eq("reserva_id", r.id).order("orden"),
           supabase.from("boarding_log").select("*, pasajero:pasajeros(nombre,dni,empresa)").eq("reserva_id", r.id).order("timestamp"),
-        ]).then(async ([pRes, bRes]) => {
+          supabase.from("pasajeros").select("id,nombre,dni,edad").eq("reserva_id", r.id),
+        ]).then(async ([pRes, bRes, paxRes]) => {
           setParadas(prev => ({ ...prev, [r.id]: pRes.data || [] }));
           setBoarding(prev => ({ ...prev, [r.id]: bRes.data || [] }));
           const ps = pRes.data || [];
+          let pp: any[] = [];
           if (ps.length > 0) {
-            const { data: pp } = await supabase.from("pasajeros_parada").select("*, pasajero:pasajeros(nombre,dni,edad)").in("parada_id", ps.map((p: any) => p.id));
-            setPPList(prev => ({ ...prev, [r.id]: pp || [] }));
+            const { data } = await supabase.from("pasajeros_parada").select("*, pasajero:pasajeros(nombre,dni,edad)").in("parada_id", ps.map((p: any) => p.id));
+            pp = data || [];
           }
+          // Pasajeros del manifiesto sin paradero asignado: existen en pasajeros.reserva_id
+          // pero no tienen fila en pasajeros_parada. Se agregan como entradas sintéticas
+          // (parada_id: null, id negativo para no colisionar con ids reales) para que
+          // cuenten en "Esperados", aparezcan en el PDF y se listen en su propia sección.
+          const asignados = new Set(pp.map((x: any) => x.pasajero_id));
+          const sinParada = (paxRes.data || [])
+            .filter((p: any) => !asignados.has(p.id))
+            .map((p: any) => ({ id: -p.id, parada_id: null, pasajero_id: p.id, estado: "Pendiente", pasajero: { nombre: p.nombre, dni: p.dni, edad: p.edad } }));
+          setPPList(prev => ({ ...prev, [r.id]: [...pp, ...sinParada] }));
         })
       );
     }
@@ -451,7 +466,7 @@ export default function ClientePortal() {
     }
 
     await Promise.all(tasks);
-  }, [paradas]);
+  }, [ppList]);
 
   // ─── Abrir modal GPS ──────────────────────────────────────────────────────
   const abrirGps = useCallback(async (r: Reserva) => {
@@ -554,25 +569,37 @@ export default function ClientePortal() {
   }
 
   // ─── Cargar stats de pasajeros para historial ─────────────────────────────
+  // "esperados" = roster del manifiesto = unión de dos fuentes (igual que el
+  // modal de manifiesto, que es la fuente de verdad):
+  //   (A) pasajeros ad-hoc de la reserva           → pasajeros.reserva_id
+  //   (B) pasajeros asignados a una parada         → pasajeros_parada → paradas
+  // Se dedupe por pasajero_id (un pasajero con paradero existe en ambas tablas).
+  // Antes solo se contaba (B): los pasajeros agregados "Sin asignar" salían como 0.
   const cargarHistorialStats = useCallback(async (reservaIds: number[]) => {
     if (reservaIds.length === 0) return;
     setLoadingStats(true);
-    const [{ data: boardingData }, { data: paradasData }] = await Promise.all([
+    const [{ data: boardingData }, { data: paradasData }, { data: paxAdhocData }] = await Promise.all([
       supabase.from("boarding_log").select("reserva_id").in("reserva_id", reservaIds),
       supabase.from("paradas").select("id, reserva_id").in("reserva_id", reservaIds),
+      supabase.from("pasajeros").select("id, reserva_id").in("reserva_id", reservaIds),
     ]);
     const paradaMap: Record<number, number> = {};
     const paradaIds: number[] = [];
     (paradasData || []).forEach((p: any) => { paradaMap[p.id] = p.reserva_id; paradaIds.push(p.id); });
     let ppData: any[] = [];
     if (paradaIds.length > 0) {
-      const { data } = await supabase.from("pasajeros_parada").select("parada_id").in("parada_id", paradaIds);
+      const { data } = await supabase.from("pasajeros_parada").select("parada_id, pasajero_id").in("parada_id", paradaIds);
       ppData = data || [];
     }
+    // Conjunto de pasajeros distintos por reserva (unión A ∪ B)
+    const paxPorReserva: Record<number, Set<number>> = {};
+    reservaIds.forEach(id => { paxPorReserva[id] = new Set(); });
+    (paxAdhocData || []).forEach((p: any) => { paxPorReserva[p.reserva_id]?.add(p.id); });
+    ppData.forEach((pp: any) => { const rid = paradaMap[pp.parada_id]; if (rid) paxPorReserva[rid]?.add(pp.pasajero_id); });
+
     const stats: Record<number, { embarcados: number; esperados: number }> = {};
-    reservaIds.forEach(id => { stats[id] = { embarcados: 0, esperados: 0 }; });
+    reservaIds.forEach(id => { stats[id] = { embarcados: 0, esperados: paxPorReserva[id]?.size || 0 }; });
     (boardingData || []).forEach((b: any) => { if (stats[b.reserva_id]) stats[b.reserva_id].embarcados++; });
-    ppData.forEach((pp: any) => { const rid = paradaMap[pp.parada_id]; if (rid && stats[rid]) stats[rid].esperados++; });
     setReservaStats(stats);
     setLoadingStats(false);
   }, []);
@@ -1323,7 +1350,7 @@ export default function ClientePortal() {
     const pdfLogo   = window.location.origin + "/logoafacotizacion-removebg-preview.png";
     const firmaUrl  = window.location.origin + "/firmaJLCA.PNG";
 
-    const filas = ps.map(p => {
+    const filasParadas = ps.map(p => {
       const bP  = bl.filter(b => b.parada_id === p.id);
       const ppP = pp.filter(x => x.parada_id === p.id);
       return `
@@ -1337,6 +1364,21 @@ export default function ClientePortal() {
           <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;color:#64748b;font-family:monospace;font-size:10px">${emb ? fmtTs(emb.timestamp) : "–"}</td>
         </tr>`; }).join("")}`;
     }).join("");
+
+    // Pasajeros del manifiesto sin paradero asignado (parada_id null)
+    const ppSinParada = pp.filter(x => !x.parada_id);
+    const filasSinParada = ppSinParada.length === 0 ? "" : `
+        <tr style="background:#fef3c7"><td colspan="4" style="padding:8px 14px;font-weight:800;color:#92400e;font-size:10.5px;border-bottom:1px solid #fde68a;letter-spacing:.2px">
+          Sin paradero asignado &nbsp;<span style="font-weight:500;color:#64748b;font-size:10px">(${ppSinParada.length} pasajero${ppSinParada.length !== 1 ? "s" : ""})</span>
+        </td></tr>
+        ${ppSinParada.map((x, xi) => { const emb = bl.find(b => b.pasajero_id === x.pasajero_id); return `<tr style="background:${xi%2===0?"#fff":"#f8fafc"}">
+          <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9">${x.pasajero?.nombre || `#${x.pasajero_id}`}</td>
+          <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;font-family:monospace;font-size:10px;color:#475569">${x.pasajero?.dni || "–"}</td>
+          <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;text-align:center"><span style="font-size:10px;font-weight:700;padding:2px 10px;border-radius:12px;background:${emb?"#dbeafe":"#f1f5f9"};color:${emb?"#1e40af":"#475569"}">${emb ? "✓ Embarcó" : "✗ No asistió"}</span></td>
+          <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;color:#64748b;font-family:monospace;font-size:10px">${emb ? fmtTs(emb.timestamp) : "–"}</td>
+        </tr>`; }).join("")}`;
+
+    const filas = filasParadas + filasSinParada;
 
     const html = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Reporte · ${fmtFecha(r.fecha_servicio)}</title>
 <style>
@@ -2959,7 +3001,7 @@ tbody tr:nth-child(even){background:#f9fafb}
           const totalEmbarcados = Object.values(reservaStats).reduce((s, x) => s + x.embarcados, 0);
           const reservasConStats = Object.values(reservaStats).filter(x => x.esperados > 0);
           const slaPromedio = reservasConStats.length > 0
-            ? Math.round(reservasConStats.reduce((s, x) => s + (x.embarcados / x.esperados) * 100, 0) / reservasConStats.length)
+            ? Math.round(reservasConStats.reduce((s, x) => s + Math.min(100, (x.embarcados / x.esperados) * 100), 0) / reservasConStats.length)
             : null;
           const tasaCancelacion = reservas.length > 0
             ? Math.round((reservas.filter(r => esCancelado(r.estado)).length / reservas.length) * 100)
@@ -3109,7 +3151,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                     <div>
                       {filas.map((r, ri) => {
                         const st = reservaStats[r.id];
-                        const sla = st && st.esperados > 0 ? Math.round((st.embarcados / st.esperados) * 100) : null;
+                        const sla = st && st.esperados > 0 ? Math.min(100, Math.round((st.embarcados / st.esperados) * 100)) : null;
                         const slaColor = (pct: number) => pct >= 95 ? C.success : pct >= 85 ? C.warn : C.danger;
                         const est = ESTADO[efectivoEstado(r)] || { bg: "#F1F5F9", c: "#475569", label: efectivoEstado(r), dot: "#94A3B8" };
                         return (
@@ -3371,7 +3413,10 @@ tbody tr:nth-child(even){background:#f9fafb}
             {(() => {
               const bl  = boarding[reservaSel.id] || [];
               const pp  = ppList[reservaSel.id] || [];
-              const pct = pp.length > 0 ? Math.round((bl.length / pp.length) * 100) : 0;
+              // Clamp: una fila de boarding_log huérfana (pasajero embarcado y luego quitado
+              // del roster) puede hacer bl.length > pp.length → evita SLA >100% y ausentes < 0.
+              const pct = pp.length > 0 ? Math.min(100, Math.round((bl.length / pp.length) * 100)) : 0;
+              const noAsistieron = Math.max(0, pp.length - bl.length);
               const ps  = paradas[reservaSel.id] || [];
               const pctColor = pct >= 80 ? C.success : pct >= 50 ? C.warn : C.danger;
               return (
@@ -3381,7 +3426,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                     {[
                       { l: "Esperados",     v: pp.length,             sub: "pasajeros",  accent: C.navy    },
                       { l: "Embarcaron",    v: bl.length,             sub: "a bordo",    accent: C.success },
-                      { l: "No asistieron", v: pp.length - bl.length, sub: "ausentes",   accent: C.danger  },
+                      { l: "No asistieron", v: noAsistieron,           sub: "ausentes",   accent: C.danger  },
                       { l: "Cumplimiento",  v: `${pct}%`,             sub: "SLA",        accent: pctColor  },
                       { l: "Paradas",       v: ps.length,             sub: "paraderos",  accent: C.warn    },
                     ].map(k => (
@@ -3410,7 +3455,7 @@ tbody tr:nth-child(even){background:#f9fafb}
               );
             })()}
 
-            {(paradas[reservaSel.id] || []).length === 0 ? (
+            {(paradas[reservaSel.id] || []).length === 0 && (ppList[reservaSel.id] || []).filter(x => !x.parada_id).length === 0 ? (
               <div style={{ background: C.surface, borderRadius: 16, padding: 48, textAlign: "center" as const, border: `1px solid ${C.line}` }}>
                 <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke={C.line2} strokeWidth="1.2" style={{ display: "block", margin: "0 auto 14px" }}><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
                 <p style={{ color: C.ink2, fontWeight: 700, margin: 0, fontSize: 14 }}>Sin paradas configuradas en este servicio</p>
@@ -3503,6 +3548,56 @@ tbody tr:nth-child(even){background:#f9fafb}
                 </div>
               );
             })}
+
+            {/* Pasajeros del manifiesto sin paradero asignado */}
+            {(() => {
+              const sinParada = (ppList[reservaSel.id] || []).filter(x => !x.parada_id);
+              if (sinParada.length === 0) return null;
+              const bl = boarding[reservaSel.id] || [];
+              return (
+                <div style={{ background: C.surface, borderRadius: 16, overflow: "hidden" as const, border: `1px solid ${C.line}` }}>
+                  <div style={{ padding: "14px 20px", background: C.warnTint, borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <div style={{ width: 32, height: 32, borderRadius: "50%", background: C.warn, display: "flex", alignItems: "center", justifyContent: "center", color: "white", flexShrink: 0 }}>
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><line x1="12" y1="7" x2="12" y2="11"/><line x1="12" y1="14" x2="12" y2="14"/></svg>
+                      </div>
+                      <div>
+                        <p style={{ color: C.ink, fontWeight: 800, fontSize: 14, margin: 0 }}>Sin paradero asignado</p>
+                        <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0" }}>Pasajeros del manifiesto aún sin paradero de abordaje</p>
+                      </div>
+                    </div>
+                    <p style={{ fontFamily: C.fontMono, fontWeight: 900, fontSize: 16, color: C.warn, margin: 0 }}>{sinParada.length}</p>
+                  </div>
+                  <div style={{ overflowX: "auto" as const }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ background: C.paper, borderBottom: `1px solid ${C.line}` }}>
+                          {["Pasajero","DNI","Estado"].map(h => (
+                            <th key={h} style={{ padding: "8px 16px", textAlign: "left" as const, fontSize: 10, fontWeight: 800, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.05em" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sinParada.map(x => {
+                          const emb = bl.find(b => b.pasajero_id === x.pasajero_id);
+                          return (
+                            <tr key={x.id} style={{ borderBottom: `1px solid ${C.line}` }}>
+                              <td style={{ padding: "10px 16px", fontWeight: 700, color: C.ink2 }}>{x.pasajero?.nombre || `#${x.pasajero_id}`}</td>
+                              <td style={{ padding: "10px 16px", fontFamily: C.fontMono, color: C.mute, fontSize: 11 }}>{x.pasajero?.dni || "–"}</td>
+                              <td style={{ padding: "10px 16px" }}>
+                                <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: emb ? C.successTint : C.warnTint, color: emb ? C.success : C.warn }}>
+                                  {emb ? "Embarcó" : "Sin paradero"}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Documentos vinculados */}
             <div style={{ background: C.surface, borderRadius: 14, padding: "16px 20px", border: `1px solid ${C.line}` }}>
@@ -4108,6 +4203,19 @@ tbody tr:nth-child(even){background:#f9fafb}
           onClose={() => setModalManifiestoData(null)}
           onChanged={() => {
             if (cliente) cargarHistorialStats(reservas.map(r => r.id));
+            // El detalle y los PDFs leen ppList/paradas/boarding cacheados. Tras editar el
+            // manifiesto hay que refrescarlos o quedarían obsoletos respecto al historial.
+            const rid = modalManifiestoData.reservaId;
+            if (reservaSel?.id === rid) {
+              // Detalle abierto: recarga forzada para que no quede vacío ni desactualizado.
+              const r = reservas.find(x => x.id === rid);
+              if (r) cargarDetalle(r, true);
+            } else {
+              // Detalle cerrado: invalida la caché; se recargará al abrir "Ver".
+              setPPList(prev => { const cp = { ...prev }; delete cp[rid]; return cp; });
+              setParadas(prev => { const cp = { ...prev }; delete cp[rid]; return cp; });
+              setBoarding(prev => { const cp = { ...prev }; delete cp[rid]; return cp; });
+            }
           }}
         />
       )}
