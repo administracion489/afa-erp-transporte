@@ -73,26 +73,85 @@ function calcBearing(lat1: number, lng1: number, lat2: number, lng2: number): nu
   return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
 }
 
+// Distancia en metros entre dos coordenadas (haversine).
+function distM(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const R = 6371000;
+  const dLa = (bLat - aLat) * Math.PI / 180, dLo = (bLng - aLng) * Math.PI / 180;
+  const la1 = aLat * Math.PI / 180, la2 = bLat * Math.PI / 180;
+  const h = Math.sin(dLa / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLo / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+type MatchPt = { lat: number; lng: number; acc: number };
+
+// Prepara los puntos para Map Matching: colapsa los clusters estacionarios (un bus
+// detenido emite decenas de fixes con jitter sobre el mismo punto → confunden al matcher
+// y producen una línea recta de baja confianza) descartando puntos a <8 m del anterior,
+// y limita a 100 (máximo de la API), conservando primero y último.
+function prepararPuntos(pts: MatchPt[]): MatchPt[] {
+  const dedup: MatchPt[] = [];
+  for (const p of pts) {
+    const last = dedup[dedup.length - 1];
+    if (!last || distM(last.lat, last.lng, p.lat, p.lng) >= 8) dedup.push(p);
+  }
+  if (dedup.length <= 100) return dedup;
+  const N = Math.ceil(dedup.length / 100);
+  const out = dedup.filter((_, i) => i % N === 0);
+  if (out[out.length - 1] !== dedup[dedup.length - 1]) out.push(dedup[dedup.length - 1]);
+  return out;
+}
+
 // Ajusta la huella GPS a la red vial usando Mapbox Map Matching API.
-// Muestrea ≤100 puntos (límite de la API), radio de búsqueda 50 m.
+// Devuelve { coords, confidence } o null. RECHAZA (null) cuando hay 0 ó >1 matchings:
+// >1 = la traza está mal alineada a la red vial (no dibujar). El radio de búsqueda por
+// punto se deriva de la precisión GPS (acc·1.5, acotado a 5–50 m, máximo de la API).
 async function mapMatchTrail(
-  pts: { lat: number; lng: number }[],
+  pts: MatchPt[],
   token: string
-): Promise<[number, number][] | null> {
-  const N = Math.max(1, Math.ceil(pts.length / 100));
-  const sample = pts.filter((_, i) => i % N === 0 || i === pts.length - 1);
+): Promise<{ coords: [number, number][]; confidence: number } | null> {
+  const sample = prepararPuntos(pts);
   if (sample.length < 2) return null;
   const coords = sample.map(p => `${p.lng},${p.lat}`).join(";");
-  const radii  = sample.map(() => "50").join(";");
+  const radii  = sample.map(p => String(Math.min(50, Math.max(5, Math.ceil((p.acc || 25) * 1.5))))).join(";");
   try {
     const res = await fetch(
-      `https://api.mapbox.com/matching/v5/mapbox/driving/${coords}?geometries=geojson&radiuses=${radii}&access_token=${token}`
+      `https://api.mapbox.com/matching/v5/mapbox/driving/${coords}` +
+      `?geometries=geojson&overview=full&tidy=true&radiuses=${radii}&access_token=${token}`
     );
     if (!res.ok) return null;
     const json = await res.json();
-    const c: [number, number][] = json?.matchings?.[0]?.geometry?.coordinates;
-    return c?.length >= 2 ? c : null;
+    const m = json?.matchings;
+    if (!Array.isArray(m) || m.length !== 1) return null;
+    const c: [number, number][] = m[0]?.geometry?.coordinates;
+    const confidence = Number(m[0]?.confidence) || 0;
+    return c?.length >= 2 ? { coords: c, confidence } : null;
   } catch { return null; }
+}
+
+// Reparte la velocidad de la huella cruda sobre la geometría ajustada a la vía:
+// a cada vértice ajustado le asigna la velocidad del punto GPS real más cercano,
+// para conservar el coloreado por velocidad de la leyenda sobre la línea pegada a la pista.
+function colorearMatched(
+  coords: [number, number][],
+  huella: { lat: number; lng: number; velocidad: number }[]
+): any[] {
+  const velCercana = (lng: number, lat: number): number => {
+    let best = 0, bd = Infinity;
+    for (const h of huella) {
+      const d = (h.lng - lng) ** 2 + (h.lat - lat) ** 2;
+      if (d < bd) { bd = d; best = h.velocidad ?? 0; }
+    }
+    return best;
+  };
+  const feats: any[] = [];
+  for (let i = 0; i < coords.length - 1; i++) {
+    feats.push({
+      type: "Feature",
+      properties: { velocidad: velCercana(coords[i][0], coords[i][1]) },
+      geometry: { type: "LineString", coordinates: [coords[i], coords[i + 1]] },
+    });
+  }
+  return feats;
 }
 
 export default function ModalGps({
@@ -321,6 +380,8 @@ export default function ModalGps({
   useEffect(() => {
     let cancel = false;
     let lastMatchMs = 0;
+    let huboMatch = false;                                   // ¿ya hay una huella ajustada aceptada?
+    let lastTail: { lat: number; lng: number } | null = null; // último punto enviado a matching
     const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
     const cargar = async () => {
       try {
@@ -334,13 +395,24 @@ export default function ModalGps({
         if (!cancel && arr.length > 0) {
           const pts = arr.map((d: any) => ({ lat: d.lat, lng: d.lng, velocidad: d.velocidad ?? 0 }));
           setHuella(pts);
-          // Map Matching: ajustar huella a la red vial. Máx. una vez por minuto para no
-          // exceder el límite de la API de Mapbox ($0.50 / 1000 llamadas).
+          // Map Matching: ajustar la huella a la red vial. Throttle 60 s (límite de costo de
+          // la API de Mapbox) y, si el bus no se movió (>8 m) desde el último match, se omite
+          // la llamada y se conserva la huella ajustada previa → bus parado = 0 llamadas extra.
           const ahora = Date.now();
-          if (token && ahora - lastMatchMs >= 60000) {
+          const tail = pts[pts.length - 1];
+          const seMovio = !lastTail || distM(lastTail.lat, lastTail.lng, tail.lat, tail.lng) >= 8;
+          if (token && ahora - lastMatchMs >= 60000 && (seMovio || !huboMatch)) {
             lastMatchMs = ahora;
-            const matched = await mapMatchTrail(pts, token);
-            if (!cancel && matched) setMatchedCoords(matched);
+            lastTail = { lat: tail.lat, lng: tail.lng };
+            const mp = arr.map((d: any) => ({ lat: d.lat, lng: d.lng, acc: d.precision_m ?? 25 }));
+            const r = await mapMatchTrail(mp, token);
+            if (!cancel && r) {
+              // Compuerta de calidad: la primera vez aceptamos con barra baja (pegar a la vía
+              // cuanto antes); en régimen exigimos confianza decente para NO pisar una huella
+              // buena con una recta de baja confianza (p. ej. cuando el bus está detenido).
+              const minConf = huboMatch ? 0.5 : 0.3;
+              if (r.confidence >= minConf) { huboMatch = true; setMatchedCoords(r.coords); }
+            }
           }
         }
       } catch { /* conservar estela previa */ }
@@ -360,31 +432,32 @@ export default function ModalGps({
       if (map.getLayer("huella-gps-line")) map.removeLayer("huella-gps-line");
       if (map.getSource("huella-gps"))    map.removeSource("huella-gps");
 
-      if (matchedCoords && matchedCoords.length >= 2) {
-        // Ruta ajustada a la red vial vía Mapbox Map Matching — sigue la carretera real.
-        map.addSource("huella-gps", { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: matchedCoords } } });
-        map.addLayer({ id: "huella-gps-line", type: "line", source: "huella-gps",
-          layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-width": 5, "line-opacity": 0.9, "line-color": "#dc2626" },
-        });
-      } else {
-        // Fallback: huella cruda suavizada (mientras Map Matching carga o si falla).
-        const pts = suavizarHuella(huella);
-        const features: any[] = [];
-        for (let i = 0; i < pts.length - 1; i++) {
-          features.push({
-            type: "Feature",
-            properties: { velocidad: pts[i].velocidad ?? 0 },
-            geometry: { type: "LineString", coordinates: [[pts[i].lng, pts[i].lat], [pts[i + 1].lng, pts[i + 1].lat]] },
-          });
-        }
-        map.addSource("huella-gps", { type: "geojson", data: { type: "FeatureCollection", features } });
-        map.addLayer({ id: "huella-gps-line", type: "line", source: "huella-gps",
-          paint: { "line-width": 5, "line-opacity": 0.9,
-            "line-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"],
-          },
-        });
-      }
+      // Con Map Matching: geometría pegada a la vía, coloreada por velocidad (leyenda).
+      // Sin él (aún cargando o rechazado por baja confianza): huella cruda suavizada.
+      const features = (matchedCoords && matchedCoords.length >= 2)
+        ? colorearMatched(matchedCoords, huella)
+        : (() => {
+            const pts = suavizarHuella(huella);
+            const f: any[] = [];
+            for (let i = 0; i < pts.length - 1; i++) {
+              f.push({
+                type: "Feature",
+                properties: { velocidad: pts[i].velocidad ?? 0 },
+                geometry: { type: "LineString", coordinates: [[pts[i].lng, pts[i].lat], [pts[i + 1].lng, pts[i + 1].lat]] },
+              });
+            }
+            return f;
+          })();
+
+      map.addSource("huella-gps", { type: "geojson", data: { type: "FeatureCollection", features } });
+      map.addLayer({
+        id: "huella-gps-line", type: "line", source: "huella-gps",
+        layout: { "line-join": "round", "line-cap": "round" },
+        paint: {
+          "line-width": 5, "line-opacity": 0.9,
+          "line-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"],
+        },
+      });
     } catch (e) { console.error("[ModalGps] Error dibujando huella GPS:", e); }
   }, [huella, matchedCoords, mapListo]);
 
