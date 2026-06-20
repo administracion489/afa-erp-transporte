@@ -908,13 +908,42 @@ export default function AppPasajero() {
     setReservasDisp([]);
     setSelRutaId(null);
     setSelParadaId(null);
-    setMiParada(r.miParada);
+    // Actualización idempotente: el refresco periódico (p. ej. cuando el operador mueve al
+    // pasajero a otro servicio) vuelve a llamar esta función. Solo reemplazamos miParada y
+    // rutaParadas cuando de verdad cambian, para no re-disparar el redibujado del mapa ni la
+    // consulta a Google Directions en cada ciclo si la asignación sigue igual.
+    setMiParada((prev) =>
+      prev && prev.id === r.miParada.id && prev.reserva_id === r.miParada.reserva_id ? prev : r.miParada
+    );
     setMiEstado(r.miEstado || "esperando");
-    setRutaParadas(r.rutaParadas || []);
+    setRutaParadas((prev) => {
+      const next: Parada[] = r.rutaParadas || [];
+      const igual = prev.length === next.length && prev.every((p, i) => p.id === next[i].id);
+      return igual ? prev : next;
+    });
     if (r.vehiculo)    setVehiculo(r.vehiculo);
     if (r.busPosicion) setBusPosicion(r.busPosicion);
     if (r.conductor)   setConductor(r.conductor);
   }, []);
+
+  // Refresco automático de la asignación. El operador puede mover al pasajero a otro servicio
+  // desde el ERP; el pasajero es anónimo (DNI+PIN), así que Realtime queda bloqueado por RLS
+  // (igual que la posición del bus) y sondeamos /api/pasajero "ruta" periódicamente y cada vez
+  // que la app vuelve al foreground. Sin esto el pasajero se queda con su vehículo viejo hasta
+  // cerrar y reabrir la app.
+  useEffect(() => {
+    const pid = pasajero?.id;
+    if (!pid) return;
+    const id = setInterval(() => { void cargarMiRuta(pid); }, 30000);
+    const refrescar = () => { if (document.visibilityState === "visible") void cargarMiRuta(pid); };
+    document.addEventListener("visibilitychange", refrescar);
+    window.addEventListener("focus", refrescar);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", refrescar);
+      window.removeEventListener("focus", refrescar);
+    };
+  }, [pasajero?.id, cargarMiRuta]);
 
   function abrirWaze() {
     if (!miParada) return;
