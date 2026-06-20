@@ -14,7 +14,7 @@ type Cliente        = { id: number; nombre: string; empresa: string | null; ruc:
 type Reserva        = { id: number; origen: string; destino: string; fecha_servicio: string | null; hora_servicio: string | null; estado: string; precio_cliente: number; vehiculo_id: number | null; conductor_id: number | null; cotizacion_id: number | null; created_at: string; };
 type Parada         = { id: number; reserva_id: number; orden: number; nombre: string; direccion: string | null; lat: number | null; lng: number | null; hora_estimada: string | null; estado: string; };
 type Boarding       = { id: number; pasajero_id: number; parada_id: number; timestamp: string; metodo: string; pasajero?: { nombre: string; dni: string | null; empresa: string | null; }; };
-type PasajeroParada = { id: number; parada_id: number; pasajero_id: number; estado: string; pasajero?: { nombre: string; dni: string | null; edad: number | null; }; };
+type PasajeroParada = { id: number; parada_id: number | null; pasajero_id: number; estado: string; estado_abordaje?: string | null; hora_abordaje?: string | null; pasajero?: { nombre: string; dni: string | null; edad: number | null; }; };
 type GPS            = { lat: number; lng: number; velocidad: number; timestamp: string; estado?: string; };
 type EmpresaPerfil  = { nombre: string | null; logo_url: string | null; color_primario: string | null; telefono: string | null; email: string | null; slogan: string | null; };
 type ConductorInfo  = { nombre: string; numero_licencia: string | null; telefono: string | null; };
@@ -23,6 +23,12 @@ type Tab = "dashboard" | "activos" | "historial" | "facturacion" | "documentos" 
 type CuentaSeccion = "empresa" | "usuarios" | "notificaciones" | "facturacion_cfg" | "integraciones" | "seguridad" | "preferencias";
 type Factura = { id: number; reserva_id: number | null; tipo_comprobante: string; serie: string | null; numero: string | null; fecha_emision: string | null; fecha_vencimiento: string | null; total: number; estado: string; pdf_url: string | null; };
 type PortalUsuario = { id: number; cliente_id: number; nombre: string; dni: string; cargo: string | null; rol: "admin" | "visor"; email: string | null; codigo_acceso: string; activo: boolean; created_at: string; modulos_permitidos: string[] | null; };
+
+// Fuente de verdad del abordaje en TODO el ERP: pasajeros_parada (estado + estado_abordaje,
+// sincronizadas por trigger en BD). boarding_log se agregó después y está sin backfill, así
+// que NO sirve para contar embarcados de servicios históricos. Misma lógica que conductor/lector.
+const esAbordado = (pp?: { estado?: string | null; estado_abordaje?: string | null } | null): boolean =>
+  pp?.estado_abordaje === "Abordado" || pp?.estado === "abordado" || pp?.estado === "embarcado";
 
 const MODULOS_CTRL = [
   { id: "activos",     label: "En vivo · GPS" },
@@ -599,24 +605,28 @@ export default function ClientePortal() {
       return all;
     };
 
-    const [ppData, paxAdhocData, boardingData] = await Promise.all([
-      // (B) por paradero: join a paradas para obtener reserva_id sin traer todas las paradas
-      fetchAll((f, t) => supabase.from("pasajeros_parada").select("pasajero_id, paradas!inner(reserva_id)").in("paradas.reserva_id", reservaIds).order("id").range(f, t)),
+    const [ppData, paxAdhocData] = await Promise.all([
+      // (B) por paradero: join a paradas para obtener reserva_id sin traer todas las paradas.
+      // Se trae estado/estado_abordaje porque el abordaje vive aquí (boarding_log está vacía).
+      fetchAll((f, t) => supabase.from("pasajeros_parada").select("pasajero_id, estado, estado_abordaje, paradas!inner(reserva_id)").in("paradas.reserva_id", reservaIds).order("id").range(f, t)),
       // (A) ad-hoc de la reserva
       fetchAll((f, t) => supabase.from("pasajeros").select("id, reserva_id").in("reserva_id", reservaIds).order("id").range(f, t)),
-      // embarcados (boarding_log)
-      fetchAll((f, t) => supabase.from("boarding_log").select("reserva_id").in("reserva_id", reservaIds).order("id").range(f, t)),
     ]);
 
-    // Conjunto de pasajeros distintos por reserva (unión A ∪ B)
+    // Por reserva: pasajeros distintos (esperados = unión A ∪ B) y abordados distintos.
     const paxPorReserva: Record<number, Set<number>> = {};
-    reservaIds.forEach(id => { paxPorReserva[id] = new Set(); });
+    const abordadosPorReserva: Record<number, Set<number>> = {};
+    reservaIds.forEach(id => { paxPorReserva[id] = new Set(); abordadosPorReserva[id] = new Set(); });
     paxAdhocData.forEach((p: any) => { paxPorReserva[p.reserva_id]?.add(p.id); });
-    ppData.forEach((pp: any) => { const rid = pp.paradas?.reserva_id; if (rid) paxPorReserva[rid]?.add(pp.pasajero_id); });
+    ppData.forEach((pp: any) => {
+      const rid = pp.paradas?.reserva_id;
+      if (!rid) return;
+      paxPorReserva[rid]?.add(pp.pasajero_id);
+      if (esAbordado(pp)) abordadosPorReserva[rid]?.add(pp.pasajero_id);
+    });
 
     const stats: Record<number, { embarcados: number; esperados: number }> = {};
-    reservaIds.forEach(id => { stats[id] = { embarcados: 0, esperados: paxPorReserva[id]?.size || 0 }; });
-    boardingData.forEach((b: any) => { if (stats[b.reserva_id]) stats[b.reserva_id].embarcados++; });
+    reservaIds.forEach(id => { stats[id] = { embarcados: abordadosPorReserva[id]?.size || 0, esperados: paxPorReserva[id]?.size || 0 }; });
     setReservaStats(stats);
     setLoadingStats(false);
   }, []);
@@ -1356,11 +1366,12 @@ export default function ClientePortal() {
   // ─── Reporte de embarque PDF ──────────────────────────────────────────────
   function generarReportePDF(r: Reserva) {
     const ps = paradas[r.id] || [];
-    const bl = boarding[r.id] || [];
+    const bl = boarding[r.id] || [];   // boarding_log: solo para método/hora si existe
     const pp = ppList[r.id] || [];
-    const totalEsp = pp.length, totalEmb = bl.length;
-    const pct = totalEsp > 0 ? Math.round((totalEmb / totalEsp) * 100) : 0;
-    const noEmb = pp.filter(p => !bl.find(b => b.pasajero_id === p.pasajero_id));
+    // El abordaje se determina por pasajeros_parada.estado_abordaje (boarding_log está vacía).
+    const totalEsp = pp.length, totalEmb = pp.filter(esAbordado).length;
+    const pct = totalEsp > 0 ? Math.min(100, Math.round((totalEmb / totalEsp) * 100)) : 0;
+    const noEmb = pp.filter(p => !esAbordado(p));
     const empNombre = empresa?.nombre || "AFA Tours Peru S.A.C.";
     const empTel    = empresa?.telefono || "966 707 225";
     const empEmail  = empresa?.email || "transporte@afatoursperu.com";
@@ -1368,17 +1379,17 @@ export default function ClientePortal() {
     const firmaUrl  = window.location.origin + "/firmaJLCA.PNG";
 
     const filasParadas = ps.map(p => {
-      const bP  = bl.filter(b => b.parada_id === p.id);
       const ppP = pp.filter(x => x.parada_id === p.id);
+      const embP = ppP.filter(esAbordado).length;
       return `
         <tr style="background:#eff6ff"><td colspan="4" style="padding:8px 14px;font-weight:800;color:#1e40af;font-size:10.5px;border-bottom:1px solid #dbeafe;letter-spacing:.2px">
-          ${p.orden}. ${p.nombre}${p.hora_estimada ? ` &nbsp;·&nbsp; ${p.hora_estimada}` : ""} &nbsp;<span style="font-weight:500;color:#64748b;font-size:10px">(${bP.length}/${ppP.length} embarcaron)</span>
+          ${p.orden}. ${p.nombre}${p.hora_estimada ? ` &nbsp;·&nbsp; ${p.hora_estimada}` : ""} &nbsp;<span style="font-weight:500;color:#64748b;font-size:10px">(${embP}/${ppP.length} embarcaron)</span>
         </td></tr>
-        ${ppP.map((x, xi) => { const emb = bl.find(b => b.pasajero_id === x.pasajero_id && b.parada_id === p.id); return `<tr style="background:${xi%2===0?"#fff":"#f8fafc"}">
+        ${ppP.map((x, xi) => { const emb = esAbordado(x); const blRow = bl.find(b => b.pasajero_id === x.pasajero_id); const hora = x.hora_abordaje || blRow?.timestamp; return `<tr style="background:${xi%2===0?"#fff":"#f8fafc"}">
           <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9">${x.pasajero?.nombre || `#${x.pasajero_id}`}</td>
           <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;font-family:monospace;font-size:10px;color:#475569">${x.pasajero?.dni || "–"}</td>
           <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;text-align:center"><span style="font-size:10px;font-weight:700;padding:2px 10px;border-radius:12px;background:${emb?"#dbeafe":"#f1f5f9"};color:${emb?"#1e40af":"#475569"}">${emb ? "✓ Embarcó" : "✗ No asistió"}</span></td>
-          <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;color:#64748b;font-family:monospace;font-size:10px">${emb ? fmtTs(emb.timestamp) : "–"}</td>
+          <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;color:#64748b;font-family:monospace;font-size:10px">${hora ? fmtTs(hora) : "–"}</td>
         </tr>`; }).join("")}`;
     }).join("");
 
@@ -1388,11 +1399,11 @@ export default function ClientePortal() {
         <tr style="background:#fef3c7"><td colspan="4" style="padding:8px 14px;font-weight:800;color:#92400e;font-size:10.5px;border-bottom:1px solid #fde68a;letter-spacing:.2px">
           Sin paradero asignado &nbsp;<span style="font-weight:500;color:#64748b;font-size:10px">(${ppSinParada.length} pasajero${ppSinParada.length !== 1 ? "s" : ""})</span>
         </td></tr>
-        ${ppSinParada.map((x, xi) => { const emb = bl.find(b => b.pasajero_id === x.pasajero_id); return `<tr style="background:${xi%2===0?"#fff":"#f8fafc"}">
+        ${ppSinParada.map((x, xi) => { const emb = esAbordado(x); const blRow = bl.find(b => b.pasajero_id === x.pasajero_id); const hora = x.hora_abordaje || blRow?.timestamp; return `<tr style="background:${xi%2===0?"#fff":"#f8fafc"}">
           <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9">${x.pasajero?.nombre || `#${x.pasajero_id}`}</td>
           <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;font-family:monospace;font-size:10px;color:#475569">${x.pasajero?.dni || "–"}</td>
           <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;text-align:center"><span style="font-size:10px;font-weight:700;padding:2px 10px;border-radius:12px;background:${emb?"#dbeafe":"#f1f5f9"};color:${emb?"#1e40af":"#475569"}">${emb ? "✓ Embarcó" : "✗ No asistió"}</span></td>
-          <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;color:#64748b;font-family:monospace;font-size:10px">${emb ? fmtTs(emb.timestamp) : "–"}</td>
+          <td style="padding:7px 14px;border-bottom:1px solid #f1f5f9;color:#64748b;font-family:monospace;font-size:10px">${hora ? fmtTs(hora) : "–"}</td>
         </tr>`; }).join("")}`;
 
     const filas = filasParadas + filasSinParada;
@@ -1497,9 +1508,11 @@ ${noEmb.length > 0 ? `<div class="box box-red" style="margin-bottom:14px"><div c
 
     let filas = "";
     pp.forEach((x, idx) => {
-      const emb        = bl.find(b => b.pasajero_id === x.pasajero_id);
-      const validadoQR = emb?.metodo === "qr";
-      const tsQR       = emb ? fmtQR(emb.timestamp) : null;
+      // Abordaje por estado_abordaje (boarding_log está vacía); hora desde hora_abordaje.
+      const embarco    = esAbordado(x);
+      const blRow      = bl.find(b => b.pasajero_id === x.pasajero_id);
+      const horaAb     = x.hora_abordaje || blRow?.timestamp || null;
+      const tsTxt      = horaAb ? fmtQR(horaAb) : "";
       const edadStr    = (x.pasajero as any)?.edad ? String((x.pasajero as any).edad) : "–";
       filas += `
         <tr>
@@ -1508,10 +1521,10 @@ ${noEmb.length > 0 ? `<div class="box box-red" style="margin-bottom:14px"><div c
           <td style="padding:5px 8px;border:1px solid #374151;text-align:center;font-family:monospace;width:105px">${x.pasajero?.dni || "–"}</td>
           <td style="padding:5px 8px;border:1px solid #374151;text-align:center;width:46px">${edadStr}</td>
           <td style="padding:0;border:1px solid #374151;width:150px;vertical-align:top">
-            <div style="${validadoQR ? 'background:#f0fdf4;' : ''}padding:4px 6px;min-height:24px;border-bottom:1px dotted #d1d5db">
-              ${validadoQR
-                ? `<div style="font-size:7.5px;color:#166534;font-weight:700;font-family:monospace">&#10003; VALIDADO QR ${tsQR}</div>`
-                : `<div style="font-size:7.5px;color:#9ca3af;font-style:italic">Pendiente QR</div>`
+            <div style="${embarco ? 'background:#f0fdf4;' : ''}padding:4px 6px;min-height:24px;border-bottom:1px dotted #d1d5db">
+              ${embarco
+                ? `<div style="font-size:7.5px;color:#166534;font-weight:700;font-family:monospace">&#10003; ABORDADO${tsTxt ? " " + tsTxt : ""}</div>`
+                : `<div style="font-size:7.5px;color:#9ca3af;font-style:italic">Pendiente</div>`
               }
             </div>
             <div style="min-height:34px;padding:4px 6px;display:flex;flex-direction:column;justify-content:flex-end">
@@ -3428,12 +3441,12 @@ tbody tr:nth-child(even){background:#f9fafb}
             </div>
 
             {(() => {
-              const bl  = boarding[reservaSel.id] || [];
               const pp  = ppList[reservaSel.id] || [];
-              // Clamp: una fila de boarding_log huérfana (pasajero embarcado y luego quitado
-              // del roster) puede hacer bl.length > pp.length → evita SLA >100% y ausentes < 0.
-              const pct = pp.length > 0 ? Math.min(100, Math.round((bl.length / pp.length) * 100)) : 0;
-              const noAsistieron = Math.max(0, pp.length - bl.length);
+              // El abordaje se cuenta desde pasajeros_parada.estado_abordaje (boarding_log
+              // está vacía). Clamp defensivo por si hubiera datos inconsistentes.
+              const abordados = pp.filter(esAbordado).length;
+              const pct = pp.length > 0 ? Math.min(100, Math.round((abordados / pp.length) * 100)) : 0;
+              const noAsistieron = Math.max(0, pp.length - abordados);
               const ps  = paradas[reservaSel.id] || [];
               const pctColor = pct >= 80 ? C.success : pct >= 50 ? C.warn : C.danger;
               return (
@@ -3442,7 +3455,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 10 }}>
                     {[
                       { l: "Esperados",     v: pp.length,             sub: "pasajeros",  accent: C.navy    },
-                      { l: "Embarcaron",    v: bl.length,             sub: "a bordo",    accent: C.success },
+                      { l: "Embarcaron",    v: abordados,             sub: "a bordo",    accent: C.success },
                       { l: "No asistieron", v: noAsistieron,           sub: "ausentes",   accent: C.danger  },
                       { l: "Cumplimiento",  v: `${pct}%`,             sub: "SLA",        accent: pctColor  },
                       { l: "Paradas",       v: ps.length,             sub: "paraderos",  accent: C.warn    },
@@ -3460,7 +3473,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                     <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
                       <div>
                         <p style={{ fontWeight: 700, color: C.ink2, fontSize: 13, margin: 0 }}>Tasa de embarque</p>
-                        <p style={{ fontSize: 11, color: C.mute, margin: "2px 0 0" }}>{bl.length} de {pp.length} pasajeros esperados embarcaron</p>
+                        <p style={{ fontSize: 11, color: C.mute, margin: "2px 0 0" }}>{abordados} de {pp.length} pasajeros esperados embarcaron</p>
                       </div>
                       <span style={{ fontFamily: C.fontMono, fontWeight: 900, color: pctColor, fontSize: 20 }}>{pct}%</span>
                     </div>
@@ -3479,9 +3492,10 @@ tbody tr:nth-child(even){background:#f9fafb}
                 <p style={{ color: C.mute, fontSize: 13, margin: "6px 0 0" }}>Los datos de boarding aparecerán cuando se configuren los paraderos</p>
               </div>
             ) : (paradas[reservaSel.id] || []).map(p => {
-              const bParada  = (boarding[reservaSel.id] || []).filter(b => b.parada_id === p.id);
-              const ppParada = (ppList[reservaSel.id] || []).filter(x => x.parada_id === p.id);
-              const pct      = ppParada.length > 0 ? Math.round((bParada.length / ppParada.length) * 100) : 0;
+              const ppParada    = (ppList[reservaSel.id] || []).filter(x => x.parada_id === p.id);
+              const blParada    = (boarding[reservaSel.id] || []).filter(b => b.parada_id === p.id); // método/hora si existe
+              const abordadosPar = ppParada.filter(esAbordado).length;
+              const pct      = ppParada.length > 0 ? Math.min(100, Math.round((abordadosPar / ppParada.length) * 100)) : 0;
               const pctColor = pct >= 80 ? C.success : pct >= 50 ? C.warn : C.danger;
               return (
                 <div key={p.id} style={{ background: C.surface, borderRadius: 16, overflow: "hidden" as const, border: `1px solid ${C.line}` }}>
@@ -3506,7 +3520,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                       </div>
                     </div>
                     <div style={{ textAlign: "right" as const }}>
-                      <p style={{ fontFamily: C.fontMono, fontWeight: 900, fontSize: 16, color: C.navy, margin: 0 }}>{bParada.length}/{ppParada.length}</p>
+                      <p style={{ fontFamily: C.fontMono, fontWeight: 900, fontSize: 16, color: C.navy, margin: 0 }}>{abordadosPar}/{ppParada.length}</p>
                       <p style={{ color: pctColor, fontSize: 11, fontWeight: 700, margin: "2px 0 0" }}>{pct}% cumplimiento</p>
                     </div>
                   </div>
@@ -3524,23 +3538,26 @@ tbody tr:nth-child(even){background:#f9fafb}
                         </thead>
                         <tbody>
                           {ppParada.map(x => {
-                            const emb = bParada.find(b => b.pasajero_id === x.pasajero_id);
+                            const embarco = esAbordado(x);
+                            const blRow   = blParada.find(b => b.pasajero_id === x.pasajero_id); // método/hora si existe
+                            const hora    = x.hora_abordaje || blRow?.timestamp || null;
+                            const esQR    = blRow?.metodo === "qr" || blRow?.metodo === "qr_conductor";
                             return (
                               <tr key={x.id} style={{ borderBottom: `1px solid ${C.line}` }}>
                                 <td style={{ padding: "10px 16px", fontWeight: 700, color: C.ink2 }}>{x.pasajero?.nombre || `#${x.pasajero_id}`}</td>
                                 <td style={{ padding: "10px 16px", fontFamily: C.fontMono, color: C.mute, fontSize: 11 }}>{x.pasajero?.dni || "–"}</td>
                                 <td style={{ padding: "10px 16px" }}>
-                                  <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: emb ? C.successTint : C.dangerTint, color: emb ? C.success : C.danger }}>
-                                    {emb
+                                  <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: embarco ? C.successTint : C.dangerTint, color: embarco ? C.success : C.danger }}>
+                                    {embarco
                                       ? <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
                                       : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>}
-                                    {emb ? "Embarcó" : "Pendiente"}
+                                    {embarco ? "Embarcó" : "Pendiente"}
                                   </span>
                                 </td>
-                                <td style={{ padding: "10px 16px", fontFamily: C.fontMono, color: C.mute, fontSize: 11 }}>{emb ? fmtTs(emb.timestamp) : "–"}</td>
+                                <td style={{ padding: "10px 16px", fontFamily: C.fontMono, color: C.mute, fontSize: 11 }}>{hora ? fmtTs(hora) : "–"}</td>
                                 <td style={{ padding: "10px 16px", color: C.mute2, fontSize: 11 }}>
-                                  {emb ? (
-                                    emb.metodo === "qr"
+                                  {!blRow?.metodo ? "–" : (
+                                    esQR
                                       ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: C.navy, fontWeight: 600 }}>
                                           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                                           QR
@@ -3549,7 +3566,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                                           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
                                           Manual
                                         </span>
-                                  ) : "–"}
+                                  )}
                                 </td>
                               </tr>
                             );
@@ -3570,7 +3587,6 @@ tbody tr:nth-child(even){background:#f9fafb}
             {(() => {
               const sinParada = (ppList[reservaSel.id] || []).filter(x => !x.parada_id);
               if (sinParada.length === 0) return null;
-              const bl = boarding[reservaSel.id] || [];
               return (
                 <div style={{ background: C.surface, borderRadius: 16, overflow: "hidden" as const, border: `1px solid ${C.line}` }}>
                   <div style={{ padding: "14px 20px", background: C.warnTint, borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -3596,14 +3612,14 @@ tbody tr:nth-child(even){background:#f9fafb}
                       </thead>
                       <tbody>
                         {sinParada.map(x => {
-                          const emb = bl.find(b => b.pasajero_id === x.pasajero_id);
+                          const embarco = esAbordado(x);
                           return (
                             <tr key={x.id} style={{ borderBottom: `1px solid ${C.line}` }}>
                               <td style={{ padding: "10px 16px", fontWeight: 700, color: C.ink2 }}>{x.pasajero?.nombre || `#${x.pasajero_id}`}</td>
                               <td style={{ padding: "10px 16px", fontFamily: C.fontMono, color: C.mute, fontSize: 11 }}>{x.pasajero?.dni || "–"}</td>
                               <td style={{ padding: "10px 16px" }}>
-                                <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: emb ? C.successTint : C.warnTint, color: emb ? C.success : C.warn }}>
-                                  {emb ? "Embarcó" : "Sin paradero"}
+                                <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: embarco ? C.successTint : C.warnTint, color: embarco ? C.success : C.warn }}>
+                                  {embarco ? "Embarcó" : "Sin paradero"}
                                 </span>
                               </td>
                             </tr>
