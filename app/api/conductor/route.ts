@@ -57,6 +57,64 @@ export async function POST(req: NextRequest) {
     const accion = body.accion as string;
 
     switch (accion) {
+      // ── Login del lector web (DNI + PIN) ─────────────────────────────────────
+      // Verifica credenciales en el SERVIDOR para no exponer pin_acceso al cliente
+      // (a diferencia del login del APK, que consulta anon). Busca primero en
+      // conductores propios y luego en conductores_tercero. Mismo gate activo_app.
+      case "login": {
+        const { dni, pin } = body;
+        if (!dni || !pin) return NextResponse.json({ error: "dni y pin requeridos" }, { status: 400 });
+        const dniT = String(dni).trim();
+
+        for (const tabla of ["conductores", "conductores_tercero"] as const) {
+          const { data: c } = await admin.from(tabla)
+            .select("id,nombre,dni,telefono,pin_acceso,activo_app")
+            .eq("dni", dniT).maybeSingle();
+          if (!c) continue;
+          if (!c.activo_app) return NextResponse.json({ ok: false, error: "Acceso no activado. Llama a central." });
+          if (String(c.pin_acceso ?? "") !== String(pin)) return NextResponse.json({ ok: false, error: "PIN incorrecto" });
+          return NextResponse.json({
+            ok: true,
+            conductor: { id: c.id, nombre: c.nombre, dni: c.dni, tabla },
+          });
+        }
+        return NextResponse.json({ ok: false, error: "DNI no encontrado" });
+      }
+
+      // ── Servicios de HOY de un conductor (para el selector del lector) ───────
+      // Trae las reservas del conductor (propio o tercero) con su vehículo unido,
+      // sea propio (vehiculos) o tercero (vehiculos_tercero). Service_role evita que
+      // RLS bloquee las lecturas de terceros.
+      case "lector_servicios": {
+        const { cid, tabla, hoy } = body;
+        if (!cid || !hoy) return NextResponse.json({ error: "cid y hoy requeridos" }, { status: 400 });
+        const condField = tabla === "conductores_tercero" ? "conductor_tercero_id" : "conductor_id";
+        const { data, error } = await admin.from("reservas")
+          .select("id,origen,destino,fecha_servicio,hora_servicio,estado,vehiculo_id,vehiculo_tercero_id," +
+            "vehiculo:vehiculos(id,placa,categoria),vehiculo_tercero:vehiculos_tercero(id,placa,categoria)")
+          .eq("fecha_servicio", hoy).eq(condField, cid).order("hora_servicio");
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ reservas: data || [] });
+      }
+
+      // ── Ruta de una reserva (reserva + paradas) para el lector ──────────────
+      case "lector_ruta": {
+        const { reservaId } = body;
+        if (!reservaId) return NextResponse.json({ error: "reservaId requerido" }, { status: 400 });
+        const [{ data: reserva, error: eR }, { data: paradas, error: eP }] = await Promise.all([
+          admin.from("reservas")
+            .select("id,origen,destino,fecha_servicio,hora_servicio,estado,vehiculo_id,vehiculo_tercero_id," +
+              "vehiculo:vehiculos(id,placa,categoria),vehiculo_tercero:vehiculos_tercero(id,placa,categoria)")
+            .eq("id", reservaId).maybeSingle(),
+          admin.from("paradas")
+            .select("id,nombre,orden,hora_estimada,lat,lng,estado")
+            .eq("reserva_id", reservaId).order("orden"),
+        ]);
+        if (eR) return NextResponse.json({ error: eR.message }, { status: 500 });
+        if (eP) return NextResponse.json({ error: eP.message }, { status: 500 });
+        return NextResponse.json({ reserva: reserva || null, paradas: paradas || [] });
+      }
+
       // ── Datos del home (reservas de hoy + vehículos + docs + checklist) ──────
       case "inicio": {
         const { cid, tabla, hoy } = body;

@@ -684,8 +684,13 @@ export default function ConductorApp() {
     // Throttle: máx. 1 punto cada 10 s, salvo el envío de cierre ("finalizado").
     const ahora = Date.now();
     if (estado !== "finalizado" && ahora - lastSentRef.current < 10000) return;
-    // Descartar fixes imprecisos (fallback a red/WiFi >80 m) salvo cierre de servicio.
-    if (estado !== "finalizado" && pos.coords.accuracy > 80) return;
+    // NO bloquear el rastreo en vivo por imprecisión: en aparatos sin chip GPS
+    // (tablet WiFi-only, FUSED por red) los fixes son >80 m y descartarlos aquí
+    // dejaba al vehículo INVISIBLE en central aunque "GPS activo". El suavizado de
+    // la huella y la compuerta de confianza viven en la LECTURA (ModalGps.tsx:
+    // Map Matching + precision_m), así que aquí enviamos siempre y solo
+    // descartamos un fix basura de torre celular (varios km).
+    if (estado !== "finalizado" && pos.coords.accuracy > 1500) return;
     lastSentRef.current = ahora;
     // "en_ruta" sólo si hay SERVICIO activo (res); conectado-libre → "disponible".
     const estadoFinal = estado || (res ? "en_ruta" : "disponible");

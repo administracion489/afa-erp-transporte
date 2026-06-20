@@ -81,6 +81,16 @@ function fmtHoraLlegada(m:number): string {
   const d = new Date(Date.now() + m * 60 * 1000);
   return d.toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Lima" });
 }
+// Minutos desde medianoche de un "HH:MM" / "HH:MM:SS". Sin hora válida → Infinity (queda al final).
+function minutosDelDia(h: string | null | undefined): number {
+  const [hh, mm] = String(h || "").slice(0, 5).split(":").map(Number);
+  if (Number.isNaN(hh) || Number.isNaN(mm)) return Number.POSITIVE_INFINITY;
+  return hh * 60 + mm;
+}
+// Hora actual de Lima en minutos desde medianoche.
+function ahoraLimaMin(): number {
+  return minutosDelDia(new Date().toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Lima" }));
+}
 function ini(n:string): string { return n.split(" ").slice(0,2).map(w=>w[0]).join("").toUpperCase(); }
 
 // Detectar si es iOS
@@ -900,12 +910,19 @@ export default function AppPasajero() {
         const disponibles: any[] = reservas || [];
         // Dedup defensivo por id en el cliente
         const unicos = Array.from(new Map(disponibles.map((r: any) => [r.id, r])).values());
+        // Orden cronológico fijo: siempre ascendente por hora (20:15 antes que 22:30),
+        // sin importar la hora actual. El estado "En ruta" / "Próximo" se calcula al
+        // pintar (ver el .map de reservasDisp), así el pasajero ve sus horarios en orden
+        // y el sistema le avisa cuál ya salió y cuál es el siguiente. Sin hora → al final.
+        const ordenadas = unicos.slice().sort(
+          (a: any, b: any) => minutosDelDia(a.hora_servicio) - minutosDelDia(b.hora_servicio)
+        );
         // Si solo hay una opción, ir directo al paso 2 (elegir paradero)
-        if (unicos.length === 1) {
-          setSelRutaId(unicos[0].id);
+        if (ordenadas.length === 1) {
+          setSelRutaId(ordenadas[0].id);
           setSelParadaId(null);
         }
-        setReservasDisp(unicos);
+        setReservasDisp(ordenadas);
       } catch { /* silencioso */ }
       return;
     }
@@ -1629,33 +1646,53 @@ export default function AppPasajero() {
                   {reservasDisp.length > 0 ? (
                     /* ── AUTOSELECCIÓN: hay buses disponibles ── */
                     selRutaId === null ? (
-                      /* Paso 1: elegir bus/ruta */
+                      /* Paso 1: elegir ruta/servicio */
                       <>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
                           <StatusDot color="var(--navy)" size={7} pulse />
-                          <Eyebrow color="var(--navy)">Elige tu bus de hoy</Eyebrow>
+                          <Eyebrow color="var(--navy)">Elige tu ruta de hoy</Eyebrow>
                         </div>
                         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                          {reservasDisp.map((r: any) => (
-                            <button
-                              key={r.id}
-                              onClick={() => { setSelRutaId(r.id); setSelParadaId(null); }}
-                              style={{ textAlign: "left", padding: "14px 16px", borderRadius: 16, border: "1.5px solid var(--line2)", background: "var(--surface)", cursor: "pointer", fontFamily: "var(--f)", display: "flex", alignItems: "center", gap: 14 }}
-                            >
-                              <div style={{ width: 44, height: 44, borderRadius: 12, background: "var(--navy-tint)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                                <IconBus sz={22} c="var(--navy)" />
-                              </div>
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <p style={{ margin: 0, fontWeight: 800, fontSize: 14, color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {r.ruta_nombre || `${r.origen} → ${r.destino}`}
-                                </p>
-                                <p style={{ margin: "3px 0 0", fontSize: 12, color: "var(--mute)" }}>
-                                  Hoy · {(r.hora_servicio || "—").slice(0, 5)} · {(r.paradas || []).length} paraderos
-                                </p>
-                              </div>
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--mute2)" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
-                            </button>
-                          ))}
+                          {(() => {
+                            // Avisos calculados con hora de Lima (la lista ya viene ascendente).
+                            // "Próximo" = primer servicio que aún no sale; los previos ya están "En ruta".
+                            const ahoraMin = ahoraLimaMin();
+                            const idxProximo = reservasDisp.findIndex((r: any) => minutosDelDia(r.hora_servicio) >= ahoraMin);
+                            return reservasDisp.map((r: any, i: number) => {
+                              const m        = minutosDelDia(r.hora_servicio);
+                              const enRuta   = Number.isFinite(m) && m < ahoraMin;
+                              const esProximo = i === idxProximo;
+                              return (
+                                <button
+                                  key={r.id}
+                                  onClick={() => { setSelRutaId(r.id); setSelParadaId(null); }}
+                                  style={{ textAlign: "left", padding: "14px 16px", borderRadius: 16, border: `1.5px solid ${esProximo ? "var(--navy)" : "var(--line2)"}`, background: "var(--surface)", cursor: "pointer", fontFamily: "var(--f)", display: "flex", alignItems: "center", gap: 14 }}
+                                >
+                                  <div style={{ width: 44, height: 44, borderRadius: 12, background: "var(--navy-tint)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                                    <IconBus sz={22} c="var(--navy)" />
+                                  </div>
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <p style={{ margin: 0, fontWeight: 800, fontSize: 14, color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                      {r.ruta_nombre || `${r.origen} → ${r.destino}`}
+                                    </p>
+                                    <p style={{ margin: "3px 0 0", fontSize: 12, color: "var(--mute)" }}>
+                                      Hoy · {(r.hora_servicio || "—").slice(0, 5)} · {(r.paradas || []).length} paraderos
+                                    </p>
+                                  </div>
+                                  {enRuta ? (
+                                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 800, letterSpacing: 0.2, color: "var(--success)", background: "var(--success-tint)", padding: "4px 9px", borderRadius: 999, flexShrink: 0, whiteSpace: "nowrap" }}>
+                                      <StatusDot color="var(--success)" size={6} /> En ruta
+                                    </span>
+                                  ) : esProximo ? (
+                                    <span style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.2, color: "var(--navy)", background: "var(--navy-tint)", padding: "4px 9px", borderRadius: 999, flexShrink: 0, whiteSpace: "nowrap" }}>
+                                      Próximo
+                                    </span>
+                                  ) : null}
+                                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--mute2)" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
+                                </button>
+                              );
+                            });
+                          })()}
                         </div>
                         <button onClick={() => cargarMiRuta(pasajero.id)} style={{ marginTop: 14, width: "100%", padding: "10px", borderRadius: 12, border: "1px solid var(--line)", background: "transparent", color: "var(--mute)", fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "var(--f)" }}>
                           Actualizar
