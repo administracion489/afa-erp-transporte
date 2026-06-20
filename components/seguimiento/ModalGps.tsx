@@ -64,6 +64,37 @@ function suavizarHuella<T extends { lat: number; lng: number }>(pts: T[]): T[] {
   });
 }
 
+// Bearing geodésico (0-360) entre dos puntos GPS. Usado cuando el GPS no reporta rumbo.
+function calcBearing(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const dL = (lng2 - lng1) * Math.PI / 180;
+  const r1 = lat1 * Math.PI / 180, r2 = lat2 * Math.PI / 180;
+  const y = Math.sin(dL) * Math.cos(r2);
+  const x = Math.cos(r1) * Math.sin(r2) - Math.sin(r1) * Math.cos(r2) * Math.cos(dL);
+  return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
+}
+
+// Ajusta la huella GPS a la red vial usando Mapbox Map Matching API.
+// Muestrea ≤100 puntos (límite de la API), radio de búsqueda 50 m.
+async function mapMatchTrail(
+  pts: { lat: number; lng: number }[],
+  token: string
+): Promise<[number, number][] | null> {
+  const N = Math.max(1, Math.ceil(pts.length / 100));
+  const sample = pts.filter((_, i) => i % N === 0 || i === pts.length - 1);
+  if (sample.length < 2) return null;
+  const coords = sample.map(p => `${p.lng},${p.lat}`).join(";");
+  const radii  = sample.map(() => "50").join(";");
+  try {
+    const res = await fetch(
+      `https://api.mapbox.com/matching/v5/mapbox/driving/${coords}?geometries=geojson&radiuses=${radii}&access_token=${token}`
+    );
+    if (!res.ok) return null;
+    const json = await res.json();
+    const c: [number, number][] = json?.matchings?.[0]?.geometry?.coordinates;
+    return c?.length >= 2 ? c : null;
+  } catch { return null; }
+}
+
 export default function ModalGps({
   reservaId, vehiculoId, vehiculoTerceroId = null, vehiculoPlaca, conductorNombre,
   conductorTel, clienteNombre, paradas, paradasJson, origen, destino, onClose,
@@ -71,7 +102,8 @@ export default function ModalGps({
   const mapRef    = useRef<HTMLDivElement>(null);
   const mapInst   = useRef<any>(null);
   const markerRef = useRef<any>(null);
-  const ubicRef   = useRef<UbicGps | null>(null);
+  const ubicRef    = useRef<UbicGps | null>(null);
+  const prevUbicRef = useRef<{ lat: number; lng: number } | null>(null);
 
   const [ubic,           setUbic]           = useState<UbicGps | null>(null);
   const [errorMapa,      setErrorMapa]      = useState(false);
@@ -83,6 +115,7 @@ export default function ModalGps({
   const [errorRuta,         setErrorRuta]         = useState<string | null>(null);
   const [paradasResueltas,  setParadasResueltas]  = useState<Parada[]>([]);
   const [huella,            setHuella]            = useState<{lat:number;lng:number;velocidad:number}[]>([]);
+  const [matchedCoords,     setMatchedCoords]     = useState<[number, number][] | null>(null);
   const stopMarkersRef = useRef<any[]>([]);
   // ETA dinámica: posición actual del vehículo → próxima parada (Google Directions)
   const [etaMin, setEtaMin] = useState<number | null>(null);
@@ -287,8 +320,8 @@ export default function ModalGps({
 
   useEffect(() => {
     let cancel = false;
-    // Estela vía endpoint service_role (sin RLS) — para terceros los puntos no tienen
-    // reserva_id, así que el endpoint cae a vehiculo_tercero_id acotado a las últimas 12 h.
+    let lastMatchMs = 0;
+    const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
     const cargar = async () => {
       try {
         const res = await fetch("/api/cliente/gps", {
@@ -299,7 +332,16 @@ export default function ModalGps({
         const json = await res.json();
         const arr = Array.isArray(json?.huella) ? json.huella : [];
         if (!cancel && arr.length > 0) {
-          setHuella(arr.map((d: any) => ({ lat: d.lat, lng: d.lng, velocidad: d.velocidad ?? 0 })));
+          const pts = arr.map((d: any) => ({ lat: d.lat, lng: d.lng, velocidad: d.velocidad ?? 0 }));
+          setHuella(pts);
+          // Map Matching: ajustar huella a la red vial. Máx. una vez por minuto para no
+          // exceder el límite de la API de Mapbox ($0.50 / 1000 llamadas).
+          const ahora = Date.now();
+          if (token && ahora - lastMatchMs >= 60000) {
+            lastMatchMs = ahora;
+            const matched = await mapMatchTrail(pts, token);
+            if (!cancel && matched) setMatchedCoords(matched);
+          }
         }
       } catch { /* conservar estela previa */ }
     };
@@ -308,35 +350,43 @@ export default function ModalGps({
     return () => { cancel = true; clearInterval(iv); };
   }, [reservaId, vehiculoId, vehiculoTerceroId]); // eslint-disable-line
 
-  // ── CAPA 2: Dibujar huella GPS coloreada por velocidad ───────────────────
+  // ── CAPA 2: Dibujar huella GPS (ajustada a carretera si hay Map Matching) ───
 
   useEffect(() => {
-    if (!mapListo || !mapInst.current || huella.length < 2) return;
+    if (!mapListo || !mapInst.current) return;
+    if (!matchedCoords && huella.length < 2) return;
     const map = mapInst.current;
     try {
       if (map.getLayer("huella-gps-line")) map.removeLayer("huella-gps-line");
       if (map.getSource("huella-gps"))    map.removeSource("huella-gps");
 
-      const pts = suavizarHuella(huella);
-      const features: any[] = [];
-      for (let i = 0; i < pts.length - 1; i++) {
-        features.push({
-          type: "Feature",
-          properties: { velocidad: pts[i].velocidad ?? 0 },
-          geometry: { type: "LineString", coordinates: [[pts[i].lng, pts[i].lat], [pts[i + 1].lng, pts[i + 1].lat]] },
+      if (matchedCoords && matchedCoords.length >= 2) {
+        // Ruta ajustada a la red vial vía Mapbox Map Matching — sigue la carretera real.
+        map.addSource("huella-gps", { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: matchedCoords } } });
+        map.addLayer({ id: "huella-gps-line", type: "line", source: "huella-gps",
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: { "line-width": 5, "line-opacity": 0.9, "line-color": "#dc2626" },
+        });
+      } else {
+        // Fallback: huella cruda suavizada (mientras Map Matching carga o si falla).
+        const pts = suavizarHuella(huella);
+        const features: any[] = [];
+        for (let i = 0; i < pts.length - 1; i++) {
+          features.push({
+            type: "Feature",
+            properties: { velocidad: pts[i].velocidad ?? 0 },
+            geometry: { type: "LineString", coordinates: [[pts[i].lng, pts[i].lat], [pts[i + 1].lng, pts[i + 1].lat]] },
+          });
+        }
+        map.addSource("huella-gps", { type: "geojson", data: { type: "FeatureCollection", features } });
+        map.addLayer({ id: "huella-gps-line", type: "line", source: "huella-gps",
+          paint: { "line-width": 5, "line-opacity": 0.9,
+            "line-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"],
+          },
         });
       }
-
-      map.addSource("huella-gps", { type: "geojson", data: { type: "FeatureCollection", features } });
-      map.addLayer({
-        id: "huella-gps-line", type: "line", source: "huella-gps",
-        paint: {
-          "line-width": 5, "line-opacity": 0.9,
-          "line-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"],
-        },
-      });
     } catch (e) { console.error("[ModalGps] Error dibujando huella GPS:", e); }
-  }, [huella, mapListo]);
+  }, [huella, matchedCoords, mapListo]);
 
   // ── Marcadores numerados con etiqueta de texto ────────────────────────────
 
@@ -460,7 +510,15 @@ export default function ModalGps({
   useEffect(() => {
     if (!ubic || !mapListo || !mapInst.current) return;
     const lngLat: [number, number] = [ubic.lng, ubic.lat];
-    const rot = Number(ubic.rumbo) || 0;
+    // Heading: usar rumbo del GPS si es válido (>0). Si no (detenido o sensor sin dato),
+    // calcular desde el desplazamiento respecto al punto anterior.
+    const rawRumbo = Number(ubic.rumbo);
+    const rot = rawRumbo > 0
+      ? rawRumbo
+      : (prevUbicRef.current && (ubic.lat !== prevUbicRef.current.lat || ubic.lng !== prevUbicRef.current.lng))
+          ? calcBearing(prevUbicRef.current.lat, prevUbicRef.current.lng, ubic.lat, ubic.lng)
+          : rawRumbo;
+    prevUbicRef.current = { lat: ubic.lat, lng: ubic.lng };
     // Color del pulso según antigüedad de la señal (igual que el mapa "En vivo").
     const fechaRef = ubic.created_at || ubic.timestamp;
     const edadS = fechaRef ? (Date.now() - new Date(fechaRef).getTime()) / 1000 : 9999;
@@ -468,7 +526,7 @@ export default function ModalGps({
 
     if (markerRef.current) {
       markerRef.current.setLngLat(lngLat);
-      if (ubic.rumbo !== undefined && ubic.rumbo !== null) markerRef.current.setRotation(rot);
+      markerRef.current.setRotation(rot);
       // Mantener el color del pulso en sync con el estado de señal.
       const elc = markerRef.current.getElement();
       const p1 = elc?.querySelector(".afa-pulse1") as HTMLElement | null;
