@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
+import { animarMarcador } from "@/lib/anim-marker";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || '';
 
@@ -42,14 +43,19 @@ function estadoLabel(min: number): string {
 }
 
 // Llave compuesta NO ambigua para asociar puntos GPS a un movil/conductor en vivo.
-// Prioriza reserva_id; luego conductor_tercero_id -> conductor_id -> vehiculo_tercero_id -> vehiculo_id.
+// Prioriza la IDENTIDAD ESTABLE del móvil (conductor -> vehículo); reserva_id va al FINAL.
+// Por qué NO reserva_id primero: con "Conectarse" (estilo Uber) un mismo conductor alterna
+// reserva_id=null (conectado-libre, "disponible") y reserva_id=X (en servicio, "en_ruta") en
+// una sola sesión. Si la clave fuera reserva_id, el MISMO móvil se partía en 2 marcadores
+// (uno "en línea" y otro "rancio") y descuadraba los contadores. Por conductor/vehículo, colapsa
+// a UN solo marcador aunque su reserva cambie.
 // Importante: los IDs se solapan entre tablas AFA y _tercero, por eso el prefijo distingue el origen.
 function keyGps(u: { reserva_id?: number | null; conductor_tercero_id?: number | null; conductor_id?: number | null; vehiculo_tercero_id?: number | null; vehiculo_id?: number | null; id?: number }): string {
-  if (u.reserva_id != null) return `r${u.reserva_id}`;
   if (u.conductor_tercero_id != null) return `ct${u.conductor_tercero_id}`;
   if (u.conductor_id != null) return `c${u.conductor_id}`;
   if (u.vehiculo_tercero_id != null) return `vt${u.vehiculo_tercero_id}`;
   if (u.vehiculo_id != null) return `v${u.vehiculo_id}`;
+  if (u.reserva_id != null) return `r${u.reserva_id}`;
   return `id${u.id}`;
 }
 
@@ -101,7 +107,7 @@ export default function MonitoreoPage() {
       .order("timestamp", { ascending: false })
       .limit(500);
     if (!data) return;
-    // Clave compuesta NO ambigua (reserva_id -> ct/c/vt/v). Ver keyGps().
+    // Clave compuesta NO ambigua por móvil (ct/c/vt/v -> reserva_id). Ver keyGps().
     const latest: Record<string, UbicacionGPS> = {};
     data.forEach(u => {
       const key = keyGps(u);
@@ -208,7 +214,7 @@ export default function MonitoreoPage() {
       const color    = estadoColor(min);
       const esSOS    = u.estado === "sos";
       const sinVeh   = u.vehiculo_id == null && u.vehiculo_tercero_id == null;
-      // Clave compuesta NO ambigua (reserva_id -> ct/c/vt/v). Ver keyGps().
+      // Clave compuesta NO ambigua por móvil (ct/c/vt/v -> reserva_id). Ver keyGps().
       const key = keyGps(u);
 
       // Crear elemento del marcador
@@ -227,7 +233,7 @@ export default function MonitoreoPage() {
         : "<div style='font-family:sans-serif;min-width:180px;padding:4px'><div style='font-weight:900;font-size:14px;color:#0b315f;margin-bottom:4px'>" + (placa || "#" + (u.vehiculo_tercero_id ?? u.vehiculo_id)) + (esSOS ? " ⚠ SOS" : "") + "</div><div style='font-size:12px;color:#374151;margin-bottom:4px'>" + (nombre || "-") + "</div><div style='font-size:12px;color:#374151;margin-bottom:4px'>" + (u.velocidad || 0) + " km/h</div><div style='font-size:11px;font-weight:700;color:" + color + ";'>" + estadoLabel(min) + "</div>" + (telefono ? "<a href='tel:" + telefono + "' style='display:block;margin-top:8px;background:#0b315f;color:white;text-align:center;padding:6px;border-radius:8px;font-size:11px;text-decoration:none;'>" + telefono + "</a>" : "") + "</div>";
 
       if (markers.current[key]) {
-        markers.current[key].setLngLat([Number(u.lng), Number(u.lat)]);
+        animarMarcador(markers.current[key], [Number(u.lng), Number(u.lat)]);
       } else {
         const popup = new mapboxgl.Popup({ offset: 25, closeButton: true }).setHTML(popupHtml);
         const marker = new mapboxgl.Marker({ element: el })

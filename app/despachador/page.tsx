@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { etiquetaEstado } from "@/lib/estados";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
+import { animarMarcador } from "@/lib/anim-marker";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 
@@ -264,9 +265,9 @@ export default function DespachadorPage() {
       const key = keyGps(u);
       if (!key) return;
 
-      // Si ya existe el marcador, solo actualizamos posición
+      // Si ya existe el marcador, deslizarlo suavemente a la nueva posición.
       if (markers.current[key]) {
-        markers.current[key].setLngLat([Number(u.lng), Number(u.lat)]);
+        animarMarcador(markers.current[key], [Number(u.lng), Number(u.lat)]);
         return;
       }
 
@@ -387,7 +388,10 @@ export default function DespachadorPage() {
 
   useEffect(() => {
     cargarDatos();
-    const id = setInterval(actualizarGPS, 30_000);
+    // Despachador es poll-only (sin realtime). Refresco cada 12 s para acercarse al
+    // ritmo de envío adaptativo del conductor (3-5 s en marcha). Para vivo-instantáneo
+    // conviene añadir suscripción realtime como en /monitoreo (pendiente).
+    const id = setInterval(actualizarGPS, 12_000);
     return () => clearInterval(id);
   }, [cargarDatos, actualizarGPS]);
 

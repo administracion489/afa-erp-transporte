@@ -106,9 +106,18 @@ export async function GET(req: NextRequest) {
     // Fallback: el registro GPS puede no tener reserva_id. Ramificar por columna
     // correcta — los IDs se solapan entre vehiculos y vehiculos_tercero, así que
     // un id de tercero NO debe buscarse dentro de la columna vehiculo_id.
+    // IMPORTANTE: con la función "Conectarse" (estilo Uber) el conductor emite su
+    // posición SIN reserva (estado "disponible") antes/después del servicio. El
+    // pasajero NO debe ver al móvil en modo conectado-libre ni una posición rancia
+    // de un servicio anterior del mismo vehículo: excluimos "disponible" y acotamos
+    // a los últimos 15 min. (Durante el servicio real el punto SÍ lleva reserva_id,
+    // así que lo cubre la consulta primaria de arriba.)
+    const hace15min = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     let query = supabase
       .from("ubicaciones_gps")
       .select("lat, lng, velocidad, rumbo, estado, created_at")
+      .neq("estado", "disponible")
+      .gte("created_at", hace15min)
       .order("created_at", { ascending: false })
       .limit(1);
 

@@ -67,13 +67,16 @@ index 97ff3a8..c681a57 100644
 +    // (p.ej. Redmi Pad SE) FUSED/NETWORK entregan posición por red/WiFi. El proveedor
 +    // que el dispositivo tenga entrega; el resto se ignora sin romper nada. El plugin
 +    // original sólo escuchaba GPS_PROVIDER, por eso daba 0 fixes en equipos sin GPS.
-+    // Heartbeat por TIEMPO (no por distancia): entrega una posición cada ~10 s AUNQUE
-+    // el vehículo esté detenido, en primer y segundo plano, para que el despachador
-+    // siempre vea al conductor (paradero, tráfico, Waze encima). minDistance=0 evita
-+    // que GMS bloquee entregas "too close" al estar quieto (el distanceFilter del JS
-+    // se ignora a propósito a favor del heartbeat). Con fixes regulares, además, el
-+    // watchdog de 60 s nunca dispara.
-+    private static final long HEARTBEAT_INTERVAL_MS = 10000;
++    // Heartbeat por TIEMPO (no por distancia): es el PISO DE CAPTURA. Pide al proveedor
++    // un fix tan seguido como ~2 s, en primer y segundo plano, AUNQUE el vehículo esté
++    // detenido (minDistance=0 evita que GMS bloquee entregas "too close" al estar quieto;
++    // el distanceFilter del JS se ignora a propósito a favor del heartbeat). Captar rápido
++    // NO significa enviar rápido: el lado JS (intervaloEnvioMs en app/conductor) decide el
++    // ritmo REAL de envío de forma ADAPTATIVA (3-5 s en marcha, ~25 s detenido) para no
++    // malgastar batería/datos/costo. Con fixes regulares, además, el watchdog de 60 s nunca
++    // dispara. NOTA batería: 2 s mantiene el chip GPS más activo; subir a 3000-5000 si se
++    // prioriza autonomía (el envío adaptativo seguirá topando en el piso que se elija).
++    private static final long HEARTBEAT_INTERVAL_MS = 2000;
 +
 +    private void requestLocationUpdatesMultiProvider(float distanceFilter) {
 +        if (client == null || locationCallback == null) {

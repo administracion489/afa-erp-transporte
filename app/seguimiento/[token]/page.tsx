@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import "mapbox-gl/dist/mapbox-gl.css";
+import { animarMarcador } from "@/lib/anim-marker";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 type Parada = {
@@ -246,7 +247,7 @@ export default function SeguimientoPage() {
     const lngLat: [number, number] = [lng, lat];
 
     if (busMarkerRef.current) {
-      busMarkerRef.current.setLngLat(lngLat);
+      animarMarcador(busMarkerRef.current, lngLat); // deslizar suave entre puntos
       if (ubicacion.rumbo != null && !isNaN(Number(ubicacion.rumbo))) {
         busMarkerRef.current.setRotation(Number(ubicacion.rumbo));
       }

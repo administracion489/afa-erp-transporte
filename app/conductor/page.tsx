@@ -206,6 +206,46 @@ function fechaTitulo(): { dow: string; fecha: string } {
   return { dow: dow.toUpperCase(), fecha };
 }
 
+// ─── Ritmo de envío GPS ADAPTATIVO ────────────────────────────────────────────
+// Distancia en metros entre dos posiciones (haversine). Sirve para enviar ANTES del
+// intervalo por tiempo cuando el móvil dio un salto grande entre capturas (curva,
+// aceleración) y así no "cortar" la huella.
+function distanciaMetros(a: GeoPos, b: GeoPos): number {
+  const R = 6371000;
+  const toRad = (x: number) => (x * Math.PI) / 180;
+  const dLat = toRad(b.coords.latitude - a.coords.latitude);
+  const dLng = toRad(b.coords.longitude - a.coords.longitude);
+  const lat1 = toRad(a.coords.latitude);
+  const lat2 = toRad(b.coords.latitude);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+// Intervalo OBJETIVO de envío según la marcha. GPS vehicular: frecuente cuando importa
+// (rápido, cerca de paradero, emergencia) y espaciado detenido para ahorrar batería,
+// datos y costo de backend. El piso de CAPTURA lo fija el plugin nativo
+// (HEARTBEAT_INTERVAL_MS en patches/@capgo+background-geolocation+8.0.40.patch); aquí
+// solo decidimos CUÁNDO enviar cada fix capturado.
+function intervaloEnvioMs(kmh: number, cercaParadero: boolean, emergencia: boolean): number {
+  if (emergencia)    return 2000;   // SOS: lo más rápido que permita la captura
+  if (cercaParadero) return 3000;   // arribo/embarque: precisar la maniobra
+  if (kmh < 3)       return 25000;  // detenido: solo heartbeat de presencia
+  if (kmh < 20)      return 8000;   // lento / maniobras / tráfico denso
+  if (kmh < 60)      return 4000;   // urbano
+  return 3000;                      // carretera: más seguido para no saltar la huella
+}
+
+// true si la posición está a < UMBRAL_PARADERO_M de alguna parada con coordenadas.
+const UMBRAL_PARADERO_M = 150;
+function cercaDeAlgunParadero(pos: GeoPos, paradas: { lat: number | null; lng: number | null }[]): boolean {
+  for (const p of paradas) {
+    if (p.lat == null || p.lng == null) continue;
+    const d = distanciaMetros(pos, { coords: { latitude: p.lat, longitude: p.lng, accuracy: 0 } });
+    if (d < UMBRAL_PARADERO_M) return true;
+  }
+  return false;
+}
+
 // ─── SESSION ──────────────────────────────────────────────────────────────────
 
 const SK = "afa_cond_v2";
@@ -381,16 +421,19 @@ export default function ConductorApp() {
   const reintentoRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
   const intentosRef      = useRef(0);
   const lastSentRef      = useRef(0);
+  const lastSentPosRef   = useRef<GeoPos | null>(null); // última posición ENVIADA (gate por distancia)
   const drenarColaRef    = useRef<() => void>(() => {});
   // Refs estables para GPS (evitan closures obsoletos en setInterval)
   const vehiculoIdRef    = useRef<number | null>(null);
   const conductorRef     = useRef<Conductor | null>(null);
   const reservaActivaRef = useRef<Reserva | null>(null);
+  const paradasRef       = useRef<Parada[]>([]); // para el gate "cerca de paradero" del envío
 
   // ── Sync refs (para GPS sin closures obsoletos) ────────────────────────────
   useEffect(() => { vehiculoIdRef.current    = vehiculoId;    }, [vehiculoId]);
   useEffect(() => { conductorRef.current     = conductor;     }, [conductor]);
   useEffect(() => { reservaActivaRef.current = reservaActiva; }, [reservaActiva]);
+  useEffect(() => { paradasRef.current       = paradas;       }, [paradas]);
 
   // ── Tick para refrescar countdown y duración (1 minuto) ────────────────────
   const [tick, setTick] = useState(0);
@@ -681,17 +724,25 @@ export default function ConductorApp() {
     if (!cond) return;                        // sólo necesitamos el conductor
     const vel = pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0;
     setVelocidad(vel);
-    // Throttle: máx. 1 punto cada 10 s, salvo el envío de cierre ("finalizado").
     const ahora = Date.now();
-    if (estado !== "finalizado" && ahora - lastSentRef.current < 10000) return;
-    // NO bloquear el rastreo en vivo por imprecisión: en aparatos sin chip GPS
-    // (tablet WiFi-only, FUSED por red) los fixes son >80 m y descartarlos aquí
-    // dejaba al vehículo INVISIBLE en central aunque "GPS activo". El suavizado de
-    // la huella y la compuerta de confianza viven en la LECTURA (ModalGps.tsx:
-    // Map Matching + precision_m), así que aquí enviamos siempre y solo
-    // descartamos un fix basura de torre celular (varios km).
-    if (estado !== "finalizado" && pos.coords.accuracy > 1500) return;
+    // Cierre de servicio o SOS → enviar SIEMPRE (no se throttlea).
+    const forzar = estado === "finalizado" || estado === "sos";
+    if (!forzar) {
+      // NO bloquear el rastreo en vivo por imprecisión: en aparatos sin chip GPS
+      // (tablet WiFi-only, FUSED por red) los fixes son >80 m; el suavizado/confianza
+      // ya vive en la LECTURA (ModalGps.tsx). Aquí solo cortamos basura de torre celular.
+      if (pos.coords.accuracy > 1500) return;
+      // Throttle ADAPTATIVO: el intervalo objetivo depende de la marcha (ver
+      // intervaloEnvioMs). Además, si el móvil saltó > 60 m desde el último envío,
+      // refrescar YA aunque no toque el tiempo. Piso anti-spam de 2.5 s (protege el API).
+      const objetivo = intervaloEnvioMs(vel, cercaDeAlgunParadero(pos, paradasRef.current), false);
+      const dt = ahora - lastSentRef.current;
+      const distMov = lastSentPosRef.current ? distanciaMetros(pos, lastSentPosRef.current) : Infinity;
+      if (dt < 2500) return;                      // nunca más de ~1 envío cada 2.5 s
+      if (dt < objetivo && distMov < 60) return;  // ni antes del objetivo salvo salto > 60 m
+    }
     lastSentRef.current = ahora;
+    lastSentPosRef.current = pos;
     // "en_ruta" sólo si hay SERVICIO activo (res); conectado-libre → "disponible".
     const estadoFinal = estado || (res ? "en_ruta" : "disponible");
     // Rutear por TABLA (no por id: los ids de AFA y tercero se solapan). El tercero
@@ -751,10 +802,9 @@ export default function ConductorApp() {
         try {
           const w = await observarUbicacion(
             (pos) => {
-              const primera = !recibioPos;
               recibioPos = true;
               posRef.current = pos; setPosActual(pos); setGpsError(null);
-              if (primera) enviarUbicacion(pos); // primer envío inmediato
+              enviarUbicacion(pos); // el throttle adaptativo decide el ritmo real
             },
             (e) => { if (!recibioPos) setGpsError(e.message); },
             { enableHighAccuracy: alta, maximumAge: alta ? 5000 : 20000, timeout: alta ? 12000 : 25000 }
@@ -775,10 +825,11 @@ export default function ConductorApp() {
           .catch(() => {});
       })();
 
-      // Enviar ubicación cada 15 s (sin vehículo → 🧑 persona; con vehículo → 🚌 bus)
+      // Backstop por si watchPosition deja de emitir (quieto): reintenta seguido y el
+      // throttle adaptativo gobierna el ritmo real (no fuerza un envío cada 15 s).
       intervalRef.current = setInterval(() => {
         if (posRef.current) enviarUbicacion(posRef.current);
-      }, 15000);
+      }, 4000);
     }
 
     // Drenar lo que haya quedado en cola de una sesión previa.

@@ -6,6 +6,7 @@ import ModalGps from "@/components/seguimiento/ModalGps";
 import ModalManifiestoPortal from "@/components/portal/ModalManifiestoPortal";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
+import { animarMarcador } from "@/lib/anim-marker";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 
@@ -855,8 +856,7 @@ export default function ClientePortal() {
   // ─── Mapa En vivo: actualizar marcadores cuando cambian ubicaciones ────────
   useEffect(() => {
     if (!mapListoEnVivo || !mapRef.current) return;
-    Object.values(markersEnVivo.current).forEach(m => m.remove());
-    markersEnVivo.current = {};
+    const vistos = new Set<string>();
     ubicacionesEnVivo.forEach(u => {
       // Key compuesta: prioriza conductor/vehículo de tercero sobre los propios.
       // Evita colisiones cuando vehiculo_id es null (puntos de tercero) o cuando
@@ -878,6 +878,18 @@ export default function ClientePortal() {
       const min = Math.floor((Date.now() - new Date(u.timestamp).getTime()) / 60000);
       const color = min <= 2 ? "#16a34a" : min <= 10 ? "#d97706" : "#dc2626";
       const label = min <= 2 ? "En línea" : min <= 10 ? `Hace ${min}m` : "Sin señal";
+      vistos.add(key);
+      const popupHtml = `<div style="font-family:system-ui,sans-serif;padding:2px 0"><b style="font-size:13px;color:#0a0e1a">${placa}</b><br><span style="font-size:12px;color:${color};font-weight:600">${label}</span><br><span style="font-size:11px;color:#6b6f7c">${u.velocidad} km/h</span></div>`;
+
+      // Si el marcador ya existe: deslizarlo suave (tween) y refrescar rumbo, color y popup.
+      const existente = markersEnVivo.current[key];
+      if (existente) {
+        animarMarcador(existente, [u.lng, u.lat]);
+        existente.setRotation(Number(u.rumbo) || 0);
+        existente.getElement().querySelectorAll<HTMLElement>(".afa-pulse1, .afa-pulse2").forEach(d => { d.style.background = color; });
+        existente.getPopup()?.setHTML(popupHtml);
+        return;
+      }
 
       // CSS de los anillos de pulso (igual que la página de seguimiento), una sola vez.
       if (!document.getElementById("afa-bus-css")) {
@@ -915,9 +927,7 @@ export default function ClientePortal() {
           style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2;width:44px;height:74px;object-fit:contain;filter:drop-shadow(0 5px 14px rgba(6,14,40,.85));"
           alt="bus"/>
       `;
-      const popup = new mapboxgl.Popup({ offset: 28, closeButton: false }).setHTML(
-        `<div style="font-family:system-ui,sans-serif;padding:2px 0"><b style="font-size:13px;color:#0a0e1a">${placa}</b><br><span style="font-size:12px;color:${color};font-weight:600">${label}</span><br><span style="font-size:11px;color:#6b6f7c">${u.velocidad} km/h</span></div>`
-      );
+      const popup = new mapboxgl.Popup({ offset: 28, closeButton: false }).setHTML(popupHtml);
       markersEnVivo.current[key] = new mapboxgl.Marker({
         element: el,
         rotation: Number(u.rumbo) || 0,
@@ -927,6 +937,10 @@ export default function ClientePortal() {
         .setLngLat([u.lng, u.lat])
         .setPopup(popup)
         .addTo(mapRef.current!);
+    });
+    // Quitar marcadores de móviles que ya no aparecen en el lote (desconectados).
+    Object.keys(markersEnVivo.current).forEach(k => {
+      if (!vistos.has(k)) { markersEnVivo.current[k].remove(); delete markersEnVivo.current[k]; }
     });
     // Mantener ref actualizada para el efecto de chip-click
     ubicacionesEnVivoRef.current = ubicacionesEnVivo;
