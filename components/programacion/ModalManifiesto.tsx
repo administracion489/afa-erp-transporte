@@ -570,39 +570,72 @@ export default function ModalManifiesto(props: Props) {
   const confirmarMover = async (destinoId: number) => {
     if (!moverPaxId) return;
     setMoviendoPax(true);
-    const p = pasajeros.find((x) => x.id === moverPaxId)!;
-    const a = asignaciones[moverPaxId];
+    const pid = moverPaxId;
+    const p = pasajeros.find((x) => x.id === pid)!;
+    const a = asignaciones[pid];
+    // Parada que tenía en el origen: la usamos para reproducir su paradero en el destino.
+    const paradaOrigen = a ? paradas.find((x) => x.id === a.parada_id) ?? null : null;
 
+    // 1. Quitar su anclaje al servicio origen.
     if (a) {
       await supabase.from("pasajeros_parada")
         .delete()
-        .eq("pasajero_id", moverPaxId)
+        .eq("pasajero_id", pid)
         .eq("parada_id", a.parada_id);
     }
 
-    if (p.reserva_id === reservaId) {
-      await supabase.from("pasajeros").update({ reserva_id: destinoId }).eq("id", moverPaxId);
-    } else {
-      const { data: primerParada } = await supabase
-        .from("paradas").select("id").eq("reserva_id", destinoId).order("orden").limit(1).maybeSingle();
-      if (!primerParada) {
-        setMensaje({ tipo: "err", texto: "El servicio destino no tiene paradas configuradas. Configúralas primero." });
-        setMoviendoPax(false);
-        return;
+    // 2. Buscar en el destino la parada equivalente: primero por place_id (ID de lugar de
+    //    Google = mismo punto físico exacto); si no, por coordenadas con tolerancia ~5 m.
+    let paradaDestinoId: number | null = null;
+    if (paradaOrigen) {
+      const { data: paradasDestino } = await supabase
+        .from("paradas").select("id, lat, lng, place_id").eq("reserva_id", destinoId);
+      const lista = (paradasDestino || []) as any[];
+
+      const placeIdOrigen = (paradaOrigen as any).place_id || null;
+      if (placeIdOrigen) {
+        const m = lista.find((x) => x.place_id && x.place_id === placeIdOrigen);
+        if (m) paradaDestinoId = m.id;
       }
-      await supabase.from("pasajeros_parada").insert({
-        pasajero_id: moverPaxId, parada_id: primerParada.id,
-        estado: "esperando", estado_abordaje: "Pendiente",
-      });
+      if (paradaDestinoId == null && paradaOrigen.lat != null && paradaOrigen.lng != null) {
+        const TOL = 0.00005; // ~5 m: tolera diferencias de redondeo entre servicios
+        const m = lista.find((x) =>
+          x.lat != null && x.lng != null &&
+          Math.abs(Number(x.lat) - Number(paradaOrigen.lat)) <= TOL &&
+          Math.abs(Number(x.lng) - Number(paradaOrigen.lng)) <= TOL
+        );
+        if (m) paradaDestinoId = m.id;
+      }
     }
 
-    const pid = moverPaxId;
+    // 3. Anclar al destino. Con paradero si hubo equivalente; si no, sin asignar.
+    let conservoParadero = false;
+    if (paradaDestinoId != null) {
+      await supabase.from("pasajeros_parada").insert({
+        pasajero_id: pid, parada_id: paradaDestinoId,
+        estado: "esperando", estado_abordaje: "Pendiente",
+      });
+      conservoParadero = true;
+      // Si era ad-hoc del origen, mover su pertenencia para que no siga en el origen.
+      if (p.reserva_id === reservaId) {
+        await supabase.from("pasajeros").update({ reserva_id: destinoId }).eq("id", pid);
+      }
+    } else {
+      // Sin parada equivalente → fijarlo al servicio destino para que aparezca "sin asignar".
+      await supabase.from("pasajeros").update({ reserva_id: destinoId }).eq("id", pid);
+    }
+
     setPasajeros((prev) => prev.filter((x) => x.id !== pid));
     setAsignaciones((prev) => { const n = { ...prev }; delete n[pid]; return n; });
     setMoverPaxId(null);
     setServiciosDestino([]);
     setMoviendoPax(false);
-    setMensaje({ tipo: "ok", texto: "Pasajero movido al servicio destino." });
+    setMensaje({
+      tipo: conservoParadero ? "ok" : "warn",
+      texto: conservoParadero
+        ? "Pasajero movido al servicio destino conservando su paradero."
+        : "Pasajero movido al servicio destino. Ese servicio no tiene su paradero: quedó sin asignar.",
+    });
     if (onChange) onChange();
   };
 
