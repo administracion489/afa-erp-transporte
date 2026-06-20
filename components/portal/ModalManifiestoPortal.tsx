@@ -64,7 +64,7 @@ type AsignacionParada = {
 
 type Mensaje = { tipo: "ok" | "err" | "warn"; texto: string };
 
-type AddForm = { nombre: string; dni: string; empresa: string; telefono: string; parada_id: string };
+type AddForm = { nombre: string; dni: string; empresa: string; telefono: string; edad: string; parada_id: string };
 
 export type Props = {
   reservaId:  number;
@@ -108,7 +108,7 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
 
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const emptyForm: AddForm = { nombre: "", dni: "", empresa: "", telefono: "", parada_id: "" };
+  const emptyForm: AddForm = { nombre: "", dni: "", empresa: "", telefono: "", edad: "", parada_id: "" };
   const [form, setForm] = useState<AddForm>(emptyForm);
 
   // ── Carga inicial ─────────────────────────────────────────────────────────
@@ -220,6 +220,7 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
         dni:       form.dni.trim(),
         empresa:   form.empresa.trim() || null,
         telefono:  form.telefono.trim() || null,
+        edad:      form.edad.trim() || null,
       };
       if (form.parada_id) body.parada_id = Number(form.parada_id);
 
@@ -316,6 +317,7 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
           dni:          p.dni,
           empresa:      p.empresa,
           telefono:     p.telefono,
+          edad:         p.edad,
           parada_nombre: p.parada || undefined,
         })),
       });
@@ -589,6 +591,17 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
                   value={form.telefono}
                   onChange={e => setForm(f => ({ ...f, telefono: e.target.value }))}
                   placeholder="999111222"
+                  style={{ width: "100%", padding: "7px 10px", borderRadius: 8, border: `1px solid ${C.line2}`, fontSize: 12, fontFamily: C.fontMono, outline: "none", boxSizing: "border-box" }}
+                />
+              </div>
+              {/* Edad */}
+              <div style={{ flex: "0 1 90px" }}>
+                <p style={{ fontSize: 9.5, fontWeight: 700, color: C.mute, textTransform: "uppercase", letterSpacing: "0.05em", margin: "0 0 4px" }}>Edad</p>
+                <input
+                  value={form.edad}
+                  onChange={e => setForm(f => ({ ...f, edad: e.target.value.replace(/\D/g, "").slice(0, 3) }))}
+                  inputMode="numeric"
+                  placeholder="Años"
                   style={{ width: "100%", padding: "7px 10px", borderRadius: 8, border: `1px solid ${C.line2}`, fontSize: 12, fontFamily: C.fontMono, outline: "none", boxSizing: "border-box" }}
                 />
               </div>

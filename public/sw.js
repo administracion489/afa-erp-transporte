@@ -3,7 +3,11 @@
 // resistentes a microcortes de red. SOLO intercepta estáticos de Next y la navegación
 // de /conductor y /pasajero. El resto (ERP, APIs, Supabase) va directo a la red.
 
-const VERSION = "afa-v1";
+// Súbele el número en cada deploy que deba invalidar assets cacheados: el handler
+// `activate` borra todos los cachés cuya clave no termine en VERSION, forzando que los
+// navegadores ya instalados re-descarguen los chunks de Next (evita quedar pegado en una
+// versión vieja del ERP/app tras un deploy).
+const VERSION = "afa-v2";
 const STATIC_CACHE = `afa-static-${VERSION}`;
 const SHELL_CACHE = `afa-shell-${VERSION}`;
 

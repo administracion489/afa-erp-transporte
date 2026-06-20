@@ -172,6 +172,23 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
+      // ── Guardar datos de perfil del pasajero (edad para el Manifiesto MTC) ────
+      case "perfil": {
+        const { pid, edad } = body;
+        if (!pid) return NextResponse.json({ error: "pid requerido" }, { status: 400 });
+        let e: number | null = null;
+        if (edad !== null && edad !== undefined && edad !== "") {
+          const n = Number(edad);
+          if (!Number.isInteger(n) || n < 0 || n > 120) {
+            return NextResponse.json({ error: "Edad inválida (0–120)" }, { status: 400 });
+          }
+          e = n;
+        }
+        const { error } = await admin.from("pasajeros").update({ edad: e }).eq("id", pid);
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ ok: true });
+      }
+
       // ── Mensaje / reporte al operador ────────────────────────────────────────
       case "mensaje": {
         const { mensaje } = body;

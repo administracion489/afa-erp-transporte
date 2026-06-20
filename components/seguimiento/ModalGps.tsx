@@ -55,6 +55,15 @@ const fmtTiempo = (min: number) => {
 };
 const fmtDistancia = (m: number) => (m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(1)} km`);
 
+// Media móvil de 3 puntos sobre lat/lng para reducir el zigzag por imprecisión GPS.
+function suavizarHuella<T extends { lat: number; lng: number }>(pts: T[]): T[] {
+  return pts.map((p, i) => {
+    const s = Math.max(0, i - 1), e = Math.min(pts.length - 1, i + 1);
+    const w = pts.slice(s, e + 1);
+    return { ...p, lat: w.reduce((a, q) => a + q.lat, 0) / w.length, lng: w.reduce((a, q) => a + q.lng, 0) / w.length };
+  });
+}
+
 export default function ModalGps({
   reservaId, vehiculoId, vehiculoTerceroId = null, vehiculoPlaca, conductorNombre,
   conductorTel, clienteNombre, paradas, paradasJson, origen, destino, onClose,
@@ -308,12 +317,13 @@ export default function ModalGps({
       if (map.getLayer("huella-gps-line")) map.removeLayer("huella-gps-line");
       if (map.getSource("huella-gps"))    map.removeSource("huella-gps");
 
+      const pts = suavizarHuella(huella);
       const features: any[] = [];
-      for (let i = 0; i < huella.length - 1; i++) {
+      for (let i = 0; i < pts.length - 1; i++) {
         features.push({
           type: "Feature",
-          properties: { velocidad: huella[i].velocidad ?? 0 },
-          geometry: { type: "LineString", coordinates: [[huella[i].lng, huella[i].lat], [huella[i + 1].lng, huella[i + 1].lat]] },
+          properties: { velocidad: pts[i].velocidad ?? 0 },
+          geometry: { type: "LineString", coordinates: [[pts[i].lng, pts[i].lat], [pts[i + 1].lng, pts[i + 1].lat]] },
         });
       }
 

@@ -14,7 +14,7 @@ type Cliente        = { id: number; nombre: string; empresa: string | null; ruc:
 type Reserva        = { id: number; origen: string; destino: string; fecha_servicio: string | null; hora_servicio: string | null; estado: string; precio_cliente: number; vehiculo_id: number | null; conductor_id: number | null; cotizacion_id: number | null; created_at: string; };
 type Parada         = { id: number; reserva_id: number; orden: number; nombre: string; direccion: string | null; lat: number | null; lng: number | null; hora_estimada: string | null; estado: string; };
 type Boarding       = { id: number; pasajero_id: number; parada_id: number; timestamp: string; metodo: string; pasajero?: { nombre: string; dni: string | null; empresa: string | null; }; };
-type PasajeroParada = { id: number; parada_id: number | null; pasajero_id: number; estado: string; estado_abordaje?: string | null; hora_abordaje?: string | null; pasajero?: { nombre: string; dni: string | null; edad: number | null; }; };
+type PasajeroParada = { id: number; parada_id: number | null; pasajero_id: number; estado: string; estado_abordaje?: string | null; hora_abordaje?: string | null; pasajero?: { nombre: string; dni: string | null; edad?: number | null; }; };
 type GPS            = { lat: number; lng: number; velocidad: number; timestamp: string; estado?: string; };
 type EmpresaPerfil  = { nombre: string | null; logo_url: string | null; color_primario: string | null; telefono: string | null; email: string | null; slogan: string | null; };
 type ConductorInfo  = { nombre: string; numero_licencia: string | null; telefono: string | null; };
@@ -23,6 +23,15 @@ type Tab = "dashboard" | "activos" | "historial" | "facturacion" | "documentos" 
 type CuentaSeccion = "empresa" | "usuarios" | "notificaciones" | "facturacion_cfg" | "integraciones" | "seguridad" | "preferencias";
 type Factura = { id: number; reserva_id: number | null; tipo_comprobante: string; serie: string | null; numero: string | null; fecha_emision: string | null; fecha_vencimiento: string | null; total: number; estado: string; pdf_url: string | null; };
 type PortalUsuario = { id: number; cliente_id: number; nombre: string; dni: string; cargo: string | null; rol: "admin" | "visor"; email: string | null; codigo_acceso: string; activo: boolean; created_at: string; modulos_permitidos: string[] | null; };
+
+// Media móvil de 3 puntos para reducir el zigzag GPS antes de renderizar la huella.
+function suavizarHuella<T extends { lat: number; lng: number }>(pts: T[]): T[] {
+  return pts.map((p, i) => {
+    const s = Math.max(0, i - 1), e = Math.min(pts.length - 1, i + 1);
+    const w = pts.slice(s, e + 1);
+    return { ...p, lat: w.reduce((a, q) => a + q.lat, 0) / w.length, lng: w.reduce((a, q) => a + q.lng, 0) / w.length };
+  });
+}
 
 // Fuente de verdad del abordaje en TODO el ERP: pasajeros_parada (estado + estado_abordaje,
 // sincronizadas por trigger en BD). boarding_log se agregó después y está sin backfill, así
@@ -434,14 +443,18 @@ export default function ClientePortal() {
         Promise.all([
           supabase.from("paradas").select("*").eq("reserva_id", r.id).order("orden"),
           supabase.from("boarding_log").select("*, pasajero:pasajeros(nombre,dni,empresa)").eq("reserva_id", r.id).order("timestamp"),
-          supabase.from("pasajeros").select("id,nombre,dni,edad").eq("reserva_id", r.id),
+          // NO pedir "edad" aquí ni en el join de pasajeros_parada: si la columna faltara,
+          // PostgREST devuelve error y el cliente retorna data:null → roster vacío (Esperados 0
+          // / PDFs sin pasajeros). La edad se lee en una consulta APARTE más abajo, cuyo fallo
+          // jamás vacía el roster (el manifiesto MTC mostraría "–" en Edad).
+          supabase.from("pasajeros").select("id,nombre,dni").eq("reserva_id", r.id),
         ]).then(async ([pRes, bRes, paxRes]) => {
           setParadas(prev => ({ ...prev, [r.id]: pRes.data || [] }));
           setBoarding(prev => ({ ...prev, [r.id]: bRes.data || [] }));
           const ps = pRes.data || [];
           let pp: any[] = [];
           if (ps.length > 0) {
-            const { data } = await supabase.from("pasajeros_parada").select("*, pasajero:pasajeros(nombre,dni,edad)").in("parada_id", ps.map((p: any) => p.id));
+            const { data } = await supabase.from("pasajeros_parada").select("*, pasajero:pasajeros(nombre,dni)").in("parada_id", ps.map((p: any) => p.id));
             pp = data || [];
           }
           // Pasajeros del manifiesto sin paradero asignado: existen en pasajeros.reserva_id
@@ -451,8 +464,20 @@ export default function ClientePortal() {
           const asignados = new Set(pp.map((x: any) => x.pasajero_id));
           const sinParada = (paxRes.data || [])
             .filter((p: any) => !asignados.has(p.id))
-            .map((p: any) => ({ id: -p.id, parada_id: null, pasajero_id: p.id, estado: "Pendiente", pasajero: { nombre: p.nombre, dni: p.dni, edad: p.edad } }));
-          setPPList(prev => ({ ...prev, [r.id]: [...pp, ...sinParada] }));
+            .map((p: any) => ({ id: -p.id, parada_id: null, pasajero_id: p.id, estado: "Pendiente", pasajero: { nombre: p.nombre, dni: p.dni } }));
+          const roster = [...pp, ...sinParada];
+          // Edad para el Manifiesto MTC. Consulta AISLADA a propósito: si la columna `edad`
+          // no existiera en la BD, esta query falla sola (data:null) sin afectar el roster ya
+          // construido arriba. Así nunca se repite el bug de "Esperados 0".
+          const idsPax = [...new Set(roster.map((x: any) => x.pasajero_id).filter(Boolean))];
+          if (idsPax.length > 0) {
+            const { data: edades } = await supabase.from("pasajeros").select("id,edad").in("id", idsPax);
+            if (edades) {
+              const em = new Map((edades as any[]).map(e => [e.id, e.edad]));
+              roster.forEach((x: any) => { if (x.pasajero) x.pasajero.edad = em.get(x.pasajero_id) ?? null; });
+            }
+          }
+          setPPList(prev => ({ ...prev, [r.id]: roster }));
         })
       );
     }
@@ -1173,7 +1198,7 @@ export default function ClientePortal() {
     }
 
     // CAPA 2 — Huella GPS real (segmentos coloreados por velocidad)
-    const huella = huellaGpsMap[sel.id] || [];
+    const huella = suavizarHuella(huellaGpsMap[sel.id] || []);
     if (huella.length >= 2) {
       const feats = [];
       for (let i = 0; i < huella.length - 1; i++) {

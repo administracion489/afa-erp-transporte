@@ -13,6 +13,7 @@ mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 type Pasajero = {
   id: number; nombre: string; dni: string | null; empresa: string | null;
   telefono: string | null; qr_code: string | null; foto_url: string | null;
+  edad: number | null;
 };
 type Parada = {
   id: number; reserva_id: number; orden: number; nombre: string;
@@ -455,6 +456,9 @@ export default function AppPasajero() {
   const [copiado,        setCopiado]        = useState(false);
   const [uploading,      setUploading]      = useState(false);
   const [fotoErr,        setFotoErr]        = useState("");
+  const [edadInput,      setEdadInput]      = useState("");
+  const [savingEdad,     setSavingEdad]     = useState(false);
+  const [edadOk,         setEdadOk]         = useState(false);
 
   // ── CONFIRMAR PARADERO ──────────────────────────────────────────────────────
   const [mostrarConfirmarParadero, setMostrarConfirmarParadero] = useState(false);
@@ -993,6 +997,25 @@ export default function AppPasajero() {
     } catch (e: any) {
       setFotoErr(e?.message || "Error al subir la foto.");
     } finally { setUploading(false); }
+  }
+  // Sincroniza el campo de edad con el valor guardado del pasajero (al login / cambios).
+  useEffect(() => {
+    setEdadInput(pasajero?.edad != null ? String(pasajero.edad) : "");
+  }, [pasajero?.id, pasajero?.edad]);
+
+  // Edad para el Manifiesto MTC: el pasajero la edita en su perfil.
+  async function guardarEdad() {
+    if (!pasajero) return;
+    const trimmed = edadInput.trim();
+    const n = trimmed === "" ? null : parseInt(trimmed, 10);
+    if (n !== null && (!Number.isFinite(n) || n < 0 || n > 120)) return;
+    setSavingEdad(true); setEdadOk(false);
+    try {
+      await paxApi("perfil", { pid: pasajero.id, edad: n });
+      const updated = { ...pasajero, edad: n }; setPasajero(updated); saveSession(updated);
+      setEdadOk(true);
+      setTimeout(() => setEdadOk(false), 2000);
+    } catch { /* noop */ } finally { setSavingEdad(false); }
   }
   async function enviarReporte() {
     if (!pasajero || !miParada) return;
@@ -2018,6 +2041,31 @@ export default function AppPasajero() {
                 )}
               </div>
               {fotoErr && <p style={{ margin: "8px 0 0", padding: "10px 14px", background: "var(--danger-tint)", borderRadius: 10, fontSize: 12, fontWeight: 600, color: "var(--danger)" }}>{fotoErr}</p>}
+            </div>
+
+            {/* Mis datos — edad para el manifiesto oficial */}
+            <div style={{ padding: "20px 18px 0" }}>
+              <Eyebrow>Mis datos</Eyebrow>
+              <div style={{ background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 16, marginTop: 10, padding: "14px 16px" }}>
+                <p style={{ margin: 0, fontSize: 10.5, color: "var(--mute)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>Edad</p>
+                <p style={{ margin: "4px 0 10px", fontSize: 12, color: "var(--mute)" }}>Requerida para el manifiesto oficial (SUTRAN · MTC).</p>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <input
+                    value={edadInput}
+                    onChange={e => { setEdadInput(e.target.value.replace(/\D/g, "").slice(0, 3)); setEdadOk(false); }}
+                    inputMode="numeric"
+                    placeholder="Años"
+                    style={{ flex: 1, minWidth: 0, padding: "11px 14px", borderRadius: 12, border: "1px solid var(--line)", fontSize: 15, fontFamily: "var(--f)", outline: "none", color: "var(--ink)", background: "var(--surface)", boxSizing: "border-box" }}
+                  />
+                  <button
+                    onClick={guardarEdad}
+                    disabled={savingEdad || edadInput.trim() === (pasajero.edad != null ? String(pasajero.edad) : "")}
+                    style={{ flexShrink: 0, padding: "11px 20px", borderRadius: 12, border: "none", background: savingEdad ? "var(--mute2)" : "var(--navy)", color: "white", fontWeight: 700, fontSize: 14, fontFamily: "var(--f)", cursor: savingEdad ? "not-allowed" : "pointer", opacity: (savingEdad || edadInput.trim() === (pasajero.edad != null ? String(pasajero.edad) : "")) ? 0.55 : 1 }}
+                  >
+                    {savingEdad ? "Guardando…" : edadOk ? "Guardado ✓" : "Guardar"}
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* Mi servicio list */}

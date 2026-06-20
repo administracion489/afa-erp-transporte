@@ -15,6 +15,14 @@ const supabaseAdmin = createClient(
 const ESTADOS_EDITABLES = ["pendiente", "confirmado", "confirmada", "por_confirmar", "programada"];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+// Normaliza la edad: entero plausible (0–120) o null. Fuera de rango → null,
+// para no disparar el CHECK de la columna `pasajeros.edad`.
+function sanitizarEdad(edad: unknown): number | null {
+  if (edad === null || edad === undefined || edad === "") return null;
+  const n = Number(edad);
+  return Number.isInteger(n) && n >= 0 && n <= 120 ? n : null;
+}
+
 async function verificarAcceso(
   reservaId: number,
   clienteId: number
@@ -81,10 +89,11 @@ export async function POST(req: NextRequest) {
 
     // ── ADD: insertar un pasajero al manifiesto de esta reserva ──────────────
     if (action === "add") {
-      const { nombre, dni, empresa, telefono, parada_id } = body;
+      const { nombre, dni, empresa, telefono, parada_id, edad } = body;
       if (!nombre?.trim() || !dni?.trim()) {
         return NextResponse.json({ error: "Nombre y DNI son requeridos" }, { status: 400 });
       }
+      const edadSane = sanitizarEdad(edad);
       if (parada_id && !(await verificarParada(Number(parada_id), Number(reserva_id)))) {
         return NextResponse.json({ error: "Parada no válida para este servicio" }, { status: 400 });
       }
@@ -103,6 +112,7 @@ export async function POST(req: NextRequest) {
         dni: dni.trim(),
         empresa: empresa?.trim() || null,
         telefono: telefono?.trim() || null,
+        edad: edadSane,
         activo: true,
       }).select("id").single();
 
@@ -208,6 +218,7 @@ export async function POST(req: NextRequest) {
           dni: p.dni.trim(),
           empresa: p.empresa?.trim() || null,
           telefono: p.telefono?.trim() || null,
+          edad: sanitizarEdad(p.edad),
           activo: true,
         }).select("id").single();
 

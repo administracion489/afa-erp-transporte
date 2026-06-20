@@ -13,6 +13,7 @@ export type PasajeroImportado = {
   telefono: string | null;
   email:    string | null;
   empresa:  string | null;
+  edad:     number | null;  // para la columna "Edad" del Manifiesto MTC
   asiento:  string | null;
   notas:    string | null;
   parada:   string | null;  // nombre de la parada donde aborda (para portal cliente)
@@ -31,6 +32,7 @@ const COLUMNAS = {
   telefono: ["telefono", "teléfono", "celular", "phone", "movil", "móvil", "whatsapp"],
   email:    ["email", "correo", "e-mail", "mail"],
   empresa:  ["empresa", "compañia", "compañía", "company", "organización", "organizacion"],
+  edad:     ["edad", "edades", "años", "anos", "age", "edad (años)"],
   asiento:  ["asiento", "seat", "butaca"],
   notas:    ["notas", "observaciones", "obs", "comentarios", "notes"],
   parada:   ["parada", "paradero", "stop", "punto abordaje", "punto de abordaje", "lugar abordaje", "embarque", "subida"],
@@ -123,12 +125,17 @@ export async function parsearManifiesto(file: File): Promise<ResultadoImport> {
     }
     dnisVistos.add(dni);
 
+    const edadRaw = get("edad");
+    const edadNum = edadRaw ? parseInt(edadRaw, 10) : NaN;
+    const edad    = Number.isFinite(edadNum) && edadNum >= 0 && edadNum <= 120 ? edadNum : null;
+
     ok.push({
       nombre,
       dni,
       telefono: get("telefono") || null,
       email:    get("email")    || null,
       empresa:  get("empresa")  || null,
+      edad,
       asiento:  get("asiento")  || null,
       notas:    get("notas")    || null,
       parada:   get("parada")   || null,
@@ -143,13 +150,13 @@ export async function parsearManifiesto(file: File): Promise<ResultadoImport> {
  */
 export function descargarPlantilla(): void {
   const ws = XLSX.utils.aoa_to_sheet([
-    ["Nombre", "DNI", "Teléfono", "Email", "Empresa", "Asiento", "Notas"],
-    ["Juan Pérez Quispe",      "12345678", "999111222", "juan@empresa.pe",  "ACME S.A.C.", "A1", ""],
-    ["María García Rodríguez", "87654321", "999333444", "maria@empresa.pe", "ACME S.A.C.", "A2", "Vegetariano"],
+    ["Nombre", "DNI", "Teléfono", "Email", "Empresa", "Edad", "Asiento", "Notas"],
+    ["Juan Pérez Quispe",      "12345678", "999111222", "juan@empresa.pe",  "ACME S.A.C.", "34", "A1", ""],
+    ["María García Rodríguez", "87654321", "999333444", "maria@empresa.pe", "ACME S.A.C.", "29", "A2", "Vegetariano"],
   ]);
   // Anchos sugeridos
   (ws as any)["!cols"] = [
-    { wch: 28 }, { wch: 10 }, { wch: 12 }, { wch: 24 }, { wch: 18 }, { wch: 8 }, { wch: 24 },
+    { wch: 28 }, { wch: 10 }, { wch: 12 }, { wch: 24 }, { wch: 18 }, { wch: 6 }, { wch: 8 }, { wch: 24 },
   ];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Manifiesto");
@@ -166,20 +173,20 @@ export function descargarPlantillaPortal(
   const wb = XLSX.utils.book_new();
 
   // Hoja 1: Plantilla de pasajeros
-  const headerRow = ["Nombre", "DNI", "Empresa", "Teléfono", "Parada"];
+  const headerRow = ["Nombre", "DNI", "Empresa", "Edad", "Teléfono", "Parada"];
   const ejemplos = paradas.length > 0
     ? [
-        ["Juan Pérez Quispe",      "12345678", "ACME S.A.C.", "999111222", paradas[0]?.nombre || ""],
-        ["María García Rodríguez", "87654321", "ACME S.A.C.", "999333444", paradas[Math.min(1, paradas.length - 1)]?.nombre || ""],
+        ["Juan Pérez Quispe",      "12345678", "ACME S.A.C.", "34", "999111222", paradas[0]?.nombre || ""],
+        ["María García Rodríguez", "87654321", "ACME S.A.C.", "29", "999333444", paradas[Math.min(1, paradas.length - 1)]?.nombre || ""],
       ]
     : [
-        ["Juan Pérez Quispe",      "12345678", "ACME S.A.C.", "999111222", ""],
-        ["María García Rodríguez", "87654321", "ACME S.A.C.", "999333444", ""],
+        ["Juan Pérez Quispe",      "12345678", "ACME S.A.C.", "34", "999111222", ""],
+        ["María García Rodríguez", "87654321", "ACME S.A.C.", "29", "999333444", ""],
       ];
 
   const ws1 = XLSX.utils.aoa_to_sheet([headerRow, ...ejemplos]);
   (ws1 as any)["!cols"] = [
-    { wch: 30 }, { wch: 11 }, { wch: 22 }, { wch: 13 }, { wch: 28 },
+    { wch: 30 }, { wch: 11 }, { wch: 22 }, { wch: 6 }, { wch: 13 }, { wch: 28 },
   ];
   XLSX.utils.book_append_sheet(wb, ws1, "Pasajeros");
 

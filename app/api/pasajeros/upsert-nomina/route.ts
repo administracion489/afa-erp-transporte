@@ -8,7 +8,7 @@ const supaAdmin = createClient(
 );
 
 /** POST /api/pasajeros/upsert-nomina
- *  body: { clienteId, pasajeros: [{nombre,dni,telefono,empresa,email}] }
+ *  body: { clienteId, pasajeros: [{nombre,dni,telefono,empresa,email,edad}] }
  *  Upsert bulk — service role bypasses RLS
  */
 export async function POST(req: NextRequest) {
@@ -36,15 +36,16 @@ export async function POST(req: NextRequest) {
     const id = existingMap.get(String(p.dni));
     if (id) {
       const campos: Record<string, any> = { nombre: p.nombre };
-      if (p.email)    campos.email    = p.email;
-      if (p.telefono) campos.telefono = p.telefono;
-      if (p.empresa)  campos.empresa  = p.empresa;
+      if (p.email)         campos.email    = p.email;
+      if (p.telefono)      campos.telefono = p.telefono;
+      if (p.empresa)       campos.empresa  = p.empresa;
+      if (p.edad != null)  campos.edad     = p.edad;
       const { error } = await supaAdmin.from("pasajeros").update(campos).eq("id", id);
       if (error) { errores++; mensajesError.push(error.message); } else actualizados++;
     } else {
       const { error } = await supaAdmin.from("pasajeros").insert({
         nombre: p.nombre, dni: p.dni, telefono: p.telefono,
-        empresa: p.empresa, email: p.email,
+        empresa: p.empresa, email: p.email, edad: p.edad ?? null,
         cliente_id: clienteId, reserva_id: null,
       });
       if (error) { errores++; mensajesError.push(error.message); } else insertados++;
@@ -55,7 +56,7 @@ export async function POST(req: NextRequest) {
 }
 
 /** PATCH /api/pasajeros/upsert-nomina
- *  body: { id, campos: {nombre,dni,telefono,empresa,email,pin_acceso} }
+ *  body: { id, campos: {nombre,dni,telefono,empresa,email,pin_acceso,edad} }
  *  Update individual — service role bypasses RLS
  */
 export async function PATCH(req: NextRequest) {

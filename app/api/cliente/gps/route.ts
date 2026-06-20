@@ -53,7 +53,7 @@ export async function POST(req: NextRequest) {
       const reservaId         = body.reservaId ?? null;
       const vehiculoId        = body.vehiculoId ?? null;
       const vehiculoTerceroId = body.vehiculoTerceroId ?? null;
-      const HCOLS = "lat,lng,velocidad,created_at,timestamp,reserva_id,vehiculo_id,vehiculo_tercero_id";
+      const HCOLS = "lat,lng,velocidad,created_at,timestamp,reserva_id,vehiculo_id,vehiculo_tercero_id,precision_m";
       let filas: any[] = [];
       if (reservaId != null) {
         const { data } = await supabase.from("ubicaciones_gps").select(HCOLS)
@@ -70,7 +70,8 @@ export async function POST(req: NextRequest) {
         const { data } = await q;
         filas = data || [];
       }
-      return NextResponse.json({ huella: filas.map(norm) });
+      const filasOk = filas.filter((p: any) => p.precision_m == null || p.precision_m <= 80);
+      return NextResponse.json({ huella: filasOk.map(norm) });
     }
 
     const vehiculoIds = Array.isArray(body.vehiculoIds)

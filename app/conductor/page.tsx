@@ -684,6 +684,8 @@ export default function ConductorApp() {
     // Throttle: máx. 1 punto cada 10 s, salvo el envío de cierre ("finalizado").
     const ahora = Date.now();
     if (estado !== "finalizado" && ahora - lastSentRef.current < 10000) return;
+    // Descartar fixes imprecisos (fallback a red/WiFi >80 m) salvo cierre de servicio.
+    if (estado !== "finalizado" && pos.coords.accuracy > 80) return;
     lastSentRef.current = ahora;
     // "en_ruta" sólo si hay SERVICIO activo (res); conectado-libre → "disponible".
     const estadoFinal = estado || (res ? "en_ruta" : "disponible");

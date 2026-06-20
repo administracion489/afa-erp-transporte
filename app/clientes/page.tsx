@@ -22,6 +22,7 @@ type PasajeroCliente = {
   empresa: string | null;
   email: string | null;
   pin_acceso: string | null;
+  edad: number | null;
 };
 
 type Contacto = {
@@ -746,7 +747,7 @@ export default function ClientesPage() {
   const [importandoNomina, setImportandoNomina] = useState(false);
   const [nominaExpandida,  setNominaExpandida]  = useState(false);
   const [editandoPax,      setEditandoPax]      = useState<PasajeroCliente | null>(null);
-  const [formPax,          setFormPax]          = useState({ nombre: "", dni: "", telefono: "", empresa: "", email: "", pin_acceso: "" });
+  const [formPax,          setFormPax]          = useState({ nombre: "", dni: "", telefono: "", empresa: "", email: "", pin_acceso: "", edad: "" });
   const [savingPax,        setSavingPax]        = useState(false);
   const [enviandoCreds,    setEnviandoCreds]    = useState<Set<number>>(new Set());
   const nominaInputRef = useRef<HTMLInputElement>(null);
@@ -798,7 +799,7 @@ export default function ClientesPage() {
     setLoadingNomina(true);
     const { data } = await supabase
       .from("pasajeros")
-      .select("id, nombre, dni, telefono, empresa, email, pin_acceso")
+      .select("id, nombre, dni, telefono, empresa, email, pin_acceso, edad")
       .eq("cliente_id", clienteId)
       .is("reserva_id", null)
       .order("nombre");
@@ -829,7 +830,7 @@ export default function ClientesPage() {
           clienteId,
           pasajeros: resultado.ok.map(p => ({
             nombre: p.nombre, dni: p.dni, telefono: p.telefono,
-            empresa: p.empresa, email: p.email,
+            empresa: p.empresa, email: p.email, edad: p.edad,
           })),
         }),
       });
@@ -850,7 +851,7 @@ export default function ClientesPage() {
 
   const abrirEditarPax = (p: PasajeroCliente) => {
     setEditandoPax(p);
-    setFormPax({ nombre: p.nombre, dni: p.dni, telefono: p.telefono || "", empresa: p.empresa || "", email: p.email || "", pin_acceso: p.pin_acceso || "" });
+    setFormPax({ nombre: p.nombre, dni: p.dni, telefono: p.telefono || "", empresa: p.empresa || "", email: p.email || "", pin_acceso: p.pin_acceso || "", edad: p.edad != null ? String(p.edad) : "" });
   };
 
   const guardarPax = async () => {
@@ -868,6 +869,7 @@ export default function ClientesPage() {
           empresa:    formPax.empresa.trim()    || null,
           email:      formPax.email.trim()      || null,
           pin_acceso: formPax.pin_acceso.trim() || null,
+          edad:       formPax.edad.trim() === "" ? null : Number(formPax.edad),
         },
       }),
     });
@@ -1066,6 +1068,12 @@ export default function ClientesPage() {
                     style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 9, padding: "8px 12px", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
                 </div>
                 <div>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 4px" }}>Edad</p>
+                  <input value={formPax.edad} onChange={e => setFormPax(f => ({ ...f, edad: e.target.value.replace(/\D/g, "").slice(0, 3) }))}
+                    inputMode="numeric" placeholder="Años (para Manifiesto MTC)"
+                    style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 9, padding: "8px 12px", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+                </div>
+                <div>
                   <p style={{ fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 4px" }}>PIN de acceso (4 dígitos)</p>
                   <input value={formPax.pin_acceso} onChange={e => setFormPax(f => ({ ...f, pin_acceso: e.target.value.replace(/\D/g, "").slice(0,4) }))}
                     placeholder={`default: ${formPax.dni.slice(-4) || "últimos 4 del DNI"}`}
@@ -1073,7 +1081,7 @@ export default function ClientesPage() {
                     style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 9, padding: "8px 12px", fontSize: 16, fontFamily: "monospace", letterSpacing: 4, outline: "none", boxSizing: "border-box" }} />
                   <p style={{ fontSize: 10, color: "#94a3b8", margin: "4px 0 0" }}>Vacío = últimos 4 dígitos del DNI como PIN</p>
                 </div>
-                <div style={{ display: "flex", alignItems: "flex-end" }}>
+                <div style={{ display: "flex", alignItems: "flex-end", gridColumn: "1 / -1" }}>
                   <button onClick={e => { e.stopPropagation(); if (editandoPax) enviarCredenciales([editandoPax.id]); }} disabled={!formPax.email || enviandoCreds.size > 0}
                     style={{ width: "100%", padding: "8px 12px", borderRadius: 9, border: "1px solid #0b315f", background: "white", fontSize: 12, fontWeight: 700, cursor: formPax.email ? "pointer" : "not-allowed", color: formPax.email ? "#0b315f" : "#94a3b8", opacity: formPax.email ? 1 : 0.5 }}>
                     {enviandoCreds.size > 0 ? "Enviando..." : "✉ Enviar credenciales"}
@@ -1859,6 +1867,7 @@ export default function ClientesPage() {
                                           <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 10px", background: "white", borderRadius: 8, border: "1px solid #f1f5f9" }}>
                                             <span style={{ fontWeight: 700, fontSize: 11, color: "#0f172a", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.nombre}</span>
                                             <span style={{ fontSize: 10, color: "#64748b", fontFamily: "monospace", flexShrink: 0 }}>{p.dni}</span>
+                                            {p.edad != null && <span style={{ fontSize: 10, color: "#64748b", flexShrink: 0 }} title="Edad">{p.edad} años</span>}
                                             {p.empresa && <span style={{ fontSize: 10, color: "#94a3b8", flexShrink: 0, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.empresa}</span>}
                                             {p.email
                                               ? <span style={{ fontSize: 10, color: "#16a34a", flexShrink: 0 }}>✓ email</span>
