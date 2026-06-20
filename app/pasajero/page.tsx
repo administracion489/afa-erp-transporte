@@ -27,7 +27,7 @@ type Reserva = {
 };
 type UbicacionBus = {
   vehiculo_id: number; lat: number; lng: number;
-  velocidad: number; estado: string; timestamp: string;
+  velocidad: number; estado: string; timestamp: string; created_at?: string;
 };
 type Vehiculo  = { id: number; placa: string; categoria: string | null };
 type Conductor = { id: number; nombre: string; telefono: string | null };
@@ -92,6 +92,8 @@ function ahoraLimaMin(): number {
   return minutosDelDia(new Date().toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Lima" }));
 }
 function ini(n:string): string { return n.split(" ").slice(0,2).map(w=>w[0]).join("").toUpperCase(); }
+// href tel: con el número saneado (solo dígitos y +), tolera valores crudos de la BD.
+function telHref(tel: string | null | undefined): string { return `tel:${String(tel || "").replace(/[^\d+]/g, "")}`; }
 
 // Detectar si es iOS
 function esIOS(): boolean {
@@ -461,6 +463,9 @@ export default function AppPasajero() {
   const [rutaParadas,    setRutaParadas]    = useState<Parada[]>([]);
   const [alerta5min,     setAlerta5min]     = useState(false);
   const [alertaDismiss,  setAlertaDismiss]  = useState(false);
+  // ── AUTO-DETECCIÓN B2: el bus pasó mi paradero sin escanear (solo UI, sin DB) ──
+  const [busPasoMiParada, setBusPasoMiParada] = useState(false);
+  const [pasoDismiss,     setPasoDismiss]     = useState(false);
   const [agoMin,         setAgoMin]         = useState<number>(0); // minutos desde última señal del bus
   const [avisadoSinSenal, setAvisadoSinSenal] = useState(false);
   const [copiado,        setCopiado]        = useState(false);
@@ -500,6 +505,8 @@ export default function AppPasajero() {
   const [mostrarParadasModal, setMostrarParadasModal] = useState(false);
 
   const alertaRef    = useRef(false);
+  const minDistRef   = useRef<number>(Infinity);          // mín. distancia bus→miParada vista
+  const pasoDesdeRef = useRef<number | null>(null);       // ts en que empezó a alejarse
   const watchRef     = useRef<GeoWatch | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -709,15 +716,22 @@ export default function AppPasajero() {
           </div>`
         )).addTo(map.current!);
     }
-    if (miParada?.lat && miParada?.lng) {
-      const d   = dist(Number(busPosicion.lat), Number(busPosicion.lng), Number(miParada.lat), Number(miParada.lng));
+    // Cuando el pasajero ya abordó, medir distancia hasta el destino final (última parada)
+    const paradaDestino = miEstado === "embarcado"
+      ? (rutaParadas[rutaParadas.length - 1] ?? miParada)
+      : miParada;
+    if (paradaDestino?.lat && paradaDestino?.lng) {
+      const d   = dist(Number(busPosicion.lat), Number(busPosicion.lng), Number(paradaDestino.lat), Number(paradaDestino.lng));
       const eta = calcETA(d, busPosicion.velocidad);
       setDistM(d); setEtaMin(eta);
       if (eta <= 5 && !alertaRef.current && miEstado !== "embarcado") {
         alertaRef.current = true; setAlerta5min(true); setAlertaDismiss(false);
         if ("vibrate" in navigator) navigator.vibrate([300, 100, 300]);
       }
-      const ago = (Date.now() - new Date(busPosicion.timestamp).getTime()) / 60000;
+      // La fila de ubicaciones_gps usa `created_at`; el API la normaliza a `timestamp`,
+      // pero por defensa caemos a created_at. Sin tiempo válido → ago=0 (no marcar sin_señal).
+      const tBus = new Date(busPosicion.timestamp ?? busPosicion.created_at ?? 0).getTime();
+      const ago = tBus > 0 ? (Date.now() - tBus) / 60000 : 0;
       setAgoMin(Math.round(ago));
       if      (ago > 5)                            setEstadoBus("sin_señal");
       else if (busPosicion.estado === "finalizado") setEstadoBus("finalizado");
@@ -725,10 +739,29 @@ export default function AppPasajero() {
       else                                          setEstadoBus("en_camino");
       const b = new mapboxgl.LngLatBounds();
       b.extend([Number(busPosicion.lng), Number(busPosicion.lat)]);
-      b.extend([Number(miParada.lng), Number(miParada.lat)]);
+      b.extend([Number(paradaDestino.lng), Number(paradaDestino.lat)]);
       map.current?.fitBounds(b, { padding: 80, maxZoom: 15, duration: 1500 });
     }
-  }, [busPosicion, mapListo, miParada, vehiculo, conductor, miEstado]);
+
+    // ── B2: auto-detección "el bus pasó mi paradero sin escanear" ──────────────
+    // Solo aplica si sigo esperando y mi paradero tiene coords. Es una señal local
+    // (no escribe DB): el "No Show" oficial sigue siendo del despachador.
+    if (miEstado === "esperando" && miParada?.lat && miParada?.lng) {
+      const dMia = dist(Number(busPosicion.lat), Number(busPosicion.lng), Number(miParada.lat), Number(miParada.lng));
+      if (dMia < minDistRef.current) minDistRef.current = dMia;
+      // Se acercó DE VERDAD al paradero (<150 m, no solo de paso por una ruta vecina) y
+      // ahora se aleja (>500 m) yendo en movimiento.
+      const seAlejando = minDistRef.current < 150 && dMia > 500 && Number(busPosicion.velocidad) > 3;
+      const t = new Date(busPosicion.timestamp ?? busPosicion.created_at ?? 0).getTime();
+      if (seAlejando && t > 0) {
+        if (pasoDesdeRef.current == null) pasoDesdeRef.current = t;
+        // Sostenido ≥ 2 min → confirmar el aviso.
+        else if (t - pasoDesdeRef.current >= 120000) setBusPasoMiParada(true);
+      } else if (!seAlejando) {
+        pasoDesdeRef.current = null;   // el bus volvió a acercarse → resetear
+      }
+    }
+  }, [busPosicion, mapListo, miParada, vehiculo, conductor, miEstado, rutaParadas]);
 
   // Marcadores de TODOS los paraderos de la ruta
   useEffect(() => {
@@ -849,9 +882,21 @@ export default function AppPasajero() {
   // Mantener ref sincronizada con el último GPS (para leerlo dentro de intervalos sin dep)
   useEffect(() => { busPosicionRef.current = busPosicion; }, [busPosicion]);
 
-  // ETA vía Google Directions — recalcular cada 60 s cuando el bus está activo
+  // Resetear la auto-detección B2 al cambiar de servicio/parada (o si ya abordó).
   useEffect(() => {
-    if (!miParada?.lat || !miParada?.lng || !busPosicion || estadoBus === "finalizado" || estadoBus === "sin_señal") {
+    minDistRef.current = Infinity;
+    pasoDesdeRef.current = null;
+    setBusPasoMiParada(false);
+    setPasoDismiss(false);
+  }, [miParada?.id, miEstado]);
+
+  // ETA vía Google Directions — recalcular cada 60 s cuando el bus está activo.
+  // Cuando el pasajero ya abordó, calcula hasta el destino final (última parada).
+  useEffect(() => {
+    const destinoGoogle = miEstado === "embarcado"
+      ? (rutaParadas[rutaParadas.length - 1] ?? miParada)
+      : miParada;
+    if (!destinoGoogle?.lat || !destinoGoogle?.lng || !busPosicion || estadoBus === "finalizado" || estadoBus === "sin_señal") {
       setEtaGoogle(null); return;
     }
     let cancelled = false;
@@ -863,7 +908,7 @@ export default function AppPasajero() {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ paradas: [
             { lat: Number(bp.lat), lng: Number(bp.lng), nombre: "Bus" },
-            { lat: Number(miParada.lat), lng: Number(miParada.lng), nombre: miParada.nombre },
+            { lat: Number(destinoGoogle.lat), lng: Number(destinoGoogle.lng), nombre: destinoGoogle.nombre },
           ]}),
         });
         const d = await res.json();
@@ -874,7 +919,7 @@ export default function AppPasajero() {
     const id = setInterval(calcular, 60000);
     return () => { cancelled = true; clearInterval(id); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [miParada?.id, miParada?.lat, miParada?.lng, estadoBus, busPosicion ? "on" : "off"]);
+  }, [miParada?.id, miEstado, rutaParadas.length, estadoBus, busPosicion ? "on" : "off"]);
 
   // ── FUNCIONES ───────────────────────────────────────────────────────────────
 
@@ -1605,7 +1650,7 @@ export default function AppPasajero() {
             </div>
 
             {/* Arrival banner (≤5 min) */}
-            {alerta5min && !alertaDismiss && miEstado !== "embarcado" && (
+            {alerta5min && !alertaDismiss && miEstado !== "embarcado" && !busPasoMiParada && (
               <div style={{ position: "absolute", top: 78, left: 14, right: 14, zIndex: 4, background: "var(--navy)", color: "white", borderRadius: 18, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, boxShadow: "0 10px 30px rgba(11,49,95,0.4)", animation: "sheetIn 0.4s cubic-bezier(.2,.7,.3,1)" }}>
                 <div style={{ width: 38, height: 38, borderRadius: 12, background: "rgba(255,255,255,0.14)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                   <IconBell sz={20} c="white" />
@@ -1620,9 +1665,35 @@ export default function AppPasajero() {
               </div>
             )}
 
+            {/* Banner B2: el bus podría haber pasado tu paradero (heurística local, sin DB) */}
+            {busPasoMiParada && !pasoDismiss && miEstado === "esperando" && (
+              <div style={{ position: "absolute", top: 78, left: 14, right: 14, zIndex: 4, background: "#fffbeb", color: "#92400e", borderRadius: 18, padding: "14px 16px", display: "flex", alignItems: "flex-start", gap: 12, boxShadow: "0 10px 30px rgba(146,64,14,0.25)", border: "1px solid rgba(180,83,9,0.25)", animation: "sheetIn 0.4s cubic-bezier(.2,.7,.3,1)" }}>
+                <div style={{ width: 38, height: 38, borderRadius: 12, background: "rgba(180,83,9,0.12)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <IconBus sz={20} c="#b45309" />
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{ margin: 0, fontWeight: 800, fontSize: 15, letterSpacing: -0.2 }}>El bus podría haber pasado tu paradero</p>
+                  <p style={{ margin: "2px 0 8px", fontSize: 12.5, color: "rgba(146,64,14,0.78)", letterSpacing: -0.1 }}>¿No te recogieron? Contáctanos para resolverlo.</p>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {conductor?.telefono && (
+                      <a href={telHref(conductor.telefono)} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 10, background: "#b45309", color: "white", textDecoration: "none", fontWeight: 700, fontSize: 12, fontFamily: "var(--f)" }}>
+                        <IconPhone sz={13} c="white" /> Llamar al conductor
+                      </a>
+                    )}
+                    <button onClick={() => setMostrarReporte(true)} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 10, background: "rgba(180,83,9,0.1)", border: "none", color: "#92400e", cursor: "pointer", fontWeight: 700, fontSize: 12, fontFamily: "var(--f)" }}>
+                      <IconMessageCircle sz={13} c="#92400e" /> Avisar al operador
+                    </button>
+                  </div>
+                </div>
+                <button onClick={() => setPasoDismiss(true)} style={{ background: "rgba(180,83,9,0.12)", border: "none", width: 28, height: 28, borderRadius: 999, color: "#92400e", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <IconClose sz={15} c="#92400e" sw={2.5} />
+                </button>
+              </div>
+            )}
+
             {/* GPS denied banner */}
             {gpsPermiso === "denied" && !mostrarModalGPS && (
-              <div style={{ position: "absolute", top: alerta5min && !alertaDismiss ? 144 : 78, left: 14, right: 14, zIndex: 3, background: "var(--warn-tint)", borderRadius: 14, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, border: "1px solid rgba(180,83,9,0.2)" }}>
+              <div style={{ position: "absolute", top: (busPasoMiParada && !pasoDismiss && miEstado === "esperando") ? 188 : (alerta5min && !alertaDismiss && miEstado !== "embarcado" && !busPasoMiParada) ? 144 : 78, left: 14, right: 14, zIndex: 3, background: "var(--warn-tint)", borderRadius: 14, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, border: "1px solid rgba(180,83,9,0.2)" }}>
                 <IconPin sz={16} c="var(--warn)" />
                 <p style={{ flex: 1, margin: 0, fontSize: 12, color: "var(--warn)", fontWeight: 600 }}>GPS desactivado — actívalo para ver tu posición</p>
                 <button onClick={() => void solicitarGPS(true)} style={{ background: "var(--warn)", border: "none", borderRadius: 8, padding: "4px 10px", color: "white", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>Activar</button>
@@ -1772,7 +1843,7 @@ export default function AppPasajero() {
                     </>
                   )}
                 </div>
-              ) : estadoBus === "sin_señal" ? (
+              ) : (estadoBus === "sin_señal" && miEstado !== "cancelado" && miEstado !== "no abordó") ? (
                 /* ── NO GPS ── */
                 <div style={{ padding: "16px 20px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
@@ -1806,6 +1877,59 @@ export default function AppPasajero() {
                       {avisadoSinSenal ? <><IconCheck sz={16} c="white" sw={2.5} /> Operador avisado</> : <><IconMessageCircle sz={16} c="white" /> Avisar operador</>}
                     </button>
                     <button onClick={centrarMapa} style={{ padding: "12px 14px", borderRadius: 14, background: "var(--surface)", color: "var(--ink)", border: "1px solid var(--line)", cursor: "pointer", fontFamily: "var(--f)", fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}><IconCrosshair sz={17} c="var(--navy)" /> Ver mapa</button>
+                  </div>
+                </div>
+              ) : miEstado === "cancelado" ? (
+                /* ── CANCELADO ── */
+                <div style={{ padding: "16px 20px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                    <div style={{ width: 48, height: 48, borderRadius: 14, background: "var(--line2)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <IconClose sz={24} c="var(--mute)" sw={2.5} />
+                    </div>
+                    <div>
+                      <Eyebrow color="var(--mute)">Servicio cancelado</Eyebrow>
+                      <p style={{ margin: "4px 0 0", fontWeight: 800, fontSize: 18, color: "var(--ink)", letterSpacing: -0.4 }}>Tu servicio fue cancelado</p>
+                    </div>
+                  </div>
+                  <p style={{ margin: "0 0 14px", fontSize: 13, color: "var(--mute)", lineHeight: 1.5 }}>Este servicio ya no está activo. Si necesitas más información, comunícate con la central.</p>
+                  <a href="tel:013453707" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px", borderRadius: 14, background: "var(--navy)", color: "white", textDecoration: "none", fontWeight: 700, fontSize: 14, fontFamily: "var(--f)" }}>
+                    <IconPhone sz={16} c="white" /> Central AFA · 01 345 3707
+                  </a>
+                </div>
+              ) : miEstado === "no abordó" ? (
+                /* ── NO ABORDÓ ── */
+                <div style={{ padding: "16px 20px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                    <div style={{ width: 48, height: 48, borderRadius: 14, background: "#fef2f2", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <IconBus sz={24} c="#ef4444" />
+                    </div>
+                    <div>
+                      <Eyebrow color="#ef4444">No abordaste</Eyebrow>
+                      <p style={{ margin: "4px 0 0", fontWeight: 800, fontSize: 18, color: "var(--ink)", letterSpacing: -0.4 }}>El bus pasó por tu paradero</p>
+                    </div>
+                  </div>
+                  <p style={{ margin: "0 0 14px", fontSize: 13, color: "var(--mute)", lineHeight: 1.5 }}>No se registró tu abordaje. Si esto es un error, llama a la central o envía un mensaje al operador.</p>
+                  <div style={{ background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 16, padding: 14, marginBottom: 12 }}>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                      <div style={{ width: 44, height: 44, borderRadius: 12, background: "var(--navy)", display: "flex", alignItems: "center", justifyContent: "center" }}><IconBus sz={22} c="white" /></div>
+                      <div>
+                        <p style={{ margin: 0, fontFamily: "var(--m)", fontWeight: 700, fontSize: 15, color: "var(--ink)", letterSpacing: 0.4 }}>{vehiculo?.placa || "—"}</p>
+                        <p style={{ margin: "2px 0 0", fontSize: 12, color: "var(--mute)" }}>{conductor?.nombre || "Conductor AFA"}</p>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {conductor?.telefono && (
+                      <a href={telHref(conductor.telefono)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px", borderRadius: 14, background: "var(--navy)", color: "white", textDecoration: "none", fontWeight: 700, fontSize: 14, fontFamily: "var(--f)" }}>
+                        <IconPhone sz={16} c="white" /> Llamar al conductor
+                      </a>
+                    )}
+                    <a href="tel:013453707" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--line2)", textDecoration: "none", color: "var(--ink)", fontWeight: 600, fontSize: 13, fontFamily: "var(--f)" }}>
+                      <IconPhone sz={15} c="var(--navy)" /> Central AFA · 01 345 3707
+                    </a>
+                    <button onClick={() => setMostrarReporte(true)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--line2)", cursor: "pointer", color: "var(--mute)", fontWeight: 600, fontSize: 13, fontFamily: "var(--f)" }}>
+                      <IconMessageCircle sz={15} c="var(--mute)" /> Enviar mensaje al operador
+                    </button>
                   </div>
                 </div>
               ) : (
@@ -1850,7 +1974,7 @@ export default function AppPasajero() {
                       </div>
                       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
                         <span style={{ fontSize: 10, color: "var(--mute2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>{(miParada.reserva as any)?.origen || "Origen"}</span>
-                        <span style={{ fontSize: 10, color: "var(--mute2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>{(miParada.reserva as any)?.destino || "Destino"}</span>
+                        <span style={{ fontSize: 10, color: miEstado === "embarcado" ? "var(--success)" : "var(--mute2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>{miEstado === "embarcado" ? (rutaParadas[rutaParadas.length - 1]?.nombre || (miParada.reserva as any)?.destino || "Destino") : ((miParada.reserva as any)?.destino || "Destino")}</span>
                       </div>
                     </div>
                   )}
@@ -1875,12 +1999,14 @@ export default function AppPasajero() {
                   </div>
 
                   {/* Action buttons */}
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-                    <button onClick={() => setMostrarNavModal(true)} style={{ padding: "12px 14px", borderRadius: 14, background: "var(--ink)", color: "white", border: "none", cursor: "pointer", fontFamily: "var(--f)", fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, letterSpacing: -0.1 }}>
-                      <IconNav sz={17} c="white" /> Llegar al paradero
-                    </button>
-                    <button onClick={() => setMostrarParadasModal(true)} style={{ padding: "12px 14px", borderRadius: 14, background: "var(--surface)", color: "var(--ink)", border: "1px solid var(--line)", cursor: "pointer", fontFamily: "var(--f)", fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, letterSpacing: -0.1 }}>
-                      <IconRoute sz={17} c="var(--navy)" /> Ver paradas
+                  <div style={{ display: "grid", gridTemplateColumns: miEstado === "embarcado" ? "1fr" : "1fr 1fr", gap: 10, marginBottom: 10 }}>
+                    {miEstado !== "embarcado" && (
+                      <button onClick={() => setMostrarNavModal(true)} style={{ padding: "12px 14px", borderRadius: 14, background: "var(--ink)", color: "white", border: "none", cursor: "pointer", fontFamily: "var(--f)", fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, letterSpacing: -0.1 }}>
+                        <IconNav sz={17} c="white" /> Llegar al paradero
+                      </button>
+                    )}
+                    <button onClick={() => setMostrarParadasModal(true)} style={{ padding: "12px 14px", borderRadius: 14, background: miEstado === "embarcado" ? "var(--ink)" : "var(--surface)", color: miEstado === "embarcado" ? "white" : "var(--ink)", border: miEstado === "embarcado" ? "none" : "1px solid var(--line)", cursor: "pointer", fontFamily: "var(--f)", fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, letterSpacing: -0.1 }}>
+                      <IconRoute sz={17} c={miEstado === "embarcado" ? "white" : "var(--navy)"} /> Ver paradas
                     </button>
                   </div>
 

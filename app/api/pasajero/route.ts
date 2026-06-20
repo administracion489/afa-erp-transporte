@@ -17,6 +17,11 @@ const admin = createClient(
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
+// El insert del conductor en ubicaciones_gps solo setea `created_at` (no `timestamp`).
+// Garantizamos que `timestamp` siempre tenga valor para que la app del pasajero pueda
+// calcular antigüedad ("sin señal") y la heurística B2. Mismo patrón que /api/cliente/gps.
+const norm = (g: any) => (g ? { ...g, timestamp: g.timestamp ?? g.created_at ?? null } : g);
+
 export async function POST(req: NextRequest) {
   try {
     // Mismo gate que /api/conductor: exige x-afa-key si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está
@@ -83,10 +88,18 @@ export async function POST(req: NextRequest) {
         if (!miPP?.parada) return NextResponse.json({ ruta: null });
 
         const miParada = miPP.parada;
-        // El valor canónico de la BD para "a bordo" es "abordado"; la app del pasajero
-        // usa "embarcado". Normalizamos aquí para no tocar la UI del pasajero.
-        const rawEstado = miPP.estado || "esperando";
-        const miEstado = rawEstado === "abordado" ? "embarcado" : rawEstado;
+        // estado_abordaje es la fuente canónica (escrita por el admin/conductor).
+        // estado es el campo legado del conductor app (puede desfasarse).
+        // Mapeamos a tres valores que consume la UI del pasajero:
+        //   "embarcado"  → pasajero a bordo
+        //   "no abordó"  → bus pasó, no embarcó
+        //   "esperando"  → estado inicial
+        // Valores reales del manifiesto: "Pendiente" | "Abordado" | "No Show" | "Cancelado".
+        const miEstado =
+          miPP.estado_abordaje === "No Show" ? "no abordó"
+          : miPP.estado_abordaje === "Cancelado" ? "cancelado"
+          : (miPP.estado_abordaje === "Abordado" || miPP.estado === "abordado" || miPP.estado === "embarcado") ? "embarcado"
+          : "esperando";
         const rId = miParada.reserva_id;
 
         let rutaParadas: any[] = [];
@@ -128,7 +141,7 @@ export async function POST(req: NextRequest) {
         const [vR, cR, uR] = await Promise.all([fetchVehiculo, fetchConductor, fetchGPS]);
         vehiculo   = vR?.data   ?? null;
         conductor  = cR?.data   ?? null;
-        busPosicion = uR?.data?.[0] ?? null;
+        busPosicion = norm(uR?.data?.[0] ?? null);
 
         // Si no hubo conductor por reserva, resolver desde el punto GPS activo.
         // Priorizar conductor_tercero_id (→ conductores_tercero) sobre conductor_id (→ conductores),
@@ -160,7 +173,7 @@ export async function POST(req: NextRequest) {
         }
         const { data, error } = await q.order("created_at", { ascending: false }).limit(1);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-        return NextResponse.json({ busPosicion: data?.[0] ?? null });
+        return NextResponse.json({ busPosicion: norm(data?.[0] ?? null) });
       }
 
       // ── Guardar URL de foto de perfil ────────────────────────────────────────
