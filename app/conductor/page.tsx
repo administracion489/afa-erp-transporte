@@ -229,8 +229,8 @@ function distanciaMetros(a: GeoPos, b: GeoPos): number {
 function intervaloEnvioMs(kmh: number, cercaParadero: boolean, emergencia: boolean): number {
   if (emergencia)    return 2000;   // SOS: lo más rápido que permita la captura
   if (cercaParadero) return 3000;   // arribo/embarque: precisar la maniobra
-  if (kmh < 3)       return 25000;  // detenido: solo heartbeat de presencia
-  if (kmh < 20)      return 8000;   // lento / maniobras / tráfico denso
+  if (kmh < 3)       return 25000;  // detenido: solo heartbeat (el jitter lo colapsa lib/huella)
+  if (kmh < 20)      return 5000;   // lento / maniobras / tráfico denso → más puntos para la huella
   if (kmh < 60)      return 4000;   // urbano
   return 3000;                      // carretera: más seguido para no saltar la huella
 }

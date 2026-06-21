@@ -7,6 +7,9 @@ import ModalManifiestoPortal from "@/components/portal/ModalManifiestoPortal";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador } from "@/lib/anim-marker";
+import {
+  suavizarHuella, limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos,
+} from "@/lib/huella";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 
@@ -25,14 +28,7 @@ type CuentaSeccion = "empresa" | "usuarios" | "notificaciones" | "facturacion_cf
 type Factura = { id: number; reserva_id: number | null; tipo_comprobante: string; serie: string | null; numero: string | null; fecha_emision: string | null; fecha_vencimiento: string | null; total: number; estado: string; pdf_url: string | null; };
 type PortalUsuario = { id: number; cliente_id: number; nombre: string; dni: string; cargo: string | null; rol: "admin" | "visor"; email: string | null; codigo_acceso: string; activo: boolean; created_at: string; modulos_permitidos: string[] | null; };
 
-// Media móvil de 3 puntos para reducir el zigzag GPS antes de renderizar la huella.
-function suavizarHuella<T extends { lat: number; lng: number }>(pts: T[]): T[] {
-  return pts.map((p, i) => {
-    const s = Math.max(0, i - 1), e = Math.min(pts.length - 1, i + 1);
-    const w = pts.slice(s, e + 1);
-    return { ...p, lat: w.reduce((a, q) => a + q.lat, 0) / w.length, lng: w.reduce((a, q) => a + q.lng, 0) / w.length };
-  });
-}
+// suavizarHuella + limpieza/Map Matching de la huella viven en lib/huella.ts (compartido con ModalGps).
 
 // Fuente de verdad del abordaje en TODO el ERP: pasajeros_parada (estado + estado_abordaje,
 // sincronizadas por trigger en BD). boarding_log se agregó después y está sin backfill, así
@@ -277,12 +273,15 @@ export default function ClientePortal() {
   const [rutaSelId,         setRutaSelId]         = useState<number | null>(null);
   const [rutasEnVivoMap,    setRutasEnVivoMap]    = useState<Record<number, [number,number][]>>({});
   const [huellaGpsMap,      setHuellaGpsMap]      = useState<Record<number, {lat:number;lng:number;velocidad:number;ts:string|null}[]>>({});
+  // Geometría ajustada a la vía (Map Matching) por servicio — misma calidad que el modal.
+  const [matchedEnVivoMap,  setMatchedEnVivoMap]  = useState<Record<number, [number,number][]>>({});
   const [paradasResueltasMap, setParadasResueltasMap] = useState<Record<number, Parada[]>>({});
   // Dashboard — info enriquecida por servicio destacado
   const [condInfoMap,   setCondInfoMap]   = useState<Record<number, {nombre: string; tel: string}>>({});
   const [vehPlacaMap,   setVehPlacaMap]   = useState<Record<number, string>>({});
   const [gpsCardMap,    setGpsCardMap]    = useState<Record<number, {lat:number;lng:number;velocidad:number} | null>>({});
   const [etaDestinoMap, setEtaDestinoMap] = useState<Record<number, string | null>>({});
+  const ajustadoresRef   = useRef<Record<number, ReturnType<typeof crearAjustadorHuella>>>({}); // 1 ajustador de Map Matching por servicio
   const dibujoLayersRef  = useRef<string[]>([]);
   const dibujoSourcesRef = useRef<string[]>([]);
   const stopMarkersRef   = useRef<mapboxgl.Marker[]>([]);
@@ -811,14 +810,16 @@ export default function ClientePortal() {
     return () => { supabase.removeChannel(ch); };
   }, [cliente]);
 
-  // ─── Mapa En vivo: cargar vehículos cuando se abre el tab ─────────────────
+  // ─── Cargar GPS en vivo al abrir En vivo o el Dashboard ───────────────────
+  // El dashboard también lo necesita: las cards "EN CURSO" deciden qué servicios
+  // están en ruta a partir de ubicacionesEnVivo (no de reservas.estado).
   useEffect(() => {
-    if (tab === "activos" && cliente) cargarVehiculosCliente(cliente.id);
+    if ((tab === "activos" || tab === "dashboard") && cliente) cargarVehiculosCliente(cliente.id);
   }, [tab, cliente, cargarVehiculosCliente]);
 
-  // ─── Mapa En vivo: refresco periódico GPS cada 15s ────────────────────────
+  // ─── Refresco periódico GPS cada 15s (En vivo + Dashboard) ────────────────
   useEffect(() => {
-    if (tab !== "activos" || !cliente) return;
+    if ((tab !== "activos" && tab !== "dashboard") || !cliente) return;
     const iv = setInterval(() => cargarVehiculosCliente(cliente.id), 15000);
     return () => clearInterval(iv);
   }, [tab, cliente, cargarVehiculosCliente]);
@@ -991,11 +992,10 @@ export default function ClientePortal() {
   // ─── Dashboard: conductor / vehículo / GPS por servicio destacado ─────────
   useEffect(() => {
     if (tab !== "dashboard") return;
-    const hora = serviciosHoyRef.current.find(r => efectivoEstado(r) === "en_curso")?.hora_servicio
-              || serviciosHoyRef.current[0]?.hora_servicio;
-    if (!hora) return;
-    const destacados = serviciosHoyRef.current.filter(r => r.hora_servicio === hora);
-    destacados.forEach(async r => {
+    // Carga datos para TODOS los servicios de hoy (no un solo turno) y los refresca
+    // cada 15s: así cualquiera que esté en ruta ahora tiene conductor/placa/GPS listos
+    // para su card EN CURSO.
+    const cargar = () => serviciosHoyRef.current.forEach(async r => {
       const ra = r as any;
       // Conductor
       if (!(r.id in condInfoMap)) {
@@ -1029,6 +1029,9 @@ export default function ClientePortal() {
         setGpsCardMap(prev => ({ ...prev, [r.id]: null }));
       }
     });
+    cargar();
+    const iv = setInterval(cargar, 15000);
+    return () => clearInterval(iv);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, reservas.length]);
 
@@ -1157,17 +1160,22 @@ export default function ClientePortal() {
   useEffect(() => {
     if (tab !== "activos" || rutaSelId == null) return;
     let cancel = false;
+    const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
     const cargarHuella = async (rid: number) => {
       const { data } = await supabase.from("ubicaciones_gps")
-        .select("lat,lng,velocidad,created_at,timestamp")
+        .select("lat,lng,velocidad,precision_m,created_at,timestamp")
         .eq("reserva_id", rid)
         .order("created_at", { ascending: true })
         .limit(5000);
       if (cancel) return;
-      const pts = (data || [])
-        .filter((p: any) => p.lat && p.lng)
-        .map((p: any) => ({ lat: Number(p.lat), lng: Number(p.lng), velocidad: Number(p.velocidad) || 0, ts: p.created_at || p.timestamp }));
-      setHuellaGpsMap(prev => ({ ...prev, [rid]: pts }));
+      const filas = (data || []).filter((p: any) => p.lat && p.lng);
+      // Limpieza de jitter (mismo motor que el modal): colapsa rachas detenidas, dedup en marcha.
+      const limpio = limpiarHuella(filasAPuntos(filas));
+      setHuellaGpsMap(prev => ({ ...prev, [rid]: limpio.map(p => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad, ts: null })) }));
+      // Map Matching por ventanas (pegado a la pista) — throttle/congelado interno del ajustador.
+      if (!ajustadoresRef.current[rid]) ajustadoresRef.current[rid] = crearAjustadorHuella();
+      const matched = await ajustadoresRef.current[rid].ajustar(limpio, token, () => cancel);
+      if (matched && !cancel) setMatchedEnVivoMap(prev => ({ ...prev, [rid]: matched }));
     };
     cargarHuella(rutaSelId);
     // Refresca cada 12s (para servicios en curso)
@@ -1212,13 +1220,22 @@ export default function ClientePortal() {
     }
 
     // CAPA 2 — Huella GPS real (segmentos coloreados por velocidad)
-    const huella = suavizarHuella(huellaGpsMap[sel.id] || []);
-    if (huella.length >= 2) {
-      const feats = [];
-      for (let i = 0; i < huella.length - 1; i++) {
-        const a = huella[i], b = huella[i + 1];
-        feats.push({ type: "Feature" as const, properties: { velocidad: (a.velocidad + b.velocidad) / 2 }, geometry: { type: "LineString" as const, coordinates: [[a.lng, a.lat], [b.lng, b.lat]] } });
-      }
+    // Si hay geometría ajustada a la vía (Map Matching) se dibuja esa (pegada a la pista);
+    // si no, la huella cruda ya limpiada + suavizada (sin zigzag). Mismo motor que el modal.
+    const huellaPts = huellaGpsMap[sel.id] || [];
+    const matchedEV = matchedEnVivoMap[sel.id];
+    const feats: any[] = (matchedEV && matchedEV.length >= 2)
+      ? colorearMatched(matchedEV, huellaPts)
+      : (() => {
+          const huella = suavizarHuella(huellaPts);
+          const f: any[] = [];
+          for (let i = 0; i < huella.length - 1; i++) {
+            const a = huella[i], b = huella[i + 1];
+            f.push({ type: "Feature" as const, properties: { velocidad: (a.velocidad + b.velocidad) / 2 }, geometry: { type: "LineString" as const, coordinates: [[a.lng, a.lat], [b.lng, b.lat]] } });
+          }
+          return f;
+        })();
+    if (feats.length > 0) {
       const sid = `gps-s-${sel.id}`, lid = `gps-l-${sel.id}`;
       try {
         map.addSource(sid, { type: "geojson", data: { type: "FeatureCollection", features: feats } as any });
@@ -1227,7 +1244,7 @@ export default function ClientePortal() {
           "line-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"] as any,
         } });
         dibujoSourcesRef.current.push(sid); dibujoLayersRef.current.push(lid);
-        huella.forEach(p => { bounds.extend([p.lng, p.lat]); hasBounds = true; });
+        huellaPts.forEach(p => { bounds.extend([p.lng, p.lat]); hasBounds = true; });
       } catch {}
     }
 
@@ -1253,7 +1270,7 @@ export default function ClientePortal() {
       try { map.fitBounds(bounds, { padding: 60, maxZoom: 14, duration: 700 }); lastFitRef.current = sel.id; } catch {}
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapListoEnVivo, rutasEnVivoMap, huellaGpsMap, paradasResueltasMap, paradas, rutaSelId, tab]);
+  }, [mapListoEnVivo, rutasEnVivoMap, huellaGpsMap, matchedEnVivoMap, paradasResueltasMap, paradas, rutaSelId, tab]);
 
   // ─── KPIs ─────────────────────────────────────────────────────────────────
   const hoy          = getHoyPeru();
@@ -1299,12 +1316,41 @@ export default function ClientePortal() {
   const serviciosHoy   = reservas
     .filter(r => esHoy(r.fecha_servicio) && !esCancelado(r.estado))
     .sort((a, b) => (a.hora_servicio || "").localeCompare(b.hora_servicio || ""));
-  // Prioriza el servicio con GPS activo para la card principal
-  const servicioActivo = serviciosHoy.find(r => efectivoEstado(r) === "en_curso") || serviciosHoy[0] || null;
-  // Todos los servicios de la misma hora que el servicio activo → aparecen como cards EN RUTA
-  const serviciosDestacados = servicioActivo
-    ? serviciosHoy.filter(r => r.hora_servicio === servicioActivo.hora_servicio)
-    : [];
+  // ─── ¿Qué servicios están EN RUTA *ahora*? ──────────────────────────────────
+  // No se puede confiar en reservas.estado: la app del conductor no siempre marca
+  // "finalizada", así que un turno que ya terminó puede quedar "en_curso" en BD y
+  // tapar a los que recién arrancan. Fuente de verdad = GPS en vivo + recorrido: un
+  // servicio está en ruta si su vehículo transmitió hace ≤20 min y su recorrido no
+  // está completo (ni finalizado).
+  const LIVE_MAX_MIN = 20;
+  const minGpsServicio = (r: Reserva): number | null => {
+    const ra = r as any;
+    const esTer = ra.vehiculo_tercero_id != null;
+    const u = ubicacionesEnVivo.find(p =>
+      (p.reserva_id != null && p.reserva_id === r.id) ||
+      (esTer && ra.vehiculo_tercero_id != null && p.vehiculo_tercero_id === ra.vehiculo_tercero_id) ||
+      (!esTer && r.vehiculo_id != null && p.vehiculo_id === r.vehiculo_id));
+    return u ? Math.floor((Date.now() - new Date(u.timestamp).getTime()) / 60000) : null;
+  };
+  const rutaCompleta = (r: Reserva): boolean => {
+    const ps = paradas[r.id] || [];
+    return ps.length > 0 && ps.every(p => p.estado === "completada");
+  };
+  const enRutaAhora = (r: Reserva): boolean => {
+    if (esFinalizado(r.estado) || rutaCompleta(r)) return false;
+    const m = minGpsServicio(r);
+    return m != null && m <= LIVE_MAX_MIN;
+  };
+  const serviciosEnRuta = serviciosHoy.filter(enRutaAhora);
+  // Card principal: el primero en ruta; si ninguno transmite aún, el en_curso por BD o el primer turno.
+  const servicioActivo = serviciosEnRuta[0]
+    || serviciosHoy.find(r => efectivoEstado(r) === "en_curso")
+    || serviciosHoy[0] || null;
+  // Cards EN RUTA: TODOS los que están en ruta ahora (varios turnos a la vez). Si ninguno
+  // transmite todavía, se muestra el turno del servicio activo como vista previa (pre-inicio).
+  const serviciosDestacados = serviciosEnRuta.length > 0
+    ? serviciosEnRuta
+    : (servicioActivo ? serviciosHoy.filter(r => r.hora_servicio === servicioActivo.hora_servicio) : []);
   // Ref siempre actualizado (para efectos que no pueden incluir serviciosHoy en deps)
   serviciosHoyRef.current = serviciosHoy;
   const COLORES_RUTA = ["#0b315f", "#ea580c", "#16a34a", "#7c3aed"];
