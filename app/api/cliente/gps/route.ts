@@ -43,6 +43,22 @@ const keyDe = (g: any) =>
 // del portal calculan antigüedad con `timestamp`; si viniera null marcarían "sin señal".
 const norm = (g: any) => (g ? { ...g, timestamp: g.timestamp ?? g.created_at ?? null } : g);
 
+// Mantiene solo el ÚLTIMO tramo contiguo: corta donde haya un hueco temporal > gapMs.
+// La rama por-vehículo (terceros, sin reserva_id) trae las últimas 12 h, que pueden incluir
+// DOS servicios del mismo bus → sin esto, la huella dibuja una recta larga uniendo el fin del
+// viaje A con el inicio del viaje B. Dentro de un servicio el conductor late cada ~25 s aun
+// detenido, así que un hueco > gapMs = la app dejó de transmitir = otro servicio (o fin).
+// filas viene ordenado por created_at asc.
+const HUECO_VIAJE_MS = 30 * 60 * 1000; // 30 min: separa servicios sin cortar paradas/cortes de señal
+function ultimoTramo(filas: any[], gapMs: number): any[] {
+  if (filas.length < 2) return filas;
+  let inicio = 0;
+  for (let i = 1; i < filas.length; i++) {
+    if (tMs(filas[i]) - tMs(filas[i - 1]) > gapMs) inicio = i;
+  }
+  return inicio === 0 ? filas : filas.slice(inicio);
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -55,6 +71,7 @@ export async function POST(req: NextRequest) {
       const vehiculoTerceroId = body.vehiculoTerceroId ?? null;
       const HCOLS = "lat,lng,velocidad,created_at,timestamp,reserva_id,vehiculo_id,vehiculo_tercero_id,precision_m";
       let filas: any[] = [];
+      let viaVehiculo = false; // ¿se usó la rama por-vehículo (sin reserva_id)?
       if (reservaId != null) {
         const { data } = await supabase.from("ubicaciones_gps").select(HCOLS)
           .eq("reserva_id", reservaId).order("created_at", { ascending: true }).limit(5000);
@@ -69,8 +86,13 @@ export async function POST(req: NextRequest) {
         else                            q = q.eq("vehiculo_id", vehiculoId);
         const { data } = await q;
         filas = data || [];
+        viaVehiculo = true;
       }
-      const filasOk = filas.filter((p: any) => p.precision_m == null || p.precision_m <= 80);
+      // Rama por-vehículo: la ventana de 12 h puede traer 2 servicios del mismo bus → quedarnos
+      // solo con el viaje más reciente (cortar por hueco temporal). La rama por reserva_id ya
+      // está acotada a un único servicio, no se toca.
+      const base = viaVehiculo ? ultimoTramo(filas, HUECO_VIAJE_MS) : filas;
+      const filasOk = base.filter((p: any) => p.precision_m == null || p.precision_m <= 80);
       return NextResponse.json({ huella: filasOk.map(norm) });
     }
 
