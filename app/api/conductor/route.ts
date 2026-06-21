@@ -375,14 +375,37 @@ export async function POST(req: NextRequest) {
       }
 
       // ── Actualizar estado de reserva ────────────────────────────────────────
+      // El conductor SOLO maneja el ciclo OPERATIVO: "en_curso" (al iniciar) y
+      // "finalizada" (al completar o cerrar anticipado). "programada"/"confirmada"
+      // son del operador (confirmación del cliente del recurso) y NO se tocan desde
+      // la app del conductor. Para deshacer un inicio por error, usar "revertir_inicio".
       case "actualizar_estado": {
         const { reservaId, estado } = body;
         if (!reservaId || !estado) return NextResponse.json({ error: "reservaId y estado requeridos" }, { status: 400 });
-        const estadosValidos = ["pendiente", "programada", "confirmada", "en_curso", "finalizada", "cancelada"];
-        if (!estadosValidos.includes(estado)) return NextResponse.json({ error: "estado inválido" }, { status: 400 });
+        const estadosConductor = ["en_curso", "finalizada"];
+        if (!estadosConductor.includes(estado))
+          return NextResponse.json({ error: "El conductor solo puede marcar 'en_curso' o 'finalizada'" }, { status: 403 });
         const { error } = await admin.from("reservas").update({ estado }).eq("id", reservaId);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ ok: true });
+      }
+
+      // ── Revertir un inicio por error ─────────────────────────────────────────
+      // El conductor inició el servicio equivocado y "Sale": restaura el estado del
+      // operador que tenía ANTES del en_curso (programada/confirmada), nunca lo degrada.
+      // Solo revierte si la reserva sigue "en_curso"; si el operador ya cambió el estado,
+      // no lo pisa.
+      case "revertir_inicio": {
+        const { reservaId, estadoPrevio } = body;
+        if (!reservaId) return NextResponse.json({ error: "reservaId requerido" }, { status: 400 });
+        const destino = (estadoPrevio === "programada" || estadoPrevio === "confirmada") ? estadoPrevio : "confirmada";
+        const { data: r, error: rErr } = await admin.from("reservas").select("estado").eq("id", reservaId).maybeSingle();
+        if (rErr) return NextResponse.json({ error: rErr.message }, { status: 500 });
+        if (!r) return NextResponse.json({ error: "Reserva no encontrada" }, { status: 404 });
+        if (r.estado !== "en_curso") return NextResponse.json({ ok: true, sinCambio: true });
+        const { error } = await admin.from("reservas").update({ estado: destino }).eq("id", reservaId);
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ ok: true, estado: destino });
       }
 
       // ── Cambiar PIN de acceso ────────────────────────────────────────────────

@@ -84,16 +84,26 @@ function distM(aLat: number, aLng: number, bLat: number, bLng: number): number {
 
 type MatchPt = { lat: number; lng: number; acc: number };
 
-// Prepara los puntos para Map Matching: colapsa los clusters estacionarios (un bus
-// detenido emite decenas de fixes con jitter sobre el mismo punto → confunden al matcher
-// y producen una línea recta de baja confianza) descartando puntos a <8 m del anterior,
-// y limita a 100 (máximo de la API), conservando primero y último.
-function prepararPuntos(pts: MatchPt[]): MatchPt[] {
-  const dedup: MatchPt[] = [];
+// Colapsa los clusters estacionarios: descarta puntos a <minM del último conservado
+// (un bus detenido emite decenas de fixes con jitter sobre el mismo punto → confunden
+// al matcher y producen una recta de baja confianza). El resultado es un PREFIJO ESTABLE:
+// al añadir puntos al final, los ya conservados no cambian (la decisión de cada punto
+// depende solo de los anteriores). Eso permite "congelar" ventanas ya ajustadas mientras
+// el viaje sigue en curso (ver el efecto de carga de huella).
+function dedupCercanos(pts: MatchPt[], minM = 8): MatchPt[] {
+  const out: MatchPt[] = [];
   for (const p of pts) {
-    const last = dedup[dedup.length - 1];
-    if (!last || distM(last.lat, last.lng, p.lat, p.lng) >= 8) dedup.push(p);
+    const last = out[out.length - 1];
+    if (!last || distM(last.lat, last.lng, p.lat, p.lng) >= minM) out.push(p);
   }
+  return out;
+}
+
+// Prepara una ventana para Map Matching: deduplica y limita a 100 (máximo de la API),
+// conservando primero y último. NO se usa para diezmar el viaje entero (eso producía la
+// huella de rectas en servicios largos); se llama por ventana, que ya viene ≤100.
+function prepararPuntos(pts: MatchPt[]): MatchPt[] {
+  const dedup = dedupCercanos(pts);
   if (dedup.length <= 100) return dedup;
   const N = Math.ceil(dedup.length / 100);
   const out = dedup.filter((_, i) => i % N === 0);
@@ -126,6 +136,15 @@ async function mapMatchTrail(
     const confidence = Number(m[0]?.confidence) || 0;
     return c?.length >= 2 ? { coords: c, confidence } : null;
   } catch { return null; }
+}
+
+// Ajusta UNA ventana (≤100 puntos densos) a la vía. Si Map Matching falla o devuelve
+// baja confianza, cae a la huella cruda de la ventana (densa: sigue la pista sin inventar
+// rectas largas) en vez de dejar un hueco. Nunca devuelve null.
+async function matchVentana(ventana: MatchPt[], token: string): Promise<[number, number][]> {
+  const r = await mapMatchTrail(ventana, token);
+  if (r && r.confidence >= 0.4 && r.coords.length >= 2) return r.coords;
+  return ventana.length >= 2 ? ventana.map(p => [p.lng, p.lat] as [number, number]) : [];
 }
 
 // Reparte la velocidad de la huella cruda sobre la geometría ajustada a la vía:
@@ -380,9 +399,17 @@ export default function ModalGps({
   useEffect(() => {
     let cancel = false;
     let lastMatchMs = 0;
-    let huboMatch = false;                                   // ¿ya hay una huella ajustada aceptada?
     let lastTail: { lat: number; lng: number } | null = null; // último punto enviado a matching
     const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
+    // Map Matching topa en 100 coordenadas por llamada. Ajustar el viaje ENTERO en una sola
+    // llamada obliga a diezmar la huella (1 de cada N puntos); en un servicio largo los
+    // puntos quedan a cientos de metros y la API devuelve una traza recta de baja confianza
+    // → es el bug de "líneas rectas" que reaparece al revisar un servicio terminado. En vez
+    // de eso troceamos en ventanas DENSAS de ≤100 puntos, ajustamos cada una y las unimos.
+    const WIN = 100;     // máximo de la API por llamada
+    const SOLAPE = 1;    // 1 punto compartido entre ventanas contiguas para que se unan
+    const congeladas: [number, number][][] = []; // ventanas COMPLETAS ya ajustadas (no se recalculan)
+    let congeladoHasta = 0;                       // nº de puntos deduplicados ya congelados
     const cargar = async () => {
       try {
         const res = await fetch("/api/cliente/gps", {
@@ -392,29 +419,45 @@ export default function ModalGps({
         });
         const json = await res.json();
         const arr = Array.isArray(json?.huella) ? json.huella : [];
-        if (!cancel && arr.length > 0) {
-          const pts = arr.map((d: any) => ({ lat: d.lat, lng: d.lng, velocidad: d.velocidad ?? 0 }));
-          setHuella(pts);
-          // Map Matching: ajustar la huella a la red vial. Throttle 60 s (límite de costo de
-          // la API de Mapbox) y, si el bus no se movió (>8 m) desde el último match, se omite
-          // la llamada y se conserva la huella ajustada previa → bus parado = 0 llamadas extra.
-          const ahora = Date.now();
-          const tail = pts[pts.length - 1];
-          const seMovio = !lastTail || distM(lastTail.lat, lastTail.lng, tail.lat, tail.lng) >= 8;
-          if (token && ahora - lastMatchMs >= 60000 && (seMovio || !huboMatch)) {
-            lastMatchMs = ahora;
-            lastTail = { lat: tail.lat, lng: tail.lng };
-            const mp = arr.map((d: any) => ({ lat: d.lat, lng: d.lng, acc: d.precision_m ?? 25 }));
-            const r = await mapMatchTrail(mp, token);
-            if (!cancel && r) {
-              // Compuerta de calidad: la primera vez aceptamos con barra baja (pegar a la vía
-              // cuanto antes); en régimen exigimos confianza decente para NO pisar una huella
-              // buena con una recta de baja confianza (p. ej. cuando el bus está detenido).
-              const minConf = huboMatch ? 0.5 : 0.3;
-              if (r.confidence >= minConf) { huboMatch = true; setMatchedCoords(r.coords); }
-            }
-          }
+        if (cancel || arr.length === 0) return;
+
+        const pts = arr.map((d: any) => ({ lat: d.lat, lng: d.lng, velocidad: d.velocidad ?? 0 }));
+        setHuella(pts); // mientras se ajusta se dibuja la huella cruda densa (sin rectas falsas)
+        if (!token) return;
+
+        // Throttle 60 s (costo Map Matching). Si el bus no se movió (>8 m) y ya hay geometría
+        // congelada, no hay nada nuevo que ajustar → 0 llamadas (bus parado / servicio fijo).
+        const ahora = Date.now();
+        const cola = pts[pts.length - 1];
+        const seMovio = !lastTail || distM(lastTail.lat, lastTail.lng, cola.lat, cola.lng) >= 8;
+        if (ahora - lastMatchMs < 60000) return;
+        if (!seMovio && congeladas.length) return;
+        lastMatchMs = ahora;
+        lastTail = { lat: cola.lat, lng: cola.lng };
+
+        // Deduplicar TODO el stream (prefijo estable, append-only): el índice de las ventanas
+        // ya congeladas no se corre cuando el viaje crece.
+        const limpio = dedupCercanos(
+          arr.map((d: any) => ({ lat: d.lat, lng: d.lng, acc: d.precision_m ?? 25 }))
+        );
+
+        // Congelar las ventanas COMPLETAS nuevas (cada una se ajusta una sola vez).
+        while (limpio.length - congeladoHasta >= WIN) {
+          const ini = Math.max(0, congeladoHasta - SOLAPE);
+          const ventana = limpio.slice(ini, congeladoHasta + WIN);
+          const coords = await matchVentana(ventana, token);
+          if (cancel) return;
+          congeladas.push(coords);
+          congeladoHasta += WIN;
         }
+
+        // Ventana de cola (tramo en curso): se re-ajusta cada ciclo hasta completarse.
+        const colaVentana = limpio.slice(Math.max(0, congeladoHasta - SOLAPE));
+        const coordsCola = colaVentana.length >= 2 ? await matchVentana(colaVentana, token) : [];
+        if (cancel) return;
+
+        const todo = [...congeladas, coordsCola].flat() as [number, number][];
+        if (todo.length >= 2) setMatchedCoords(todo);
       } catch { /* conservar estela previa */ }
     };
     cargar();

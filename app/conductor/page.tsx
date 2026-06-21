@@ -268,9 +268,15 @@ const SK_SRV = "afa_serv_v1";
 type ServicioGuardado = {
   reservaId: number; vehiculoId: number;
   paradaIdx: number; inicioViaje: string;
+  // Estado del operador (programada/confirmada) que la reserva tenía ANTES de que el
+  // conductor la pusiera en_curso. Se restaura si el conductor "Sale" del servicio.
+  estadoPrevio?: string | null;
 };
+// Merge con lo ya guardado: los re-guardados parciales (p.ej. avance de paradero) NO
+// deben borrar estadoPrevio fijado al iniciar.
 function saveServicio(d: ServicioGuardado) {
-  localStorage.setItem(SK_SRV, JSON.stringify(d));
+  const prev = loadServicio();
+  localStorage.setItem(SK_SRV, JSON.stringify({ ...prev, ...d }));
 }
 function loadServicio(): ServicioGuardado | null {
   try {
@@ -884,7 +890,9 @@ export default function ConductorApp() {
     setInicioViaje(ahora);
     setIniciando(false);
     setTab("paradas");
-    saveServicio({ reservaId: reserva.id, vehiculoId: vehiculoId!, paradaIdx: 0, inicioViaje: ahora.toISOString() });
+    // Guardar el estado del operador ANTES de pisarlo con en_curso, para poder restaurarlo
+    // exacto si el conductor "Sale" del servicio (no degradar Confirmada → Programada).
+    saveServicio({ reservaId: reserva.id, vehiculoId: vehiculoId!, paradaIdx: 0, inicioViaje: ahora.toISOString(), estadoPrevio: reserva.estado ?? null });
     // Marcar en_curso en DB (best-effort, no bloquea la UI).
     condApi("actualizar_estado", { reservaId: reserva.id, estado: "en_curso" }).catch(() => {});
     setReservasHoy(prev => prev.map(r => r.id === reserva.id ? { ...r, estado: "en_curso" } : r));
@@ -905,17 +913,22 @@ export default function ConductorApp() {
   }
 
   // Recuperación: el conductor inició un servicio por error o aún no está listo.
-  // Lo devuelve a la lista de pendientes SIN registrarlo como finalizado.
+  // Lo devuelve a su lista SIN registrarlo como finalizado, RESTAURANDO el estado del
+  // operador (programada/confirmada). El conductor NO decide ese estado: solo deshace su
+  // propio en_curso. Tras una recarga, reservaActiva.estado ya sería "en_curso", por eso
+  // el estado previo se lee del servicio guardado.
   function volverAPendientes() {
     const rId = reservaActiva?.id;
     if (!rId) return;
     const ok = window.confirm(
-      "¿Salir de este servicio?\n\nVolverá a tu lista de pendientes para que lo inicies cuando estés listo. NO se registra como finalizado."
+      "¿Salir de este servicio?\n\nVolverá a tu lista para que lo inicies cuando estés listo. NO se registra como finalizado."
     );
     if (!ok) return;
+    const previo = loadServicio()?.estadoPrevio;
+    const restaurado = (previo === "programada" || previo === "confirmada") ? previo : "confirmada";
     clearServicio();
-    condApi("actualizar_estado", { reservaId: rId, estado: "programada" }).catch(() => {});
-    setReservasHoy(prev => prev.map(r => r.id === rId ? { ...r, estado: "programada" } : r));
+    condApi("revertir_inicio", { reservaId: rId, estadoPrevio: restaurado }).catch(() => {});
+    setReservasHoy(prev => prev.map(r => r.id === rId ? { ...r, estado: restaurado } : r));
     setEnRuta(false); setReservaActiva(null); setParadas([]); setPasajeros([]);
     setParadaIdx(0); setVelocidad(0); setTotalEnvios(0); setInicioViaje(null);
     setTab("ruta");
