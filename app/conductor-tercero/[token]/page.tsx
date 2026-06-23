@@ -60,6 +60,27 @@ function distanciaMetros(la1: number, ln1: number, la2: number, ln2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// ─── CADENCIA DE ENVÍO ADAPTATIVA (mismo criterio que la app del conductor AFA) ──
+// Denso cuando importa (cerca de paradero / en marcha) y espaciado detenido. Produce
+// puntos a ~50-78 m → la huella (Map Matching por ventanas de lib/huella.ts) se pega a
+// la pista igual que la app nativa, en vez de los ~110 m del envío PLANO de 10 s que
+// dejaba rectas para los terceros que usan el link web.
+const UMBRAL_PARADERO_M = 150;
+function intervaloEnvioMs(kmh: number, cercaParadero: boolean): number {
+  if (cercaParadero) return 3000;   // arribo/embarque: precisar la maniobra
+  if (kmh < 3)  return 25000;       // detenido: solo heartbeat (el jitter lo colapsa lib/huella)
+  if (kmh < 20) return 5000;        // lento / maniobras / tráfico denso
+  if (kmh < 60) return 4000;        // urbano
+  return 3000;                      // carretera: más seguido para no saltar la huella
+}
+function cercaDeParadero(lat: number, lng: number, lista: Parada[]): boolean {
+  for (const p of lista) {
+    if (p.lat == null || p.lng == null) continue;
+    if (distanciaMetros(lat, lng, Number(p.lat), Number(p.lng)) < UMBRAL_PARADERO_M) return true;
+  }
+  return false;
+}
+
 // ─── ETIQUETA DE DIRECCIÓN ────────────────────────────────────────────────────
 function getDireccionLabel(h: number): string {
   const dirs = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"];
@@ -139,6 +160,11 @@ export default function ConductorTerceroPage() {
   const rumboSuavRef    = useRef<number>(0);           // rumbo suavizado acumulado (no 0-360 bounded)
   const rumboRef        = useRef<number>(0);           // último rumbo para la brújula CSS
 
+  // ── Throttle adaptativo de envío (mismo criterio que la app del conductor) ────
+  const lastSentRef     = useRef<number>(0);           // ts del último envío
+  const lastSentPosRef  = useRef<{ lat: number; lng: number } | null>(null);
+  const precisionRef    = useRef<number>(0);           // accuracy (m) del último fix
+
   // Sincronizar refs con state
   useEffect(() => { paradaIdxRef.current = paradaIdx; }, [paradaIdx]);
   useEffect(() => { paradasRef.current = paradas; }, [paradas]);
@@ -173,11 +199,26 @@ export default function ConductorTerceroPage() {
   }, [token]);
 
   // ── GPS ──────────────────────────────────────────────────────────────────────
-  const enviarUbicacion = useCallback(async (pos: { lat: number; lng: number }) => {
+  const enviarUbicacion = useCallback(async (pos: { lat: number; lng: number }, accuracy?: number) => {
+    const acc = accuracy ?? precisionRef.current ?? 0;
+    if (acc > 1500) return;                                   // basura de torre celular
+    const vel = Math.round(speedRef.current * 3.6);
+    const ahora = Date.now();
+    // Throttle ADAPTATIVO: el intervalo objetivo depende de la marcha; además, si saltó
+    // > 60 m desde el último envío, refrescar YA. Piso anti-spam de 2.5 s (protege el API).
+    const objetivo = intervaloEnvioMs(vel, cercaDeParadero(pos.lat, pos.lng, paradasRef.current));
+    const dt = ahora - lastSentRef.current;
+    const distMov = lastSentPosRef.current
+      ? distanciaMetros(pos.lat, pos.lng, lastSentPosRef.current.lat, lastSentPosRef.current.lng)
+      : Infinity;
+    if (dt < 2500) return;
+    if (dt < objetivo && distMov < 60) return;
+    lastSentRef.current = ahora;
+    lastSentPosRef.current = { lat: pos.lat, lng: pos.lng };
     try {
       await fetch("/api/conductor-tercero/ubicacion", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, lat: pos.lat, lng: pos.lng, velocidad: Math.round(speedRef.current * 3.6), rumbo: Math.round(rumboRef.current) }),
+        body: JSON.stringify({ token, lat: pos.lat, lng: pos.lng, velocidad: vel, rumbo: Math.round(rumboRef.current), precision: Math.round(acc) }),
       });
     } catch {}
   }, [token]);
@@ -263,9 +304,10 @@ export default function ConductorTerceroPage() {
     gpsRunningRef.current = true;
     watchIdRef.current = navigator.geolocation.watchPosition(
       (pos) => {
-        const { latitude: lat, longitude: lng, heading: h, speed: s } = pos.coords;
+        const { latitude: lat, longitude: lng, heading: h, speed: s, accuracy: acc } = pos.coords;
         posActualRef.current = { lat, lng };
         speedRef.current = s ?? 0;
+        precisionRef.current = acc ?? 0;
         setUbicacion({ lat, lng });
 
         // Heading desde GPS solo cuando hay velocidad real (>~3 km/h)
@@ -276,13 +318,18 @@ export default function ConductorTerceroPage() {
           setRumbo(Math.round(suavizado));
         }
         verificarGeofence(lat, lng);
+        // Enviar en cada fix; el throttle adaptativo de enviarUbicacion decide el ritmo
+        // real (~3-5 s en marcha, 25 s detenido) → huella densa como la app nativa.
+        enviarUbicacion({ lat, lng }, acc ?? 0);
       },
       (err) => { console.warn("[GPS]", err.message); },
       { enableHighAccuracy: true, maximumAge: 3000, timeout: 15000 }
     );
+    // Backstop: si watchPosition deja de emitir (detenido), reintenta seguido; el
+    // throttle adaptativo de enviarUbicacion gobierna el ritmo real (no fuerza cada 4 s).
     intervaloUbicacionRef.current = setInterval(() => {
-      if (posActualRef.current) enviarUbicacion(posActualRef.current);
-    }, 10000);
+      if (posActualRef.current) enviarUbicacion(posActualRef.current, precisionRef.current);
+    }, 4000);
   }, [enviarUbicacion, verificarGeofence]);
 
   // ── 1. Restaurar sesión ──────────────────────────────────────────────────────
