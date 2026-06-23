@@ -92,7 +92,13 @@ export async function POST(req: NextRequest) {
       // solo con el viaje más reciente (cortar por hueco temporal). La rama por reserva_id ya
       // está acotada a un único servicio, no se toca.
       const base = viaVehiculo ? ultimoTramo(filas, HUECO_VIAJE_MS) : filas;
-      const filasOk = base.filter((p: any) => p.precision_m == null || p.precision_m <= 80);
+      // Coherencia escritura↔lectura: el conductor (enviarUbicacion) acepta fixes hasta
+      // 1500 m a propósito (tablets/FUSED por red sin chip GPS) y DELEGA el suavizado a la
+      // lectura. Si aquí cortáramos a 80 m, esos puntos (80–1500 m) se perderían → huella
+      // vacía o con huecos → rectas, justo en equipos posicionados por red. La imprecisión
+      // ya la absorben limpiarHuella + los radii de Map Matching (acc·1.5), así que basta
+      // descartar solo la basura de torre celular (el MISMO techo que la escritura).
+      const filasOk = base.filter((p: any) => p.precision_m == null || p.precision_m <= 1500);
       return NextResponse.json({ huella: filasOk.map(norm) });
     }
 
@@ -140,8 +146,14 @@ export async function POST(req: NextRequest) {
     if (!ubic && (vehiculoTerceroId != null || vehiculoId != null)) {
       // Fallback por vehículo: solo puntos "en_ruta" para que el cliente no vea
       // al conductor en modo conectado-libre (antes/después de su servicio).
+      // Cota temporal: finalizar un servicio NO cierra las filas "en_ruta" del viaje
+      // anterior. Sin esta cota, al abrir un servicio nuevo (antes del 1er fix con su
+      // reserva_id) el fallback resucitaría el ÚLTIMO punto "en_ruta" del viaje pasado
+      // → el bus aparecería congelado en una posición vieja. 2 h cubre cualquier viaje.
+      const desdeFallback = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
       let q = supabase.from("ubicaciones_gps").select(COLS)
         .eq("estado", "en_ruta")
+        .gte("created_at", desdeFallback)
         .order("created_at", { ascending: false }).limit(1);
       if (vehiculoTerceroId != null) q = q.eq("vehiculo_tercero_id", vehiculoTerceroId);
       else                            q = q.eq("vehiculo_id", vehiculoId);

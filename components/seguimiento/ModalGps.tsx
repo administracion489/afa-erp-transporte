@@ -601,7 +601,12 @@ export default function ModalGps({
   const proximaParada  = paradasDisplay.find(p => p.estado !== "completada");
   const paradasComp    = paradas.filter(p => p.estado === "completada").length;
   const pct            = paradas.length > 0 ? Math.round((paradasComp / paradas.length) * 100) : 0;
-  const segsDesdeUlt  = ultimaActualiz ? Math.floor((Date.now() - ultimaActualiz.getTime()) / 1000) : null;
+  // "hace Ns" = antigüedad del FIX GPS real (created_at del punto), NO del último fetch.
+  // Antes usaba ultimaActualiz (momento del poll), que se reinicia a 0 cada 10 s aunque el
+  // punto esté congelado → mostraba "hace 3s" con el bus parado hace 1 min. Ahora coincide
+  // con sinSenal (>60s) y con el color del pulso (edad del punto).
+  const fechaPunto    = ubic ? (ubic.created_at || ubic.timestamp) : null;
+  const segsDesdeUlt  = fechaPunto ? Math.floor((Date.now() - new Date(fechaPunto).getTime()) / 1000) : null;
   const hayTrafico    = ruta?.tramos?.some(t => t.duracion_trafico_min > t.duracion_min + 2) ?? false;
 
   // ── ETA dinámica: posición actual del vehículo → próxima parada ────────────

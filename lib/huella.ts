@@ -200,8 +200,14 @@ export function colorearMatched(
 //   seleccionado). Llamar `ajustar(limpio, token, cancelado?)` cada ciclo; devuelve las
 //   coords unidas, o null si no hay nada nuevo (conservar la geometría previa).
 export function crearAjustadorHuella() {
-  const WIN = 100;     // máximo de la API por llamada
-  const SOLAPE = 1;    // 1 punto compartido entre ventanas contiguas para que se unan
+  // La API topa en MAX coords/llamada. Cada ventana se arma con MAX puntos COMO MÁXIMO
+  // (solape INCLUIDO) para que prepararPuntos NUNCA la diezme. Antes la ventana medía
+  // WIN+SOLAPE = 101 > 100 → prepararPuntos tomaba 1 de cada 2 → media densidad → Map
+  // Matching de baja confianza → RECTAS en servicios largos (todas las ventanas menos la
+  // 1ª). Reservar el solape dentro del presupuesto de 100 elimina ese diezmado.
+  const MAX = 100;             // máximo de coords por llamada de Map Matching (cap de la API)
+  const SOLAPE = 1;            // punto(s) compartido(s) entre ventanas contiguas para unirlas
+  const NUEVOS = MAX - SOLAPE; // puntos NUEVOS que congela cada ventana (deja sitio al solape)
   const congeladas: [number, number][][] = [];
   let congeladoHasta = 0;
   let lastMatchMs = 0;
@@ -221,13 +227,13 @@ export function crearAjustadorHuella() {
       lastMatchMs = Date.now();
       lastTail = { lat: cola.lat, lng: cola.lng };
 
-      while (limpio.length - congeladoHasta >= WIN) {
+      while (limpio.length - congeladoHasta >= NUEVOS) {
         const ini = Math.max(0, congeladoHasta - SOLAPE);
-        const ventana = limpio.slice(ini, congeladoHasta + WIN);
+        const ventana = limpio.slice(ini, ini + MAX);   // ≤ MAX SIEMPRE → no se diezma
         const coords = await matchVentana(ventana, token);
         if (cancelado?.()) return null;
         congeladas.push(coords);
-        congeladoHasta += WIN;
+        congeladoHasta += NUEVOS;
       }
       const colaVentana = limpio.slice(Math.max(0, congeladoHasta - SOLAPE));
       const coordsCola = colaVentana.length >= 2 ? await matchVentana(colaVentana, token) : [];
