@@ -10,6 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { firmarTokenPasajero, pidDeToken, loginBloqueado, registrarIntentoFallido, limpiarIntentos } from "@/lib/pasajero-auth";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -35,32 +36,57 @@ export async function POST(req: NextRequest) {
     const accion = body.accion as string;
 
     switch (accion) {
-      // ── Login por DNI (el PIN se valida en el cliente con la fila devuelta) ───
+      // ── Login por DNI+PIN (validado y firmado en el SERVIDOR) ────────────────
       case "login": {
         const { dni, pin } = body;
         if (!dni) return NextResponse.json({ error: "dni requerido" }, { status: 400 });
-        // Usar limit(1) en lugar de maybeSingle() para tolerar DNIs duplicados en BD.
-        const { data: rows, error } = await admin
-          .from("pasajeros").select("*").eq("dni", String(dni).trim())
-          .order("id", { ascending: false }).limit(1);
-        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-        const row: any = rows?.[0] ?? null;
-        if (!row) return NextResponse.json({ pasajero: null });
-        // Validar el PIN EN EL SERVIDOR. Antes se validaba en el cliente, lo que obligaba a
-        // devolver la fila completa (incl. pin_acceso) a cualquiera con un DNI = fuga de datos.
-        // Regla: pin_acceso si existe; si no, los últimos 4 dígitos del DNI.
-        const pinEsperado = row.pin_acceso || String(dni).trim().slice(-4);
-        if (!pin || String(pin) !== String(pinEsperado)) {
-          return NextResponse.json({ pinIncorrecto: true });
+        const dniT = String(dni).trim();
+
+        // Rate limit best-effort por (IP, DNI): frena brute-force/enumeración.
+        const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || "?";
+        const claveRL = `${ip}|${dniT}`;
+        if (loginBloqueado(claveRL)) {
+          return NextResponse.json({ error: "Demasiados intentos. Espera unos minutos." }, { status: 429 });
         }
-        delete row.pin_acceso;  // nunca devolver el PIN al cliente
-        return NextResponse.json({ pasajero: row });
+
+        // select("*") (resiliente a columnas que aún no existen en BD, p.ej. `edad`).
+        // limit(1) en vez de maybeSingle() para tolerar DNIs duplicados en BD.
+        const { data: rows, error } = await admin
+          .from("pasajeros").select("*")
+          .eq("dni", dniT).order("id", { ascending: false }).limit(1);
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        const full: any = rows?.[0] ?? null;
+
+        // Regla del PIN: pin_acceso si existe; si no, los últimos 4 dígitos del DNI.
+        // Respuesta UNIFORME para "DNI no existe" y "PIN incorrecto" → cierra el oráculo
+        // de enumeración de DNIs y no revela que el PIN por defecto deriva del DNI.
+        const pinEsperado = full ? (full.pin_acceso || dniT.slice(-4)) : null;
+        if (!full || !pin || String(pin) !== String(pinEsperado)) {
+          registrarIntentoFallido(claveRL);
+          return NextResponse.json({ credencialesInvalidas: true });
+        }
+        limpiarIntentos(claveRL);
+
+        // Proyección de salida: SOLO las columnas que usa la UI (minimización de PII;
+        // antes se devolvía la fila completa quitando solo pin_acceso).
+        const row = {
+          id: full.id, nombre: full.nombre, dni: full.dni ?? null, empresa: full.empresa ?? null,
+          telefono: full.telefono ?? null, qr_code: full.qr_code ?? null,
+          foto_url: full.foto_url ?? null, edad: full.edad ?? null,
+        };
+
+        // Token de sesión: el cliente lo reenvía en cada acción; el server deriva el
+        // pasajero_id DEL TOKEN (no del body) → cierra el IDOR.
+        const token = firmarTokenPasajero(row.id);
+        return NextResponse.json({ pasajero: row, token });
       }
 
       // ── Ruta del pasajero (resuelve todo el bundle del seguimiento) ──────────
       case "ruta": {
-        const { pid, hoy } = body;
-        if (!pid || !hoy) return NextResponse.json({ error: "pid y hoy requeridos" }, { status: 400 });
+        const pid = pidDeToken(body.token);
+        const { hoy } = body;
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!hoy) return NextResponse.json({ error: "hoy requerido" }, { status: 400 });
 
         const { data: pp, error: ppErr } = await admin
           .from("pasajeros_parada")
@@ -159,27 +185,39 @@ export async function POST(req: NextRequest) {
       }
 
       // ── Posición del bus en vivo (polling, reemplaza Realtime) ───────────────
+      // Resuelve SIEMPRE por reserva_id (no ambiguo) → funciona igual para flota
+      // propia y tercerizada. Exige token y que la reserva sea del propio pasajero
+      // (antes cualquiera podía pollear el GPS de cualquier vehículo enumerando ids).
       case "bus_posicion": {
-        const { reservaId, vehiculoId, esTercero } = body;
-        // Preferir reserva_id (no ambiguo). Si solo llega vehiculoId, usar el flag
-        // esTercero para elegir vehiculo_tercero_id vs vehiculo_id (los IDs se solapan).
-        let q = admin.from("ubicaciones_gps").select("*");
-        if (reservaId) {
-          q = q.eq("reserva_id", reservaId);
-        } else if (vehiculoId) {
-          q = q.eq(esTercero ? "vehiculo_tercero_id" : "vehiculo_id", vehiculoId);
-        } else {
-          return NextResponse.json({ busPosicion: null });
-        }
-        const { data, error } = await q.order("created_at", { ascending: false }).limit(1);
+        const pid = pidDeToken(body.token);
+        const { reservaId } = body;
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!reservaId) return NextResponse.json({ busPosicion: null });
+
+        // Pertenencia: el pasajero debe tener una parada en esa reserva.
+        const { data: pps } = await admin
+          .from("pasajeros_parada")
+          .select("parada:paradas(reserva_id)")
+          .eq("pasajero_id", pid);
+        const pertenece = (pps || []).some((x: any) => x.parada?.reserva_id === Number(reservaId));
+        if (!pertenece) return NextResponse.json({ busPosicion: null });
+
+        const { data, error } = await admin.from("ubicaciones_gps").select("*")
+          .eq("reserva_id", reservaId).order("created_at", { ascending: false }).limit(1);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ busPosicion: norm(data?.[0] ?? null) });
       }
 
       // ── Guardar URL de foto de perfil ────────────────────────────────────────
       case "foto": {
-        const { pid, fotoUrl } = body;
-        if (!pid || !fotoUrl) return NextResponse.json({ error: "pid y fotoUrl requeridos" }, { status: 400 });
+        const pid = pidDeToken(body.token);
+        const { fotoUrl } = body;
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        // Solo aceptar URLs de NUESTRO bucket (no inyectar URLs externas/trackers).
+        const prefijo = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/pasajeros-fotos/`;
+        if (typeof fotoUrl !== "string" || !fotoUrl.startsWith(prefijo)) {
+          return NextResponse.json({ error: "URL de foto inválida" }, { status: 400 });
+        }
         const { error } = await admin.from("pasajeros").update({ foto_url: fotoUrl }).eq("id", pid);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ ok: true });
@@ -187,8 +225,9 @@ export async function POST(req: NextRequest) {
 
       // ── Guardar datos de perfil del pasajero (edad para el Manifiesto MTC) ────
       case "perfil": {
-        const { pid, edad } = body;
-        if (!pid) return NextResponse.json({ error: "pid requerido" }, { status: 400 });
+        const pid = pidDeToken(body.token);
+        const { edad } = body;
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
         let e: number | null = null;
         if (edad !== null && edad !== undefined && edad !== "") {
           const n = Number(edad);
@@ -204,17 +243,31 @@ export async function POST(req: NextRequest) {
 
       // ── Mensaje / reporte al operador ────────────────────────────────────────
       case "mensaje": {
-        const { mensaje } = body;
-        if (!mensaje?.pasajero_id) return NextResponse.json({ error: "mensaje inválido" }, { status: 400 });
-        const { error } = await admin.from("mensajes_pasajero").insert(mensaje);
+        const pid = pidDeToken(body.token);
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        const m = body.mensaje || {};
+        const texto = String(m.mensaje ?? "").trim().slice(0, 1000);
+        if (!texto) return NextResponse.json({ error: "mensaje vacío" }, { status: 400 });
+        // Whitelist de columnas: pasajero_id viene del TOKEN (no del body) y el cliente
+        // no puede setear columnas internas (p.ej. leido) → cierra el mass-assignment.
+        const fila = {
+          pasajero_id: pid,
+          reserva_id:  m.reserva_id ?? null,
+          parada_id:   m.parada_id ?? null,
+          tipo:        typeof m.tipo === "string" ? m.tipo.slice(0, 40) : "novedad",
+          mensaje:     texto,
+        };
+        const { error } = await admin.from("mensajes_pasajero").insert(fila);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ ok: true });
       }
 
       // ── Cambiar paradero en todos los servicios vigentes ─────────────────────
       case "cambiar_paradero": {
-        const { pid, nombreParada, hoy } = body;
-        if (!pid || !nombreParada || !hoy) return NextResponse.json({ error: "pid, nombreParada y hoy requeridos" }, { status: 400 });
+        const pid = pidDeToken(body.token);
+        const { nombreParada, hoy } = body;
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!nombreParada || !hoy) return NextResponse.json({ error: "nombreParada y hoy requeridos" }, { status: 400 });
 
         const { data: pp, error: ppErr } = await admin
           .from("pasajeros_parada")
@@ -259,8 +312,10 @@ export async function POST(req: NextRequest) {
 
       // ── Reservas disponibles para autoselección ───────────────────────────
       case "reservas_disponibles": {
-        const { pid, hoy } = body;
-        if (!pid || !hoy) return NextResponse.json({ error: "pid y hoy requeridos" }, { status: 400 });
+        const pid = pidDeToken(body.token);
+        const { hoy } = body;
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!hoy) return NextResponse.json({ error: "hoy requerido" }, { status: 400 });
 
         const { data: pax } = await admin
           .from("pasajeros").select("cliente_id, reserva_id").eq("id", pid).maybeSingle();
@@ -371,8 +426,10 @@ export async function POST(req: NextRequest) {
 
       // ── Autoseleccionar paradero ──────────────────────────────────────────
       case "autoseleccionar": {
-        const { pid, parada_id } = body;
-        if (!pid || !parada_id) return NextResponse.json({ error: "pid y parada_id requeridos" }, { status: 400 });
+        const pid = pidDeToken(body.token);
+        const { parada_id } = body;
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        if (!parada_id) return NextResponse.json({ error: "parada_id requerido" }, { status: 400 });
 
         // Obtener cliente_id del pasajero
         const { data: pax } = await admin

@@ -7,7 +7,7 @@
 // `activate` borra todos los cachés cuya clave no termine en VERSION, forzando que los
 // navegadores ya instalados re-descarguen los chunks de Next (evita quedar pegado en una
 // versión vieja del ERP/app tras un deploy).
-const VERSION = "afa-v2";
+const VERSION = "afa-v3";
 const STATIC_CACHE = `afa-static-${VERSION}`;
 const SHELL_CACHE = `afa-shell-${VERSION}`;
 

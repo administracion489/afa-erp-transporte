@@ -240,10 +240,10 @@ export default function VehiculosPage() {
     setSubiendoFoto(slot);
     const placa = formV.placa.trim().toUpperCase().replace(/[^A-Z0-9]/g,"") || "tmp";
     const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
-    const path = `${placa}/${slot}_${Date.now()}.${ext}`;
-    const { error } = await supabase.storage.from("vehiculos").upload(path, file, { upsert: true });
+    const path = `propios/${placa}/${slot}_${Date.now()}.${ext}`;
+    const { error } = await supabase.storage.from("vehiculos-fotos").upload(path, file, { upsert: true });
     if (error) { alert("Error al subir foto: " + error.message); setSubiendoFoto(null); return; }
-    const { data: { publicUrl } } = supabase.storage.from("vehiculos").getPublicUrl(path);
+    const { data: { publicUrl } } = supabase.storage.from("vehiculos-fotos").getPublicUrl(path);
     setFormV(p => ({ ...p, [campo]: publicUrl }));
     setSubiendoFoto(null);
   };

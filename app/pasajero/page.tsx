@@ -23,7 +23,7 @@ type Parada = {
 type Reserva = {
   id: number; origen: string; destino: string;
   fecha_servicio: string | null; hora_servicio: string | null;
-  vehiculo_id: number | null;
+  vehiculo_id: number | null; vehiculo_tercero_id: number | null;
 };
 type UbicacionBus = {
   vehiculo_id: number; lat: number; lng: number;
@@ -41,12 +41,24 @@ function getFechaLocal(): string {
   const n = new Date();
   return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
 }
-const SK = "afa_pasajero_v2";
-function saveSession(p: Pasajero) { localStorage.setItem(SK, JSON.stringify({ p, exp: Date.now()+86400000 })); }
-function loadSession(): Pasajero | null {
-  try { const r = localStorage.getItem(SK); if(!r) return null; const {p,exp}=JSON.parse(r); if(Date.now()>exp){localStorage.removeItem(SK);return null;} return p; } catch{return null;}
+// v3: la sesión ahora guarda el token de servidor. Las sesiones v2 (sin token) quedan
+// inválidas tras el deploy → el pasajero vuelve a loguearse una vez.
+const SK = "afa_pasajero_v3";
+let _token: string | null = null;  // token de sesión firmado; paxApi lo adjunta en cada request
+function saveSession(p: Pasajero, token?: string) {
+  if (token) _token = token;  // en refrescos (foto/edad) se omite y se reusa el token vigente
+  localStorage.setItem(SK, JSON.stringify({ p, token: _token, exp: Date.now()+86400000 }));
 }
-function clearSession() { localStorage.removeItem(SK); }
+function loadSession(): Pasajero | null {
+  try {
+    const r = localStorage.getItem(SK); if(!r) return null;
+    const {p,token,exp}=JSON.parse(r);
+    if(!token || Date.now()>exp){localStorage.removeItem(SK);return null;}
+    _token = token;
+    return p;
+  } catch{return null;}
+}
+function clearSession() { _token = null; localStorage.removeItem(SK); }
 function loadParaderoOk(): boolean {
   try { const r = localStorage.getItem(SK); if (!r) return false; return !!JSON.parse(r).paraderoOk; } catch { return false; }
 }
@@ -63,7 +75,7 @@ async function paxApi(accion: string, params: Record<string, any> = {}) {
   const res = await fetch("/api/pasajero", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-afa-key": AFA_KEY },
-    body: JSON.stringify({ accion, ...params }),
+    body: JSON.stringify({ accion, token: _token, ...params }),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(json.error || "Error de red");
@@ -77,6 +89,7 @@ function dist(lat1:number,lng1:number,lat2:number,lng2:number): number {
 function calcETA(d:number,v:number): number { return Math.ceil((d/1000)/(v>5?v:25)*60); }
 function fmtETA(m:number): string { if(m<=0) return "¡Llegando!"; if(m<60) return `${m} min`; return `${Math.floor(m/60)}h ${m%60}m`; }
 function fmtDist(m:number): string { return m>=1000?`${(m/1000).toFixed(1)} km`:`${Math.round(m)} m`; }
+function fmtHora(t: string | null | undefined): string { return t ? t.slice(0, 5) : "—"; }
 function fmtHoraLlegada(m:number): string {
   const d = new Date(Date.now() + m * 60 * 1000);
   return d.toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Lima" });
@@ -218,7 +231,7 @@ const CSS = `
 .afa-app{position:fixed;inset:0;z-index:9999;background:var(--paper);display:flex;flex-direction:column;overflow:hidden;font-family:var(--f);}
 
 /* ── TAB BAR ── */
-.afa-nav{position:absolute;bottom:0;left:0;right:0;background:rgba(255,255,255,0.92);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-top:1px solid var(--line2);display:flex;z-index:20;padding-bottom:22px;padding-top:8px;}
+.afa-nav{position:absolute;bottom:0;left:0;right:0;background:rgba(255,255,255,0.92);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-top:1px solid var(--line2);display:flex;z-index:20;padding-bottom:calc(22px + env(safe-area-inset-bottom));padding-top:8px;}
 .afa-tab{flex:1;border:none;background:none;cursor:pointer;padding:4px 10px 0;display:flex;flex-direction:column;align-items:center;gap:4px;position:relative;font-family:var(--f);}
 .afa-tab-lbl{font-size:10.5px;font-weight:700;color:var(--mute2);letter-spacing:.1px;}
 .afa-tab.active .afa-tab-lbl{color:var(--navy);}
@@ -230,7 +243,7 @@ const CSS = `
 
 /* ── MODAL ── */
 .afa-modal-overlay{position:fixed;inset:0;z-index:10000;background:rgba(11,31,58,.7);display:flex;align-items:flex-end;justify-content:center;animation:afa-fadeIn .2s ease;}
-.afa-modal-sheet{background:var(--surface);border-radius:24px 24px 0 0;width:100%;max-width:520px;padding:0 0 32px;box-shadow:0 -8px 40px rgba(0,0,0,.25);}
+.afa-modal-sheet{background:var(--surface);border-radius:24px 24px 0 0;width:100%;max-width:520px;padding:0 0 calc(32px + env(safe-area-inset-bottom));box-shadow:0 -8px 40px rgba(0,0,0,.25);}
 .afa-modal-handle{width:40px;height:4px;background:var(--line);border-radius:2px;margin:14px auto 20px;}
 .afa-modal-title{font-weight:800;font-size:18px;color:var(--ink);margin-bottom:8px;letter-spacing:-.3px;}
 .afa-modal-desc{font-size:13px;color:var(--mute);line-height:1.6;}
@@ -245,7 +258,7 @@ const CSS = `
 
 /* ── PARADAS SHEET ── */
 .afa-para-sheet{background:var(--surface);border-radius:24px 24px 0 0;width:100%;max-width:520px;box-shadow:0 -8px 40px rgba(0,0,0,.25);display:flex;flex-direction:column;max-height:92dvh;}
-.afa-para-scroll{flex:1;overflow-y:auto;padding:8px 20px 32px;-webkit-overflow-scrolling:touch;}
+.afa-para-scroll{flex:1;overflow-y:auto;padding:8px 20px calc(32px + env(safe-area-inset-bottom));-webkit-overflow-scrolling:touch;}
 
 /* Paradas header */
 .afa-para-hdr{padding:0 20px 12px;border-bottom:1px solid var(--line2);}
@@ -302,7 +315,7 @@ const CSS = `
 
 /* ── RESPONSIVE WRAPPERS ── */
 .afa-scroll-inner{width:100%;}
-.afa-bottom-sheet{position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:100%;z-index:5;background:var(--paper);border-radius:24px 24px 0 0;box-shadow:0 -10px 30px rgba(0,0,0,.08);padding-bottom:90px;max-height:64%;overflow-y:auto;}
+.afa-bottom-sheet{position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:100%;z-index:5;background:var(--paper);border-radius:24px 24px 0 0;box-shadow:0 -10px 30px rgba(0,0,0,.08);padding-bottom:calc(90px + env(safe-area-inset-bottom));max-height:64%;overflow-y:auto;}
 .afa-map-hdr{position:absolute;top:0;left:50%;transform:translateX(-50%);width:100%;z-index:2;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;gap:8px;pointer-events:none;}
 .afa-map-hdr>*{pointer-events:auto;}
 
@@ -323,7 +336,7 @@ const CSS = `
   .afa-modal-sheet,.afa-para-sheet{max-width:560px;}
   .afa-tab{padding:6px 28px 0;}
   .afa-tab-lbl{font-size:12px;}
-  .afa-nav{padding-bottom:20px;padding-top:10px;}
+  .afa-nav{padding-bottom:calc(20px + env(safe-area-inset-bottom));padding-top:10px;}
 }
 @media(min-width:960px){
   .afa-login-body{max-width:560px;}
@@ -865,19 +878,23 @@ export default function AppPasajero() {
   // Posición del bus en vivo — polling vía API (Realtime no funciona para anónimo
   // con RLS activo). El conductor envía ubicación cada ~10 s; consultamos cada 5 s.
   useEffect(() => {
-    if (!miParada?.reserva?.vehiculo_id) return;
-    const vid = miParada.reserva.vehiculo_id;
+    // Resolver SIEMPRE por reserva_id: funciona igual para flota propia y tercerizada
+    // (antes se gateaba por reserva.vehiculo_id → el tracking en vivo NUNCA arrancaba
+    // para buses de tercero, que tienen vehiculo_id null).
+    const rid = miParada?.reserva_id;
+    if (!rid) return;
     let activo = true;
     const tick = async () => {
+      if (document.hidden) return; // no pollear GPS con la app en segundo plano (batería/datos)
       try {
-        const { busPosicion } = await paxApi("bus_posicion", { vehiculoId: vid });
+        const { busPosicion } = await paxApi("bus_posicion", { reservaId: rid });
         if (activo && busPosicion) setBusPosicion(busPosicion as UbicacionBus);
       } catch { /* reintentará en el próximo tick */ }
     };
     tick();
     const id = setInterval(tick, 5000);
     return () => { activo = false; clearInterval(id); };
-  }, [miParada]);
+  }, [miParada?.reserva_id]);
 
   // Mantener ref sincronizada con el último GPS (para leerlo dentro de intervalos sin dep)
   useEffect(() => { busPosicionRef.current = busPosicion; }, [busPosicion]);
@@ -932,10 +949,11 @@ export default function AppPasajero() {
       // El PIN se valida EN EL SERVIDOR (ya no se descarga la fila completa por DNI).
       r = await paxApi("login", { dni: dniInput.trim(), pin: pinInput });
     } catch (e: any) { setLoginErr(`Error: ${e?.message ?? "no se pudo conectar"}`); setLoginLoad(false); return; }
-    if (r?.pinIncorrecto) { setLoginErr("PIN incorrecto. Intenta con los últimos 4 dígitos de tu DNI."); setLoginLoad(false); return; }
+    // Respuesta uniforme del server (no distingue DNI inexistente de PIN incorrecto).
+    if (r?.credencialesInvalidas) { setLoginErr("DNI o PIN incorrecto. ¿Problemas? Llama a soporte: 01 345 3707"); setLoginLoad(false); return; }
     const data = r?.pasajero;
-    if (!data) { setLoginErr("DNI no registrado. Contacta a tu empresa o a AFA Tours."); setLoginLoad(false); return; }
-    saveSession(data); setPasajero(data); await cargarMiRuta(data.id); setLoginLoad(false);
+    if (!data || !r?.token) { setLoginErr("No se pudo iniciar sesión. Intenta de nuevo."); setLoginLoad(false); return; }
+    saveSession(data, r.token); setPasajero(data); await cargarMiRuta(data.id); setLoginLoad(false);
   }
 
   const cargarMiRuta = useCallback(async (pid: number) => {
@@ -1050,7 +1068,8 @@ export default function AppPasajero() {
       const canvas = document.createElement("canvas"); canvas.width = w; canvas.height = h;
       const ctx = canvas.getContext("2d")!; ctx.drawImage(bitmap, 0, 0, w, h);
       const blob = await new Promise<Blob>(res => canvas.toBlob(b => res(b!), "image/jpeg", 0.85));
-      const path = `${pasajero.id}/foto_${Date.now()}.jpg`;
+      // Nombre no adivinable (antes era foto_<timestamp>, enumerable junto al id secuencial).
+      const path = `${pasajero.id}/${crypto.randomUUID()}.jpg`;
       const { error: upErr } = await supabase.storage.from("pasajeros-fotos").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
       if (upErr) throw upErr;
       const { data: { publicUrl } } = supabase.storage.from("pasajeros-fotos").getPublicUrl(path);
@@ -1185,7 +1204,7 @@ export default function AppPasajero() {
     <>
       <style>{CSS}</style>
       <div className="afa-backdrop" />
-      <div style={{ position: "fixed", top: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 420, height: "100vh", zIndex: 9999, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, background: "var(--paper)" }}>
+      <div style={{ position: "fixed", top: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 420, height: "100dvh", zIndex: 9999, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, background: "var(--paper)" }}>
         <CondorMark size={48} color="var(--navy)" />
         <div className="afa-spin" />
       </div>
@@ -1222,7 +1241,7 @@ export default function AppPasajero() {
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 4px 10px", borderBottom: `1.5px solid ${dniInput.length >= 7 ? "var(--navy)" : "var(--line)"}`, marginTop: 10, marginBottom: 16 }}>
               <span style={{ fontFamily: "var(--m)", fontSize: 13, color: "var(--mute2)", fontWeight: 600, flexShrink: 0 }}>PE</span>
               <input
-                type="tel" inputMode="numeric" maxLength={8} value={dniInput}
+                type="tel" inputMode="numeric" maxLength={8} value={dniInput} autoFocus aria-label="DNI"
                 onChange={e => { setDniInput(e.target.value.replace(/\D/g, "").slice(0, 8)); setLoginErr(""); }}
                 onKeyDown={e => e.key === "Enter" && login()}
                 placeholder="12345678"
@@ -1236,7 +1255,7 @@ export default function AppPasajero() {
             </div>
             <div style={{ padding: "8px 4px 12px", borderBottom: `1.5px solid ${pinInput.length === 4 ? "var(--navy)" : "var(--line)"}`, marginBottom: 18 }}>
               <input
-                type="password" inputMode="numeric" maxLength={4} value={pinInput}
+                type="password" inputMode="numeric" maxLength={4} value={pinInput} aria-label="PIN de acceso"
                 onChange={e => { setPinInput(e.target.value.replace(/\D/g, "").slice(0, 4)); setLoginErr(""); }}
                 onKeyDown={e => e.key === "Enter" && login()}
                 placeholder="••••"
@@ -1497,9 +1516,9 @@ export default function AppPasajero() {
                 </div>
                 {(reporteTipo === "otro" || reporteTipo) && (
                   <div style={{ padding: "0 24px", marginBottom: 16 }}>
-                    <textarea rows={3} placeholder={reporteTipo === "otro" ? "Describe tu situación..." : "Agregar detalle (opcional)..."}
+                    <textarea rows={3} aria-label="Detalle del reporte" placeholder={reporteTipo === "otro" ? "Describe tu situación..." : "Agregar detalle (opcional)..."}
                       value={reporteMensaje} onChange={e => setReporteMensaje(e.target.value)}
-                      style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: "1.5px solid var(--line)", fontSize: 13, fontFamily: "var(--f)", resize: "none", outline: "none", color: "var(--ink)", boxSizing: "border-box" }} />
+                      style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: "1.5px solid var(--line)", fontSize: 16, fontFamily: "var(--f)", resize: "none", outline: "none", color: "var(--ink)", boxSizing: "border-box" }} />
                   </div>
                 )}
                 <div className="afa-modal-btns">
@@ -1701,7 +1720,7 @@ export default function AppPasajero() {
             )}
 
             {/* Crosshair button */}
-            <button onClick={centrarMapa} style={{ position: "absolute", right: 14, top: "40%", width: 44, height: 44, borderRadius: 14, background: "white", border: "1px solid var(--line2)", boxShadow: "0 4px 14px rgba(0,0,0,0.1)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 3 }}>
+            <button onClick={centrarMapa} aria-label="Centrar mapa" style={{ position: "absolute", right: 14, top: "40%", width: 44, height: 44, borderRadius: 14, background: "white", border: "1px solid var(--line2)", boxShadow: "0 4px 14px rgba(0,0,0,0.1)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 3 }}>
               <IconCrosshair sz={20} c="var(--navy)" />
             </button>
 
@@ -1952,16 +1971,16 @@ export default function AppPasajero() {
                     )}
                     <div style={{ paddingBottom: 6 }}>
                       <p style={{ margin: 0, fontWeight: 700, fontSize: 16, color: "var(--ink)", letterSpacing: -0.3 }}>{busActivo && etaMin !== null ? "min" : "Bus esperando"}</p>
-                      <p style={{ margin: "2px 0 0", fontSize: 12, color: "var(--mute)" }}>{distM !== null ? fmtDist(distM) : miParada.reserva?.hora_servicio ? `Sale: ${miParada.reserva.hora_servicio}` : ""}</p>
+                      <p style={{ margin: "2px 0 0", fontSize: 12, color: "var(--mute)" }}>{distM !== null ? fmtDist(distM) : miParada.reserva?.hora_servicio ? `Primer paradero · ${fmtHora(miParada.reserva.hora_servicio)}` : ""}</p>
                     </div>
                     <div style={{ flex: 1 }} />
                     {/* Arrival time chip — En vivo con Google cuando bus conectado */}
                     <div style={{ background: etaGoogle !== null ? "var(--navy)" : "var(--surface)", border: `1px solid ${etaGoogle !== null ? "transparent" : "var(--line)"}`, borderRadius: 12, padding: "8px 12px", alignSelf: "flex-end", transition: "background 0.4s" }}>
                       <p style={{ margin: 0, fontSize: 9, fontWeight: 700, color: etaGoogle !== null ? "rgba(255,255,255,0.7)" : "var(--mute)", letterSpacing: 0.6, textTransform: "uppercase" }}>
-                        {miEstado === "embarcado" ? "Llega destino" : etaGoogle !== null ? "En vivo · llega" : "Programado"}
+                        {miEstado === "embarcado" ? "Llega destino" : etaGoogle !== null ? "En vivo · llega" : miParada.hora_estimada ? "Tu recojo" : "Salida"}
                       </p>
                       <p style={{ margin: "2px 0 0", fontFamily: "var(--m)", fontSize: 18, fontWeight: 700, color: etaGoogle !== null ? "white" : "var(--ink)", letterSpacing: -0.5 }}>
-                        {etaGoogle !== null ? fmtHoraLlegada(etaGoogle) : (miParada.hora_estimada || miParada.reserva?.hora_servicio || "—")}
+                        {etaGoogle !== null ? fmtHoraLlegada(etaGoogle) : (miParada.hora_estimada || fmtHora(miParada.reserva?.hora_servicio) || "—")}
                       </p>
                     </div>
                   </div>
@@ -1992,7 +2011,7 @@ export default function AppPasajero() {
                       <p style={{ margin: "4px 0 0", fontSize: 12.5, color: "var(--mute)", letterSpacing: -0.1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{conductor?.nombre || "Conductor AFA"}</p>
                     </div>
                     <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                      <button onClick={compartir} style={{ width: 38, height: 38, borderRadius: 12, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <button onClick={compartir} aria-label="Compartir" style={{ width: 38, height: 38, borderRadius: 12, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
                         <IconShare sz={18} c="var(--navy)" />
                       </button>
                     </div>
@@ -2035,7 +2054,7 @@ export default function AppPasajero() {
                 <Eyebrow>Tu identificación</Eyebrow>
                 <h1 style={{ margin: "6px 0 0", fontWeight: 800, fontSize: 28, letterSpacing: -1.1, color: "var(--ink)", fontFamily: "var(--f)" }}>Pase de embarque</h1>
               </div>
-              <button onClick={compartir} style={{ width: 40, height: 40, borderRadius: 14, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <button onClick={compartir} aria-label="Compartir" style={{ width: 40, height: 40, borderRadius: 14, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
                 <IconShare sz={18} c="var(--navy)" />
               </button>
             </div>
@@ -2174,11 +2193,11 @@ export default function AppPasajero() {
                 <div style={{ display: "flex", alignItems: "center", gap: 14, position: "relative" }}>
                   <div style={{ position: "relative", flexShrink: 0 }}>
                     <div style={{ width: 56, height: 56, borderRadius: 18, background: "rgba(255,255,255,0.16)", border: "1px solid rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 20, overflow: "hidden" }}>
-                      {pasajero.foto_url ? <img src={`${pasajero.foto_url}?t=${Date.now()}`} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : ini(pasajero.nombre)}
+                      {pasajero.foto_url ? <img src={pasajero.foto_url} alt="Foto de perfil" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : ini(pasajero.nombre)}
                       {uploading && <div style={{ position: "absolute", inset: 0, background: "rgba(11,49,95,0.6)", display: "flex", alignItems: "center", justifyContent: "center" }}><div className="afa-foto-spin" /></div>}
                     </div>
                     {!uploading && (
-                      <button onClick={() => fileInputRef.current?.click()} style={{ position: "absolute", bottom: -4, right: -4, width: 24, height: 24, borderRadius: "50%", background: "var(--blue)", border: "2px solid var(--navy)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+                      <button onClick={() => fileInputRef.current?.click()} aria-label="Cambiar foto de perfil" style={{ position: "absolute", bottom: -4, right: -4, width: 24, height: 24, borderRadius: "50%", background: "var(--blue)", border: "2px solid var(--navy)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
                         <IconCamera sz={12} c="white" />
                       </button>
                     )}
@@ -2216,9 +2235,9 @@ export default function AppPasajero() {
                   <input
                     value={edadInput}
                     onChange={e => { setEdadInput(e.target.value.replace(/\D/g, "").slice(0, 3)); setEdadOk(false); }}
-                    inputMode="numeric"
+                    inputMode="numeric" aria-label="Edad"
                     placeholder="Años"
-                    style={{ flex: 1, minWidth: 0, padding: "11px 14px", borderRadius: 12, border: "1px solid var(--line)", fontSize: 15, fontFamily: "var(--f)", outline: "none", color: "var(--ink)", background: "var(--surface)", boxSizing: "border-box" }}
+                    style={{ flex: 1, minWidth: 0, padding: "11px 14px", borderRadius: 12, border: "1px solid var(--line)", fontSize: 16, fontFamily: "var(--f)", outline: "none", color: "var(--ink)", background: "var(--surface)", boxSizing: "border-box" }}
                   />
                   <button
                     onClick={guardarEdad}

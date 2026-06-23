@@ -612,7 +612,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </div>
 
         ) : esPublica ? (
-          <div style={{ margin: 0, padding: 0, height: "100vh" }}>{children}</div>
+          <div style={{ margin: 0, padding: 0, height: "100dvh" }}>{children}</div>
 
         ) : cargando ? (
           <div className="min-h-screen flex items-center justify-center bg-[#eef3f8]">
