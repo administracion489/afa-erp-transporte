@@ -73,6 +73,7 @@ export async function POST(req: NextRequest) {
           id: full.id, nombre: full.nombre, dni: full.dni ?? null, empresa: full.empresa ?? null,
           telefono: full.telefono ?? null, qr_code: full.qr_code ?? null,
           foto_url: full.foto_url ?? null, edad: full.edad ?? null,
+          email: full.email ?? null, tipo_documento: full.tipo_documento ?? null,
         };
 
         // Token de sesión: el cliente lo reenvía en cada acción; el server deriva el
@@ -223,20 +224,59 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
-      // ── Guardar datos de perfil del pasajero (edad para el Manifiesto MTC) ────
+      // ── Guardar datos de perfil del pasajero (para el Manifiesto MTC) ─────────
+      // Campos editables por el propio pasajero: nombre, email, tipo_documento, edad.
+      // El NÚMERO de documento (`dni`) NO se acepta aquí: es la llave de login del
+      // pasajero y la que cruza el manifiesto del operador → se corrige desde el ERP.
+      // Solo se actualizan los campos presentes en el body (whitelist), nunca `dni`.
       case "perfil": {
         const pid = pidDeToken(body.token);
-        const { edad } = body;
         if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
-        let e: number | null = null;
-        if (edad !== null && edad !== undefined && edad !== "") {
-          const n = Number(edad);
-          if (!Number.isInteger(n) || n < 0 || n > 120) {
-            return NextResponse.json({ error: "Edad inválida (0–120)" }, { status: 400 });
-          }
-          e = n;
+
+        const updates: Record<string, any> = {};
+
+        if ("nombre" in body) {
+          const nombre = String(body.nombre ?? "").trim().slice(0, 120);
+          if (!nombre) return NextResponse.json({ error: "El nombre no puede quedar vacío" }, { status: 400 });
+          updates.nombre = nombre;
         }
-        const { error } = await admin.from("pasajeros").update({ edad: e }).eq("id", pid);
+
+        if ("email" in body) {
+          const raw = String(body.email ?? "").trim();
+          if (raw === "") {
+            updates.email = null;
+          } else {
+            if (raw.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) {
+              return NextResponse.json({ error: "Correo inválido" }, { status: 400 });
+            }
+            updates.email = raw.toLowerCase();
+          }
+        }
+
+        if ("tipo_documento" in body) {
+          const t = String(body.tipo_documento ?? "").trim().toUpperCase();
+          if (!["DNI", "CE", "PASAPORTE", "OTRO"].includes(t)) {
+            return NextResponse.json({ error: "Tipo de documento inválido" }, { status: 400 });
+          }
+          updates.tipo_documento = t;
+        }
+
+        if ("edad" in body) {
+          const { edad } = body;
+          let e: number | null = null;
+          if (edad !== null && edad !== undefined && edad !== "") {
+            const n = Number(edad);
+            if (!Number.isInteger(n) || n < 0 || n > 120) {
+              return NextResponse.json({ error: "Edad inválida (0–120)" }, { status: 400 });
+            }
+            e = n;
+          }
+          updates.edad = e;
+        }
+
+        if (Object.keys(updates).length === 0) return NextResponse.json({ ok: true });
+
+        const { error } = await admin.from("pasajeros").update(updates).eq("id", pid);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ ok: true });
       }
@@ -291,21 +331,23 @@ export async function POST(req: NextRequest) {
           if (!reservaId) continue;
           const { data: candidatas } = await admin
             .from("paradas")
-            .select("id")
+            .select("id, estado")
             .eq("reserva_id", reservaId)
             .eq("nombre", nombreParada)
             .limit(1);
-          if (candidatas?.length && candidatas[0].id !== ppRow.parada_id) {
-            const { error: updErr } = await admin
-              .from("pasajeros_parada")
-              .update({
-                parada_id: candidatas[0].id,
-                parada_id_original: (ppRow as any).parada_id_original ?? ppRow.parada_id,
-                cambio_parada_en: new Date().toISOString(),
-              })
-              .eq("id", ppRow.id);
-            if (!updErr) actualizados++;
-          }
+          const destino = candidatas?.[0];
+          if (!destino || destino.id === ppRow.parada_id) continue;
+          // Servicio en curso: no permitir cambiar a un paradero que el bus ya pasó.
+          if (reserva.estado === "en_curso" && destino.estado === "completada") continue;
+          const { error: updErr } = await admin
+            .from("pasajeros_parada")
+            .update({
+              parada_id: destino.id,
+              parada_id_original: (ppRow as any).parada_id_original ?? ppRow.parada_id,
+              cambio_parada_en: new Date().toISOString(),
+            })
+            .eq("id", ppRow.id);
+          if (!updErr) actualizados++;
         }
         return NextResponse.json({ ok: true, actualizados });
       }
@@ -321,13 +363,20 @@ export async function POST(req: NextRequest) {
           .from("pasajeros").select("cliente_id, reserva_id").eq("id", pid).maybeSingle();
         if (!pax?.cliente_id) return NextResponse.json({ reservas: [] });
 
+        // `hoy` se interpola en el filtro .or() de abajo → validar formato (anti-inyección PostgREST).
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(hoy))) {
+          return NextResponse.json({ error: "hoy inválido" }, { status: 400 });
+        }
+
         const { data: reservasRaw, error: rErr } = await admin
           .from("reservas")
-          .select("id, ruta_nombre, origen, destino, fecha_servicio, hora_servicio, vehiculo_id, vehiculo_tercero_id, paradas(*)")
+          .select("id, estado, ruta_nombre, origen, destino, fecha_servicio, hora_servicio, vehiculo_id, vehiculo_tercero_id, paradas(*)")
           .eq("cliente_id", pax.cliente_id)
           .eq("permite_autoseleccion", true)
-          .eq("fecha_servicio", hoy)          // solo servicios de hoy exacto
-          .in("estado", ["pendiente", "programada", "confirmada"]);
+          // Elegibles: servicios de hoy aún no iniciados, O cualquier servicio EN CURSO
+          // (incluye nocturnos que cruzan medianoche; mismo criterio que la acción "ruta").
+          // Así el pasajero que aún no eligió no queda bloqueado cuando el bus arranca.
+          .or(`and(fecha_servicio.eq.${hoy},estado.in.(pendiente,programada,confirmada)),estado.eq.en_curso`);
         if (rErr) return NextResponse.json({ error: rErr.message }, { status: 500 });
         if (!reservasRaw?.length) return NextResponse.json({ reservas: [] });
 
@@ -380,6 +429,17 @@ export async function POST(req: NextRequest) {
           return { ...r, capacidad: cap, ocupacion: ocupacion.get(r.id) || 0 };
         });
 
+        // Para servicios EN CURSO, ocultar los paraderos que el bus ya pasó
+        // (paradas.estado === "completada", que escribe el conductor al marcar la parada).
+        // Si ya pasó todos, el servicio deja de ser elegible — no tiene sentido subirse a
+        // un paradero que quedó atrás. Los servicios no iniciados pasan sin tocar.
+        const soloVigentes = (r: any): any | null => {
+          if (r.estado !== "en_curso") return r;
+          const ps = (r.paradas || []).filter((p: any) => p.estado !== "completada");
+          if (ps.length === 0) return null;
+          return { ...r, paradas: ps };
+        };
+
         // Si el operador pre-asignó al pasajero a una reserva específica de hoy,
         // mostrar solo esa reserva sin consolidación. Así su elección de paradero
         // actualiza directamente el manifiesto del bus correcto.
@@ -389,7 +449,10 @@ export async function POST(req: NextRequest) {
             !yaAsignados.has(r.id) &&
             (r.capacidad === null || r.ocupacion < r.capacidad)
           );
-          if (preAsignada) return NextResponse.json({ reservas: [preAsignada] });
+          if (preAsignada) {
+            const f = soloVigentes(preAsignada);
+            return NextResponse.json({ reservas: f ? [f] : [] });
+          }
         }
 
         // Sin pre-asignación: agrupar por hora de salida + secuencia exacta de coordenadas
@@ -421,7 +484,7 @@ export async function POST(req: NextRequest) {
           if (elegido) disponibles.push(elegido);
         }
 
-        return NextResponse.json({ reservas: disponibles });
+        return NextResponse.json({ reservas: disponibles.map(soloVigentes).filter(Boolean) });
       }
 
       // ── Autoseleccionar paradero ──────────────────────────────────────────
@@ -439,7 +502,7 @@ export async function POST(req: NextRequest) {
         // Verificar que la parada pertenece a una reserva de la empresa con autoselección activa
         const { data: parada } = await admin
           .from("paradas")
-          .select("id, reserva_id, reserva:reservas(id, cliente_id, permite_autoseleccion, estado, vehiculo_id, vehiculo_tercero_id)")
+          .select("id, reserva_id, estado, reserva:reservas(id, cliente_id, permite_autoseleccion, estado, vehiculo_id, vehiculo_tercero_id)")
           .eq("id", parada_id)
           .maybeSingle();
         const reserva = (parada as any)?.reserva;
@@ -448,8 +511,11 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: "No autorizado" }, { status: 403 });
         if (!reserva.permite_autoseleccion)
           return NextResponse.json({ error: "No autorizado" }, { status: 403 });
-        if (!["pendiente", "programada", "confirmada"].includes(reserva.estado))
+        if (!["pendiente", "programada", "confirmada", "en_curso"].includes(reserva.estado))
           return NextResponse.json({ error: "Servicio no disponible" }, { status: 400 });
+        // Servicio en curso: no permitir subirse a un paradero que el bus ya pasó.
+        if (reserva.estado === "en_curso" && (parada as any).estado === "completada")
+          return NextResponse.json({ error: "El bus ya pasó por este paradero" }, { status: 400 });
 
         // Verificar que el pasajero no esté ya asignado en esta reserva
         const { data: paradaIds } = await admin

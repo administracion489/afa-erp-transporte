@@ -13,7 +13,7 @@ mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 type Pasajero = {
   id: number; nombre: string; dni: string | null; empresa: string | null;
   telefono: string | null; qr_code: string | null; foto_url: string | null;
-  edad: number | null;
+  edad: number | null; email: string | null; tipo_documento: string | null;
 };
 type Parada = {
   id: number; reserva_id: number; orden: number; nombre: string;
@@ -112,6 +112,32 @@ function telHref(tel: string | null | undefined): string { return `tel:${String(
 function esIOS(): boolean {
   return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform==="MacIntel" && navigator.maxTouchPoints>1);
 }
+
+// ── DOCUMENTO DE IDENTIDAD ──────────────────────────────────────────────────
+// El valor canónico que se guarda en BD (columna pasajeros.tipo_documento) es el
+// código corto; la etiqueta es solo para mostrar. Mismo set que valida /api/pasajero.
+const TIPOS_DOC: { val: string; label: string; corto: string }[] = [
+  { val: "DNI",       label: "DNI",                    corto: "DNI" },
+  { val: "CE",        label: "Carné de extranjería",   corto: "C.E." },
+  { val: "PASAPORTE", label: "Pasaporte",              corto: "Pas." },
+  { val: "OTRO",      label: "Otro documento",         corto: "Doc." },
+];
+function tipoDocLabel(val: string | null | undefined): string {
+  return TIPOS_DOC.find(t => t.val === val)?.label ?? "DNI";
+}
+function tipoDocCorto(val: string | null | undefined): string {
+  return TIPOS_DOC.find(t => t.val === val)?.corto ?? "DNI";
+}
+// Validación de correo (mismo criterio laxo que el panel admin de /pasajeros).
+function esEmailValido(e: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
+}
+
+// Estilos compartidos del formulario "Mis datos" (label + input).
+const DATO_LBL: React.CSSProperties = { margin: 0, fontSize: 10.5, color: "var(--mute)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, display: "block" };
+const DATO_INP: React.CSSProperties = { width: "100%", padding: "11px 14px", borderRadius: 12, border: "1px solid var(--line)", fontSize: 16, fontFamily: "var(--f)", outline: "none", color: "var(--ink)", background: "var(--surface)", boxSizing: "border-box" };
+// Chevron para el <select> de tipo de documento (evita el estilo nativo feo en móvil).
+const SELECT_CHEVRON = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E\")";
 
 // ─── SVG ICONS ────────────────────────────────────────────────────────────────
 
@@ -484,9 +510,14 @@ export default function AppPasajero() {
   const [copiado,        setCopiado]        = useState(false);
   const [uploading,      setUploading]      = useState(false);
   const [fotoErr,        setFotoErr]        = useState("");
+  // ── MIS DATOS (perfil para el manifiesto MTC) ───────────────────────────────
+  const [nombreInput,    setNombreInput]    = useState("");
+  const [tipoDocInput,   setTipoDocInput]   = useState("DNI");
   const [edadInput,      setEdadInput]      = useState("");
-  const [savingEdad,     setSavingEdad]     = useState(false);
-  const [edadOk,         setEdadOk]         = useState(false);
+  const [emailInput,     setEmailInput]     = useState("");
+  const [savingDatos,    setSavingDatos]    = useState(false);
+  const [datosOk,        setDatosOk]        = useState(false);
+  const [datosErr,       setDatosErr]       = useState("");
 
   // ── CONFIRMAR PARADERO ──────────────────────────────────────────────────────
   const [mostrarConfirmarParadero, setMostrarConfirmarParadero] = useState(false);
@@ -1079,24 +1110,45 @@ export default function AppPasajero() {
       setFotoErr(e?.message || "Error al subir la foto.");
     } finally { setUploading(false); }
   }
-  // Sincroniza el campo de edad con el valor guardado del pasajero (al login / cambios).
+  // Sincroniza el formulario "Mis datos" con los valores guardados (al login / cambios).
   useEffect(() => {
+    setNombreInput(pasajero?.nombre ?? "");
+    setTipoDocInput(pasajero?.tipo_documento || "DNI");
     setEdadInput(pasajero?.edad != null ? String(pasajero.edad) : "");
-  }, [pasajero?.id, pasajero?.edad]);
+    setEmailInput(pasajero?.email ?? "");
+    setDatosErr(""); setDatosOk(false);
+  }, [pasajero?.id, pasajero?.nombre, pasajero?.tipo_documento, pasajero?.edad, pasajero?.email]);
 
-  // Edad para el Manifiesto MTC: el pasajero la edita en su perfil.
-  async function guardarEdad() {
+  // ¿Cambió algo respecto a lo guardado? (controla el botón Guardar)
+  const datosCambiados = !!pasajero && (
+    nombreInput.trim() !== (pasajero.nombre ?? "").trim() ||
+    (tipoDocInput || "DNI") !== (pasajero.tipo_documento || "DNI") ||
+    edadInput.trim() !== (pasajero.edad != null ? String(pasajero.edad) : "") ||
+    emailInput.trim() !== (pasajero.email ?? "").trim()
+  );
+
+  // Mis datos para el Manifiesto MTC: el pasajero los completa/corrige en su perfil.
+  // El número de documento NO se envía (es de solo lectura: es su llave de login).
+  async function guardarDatos() {
     if (!pasajero) return;
-    const trimmed = edadInput.trim();
-    const n = trimmed === "" ? null : parseInt(trimmed, 10);
-    if (n !== null && (!Number.isFinite(n) || n < 0 || n > 120)) return;
-    setSavingEdad(true); setEdadOk(false);
+    const nombre = nombreInput.trim();
+    if (!nombre) { setDatosErr("Ingresa tu nombre completo."); return; }
+    const emailT = emailInput.trim();
+    if (emailT && !esEmailValido(emailT)) { setDatosErr("El correo no tiene un formato válido."); return; }
+    const edadT = edadInput.trim();
+    const edad = edadT === "" ? null : parseInt(edadT, 10);
+    if (edad !== null && (!Number.isFinite(edad) || edad < 0 || edad > 120)) { setDatosErr("La edad debe estar entre 0 y 120."); return; }
+
+    setSavingDatos(true); setDatosOk(false); setDatosErr("");
     try {
-      await paxApi("perfil", { pid: pasajero.id, edad: n });
-      const updated = { ...pasajero, edad: n }; setPasajero(updated); saveSession(updated);
-      setEdadOk(true);
-      setTimeout(() => setEdadOk(false), 2000);
-    } catch { /* noop */ } finally { setSavingEdad(false); }
+      await paxApi("perfil", { nombre, tipo_documento: tipoDocInput, edad, email: emailT || null });
+      const updated = { ...pasajero, nombre, tipo_documento: tipoDocInput, edad, email: emailT || null };
+      setPasajero(updated); saveSession(updated);
+      setDatosOk(true);
+      setTimeout(() => setDatosOk(false), 2000);
+    } catch (e: any) {
+      setDatosErr(e?.message || "No se pudo guardar. Reintenta.");
+    } finally { setSavingDatos(false); }
   }
   async function enviarReporte() {
     if (!pasajero || !miParada) return;
@@ -1557,17 +1609,22 @@ export default function AppPasajero() {
                 {rutaParadas.map((p, i) => {
                   const esAsignado  = p.id === miParada.id;
                   const esSel       = p.id === paraderoModalSel?.id;
+                  // El bus ya pasó este paradero: no se puede elegir como destino.
+                  // El propio asignado nunca se deshabilita (puede haber quedado atrás en un No Show).
+                  const yaPaso      = p.estado === "completada" && !esAsignado;
                   return (
                     <button
                       key={p.id}
-                      onClick={() => setParaderoModalSel(p)}
+                      onClick={() => { if (!yaPaso) setParaderoModalSel(p); }}
+                      disabled={yaPaso}
                       style={{
-                        width: "100%", textAlign: "left", cursor: "pointer", fontFamily: "var(--f)",
-                        background: esSel ? "var(--navy-tint)" : "var(--surface)",
+                        width: "100%", textAlign: "left", cursor: yaPaso ? "not-allowed" : "pointer", fontFamily: "var(--f)",
+                        background: yaPaso ? "var(--soft)" : esSel ? "var(--navy-tint)" : "var(--surface)",
                         border: "none",
                         outline: esSel ? "2px solid var(--navy)" : "1.5px solid var(--line2)",
                         borderRadius: 14, padding: "12px 14px",
                         display: "flex", alignItems: "center", gap: 12,
+                        opacity: yaPaso ? 0.55 : 1,
                       }}
                     >
                       <div style={{
@@ -1578,7 +1635,7 @@ export default function AppPasajero() {
                         fontSize: 11, fontWeight: 800,
                       }}>{i + 1}</div>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <p style={{ margin: 0, fontWeight: 700, fontSize: 13.5, color: esSel ? "var(--navy)" : "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        <p style={{ margin: 0, fontWeight: 700, fontSize: 13.5, color: esSel ? "var(--navy)" : "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textDecoration: yaPaso ? "line-through" : "none" }}>
                           {p.nombre}
                         </p>
                         {p.direccion && (
@@ -1589,7 +1646,11 @@ export default function AppPasajero() {
                         {p.hora_estimada && (
                           <span style={{ fontFamily: "var(--m)", fontSize: 12, fontWeight: 700, color: esSel ? "var(--navy)" : "var(--mute)" }}>{p.hora_estimada}</span>
                         )}
-                        {esAsignado && (
+                        {yaPaso ? (
+                          <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--mute)", background: "var(--line2)", padding: "2px 7px", borderRadius: 999, letterSpacing: 0.3 }}>
+                            YA PASÓ
+                          </span>
+                        ) : esAsignado && (
                           <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--navy)", background: "var(--navy-tint)", padding: "2px 7px", borderRadius: 999, letterSpacing: 0.3 }}>
                             ASIGNADO
                           </span>
@@ -2205,7 +2266,7 @@ export default function AppPasajero() {
                   <div style={{ flex: 1 }}>
                     <p style={{ margin: 0, fontWeight: 800, fontSize: 18, letterSpacing: -0.4 }}>{pasajero.nombre}</p>
                     <p style={{ margin: "3px 0 0", fontSize: 12.5, color: "rgba(255,255,255,0.7)", letterSpacing: -0.1 }}>
-                      {pasajero.empresa || "AFA Tours Peru"}{pasajero.dni ? ` · DNI ${pasajero.dni}` : ""}
+                      {pasajero.empresa || "AFA Tours Peru"}{pasajero.dni ? ` · ${tipoDocCorto(pasajero.tipo_documento)} ${pasajero.dni}` : ""}
                     </p>
                   </div>
                 </div>
@@ -2225,29 +2286,82 @@ export default function AppPasajero() {
               {fotoErr && <p style={{ margin: "8px 0 0", padding: "10px 14px", background: "var(--danger-tint)", borderRadius: 10, fontSize: 12, fontWeight: 600, color: "var(--danger)" }}>{fotoErr}</p>}
             </div>
 
-            {/* Mis datos — edad para el manifiesto oficial */}
+            {/* Mis datos — perfil para el manifiesto oficial (SUTRAN · MTC) */}
             <div style={{ padding: "20px 18px 0" }}>
               <Eyebrow>Mis datos</Eyebrow>
-              <div style={{ background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 16, marginTop: 10, padding: "14px 16px" }}>
-                <p style={{ margin: 0, fontSize: 10.5, color: "var(--mute)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>Edad</p>
-                <p style={{ margin: "4px 0 10px", fontSize: 12, color: "var(--mute)" }}>Requerida para el manifiesto oficial (SUTRAN · MTC).</p>
-                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                  <input
-                    value={edadInput}
-                    onChange={e => { setEdadInput(e.target.value.replace(/\D/g, "").slice(0, 3)); setEdadOk(false); }}
-                    inputMode="numeric" aria-label="Edad"
-                    placeholder="Años"
-                    style={{ flex: 1, minWidth: 0, padding: "11px 14px", borderRadius: 12, border: "1px solid var(--line)", fontSize: 16, fontFamily: "var(--f)", outline: "none", color: "var(--ink)", background: "var(--surface)", boxSizing: "border-box" }}
+              <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--mute)", lineHeight: 1.5 }}>
+                Completa tus datos para el manifiesto oficial (SUTRAN · MTC).
+              </p>
+              <div style={{ background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 16, marginTop: 10, padding: "2px 16px" }}>
+
+                {/* Nombre completo */}
+                <div style={{ padding: "14px 0", borderBottom: "1px solid var(--line2)" }}>
+                  <label htmlFor="dato-nombre" style={DATO_LBL}>Nombre completo</label>
+                  <input id="dato-nombre"
+                    value={nombreInput}
+                    onChange={e => { setNombreInput(e.target.value.slice(0, 120)); setDatosOk(false); setDatosErr(""); }}
+                    autoComplete="name" placeholder="Nombres y apellidos"
+                    style={{ ...DATO_INP, marginTop: 8 }}
                   />
-                  <button
-                    onClick={guardarEdad}
-                    disabled={savingEdad || edadInput.trim() === (pasajero.edad != null ? String(pasajero.edad) : "")}
-                    style={{ flexShrink: 0, padding: "11px 20px", borderRadius: 12, border: "none", background: savingEdad ? "var(--mute2)" : "var(--navy)", color: "white", fontWeight: 700, fontSize: 14, fontFamily: "var(--f)", cursor: savingEdad ? "not-allowed" : "pointer", opacity: (savingEdad || edadInput.trim() === (pasajero.edad != null ? String(pasajero.edad) : "")) ? 0.55 : 1 }}
+                </div>
+
+                {/* Documento de identidad — tipo editable, número de solo lectura */}
+                <div style={{ padding: "14px 0", borderBottom: "1px solid var(--line2)" }}>
+                  <label htmlFor="dato-tipodoc" style={DATO_LBL}>Documento de identidad</label>
+                  <select id="dato-tipodoc"
+                    value={tipoDocInput}
+                    onChange={e => { setTipoDocInput(e.target.value); setDatosOk(false); setDatosErr(""); }}
+                    style={{ ...DATO_INP, marginTop: 8, appearance: "none", WebkitAppearance: "none", cursor: "pointer", paddingRight: 36, backgroundImage: SELECT_CHEVRON, backgroundRepeat: "no-repeat", backgroundPosition: "right 14px center" }}
                   >
-                    {savingEdad ? "Guardando…" : edadOk ? "Guardado ✓" : "Guardar"}
-                  </button>
+                    {TIPOS_DOC.map(t => <option key={t.val} value={t.val}>{t.label}</option>)}
+                  </select>
+                  <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderRadius: 12, border: "1px dashed var(--line)", background: "var(--soft)" }}>
+                    <span style={{ fontSize: 10, color: "var(--mute)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, flexShrink: 0 }}>N.º</span>
+                    <span style={{ flex: 1, minWidth: 0, fontFamily: "var(--m)", fontSize: 15, fontWeight: 700, color: "var(--ink)", letterSpacing: 0.4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pasajero.dni || "—"}</span>
+                    <span style={{ fontSize: 9.5, color: "var(--mute2)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, flexShrink: 0 }}>Solo lectura</span>
+                  </div>
+                  <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--mute2)", lineHeight: 1.4 }}>
+                    El número es tu acceso a la app; para corregirlo contacta a tu operador.
+                  </p>
+                </div>
+
+                {/* Edad */}
+                <div style={{ padding: "14px 0", borderBottom: "1px solid var(--line2)" }}>
+                  <label htmlFor="dato-edad" style={DATO_LBL}>Edad</label>
+                  <input id="dato-edad"
+                    value={edadInput}
+                    onChange={e => { setEdadInput(e.target.value.replace(/\D/g, "").slice(0, 3)); setDatosOk(false); setDatosErr(""); }}
+                    inputMode="numeric" placeholder="Años"
+                    style={{ ...DATO_INP, marginTop: 8 }}
+                  />
+                </div>
+
+                {/* Correo */}
+                <div style={{ padding: "14px 0" }}>
+                  <label htmlFor="dato-email" style={DATO_LBL}>Correo</label>
+                  <input id="dato-email"
+                    value={emailInput}
+                    onChange={e => { setEmailInput(e.target.value.replace(/\s/g, "").slice(0, 254)); setDatosOk(false); setDatosErr(""); }}
+                    type="email" inputMode="email" autoComplete="email" placeholder="tucorreo@ejemplo.com"
+                    style={{ ...DATO_INP, marginTop: 8, borderColor: emailInput && !esEmailValido(emailInput) ? "var(--danger)" : "var(--line)" }}
+                  />
+                  {emailInput && !esEmailValido(emailInput) && (
+                    <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--danger)", fontWeight: 600 }}>Formato de correo inválido.</p>
+                  )}
                 </div>
               </div>
+
+              {datosErr && (
+                <p style={{ margin: "10px 0 0", padding: "10px 14px", background: "var(--danger-tint)", borderRadius: 10, fontSize: 12.5, fontWeight: 600, color: "var(--danger)" }}>{datosErr}</p>
+              )}
+
+              <button
+                onClick={guardarDatos}
+                disabled={savingDatos || !datosCambiados}
+                style={{ width: "100%", marginTop: 12, padding: "13px 0", borderRadius: 14, border: "none", background: datosOk ? "var(--success)" : "var(--navy)", color: "white", fontWeight: 700, fontSize: 15, fontFamily: "var(--f)", cursor: (savingDatos || !datosCambiados) ? "not-allowed" : "pointer", opacity: (savingDatos || !datosCambiados) ? 0.55 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, transition: "opacity .15s, background .15s" }}
+              >
+                {savingDatos ? "Guardando…" : datosOk ? <><IconCheck sz={16} c="white" sw={3} /> Guardado</> : "Guardar mis datos"}
+              </button>
             </div>
 
             {/* Mi servicio list */}
