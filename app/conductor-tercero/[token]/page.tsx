@@ -120,6 +120,7 @@ export default function ConductorTerceroPage() {
 
   // ── Permiso de ubicación (web nativo del navegador) ──────────────────────────
   const [errorGps, setErrorGps]                   = useState(false);   // GPS denegado/bloqueado por el navegador
+  const [gpsCongelado, setGpsCongelado]           = useState(false);   // watchPosition dejó de dar fixes nuevos (pantalla bloqueada / 2º plano / sin alta precisión)
 
   // ── Estado orientación / brújula ─────────────────────────────────────────────
   const [rumbo, setRumbo]                         = useState(0);       // 0-360, dirección actual del conductor
@@ -164,6 +165,7 @@ export default function ConductorTerceroPage() {
   const lastSentRef     = useRef<number>(0);           // ts del último envío
   const lastSentPosRef  = useRef<{ lat: number; lng: number } | null>(null);
   const precisionRef    = useRef<number>(0);           // accuracy (m) del último fix
+  const ultimoFixRef    = useRef<number>(0);           // ms del último fix RECIBIDO de watchPosition (watchdog anti-congelado)
 
   // Sincronizar refs con state
   useEffect(() => { paradaIdxRef.current = paradaIdx; }, [paradaIdx]);
@@ -302,9 +304,12 @@ export default function ConductorTerceroPage() {
     if (gpsRunningRef.current) return;
     if (!navigator.geolocation) { setErrorMsg("Tu dispositivo no soporta GPS."); return; }
     gpsRunningRef.current = true;
+    ultimoFixRef.current = Date.now(); // periodo de gracia: el watch recién armado no se juzga "congelado"
     watchIdRef.current = navigator.geolocation.watchPosition(
       (pos) => {
         const { latitude: lat, longitude: lng, heading: h, speed: s, accuracy: acc } = pos.coords;
+        ultimoFixRef.current = Date.now();   // fix fresco recibido → el watchdog no marca congelado
+        setGpsCongelado(false);
         posActualRef.current = { lat, lng };
         speedRef.current = s ?? 0;
         precisionRef.current = acc ?? 0;
@@ -323,7 +328,7 @@ export default function ConductorTerceroPage() {
         enviarUbicacion({ lat, lng }, acc ?? 0);
       },
       (err) => { console.warn("[GPS]", err.message); },
-      { enableHighAccuracy: true, maximumAge: 3000, timeout: 15000 }
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 } // maximumAge:0 → exige fix FRESCO (no posición cacheada que finge movimiento)
     );
     // Backstop: si watchPosition deja de emitir (detenido), reintenta seguido; el
     // throttle adaptativo de enviarUbicacion gobierna el ritmo real (no fuerza cada 4 s).
@@ -385,6 +390,26 @@ export default function ConductorTerceroPage() {
     document.addEventListener("visibilitychange", handler);
     return () => document.removeEventListener("visibilitychange", handler);
   }, [token, solicitarWakeLock, detenerGPS, iniciarGPS, persistirSesion]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── 3b. Watchdog anti-CONGELADO del GPS ──────────────────────────────────────
+  // En el LINK WEB, watchPosition se SUSPENDE cuando la pantalla se bloquea o el chofer
+  // pasa a otra app (Waze), y el backstop sigue re-enviando la ÚLTIMA posición → el bus se
+  // ve "pegado" en el mapa aunque avance. (El rastreo de fondo real solo lo da la APP nativa.)
+  // Aquí, con la pantalla VISIBLE: si no llega un fix nuevo en 60 s, re-armamos watchPosition
+  // (fuerza un fix fresco) y marcamos `gpsCongelado` para avisar al chofer. Al llegar un fix,
+  // el callback limpia la marca. No corre en 2º plano (el timer está suspendido igual). 60 s
+  // (no 45) evita falsos positivos en un semáforo largo; un congelado real es indefinido.
+  useEffect(() => {
+    if (fase !== "en_ruta") return;
+    const STALE_MS = 60_000;
+    const iv = setInterval(() => {
+      if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+      const viejo = Date.now() - (ultimoFixRef.current || 0) > STALE_MS;
+      setGpsCongelado(viejo);
+      if (viejo) { detenerGPS(); iniciarGPS(); solicitarWakeLock(); } // re-armar: pide un fix fresco
+    }, 15_000);
+    return () => clearInterval(iv);
+  }, [fase, detenerGPS, iniciarGPS, solicitarWakeLock]);
 
   // ── 4. Persistir cambios ──────────────────────────────────────────────────────
   useEffect(() => { if (fase === "en_ruta") persistirSesion(); }, [fase, paradas, paradaIdx, mapaAbierto, persistirSesion]);
@@ -813,6 +838,21 @@ export default function ConductorTerceroPage() {
         </div>
       </div>
 
+      {/* Aviso GPS congelado: la posición dejó de actualizarse (pantalla bloqueada / 2º plano / sin alta precisión) */}
+      {gpsCongelado && (
+        <div className="px-4 pt-3 flex-shrink-0">
+          <div className="rounded-xl px-4 py-3 flex items-start gap-2" style={{ background: "#FEF3C7", border: "1px solid #F59E0B" }}>
+            <span className="text-lg leading-none flex-shrink-0">⚠️</span>
+            <div className="min-w-0">
+              <p className="text-sm font-bold" style={{ color: "#92400E" }}>GPS detenido — el bus se ve pegado</p>
+              <p className="text-xs mt-0.5" style={{ color: "#92400E" }}>
+                Mantén ESTA pantalla abierta y encendida, y activa la ubicación en <strong>Alta precisión</strong>. No bloquees el teléfono ni cambies de app durante el viaje.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Card próxima parada */}
       <div className="px-4 pt-4 flex-shrink-0">
         {proximaParada ? (
@@ -832,8 +872,10 @@ export default function ConductorTerceroPage() {
             {/* GPS status + botón Ver ruta */}
             <div className="mt-3 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
-                <span className="w-2 h-2 rounded-full flex-shrink-0 animate-pulse" style={{ background: C.verde }} />
-                <span className="text-xs truncate" style={{ color: C.grisMedio }}>GPS activo — avanza automáticamente</span>
+                <span className="w-2 h-2 rounded-full flex-shrink-0 animate-pulse" style={{ background: gpsCongelado ? "#F59E0B" : C.verde }} />
+                <span className="text-xs truncate" style={{ color: gpsCongelado ? "#92400E" : C.grisMedio }}>
+                  {gpsCongelado ? "GPS detenido — mantén la pantalla abierta" : "GPS activo — avanza automáticamente"}
+                </span>
               </div>
               <button
                 onClick={handleAbrirMapa}
