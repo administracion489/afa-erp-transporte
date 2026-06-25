@@ -6,8 +6,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import {
-  calcBearing, suavizarHuella, limpiarHuella, colorearMatched,
-  crearAjustadorHuella, filasAPuntos,
+  calcBearing, limpiarHuella, colorearMatched,
+  crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures,
 } from "@/lib/huella";
 
 declare global { interface Window { mapboxgl: any; } }
@@ -327,21 +327,11 @@ export default function ModalGps({
       if (map.getSource("huella-gps"))    map.removeSource("huella-gps");
 
       // Con Map Matching: geometría pegada a la vía, coloreada por velocidad (leyenda).
-      // Sin él (aún cargando o rechazado por baja confianza): huella cruda suavizada.
+      // Sin él (aún cargando o rechazado por baja confianza, p. ej. GPS de torre): huella cruda
+      // suavizada por tramos (corta teleports/huecos, no recta cruzando el mapa). lib/huella.ts.
       const features = (matchedCoords && matchedCoords.length >= 2)
         ? colorearMatched(matchedCoords, huella)
-        : (() => {
-            const pts = suavizarHuella(huella);
-            const f: any[] = [];
-            for (let i = 0; i < pts.length - 1; i++) {
-              f.push({
-                type: "Feature",
-                properties: { velocidad: pts[i].velocidad ?? 0 },
-                geometry: { type: "LineString", coordinates: [[pts[i].lng, pts[i].lat], [pts[i + 1].lng, pts[i + 1].lat]] },
-              });
-            }
-            return f;
-          })();
+        : huellaCrudaFeatures(huella);
 
       map.addSource("huella-gps", { type: "geojson", data: { type: "FeatureCollection", features } });
       map.addLayer({

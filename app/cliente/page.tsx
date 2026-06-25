@@ -8,7 +8,7 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador } from "@/lib/anim-marker";
 import {
-  suavizarHuella, limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos,
+  limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures,
 } from "@/lib/huella";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
@@ -1226,15 +1226,7 @@ export default function ClientePortal() {
     const matchedEV = matchedEnVivoMap[sel.id];
     const feats: any[] = (matchedEV && matchedEV.length >= 2)
       ? colorearMatched(matchedEV, huellaPts)
-      : (() => {
-          const huella = suavizarHuella(huellaPts);
-          const f: any[] = [];
-          for (let i = 0; i < huella.length - 1; i++) {
-            const a = huella[i], b = huella[i + 1];
-            f.push({ type: "Feature" as const, properties: { velocidad: (a.velocidad + b.velocidad) / 2 }, geometry: { type: "LineString" as const, coordinates: [[a.lng, a.lat], [b.lng, b.lat]] } });
-          }
-          return f;
-        })();
+      : huellaCrudaFeatures(huellaPts);   // cruda por tramos (corta teleports/huecos). lib/huella.ts
     if (feats.length > 0) {
       const sid = `gps-s-${sel.id}`, lid = `gps-l-${sel.id}`;
       try {

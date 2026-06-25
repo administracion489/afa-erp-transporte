@@ -25,10 +25,12 @@ export function calcBearing(lat1: number, lng1: number, lat2: number, lng2: numb
   return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
 }
 
-// Media móvil de 3 puntos sobre lat/lng para reducir el zigzag por imprecisión GPS.
-export function suavizarHuella<T extends { lat: number; lng: number }>(pts: T[]): T[] {
+// Media móvil sobre lat/lng (ventana ±rad puntos) para reducir el zigzag por imprecisión GPS.
+// rad=1 → 3 puntos (defecto, GPS bueno). rad=2 → 5 puntos: aplana más el ruido de GPS pobre
+// en la huella cruda (fallback cuando Map Matching no logra pegar a la vía).
+export function suavizarHuella<T extends { lat: number; lng: number }>(pts: T[], rad = 1): T[] {
   return pts.map((p, i) => {
-    const s = Math.max(0, i - 1), e = Math.min(pts.length - 1, i + 1);
+    const s = Math.max(0, i - rad), e = Math.min(pts.length - 1, i + rad);
     const w = pts.slice(s, e + 1);
     return { ...p, lat: w.reduce((a, q) => a + q.lat, 0) / w.length, lng: w.reduce((a, q) => a + q.lng, 0) / w.length };
   });
@@ -70,11 +72,38 @@ export function dedupCercanos(pts: MatchPt[], minM = 8): MatchPt[] {
 // Colapsa el jitter parado (inicio, paraderos, fin) y preserva el trayecto real aunque el
 // sensor de velocidad mienta o esté en cero. Es un fold izq→der: el prefijo ya emitido es
 // estable salvo la cola pendiente → no afecta a las ventanas ya congeladas del Map Matching.
-const R_STOP_M  = 45;  // radio del cluster de parada (cubre el jitter típico ±26 m)
+//
+// PRECISIÓN-CONSCIENTE: los radios FIJOS de 45/30 m se afinaron para GPS bueno (jitter ±26 m,
+// flota propia con chip → precision_m ~8 m). Un tercero con GPS pobre (link web / equipo sin
+// chip → precision_m 80-500 m) salta 60-95 m ESTANDO QUIETO; con radio fijo de 45 m esos
+// saltos superan el umbral, la máquina los toma como "en marcha" y dibuja cada uno = zigzag.
+// Solución: el radio de cada punto crece con SU incertidumbre `acc` (precision_m). Un fix con
+// acc=500 m que cae a 120 m del centroide es, estadísticamente, el MISMO lugar → es jitter, no
+// movimiento. Para acc≤30 m (GPS bueno) el radio queda en el piso 45/30 → comportamiento
+// IDÉNTICO al anterior; solo se relaja para GPS pobre. Cap modesto (150/100 m) para no colapsar
+// el avance real (puntos que MARCHAN en una dirección escapan igual tras ESCAPE_N muestras).
+const R_STOP_M  = 45;  // piso del radio del cluster de parada (GPS bueno, jitter ±26 m)
+const R_STOP_MAX = 150; // techo del radio de parada (no colapsar avance real)
 const ESCAPE_N  = 3;   // muestras consecutivas alejándose para confirmar SALIDA
-const DWELL_R_M = 30;  // radio para detectar que el bus se volvió a parar
+const DWELL_R_M = 30;  // piso del radio para detectar que el bus se volvió a parar
+const DWELL_R_MAX = 100; // techo del radio de re-parada
 const DWELL_N   = 3;   // muestras consecutivas asentadas para confirmar PARADA
+// Radio efectivo de un punto = max(piso, min(techo, acc·1.5)). Escala con la precisión GPS.
+const radioStop  = (acc: number) => Math.min(R_STOP_MAX, Math.max(R_STOP_M, (acc || 25) * 1.5));
+const radioDwell = (acc: number) => Math.min(DWELL_R_MAX, Math.max(DWELL_R_M, (acc || 25)));
+// Techo de incertidumbre para DIBUJAR el trazo: un fix con precision_m > esto es ubicación de
+// torre/WiFi (no GPS) → demasiado incierto para la huella y suele venir con saltos imposibles
+// (>1000 km/h). Se descarta SOLO de la huella; el punto en vivo y el envío no se tocan (un
+// equipo sin chip puede reportar legítimamente >80 m, ver project_conectarse_gps).
+const ACC_MAX_TRAIL = 300;
 export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
+  // Pre-filtro: descarta fixes demasiado inciertos para el trazo (torre/WiFi, saltos imposibles).
+  // PERO si eso dejaría el trazo casi vacío (equipo legítimo SIN chip, consistentemente >300 m),
+  // se conservan los crudos finitos: una estela degradada es mejor que NINGUNA.
+  const finitos = pts.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+  const precisos = finitos.filter((p) => p.acc <= ACC_MAX_TRAIL);
+  const base = precisos.length >= 2 ? precisos : finitos;
+
   const out: HuellaPt[] = [];
   const emitir = (lat: number, lng: number, velocidad: number, acc: number) => {
     const last = out[out.length - 1];
@@ -91,11 +120,10 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
   let pend: HuellaPt[] = [];  // stop: salidas pendientes de confirmar
   let dwell = 0;              // move: muestras seguidas asentadas
 
-  for (const p of pts) {
-    if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng)) continue; // fila corrupta
+  for (const p of base) {
     if (modo === "stop") {
       if (!cl) { cl = nuevoCl(p); continue; }
-      if (distM(cLat(cl), cLng(cl), p.lat, p.lng) < R_STOP_M) {
+      if (distM(cLat(cl), cLng(cl), p.lat, p.lng) < radioStop(p.acc)) {
         pend = []; fold(cl, p);                              // jitter / sigue parado
       } else {
         pend.push(p);
@@ -108,7 +136,7 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
     } else { // move
       emitir(p.lat, p.lng, p.velocidad, p.acc);
       if (!cl) { cl = nuevoCl(p); dwell = 1; }
-      else if (distM(cLat(cl), cLng(cl), p.lat, p.lng) < DWELL_R_M) {
+      else if (distM(cLat(cl), cLng(cl), p.lat, p.lng) < radioDwell(p.acc)) {
         fold(cl, p); dwell++;
         if (dwell >= DWELL_N) { modo = "stop"; pend = []; }   // se volvió a parar
       } else {
@@ -166,8 +194,15 @@ export async function matchVentana(ventana: MatchPt[], token: string): Promise<[
   return suav.length >= 2 ? suav.map(p => [p.lng, p.lat] as [number, number]) : [];
 }
 
+// Tramo máximo que se DIBUJA entre dos vértices consecutivos. Más largo que esto = teleport
+// por pérdida de señal o fix basura → se deja un HUECO honesto en vez de una recta cruzando el
+// mapa. Holgado (300 m) para no cortar avance real: la huella buena densa nunca lo alcanza
+// (#1138, chip GPS a 4 s: máx ~138 m), solo lo superan los saltos imposibles del GPS pobre.
+export const MAX_SEG_M = 300;
+
 // Reparte la velocidad de la huella cruda sobre la geometría ajustada a la vía: a cada
 // vértice ajustado le asigna la velocidad del punto GPS real más cercano (coloreado leyenda).
+// Corta el trazo en saltos > MAX_SEG_M (costuras de ventanas fallidas / huecos).
 export function colorearMatched(
   coords: [number, number][],
   huella: { lat: number; lng: number; velocidad: number }[]
@@ -182,11 +217,48 @@ export function colorearMatched(
   };
   const feats: any[] = [];
   for (let i = 0; i < coords.length - 1; i++) {
+    const [aLng, aLat] = coords[i], [bLng, bLat] = coords[i + 1];
+    if (distM(aLat, aLng, bLat, bLng) > MAX_SEG_M) continue;   // hueco, no recta cruzando el mapa
     feats.push({
       type: "Feature",
-      properties: { velocidad: velCercana(coords[i][0], coords[i][1]) },
+      properties: { velocidad: velCercana(aLng, aLat) },
       geometry: { type: "LineString", coordinates: [coords[i], coords[i + 1]] },
     });
+  }
+  return feats;
+}
+
+// Features de la huella CRUDA (cuando Map Matching no logra pegar a la vía, p. ej. terceros con
+// GPS de torre/WiFi). Parte el trazo en tramos contiguos (corta donde el salto > MAX_SEG_M: así
+// el suavizado NO promedia a través de un teleport y no se dibuja una recta sobre el hueco),
+// suaviza cada tramo (ventana ±2) y emite un segmento por par, coloreado por velocidad. Fuente
+// ÚNICA del fallback crudo del modal y del "En vivo" del cliente (antes duplicado).
+export function huellaCrudaFeatures(
+  huellaPts: { lat: number; lng: number; velocidad: number }[],
+  maxSegM = MAX_SEG_M
+): any[] {
+  const tramos: typeof huellaPts[] = [];
+  let cur: typeof huellaPts = [];
+  for (let i = 0; i < huellaPts.length; i++) {
+    if (i > 0 && distM(huellaPts[i - 1].lat, huellaPts[i - 1].lng, huellaPts[i].lat, huellaPts[i].lng) > maxSegM) {
+      if (cur.length) tramos.push(cur);
+      cur = [];
+    }
+    cur.push(huellaPts[i]);
+  }
+  if (cur.length) tramos.push(cur);
+
+  const feats: any[] = [];
+  for (const tramo of tramos) {
+    const pts = suavizarHuella(tramo, 2);   // suaviza DENTRO del tramo (no cruza huecos)
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      feats.push({
+        type: "Feature",
+        properties: { velocidad: ((a.velocidad ?? 0) + (b.velocidad ?? 0)) / 2 },
+        geometry: { type: "LineString", coordinates: [[a.lng, a.lat], [b.lng, b.lat]] },
+      });
+    }
   }
   return feats;
 }

@@ -179,50 +179,75 @@ export async function observarUbicacionBackground(
   onPos: (pos: GeoPos) => void,
   onError?: (err: { code?: number; message: string }) => void,
 ): Promise<GeoWatch> {
-  if (esNativo()) {
-    try {
-      // NO pre-chequear el permiso con @capacitor/geolocation: en MIUI/HyperOS su
-      // checkPermissions() se cuelga o devuelve "no concedido" AUNQUE el permiso SÍ
-      // esté concedido, y eso hacía que NUNCA se llamara a start() (el servicio nunca
-      // arrancaba → ENVÍOS GPS: 0). Llamamos al plugin DIRECTO: él hace su propio
-      // chequeo nativo (rápido y fiable) y, con requestPermissions:true, pide el permiso
-      // si falta. El servicio nativo está parcheado (startForeground inmediato en
-      // onStartCommand → sin ANR; escucha FUSED/GPS/NETWORK → funciona en WiFi-only).
-      // stale:true devuelve la última ubicación conocida al instante (primer envío rápido).
-      const { BackgroundGeolocation } = await import("@capgo/background-geolocation");
-      await BackgroundGeolocation.start(
-        {
-          backgroundTitle: "AFA · rastreo activo",
-          backgroundMessage: "Enviando tu ubicación durante el viaje",
-          requestPermissions: true,
-          stale: true,
-          distanceFilter: 20,
-        },
-        (location, error) => {
-          if (error) { onError?.({ message: error.message || "Error de GPS en segundo plano", code: (error as any).code }); return; }
-          if (!location) return;
-          onPos({
-            coords: {
-              latitude: location.latitude,
-              longitude: location.longitude,
-              accuracy: location.accuracy ?? 0,
-              speed: location.speed ?? null,
-              heading: location.bearing ?? null,
-            },
-            timestamp: location.time ?? undefined,
-          });
-        },
-      );
-      _bgActivo = true;
-      return { clear: () => { _bgActivo = false; void BackgroundGeolocation.stop().catch(() => {}); } };
-    } catch (e: any) {
-      // Plugin nativo ausente en este build → fallback a primer plano (sin romper nada).
+  if (!esNativo()) return observarUbicacion(onPos, onError);
+
+  // 1) Cargar el plugin nativo. Que FALLE el import es el ÚNICO "plugin ausente" real (APK
+  //    viejo sin recompilar) → ahí sí cae a primer plano. Un fallo de start() NO es ausencia.
+  let BackgroundGeolocation: any;
+  try {
+    ({ BackgroundGeolocation } = await import("@capgo/background-geolocation"));
+  } catch (e: any) {
+    _bgActivo = false;
+    console.warn("[geo] background-geolocation no disponible, fallback a primer plano:", e?.message);
+    return observarUbicacion(onPos, onError);
+  }
+
+  // NO pre-chequear el permiso con @capacitor/geolocation: en MIUI/HyperOS su checkPermissions()
+  // se cuelga o devuelve "no concedido" AUNQUE el permiso SÍ esté concedido → el servicio nunca
+  // arrancaba (ENVÍOS GPS: 0). El plugin hace su propio chequeo nativo (con requestPermissions:true
+  // pide el permiso si falta). El servicio está parcheado (startForeground inmediato en
+  // onStartCommand → sin ANR; escucha FUSED/GPS/NETWORK → funciona en WiFi-only). stale:true
+  // devuelve la última ubicación conocida al instante.
+  const opciones = {
+    backgroundTitle: "AFA · rastreo activo",
+    backgroundMessage: "Enviando tu ubicación durante el viaje",
+    requestPermissions: true,
+    stale: true,
+    distanceFilter: 20,
+  };
+  const onUpdate = (location: any, error: any) => {
+    if (error) { onError?.({ message: error.message || "Error de GPS en segundo plano", code: error.code }); return; }
+    if (!location) return;
+    onPos({
+      coords: {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        accuracy: location.accuracy ?? 0,
+        speed: location.speed ?? null,
+        heading: location.bearing ?? null,
+      },
+      timestamp: location.time ?? undefined,
+    });
+  };
+  const esYaIniciado = (e: any) =>
+    e?.code === "ALREADY_STARTED" || /already started/i.test(String(e?.message ?? ""));
+
+  // 2) Arrancar el servicio. Robusto al RE-ARMADO del watchdog: React no espera al cleanup (que
+  //    hace stop() SIN await), así que este start() puede llegar mientras el servicio nativo aún
+  //    no liberó `serviceConnectionFuture` → el plugin rechaza con ALREADY_STARTED. En ese caso
+  //    NO degradar a primer plano (sería rastreo sin background, lo contrario de recuperar): se
+  //    para LIMPIO (await stop() deja serviceConnectionFuture=null antes de resolver) y se
+  //    reintenta UNA vez. Cualquier otro fallo sí cae a primer plano (degradado, no muerto).
+  try {
+    await BackgroundGeolocation.start(opciones, onUpdate);
+  } catch (e: any) {
+    if (esYaIniciado(e)) {
+      try { await BackgroundGeolocation.stop(); } catch { /* noop */ }
+      try {
+        await BackgroundGeolocation.start(opciones, onUpdate);
+      } catch (e2: any) {
+        _bgActivo = false;
+        console.warn("[geo] re-arranque background falló, fallback a primer plano:", e2?.message);
+        return observarUbicacion(onPos, onError);
+      }
+    } else {
       _bgActivo = false;
-      console.warn("[geo] background-geolocation no disponible, fallback a primer plano:", e?.message);
+      console.warn("[geo] start background falló, fallback a primer plano:", e?.message);
       return observarUbicacion(onPos, onError);
     }
   }
-  return observarUbicacion(onPos, onError);
+  _bgActivo = true;
+  return { clear: () => { _bgActivo = false; void BackgroundGeolocation.stop().catch(() => {}); } };
 }
 
 /** Abre los ajustes de la app para conceder "Permitir todo el tiempo" (Android 11+). */

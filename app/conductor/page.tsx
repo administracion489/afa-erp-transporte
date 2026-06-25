@@ -422,6 +422,8 @@ export default function ConductorApp() {
   const watchIdRef       = useRef<GeoWatch | null>(null);
   const intervalRef      = useRef<NodeJS.Timeout | null>(null);
   const posRef           = useRef<GeoPos | null>(null);
+  const ultimoFixRef     = useRef<number>(0); // ms del último fix RECIBIDO (watchdog de auto-recuperación)
+  const ultimoReArmRef   = useRef<number>(0); // ms del último re-arm del GPS (coalesce: máx 1 cada 10 s)
   // Cola/reintentos de envío GPS
   const drenandoRef      = useRef(false);
   const reintentoRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -494,6 +496,10 @@ export default function ConductorApp() {
   const [gpsHabilitado, setGpsHabilitado] = useState<boolean>(() => {
     try { return !!localStorage.getItem("afa_bg_disclosure_v1"); } catch { return true; }
   });
+  // Contador para FORZAR re-armar el watch de GPS (watchdog/resume). Cambiarlo re-ejecuta el
+  // effect de GPS: limpia (stop) y vuelve a arrancar (start). Recupera el rastreo cuando el
+  // listener nativo se quedó mudo (Doze / app en 2º plano largo rato) sin tener que reiniciar.
+  const [gpsNonce, setGpsNonce] = useState(0);
   const [showFinViaje,   setShowFinViaje]   = useState(false);
   const [showFinOverlay, setShowFinOverlay] = useState(false);
   const [datosFinViaje,  setDatosFinViaje]  = useState<{
@@ -782,6 +788,7 @@ export default function ConductorApp() {
     if (!geoDisponible()) { setGpsError("GPS no disponible en este dispositivo"); return; }
     let cancelado = false;
     let recibioPos = false;
+    ultimoFixRef.current = Date.now(); // periodo de gracia: el watch recién armado no se juzga "viejo"
     let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
     // Limpiar instancias previas por si acaso
     if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
@@ -791,7 +798,7 @@ export default function ConductorApp() {
       // App nativa: rastreo en SEGUNDO PLANO (sigue con Waze encima o pantalla
       // bloqueada). Si el plugin no está en este build, cae a primer plano solo.
       observarUbicacionBackground(
-        (pos) => { recibioPos = true; posRef.current = pos; setPosActual(pos); setGpsError(null); enviarUbicacion(pos); },
+        (pos) => { recibioPos = true; ultimoFixRef.current = Date.now(); posRef.current = pos; setPosActual(pos); setGpsError(null); enviarUbicacion(pos); },
         (e) => { if (!recibioPos) setGpsError(e.message); },
       )
         .then((w) => { if (cancelado) w.clear(); else watchIdRef.current = w; })
@@ -808,7 +815,7 @@ export default function ConductorApp() {
         try {
           const w = await observarUbicacion(
             (pos) => {
-              recibioPos = true;
+              recibioPos = true; ultimoFixRef.current = Date.now();
               posRef.current = pos; setPosActual(pos); setGpsError(null);
               enviarUbicacion(pos); // el throttle adaptativo decide el ritmo real
             },
@@ -849,6 +856,39 @@ export default function ConductorApp() {
       if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
       if (reintentoRef.current) { clearTimeout(reintentoRef.current); reintentoRef.current = null; }
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conductor?.id, gpsHabilitado, compartiendo, gpsNonce]);
+
+  // ── Watchdog de GPS: auto-recuperación sin reiniciar el celular ──────────────
+  // Caso real reportado: tras NO usar el app ~24 h, el GPS deja de funcionar en 1er y 2º
+  // plano hasta reiniciar el teléfono. Parte es batería del fabricante (MIUI/HyperOS) — eso
+  // se arregla en ajustes del equipo (Autostart + batería "Sin restricciones" + ubicación
+  // "Todo el tiempo"). Pero otra parte es el listener nativo que se queda MUDO tras Doze /
+  // 2º plano largo y no se vuelve a registrar solo. Aquí: si estamos compartiendo y el último
+  // fix quedó viejo, forzamos re-armar el watch (stop→start) — al volver a 1er plano y, como
+  // respaldo, cada 30 s mientras la pantalla está visible. Re-armar es barato y sólo dispara
+  // cuando el GPS YA está roto (en marcha llegan fixes cada ~2 s → nunca se vuelve viejo).
+  useEffect(() => {
+    if (!conductor || !gpsHabilitado || !compartiendo) return;
+    const VIEJO_PERIODICO = 120_000; // 2 min sin fix con pantalla visible → re-armar
+    const VIEJO_RESUME    = 30_000;  // al volver a 1er plano, 30 s de antigüedad ya re-arma
+    // Coalesce: visibilitychange y el tick de 30 s pueden coincidir; sin esto se encadenarían
+    // dos ciclos stop/start del servicio nativo solapados. Máx 1 re-arm cada 10 s.
+    const reArmar = () => {
+      if (Date.now() - ultimoReArmRef.current < 10_000) return;
+      ultimoReArmRef.current = Date.now();
+      setGpsNonce((n) => n + 1);
+    };
+    const edadFix = () => Date.now() - (ultimoFixRef.current || 0);
+    const onVis = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible" && edadFix() > VIEJO_RESUME) reArmar();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    const iv = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return; // en 2º plano el timer está throttleado igual
+      if (edadFix() > VIEJO_PERIODICO) reArmar();
+    }, 30_000);
+    return () => { document.removeEventListener("visibilitychange", onVis); clearInterval(iv); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conductor?.id, gpsHabilitado, compartiendo]);
 
