@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { responderConIA } from "@/lib/crm-ia";
 
 const db = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
+
+// El agente IA (after) puede tardar varios segundos con herramientas; damos margen.
+export const maxDuration = 60;
 
 // GET — verificación del webhook por Meta
 export async function GET(req: NextRequest) {
@@ -24,6 +29,7 @@ export async function POST(req: NextRequest) {
   try { body = await req.json(); } catch { return NextResponse.json({ ok: true }); }
 
   const { object, entry = [] } = body;
+  const conversacionesNuevas = new Set<string>(); // hilos con mensaje entrante → atender con IA
 
   for (const e of entry) {
     // ── WhatsApp ──────────────────────────────────────────────────────────
@@ -32,7 +38,7 @@ export async function POST(req: NextRequest) {
         if (change.field !== "messages") continue;
         const val = change.value;
         for (const msg of val.messages ?? []) {
-          await processarMensaje({
+          const convId = await processarMensaje({
             canal: "whatsapp",
             senderId: msg.from,
             senderName: val.contacts?.[0]?.profile?.name ?? msg.from,
@@ -42,6 +48,7 @@ export async function POST(req: NextRequest) {
             mediaUrl: msg.image?.url ?? msg.audio?.url ?? msg.video?.url ?? msg.document?.url ?? null,
             metaMessageId: msg.id,
           });
+          if (convId) conversacionesNuevas.add(convId);
         }
       }
     }
@@ -50,7 +57,7 @@ export async function POST(req: NextRequest) {
     if (object === "page") {
       for (const ev of e.messaging ?? []) {
         if (!ev.message) continue;
-        await processarMensaje({
+        const convId = await processarMensaje({
           canal: "messenger",
           senderId: ev.sender.id,
           senderName: "",
@@ -60,6 +67,7 @@ export async function POST(req: NextRequest) {
           mediaUrl: ev.message.attachments?.[0]?.payload?.url ?? null,
           metaMessageId: ev.message.mid,
         });
+        if (convId) conversacionesNuevas.add(convId);
       }
     }
 
@@ -67,7 +75,7 @@ export async function POST(req: NextRequest) {
     if (object === "instagram") {
       for (const ev of e.messaging ?? []) {
         if (!ev.message) continue;
-        await processarMensaje({
+        const convId = await processarMensaje({
           canal: "instagram",
           senderId: ev.sender.id,
           senderName: "",
@@ -77,8 +85,23 @@ export async function POST(req: NextRequest) {
           mediaUrl: ev.message.attachments?.[0]?.payload?.url ?? null,
           metaMessageId: ev.message.mid,
         });
+        if (convId) conversacionesNuevas.add(convId);
       }
     }
+  }
+
+  // El agente IA corre DESPUÉS de responder 200 a Meta (no bloquea el webhook).
+  // responderConIA decide solo si está activo, el canal aplica, el hilo no está pausado, etc.
+  if (conversacionesNuevas.size > 0) {
+    after(async () => {
+      for (const id of conversacionesNuevas) {
+        try {
+          await responderConIA(id);
+        } catch {
+          /* el motor ya maneja sus errores; no romper el resto */
+        }
+      }
+    });
   }
 
   return NextResponse.json({ ok: true });
@@ -95,7 +118,7 @@ type MsgInput = {
   metaMessageId: string;
 };
 
-async function processarMensaje(m: MsgInput) {
+async function processarMensaje(m: MsgInput): Promise<string | null> {
   const supabase = db();
 
   // Dedup
@@ -104,7 +127,7 @@ async function processarMensaje(m: MsgInput) {
     .select("id")
     .eq("meta_message_id", m.metaMessageId)
     .maybeSingle();
-  if (dup) return;
+  if (dup) return null;
 
   // Buscar o crear contacto
   let { data: contacto } = await supabase
@@ -155,4 +178,6 @@ async function processarMensaje(m: MsgInput) {
     .from("crm_conversaciones")
     .update({ ultimo_mensaje_at: new Date().toISOString(), no_leidos: (conv!.no_leidos ?? 0) + 1 })
     .eq("id", conv!.id);
+
+  return conv!.id as string;
 }

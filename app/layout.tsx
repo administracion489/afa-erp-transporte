@@ -249,6 +249,11 @@ const Ic = {
       <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>
     </svg>
   ),
+  Bot: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <rect width="18" height="10" x="3" y="11" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" x2="8" y1="16" y2="16"/><line x1="16" x2="16" y1="16" y2="16"/>
+    </svg>
+  ),
 };
 
 // ─── Tipos ─────────────────────────────────────────────────────────────────
@@ -284,6 +289,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
     items: [
       { href: "/crm",          label: "Inbox CRM",  sub: "Conversaciones",      icon: Ic.MessageSquare, modulo: "crm" },
       { href: "/crm/pipeline", label: "Pipeline",   sub: "Embudo de ventas",    icon: Ic.TrendingUp,    modulo: "crm" },
+      { href: "/crm/agente",   label: "Agente IA",  sub: "Asistente con Claude", icon: Ic.Bot,          modulo: "crm" },
     ],
   },
   {

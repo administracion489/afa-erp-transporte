@@ -16,6 +16,7 @@ type Conversacion = {
   id: string; canal: Canal; estado: Estado; asunto?: string;
   ultimo_mensaje_at?: string; no_leidos: number; pipeline_id?: string;
   contacto_id: string; crm_contactos: Contacto;
+  ia_pausada?: boolean; borrador_ia?: string | null; borrador_ia_at?: string | null;
   _ultimo_texto?: string;
 };
 
@@ -23,6 +24,12 @@ type Mensaje = {
   id: string; conversacion_id: string; direccion: "entrante" | "saliente";
   tipo: string; contenido?: string; media_url?: string;
   enviado_por?: string; error?: string; created_at: string;
+  generado_por_ia?: boolean;
+};
+
+type AccionIA = {
+  id: string; conversacion_id: string; tipo: "cotizacion" | "reserva";
+  resumen?: string; payload: any; estado: string; created_at?: string;
 };
 
 // ── Canal config ──────────────────────────────────────────────────────────
@@ -82,6 +89,8 @@ export default function CRMPage() {
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [cargando, setCargando] = useState(true);
   const [sincronizando, setSincronizando] = useState(false);
+  const [acciones, setAcciones] = useState<AccionIA[]>([]);
+  const [pidiendoIA, setPidiendoIA] = useState(false);
   const [nuevoContactoModal, setNuevoContactoModal] = useState(false);
   const [nuevoForm, setNuevoForm] = useState({ nombre: "", empresa: "", telefono: "", email: "", canal: "whatsapp", notas: "" });
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -151,13 +160,26 @@ export default function CRMPage() {
     setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
   }, []);
 
+  const cargarAcciones = useCallback(async (convId: string) => {
+    const { data } = await supabase
+      .from("crm_acciones_ia")
+      .select("*")
+      .eq("conversacion_id", convId)
+      .eq("estado", "pendiente")
+      .order("created_at", { ascending: false });
+    setAcciones((data ?? []) as AccionIA[]);
+  }, []);
+
   useEffect(() => {
     if (selected) {
       cargarMensajes(selected.id);
+      cargarAcciones(selected.id);
       // Marcar como leído
       supabase.from("crm_conversaciones").update({ no_leidos: 0 }).eq("id", selected.id);
+    } else {
+      setAcciones([]);
     }
-  }, [selected, cargarMensajes]);
+  }, [selected, cargarMensajes, cargarAcciones]);
 
   // ── Realtime ───────────────────────────────────────────────────────────
 
@@ -172,20 +194,32 @@ export default function CRMPage() {
         }
         cargarConvs();
       })
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "crm_conversaciones" }, () => {
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "crm_conversaciones" }, (payload) => {
+        const upd = payload.new as Conversacion;
+        // Refrescar el hilo abierto (borrador IA, pausa, estado) sin perder el contacto embebido
+        setSelected((prev) =>
+          prev && prev.id === upd.id
+            ? { ...prev, ia_pausada: upd.ia_pausada, borrador_ia: upd.borrador_ia, borrador_ia_at: upd.borrador_ia_at, estado: upd.estado }
+            : prev
+        );
         cargarConvs();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "crm_acciones_ia" }, (payload) => {
+        const row = (payload.new ?? payload.old) as AccionIA;
+        if (selected && row?.conversacion_id === selected.id) cargarAcciones(selected.id);
       })
       .subscribe();
     return () => { supabase.removeChannel(ch); };
-  }, [selected, cargarConvs]);
+  }, [selected, cargarConvs, cargarAcciones]);
 
   // ── Enviar mensaje ─────────────────────────────────────────────────────
 
-  const enviar = async () => {
-    if (!reply.trim() || !selected || enviando) return;
+  const enviar = async (override?: string) => {
+    const base = override ?? reply;
+    if (!base.trim() || !selected || enviando) return;
     setEnviando(true);
-    const texto = reply.trim();
-    setReply("");
+    const texto = base.trim();
+    if (override === undefined) setReply("");
 
     const res = await fetch("/api/crm/mensajes/enviar", {
       method: "POST",
@@ -197,8 +231,69 @@ export default function CRMPage() {
 
     if (!data.ok) showToast(data.error ?? "Error al enviar", false);
     else {
+      // Al enviar (manual o aprobando un borrador), el borrador IA queda obsoleto
+      if (selected.borrador_ia) await limpiarBorrador(selected.id);
       cargarMensajes(selected.id);
       cargarConvs();
+    }
+  };
+
+  // ── Agente IA ────────────────────────────────────────────────────────────
+
+  const limpiarBorrador = async (convId: string) => {
+    await supabase.from("crm_conversaciones").update({ borrador_ia: null, borrador_ia_at: null }).eq("id", convId);
+    setSelected((prev) => (prev && prev.id === convId ? { ...prev, borrador_ia: null } : prev));
+  };
+
+  const pedirRespuestaIA = async () => {
+    if (!selected || pidiendoIA) return;
+    setPidiendoIA(true);
+    try {
+      const res = await fetch("/api/crm/ia/responder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversacion_id: selected.id, forzar_borrador: true }),
+      });
+      const data = await res.json();
+      if (data.ok && data.texto) {
+        setSelected((prev) => (prev && prev.id === selected.id ? { ...prev, borrador_ia: data.texto } : prev));
+        showToast("La IA preparó una sugerencia");
+      } else {
+        showToast(data.error || data.motivo || "La IA no generó respuesta", false);
+      }
+    } catch {
+      showToast("Error al pedir respuesta a la IA", false);
+    }
+    setPidiendoIA(false);
+  };
+
+  const editarBorrador = async () => {
+    if (!selected?.borrador_ia) return;
+    setReply(selected.borrador_ia);
+    await limpiarBorrador(selected.id);
+    replyRef.current?.focus();
+  };
+
+  const toggleIaPausada = async () => {
+    if (!selected) return;
+    const nuevo = !selected.ia_pausada;
+    await supabase.from("crm_conversaciones").update({ ia_pausada: nuevo }).eq("id", selected.id);
+    setSelected({ ...selected, ia_pausada: nuevo });
+    showToast(nuevo ? "IA pausada en este chat" : "IA reactivada en este chat");
+  };
+
+  const resolverAccion = async (accionId: string, decision: "aprobar" | "rechazar") => {
+    const res = await fetch("/api/crm/ia/accion", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accion_id: accionId, decision }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showToast(decision === "aprobar" ? "Propuesta aprobada y creada" : "Propuesta rechazada");
+      if (selected) cargarAcciones(selected.id);
+    } else {
+      showToast(data.error ?? "Error al procesar la propuesta", false);
     }
   };
 
@@ -443,6 +538,19 @@ export default function CRMPage() {
                 ))}
               </select>
 
+              {/* Control de IA por conversación */}
+              <button
+                onClick={toggleIaPausada}
+                title={selected.ia_pausada ? "La IA no responderá en este chat" : "La IA puede responder en este chat"}
+                className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors ${
+                  selected.ia_pausada
+                    ? "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                    : "bg-green-100 text-green-700 hover:bg-green-200"
+                }`}
+              >
+                {selected.ia_pausada ? "🤖 IA pausada" : "🤖 IA activa"}
+              </button>
+
               <a
                 href="/crm/pipeline"
                 className="text-xs bg-[#0b315f]/10 text-[#0b315f] font-semibold px-3 py-1.5 rounded-lg hover:bg-[#0b315f]/20 transition-colors"
@@ -482,6 +590,7 @@ export default function CRMPage() {
                       )}
                       <p className="whitespace-pre-wrap">{m.contenido}</p>
                       <div className={`text-[10px] mt-1 text-right ${esMio ? "text-white/60" : "text-gray-400"}`}>
+                        {m.generado_por_ia && <span className="mr-1" title="Generado por IA">✨</span>}
                         {fmtFechaMsg(m.created_at)}
                         {m.error && <span className="ml-1 text-red-300">⚠ {m.error}</span>}
                       </div>
@@ -492,6 +601,64 @@ export default function CRMPage() {
             })}
             <div ref={chatEndRef} />
           </div>
+
+          {/* ── Propuestas de la IA pendientes de confirmación ── */}
+          {acciones.length > 0 && (
+            <div className="bg-amber-50 border-t border-amber-100 px-5 py-3 space-y-2">
+              {acciones.map((a) => (
+                <div key={a.id} className="bg-white border border-amber-200 rounded-xl p-3 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">
+                      ✨ Propuesta de {a.tipo === "cotizacion" ? "cotización" : "reserva"} (IA)
+                    </div>
+                    <div className="text-sm text-gray-700 truncate">{a.resumen}</div>
+                  </div>
+                  <div className="flex gap-1.5 flex-shrink-0">
+                    <button
+                      onClick={() => resolverAccion(a.id, "rechazar")}
+                      className="text-xs px-2.5 py-1.5 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50"
+                    >
+                      Rechazar
+                    </button>
+                    <button
+                      onClick={() => resolverAccion(a.id, "aprobar")}
+                      className="text-xs px-2.5 py-1.5 rounded-lg bg-[#0b315f] text-white font-semibold hover:bg-[#1262bd]"
+                    >
+                      Aprobar y crear
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ── Sugerencia de la IA (borrador para aprobar) ── */}
+          {selected.borrador_ia && selected.estado !== "resuelta" && (
+            <div className="bg-[#0b315f]/5 border-t border-[#0b315f]/10 px-5 py-3">
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className="text-sm">✨</span>
+                <span className="text-xs font-semibold text-[#0b315f]">Sugerencia de la IA</span>
+              </div>
+              <p className="text-sm text-gray-700 whitespace-pre-wrap bg-white border border-[#0b315f]/10 rounded-xl p-3">
+                {selected.borrador_ia}
+              </p>
+              <div className="flex gap-2 mt-2">
+                <button
+                  onClick={() => enviar(selected.borrador_ia!)}
+                  disabled={enviando}
+                  className="text-xs bg-[#0b315f] text-white font-semibold px-3 py-1.5 rounded-lg hover:bg-[#1262bd] disabled:opacity-50"
+                >
+                  {enviando ? "Enviando…" : "Enviar"}
+                </button>
+                <button onClick={editarBorrador} className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50">
+                  Editar
+                </button>
+                <button onClick={() => limpiarBorrador(selected.id)} className="text-xs px-3 py-1.5 rounded-lg text-gray-400 hover:text-gray-600">
+                  Descartar
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Reply box */}
           <div className="bg-white border-t border-gray-100 p-4">
@@ -518,14 +685,25 @@ export default function CRMPage() {
                   rows={2}
                   className="flex-1 border border-gray-200 rounded-xl px-3 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
                 />
-                <button
-                  onClick={enviar}
-                  disabled={!reply.trim() || enviando}
-                  className="bg-[#0b315f] text-white px-4 py-2.5 rounded-xl text-sm font-semibold
-                    hover:bg-[#1262bd] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {enviando ? "…" : "Enviar"}
-                </button>
+                <div className="flex flex-col gap-1.5">
+                  <button
+                    onClick={pedirRespuestaIA}
+                    disabled={pidiendoIA}
+                    title="Pedir una sugerencia de respuesta a la IA"
+                    className="border border-[#0b315f]/30 text-[#0b315f] px-4 py-2 rounded-xl text-sm font-semibold
+                      hover:bg-[#0b315f]/5 transition-colors disabled:opacity-40"
+                  >
+                    {pidiendoIA ? "…" : "✨ IA"}
+                  </button>
+                  <button
+                    onClick={() => enviar()}
+                    disabled={!reply.trim() || enviando}
+                    className="bg-[#0b315f] text-white px-4 py-2.5 rounded-xl text-sm font-semibold
+                      hover:bg-[#1262bd] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {enviando ? "…" : "Enviar"}
+                  </button>
+                </div>
               </div>
             )}
             <div className="text-xs text-gray-400 mt-1.5 text-right">

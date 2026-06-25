@@ -83,6 +83,23 @@ async function geocodearDireccion(
   }
 }
 
+// Huella de ruta = secuencia ORDENADA de paraderos "nombre@lat,lng".
+// Es sensible al orden ⇒ una ruta en sentido inverso produce una huella distinta.
+// Sirve para decidir si dos servicios comparten exactamente la misma ruta
+// (mismos paraderos: nombre + coordenadas, en el mismo orden).
+function huellaRuta(lista: Array<{ orden?: number | null; nombre?: string | null; lat?: number | null; lng?: number | null }> | undefined | null): string {
+  if (!lista || lista.length === 0) return "";
+  return [...lista]
+    .sort((a, b) => (a.orden ?? 0) - (b.orden ?? 0))
+    .map((p) => {
+      const nom = (p.nombre || "").trim().toLowerCase().replace(/\s+/g, " ");
+      const lat = p.lat == null ? "" : Number(p.lat).toFixed(4);
+      const lng = p.lng == null ? "" : Number(p.lng).toFixed(4);
+      return `${nom}@${lat},${lng}`;
+    })
+    .join(" › ");
+}
+
 export default function ModalManifiesto(props: Props) {
   const { reservaId, clienteId, capacidad, sincronizadoApp, fechaSincronizacion,
     origen, destino, puntoRetorno, paradasJson, cotizacionId, vehiculoId, vehiculoTerceroId, onClose, onChange } = props;
@@ -138,6 +155,9 @@ export default function ModalManifiesto(props: Props) {
   const [incluirActual,    setIncluirActual]    = useState(true);
   const [aplicandoConfig,  setAplicandoConfig]  = useState(false);
   const [previewIds,       setPreviewIds]       = useState<number[]>([]);
+  // Candidatos totales en el rango (mismo vehículo) — para distinguir cuántos se
+  // descartaron por tener una ruta distinta a la del servicio actual.
+  const [previewTotal,     setPreviewTotal]     = useState(0);
 
   const autoCrearParadasIniciales = async (): Promise<number> => {
     // Prioridad 1: paradas_json de la cotización (ya trae coordenadas de Google Maps)
@@ -353,22 +373,62 @@ export default function ModalManifiesto(props: Props) {
       });
   }, [reservaId]);
 
-  // Preview: cuenta reservas afectadas al cambiar fechas o el checkbox
+  // Preview: cuenta reservas afectadas al cambiar fechas o el checkbox.
+  // IMPORTANTE: solo se incluyen servicios con la MISMA ruta que el actual,
+  // es decir mismos paraderos (nombre + coordenadas) y en el MISMO orden
+  // (no en inversa). El mismo vehículo puede operar rutas distintas en días
+  // distintos, así que filtrar solo por vehículo + cotización replicaba el
+  // nombre de ruta sobre servicios que no corresponden.
   useEffect(() => {
     const vidActivo = vehiculoId || vehiculoTerceroId;
     if (!modalConfigRango || !cotizacionId || !vidActivo || !configDesde || !configHasta) {
-      setPreviewIds([]); return;
+      setPreviewIds([]); setPreviewTotal(0); return;
     }
+    let cancelado = false;
     const campo = vehiculoId ? "vehiculo_id" : "vehiculo_tercero_id";
-    supabase.from("reservas").select("id")
-      .eq("cotizacion_id", cotizacionId).eq(campo, vidActivo)
-      .gte("fecha_servicio", configDesde).lte("fecha_servicio", configHasta)
-      .not("estado", "in", "(cancelada,finalizada)")
-      .then((res: any) => {
-        let ids = ((res.data || []) as any[]).map((r: any) => r.id as number);
-        if (!incluirActual) ids = ids.filter((id: number) => id !== reservaId);
-        setPreviewIds(ids);
-      });
+
+    (async () => {
+      // 1. Candidatos: misma cotización + vehículo + rango de fechas + estado activo
+      const { data: cand } = await supabase.from("reservas").select("id")
+        .eq("cotizacion_id", cotizacionId).eq(campo, vidActivo)
+        .gte("fecha_servicio", configDesde).lte("fecha_servicio", configHasta)
+        .not("estado", "in", "(cancelada,finalizada)");
+      const candIds = ((cand || []) as any[]).map((r: any) => r.id as number);
+
+      // 2. Paradas de la referencia (servicio actual) + candidatos.
+      //    Se consulta por lotes: ~142 servicios × ~10 paradas supera el tope de
+      //    ~1000 filas de un solo .in(), lo que truncaría paradas y dejaría
+      //    servicios válidos sin huella (excluidos por error).
+      const idsParaParadas = Array.from(new Set([reservaId, ...candIds]));
+      const LOTE = 60; // ≤ ~600 paradas por consulta, bajo el tope de 1000
+      const porReserva = new Map<number, any[]>();
+      for (let i = 0; i < idsParaParadas.length; i += LOTE) {
+        const lote = idsParaParadas.slice(i, i + LOTE);
+        const { data: pars } = await supabase.from("paradas")
+          .select("reserva_id, orden, nombre, lat, lng")
+          .in("reserva_id", lote);
+        for (const p of ((pars || []) as any[])) {
+          const arr = porReserva.get(p.reserva_id);
+          if (arr) arr.push(p); else porReserva.set(p.reserva_id, [p]);
+        }
+      }
+
+      // 4. Huella de ruta de cada reserva (ver helper a nivel de módulo).
+      const huellaRef = huellaRuta(porReserva.get(reservaId));
+
+      // 5. Conservar solo candidatos con la misma huella exacta.
+      //    El servicio actual siempre coincide consigo mismo (es la referencia).
+      let ids = candIds.filter((id) =>
+        id === reservaId || (huellaRef !== "" && huellaRuta(porReserva.get(id)) === huellaRef)
+      );
+      if (!incluirActual) ids = ids.filter((id: number) => id !== reservaId);
+
+      if (cancelado) return;
+      setPreviewTotal(candIds.filter((id) => incluirActual || id !== reservaId).length);
+      setPreviewIds(ids);
+    })();
+
+    return () => { cancelado = true; };
   }, [modalConfigRango, cotizacionId, vehiculoId, vehiculoTerceroId, configDesde, configHasta, incluirActual, reservaId]);
 
   const total = pasajeros.length;
@@ -891,16 +951,21 @@ export default function ModalManifiesto(props: Props) {
     if (!cotizacionId || !vehiculoId || !copiarDesde || !copiarHasta) return;
     setCopiando(true);
     try {
-      // 1. Load current paradas ordered by orden
+      // 1. Load current paradas ordered by orden (con nombre/coords para la huella)
       const { data: paradasOrigen } = await supabase
         .from("paradas")
-        .select("id, orden")
+        .select("id, orden, nombre, lat, lng")
         .eq("reserva_id", reservaId)
         .order("orden");
       if (!paradasOrigen || paradasOrigen.length === 0) {
         setMensaje({ tipo: "warn", texto: "Esta reserva no tiene paradas configuradas." });
         return;
       }
+      // Huella de la ruta de origen: solo copiaremos a servicios con la MISMA ruta
+      // (mismos paraderos, mismo orden), porque las asignaciones se mapean por
+      // `orden` y una ruta distinta o invertida mandaría pasajeros al paradero
+      // equivocado.
+      const huellaOrigen = huellaRuta(paradasOrigen as any[]);
 
       // 2. Load current pasajeros_parada for this reserva
       const paradaIds = paradasOrigen.map((p: any) => p.id);
@@ -940,15 +1005,24 @@ export default function ModalManifiesto(props: Props) {
 
       let totalInsertados = 0;
       let reservasFallidas = 0;
+      let reservasOmitidas = 0; // descartadas por tener una ruta distinta
+      let reservasCopiadas = 0;
 
       for (const rd of reservasDestino) {
-        // Load paradas for this target reserva ordered by orden
+        // Load paradas for this target reserva ordered by orden (con nombre/coords)
         const { data: paradasDest } = await supabase
           .from("paradas")
-          .select("id, orden")
+          .select("id, orden, nombre, lat, lng")
           .eq("reserva_id", rd.id)
           .order("orden");
         if (!paradasDest || paradasDest.length === 0) continue;
+
+        // Solo copiar si la ruta de destino es idéntica a la de origen
+        // (mismos paraderos y mismo orden, no en inversa).
+        if (huellaRuta(paradasDest as any[]) !== huellaOrigen) {
+          reservasOmitidas++;
+          continue;
+        }
 
         const ordenAParadaDest = new Map<number, number>(
           paradasDest.map((p: any) => [p.orden, p.id])
@@ -975,12 +1049,23 @@ export default function ModalManifiesto(props: Props) {
         }
         if (rows.length > 0) {
           const { error } = await supabase.from("pasajeros_parada").insert(rows);
-          if (error) { reservasFallidas++; } else { totalInsertados += rows.length; }
+          if (error) { reservasFallidas++; } else { totalInsertados += rows.length; reservasCopiadas++; }
         }
       }
 
-      const msg = `Copiado a ${reservasDestino.length - reservasFallidas} servicio(s) · ${totalInsertados} asignaciones${reservasFallidas ? ` · ${reservasFallidas} con error` : ""} ✓`;
-      setMensaje({ tipo: "ok", texto: msg });
+      if (reservasCopiadas === 0 && reservasOmitidas > 0) {
+        setMensaje({
+          tipo: "warn",
+          texto: `Ningún servicio del rango tiene la misma ruta que este (${reservasOmitidas} con paraderos distintos o en otro orden). No se copió nada.`,
+        });
+      } else {
+        const extras = [
+          reservasFallidas ? `${reservasFallidas} con error` : "",
+          reservasOmitidas ? `${reservasOmitidas} omitido(s) por ruta distinta` : "",
+        ].filter(Boolean).join(" · ");
+        const msg = `Copiado a ${reservasCopiadas} servicio(s) · ${totalInsertados} asignaciones${extras ? ` · ${extras}` : ""} ✓`;
+        setMensaje({ tipo: "ok", texto: msg });
+      }
       setModalCopiar(false);
       setCopiarDesde(""); setCopiarHasta("");
     } catch (e: any) {
@@ -1568,18 +1653,29 @@ export default function ModalManifiesto(props: Props) {
 
                 {/* Preview count */}
                 {configDesde && configHasta && (
-                  <p className="text-xs font-bold rounded-xl px-3 py-2 text-center"
-                    style={{ background: previewIds.length ? "#dcfce7" : "#fef9c3", color: previewIds.length ? "#166534" : "#854d0e" }}>
-                    {previewIds.length
-                      ? `Se actualizarán ${previewIds.length} servicio(s)`
-                      : "No se encontraron servicios del mismo vehículo en ese rango"}
-                  </p>
+                  <div>
+                    <p className="text-xs font-bold rounded-xl px-3 py-2 text-center"
+                      style={{ background: previewIds.length ? "#dcfce7" : "#fef9c3", color: previewIds.length ? "#166534" : "#854d0e" }}>
+                      {previewIds.length
+                        ? `Se actualizarán ${previewIds.length} servicio(s) con la misma ruta`
+                        : previewTotal > 0
+                          ? "Ningún servicio del rango tiene la misma ruta que este"
+                          : "No se encontraron servicios del mismo vehículo en ese rango"}
+                    </p>
+                    {previewTotal > previewIds.length && (
+                      <p className="text-[11px] text-gray-500 text-center mt-1.5 leading-snug">
+                        Se omitieron {previewTotal - previewIds.length} servicio(s) con paraderos
+                        distintos o en otro orden. Solo se aplica a rutas con los mismos paraderos
+                        (nombre y coordenadas) y en el mismo sentido.
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
 
               <div className="px-6 pb-5 flex gap-2 justify-end">
                 <button
-                  onClick={() => { setModalConfigRango(false); setConfigDesde(""); setConfigHasta(""); setPreviewIds([]); }}
+                  onClick={() => { setModalConfigRango(false); setConfigDesde(""); setConfigHasta(""); setPreviewIds([]); setPreviewTotal(0); }}
                   className="px-4 py-2 rounded-xl font-bold text-xs border text-gray-500 hover:bg-gray-50"
                   style={{ borderColor: "#e2e8f0" }}
                 >
@@ -1620,7 +1716,10 @@ export default function ModalManifiesto(props: Props) {
                   </div>
                 </div>
                 <p className="text-xs text-gray-400">
-                  Se reemplazarán las asignaciones existentes en cada día destino. El vehículo debe tener paradas configuradas con el mismo orden.
+                  Se reemplazarán las asignaciones existentes en cada día destino. Solo se copia a
+                  servicios con la <span className="font-semibold text-gray-500">misma ruta</span>:
+                  mismos paraderos (nombre y coordenadas) y en el mismo orden. Los días con una ruta
+                  distinta o invertida se omiten.
                 </p>
               </div>
               <div className="px-6 pb-5 flex gap-2 justify-end">

@@ -10,6 +10,7 @@
     "postinstall": "patch-package || echo patch-package: parche Android no aplicado en este entorno, irrelevante para el build web"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.106.0",
     "@capacitor/android": "^8.3.4",
     "@capacitor/camera": "^8.2.0",
     "@capacitor/cli": "^8.3.4",
