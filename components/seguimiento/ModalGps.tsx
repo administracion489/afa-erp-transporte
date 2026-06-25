@@ -77,6 +77,7 @@ export default function ModalGps({
   const [errorMapa,      setErrorMapa]      = useState(false);
   const [ultimaActualiz, setUltimaActualiz] = useState<Date | null>(null);
   const [sinSenal,       setSinSenal]       = useState(false);
+  const [congeladoMin,   setCongeladoMin]   = useState(0); // min que el conductor lleva enviando la MISMA coord (GPS congelado en su equipo)
   const [mapListo,       setMapListo]       = useState(false);
   const [ruta,              setRuta]              = useState<RutaData | null>(null);
   const [cargandoRuta,      setCargandoRuta]      = useState(false);
@@ -300,6 +301,25 @@ export default function ModalGps({
         const json = await res.json();
         const arr = Array.isArray(json?.huella) ? json.huella : [];
         if (cancel || arr.length === 0) return;
+
+        // GPS CONGELADO del conductor: detecta cuando el equipo dejó de generar fixes y solo
+        // re-envía la MISMA coord (link web con pantalla bloqueada / sin alta precisión). Un GPS
+        // real SIEMPRE jitterea unos metros → coords byte-idénticas por >3 min = congelado, no un
+        // bus parado. Evita el "GPS en vivo hace 4s" engañoso con el bus pegado. (Robusto al orden.)
+        const congMs = (() => {
+          const ts = (arr as any[])
+            .map(r => ({ t: new Date(r.created_at || r.timestamp || 0).getTime(), lat: Number(r.lat), lng: Number(r.lng) }))
+            .filter(r => Number.isFinite(r.t) && Number.isFinite(r.lat) && Number.isFinite(r.lng))
+            .sort((a, b) => a.t - b.t);
+          if (ts.length < 4) return 0;
+          const ult = ts[ts.length - 1];
+          let tIni = ult.t;
+          for (let i = ts.length - 1; i >= 0; i--) {
+            if (ts[i].lat === ult.lat && ts[i].lng === ult.lng) tIni = ts[i].t; else break;
+          }
+          return ult.t - tIni;
+        })();
+        if (!cancel) setCongeladoMin(congMs > 180000 ? Math.floor(congMs / 60000) : 0);
 
         // Limpiar UNA sola vez (colapsa rachas detenidas + dedup en marcha). El mismo set
         // limpio alimenta el dibujo (setHuella) y el ajuste por ventanas → coherentes.
@@ -648,9 +668,13 @@ export default function ModalGps({
             <div>
               <p className="text-white font-black text-sm">{clienteNombre} · Reserva #{reservaId}</p>
               <div className="flex items-center gap-2 flex-wrap">
-                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${sinSenal ? "bg-red-400" : "bg-green-400 animate-pulse"}`} />
-                <p className="text-blue-200 text-[11px]">
-                  {sinSenal ? "Sin señal GPS" : ultimaActualiz ? `GPS en vivo · hace ${segsDesdeUlt}s` : "Conectando..."}
+                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${sinSenal ? "bg-red-400" : congeladoMin > 0 ? "bg-amber-400 animate-pulse" : "bg-green-400 animate-pulse"}`} />
+                <p className={`text-[11px] ${congeladoMin > 0 && !sinSenal ? "text-amber-300 font-bold" : "text-blue-200"}`}>
+                  {sinSenal
+                    ? "Sin señal GPS"
+                    : congeladoMin > 0
+                      ? `⚠ GPS del conductor congelado · hace ${congeladoMin} min`
+                      : ultimaActualiz ? `GPS en vivo · hace ${segsDesdeUlt}s` : "Conectando..."}
                 </p>
                 {ruta && (
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${hayTrafico ? "bg-orange-500 text-white" : "bg-green-600 text-white"}`}>
