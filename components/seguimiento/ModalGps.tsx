@@ -73,6 +73,10 @@ export default function ModalGps({
   const markerRef = useRef<any>(null);
   const ubicRef    = useRef<UbicGps | null>(null);
   const prevUbicRef = useRef<{ lat: number; lng: number; ts: number } | null>(null);
+  // Historial corto de fixes (lat/lng/ts/acc) para estimar velocidad por DESPLAZAMIENTO
+  // sobre una ventana de tiempo (suprime el jitter del GPS de red, que de punto-a-punto
+  // produce velocidades absurdas: un salto de ±80 m en 1 s = 288 km/h falsos).
+  const velHistRef = useRef<{ lat: number; lng: number; ts: number; acc: number }[]>([]);
 
   const [ubic,           setUbic]           = useState<UbicGps | null>(null);
   const [errorMapa,      setErrorMapa]      = useState(false);
@@ -131,20 +135,48 @@ export default function ModalGps({
     }
   }, []); // eslint-disable-line
 
-  // Velocidad calculada desde posiciones consecutivas (fallback cuando GPS reporta 0,
-  // típico en FUSED/GPS de red que no entrega coords.speed fiable).
+  // Velocidad mostrada (km/h). `velCalc` es la ÚNICA fuente del número en pantalla:
+  //  1) si el equipo entrega una velocidad PLAUSIBLE (chip GPS real: 0 < v ≤ 130) se usa tal cual;
+  //  2) si no (FUSED/red devuelve 0 ó valores fantasma), se ESTIMA por desplazamiento sobre una
+  //     ventana de tiempo. Punto-a-punto NO sirve: con ±37 m de precisión, dos fixes a 1 s de
+  //     distancia "saltan" 80 m → 288 km/h. Sobre una ventana ≥10 s el jitter se promedia y,
+  //     restando el piso de ruido (la incertidumbre combinada), un bus quieto da 0 y uno en
+  //     marcha da su velocidad real. Cualquier resultado > 130 km/h es jitter residual → se
+  //     descarta (se conserva el último valor bueno, nunca se pinta una cifra absurda).
+  const VEL_MAX_KMH = 130;          // techo plausible para un bus (descarta jitter/glitches)
+  const VEL_VENTANA_MIN_MS = 10_000; // ventana mínima para que el jitter se promedie
+  const VEL_HIST_MS = 45_000;        // memoria de fixes para la ventana (cap del retardo)
   useEffect(() => {
     if (!ubic) return;
     const ts = ubic.created_at ? new Date(ubic.created_at).getTime()
              : ubic.timestamp  ? new Date(ubic.timestamp).getTime()
              : Date.now();
-    const prev = prevUbicRef.current;
-    if (prev && ts > prev.ts && ts - prev.ts < 300_000) {
-      const d = distM(prev.lat, prev.lng, ubic.lat, ubic.lng);
-      const dt = (ts - prev.ts) / 1000;
-      if (dt > 0 && d > 15) setVelCalc(Math.round(d / dt * 3.6));
-      else if (d < 5)        setVelCalc(0);
+    if (!Number.isFinite(ts) || !Number.isFinite(ubic.lat) || !Number.isFinite(ubic.lng)) return;
+    const acc = Number(ubic.precision_m) || 30;
+    const hist = velHistRef.current;
+    const last = hist[hist.length - 1];
+    if (!last || ts > last.ts + 500) {                 // evita duplicados realtime+poll del mismo fix
+      hist.push({ lat: ubic.lat, lng: ubic.lng, ts, acc });
+      const corte = ts - VEL_HIST_MS;
+      while (hist.length > 2 && hist[0].ts < corte) hist.shift();
     }
+
+    // 1) Velocidad del equipo, si es plausible (chip GPS real con vector de velocidad).
+    const dev = Number(ubic.velocidad) || 0;
+    if (dev > 0 && dev <= VEL_MAX_KMH) { setVelCalc(dev); return; }
+
+    // 2) Estimación por desplazamiento sobre la ventana más larga disponible (≥10 s).
+    const ahora = hist[hist.length - 1];
+    let ancla: typeof hist[number] | null = null;
+    for (const h of hist) { if (ahora.ts - h.ts >= VEL_VENTANA_MIN_MS) { ancla = h; break; } }
+    if (!ancla) return;                                // aún sin ventana → conservar valor previo
+    const dt = (ahora.ts - ancla.ts) / 1000;
+    const disp = distM(ancla.lat, ancla.lng, ahora.lat, ahora.lng);
+    const ruido = Math.min(150, ancla.acc + ahora.acc); // piso de jitter ≈ incertidumbre combinada
+    if (disp <= ruido) { setVelCalc(0); return; }       // dentro del ruido = quieto
+    const kmh = Math.round((disp / dt) * 3.6);
+    if (kmh > VEL_MAX_KMH) return;                       // jitter residual → conservar valor previo
+    setVelCalc(kmh);
   }, [ubic]); // eslint-disable-line
 
   // ── Ruta real de Google via /api/ruta ──────────────────────────────────────
@@ -601,7 +633,7 @@ export default function ModalGps({
           `<div style="font-family:system-ui;padding:4px">
             <p style="font-weight:900;margin:0;color:#0b315f;font-size:15px">${vehiculoPlaca}</p>
             <p style="margin:4px 0 0;color:#475569;font-size:12px">${conductorNombre}</p>
-            <p style="margin:6px 0 0;color:#16a34a;font-weight:700;font-size:16px">${ubic.velocidad || velCalc} km/h</p>
+            <p style="margin:6px 0 0;color:#16a34a;font-weight:700;font-size:16px">${velCalc} km/h</p>
           </div>`
         )).addTo(mapInst.current);
       // Primera vez: salto directo al vehículo (como /seguimiento), no animación lenta desde Lima.
@@ -743,12 +775,10 @@ export default function ModalGps({
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {(() => { const v = ubic?.velocidad || velCalc; return (
-            <div className={`px-4 py-1.5 rounded-xl text-center min-w-[56px] ${!ubic || v === 0 ? "bg-white/10" : v > 80 ? "bg-red-500" : "bg-green-600"}`}>
-              <p className="text-white font-black text-xl leading-none">{ubic ? v : "—"}</p>
+            <div className={`px-4 py-1.5 rounded-xl text-center min-w-[56px] ${!ubic || velCalc === 0 ? "bg-white/10" : velCalc > 80 ? "bg-red-500" : "bg-green-600"}`}>
+              <p className="text-white font-black text-xl leading-none">{ubic ? velCalc : "—"}</p>
               <p className="text-white/60 text-[9px] font-bold">km/h</p>
             </div>
-            ); })()}
             <button onClick={onClose} className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center text-white text-xl transition-colors">✕</button>
           </div>
         </div>
@@ -772,7 +802,7 @@ export default function ModalGps({
 
             {ubic && !errorMapa && (
               <div className="absolute top-3 left-3 bg-[#0b315f]/90 backdrop-blur-sm rounded-2xl px-4 py-3 shadow-xl text-center pointer-events-none">
-                <p className="text-white font-black text-4xl leading-none">{ubic.velocidad || velCalc}</p>
+                <p className="text-white font-black text-4xl leading-none">{velCalc}</p>
                 <p className="text-blue-200 text-[10px] font-bold mt-0.5">km/h</p>
                 {ubic.precision_m && <p className="text-blue-300 text-[9px] mt-1">±{Math.round(ubic.precision_m)}m</p>}
               </div>
@@ -879,11 +909,9 @@ export default function ModalGps({
             <div className="bg-white rounded-xl border p-3" style={{ borderColor: "#e2e8f0" }}>
               <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-1">Velocidad real</p>
               <div className="flex items-end gap-1">
-                {(() => { const v = ubic?.velocidad || velCalc || 0; return (
-                <p className="font-black text-3xl leading-none" style={{ color: !ubic ? "#94a3b8" : v > 80 ? "#dc2626" : v > 0 ? "#16a34a" : "#0b315f" }}>
-                  {ubic ? v : "—"}
+                <p className="font-black text-3xl leading-none" style={{ color: !ubic ? "#94a3b8" : velCalc > 80 ? "#dc2626" : velCalc > 0 ? "#16a34a" : "#0b315f" }}>
+                  {ubic ? velCalc : "—"}
                 </p>
-                ); })()}
                 <p className="text-gray-400 text-sm mb-0.5">km/h</p>
               </div>
               <p className="text-[9px] text-gray-400 mt-1">GPS real del conductor</p>
