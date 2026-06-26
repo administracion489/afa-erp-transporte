@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import {
-  calcBearing, limpiarHuella, colorearMatched,
+  calcBearing, distM, limpiarHuella, colorearMatched,
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures,
 } from "@/lib/huella";
 
