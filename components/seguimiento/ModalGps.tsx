@@ -573,6 +573,15 @@ export default function ModalGps({
 
   // ── Marcador del bus ──────────────────────────────────────────────────────
 
+  // HTML del popup del bus. Se usa al CREAR el marcador y al RE-sincronizar la velocidad
+  // (el popup se arma una vez; sin re-sync se quedaba con la velocidad inicial = 0).
+  const popupHTML = (vel: number) =>
+    `<div style="font-family:system-ui;padding:4px">
+      <p style="font-weight:900;margin:0;color:#0b315f;font-size:15px">${vehiculoPlaca}</p>
+      <p style="margin:4px 0 0;color:#475569;font-size:12px">${conductorNombre}</p>
+      <p style="margin:6px 0 0;color:#16a34a;font-weight:700;font-size:16px">${vel} km/h</p>
+    </div>`;
+
   useEffect(() => {
     if (!ubic || !mapListo || !mapInst.current) return;
     const lngLat: [number, number] = [ubic.lng, ubic.lat];
@@ -634,17 +643,18 @@ export default function ModalGps({
         element: el, rotation: rot, rotationAlignment: "map", anchor: "center",
       })
         .setLngLat(lngLat)
-        .setPopup(new window.mapboxgl.Popup({ offset: 28, closeButton: false }).setHTML(
-          `<div style="font-family:system-ui;padding:4px">
-            <p style="font-weight:900;margin:0;color:#0b315f;font-size:15px">${vehiculoPlaca}</p>
-            <p style="margin:4px 0 0;color:#475569;font-size:12px">${conductorNombre}</p>
-            <p style="margin:6px 0 0;color:#16a34a;font-weight:700;font-size:16px">${velCalc} km/h</p>
-          </div>`
-        )).addTo(mapInst.current);
+        .setPopup(new window.mapboxgl.Popup({ offset: 28, closeButton: false }).setHTML(popupHTML(velCalc)))
+        .addTo(mapInst.current);
       // Primera vez: salto directo al vehículo (como /seguimiento), no animación lenta desde Lima.
       mapInst.current.flyTo({ center: lngLat, zoom: 15, duration: 900 });
     }
   }, [ubic, mapListo, vehiculoPlaca, conductorNombre]);
+
+  // Mantener la velocidad del popup del bus en sync (se arma una vez; sin esto se quedaba en 0).
+  useEffect(() => {
+    const pop = markerRef.current?.getPopup?.();
+    if (pop?.setHTML) pop.setHTML(popupHTML(velCalc));
+  }, [velCalc, vehiculoPlaca, conductorNombre]); // eslint-disable-line
 
   // ── Init Mapbox ───────────────────────────────────────────────────────────
 
