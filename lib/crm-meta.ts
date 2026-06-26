@@ -8,11 +8,13 @@ const PAGE_TOKEN = () => process.env.META_PAGE_TOKEN ?? process.env.META_ACCESS_
 
 // ── WhatsApp ──────────────────────────────────────────────────────────────
 
-export async function enviarWhatsApp(to: string, texto: string): Promise<string | null> {
-  const phoneId = process.env.META_PHONE_NUMBER_ID;
-  if (!phoneId) throw new Error("META_PHONE_NUMBER_ID no configurado");
+// phoneId opcional: por defecto el número de clientes (META_PHONE_NUMBER_ID).
+// Para el número de pasajeros se pasa META_PHONE_NUMBER_ID_PASAJEROS.
+export async function enviarWhatsApp(to: string, texto: string, phoneId?: string): Promise<string | null> {
+  const phone = phoneId ?? process.env.META_PHONE_NUMBER_ID;
+  if (!phone) throw new Error("META_PHONE_NUMBER_ID no configurado");
 
-  const res = await fetch(`${GRAPH}/${phoneId}/messages`, {
+  const res = await fetch(`${GRAPH}/${phone}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${WA_TOKEN()}` },
     body: JSON.stringify({
@@ -24,6 +26,40 @@ export async function enviarWhatsApp(to: string, texto: string): Promise<string 
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error?.message ?? "Error WhatsApp");
+  return data.messages?.[0]?.id ?? null;
+}
+
+// Mensaje con PLANTILLA aprobada (HSM). Obligatorio para mensajes iniciados por
+// la empresa fuera de la ventana de 24h (recordatorios, avisos a pasajeros).
+// `parametros` rellena las variables {{1}}, {{2}}, … del cuerpo, en orden.
+export async function enviarWhatsAppPlantilla(
+  to: string,
+  plantilla: string,
+  idioma: string,
+  parametros: string[] = [],
+  phoneId?: string
+): Promise<string | null> {
+  const phone = phoneId ?? process.env.META_PHONE_NUMBER_ID;
+  if (!phone) throw new Error("META_PHONE_NUMBER_ID no configurado");
+
+  const res = await fetch(`${GRAPH}/${phone}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${WA_TOKEN()}` },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "template",
+      template: {
+        name: plantilla,
+        language: { code: idioma },
+        ...(parametros.length
+          ? { components: [{ type: "body", parameters: parametros.map((text) => ({ type: "text", text })) }] }
+          : {}),
+      },
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message ?? "Error WhatsApp plantilla");
   return data.messages?.[0]?.id ?? null;
 }
 

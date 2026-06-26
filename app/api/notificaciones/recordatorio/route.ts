@@ -75,7 +75,7 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    const totalEnviados = resultados.reduce((s, r) => s + (r.enviados ?? 0), 0);
+    const totalEnviados = resultados.reduce((s, r) => s + ("enviados" in r ? r.enviados : 0), 0);
 
     return NextResponse.json({
       ok:           true,

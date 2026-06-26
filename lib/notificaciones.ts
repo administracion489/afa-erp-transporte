@@ -1,7 +1,8 @@
 // lib/notificaciones.ts
-// Lógica central: Resend (email) + Twilio (WhatsApp / SMS)
+// Lógica central: Resend (email) + Meta Cloud API (WhatsApp por plantilla)
 
 import { createClient } from "@supabase/supabase-js";
+import { enviarWhatsAppPlantilla } from "@/lib/crm-meta";
 
 // Admin client para escribir logs sin RLS
 const supabaseAdmin = createClient(
@@ -73,69 +74,17 @@ export async function enviarEmail({
   }
 }
 
-// ─── WHATSAPP (TWILIO) ────────────────────────────────────────────────────────
-
-function twilioAuthHeader(): string {
-  const sid   = process.env.TWILIO_ACCOUNT_SID!;
-  const token = process.env.TWILIO_AUTH_TOKEN!;
-  return "Basic " + Buffer.from(`${sid}:${token}`).toString("base64");
-}
-
-export async function enviarWhatsApp({
-  to, body,
-}: { to: string; body: string }): Promise<void> {
-  if (!process.env.TWILIO_ACCOUNT_SID) throw new Error("TWILIO no configurado");
-
-  const sid  = process.env.TWILIO_ACCOUNT_SID;
-  // Usar número de sandbox o número de producción aprobado
-  const from = process.env.TWILIO_WHATSAPP_FROM ?? "+14155238886";
-
-  const params = new URLSearchParams({
-    From: `whatsapp:${from}`,
-    To:   `whatsapp:${to}`,
-    Body: body,
-  });
-
-  const res = await fetch(
-    `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
-    {
-      method:  "POST",
-      headers: { Authorization: twilioAuthHeader(), "Content-Type": "application/x-www-form-urlencoded" },
-      body:    params.toString(),
-    }
-  );
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Twilio WhatsApp: ${err}`);
-  }
-}
-
-export async function enviarSMS({
-  to, body,
-}: { to: string; body: string }): Promise<void> {
-  if (!process.env.TWILIO_ACCOUNT_SID) throw new Error("TWILIO no configurado");
-
-  const sid  = process.env.TWILIO_ACCOUNT_SID;
-  const from = process.env.TWILIO_SMS_FROM!;
-  if (!from) throw new Error("TWILIO_SMS_FROM no configurada");
-
-  const params = new URLSearchParams({ From: from, To: to, Body: body });
-
-  const res = await fetch(
-    `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
-    {
-      method:  "POST",
-      headers: { Authorization: twilioAuthHeader(), "Content-Type": "application/x-www-form-urlencoded" },
-      body:    params.toString(),
-    }
-  );
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Twilio SMS: ${err}`);
-  }
-}
+// ─── WHATSAPP (META CLOUD API — número de pasajeros) ──────────────────────────
+// Los avisos a pasajeros se envían por PLANTILLA aprobada (HSM) desde el número
+// dedicado META_PHONE_NUMBER_ID_PASAJEROS (distinto del de clientes/Afita).
+// La plantilla `recordatorio_servicio` se crea y aprueba en el WhatsApp Manager
+// de Meta. Sus variables de cuerpo, EN ESTE ORDEN, son:
+//   {{1}} nombre del pasajero
+//   {{2}} fecha del servicio
+//   {{3}} hora de recojo
+//   {{4}} paradero
+const PLANTILLA_RECORDATORIO = "recordatorio_servicio";
+const PLANTILLA_IDIOMA       = "es";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://www.transportesafa.com";
 
@@ -318,10 +267,9 @@ Por favor espera 5 minutos antes en tu parada 🙏`;
 
 /**
  * Notifica a todos los pasajeros de una reserva.
- * Canales por prioridad:
+ * Canales:
  *   1. Email (si tiene email y RESEND configurado)
- *   2. WhatsApp (si tiene teléfono y TWILIO configurado)
- *   3. SMS fallback (si WhatsApp falla y no tiene email)
+ *   2. WhatsApp por plantilla Meta (si tiene teléfono y META_PHONE_NUMBER_ID_PASAJEROS configurado)
  */
 export async function notificarReserva(
   reservaId: number,
@@ -436,8 +384,6 @@ export async function notificarReserva(
       empresaCliente,
     };
 
-    let envioPorWhatsApp = false;
-
     // Canal 1: Email
     if (pas.email && process.env.RESEND_API_KEY) {
       try {
@@ -457,35 +403,24 @@ export async function notificarReserva(
       }
     }
 
-    // Canal 2: WhatsApp
-    if (pas.telefono && process.env.TWILIO_ACCOUNT_SID) {
+    // Canal 2: WhatsApp por plantilla Meta (número de pasajeros)
+    if (pas.telefono && process.env.META_PHONE_NUMBER_ID_PASAJEROS) {
+      const tel = normalizarTelefono(pas.telefono);
       try {
-        const tel  = normalizarTelefono(pas.telefono);
-        const body = textoWhatsApp(datosN, esRecordatorio);
-        await enviarWhatsApp({ to: tel, body });
+        await enviarWhatsAppPlantilla(
+          tel,
+          PLANTILLA_RECORDATORIO,
+          PLANTILLA_IDIOMA,
+          [datosN.pasajeroNombre, datosN.fecha, datosN.hora, datosN.paradaNombre],
+          process.env.META_PHONE_NUMBER_ID_PASAJEROS,
+        );
         resultado.canales.push({ tipo: "whatsapp", estado: "enviado" });
-        envioPorWhatsApp = true;
         enviados++;
         await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "whatsapp", estado: "enviado", destinatario: tel, trigger });
       } catch (e: any) {
         resultado.canales.push({ tipo: "whatsapp", estado: "error", detalle: e.message });
         errores++;
-        await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "whatsapp", estado: "error", destinatario: pas.telefono, trigger, error: e.message });
-
-        // Fallback SMS si no tiene email y WhatsApp falló
-        if (!pas.email && process.env.TWILIO_SMS_FROM) {
-          try {
-            const tel  = normalizarTelefono(pas.telefono);
-            const body = `${empresa}: Servicio el ${datosN.fecha} a las ${datosN.hora}. Parada: ${datosN.paradaNombre}.`;
-            await enviarSMS({ to: tel, body });
-            resultado.canales.push({ tipo: "sms", estado: "enviado" });
-            enviados++;
-            await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "sms", estado: "enviado", destinatario: tel, trigger });
-          } catch (e2: any) {
-            resultado.canales.push({ tipo: "sms", estado: "error", detalle: e2.message });
-            errores++;
-          }
-        }
+        await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "whatsapp", estado: "error", destinatario: tel, trigger, error: e.message });
       }
     }
 
