@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import {
-  calcBearing, distM, limpiarHuella, colorearMatched,
+  calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures,
 } from "@/lib/huella";
 
@@ -427,27 +427,32 @@ export default function ModalGps({
     if (!matchedCoords && huella.length < 2) return;
     const map = mapInst.current;
     try {
-      if (map.getLayer("huella-gps-line")) map.removeLayer("huella-gps-line");
-      if (map.getSource("huella-gps"))    map.removeSource("huella-gps");
-
-      // Con Map Matching: geometría pegada a la vía, coloreada por velocidad (leyenda).
-      // Sin él (aún cargando o rechazado por baja confianza, p. ej. GPS de torre): huella cruda
-      // suavizada por tramos (corta teleports/huecos, no recta cruzando el mapa). lib/huella.ts.
+      // Con Map Matching: geometría pegada a la vía + COLA VIVA (puntos crudos posteriores y
+      // posición en vivo) para que el trazo alcance al bus pese al throttle de 60 s del matching.
+      // Sin matching aún (GPS de torre / cargando): huella cruda suavizada por tramos.
+      const live = ubic ? { lat: ubic.lat, lng: ubic.lng, velocidad: velCalc } : null;
       const features = (matchedCoords && matchedCoords.length >= 2)
-        ? colorearMatched(matchedCoords, huella)
+        ? [...colorearMatched(matchedCoords, huella), ...colaViva(matchedCoords, huella, live)]
         : huellaCrudaFeatures(huella);
+      const data: any = { type: "FeatureCollection", features };
 
-      map.addSource("huella-gps", { type: "geojson", data: { type: "FeatureCollection", features } });
-      map.addLayer({
-        id: "huella-gps-line", type: "line", source: "huella-gps",
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: {
-          "line-width": 5, "line-opacity": 0.9,
-          "line-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"],
-        },
-      });
+      // setData en vivo (sin remove/add) para que la cola siga al bus sin parpadeo.
+      const src = map.getSource("huella-gps");
+      if (src && typeof src.setData === "function") {
+        src.setData(data);
+      } else {
+        map.addSource("huella-gps", { type: "geojson", data });
+        map.addLayer({
+          id: "huella-gps-line", type: "line", source: "huella-gps",
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: {
+            "line-width": 5, "line-opacity": 0.9,
+            "line-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"],
+          },
+        });
+      }
     } catch (e) { console.error("[ModalGps] Error dibujando huella GPS:", e); }
-  }, [huella, matchedCoords, mapListo]);
+  }, [huella, matchedCoords, mapListo, ubic, velCalc]);
 
   // ── Marcadores numerados con etiqueta de texto ────────────────────────────
 

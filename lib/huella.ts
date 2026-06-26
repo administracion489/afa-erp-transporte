@@ -269,6 +269,39 @@ export function huellaCrudaFeatures(
   return feats;
 }
 
+// Cola VIVA: extiende el trazo AJUSTADO hasta el vehículo. El Map Matching se recalcula con
+// throttle (60 s), así que su último vértice queda hasta 60 s atrás del bus (≈800 m a 48 km/h)
+// → la huella "no alcanza" al vehículo. Esto añade, DESPUÉS del final del trazo ajustado, los
+// puntos CRUDOS aún no matcheados (densos: no se descartan por MAX_SEG_M) y, si se da, la
+// posición EN VIVO. Sin coste extra de Map Matching. Devuelve features coloreados por velocidad.
+export function colaViva(
+  matched: [number, number][],
+  huella: { lat: number; lng: number; velocidad: number }[],
+  live?: { lat: number; lng: number; velocidad?: number } | null,
+): any[] {
+  if (!matched.length) return [];
+  const [endLng, endLat] = matched[matched.length - 1];
+  // Punto crudo más cercano al final del trazo ajustado = frontera de lo ya matcheado.
+  let bestI = -1, bd = Infinity;
+  for (let i = 0; i < huella.length; i++) {
+    const d = distM(endLat, endLng, huella[i].lat, huella[i].lng);
+    if (d < bd) { bd = d; bestI = i; }
+  }
+  const tail = bestI >= 0 ? huella.slice(bestI + 1) : [];   // puntos POSTERIORES (no matcheados)
+  // Anclar al final REAL del trazo ajustado para no dejar hueco en la unión.
+  const pts: { lat: number; lng: number; velocidad: number }[] = [
+    { lat: endLat, lng: endLng, velocidad: tail[0]?.velocidad ?? huella[bestI]?.velocidad ?? 0 },
+    ...tail,
+  ];
+  if (live && Number.isFinite(live.lat) && Number.isFinite(live.lng)) {
+    const lastP = pts[pts.length - 1];
+    if (!lastP || distM(lastP.lat, lastP.lng, live.lat, live.lng) > 3) {  // evita duplicar el vivo
+      pts.push({ lat: live.lat, lng: live.lng, velocidad: live.velocidad ?? lastP?.velocidad ?? 0 });
+    }
+  }
+  return pts.length >= 2 ? huellaCrudaFeatures(pts) : [];
+}
+
 // ── Ajustador con estado: Map Matching por VENTANAS de ≤100 puntos, con congelado ─────────
 // La API topa en 100 coords/llamada. Ajustar el viaje entero diezma la huella → rectas en
 // servicios largos. En vez de eso troceamos en ventanas densas, ajustamos cada una y las
