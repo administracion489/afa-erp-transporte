@@ -302,6 +302,38 @@ export function colaViva(
   return pts.length >= 2 ? huellaCrudaFeatures(pts) : [];
 }
 
+// Estima la velocidad (km/h) de un historial de fixes, ROBUSTA al jitter del GPS de red.
+// Punto-a-punto NO sirve: con ±37 m de precisión, dos fixes a 1 s "saltan" 80 m → 288 km/h.
+//   1) si el equipo entrega una velocidad PLAUSIBLE (0 < v ≤ maxKmh) se usa tal cual;
+//   2) si no, se mide el DESPLAZAMIENTO sobre la ventana más larga disponible de ≥ minVentanaMs:
+//      el jitter se promedia y, restando el piso de ruido (incertidumbre combinada), un bus
+//      quieto da 0 y uno en marcha da su velocidad real.
+// Devuelve `null` cuando el resultado es IMPLAUSIBLE o aún no hay ventana → el llamador
+// CONSERVA el último valor bueno (nunca pinta una cifra absurda). Pura y testeable.
+export type FixVel = { lat: number; lng: number; ts: number; acc: number };
+export function velocidadPorVentana(
+  hist: FixVel[],
+  devVelKmh: number,
+  opts?: { maxKmh?: number; minVentanaMs?: number; ruidoMaxM?: number },
+): number | null {
+  const maxKmh = opts?.maxKmh ?? 130;
+  const minMs  = opts?.minVentanaMs ?? 10_000;
+  const ruidoMax = opts?.ruidoMaxM ?? 150;
+  if (devVelKmh > 0 && devVelKmh <= maxKmh) return devVelKmh;   // velocidad del equipo, si es real
+  if (hist.length < 2) return null;
+  const ahora = hist[hist.length - 1];
+  let ancla: FixVel | null = null;
+  for (const h of hist) { if (ahora.ts - h.ts >= minMs) { ancla = h; break; } } // ventana más larga ≥ minMs
+  if (!ancla) return null;
+  const dt = (ahora.ts - ancla.ts) / 1000;
+  if (dt <= 0) return null;
+  const disp = distM(ancla.lat, ancla.lng, ahora.lat, ahora.lng);
+  const ruido = Math.min(ruidoMax, ancla.acc + ahora.acc);
+  if (disp <= ruido) return 0;                                   // dentro del ruido = quieto
+  const kmh = Math.round((disp / dt) * 3.6);
+  return kmh > maxKmh ? null : kmh;                              // implausible → conservar valor previo
+}
+
 // ── Ajustador con estado: Map Matching por VENTANAS de ≤100 puntos, con congelado ─────────
 // La API topa en 100 coords/llamada. Ajustar el viaje entero diezma la huella → rectas en
 // servicios largos. En vez de eso troceamos en ventanas densas, ajustamos cada una y las

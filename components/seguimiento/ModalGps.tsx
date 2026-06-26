@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import {
   calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
-  crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures,
+  crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana,
 } from "@/lib/huella";
 
 declare global { interface Window { mapboxgl: any; } }
@@ -143,8 +143,6 @@ export default function ModalGps({
   //     restando el piso de ruido (la incertidumbre combinada), un bus quieto da 0 y uno en
   //     marcha da su velocidad real. Cualquier resultado > 130 km/h es jitter residual → se
   //     descarta (se conserva el último valor bueno, nunca se pinta una cifra absurda).
-  const VEL_MAX_KMH = 130;          // techo plausible para un bus (descarta jitter/glitches)
-  const VEL_VENTANA_MIN_MS = 10_000; // ventana mínima para que el jitter se promedie
   const VEL_HIST_MS = 45_000;        // memoria de fixes para la ventana (cap del retardo)
   useEffect(() => {
     if (!ubic) return;
@@ -160,23 +158,9 @@ export default function ModalGps({
       const corte = ts - VEL_HIST_MS;
       while (hist.length > 2 && hist[0].ts < corte) hist.shift();
     }
-
-    // 1) Velocidad del equipo, si es plausible (chip GPS real con vector de velocidad).
-    const dev = Number(ubic.velocidad) || 0;
-    if (dev > 0 && dev <= VEL_MAX_KMH) { setVelCalc(dev); return; }
-
-    // 2) Estimación por desplazamiento sobre la ventana más larga disponible (≥10 s).
-    const ahora = hist[hist.length - 1];
-    let ancla: typeof hist[number] | null = null;
-    for (const h of hist) { if (ahora.ts - h.ts >= VEL_VENTANA_MIN_MS) { ancla = h; break; } }
-    if (!ancla) return;                                // aún sin ventana → conservar valor previo
-    const dt = (ahora.ts - ancla.ts) / 1000;
-    const disp = distM(ancla.lat, ancla.lng, ahora.lat, ahora.lng);
-    const ruido = Math.min(150, ancla.acc + ahora.acc); // piso de jitter ≈ incertidumbre combinada
-    if (disp <= ruido) { setVelCalc(0); return; }       // dentro del ruido = quieto
-    const kmh = Math.round((disp / dt) * 3.6);
-    if (kmh > VEL_MAX_KMH) return;                       // jitter residual → conservar valor previo
-    setVelCalc(kmh);
+    // Lógica pura compartida con el reproductor offline (lib/huella.ts). null = conservar previo.
+    const v = velocidadPorVentana(hist, Number(ubic.velocidad) || 0);
+    if (v != null) setVelCalc(v);
   }, [ubic]); // eslint-disable-line
 
   // ── Ruta real de Google via /api/ruta ──────────────────────────────────────
