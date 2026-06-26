@@ -145,6 +145,12 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
     }
   }
   if (modo === "stop" && cl) emitir(cLat(cl), cLng(cl), 0, cl.acc); // cola: parada final
+
+  // FALLBACK: si el filtro colapsó todo a ≤1 punto pero había suficientes datos, el cluster
+  // era demasiado grande para la velocidad del bus (GPS pobre + ciudad lenta). Devolver la
+  // estela cruda suavizada — con algo de zigzag, pero visible en lugar de invisible.
+  if (out.length <= 1 && base.length >= 5) return suavizarHuella(base, 2);
+
   return out;
 }
 

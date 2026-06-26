@@ -72,7 +72,7 @@ export default function ModalGps({
   const mapInst   = useRef<any>(null);
   const markerRef = useRef<any>(null);
   const ubicRef    = useRef<UbicGps | null>(null);
-  const prevUbicRef = useRef<{ lat: number; lng: number } | null>(null);
+  const prevUbicRef = useRef<{ lat: number; lng: number; ts: number } | null>(null);
 
   const [ubic,           setUbic]           = useState<UbicGps | null>(null);
   const [errorMapa,      setErrorMapa]      = useState(false);
@@ -87,6 +87,7 @@ export default function ModalGps({
   const [paradasResueltas,  setParadasResueltas]  = useState<Parada[]>([]);
   const [huella,            setHuella]            = useState<{lat:number;lng:number;velocidad:number}[]>([]);
   const [matchedCoords,     setMatchedCoords]     = useState<[number, number][] | null>(null);
+  const [velCalc,           setVelCalc]           = useState<number>(0);
   const stopMarkersRef = useRef<any[]>([]);
   // ETA dinámica: posición actual del vehículo → próxima parada (Google Directions)
   const [etaMin, setEtaMin] = useState<number | null>(null);
@@ -129,6 +130,22 @@ export default function ModalGps({
       return lista;
     }
   }, []); // eslint-disable-line
+
+  // Velocidad calculada desde posiciones consecutivas (fallback cuando GPS reporta 0,
+  // típico en FUSED/GPS de red que no entrega coords.speed fiable).
+  useEffect(() => {
+    if (!ubic) return;
+    const ts = ubic.created_at ? new Date(ubic.created_at).getTime()
+             : ubic.timestamp  ? new Date(ubic.timestamp).getTime()
+             : Date.now();
+    const prev = prevUbicRef.current;
+    if (prev && ts > prev.ts && ts - prev.ts < 300_000) {
+      const d = distM(prev.lat, prev.lng, ubic.lat, ubic.lng);
+      const dt = (ts - prev.ts) / 1000;
+      if (dt > 0 && d > 15) setVelCalc(Math.round(d / dt * 3.6));
+      else if (d < 5)        setVelCalc(0);
+    }
+  }, [ubic]); // eslint-disable-line
 
   // ── Ruta real de Google via /api/ruta ──────────────────────────────────────
 
@@ -530,7 +547,10 @@ export default function ModalGps({
       : (prevUbicRef.current && (ubic.lat !== prevUbicRef.current.lat || ubic.lng !== prevUbicRef.current.lng))
           ? calcBearing(prevUbicRef.current.lat, prevUbicRef.current.lng, ubic.lat, ubic.lng)
           : rawRumbo;
-    prevUbicRef.current = { lat: ubic.lat, lng: ubic.lng };
+    const ts = ubic.created_at ? new Date(ubic.created_at).getTime()
+             : ubic.timestamp  ? new Date(ubic.timestamp).getTime()
+             : Date.now();
+    prevUbicRef.current = { lat: ubic.lat, lng: ubic.lng, ts };
     // Color del pulso según antigüedad de la señal (igual que el mapa "En vivo").
     const fechaRef = ubic.created_at || ubic.timestamp;
     const edadS = fechaRef ? (Date.now() - new Date(fechaRef).getTime()) / 1000 : 9999;
@@ -581,7 +601,7 @@ export default function ModalGps({
           `<div style="font-family:system-ui;padding:4px">
             <p style="font-weight:900;margin:0;color:#0b315f;font-size:15px">${vehiculoPlaca}</p>
             <p style="margin:4px 0 0;color:#475569;font-size:12px">${conductorNombre}</p>
-            <p style="margin:6px 0 0;color:#16a34a;font-weight:700;font-size:16px">${ubic.velocidad} km/h</p>
+            <p style="margin:6px 0 0;color:#16a34a;font-weight:700;font-size:16px">${ubic.velocidad || velCalc} km/h</p>
           </div>`
         )).addTo(mapInst.current);
       // Primera vez: salto directo al vehículo (como /seguimiento), no animación lenta desde Lima.
@@ -723,10 +743,12 @@ export default function ModalGps({
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <div className={`px-4 py-1.5 rounded-xl text-center min-w-[56px] ${!ubic || ubic.velocidad === 0 ? "bg-white/10" : ubic.velocidad > 80 ? "bg-red-500" : "bg-green-600"}`}>
-              <p className="text-white font-black text-xl leading-none">{ubic?.velocidad ?? "—"}</p>
+            {(() => { const v = ubic?.velocidad || velCalc; return (
+            <div className={`px-4 py-1.5 rounded-xl text-center min-w-[56px] ${!ubic || v === 0 ? "bg-white/10" : v > 80 ? "bg-red-500" : "bg-green-600"}`}>
+              <p className="text-white font-black text-xl leading-none">{ubic ? v : "—"}</p>
               <p className="text-white/60 text-[9px] font-bold">km/h</p>
             </div>
+            ); })()}
             <button onClick={onClose} className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center text-white text-xl transition-colors">✕</button>
           </div>
         </div>
@@ -750,7 +772,7 @@ export default function ModalGps({
 
             {ubic && !errorMapa && (
               <div className="absolute top-3 left-3 bg-[#0b315f]/90 backdrop-blur-sm rounded-2xl px-4 py-3 shadow-xl text-center pointer-events-none">
-                <p className="text-white font-black text-4xl leading-none">{ubic.velocidad}</p>
+                <p className="text-white font-black text-4xl leading-none">{ubic.velocidad || velCalc}</p>
                 <p className="text-blue-200 text-[10px] font-bold mt-0.5">km/h</p>
                 {ubic.precision_m && <p className="text-blue-300 text-[9px] mt-1">±{Math.round(ubic.precision_m)}m</p>}
               </div>
@@ -857,9 +879,11 @@ export default function ModalGps({
             <div className="bg-white rounded-xl border p-3" style={{ borderColor: "#e2e8f0" }}>
               <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-1">Velocidad real</p>
               <div className="flex items-end gap-1">
-                <p className="font-black text-3xl leading-none" style={{ color: !ubic ? "#94a3b8" : ubic.velocidad > 80 ? "#dc2626" : ubic.velocidad > 0 ? "#16a34a" : "#0b315f" }}>
-                  {ubic?.velocidad ?? "—"}
+                {(() => { const v = ubic?.velocidad || velCalc || 0; return (
+                <p className="font-black text-3xl leading-none" style={{ color: !ubic ? "#94a3b8" : v > 80 ? "#dc2626" : v > 0 ? "#16a34a" : "#0b315f" }}>
+                  {ubic ? v : "—"}
                 </p>
+                ); })()}
                 <p className="text-gray-400 text-sm mb-0.5">km/h</p>
               </div>
               <p className="text-[9px] text-gray-400 mt-1">GPS real del conductor</p>
