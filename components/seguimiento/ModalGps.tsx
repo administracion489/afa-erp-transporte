@@ -16,6 +16,7 @@ type UbicGps = {
   lat: number; lng: number; velocidad: number; rumbo: number;
   precision_m: number; estado: string;
   created_at: string | null; timestamp: string | null;
+  fix_ts?: string | null; // hora del último fix real (detección robusta de "congelado")
 };
 
 type Parada = {
@@ -77,7 +78,8 @@ export default function ModalGps({
   const [errorMapa,      setErrorMapa]      = useState(false);
   const [ultimaActualiz, setUltimaActualiz] = useState<Date | null>(null);
   const [sinSenal,       setSinSenal]       = useState(false);
-  const [congeladoMin,   setCongeladoMin]   = useState(0); // min que el conductor lleva enviando la MISMA coord (GPS congelado en su equipo)
+  const [congeladoMin,   setCongeladoMin]   = useState(0); // min con la MISMA coord Y buena precisión = fix viejo reenviado (GPS congelado real)
+  const [precBajaM,      setPrecBajaM]      = useState(0); // ±m cuando la coord está fija por baja precisión (red/FUSED, bus quieto) — NO es congelado
   const [mapListo,       setMapListo]       = useState(false);
   const [ruta,              setRuta]              = useState<RutaData | null>(null);
   const [cargandoRuta,      setCargandoRuta]      = useState(false);
@@ -302,24 +304,57 @@ export default function ModalGps({
         const arr = Array.isArray(json?.huella) ? json.huella : [];
         if (cancel || arr.length === 0) return;
 
-        // GPS CONGELADO del conductor: detecta cuando el equipo dejó de generar fixes y solo
-        // re-envía la MISMA coord (link web con pantalla bloqueada / sin alta precisión). Un GPS
-        // real SIEMPRE jitterea unos metros → coords byte-idénticas por >3 min = congelado, no un
-        // bus parado. Evita el "GPS en vivo hace 4s" engañoso con el bus pegado. (Robusto al orden.)
-        const congMs = (() => {
+        // GPS CONGELADO vs. BUS PARADO — dos métodos, el ROBUSTO primero.
+        //
+        // ROBUSTO (app actualizada): cada fila trae `fix_ts` = hora del ÚLTIMO fix REAL del
+        // equipo. El backstop (web) re-envía el MISMO punto con el MISMO fix_ts; un equipo vivo
+        // —aunque esté parado en GPS de red— produce fixes FRESCOS cuyo fix_ts AVANZA. Entonces
+        // fix_ts que NO avanza por >3 min = congelado de verdad, sin importar la precisión. Esto
+        // elimina el falso positivo del bus parado con GPS coarse.
+        //
+        // FALLBACK (filas/APK viejos, fix_ts = null): heurística por precisión — coords idénticas
+        // >3 min CON buena precisión (≤40 m, que siempre jitterea) = fix viejo reenviado; con baja
+        // precisión = solo "baja precisión" (la red coarse repite el mismo centroide estando quieto).
+        const cong = (() => {
           const ts = (arr as any[])
-            .map(r => ({ t: new Date(r.created_at || r.timestamp || 0).getTime(), lat: Number(r.lat), lng: Number(r.lng) }))
+            .map(r => ({
+              t:   new Date(r.created_at || r.timestamp || 0).getTime(),
+              lat: Number(r.lat), lng: Number(r.lng),
+              acc: Number(r.precision_m),
+              fix: r.fix_ts ? new Date(r.fix_ts).getTime() : null,
+            }))
             .filter(r => Number.isFinite(r.t) && Number.isFinite(r.lat) && Number.isFinite(r.lng))
             .sort((a, b) => a.t - b.t);
-          if (ts.length < 4) return 0;
+          if (ts.length < 4) return { ms: 0, acc: null as number | null, robusto: false };
           const ult = ts[ts.length - 1];
+          // Método robusto: ¿hace cuánto que fix_ts no avanza? (el último fix lleva fix_ts)
+          if (ult.fix != null && Number.isFinite(ult.fix)) {
+            let tIni = ult.t;
+            for (let i = ts.length - 1; i >= 0; i--) {
+              if (ts[i].fix === ult.fix) tIni = ts[i].t; else break;
+            }
+            return { ms: ult.t - tIni, acc: null as number | null, robusto: true };
+          }
+          // Fallback: ¿hace cuánto que la coord es byte-idéntica?
           let tIni = ult.t;
           for (let i = ts.length - 1; i >= 0; i--) {
             if (ts[i].lat === ult.lat && ts[i].lng === ult.lng) tIni = ts[i].t; else break;
           }
-          return ult.t - tIni;
+          return { ms: ult.t - tIni, acc: Number.isFinite(ult.acc) ? ult.acc : null, robusto: false };
         })();
-        if (!cancel) setCongeladoMin(congMs > 180000 ? Math.floor(congMs / 60000) : 0);
+        const PRECISION_BUENA_M = 40; // fallback: ≤ esto = satélite (siempre jitterea) → idéntico = re-envío
+        const estancado = cong.ms > 180000;
+        if (!cancel) {
+          if (cong.robusto) {
+            // fix_ts no avanza = congelado real (precisión irrelevante).
+            setCongeladoMin(estancado ? Math.floor(cong.ms / 60000) : 0);
+            setPrecBajaM(0);
+          } else {
+            const accBuena = cong.acc != null && cong.acc <= PRECISION_BUENA_M;
+            setCongeladoMin(estancado && accBuena ? Math.floor(cong.ms / 60000) : 0);
+            setPrecBajaM(estancado && !accBuena && cong.acc != null ? Math.round(cong.acc) : 0);
+          }
+        }
 
         // Limpiar UNA sola vez (colapsa rachas detenidas + dedup en marcha). El mismo set
         // limpio alimenta el dibujo (setHuella) y el ajuste por ventanas → coherentes.
@@ -674,7 +709,9 @@ export default function ModalGps({
                     ? "Sin señal GPS"
                     : congeladoMin > 0
                       ? `⚠ GPS del conductor congelado · hace ${congeladoMin} min`
-                      : ultimaActualiz ? `GPS en vivo · hace ${segsDesdeUlt}s` : "Conectando..."}
+                      : ultimaActualiz
+                        ? `GPS en vivo · hace ${segsDesdeUlt}s${precBajaM > 0 ? ` · ±${precBajaM}m baja precisión` : ""}`
+                        : "Conectando..."}
                 </p>
                 {ruta && (
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${hayTrafico ? "bg-orange-500 text-white" : "bg-green-600 text-white"}`}>

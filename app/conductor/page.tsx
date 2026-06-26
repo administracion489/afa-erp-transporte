@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
 import { supabase } from "@/lib/supabase";
-import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, esAppNativa, backgroundGpsActivo, geoDisponible, type GeoPos, type GeoWatch } from "@/lib/geo";
+import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, esAppNativa, backgroundGpsActivo, geoDisponible, type GeoPos, type GeoWatch } from "@/lib/geo";
 import {
   CondorMark,
   IconActivity, IconAlert, IconArrowLeft, IconArrowRight, IconBell, IconBus,
@@ -245,6 +245,66 @@ function cercaDeAlgunParadero(pos: GeoPos, paradas: { lat: number | null; lng: n
   }
   return false;
 }
+
+// ─── GUÍA DE AJUSTES DEL EQUIPO (para que el fabricante no mate el rastreo) ──────
+// Android NO deja que una app active autostart / batería sin restricciones / bloqueo
+// en Recientes por su cuenta: son ajustes del usuario. Lo máximo es DETECTAR la marca
+// y GUIAR al conductor paso a paso (él toca los toggles). Esto sube la disponibilidad
+// real más que cualquier watchdog (la causa #1 de cortes es el matado por fabricante).
+type PasoAjuste = { titulo: string; detalle: string };
+type GuiaFabricante = { marca: string; pasos: PasoAjuste[] };
+
+function detectarFabricanteGps(): string {
+  const ua = (typeof navigator !== "undefined" ? navigator.userAgent : "").toLowerCase();
+  if (/xiaomi|redmi|poco|miui|hyperos/.test(ua)) return "xiaomi";
+  if (/samsung|sm-/.test(ua))                    return "samsung";
+  if (/oppo|cph/.test(ua))                        return "oppo";
+  if (/vivo/.test(ua))                            return "vivo";
+  if (/realme|rmx/.test(ua))                      return "realme";
+  if (/huawei|honor|\bhry\b|\blio\b/.test(ua))   return "huawei";
+  if (/motorola|moto\b|\bmoto /.test(ua))         return "motorola";
+  return "generico";
+}
+
+const PASOS_COMUNES: PasoAjuste[] = [
+  { titulo: "Ubicación: “Permitir todo el tiempo”", detalle: "Ajustes → Apps → AFA Conductores → Permisos → Ubicación → Permitir todo el tiempo." },
+  { titulo: "Batería: “Sin restricciones”", detalle: "Ajustes → Apps → AFA Conductores → Batería → Sin restricciones (o “No optimizar”)." },
+  { titulo: "Bloquea la app en Recientes", detalle: "Abre Recientes (multitarea), mantén presionada AFA Conductores y toca el candado para que el sistema no la cierre." },
+];
+
+const GUIA_AJUSTES_GPS: Record<string, GuiaFabricante> = {
+  xiaomi: { marca: "Xiaomi / Redmi / POCO (MIUI/HyperOS)", pasos: [
+    { titulo: "Inicio automático: ACTIVADO", detalle: "Ajustes → Apps → Gestión de apps → AFA Conductores → Inicio automático → Activar. (También en Seguridad → Permisos → Inicio automático.)" },
+    { titulo: "Ahorro de batería: “Sin restricciones”", detalle: "En la misma pantalla de la app → Ahorro de batería → Sin restricciones." },
+    ...PASOS_COMUNES,
+  ]},
+  samsung: { marca: "Samsung (One UI)", pasos: [
+    { titulo: "Quita “Poner en suspensión”", detalle: "Ajustes → Batería → Límites de uso en segundo plano → asegúrate que AFA Conductores NO esté en “Apps en suspensión” ni “Suspensión profunda”." },
+    { titulo: "Batería: “Sin restricciones”", detalle: "Ajustes → Apps → AFA Conductores → Batería → Sin restricciones." },
+    ...PASOS_COMUNES,
+  ]},
+  oppo:    { marca: "Oppo / OnePlus (ColorOS)", pasos: [
+    { titulo: "Inicio automático: ACTIVADO", detalle: "Ajustes → Gestión de batería/apps → AFA Conductores → permitir inicio automático y ejecución en segundo plano." },
+    ...PASOS_COMUNES,
+  ]},
+  vivo:    { marca: "Vivo (Funtouch/OriginOS)", pasos: [
+    { titulo: "Inicio automático y alto consumo: PERMITIR", detalle: "Ajustes → Batería → Consumo alto en segundo plano → permitir AFA Conductores; y permitir inicio automático." },
+    ...PASOS_COMUNES,
+  ]},
+  realme:  { marca: "Realme (Realme UI)", pasos: [
+    { titulo: "Inicio automático: ACTIVADO", detalle: "Ajustes → Apps → AFA Conductores → permitir inicio automático y actividad en segundo plano." },
+    ...PASOS_COMUNES,
+  ]},
+  huawei:  { marca: "Huawei / Honor (EMUI/MagicOS)", pasos: [
+    { titulo: "Gestión manual de la app", detalle: "Ajustes → Batería → Inicio de apps → AFA Conductores → Gestionar manualmente → activar Inicio automático, Inicio secundario y Ejecución en segundo plano." },
+    ...PASOS_COMUNES,
+  ]},
+  motorola:{ marca: "Motorola", pasos: [
+    { titulo: "Batería: “Sin restricciones”", detalle: "Ajustes → Apps → AFA Conductores → Batería → Sin restricciones." },
+    ...PASOS_COMUNES,
+  ]},
+  generico:{ marca: "tu equipo", pasos: PASOS_COMUNES },
+};
 
 // ─── SESSION ──────────────────────────────────────────────────────────────────
 
@@ -496,6 +556,10 @@ export default function ConductorApp() {
   const [gpsHabilitado, setGpsHabilitado] = useState<boolean>(() => {
     try { return !!localStorage.getItem("afa_bg_disclosure_v1"); } catch { return true; }
   });
+  // Pantalla de "Ajustes recomendados" (autostart/batería/recientes por fabricante) para que
+  // el equipo no mate el rastreo. Se muestra una vez tras el disclosure y queda accesible desde
+  // el botón en la cabecera de GPS. Solo aplica en la app nativa.
+  const [mostrarAjustesGps, setMostrarAjustesGps] = useState(false);
   // Contador para FORZAR re-armar el watch de GPS (watchdog/resume). Cambiarlo re-ejecuta el
   // effect de GPS: limpia (stop) y vuelve a arrancar (start). Recupera el rastreo cuando el
   // listener nativo se quedó mudo (Doze / app en 2º plano largo rato) sin tener que reiniciar.
@@ -774,6 +838,11 @@ export default function ConductorApp() {
       precision_m:  pos.coords.accuracy,
       estado:       estadoFinal,
       created_at:   new Date().toISOString(),
+      // Hora del ÚLTIMO fix REAL recibido (ultimoFixRef solo se actualiza en el callback del
+      // GPS, NUNCA en el backstop). Así, al re-enviar el mismo punto, fix_ts NO avanza → el
+      // lector detecta "congelado" sin confundirlo con un bus parado en GPS de baja precisión
+      // (ese sí produce fixes frescos con fix_ts que avanza). Ver supabase/ubicaciones-gps-fix-ts.sql.
+      fix_ts:       ultimoFixRef.current ? new Date(ultimoFixRef.current).toISOString() : null,
     });
     setPendientes(leerCola().length);
     drenarColaRef.current();
@@ -870,7 +939,10 @@ export default function ConductorApp() {
   // cuando el GPS YA está roto (en marcha llegan fixes cada ~2 s → nunca se vuelve viejo).
   useEffect(() => {
     if (!conductor || !gpsHabilitado || !compartiendo) return;
-    const VIEJO_PERIODICO = 120_000; // 2 min sin fix con pantalla visible → re-armar
+    const VIEJO_PERIODICO = 60_000;  // 1 min sin fix con pantalla visible → re-armar. En marcha
+                                     // y detenido llegan fixes cada ~2 s (heartbeat nativo), así que
+                                     // sólo dispara con el GPS realmente roto → bajar de 120→60 s
+                                     // sólo acorta la latencia de recuperación, sin falsos positivos.
     const VIEJO_RESUME    = 30_000;  // al volver a 1er plano, 30 s de antigüedad ya re-arma
     // Coalesce: visibilitychange y el tick de 30 s pueden coincidir; sin esto se encadenarían
     // dos ciclos stop/start del servicio nativo solapados. Máx 1 re-arm cada 10 s.
@@ -910,7 +982,11 @@ export default function ConductorApp() {
   // se muestra UNA vez, antes de que el plugin pida el permiso de background.
   useEffect(() => {
     if (!conductor || !esAppNativa()) return;
-    try { if (!localStorage.getItem("afa_bg_disclosure_v1")) setMostrarDivulgacion(true); } catch {}
+    try {
+      if (!localStorage.getItem("afa_bg_disclosure_v1")) { setMostrarDivulgacion(true); return; }
+      // Disclosure ya aceptado (usuarios existentes): mostrar la guía de ajustes una vez.
+      if (!localStorage.getItem("afa_gps_ajustes_v1")) setMostrarAjustesGps(true);
+    } catch {}
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conductor?.id]);
 
@@ -1853,6 +1929,22 @@ export default function ConductorApp() {
                 }}
               >
                 ¿No rastrea con la pantalla bloqueada? Permitir ubicación “Todo el tiempo”
+              </button>
+            )}
+
+            {/* Guía de ajustes del equipo (autostart/batería/recientes) para que el
+                fabricante no corte el rastreo — la causa #1 de cortes en MIUI/Oppo/etc. */}
+            {esAppNativa() && (
+              <button
+                onClick={() => setMostrarAjustesGps(true)}
+                style={{
+                  width: "100%", marginBottom: 14, padding: "9px 14px",
+                  background: "transparent", border: "1px dashed var(--c-line)",
+                  borderRadius: 12, color: "var(--c-mute)", fontWeight: 700, fontSize: 12,
+                  cursor: "pointer", fontFamily: FONT_SANS,
+                }}
+              >
+                ⚙️ Ajustes para que NO se corte el rastreo (autostart · batería)
               </button>
             )}
 
@@ -3122,6 +3214,8 @@ export default function ConductorApp() {
                 // aviso, cumpliendo el requisito de Google Play.
                 await pedirPermisoUbicacion().catch(() => {});
                 setGpsHabilitado(true);
+                // Tras conceder el permiso, mostrar la guía de ajustes del equipo una vez.
+                try { if (!localStorage.getItem("afa_gps_ajustes_v1")) setMostrarAjustesGps(true); } catch {}
               }}
               style={{
                 width: "100%", padding: "13px 0", borderRadius: 14, border: "none",
@@ -3134,6 +3228,97 @@ export default function ConductorApp() {
           </div>
         </div>
       )}
+
+      {/* Guía de ajustes del equipo para que el fabricante no corte el rastreo */}
+      {mostrarAjustesGps && (() => {
+        const fab = detectarFabricanteGps();
+        const guia = GUIA_AJUSTES_GPS[fab] ?? GUIA_AJUSTES_GPS.generico;
+        return (
+          <div style={{
+            position: "fixed", inset: 0, zIndex: 131, background: "rgba(11,49,95,0.6)",
+            display: "flex", alignItems: "flex-end", justifyContent: "center", padding: 16,
+          }}>
+            <div style={{
+              background: "var(--c-surface)", borderRadius: 20, padding: 22,
+              maxWidth: 440, width: "100%", maxHeight: "88vh", overflowY: "auto",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.35)",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                <span style={{ fontSize: 22 }}>⚙️</span>
+                <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, letterSpacing: -0.4 }}>
+                  Que NO se corte el rastreo
+                </h2>
+              </div>
+              <p style={{ margin: "0 0 14px", fontSize: 13, lineHeight: 1.5, color: "var(--c-mute)" }}>
+                Tu equipo (<strong>{guia.marca}</strong>) puede cerrar la app en segundo plano para ahorrar
+                batería y cortar el GPS durante el viaje. Activa estos ajustes <strong>una sola vez</strong>:
+              </p>
+
+              <ol style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 10 }}>
+                {guia.pasos.map((p, i) => (
+                  <li key={i} style={{
+                    display: "flex", gap: 10, alignItems: "flex-start",
+                    background: "var(--c-paper)", border: "1px solid var(--c-line-2)",
+                    borderRadius: 12, padding: "10px 12px",
+                  }}>
+                    <span style={{
+                      flexShrink: 0, width: 22, height: 22, borderRadius: 999, background: "var(--c-navy)",
+                      color: "#fff", fontSize: 12, fontWeight: 800,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>{i + 1}</span>
+                    <div style={{ minWidth: 0 }}>
+                      <p style={{ margin: 0, fontSize: 13.5, fontWeight: 800, color: "var(--c-ink)" }}>{p.titulo}</p>
+                      <p style={{ margin: "2px 0 0", fontSize: 12, lineHeight: 1.45, color: "var(--c-mute)" }}>{p.detalle}</p>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+
+              {esAppNativa() && (
+                <button
+                  onClick={() => solicitarExencionBateria()}
+                  style={{
+                    width: "100%", marginTop: 14, padding: "11px 14px", borderRadius: 12,
+                    border: "none", background: "var(--c-success, #1f9d55)",
+                    color: "#fff", fontWeight: 800, fontSize: 13,
+                    cursor: "pointer", fontFamily: FONT_SANS,
+                  }}
+                >
+                  🔋 Optimizar batería (1 toque)
+                </button>
+              )}
+
+              {esAppNativa() && (
+                <button
+                  onClick={() => abrirAjustesUbicacion()}
+                  style={{
+                    width: "100%", marginTop: 10, padding: "11px 14px", borderRadius: 12,
+                    border: "1px solid var(--c-navy)", background: "transparent",
+                    color: "var(--c-navy)", fontWeight: 800, fontSize: 13,
+                    cursor: "pointer", fontFamily: FONT_SANS,
+                  }}
+                >
+                  Abrir ajustes de la app
+                </button>
+              )}
+
+              <button
+                onClick={() => {
+                  try { localStorage.setItem("afa_gps_ajustes_v1", "1"); } catch {}
+                  setMostrarAjustesGps(false);
+                }}
+                style={{
+                  width: "100%", marginTop: 10, padding: "13px 0", borderRadius: 14, border: "none",
+                  background: "var(--c-navy)", color: "#fff", fontWeight: 800, fontSize: 15,
+                  cursor: "pointer", fontFamily: FONT_SANS,
+                }}
+              >
+                Listo, ya los activé
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═══════════════════════════════════════════════════════════════════ */}
       {/* MANIFIESTO SUB-VISTA                                                */}

@@ -22,7 +22,7 @@ const adminClient = () =>
   );
 
 const COLS =
-  "reserva_id,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,lat,lng,velocidad,rumbo,precision_m,estado,created_at,timestamp";
+  "reserva_id,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,lat,lng,velocidad,rumbo,precision_m,estado,created_at,timestamp,fix_ts";
 
 // created_at es la columna fiable (la setea el insert del conductor); timestamp puede
 // no venir. Se ordena/dedupea por la más reciente de ambas.
@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
       const reservaId         = body.reservaId ?? null;
       const vehiculoId        = body.vehiculoId ?? null;
       const vehiculoTerceroId = body.vehiculoTerceroId ?? null;
-      const HCOLS = "lat,lng,velocidad,created_at,timestamp,reserva_id,vehiculo_id,vehiculo_tercero_id,precision_m";
+      const HCOLS = "lat,lng,velocidad,created_at,timestamp,reserva_id,vehiculo_id,vehiculo_tercero_id,precision_m,fix_ts";
       let filas: any[] = [];
       let viaVehiculo = false; // ¿se usó la rama por-vehículo (sin reserva_id)?
       if (reservaId != null) {

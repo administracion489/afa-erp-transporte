@@ -32,6 +32,7 @@ export async function POST(req: NextRequest) {
       lat, lng, velocidad: 0, rumbo: 0, precision_m: 0,
       estado: "finalizado",
       created_at: new Date().toISOString(),
+      fix_ts: new Date().toISOString(), // posición capturada AHORA = fix fresco (coherencia con el stream)
     });
   }
 

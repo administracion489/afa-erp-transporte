@@ -259,6 +259,23 @@ export async function abrirAjustesUbicacion(): Promise<void> {
   } catch { /* noop */ }
 }
 
+/**
+ * Pide al usuario excluir la app de la optimización de batería (Doze / App Standby / battery
+ * savers del fabricante) mediante el diálogo del sistema. Solo en la app nativa con el plugin
+ * nativo propio `AfaNative` (APK recompilado con AfaNativePlugin). DEBE invocarse en respuesta a
+ * una ACCIÓN del conductor (un botón), por política de Google Play — nunca automáticamente.
+ * Idempotente: si ya está exenta no muestra nada. Si el plugin no existe (APK viejo) no hace nada
+ * y el conductor puede activarlo a mano desde la guía de ajustes.
+ */
+export async function solicitarExencionBateria(): Promise<void> {
+  if (!esNativo()) return;
+  try {
+    const { registerPlugin } = await import("@capacitor/core");
+    const AfaNative = registerPlugin<{ requestBatteryExemption: () => Promise<{ opened: boolean }> }>("AfaNative");
+    await AfaNative.requestBatteryExemption();
+  } catch { /* plugin ausente / sin soporte → la guía manual cubre el caso */ }
+}
+
 /** true si hay alguna forma de geolocalización disponible. */
 export function geoDisponible(): boolean {
   if (esNativo()) return true;

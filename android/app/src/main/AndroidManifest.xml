@@ -52,6 +52,12 @@
     <!-- Notificaciones (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Exención de optimización de batería (Doze/App Standby + battery savers del
+         fabricante). Caso de uso elegible en Google Play: rastreo de ubicación continuo
+         de vehículos durante el servicio. Se solicita con el diálogo del sistema desde
+         MainActivity (1 toque), sin cambiar el ciclo del foreground service. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!-- Cámara: escaneo de QR de pasajeros -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />

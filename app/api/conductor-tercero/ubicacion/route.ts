@@ -9,9 +9,9 @@ const adminClient = () =>
   );
 
 export async function POST(req: NextRequest) {
-  const { token, lat, lng, velocidad, rumbo, precision } = await req.json() as {
+  const { token, lat, lng, velocidad, rumbo, precision, fixTs } = await req.json() as {
     token: string; lat: number; lng: number;
-    velocidad?: number; rumbo?: number; precision?: number;
+    velocidad?: number; rumbo?: number; precision?: number; fixTs?: string | null;
   };
   if (!token || lat == null || lng == null) {
     return NextResponse.json({ error: "Faltan datos" }, { status: 400 });
@@ -42,6 +42,7 @@ export async function POST(req: NextRequest) {
     precision_m: precision ?? 0,
     estado: "en_ruta",
     created_at: new Date().toISOString(),
+    fix_ts: fixTs ?? null, // hora del último fix real → detección robusta de "congelado"
   });
   if (gpsErr) {
     console.error("[conductor-tercero/ubicacion] GPS insert error:", gpsErr.message);

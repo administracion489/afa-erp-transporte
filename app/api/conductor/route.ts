@@ -168,6 +168,7 @@ export async function POST(req: NextRequest) {
         const COLS = [
           "conductor_id", "vehiculo_id", "conductor_tercero_id", "vehiculo_tercero_id",
           "reserva_id", "lat", "lng", "velocidad", "rumbo", "precision_m", "estado", "created_at",
+          "fix_ts", // hora del último fix real (detección robusta de "congelado") — null en APK viejos
         ];
         const sanitizar = (p: any) => {
           const o: Record<string, any> = {};

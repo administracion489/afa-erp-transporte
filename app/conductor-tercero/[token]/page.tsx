@@ -220,7 +220,9 @@ export default function ConductorTerceroPage() {
     try {
       await fetch("/api/conductor-tercero/ubicacion", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, lat: pos.lat, lng: pos.lng, velocidad: vel, rumbo: Math.round(rumboRef.current), precision: Math.round(acc) }),
+        // fixTs = hora del último fix REAL (ultimoFixRef solo se setea en el callback, no en el
+        // backstop) → no avanza al re-enviar el mismo punto, así el lector detecta "congelado".
+        body: JSON.stringify({ token, lat: pos.lat, lng: pos.lng, velocidad: vel, rumbo: Math.round(rumboRef.current), precision: Math.round(acc), fixTs: ultimoFixRef.current ? new Date(ultimoFixRef.current).toISOString() : null }),
       });
     } catch {}
   }, [token]);

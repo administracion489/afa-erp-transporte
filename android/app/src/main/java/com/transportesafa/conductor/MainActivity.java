@@ -19,6 +19,10 @@ public class MainActivity extends BridgeActivity {
     // sin depender de que cargue la web. Si ya están concedidos, no muestra nada.
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        // Plugin nativo propio (exención de batería). DEBE registrarse ANTES de super.onCreate.
+        // La exención NO se pide aquí automáticamente (política de Play): la dispara el JS desde
+        // un botón explícito del conductor ("Optimizar batería" en la guía de ajustes).
+        registerPlugin(AfaNativePlugin.class);
         super.onCreate(savedInstanceState);
 
         List<String> permisos = new ArrayList<>();

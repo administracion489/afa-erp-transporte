@@ -1,8 +1,10 @@
 // Meta Cloud API — WhatsApp, Messenger, Instagram
-// Env vars: META_ACCESS_TOKEN, META_PHONE_NUMBER_ID, META_PAGE_ID
+// Env vars: META_WA_TOKEN (WhatsApp system user token), META_PAGE_TOKEN (Messenger/Instagram page token)
+// Legacy: META_ACCESS_TOKEN se usa como fallback si los nuevos no están definidos
 
 const GRAPH = "https://graph.facebook.com/v19.0";
-const TOKEN = () => process.env.META_ACCESS_TOKEN!;
+const WA_TOKEN = () => process.env.META_WA_TOKEN ?? process.env.META_ACCESS_TOKEN!;
+const PAGE_TOKEN = () => process.env.META_PAGE_TOKEN ?? process.env.META_ACCESS_TOKEN!;
 
 // ── WhatsApp ──────────────────────────────────────────────────────────────
 
@@ -12,7 +14,7 @@ export async function enviarWhatsApp(to: string, texto: string): Promise<string 
 
   const res = await fetch(`${GRAPH}/${phoneId}/messages`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN()}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${WA_TOKEN()}` },
     body: JSON.stringify({
       messaging_product: "whatsapp",
       to,
@@ -36,7 +38,7 @@ export async function enviarWhatsAppMedia(
 
   const res = await fetch(`${GRAPH}/${phoneId}/messages`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN()}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${WA_TOKEN()}` },
     body: JSON.stringify({
       messaging_product: "whatsapp",
       to,
@@ -57,7 +59,7 @@ export async function enviarMessenger(psid: string, texto: string): Promise<stri
 
   const res = await fetch(`${GRAPH}/${pageId}/messages`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN()}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${PAGE_TOKEN()}` },
     body: JSON.stringify({
       recipient: { id: psid },
       message: { text: texto },
@@ -77,7 +79,7 @@ export async function enviarInstagram(igScopedId: string, texto: string): Promis
 
   const res = await fetch(`${GRAPH}/${igAccountId}/messages`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN()}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${PAGE_TOKEN()}` },
     body: JSON.stringify({
       recipient: { id: igScopedId },
       message: { text: texto },
@@ -95,7 +97,7 @@ export async function marcarLeidoWA(messageId: string): Promise<void> {
   if (!phoneId) return;
   await fetch(`${GRAPH}/${phoneId}/messages`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN()}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${WA_TOKEN()}` },
     body: JSON.stringify({ messaging_product: "whatsapp", status: "read", message_id: messageId }),
   });
 }
