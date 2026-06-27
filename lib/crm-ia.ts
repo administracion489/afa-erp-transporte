@@ -591,8 +591,8 @@ export async function responderConIA(
   return { ok: true, accion: ctx.escalado.v ? "escalado" : "borrador", texto: textoFinal };
 }
 
-/** Prueba el agente con un mensaje suelto (no envía nada, no toca el ERP de forma destructiva salvo lecturas). */
-export async function probarAgente(mensaje: string): Promise<{ ok: boolean; texto?: string; herramientas: string[]; error?: string }> {
+/** Prueba el agente con historial multi-turno (no envía nada, no toca el ERP de forma destructiva salvo lecturas). */
+export async function probarAgente(mensaje: string, historial: Anthropic.MessageParam[] = []): Promise<{ ok: boolean; texto?: string; herramientas: string[]; error?: string }> {
   if (!process.env.ANTHROPIC_API_KEY) return { ok: false, herramientas: [], error: "Falta ANTHROPIC_API_KEY." };
   const sb = db();
   const { data: agentes } = await sb.from("crm_agentes_ia").select("*").order("created_at").limit(1);
@@ -604,7 +604,7 @@ export async function probarAgente(mensaje: string): Promise<{ ok: boolean; text
   const ctx: Ctx = { sb, contacto, conv, agente, escalado: { v: false } };
   const modelo = MODELOS_VALIDOS.has(agente.modelo) ? agente.modelo : "claude-opus-4-8";
   const system = construirSystem(agente, contacto, conv);
-  const messages: Anthropic.MessageParam[] = [{ role: "user", content: mensaje }];
+  const messages: Anthropic.MessageParam[] = [...historial, { role: "user", content: mensaje }];
   const usadas: string[] = [];
 
   try {

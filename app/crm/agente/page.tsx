@@ -53,10 +53,12 @@ export default function AgenteIAPage() {
   const [guardando, setGuardando] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
 
-  // Probador
+  // Probador chat
+  type ChatMsg = { role: "user" | "afita"; texto: string; herramientas?: string[]; error?: string };
+  const [chatMsgs, setChatMsgs] = useState<ChatMsg[]>([]);
   const [pruebaMsg, setPruebaMsg] = useState("");
   const [probando, setProbando] = useState(false);
-  const [pruebaResp, setPruebaResp] = useState<{ texto?: string; herramientas?: string[]; error?: string } | null>(null);
+  const chatEndRef = React.useRef<HTMLDivElement>(null);
 
   const showToast = (msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -104,20 +106,32 @@ export default function AgenteIAPage() {
   };
 
   const probar = async () => {
-    if (!pruebaMsg.trim()) return;
+    const texto = pruebaMsg.trim();
+    if (!texto || probando) return;
+    setPruebaMsg("");
+    const msgsConUser: ChatMsg[] = [...chatMsgs, { role: "user", texto }];
+    setChatMsgs(msgsConUser);
     setProbando(true);
-    setPruebaResp(null);
+    setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+    // Construir historial Anthropic alternando user/assistant
+    const historial: { role: "user" | "assistant"; content: string }[] = [];
+    for (const m of chatMsgs) {
+      if (m.role === "user") historial.push({ role: "user", content: m.texto });
+      else if (m.texto) historial.push({ role: "assistant", content: m.texto });
+    }
     try {
       const res = await fetch("/api/crm/ia/probar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mensaje: pruebaMsg }),
+        body: JSON.stringify({ mensaje: texto, historial }),
       });
-      setPruebaResp(await res.json());
+      const data = await res.json();
+      setChatMsgs((prev) => [...prev, { role: "afita", texto: data.texto ?? "", herramientas: data.herramientas, error: data.error }]);
     } catch (e: any) {
-      setPruebaResp({ error: e?.message ?? "Error de red" });
+      setChatMsgs((prev) => [...prev, { role: "afita", texto: "", error: e?.message ?? "Error de red" }]);
     }
     setProbando(false);
+    setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
   };
 
   // ── Estados de carga / falta de migración ──────────────────────────────────
@@ -472,55 +486,81 @@ export default function AgenteIAPage() {
           )}
         </div>
 
-        {/* Probador (columna lateral) */}
+        {/* Probador chat (columna lateral) */}
         <div className="w-80 flex-shrink-0 hidden lg:block">
-          <div className="bg-white border border-gray-100 rounded-2xl p-4 sticky top-4">
-            <div className="flex items-center gap-2 mb-3">
-              <span className="text-lg">✨</span>
-              <h3 className="font-bold text-[#0b315f] text-sm">Probar agente</h3>
+          <div className="bg-white border border-gray-100 rounded-2xl flex flex-col sticky top-4" style={{ height: "calc(100vh - 120px)" }}>
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+              <div className="flex items-center gap-2">
+                <span className="text-base">✨</span>
+                <h3 className="font-bold text-[#0b315f] text-sm">Probar agente</h3>
+              </div>
+              {chatMsgs.length > 0 && (
+                <button onClick={() => setChatMsgs([])} className="text-[11px] text-gray-400 hover:text-red-400">
+                  Limpiar
+                </button>
+              )}
             </div>
-            <p className="text-xs text-gray-400 mb-3">
-              Escribe un mensaje como si fueras un cliente. No se envía nada; solo ves cómo respondería con la config
-              guardada.
-            </p>
-            <textarea
-              className={input}
-              rows={3}
-              value={pruebaMsg}
-              onChange={(e) => setPruebaMsg(e.target.value)}
-              placeholder="Hola, necesito un bus para 30 personas de Lima a Paracas el sábado…"
-            />
-            <button
-              onClick={probar}
-              disabled={probando || !pruebaMsg.trim()}
-              className="w-full mt-2 bg-[#0b315f] text-white text-sm font-semibold py-2 rounded-xl hover:bg-[#1262bd] disabled:opacity-50"
-            >
-              {probando ? "Pensando…" : "Probar respuesta"}
-            </button>
 
-            {pruebaResp && (
-              <div className="mt-3 text-sm">
-                {pruebaResp.error ? (
-                  <div className="bg-red-50 text-red-700 rounded-xl p-3 text-xs">{pruebaResp.error}</div>
-                ) : (
-                  <>
-                    <div className="bg-gray-50 rounded-xl p-3 whitespace-pre-wrap text-gray-800">{pruebaResp.texto}</div>
-                    {pruebaResp.herramientas && pruebaResp.herramientas.length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-1">
-                        {pruebaResp.herramientas.map((h) => (
-                          <span key={h} className="text-[10px] bg-[#0b315f]/10 text-[#0b315f] px-2 py-0.5 rounded-full font-medium">
+            {/* Burbujas */}
+            <div className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-2">
+              {chatMsgs.length === 0 && (
+                <p className="text-xs text-gray-400 text-center mt-6">
+                  Escribe como si fueras un cliente.<br />No se envía nada real.
+                </p>
+              )}
+              {chatMsgs.map((m, i) => (
+                <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+                  <div
+                    className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap ${
+                      m.role === "user"
+                        ? "bg-[#0b315f] text-white rounded-br-sm"
+                        : m.error
+                        ? "bg-red-50 text-red-700 rounded-bl-sm"
+                        : "bg-gray-100 text-gray-800 rounded-bl-sm"
+                    }`}
+                  >
+                    {m.error ? m.error : m.texto}
+                    {m.herramientas && m.herramientas.length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-1">
+                        {m.herramientas.map((h) => (
+                          <span key={h} className="text-[10px] bg-[#0b315f]/15 text-[#0b315f] px-1.5 py-0.5 rounded-full font-medium">
                             🔧 {h}
                           </span>
                         ))}
                       </div>
                     )}
-                  </>
-                )}
-              </div>
-            )}
-            <p className="text-[11px] text-gray-400 mt-3">
-              Recuerda <b>Guardar</b> los cambios antes de probar — la prueba usa la config guardada.
-            </p>
+                  </div>
+                </div>
+              ))}
+              {probando && (
+                <div className="flex justify-start">
+                  <div className="bg-gray-100 rounded-2xl rounded-bl-sm px-3 py-2 text-sm text-gray-400">
+                    Pensando…
+                  </div>
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            {/* Input */}
+            <div className="border-t border-gray-100 p-3 flex gap-2">
+              <textarea
+                className={`${input} flex-1 resize-none`}
+                rows={2}
+                value={pruebaMsg}
+                onChange={(e) => setPruebaMsg(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); probar(); } }}
+                placeholder="Escribe un mensaje…"
+              />
+              <button
+                onClick={probar}
+                disabled={probando || !pruebaMsg.trim()}
+                className="bg-[#0b315f] text-white text-xs font-semibold px-3 rounded-xl hover:bg-[#1262bd] disabled:opacity-40"
+              >
+                ➤
+              </button>
+            </div>
           </div>
         </div>
       </div>
