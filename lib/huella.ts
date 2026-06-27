@@ -36,6 +36,25 @@ export function suavizarHuella<T extends { lat: number; lng: number }>(pts: T[],
   });
 }
 
+// Suavizado adaptativo por DISTANCIA: cada punto se promedia con los vecinos que caen dentro de
+// R metros (ventana de índices acotada a ±K). En tramos LENTOS/densos (muchos puntos juntos) hay
+// varios vecinos dentro de R → aplana el jitter perpendicular (el "zigzag rojo" del bus lento o
+// parado); en tramos RÁPIDOS los puntos quedan a >R entre sí → sin vecinos → se conservan TAL
+// CUAL (no recorta curvas/esquinas reales). Es geométrico, independiente de la velocidad reportada
+// (el GPS pobre la da en 0). A diferencia de la media móvil por índices (suavizarHuella ±N), que
+// aplana poco el zigzag lento y SÍ recorta las curvas rápidas. Verificado sobre datos reales
+// (#944/#942): desviación perpendicular en tramos lentos ~2.8-10.9 m → ~0.8 m; en rápidos sin cambio.
+export function suavizarPorDistancia<T extends { lat: number; lng: number }>(pts: T[], R = 40, K = 8): T[] {
+  return pts.map((p, i) => {
+    let sLat = 0, sLng = 0, n = 0;
+    const lo = Math.max(0, i - K), hi = Math.min(pts.length - 1, i + K);
+    for (let j = lo; j <= hi; j++) {
+      if (distM(pts[j].lat, pts[j].lng, p.lat, p.lng) <= R) { sLat += pts[j].lat; sLng += pts[j].lng; n++; }
+    }
+    return n ? { ...p, lat: sLat / n, lng: sLng / n } : p;
+  });
+}
+
 // Normaliza filas crudas de ubicaciones_gps a HuellaPt (acc por defecto 25 m si falta).
 export function filasAPuntos(filas: any[]): HuellaPt[] {
   return (filas || []).map((d: any) => ({
@@ -148,8 +167,8 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
 
   // FALLBACK: si el filtro colapsó todo a ≤1 punto pero había suficientes datos, el cluster
   // era demasiado grande para la velocidad del bus (GPS pobre + ciudad lenta). Devolver la
-  // estela cruda suavizada — con algo de zigzag, pero visible en lugar de invisible.
-  if (out.length <= 1 && base.length >= 5) return suavizarHuella(base, 2);
+  // estela cruda suavizada por distancia — aplana el jitter lento, visible en vez de invisible.
+  if (out.length <= 1 && base.length >= 5) return suavizarPorDistancia(base);
 
   return out;
 }
@@ -192,11 +211,12 @@ export async function mapMatchTrail(
 }
 
 // Ajusta UNA ventana (≤100 puntos densos) a la vía. Si Map Matching falla o devuelve baja
-// confianza, cae a la huella cruda suavizada (densa: sigue la pista sin inventar rectas).
+// confianza (típico en GPS pobre de terceros: la ventana se fragmenta), cae a la huella cruda
+// suavizada por DISTANCIA: aplana el zigzag de los tramos lentos sin recortar las curvas rápidas.
 export async function matchVentana(ventana: MatchPt[], token: string): Promise<[number, number][]> {
   const r = await mapMatchTrail(ventana, token);
   if (r && r.confidence >= 0.4 && r.coords.length >= 2) return r.coords;
-  const suav = suavizarHuella(ventana);
+  const suav = suavizarPorDistancia(ventana);
   return suav.length >= 2 ? suav.map(p => [p.lng, p.lat] as [number, number]) : [];
 }
 
@@ -237,8 +257,8 @@ export function colorearMatched(
 // Features de la huella CRUDA (cuando Map Matching no logra pegar a la vía, p. ej. terceros con
 // GPS de torre/WiFi). Parte el trazo en tramos contiguos (corta donde el salto > MAX_SEG_M: así
 // el suavizado NO promedia a través de un teleport y no se dibuja una recta sobre el hueco),
-// suaviza cada tramo (ventana ±2) y emite un segmento por par, coloreado por velocidad. Fuente
-// ÚNICA del fallback crudo del modal y del "En vivo" del cliente (antes duplicado).
+// suaviza cada tramo por DISTANCIA (aplana el zigzag lento, conserva curvas rápidas) y emite un
+// segmento por par, coloreado por velocidad. Fuente ÚNICA del fallback crudo del modal/cliente/cola.
 export function huellaCrudaFeatures(
   huellaPts: { lat: number; lng: number; velocidad: number }[],
   maxSegM = MAX_SEG_M
@@ -256,7 +276,7 @@ export function huellaCrudaFeatures(
 
   const feats: any[] = [];
   for (const tramo of tramos) {
-    const pts = suavizarHuella(tramo, 2);   // suaviza DENTRO del tramo (no cruza huecos)
+    const pts = suavizarPorDistancia(tramo);   // aplana jitter lento DENTRO del tramo (no cruza huecos)
     for (let i = 0; i < pts.length - 1; i++) {
       const a = pts[i], b = pts[i + 1];
       feats.push({
