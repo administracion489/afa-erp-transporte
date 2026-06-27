@@ -344,7 +344,13 @@ function loadServicio(): ServicioGuardado | null {
     return raw ? (JSON.parse(raw) as ServicioGuardado) : null;
   } catch { return null; }
 }
-function clearServicio() { localStorage.removeItem(SK_SRV); }
+function clearServicio() {
+  localStorage.removeItem(SK_SRV);
+  // Al terminar/salir del servicio, limpiar la detección de "muerte por batería" para que un
+  // latido viejo no dispare un falso aviso en la próxima apertura (servicio nuevo limpio).
+  localStorage.removeItem("afa_gps_latido");
+  localStorage.removeItem("afa_gps_corte_pendiente");
+}
 
 // ─── COLA OFFLINE DE GPS (no perder puntos cuando se cae la señal) ─────────────
 const SK_COLA = "afa_gps_cola_v1";
@@ -561,11 +567,9 @@ export default function ConductorApp() {
   // el botón en la cabecera de GPS. Solo aplica en la app nativa.
   const [mostrarAjustesGps, setMostrarAjustesGps] = useState(false);
   // Exención de batería del equipo: true=ya protegido (no molestar), false=expuesto (mostrar guía),
-  // null=desconocido (web / APK viejo sin plugin). exentaBatRef = espejo estable para closures.
+  // null=desconocido (web / APK viejo sin plugin).
   const [exentaBat, setExentaBat] = useState<boolean | null>(null);
-  const exentaBatRef = useRef<boolean | null>(null);
-  useEffect(() => { exentaBatRef.current = exentaBat; }, [exentaBat]);
-  // true si la guía reaparece porque DETECTAMOS un corte de GPS en el viaje (no la 1ª vez).
+  // true si la guía reaparece porque DETECTAMOS que el SO MATÓ la app a mitad de un viaje.
   const [cortePendiente, setCortePendiente] = useState(false);
   // Expandir los pasos manuales (en equipos no-agresivos van colapsados tras "ver pasos").
   const [verPasosGps, setVerPasosGps] = useState(false);
@@ -960,23 +964,19 @@ export default function ConductorApp() {
       ultimoReArmRef.current = Date.now();
       setGpsNonce((n) => n + 1);
     };
-    const CORTE_VIAJE_MS = 180_000; // 3 min sin NINGÚN fix mientras hubo viaje = el SO congeló la app
     const edadFix = () => Date.now() - (ultimoFixRef.current || 0);
+    // Latido "app viva": el watchdog lo refresca mientras el proceso corre en 1er plano. Sirve
+    // para detectar la MUERTE del proceso por batería (cold start con latido viejo) y distinguirla
+    // de un túnel (que NO mata el proceso → el latido sigue fresco). Ver evaluarAjustesGps.
+    const latir = () => { try { localStorage.setItem("afa_gps_latido", String(Date.now())); } catch {} };
+    latir(); // marca vivo al armar el watchdog
     const onVis = () => {
-      if (typeof document === "undefined" || document.visibilityState !== "visible") return;
-      const gap = edadFix();
-      if (gap > VIEJO_RESUME) reArmar();
-      // CORTE real en un viaje: volvimos a 1er plano tras >3 min SIN fixes con un servicio activo.
-      // Si el equipo no está exento de batería, re-surface la guía (aunque ya la haya descartado).
-      if (esAppNativa() && gap > CORTE_VIAJE_MS && reservaActivaRef.current && exentaBatRef.current !== true) {
-        try { localStorage.setItem("afa_gps_corte_pendiente", "1"); } catch {}
-        setCortePendiente(true);
-        setMostrarAjustesGps(true);
-      }
+      if (typeof document !== "undefined" && document.visibilityState === "visible" && edadFix() > VIEJO_RESUME) reArmar();
     };
     document.addEventListener("visibilitychange", onVis);
     const iv = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") return; // en 2º plano el timer está throttleado igual
+      latir(); // app viva en 1er plano
       if (edadFix() > VIEJO_PERIODICO) reArmar();
     }, 30_000);
     return () => { document.removeEventListener("visibilitychange", onVis); clearInterval(iv); };
@@ -998,9 +998,16 @@ export default function ConductorApp() {
   }, [conductor?.id]);
 
   // Decide si mostrar la guía de ajustes — "detectar, no asumir":
-  //  • Si el equipo YA está exento de batería → NUNCA molestar (limpia el corte pendiente).
+  //  • Si el equipo YA está exento de batería → NUNCA molestar (limpia los flags).
   //  • Si NO está exento (o no se puede saber, APK viejo) → mostrar solo si: aún no la descartó,
-  //    o hubo un corte de GPS en un viaje (reaparición). Así no naguea, pero tampoco se pierde.
+  //    o DETECTAMOS que el SO mató la app a mitad de un viaje (reaparición).
+  //
+  // CLAVE — distinguir "mató la batería" de "túnel / sin señal": un túnel NO mata el proceso
+  // (el latido `afa_gps_latido`, que el watchdog refresca mientras la app está viva, sigue
+  // fresco). Solo un kill por batería/fabricante MATA el proceso → al reabrir hay un COLD START
+  // con un servicio activo y el último latido viejo. Por eso el disparador es el cold-start con
+  // latido viejo, NO la ausencia de fixes (que un túnel también produce). Cero falsos positivos
+  // en ruta por pérdida de señal.
   const evaluarAjustesGps = useCallback(async () => {
     if (!esAppNativa()) return;
     const exenta = await bateriaExenta();
@@ -1008,10 +1015,18 @@ export default function ConductorApp() {
     try {
       if (exenta === true) {
         localStorage.removeItem("afa_gps_corte_pendiente");
+        localStorage.removeItem("afa_gps_latido");
         setCortePendiente(false);
         setMostrarAjustesGps(false);
         return;
       }
+      // ¿La app murió a mitad de un servicio? Cold start + servicio activo + latido viejo.
+      const srv = loadServicio();
+      const latido = Number(localStorage.getItem("afa_gps_latido") || 0);
+      if (srv && latido && Date.now() - latido > 240_000) {
+        localStorage.setItem("afa_gps_corte_pendiente", "1");
+      }
+      localStorage.removeItem("afa_gps_latido"); // consumido: este cold start ya se evaluó
       const descartado = localStorage.getItem("afa_gps_ajustes_v1") === "1";
       const corte = localStorage.getItem("afa_gps_corte_pendiente") === "1";
       setCortePendiente(corte);
