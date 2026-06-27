@@ -8,7 +8,7 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador } from "@/lib/anim-marker";
 import {
-  limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures,
+  limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva,
 } from "@/lib/huella";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
@@ -1224,8 +1224,19 @@ export default function ClientePortal() {
     // si no, la huella cruda ya limpiada + suavizada (sin zigzag). Mismo motor que el modal.
     const huellaPts = huellaGpsMap[sel.id] || [];
     const matchedEV = matchedEnVivoMap[sel.id];
+    // Posición EN VIVO del bus de ESTE servicio (vía ref → NO se añade a deps, no redibuja de más):
+    // extiende la estela ajustada hasta el vehículo (colaViva), igual que el modal. Sin esto la
+    // huella queda hasta ~60 s detrás del bus (throttle de Map Matching). colaViva corta en saltos
+    // >300 m, así que un punto en vivo rancio/teleport no dibuja recta.
+    const sa = sel as any;
+    const liveU = ubicacionesEnVivoRef.current.find((u) =>
+      (u.reserva_id != null && Number(u.reserva_id) === sel.id) ||
+      (sa.vehiculo_id != null && u.vehiculo_id === sa.vehiculo_id) ||
+      (sa.vehiculo_tercero_id != null && u.vehiculo_tercero_id === sa.vehiculo_tercero_id)
+    );
+    const live = liveU ? { lat: Number(liveU.lat), lng: Number(liveU.lng), velocidad: Number(liveU.velocidad) || 0 } : null;
     const feats: any[] = (matchedEV && matchedEV.length >= 2)
-      ? colorearMatched(matchedEV, huellaPts)
+      ? [...colorearMatched(matchedEV, huellaPts), ...colaViva(matchedEV, huellaPts, live)]
       : huellaCrudaFeatures(huellaPts);   // cruda por tramos (corta teleports/huecos). lib/huella.ts
     if (feats.length > 0) {
       const sid = `gps-s-${sel.id}`, lid = `gps-l-${sel.id}`;
