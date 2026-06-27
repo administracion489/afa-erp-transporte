@@ -276,6 +276,26 @@ export async function solicitarExencionBateria(): Promise<void> {
   } catch { /* plugin ausente / sin soporte → la guía manual cubre el caso */ }
 }
 
+/**
+ * Pregunta al sistema si la app YA está exenta de la optimización de batería (plugin nativo
+ * propio `AfaNative`, APK 28+). Devuelve:
+ *   • true  → ya exenta (no hay que molestar al conductor con la guía).
+ *   • false → NO exenta (el SO puede matar el GPS → conviene mostrar la guía).
+ *   • null  → no se puede saber: web, o APK viejo sin el plugin (no asumir nada).
+ * Es de SOLO LECTURA, no abre ningún diálogo.
+ */
+export async function bateriaExenta(): Promise<boolean | null> {
+  if (!esNativo()) return null;
+  try {
+    const { registerPlugin } = await import("@capacitor/core");
+    const AfaNative = registerPlugin<{ isIgnoringBatteryOptimizations: () => Promise<{ value: boolean }> }>("AfaNative");
+    const r = await AfaNative.isIgnoringBatteryOptimizations();
+    return !!r?.value;
+  } catch {
+    return null; // plugin ausente (APK viejo) o sin soporte → desconocido
+  }
+}
+
 /** true si hay alguna forma de geolocalización disponible. */
 export function geoDisponible(): boolean {
   if (esNativo()) return true;

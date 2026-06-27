@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
 import { supabase } from "@/lib/supabase";
-import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, esAppNativa, backgroundGpsActivo, geoDisponible, type GeoPos, type GeoWatch } from "@/lib/geo";
+import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, esAppNativa, backgroundGpsActivo, geoDisponible, type GeoPos, type GeoWatch } from "@/lib/geo";
 import {
   CondorMark,
   IconActivity, IconAlert, IconArrowLeft, IconArrowRight, IconBell, IconBus,
@@ -560,6 +560,15 @@ export default function ConductorApp() {
   // el equipo no mate el rastreo. Se muestra una vez tras el disclosure y queda accesible desde
   // el botón en la cabecera de GPS. Solo aplica en la app nativa.
   const [mostrarAjustesGps, setMostrarAjustesGps] = useState(false);
+  // Exención de batería del equipo: true=ya protegido (no molestar), false=expuesto (mostrar guía),
+  // null=desconocido (web / APK viejo sin plugin). exentaBatRef = espejo estable para closures.
+  const [exentaBat, setExentaBat] = useState<boolean | null>(null);
+  const exentaBatRef = useRef<boolean | null>(null);
+  useEffect(() => { exentaBatRef.current = exentaBat; }, [exentaBat]);
+  // true si la guía reaparece porque DETECTAMOS un corte de GPS en el viaje (no la 1ª vez).
+  const [cortePendiente, setCortePendiente] = useState(false);
+  // Expandir los pasos manuales (en equipos no-agresivos van colapsados tras "ver pasos").
+  const [verPasosGps, setVerPasosGps] = useState(false);
   // Contador para FORZAR re-armar el watch de GPS (watchdog/resume). Cambiarlo re-ejecuta el
   // effect de GPS: limpia (stop) y vuelve a arrancar (start). Recupera el rastreo cuando el
   // listener nativo se quedó mudo (Doze / app en 2º plano largo rato) sin tener que reiniciar.
@@ -951,9 +960,19 @@ export default function ConductorApp() {
       ultimoReArmRef.current = Date.now();
       setGpsNonce((n) => n + 1);
     };
+    const CORTE_VIAJE_MS = 180_000; // 3 min sin NINGÚN fix mientras hubo viaje = el SO congeló la app
     const edadFix = () => Date.now() - (ultimoFixRef.current || 0);
     const onVis = () => {
-      if (typeof document !== "undefined" && document.visibilityState === "visible" && edadFix() > VIEJO_RESUME) reArmar();
+      if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+      const gap = edadFix();
+      if (gap > VIEJO_RESUME) reArmar();
+      // CORTE real en un viaje: volvimos a 1er plano tras >3 min SIN fixes con un servicio activo.
+      // Si el equipo no está exento de batería, re-surface la guía (aunque ya la haya descartado).
+      if (esAppNativa() && gap > CORTE_VIAJE_MS && reservaActivaRef.current && exentaBatRef.current !== true) {
+        try { localStorage.setItem("afa_gps_corte_pendiente", "1"); } catch {}
+        setCortePendiente(true);
+        setMostrarAjustesGps(true);
+      }
     };
     document.addEventListener("visibilitychange", onVis);
     const iv = setInterval(() => {
@@ -978,17 +997,57 @@ export default function ConductorApp() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conductor?.id]);
 
+  // Decide si mostrar la guía de ajustes — "detectar, no asumir":
+  //  • Si el equipo YA está exento de batería → NUNCA molestar (limpia el corte pendiente).
+  //  • Si NO está exento (o no se puede saber, APK viejo) → mostrar solo si: aún no la descartó,
+  //    o hubo un corte de GPS en un viaje (reaparición). Así no naguea, pero tampoco se pierde.
+  const evaluarAjustesGps = useCallback(async () => {
+    if (!esAppNativa()) return;
+    const exenta = await bateriaExenta();
+    setExentaBat(exenta);
+    try {
+      if (exenta === true) {
+        localStorage.removeItem("afa_gps_corte_pendiente");
+        setCortePendiente(false);
+        setMostrarAjustesGps(false);
+        return;
+      }
+      const descartado = localStorage.getItem("afa_gps_ajustes_v1") === "1";
+      const corte = localStorage.getItem("afa_gps_corte_pendiente") === "1";
+      setCortePendiente(corte);
+      if (!descartado || corte) setMostrarAjustesGps(true);
+    } catch {}
+  }, []);
+
   // Divulgación destacada de ubicación en segundo plano (requisito de Google Play):
   // se muestra UNA vez, antes de que el plugin pida el permiso de background.
   useEffect(() => {
     if (!conductor || !esAppNativa()) return;
     try {
       if (!localStorage.getItem("afa_bg_disclosure_v1")) { setMostrarDivulgacion(true); return; }
-      // Disclosure ya aceptado (usuarios existentes): mostrar la guía de ajustes una vez.
-      if (!localStorage.getItem("afa_gps_ajustes_v1")) setMostrarAjustesGps(true);
+      // Disclosure ya aceptado: evaluar si hace falta la guía (según exención real del equipo).
+      evaluarAjustesGps();
     } catch {}
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conductor?.id]);
+
+  // Auto-cerrar la guía si el conductor vuelve a 1er plano YA exento (concedió el diálogo del
+  // sistema). Solo OCULTA, nunca abre → cero riesgo de nagueo.
+  useEffect(() => {
+    if (!mostrarAjustesGps || !esAppNativa()) return;
+    const onVis = async () => {
+      if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+      const ex = await bateriaExenta();
+      setExentaBat(ex);
+      if (ex === true) {
+        try { localStorage.setItem("afa_gps_ajustes_v1", "1"); localStorage.removeItem("afa_gps_corte_pendiente"); } catch {}
+        setCortePendiente(false);
+        setMostrarAjustesGps(false);
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [mostrarAjustesGps]);
 
   async function iniciarRecorrido(reserva: Reserva) {
     if (reservaActiva) { alert("Hay un servicio en curso. Finalízalo antes de iniciar otro."); return; }
@@ -3214,8 +3273,8 @@ export default function ConductorApp() {
                 // aviso, cumpliendo el requisito de Google Play.
                 await pedirPermisoUbicacion().catch(() => {});
                 setGpsHabilitado(true);
-                // Tras conceder el permiso, mostrar la guía de ajustes del equipo una vez.
-                try { if (!localStorage.getItem("afa_gps_ajustes_v1")) setMostrarAjustesGps(true); } catch {}
+                // Tras conceder el permiso, evaluar si hace falta la guía (según exención real).
+                evaluarAjustesGps();
               }}
               style={{
                 width: "100%", padding: "13px 0", borderRadius: 14, border: "none",
@@ -3233,6 +3292,15 @@ export default function ConductorApp() {
       {mostrarAjustesGps && (() => {
         const fab = detectarFabricanteGps();
         const guia = GUIA_AJUSTES_GPS[fab] ?? GUIA_AJUSTES_GPS.generico;
+        // OEM agresivos: el 1-toque de batería NO basta (también piden inicio automático, etc.)
+        // → los pasos van expandidos. En el resto, el 1-toque resuelve → pasos colapsados.
+        const agresivo = ["xiaomi", "oppo", "vivo", "realme", "huawei"].includes(fab);
+        const mostrarPasos = verPasosGps || agresivo;
+        const cerrar = () => {
+          try { localStorage.setItem("afa_gps_ajustes_v1", "1"); localStorage.removeItem("afa_gps_corte_pendiente"); } catch {}
+          setCortePendiente(false);
+          setMostrarAjustesGps(false);
+        };
         return (
           <div style={{
             position: "fixed", inset: 0, zIndex: 131, background: "rgba(11,49,95,0.6)",
@@ -3244,57 +3312,40 @@ export default function ConductorApp() {
               boxShadow: "0 20px 60px rgba(0,0,0,0.35)",
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-                <span style={{ fontSize: 22 }}>⚙️</span>
+                <span style={{ fontSize: 22 }}>{cortePendiente ? "⚠️" : "⚙️"}</span>
                 <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, letterSpacing: -0.4 }}>
-                  Que NO se corte el rastreo
+                  {cortePendiente ? "El GPS se cortó en el viaje" : "Que NO se corte el rastreo"}
                 </h2>
               </div>
               <p style={{ margin: "0 0 14px", fontSize: 13, lineHeight: 1.5, color: "var(--c-mute)" }}>
-                Tu equipo (<strong>{guia.marca}</strong>) puede cerrar la app en segundo plano para ahorrar
-                batería y cortar el GPS durante el viaje. Activa estos ajustes <strong>una sola vez</strong>:
+                {cortePendiente
+                  ? <>Tu equipo (<strong>{guia.marca}</strong>) cerró la app en segundo plano y se perdió el rastreo. Protégelo con <strong>un toque</strong> para que no se vuelva a cortar:</>
+                  : <>Tu equipo (<strong>{guia.marca}</strong>) puede cerrar la app en segundo plano y cortar el GPS. Protégelo con <strong>un toque</strong>:</>}
               </p>
 
-              <ol style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 10 }}>
-                {guia.pasos.map((p, i) => (
-                  <li key={i} style={{
-                    display: "flex", gap: 10, alignItems: "flex-start",
-                    background: "var(--c-paper)", border: "1px solid var(--c-line-2)",
-                    borderRadius: 12, padding: "10px 12px",
-                  }}>
-                    <span style={{
-                      flexShrink: 0, width: 22, height: 22, borderRadius: 999, background: "var(--c-navy)",
-                      color: "#fff", fontSize: 12, fontWeight: 800,
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                    }}>{i + 1}</span>
-                    <div style={{ minWidth: 0 }}>
-                      <p style={{ margin: 0, fontSize: 13.5, fontWeight: 800, color: "var(--c-ink)" }}>{p.titulo}</p>
-                      <p style={{ margin: "2px 0 0", fontSize: 12, lineHeight: 1.45, color: "var(--c-mute)" }}>{p.detalle}</p>
-                    </div>
-                  </li>
-                ))}
-              </ol>
-
-              {esAppNativa() && (
+              {/* Acción principal: exención de batería en 1 toque (solo APK con plugin, no exento). */}
+              {exentaBat === false && (
                 <button
                   onClick={() => solicitarExencionBateria()}
                   style={{
-                    width: "100%", marginTop: 14, padding: "11px 14px", borderRadius: 12,
+                    width: "100%", padding: "13px 14px", borderRadius: 12,
                     border: "none", background: "var(--c-success, #1f9d55)",
-                    color: "#fff", fontWeight: 800, fontSize: 13,
+                    color: "#fff", fontWeight: 800, fontSize: 14,
                     cursor: "pointer", fontFamily: FONT_SANS,
                   }}
                 >
-                  🔋 Optimizar batería (1 toque)
+                  🔋 Proteger rastreo (1 toque)
                 </button>
               )}
 
-              {esAppNativa() && (
+              {/* En APK viejo (sin plugin, exentaBat===null) el 1-toque no existe → ajustes de la app. */}
+              {esAppNativa() && exentaBat !== false && (
                 <button
                   onClick={() => abrirAjustesUbicacion()}
                   style={{
-                    width: "100%", marginTop: 10, padding: "11px 14px", borderRadius: 12,
+                    width: "100%", padding: "13px 14px", borderRadius: 12,
                     border: "1px solid var(--c-navy)", background: "transparent",
-                    color: "var(--c-navy)", fontWeight: 800, fontSize: 13,
+                    color: "var(--c-navy)", fontWeight: 800, fontSize: 14,
                     cursor: "pointer", fontFamily: FONT_SANS,
                   }}
                 >
@@ -3302,18 +3353,50 @@ export default function ConductorApp() {
                 </button>
               )}
 
+              {/* Pasos manuales: expandidos en OEM agresivos; colapsados (tras "ver pasos") en el resto. */}
+              {!mostrarPasos && (
+                <button
+                  onClick={() => setVerPasosGps(true)}
+                  style={{
+                    width: "100%", marginTop: 10, padding: "8px", borderRadius: 10, border: "none",
+                    background: "transparent", color: "var(--c-mute)", fontWeight: 700, fontSize: 12,
+                    cursor: "pointer", fontFamily: FONT_SANS, textDecoration: "underline",
+                  }}
+                >
+                  ¿No funcionó? Ver pasos manuales
+                </button>
+              )}
+              {mostrarPasos && (
+                <ol style={{ margin: "14px 0 0", padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 10 }}>
+                  {guia.pasos.map((p, i) => (
+                    <li key={i} style={{
+                      display: "flex", gap: 10, alignItems: "flex-start",
+                      background: "var(--c-paper)", border: "1px solid var(--c-line-2)",
+                      borderRadius: 12, padding: "10px 12px",
+                    }}>
+                      <span style={{
+                        flexShrink: 0, width: 22, height: 22, borderRadius: 999, background: "var(--c-navy)",
+                        color: "#fff", fontSize: 12, fontWeight: 800,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                      }}>{i + 1}</span>
+                      <div style={{ minWidth: 0 }}>
+                        <p style={{ margin: 0, fontSize: 13.5, fontWeight: 800, color: "var(--c-ink)" }}>{p.titulo}</p>
+                        <p style={{ margin: "2px 0 0", fontSize: 12, lineHeight: 1.45, color: "var(--c-mute)" }}>{p.detalle}</p>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+
               <button
-                onClick={() => {
-                  try { localStorage.setItem("afa_gps_ajustes_v1", "1"); } catch {}
-                  setMostrarAjustesGps(false);
-                }}
+                onClick={cerrar}
                 style={{
-                  width: "100%", marginTop: 10, padding: "13px 0", borderRadius: 14, border: "none",
+                  width: "100%", marginTop: 14, padding: "13px 0", borderRadius: 14, border: "none",
                   background: "var(--c-navy)", color: "#fff", fontWeight: 800, fontSize: 15,
                   cursor: "pointer", fontFamily: FONT_SANS,
                 }}
               >
-                Listo, ya los activé
+                Entendido
               </button>
             </div>
           </div>
