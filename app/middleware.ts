@@ -11,6 +11,8 @@ export function middleware(request: NextRequest) {
     pathname === "/lector"            || pathname.startsWith("/lector/") ||
     pathname === "/pasajero"          || pathname.startsWith("/pasajero/") ||
     pathname === "/privacidad"        || pathname.startsWith("/privacidad/") ||
+    // Página estática para conectar el número de WhatsApp vía Embedded Signup de Meta
+    pathname.startsWith("/conectar-whatsapp") ||
     // /seguimiento/[token] es público — /seguimiento (ERP) queda protegido
     pathname.startsWith("/seguimiento/") ||
     // API pública para el link de seguimiento del pasajero

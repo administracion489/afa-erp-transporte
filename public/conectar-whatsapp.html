@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Conectar WhatsApp · AFA Transportes</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f3f4f6; color: #111827; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  .card {
+    background: #fff; border-radius: 20px; box-shadow: 0 10px 40px rgba(0,0,0,.08);
+    max-width: 480px; width: 100%; padding: 36px 32px; text-align: center;
+  }
+  .logo { width: 120px; margin: 0 auto 8px; display: block; }
+  h1 { font-size: 22px; color: #0b315f; margin-bottom: 6px; }
+  p.sub { color: #6b7280; font-size: 14px; line-height: 1.6; margin-bottom: 24px; }
+  .num {
+    background: #eef2ff; color: #0b315f; font-weight: 700; font-size: 18px;
+    padding: 10px 16px; border-radius: 12px; display: inline-block; margin-bottom: 24px;
+  }
+  button#conectar {
+    background: #25D366; color: #fff; border: none; font-size: 17px; font-weight: 700;
+    padding: 16px 24px; border-radius: 14px; cursor: pointer; width: 100%;
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    transition: background .15s;
+  }
+  button#conectar:hover { background: #1fb855; }
+  button#conectar:disabled { background: #9ca3af; cursor: default; }
+  .wa-icon { width: 24px; height: 24px; }
+  .estado {
+    margin-top: 24px; text-align: left; font-size: 14px; line-height: 1.6;
+    border-radius: 12px; padding: 0; overflow: hidden;
+  }
+  .paso { padding: 12px 16px; border-bottom: 1px solid #f3f4f6; color: #6b7280; }
+  .paso:last-child { border-bottom: none; }
+  .paso.ok { color: #065f46; background: #ecfdf5; }
+  .paso.activo { color: #0b315f; background: #eff6ff; font-weight: 600; }
+  .paso.error { color: #991b1b; background: #fef2f2; }
+  .datos {
+    margin-top: 20px; background: #f9fafb; border: 1px dashed #d1d5db; border-radius: 12px;
+    padding: 16px; text-align: left; font-family: ui-monospace, monospace; font-size: 12px;
+    color: #374151; word-break: break-all; display: none;
+  }
+  .datos b { color: #0b315f; }
+  .footnote { margin-top: 20px; font-size: 12px; color: #9ca3af; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <img src="/logoafa-removebg-preview.png" alt="AFA" class="logo" />
+    <h1>Conectar WhatsApp</h1>
+    <p class="sub">Vincula tu número de WhatsApp Business al CRM de AFA. Necesitas el celular con la app de <b>WhatsApp Business</b> a la mano para escanear un código.</p>
+
+    <div class="num">+51 966 707 225</div>
+
+    <button id="conectar" disabled>
+      <svg class="wa-icon" viewBox="0 0 24 24" fill="#fff"><path d="M17.5 14.4c-.3-.2-1.7-.9-2-1-.3-.1-.5-.2-.6.2-.2.3-.7.9-.8 1-.2.2-.3.2-.6.1-.3-.2-1.3-.5-2.4-1.5-.9-.8-1.5-1.8-1.7-2.1-.2-.3 0-.5.1-.6l.5-.5c.1-.2.2-.3.3-.5.1-.2 0-.4 0-.5 0-.1-.6-1.5-.8-2.1-.2-.5-.5-.5-.6-.5h-.5c-.2 0-.5.1-.7.3-.3.3-1 1-1 2.4s1 2.8 1.2 3c.2.2 2 3.1 5 4.3.7.3 1.2.5 1.7.6.7.2 1.3.2 1.8.1.6-.1 1.7-.7 1.9-1.3.2-.7.2-1.2.2-1.3-.1-.2-.3-.2-.5-.3zM12 2a10 10 0 00-8.6 15l-1.3 4.8 5-1.3A10 10 0 1012 2z"/></svg>
+      Conectar mi WhatsApp
+    </button>
+
+    <div class="estado">
+      <div class="paso activo" id="p1">1. Toca el botón verde de arriba</div>
+      <div class="paso" id="p2">2. En la ventana, elige "conectar número existente"</div>
+      <div class="paso" id="p3">3. En tu celular llega un mensaje → escanea el código QR</div>
+      <div class="paso" id="p4">4. Listo: el número queda conectado al CRM</div>
+    </div>
+
+    <div class="datos" id="datos"></div>
+
+    <p class="footnote" id="footnote">Cargando conexión segura con Meta…</p>
+  </div>
+
+<script>
+  var APP_ID = "1776032736701552";
+  var CONFIG_ID = "1912835406054543";
+
+  function setPaso(id, clase, texto) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.className = "paso " + clase;
+    if (texto) el.textContent = texto;
+  }
+  function mostrarDatos(html) {
+    var d = document.getElementById("datos");
+    d.style.display = "block";
+    d.innerHTML = html;
+  }
+
+  // Recibe los eventos del popup de Meta (progreso del registro)
+  window.addEventListener("message", function (event) {
+    if (event.origin !== "https://www.facebook.com" && event.origin !== "https://web.facebook.com") return;
+    try {
+      var data = JSON.parse(event.data);
+      if (data.type !== "WA_EMBEDDED_SIGNUP") return;
+      if (data.event === "FINISH" || data.event === "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING" || data.event === "FINISH_ONLY_WABA") {
+        setPaso("p3", "ok", "3. Código escaneado ✓");
+        setPaso("p4", "ok", "4. ¡Número conectado al CRM! ✓");
+        mostrarDatos(
+          "<b>CONECTADO ✓</b><br>phone_number_id: " + (data.data && data.data.phone_number_id || "—") +
+          "<br>waba_id: " + (data.data && data.data.waba_id || "—")
+        );
+      } else if (data.event === "CANCEL") {
+        setPaso("p2", "error", "Se canceló en: " + (data.data && data.data.current_step || "?"));
+      }
+    } catch (e) { /* mensajes que no son JSON, ignorar */ }
+  });
+
+  function lanzar() {
+    setPaso("p1", "ok", "1. Botón tocado ✓");
+    setPaso("p2", "activo");
+    FB.login(function (response) {
+      if (response.authResponse && response.authResponse.code) {
+        setPaso("p2", "ok", "2. Número seleccionado ✓");
+        var code = response.authResponse.code;
+        mostrarDatos("<b>Código de autorización (mándaselo a tu asistente):</b><br>" + code);
+        document.getElementById("footnote").textContent =
+          "Si el número ya quedó 'Conectado' en WhatsApp Manager, el CRM ya puede enviar y recibir.";
+      } else {
+        setPaso("p2", "error", "2. No se completó la conexión (se cerró la ventana)");
+      }
+    }, {
+      config_id: CONFIG_ID,
+      response_type: "code",
+      override_default_response_type: true,
+      extras: {
+        setup: {},
+        featureType: "whatsapp_business_app_onboarding",
+        sessionInfoVersion: "3"
+      }
+    });
+  }
+
+  window.fbAsyncInit = function () {
+    FB.init({ appId: APP_ID, cookie: true, xfbml: false, version: "v23.0" });
+    var btn = document.getElementById("conectar");
+    btn.disabled = false;
+    btn.addEventListener("click", lanzar);
+    document.getElementById("footnote").textContent =
+      "Conexión segura con Meta lista. Toca el botón verde para empezar.";
+  };
+
+  (function (d, s, id) {
+    var js, fjs = d.getElementsByTagName(s)[0];
+    if (d.getElementById(id)) return;
+    js = d.createElement(s); js.id = id;
+    js.src = "https://connect.facebook.net/es_LA/sdk.js";
+    fjs.parentNode.insertBefore(js, fjs);
+  })(document, "script", "facebook-jssdk");
+</script>
+</body>
+</html>
