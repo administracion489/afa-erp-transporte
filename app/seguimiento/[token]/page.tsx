@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { idAfa } from "@/lib/folio";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador } from "@/lib/anim-marker";
 
@@ -12,7 +13,7 @@ type Parada = {
 };
 type UbicacionGPS = { lat: number; lng: number; velocidad: number; rumbo: number; estado: string; created_at: string };
 type ReservaInfo = {
-  id: number; estado: string; fecha_servicio: string; hora_servicio: string;
+  id: number; codigo?: string | null; estado: string; fecha_servicio: string; hora_servicio: string;
   vehiculo_id: number | null; vehiculo_tercero_id: number | null;
   conductor_id: number | null; conductor_tercero_id: number | null;
   empresa_tercerizada_id: number | null;
@@ -767,7 +768,7 @@ export default function SeguimientoPage() {
             {/* Footer info */}
             <div className="pt-2 text-center">
               <p className="text-[10px]" style={{ color: AFA.grisMedio }}>
-                Reserva #{reserva?.id} · {reserva?.fecha_servicio} {reserva?.hora_servicio}
+                Reserva {reserva ? idAfa(reserva) : ""} · {reserva?.fecha_servicio} {reserva?.hora_servicio}
               </p>
             </div>
           </div>

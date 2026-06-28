@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import { idAfa } from "@/lib/folio";
+import { etiquetaEstado, normalizaEstado } from "@/lib/estados";
 
 declare global {
   interface Window { google: any; }
@@ -18,6 +20,7 @@ type Parada = {
 
 type DatosServicio = {
   id: number;
+  codigo?: string | null;
   cliente_nombre: string;
   vehiculo_placa: string;
   vehiculo_tipo: string;
@@ -33,9 +36,10 @@ type DatosServicio = {
 
 // ── HELPERS ────────────────────────────────────────────────────────────────────
 
+// Etiqueta canónica única (lib/estados). Antes mapeaba a masculinos ("Finalizado",
+// "Programado", "En ruta"); ahora coincide con el resto de la app ("Finalizada", etc.).
 function fmtEstado(e: string) {
-  return { en_curso: "En ruta", programada: "Programado", confirmada: "Confirmado",
-    finalizada: "Finalizado", cancelada: "Cancelado", pendiente: "Pendiente" }[e] ?? e;
+  return etiquetaEstado(normalizaEstado(e));
 }
 
 // ── COMPONENTE PRINCIPAL ───────────────────────────────────────────────────────
@@ -60,7 +64,7 @@ export default function GpsServicioPage() {
   const cargarDatos = useCallback(async () => {
     const [rRes, parRes] = await Promise.all([
       supabase.from("reservas")
-        .select("id,hora_servicio,fecha_servicio,estado,origen,destino,vehiculo_id,conductor_id,empresa_tercerizada_id,vehiculo_tercero_id,tipo,cliente_id")
+        .select("id,codigo,hora_servicio,fecha_servicio,estado,origen,destino,vehiculo_id,conductor_id,empresa_tercerizada_id,vehiculo_tercero_id,tipo,cliente_id")
         .eq("id", reservaId).single(),
       supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden"),
     ]);
@@ -84,6 +88,7 @@ export default function GpsServicioPage() {
 
     setDatos({
       id:               r.id,
+      codigo:           r.codigo,
       cliente_nombre:   cl?.empresa || cl?.nombre || "Sin cliente",
       vehiculo_placa:   v?.placa    || "—",
       vehiculo_tipo:    v?.categoria || "Bus",
@@ -236,7 +241,7 @@ export default function GpsServicioPage() {
             <div>
               <p className="text-white font-black text-sm">{datos.cliente_nombre}</p>
               <p className="text-blue-200 text-[11px]">
-                Reserva #{datos.id} · {datos.fecha_servicio} {datos.hora_servicio?.slice(0,5)}
+                Reserva {idAfa(datos)} · {datos.fecha_servicio} {datos.hora_servicio?.slice(0,5)}
               </p>
             </div>
           </div>

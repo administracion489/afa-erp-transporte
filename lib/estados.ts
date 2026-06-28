@@ -74,6 +74,24 @@ export function configEstado(e: EstadoReserva | string | null | undefined): Conf
   return (e && (ESTADOS_RESERVA as Record<string, ConfigEstado>)[e]) || ESTADOS_RESERVA.pendiente;
 }
 
+// Normaliza cualquier valor de estado (incluido legado o variantes de género/mayúsculas)
+// al ciclo canónico. Tras la limpieza de datos (supabase/reservas-estado-check.sql) la BD
+// ya solo guarda canónicos, pero esto blinda lecturas de datos viejos o de orígenes externos.
+// NOTA: 'por_confirmar' (valor legado) se mapea a 'programada' por decisión de negocio.
+export function normalizaEstado(e: EstadoReserva | string | null | undefined): EstadoReserva {
+  switch ((e ?? "").toString().trim().toLowerCase()) {
+    case "pendiente":                                  return "pendiente";
+    case "programada": case "por_confirmar":           return "programada";
+    case "confirmada": case "confirmado":              return "confirmada";
+    case "en_curso":   case "en_ruta":                 return "en_curso";
+    case "finalizada": case "finalizado":
+    case "completada": case "completado":
+    case "realizada":  case "realizado":               return "finalizada";
+    case "cancelada":  case "cancelado":               return "cancelada";
+    default:                                           return "pendiente";
+  }
+}
+
 // ── Dimensión B · estado administrativo / liquidación ──────────────────────────
 
 export type EstadoAdmin = "por_liquidar" | "liquidada" | "facturada" | "cobrada";
@@ -115,4 +133,32 @@ export function siguienteAdmin(e: EstadoAdmin | string | null | undefined): Esta
   const i = e ? ESTADOS_ADMIN_LISTA.indexOf(e as EstadoAdmin) : -1;
   if (i < 0 || i >= ESTADOS_ADMIN_LISTA.length - 1) return null;
   return ESTADOS_ADMIN_LISTA[i + 1];
+}
+
+// ── Capa CLIENTE · proyección de cara al cliente final ──────────────────────────
+//
+// El cliente NO ve el detalle operativo interno. En particular "pendiente" (servicio
+// recibido pero aún SIN recursos asignados) se le muestra como "En proceso" — honesto
+// y distinto de "Programada" (que implica recursos ya asignados). El resto coincide con
+// el ciclo; "Finalizada" es la única etiqueta para un servicio realizado.
+//
+// REGLA: esta es la ÚNICA fuente del vocabulario que ve el cliente. El portal
+// (app/cliente) NO debe redefinir su propio diccionario de estados.
+// El campo de color de texto se llama `c` para calzar con el design system del portal.
+
+export type ConfigCliente = { label: string; bg: string; c: string; dot: string };
+
+export const ESTADOS_CLIENTE: Record<EstadoReserva, ConfigCliente> = {
+  pendiente:  { label: "En proceso", bg: "#FBEFD5", c: "#A65B0A", dot: "#D97706" },
+  programada: { label: "Programada", bg: "#F1F5F9", c: "#475569", dot: "#94A3B8" },
+  confirmada: { label: "Confirmada", bg: "#E1E9FB", c: "#1d4ed8", dot: "#3b82f6" },
+  en_curso:   { label: "En curso",   bg: "#E3F1E6", c: "#15803d", dot: "#15803d" },
+  finalizada: { label: "Finalizada", bg: "#EFEFEC", c: "#1F2433", dot: "#6B6F7C" },
+  cancelada:  { label: "Cancelada",  bg: "#FCE5E2", c: "#B91C1C", dot: "#B91C1C" },
+};
+
+// Proyección tolerante: normaliza el valor y devuelve la config de cara al cliente.
+// Nunca undefined.
+export function estadoCliente(e: EstadoReserva | string | null | undefined): ConfigCliente {
+  return ESTADOS_CLIENTE[normalizaEstado(e)];
 }

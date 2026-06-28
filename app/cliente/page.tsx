@@ -10,12 +10,14 @@ import { animarMarcador } from "@/lib/anim-marker";
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, puentearHuecos,
 } from "@/lib/huella";
+import { idAfa } from "@/lib/folio";
+import { estadoCliente, normalizaEstado } from "@/lib/estados";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────
 type Cliente        = { id: number; nombre: string; empresa: string | null; ruc: string | null; email: string | null; telefono: string | null; };
-type Reserva        = { id: number; origen: string; destino: string; fecha_servicio: string | null; hora_servicio: string | null; estado: string; precio_cliente: number; vehiculo_id: number | null; conductor_id: number | null; cotizacion_id: number | null; created_at: string; };
+type Reserva        = { id: number; codigo?: string | null; origen: string; destino: string; fecha_servicio: string | null; hora_servicio: string | null; estado: string; precio_cliente: number; vehiculo_id: number | null; conductor_id: number | null; cotizacion_id: number | null; created_at: string; };
 type Parada         = { id: number; reserva_id: number; orden: number; nombre: string; direccion: string | null; lat: number | null; lng: number | null; hora_estimada: string | null; estado: string; };
 type Boarding       = { id: number; pasajero_id: number; parada_id: number; timestamp: string; metodo: string; pasajero?: { nombre: string; dni: string | null; empresa: string | null; }; };
 type PasajeroParada = { id: number; parada_id: number | null; pasajero_id: number; estado: string; estado_abordaje?: string | null; hora_abordaje?: string | null; pasajero?: { nombre: string; dni: string | null; edad?: number | null; }; };
@@ -95,17 +97,7 @@ const C = {
   fontMono:   '"JetBrains Mono", ui-monospace, monospace',
 };
 
-const ESTADO: Record<string, { bg: string; c: string; label: string; dot: string }> = {
-  programada: { bg: "#F1F5F9", c: "#475569", label: "Programada", dot: "#94A3B8" },
-  pendiente:  { bg: "#FBEFD5", c: "#A65B0A", label: "Pendiente",  dot: "#D97706" },
-  // "completado"/"realizado"/"finalizado" se unifican en una sola etiqueta: "Finalizada"
-  completado: { bg: "#EFEFEC", c: "#1F2433", label: "Finalizada", dot: "#6B6F7C" },
-  realizado:  { bg: "#EFEFEC", c: "#1F2433", label: "Finalizada", dot: "#6B6F7C" },
-  finalizado: { bg: "#EFEFEC", c: "#1F2433", label: "Finalizada", dot: "#6B6F7C" },
-  cancelado:  { bg: "#FCE5E2", c: "#B91C1C", label: "Cancelada",  dot: "#B91C1C" },
-  confirmado: { bg: "#E1E9FB", c: "#1d4ed8", label: "Confirmada", dot: "#3b82f6" },
-  en_curso:   { bg: "#E3F1E6", c: "#15803d", label: "En curso",   dot: "#15803d" },
-};
+// Vocabulario de estados de cara al cliente → única fuente en lib/estados.ts (estadoCliente()).
 
 // ─── SESSION ──────────────────────────────────────────────────────────────
 const SK = "afa_cliente_portal_v2";
@@ -120,21 +112,10 @@ const fmtFechaLrg = (f: string | null) => f ? new Date(f + "T00:00:00").toLocale
 const fmtTs       = (ts: string) => new Date(ts).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" });
 const fmtSoles    = (n: number) => `S/ ${Number(n || 0).toLocaleString("es-PE", { minimumFractionDigits: 2 })}`;
 
-// Todas las variantes de "servicio realizado" caen en UNA sola clave interna ("completado"),
-// que es la que usan el chip de filtro y el mapa ESTADO (etiqueta visible: "Finalizada").
-const ESTADO_NORM: Record<string, string> = {
-  pendiente:  "programada", // estado interno: el cliente ve "Programada"
-  confirmada: "confirmado",
-  cancelada:  "cancelado",
-  completada: "completado",
-  realizada:  "completado",
-  finalizada: "completado",
-  en_ruta:    "en_curso",
-};
-function normEstado(e: string) { return ESTADO_NORM[e] || e; }
+// Normalización de estados (incluye valores legados) → lib/estados.ts (normalizaEstado()).
 
 function Badge({ estado }: { estado: string }) {
-  const e = ESTADO[normEstado(estado)] || { bg: "#f3f4f6", c: "#374151", label: estado, dot: "#9ca3af" };
+  const e = estadoCliente(estado);
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: e.bg, color: e.c, whiteSpace: "nowrap" as const }}>
       <span style={{ width: 5, height: 5, borderRadius: "50%", background: e.dot, display: "inline-block" }} />
@@ -155,7 +136,7 @@ const FAQ_ITEMS = [
   { q: "¿Con qué frecuencia se actualiza el GPS?", a: "La posición del vehículo se actualiza en tiempo real cada 10 segundos cuando el conductor tiene activa la app y señal de datos." },
   { q: "¿Cómo descargo el manifiesto oficial?", a: "En la pestaña 'Reporte', selecciona el servicio y presiona 'Manifiesto MTC'. El documento sigue el formato R.D. 1946-2009-MTC-15 exigido por SUTRAN." },
   { q: "¿Puedo programar un nuevo servicio desde aquí?", a: "Para programar un nuevo servicio, comunícate con nuestro equipo al 966707225 o escríbenos por WhatsApp." },
-  { q: "¿Qué significa cada estado del servicio?", a: "Programada: reserva recibida y en proceso. Confirmada: aprobada y con recursos asignados. En curso: el bus está en ruta hoy. Finalizada: el servicio ya se realizó. Cancelada: servicio anulado." },
+  { q: "¿Qué significa cada estado del servicio?", a: "En proceso: recibimos tu solicitud y la estamos gestionando. Programada: con vehículo y conductor asignados. Confirmada: aprobada y lista. En curso: el bus está en ruta hoy. Finalizada: el servicio ya se realizó. Cancelada: servicio anulado." },
   { q: "¿Puedo agregar o editar pasajeros yo mismo?", a: "Sí. En el Historial de servicios, selecciona un servicio pendiente o confirmado y presiona 'Editar manifiesto'. Podrás agregar pasajeros por nombre/DNI, eliminarlos o subir una lista completa en formato Excel/CSV." },
 ];
 
@@ -1281,18 +1262,27 @@ export default function ClientePortal() {
   const serviciosMes   = reservas.filter(r => r.fecha_servicio?.startsWith(esteM)).length;
   const serviciosTotal = reservas.length;
   const gastosTotal    = reservas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
-  const completados    = reservas.filter(r => ["completado","realizado","finalizada"].includes(normEstado(r.estado))).length;
+  const completados    = reservas.filter(r => normalizaEstado(r.estado) === "finalizada").length;
   const puntualidad    = serviciosTotal > 0 ? Math.round((completados / serviciosTotal) * 100) : 0;
   const pasajerosTotal = Object.values(boarding).flat().length;
-  const esCancelado    = (e: string) => e === "cancelado" || e === "cancelada";
-  const esFinalizado   = (e: string) => e === "completado" || e === "realizado" || e === "finalizada";
+  const esCancelado    = (e: string) => normalizaEstado(e) === "cancelada";
+  const esFinalizado   = (e: string) => normalizaEstado(e) === "finalizada";
   const esHoy          = (f: string | null) => !!f && f.startsWith(hoy);
   const esFuturo       = (f: string | null) => !!f && f.slice(0,10) > hoy;
+
+  // Correlativo propio del cliente (su orden interno): numera TODAS sus reservas por
+  // antigüedad (id asc), estable por servicio. El identificador OFICIAL para reportar
+  // es el "ID AFA" (folio reservas.codigo); este correlativo es solo para su orden.
+  const ordenCliente = (() => {
+    const m = new Map<number, number>();
+    [...reservas].sort((a, b) => a.id - b.id).forEach((r, i) => m.set(r.id, i + 1));
+    return m;
+  })();
 
   // Deriva el estado efectivo: si el GPS de hoy está activo para este vehículo → "en_curso"
   // aunque reservas.estado no lo haya actualizado (el conductor app no escribe en reservas)
   const efectivoEstado = (r: Reserva): string => {
-    const base = normEstado(r.estado);
+    const base = normalizaEstado(r.estado);
     if (esHoy(r.fecha_servicio) && !esCancelado(r.estado) && !esFinalizado(r.estado) && base !== "en_curso") {
       const gpsDeHoy = gpsActual && gpsActual.timestamp?.slice(0, 10) === hoy;
       const mismoVehiculo = r.vehiculo_id && r.vehiculo_id === vehiculoActivo;
@@ -1313,7 +1303,7 @@ export default function ClientePortal() {
     // Servicios mañana
     ...reservas.filter(r => r.fecha_servicio === mañana && !esCancelado(r.estado)).slice(0, 1).map(r => ({ id: r.id + 6000, tipo: "info" as const, titulo: "Servicio programado mañana", desc: `${r.origen} → ${r.destino} · ${r.hora_servicio?.slice(0,5) || "–"}`, fecha: r.fecha_servicio || mañana })),
     // Próximos servicios confirmados
-    ...reservas.filter(r => esFuturo(r.fecha_servicio) && r.fecha_servicio !== mañana && (r.estado === "confirmado" || r.estado === "confirmada")).slice(0, 2).map(r => ({ id: r.id + 1000, tipo: "success" as const, titulo: "Servicio confirmado", desc: `${r.origen} → ${r.destino} · ${fmtFecha(r.fecha_servicio)}`, fecha: r.fecha_servicio || hoy })),
+    ...reservas.filter(r => esFuturo(r.fecha_servicio) && r.fecha_servicio !== mañana && normalizaEstado(r.estado) === "confirmada").slice(0, 2).map(r => ({ id: r.id + 1000, tipo: "success" as const, titulo: "Servicio confirmado", desc: `${r.origen} → ${r.destino} · ${fmtFecha(r.fecha_servicio)}`, fecha: r.fecha_servicio || hoy })),
   ];
   const servicioHoy    = reservas.find(r => esHoy(r.fecha_servicio)); // cualquier estado
   const serviciosHoy   = reservas
@@ -2578,7 +2568,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
                         <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.success, animation: "pcPulse 1.6s ease-out infinite", display: "inline-block" }} />
                         <p style={{ color: C.success, fontWeight: 800, fontSize: 11, margin: 0, letterSpacing: "1.2px", textTransform: "uppercase" as const }}>En curso · HOY</p>
-                        <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: "auto" }}>#{r.id}</span>
+                        <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: "auto" }}>{idAfa(r)}</span>
                       </div>
                       <p style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 17, letterSpacing: -0.4, margin: "0 0 4px", color: C.ink }}>
                         {r.origen} → {r.destino}
@@ -2884,7 +2874,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                   <p style={{ fontSize: 11, fontWeight: 700, color: C.mute, margin: 0 }}>
                     {rutaSelId == null
                       ? <>Mostrando <b style={{ color: C.navy }}>{busesEnVivo} bus{busesEnVivo !== 1 ? "es" : ""}</b> en vivo · toca un servicio para ver su ruta</>
-                      : <>Viendo ruta de <b style={{ color: C.navy }}>#{servicioSel?.id}</b></>}
+                      : <>Viendo ruta de <b style={{ color: C.navy }}>{servicioSel ? idAfa(servicioSel) : ""}</b></>}
                   </p>
                   {rutaSelId != null && (
                     <button onClick={() => setRutaSelId(null)}
@@ -2904,13 +2894,13 @@ tbody tr:nth-child(even){background:#f9fafb}
                         style={{ flexShrink: 0, padding: "8px 14px", borderRadius: 9, border: `2px solid ${activo ? color : C.line}`, background: activo ? color + "14" : C.surface, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 7, transition: "all 0.15s" }}>
                         <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0, ...(est === "en_curso" ? { animation: "pcPulse 1.6s ease-out infinite" } : {}) }} />
                         <span style={{ fontWeight: 800, fontSize: 12, color: activo ? color : C.ink }}>
-                          {r.hora_servicio?.slice(0, 5) || "–"} &nbsp;·&nbsp; #{r.id}
+                          {r.hora_servicio?.slice(0, 5) || "–"} &nbsp;·&nbsp; {idAfa(r)}
                         </span>
                         <span style={{ fontSize: 10.5, color: C.mute, fontWeight: 600, maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>
                           {r.origen?.split(",")[0]}
                         </span>
                         <span style={{ fontSize: 10, fontWeight: 700, background: est === "en_curso" ? "#dcfce7" : C.navyTint, color: est === "en_curso" ? "#15803d" : C.navy, padding: "2px 7px", borderRadius: 4, flexShrink: 0 }}>
-                          {ESTADO[normEstado(est)]?.label ?? est}
+                          {estadoCliente(est).label}
                         </span>
                       </button>
                     );
@@ -2947,7 +2937,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                     <p style={{ color: efectivoEstado(servicioEnVivoActivo) === "en_curso" ? C.success : C.info, fontWeight: 800, margin: 0, fontSize: 11, textTransform: "uppercase" as const, letterSpacing: "1.2px" }}>
                       {efectivoEstado(servicioEnVivoActivo) === "en_curso" ? "En curso" : esFinalizado(servicioEnVivoActivo.estado) ? "Finalizada hoy" : "Confirmada · Hoy"}
                     </p>
-                    <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: 4 }}>#{servicioEnVivoActivo.id}</span>
+                    <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: 4 }}>{idAfa(servicioEnVivoActivo)}</span>
                   </div>
                   <p style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 18, letterSpacing: -0.4, margin: "0 0 3px", color: C.ink }}>
                     {servicioEnVivoActivo.origen} → {servicioEnVivoActivo.destino}
@@ -3219,13 +3209,13 @@ tbody tr:nth-child(even){background:#f9fafb}
                 />
               </div>
               <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
-                {(["todos","programada","confirmado","en_curso","completado","cancelado"] as const).map(e => {
+                {(["todos","pendiente","programada","confirmada","en_curso","finalizada","cancelada"] as const).map(e => {
                   const cnt = e === "todos" ? reservas.length : reservas.filter(r => efectivoEstado(r) === e).length;
                   const active = filtroEstado === e;
                   return (
                     <button key={e} onClick={() => setFiltroEstado(e)}
                       style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: 20, border: `1px solid ${active ? C.navy : C.line}`, background: active ? C.navy : C.surface, color: active ? "white" : C.mute, fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans, transition: "all .12s" }}>
-                      {e === "todos" ? "Todos" : (ESTADO[e]?.label || e)}
+                      {e === "todos" ? "Todos" : estadoCliente(e).label}
                       <span style={{ fontSize: 9.5, background: active ? "rgba(255,255,255,0.2)" : C.surfaceAlt, color: active ? "rgba(255,255,255,0.8)" : C.mute2, borderRadius: 10, padding: "0 5px", lineHeight: "17px", minWidth: 20, textAlign: "center" as const }}>{cnt}</span>
                     </button>
                   );
@@ -3271,13 +3261,13 @@ tbody tr:nth-child(even){background:#f9fafb}
                         const st = reservaStats[r.id];
                         const sla = st && st.esperados > 0 ? Math.min(100, Math.round((st.embarcados / st.esperados) * 100)) : null;
                         const slaColor = (pct: number) => pct >= 95 ? C.success : pct >= 85 ? C.warn : C.danger;
-                        const est = ESTADO[efectivoEstado(r)] || { bg: "#F1F5F9", c: "#475569", label: efectivoEstado(r), dot: "#94A3B8" };
+                        const est = estadoCliente(efectivoEstado(r));
                         return (
                           <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "11px 18px", borderTop: ri > 0 ? `1px solid ${C.line}` : undefined, background: efectivoEstado(r) === "en_curso" ? "#F0F7F3" : undefined }}>
                             {/* hora + id */}
                             <div style={{ minWidth: 48, textAlign: "right" as const, flexShrink: 0 }}>
                               <div style={{ fontFamily: C.fontMono, fontWeight: 700, fontSize: 13, color: C.ink2 }}>{r.hora_servicio?.slice(0,5) || "–:–"}</div>
-                              <div style={{ fontFamily: C.fontMono, fontSize: 9.5, color: C.mute2 }}>#{r.id}</div>
+                              <div style={{ fontFamily: C.fontMono, fontSize: 9.5, color: C.mute2 }}>{idAfa(r)}</div>
                             </div>
                             {/* dot */}
                             <div style={{ width: 3, height: 36, borderRadius: 2, background: est.dot, flexShrink: 0 }} />
@@ -3326,14 +3316,14 @@ tbody tr:nth-child(even){background:#f9fafb}
                 <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 13 }}>
                   <thead>
                     <tr style={{ background: C.surfaceAlt, borderBottom: `1.5px solid ${C.line2}` }}>
-                      {[["#","48px"],["Fecha","120px"],["Hora","70px"],["Ruta","auto"],["Estado","110px"],["Manifiesto","90px"],["Pasajeros","110px"],["SLA","120px"],...(puedeVerMontos ? [["Total","110px"]] : []),["GPS","68px"],["Reporte","80px"]].map(([h,w]) => (
+                      {[["N° orden","78px"],["ID AFA","122px"],["Fecha","120px"],["Hora","70px"],["Ruta","auto"],["Estado","110px"],["Manifiesto","90px"],["Pasajeros","110px"],["SLA","120px"],...(puedeVerMontos ? [["Total","110px"]] : []),["GPS","68px"],["Reporte","80px"]].map(([h,w]) => (
                         <th key={h} style={{ padding: "10px 14px", textAlign: "left" as const, fontSize: 9.5, fontWeight: 800, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.07em", whiteSpace: "nowrap" as const, width: w !== "auto" ? w : undefined }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {reservasFiltradas.length === 0 ? (
-                      <tr><td colSpan={puedeVerMontos ? 11 : 10} style={{ padding: "56px 20px", textAlign: "center" as const }}>
+                      <tr><td colSpan={puedeVerMontos ? 12 : 11} style={{ padding: "56px 20px", textAlign: "center" as const }}>
                         <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke={C.line2} strokeWidth="1.2" style={{ display: "block", margin: "0 auto 12px" }}><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
                         <p style={{ color: C.mute, fontSize: 14, fontWeight: 600, margin: 0 }}>Sin resultados para los filtros seleccionados</p>
                       </td></tr>
@@ -3346,8 +3336,11 @@ tbody tr:nth-child(even){background:#f9fafb}
                           onMouseEnter={e => (e.currentTarget.style.background = C.navyTint)}
                           onMouseLeave={e => (e.currentTarget.style.background = rowBg)}
                           style={{ borderBottom: `1px solid ${C.line}`, background: rowBg, transition: "background 0.1s" }}>
-                          <td style={{ padding: "10px 14px", fontFamily: C.fontMono, fontSize: 10, color: C.mute2, whiteSpace: "nowrap" as const }}>
-                            {String(r.id).padStart(4, "0")}
+                          <td style={{ padding: "10px 14px", fontFamily: C.fontMono, fontSize: 11, fontWeight: 700, color: C.mute, whiteSpace: "nowrap" as const }}>
+                            {String(ordenCliente.get(r.id) ?? 0).padStart(3, "0")}
+                          </td>
+                          <td style={{ padding: "10px 14px", fontFamily: C.fontMono, fontSize: 11, fontWeight: 800, color: C.navy, whiteSpace: "nowrap" as const }} title="Código oficial AFA — úsalo para reportar este servicio">
+                            {idAfa(r)}
                           </td>
                           <td style={{ padding: "10px 14px", whiteSpace: "nowrap" as const }}>
                             <p style={{ fontFamily: C.fontMono, fontSize: 11.5, fontWeight: 700, color: C.ink2, margin: 0 }}>{fmtFecha(r.fecha_servicio)}</p>
@@ -3364,7 +3357,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                           {/* ── Manifiesto ── */}
                           <td style={{ padding: "8px 14px" }}>
                             {(() => {
-                              const esEditable = ["pendiente","confirmado","confirmada","por_confirmar","programada"].includes(r.estado);
+                              const esEditable = ["pendiente","programada","confirmada"].includes(normalizaEstado(r.estado));
                               const esCanc     = esCancelado(r.estado);
                               const paxCount   = st?.esperados ?? null;
                               return (

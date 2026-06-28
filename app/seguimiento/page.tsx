@@ -6,6 +6,7 @@ import ModalGps from "@/components/seguimiento/ModalGps";
 import PanelMensajesPasajeros from "@/components/seguimiento/PanelMensajesPasajeros";
 import { supabase } from "@/lib/supabase";
 import { ESTADOS_RESERVA, ESTADO_ADMIN_INICIAL } from "@/lib/estados";
+import { idAfa } from "@/lib/folio";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TIPOS
@@ -15,7 +16,7 @@ type EstadoReserva = "pendiente"|"programada"|"confirmada"|"en_curso"|"finalizad
 type EstadoVisual  = "programado"|"en_ruta"|"finalizado"|"alerta"|"cancelado";
 
 type Reserva = {
-  id: number; cliente_id: number|null; vehiculo_id: number|null; conductor_id: number|null;
+  id: number; codigo?: string|null; cliente_id: number|null; vehiculo_id: number|null; conductor_id: number|null;
   empresa_tercerizada_id: number|null; vehiculo_tercero_id: number|null;
   tipo: string; tipo_asignacion: string|null; tipo_servicio_detalle: string|null;
   estado: EstadoReserva; fecha_servicio: string|null; hora_servicio: string|null;
@@ -457,7 +458,7 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-black text-[#0b315f] text-sm">{s.cliente_nombre}</span>
-                  <span className="text-[10px] font-bold bg-[#EFF6FF] text-[#1d4ed8] px-2 py-0.5 rounded-full">#{r.id}</span>
+                  <span className="text-[10px] font-bold bg-[#EFF6FF] text-[#1d4ed8] px-2 py-0.5 rounded-full">{idAfa(r)}</span>
                 </div>
                 <div className="flex items-center gap-3 mt-0.5">
                   <span className="text-xs text-gray-400 font-mono font-bold">{s.vehiculo_placa}</span>
@@ -667,7 +668,7 @@ function TarjetaEventual({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: 
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-black text-[#0b315f] text-sm">{s.cliente_nombre}</span>
-                  <span className="text-[10px] font-bold bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full">Eventual #{r.id}</span>
+                  <span className="text-[10px] font-bold bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full">Eventual {idAfa(r)}</span>
                 </div>
                 <div className="flex items-center gap-3 mt-0.5">
                   <span className="text-xs text-gray-400 font-mono font-bold">{s.vehiculo_placa}</span>
@@ -1058,7 +1059,7 @@ export default function SeguimientoPage() {
                           const est=ESTADO_VIS[s.estado_visual];
                           return (
                             <tr key={s.reserva.id} className="hover:bg-gray-50 transition-colors">
-                              <td className="px-4 py-3 font-black text-[#0b315f] text-xs">#{s.reserva.id}</td>
+                              <td className="px-4 py-3 font-black text-[#0b315f] text-xs">{idAfa(s.reserva)}</td>
                               <td className="px-4 py-3">
                                 <span className={`text-[10px] font-bold px-2 py-1 rounded-lg ${!s.es_eventual?"bg-[#EFF6FF] text-[#0b315f]":"bg-indigo-50 text-indigo-600"}`}>
                                   {!s.es_eventual?"Fijo":"Eventual"}

@@ -8,6 +8,7 @@ import {
   ESTADOS_ADMIN, ESTADOS_ADMIN_LISTA, aplicaAdmin, ESTADO_ADMIN_INICIAL, etiquetaAdmin, siguienteAdmin,
 } from "@/lib/estados";
 import type { EstadoReserva, EstadoAdmin } from "@/lib/estados";
+import { idAfa } from "@/lib/folio";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
 import ModalGenerarPrograma from "@/components/programacion/ModalGenerarPrograma";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
@@ -94,7 +95,7 @@ type ConductorTercero   = { id: number; empresa_id: number; nombre: string; lice
 type DocumentoTercero   = { id: number; empresa_id: number; tipo: string; fecha_vencimiento?: string | null; };
 
 type Reserva = {
-  id: number; cliente_id: number | null; cotizacion_id: number | null;
+  id: number; codigo?: string | null; cliente_id: number | null; cotizacion_id: number | null;
   vehiculo_id: number | null; conductor_id: number | null;
   tipo: string; estado: EstadoReserva; estado_admin: EstadoAdmin | null;
   fecha_servicio: string | null; hora_servicio: string | null;
@@ -1305,7 +1306,7 @@ export default function ReservasPage() {
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
               <div className="flex items-center justify-between mb-5">
                 <div>
-                  <h3 className="text-lg font-bold text-gray-800">Links de servicio #{r.id}</h3>
+                  <h3 className="text-lg font-bold text-gray-800">Links de servicio {idAfa(r)}</h3>
                   {expira && <p className="text-xs text-gray-400 mt-0.5">Vencen: {expira}</p>}
                 </div>
                 <button onClick={() => setModalLinksId(null)} className="text-gray-400 hover:text-gray-600 text-xl font-bold leading-none">×</button>
@@ -1566,7 +1567,7 @@ export default function ReservasPage() {
               <h3 className="text-lg font-bold text-gray-900 text-center mb-1">¿Eliminar reserva?</h3>
               {r && (
                 <p className="text-sm text-gray-500 text-center mb-5">
-                  <b className="text-gray-800">#{r.id} · {nombreCliente(r.cliente_id)}</b><br />
+                  <b className="text-gray-800">{idAfa(r)} · {nombreCliente(r.cliente_id)}</b><br />
                   {fmtFecha(r.fecha_servicio)} {r.hora_servicio?.slice(0, 5) || ""}
                 </p>
               )}
@@ -1754,7 +1755,7 @@ export default function ReservasPage() {
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-lg" style={{ background: "#0b315f" }}>P</div>
             <div>
-              <h2 className="text-lg font-bold text-gray-900">Programar reserva #{editandoId}</h2>
+              <h2 className="text-lg font-bold text-gray-900">Programar reserva {(() => { const re = reservas.find(rr => rr.id === editandoId); return re ? idAfa(re) : (editandoId ? `#${editandoId}` : ""); })()}</h2>
               <p className="text-xs text-gray-400">
                 {(() => { const r = reservas.find(r => r.id === editandoId); return r ? ((r as any).origen || "") + " -> " + ((r as any).destino || "") + " · " + fmtSoles(Number(r.precio_cliente || 0)) : ""; })()}
               </p>
@@ -2284,7 +2285,7 @@ export default function ReservasPage() {
                     <div key={r.id} className="flex items-center gap-4 px-5 py-3 hover:bg-gray-50 transition-colors" style={{ boxShadow: sob ? "inset 3px 0 0 #dc2626" : urgenciaFila(r.fecha_servicio, r.estado) }}>
                       <div className="shrink-0 text-right min-w-[44px]">
                         <div className="text-sm font-bold text-gray-600">{r.hora_servicio?.slice(0,5) || "--:--"}</div>
-                        <div className="font-mono text-[10px] text-gray-300">#{r.id}</div>
+                        <div className="font-mono text-[10px] text-gray-300">{idAfa(r)}</div>
                       </div>
                       <div className="w-px h-8 rounded-full shrink-0" style={{ background: estCfg.dot }} />
                       <div className="flex-1 min-w-0">
@@ -2396,7 +2397,7 @@ export default function ReservasPage() {
                       <td className="p-3 text-gray-300 text-xs">{expandido ? "v" : ">"}</td>
 
                       <td className="p-3">
-                        <span className="font-black font-mono text-[#0b315f]">#{r.id}</span>
+                        <span className="font-black font-mono text-[#0b315f]">{idAfa(r)}</span>
                         {badge && <div className="text-[9px] font-bold" style={{ color: badge.color }}>{badge.label}</div>}
                         {riesgo === "alto" && <div className="text-[9px] font-bold text-red-600">DOC VENC.</div>}
                         {sobrecupo && <div className="text-[9px] font-bold text-red-600">SOBRECUPO</div>}
