@@ -5,7 +5,7 @@
 // arreglaba y "En vivo" quedaba con la huella cruda en zigzag. Mantener AQUÍ.
 
 export type MatchPt = { lat: number; lng: number; acc: number };
-export type HuellaPt = { lat: number; lng: number; velocidad: number; acc: number };
+export type HuellaPt = { lat: number; lng: number; velocidad: number; acc: number; ts: number };
 
 // Distancia en metros entre dos coordenadas (haversine).
 export function distM(aLat: number, aLng: number, bLat: number, bLng: number): number {
@@ -56,11 +56,14 @@ export function suavizarPorDistancia<T extends { lat: number; lng: number }>(pts
 }
 
 // Normaliza filas crudas de ubicaciones_gps a HuellaPt (acc por defecto 25 m si falta).
+// `ts` (ms) del fix real (created_at, fallback timestamp) → lo usan el gate de velocidad y el
+// puenteo de huecos. 0 si no hay fecha (entonces esas etapas se omiten, ver guardas).
 export function filasAPuntos(filas: any[]): HuellaPt[] {
   return (filas || []).map((d: any) => ({
     lat: Number(d.lat), lng: Number(d.lng),
     velocidad: Number(d.velocidad) || 0,
     acc: d.precision_m != null ? Number(d.precision_m) : 25,
+    ts: d.created_at ? new Date(d.created_at).getTime() : (d.timestamp ? new Date(d.timestamp).getTime() : 0),
   }));
 }
 
@@ -115,24 +118,50 @@ const radioDwell = (acc: number) => Math.min(DWELL_R_MAX, Math.max(DWELL_R_M, (a
 // (>1000 km/h). Se descarta SOLO de la huella; el punto en vivo y el envío no se tocan (un
 // equipo sin chip puede reportar legítimamente >80 m, ver project_conectarse_gps).
 const ACC_MAX_TRAIL = 300;
+
+// Velocidad máxima creíble para un bus. Por encima de esto un "salto" es jitter/glitch de la red
+// (la precisión reportada lo subestima), no movimiento real. La usan el gate (descartar el punto)
+// y el puenteo (decidir si un hueco se rellena o se corta).
+const VMAX_BUS_KMH = 130;
+
+// Gate de velocidad: descarta los fixes que implican una velocidad IMPOSIBLE (>VMAX) desde el
+// último fix BUENO — el glitch que "teletransporta" la posición y luego vuelve. Re-ancla tras N
+// seguidos (una relocalización REAL tras pérdida de señal larga). Quitar el punto-glitch hace que
+// sus vecinos queden contiguos → el trazo no se parte en ese punto. Requiere `ts` fiable; si no
+// hay (ts=0 / no creciente), se omite (no filtra). Pura y testeable.
+export function gateVelocidad(pts: HuellaPt[], vmaxKmh = VMAX_BUS_KMH, reanclaN = 4): HuellaPt[] {
+  if (pts.length < 2 || !(pts[pts.length - 1].ts > pts[0].ts)) return pts;
+  const vmax = vmaxKmh / 3.6;
+  const out: HuellaPt[] = [pts[0]];
+  let lejos: HuellaPt[] = [];
+  for (let i = 1; i < pts.length; i++) {
+    const p = pts[i], ref = out[out.length - 1];
+    const dt = Math.max(1, (p.ts - ref.ts) / 1000);
+    if (distM(ref.lat, ref.lng, p.lat, p.lng) / dt <= vmax) { out.push(p); lejos = []; }
+    else { lejos.push(p); if (lejos.length >= reanclaN) { out.push(...lejos); lejos = []; } } // relocalización real
+  }
+  return out;
+}
+
 export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
   // Pre-filtro: descarta fixes demasiado inciertos para el trazo (torre/WiFi, saltos imposibles).
   // PERO si eso dejaría el trazo casi vacío (equipo legítimo SIN chip, consistentemente >300 m),
   // se conservan los crudos finitos: una estela degradada es mejor que NINGUNA.
   const finitos = pts.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
   const precisos = finitos.filter((p) => p.acc <= ACC_MAX_TRAIL);
-  const base = precisos.length >= 2 ? precisos : finitos;
+  // Gate de velocidad: quita los glitches de salto imposible (la precisión no siempre los delata).
+  const base = gateVelocidad(precisos.length >= 2 ? precisos : finitos);
 
   const out: HuellaPt[] = [];
-  const emitir = (lat: number, lng: number, velocidad: number, acc: number) => {
+  const emitir = (lat: number, lng: number, velocidad: number, acc: number, ts: number) => {
     const last = out[out.length - 1];
-    if (!last || distM(last.lat, last.lng, lat, lng) >= 8) out.push({ lat, lng, velocidad, acc });
+    if (!last || distM(last.lat, last.lng, lat, lng) >= 8) out.push({ lat, lng, velocidad, acc, ts });
   };
-  type Cl = { sumLat: number; sumLng: number; n: number; acc: number };
-  const nuevoCl = (p: HuellaPt): Cl => ({ sumLat: p.lat, sumLng: p.lng, n: 1, acc: p.acc });
+  type Cl = { sumLat: number; sumLng: number; n: number; acc: number; ts: number };
+  const nuevoCl = (p: HuellaPt): Cl => ({ sumLat: p.lat, sumLng: p.lng, n: 1, acc: p.acc, ts: p.ts });
   const cLat = (c: Cl) => c.sumLat / c.n;
   const cLng = (c: Cl) => c.sumLng / c.n;
-  const fold = (c: Cl, p: HuellaPt) => { c.sumLat += p.lat; c.sumLng += p.lng; c.n++; c.acc = Math.min(c.acc, p.acc); };
+  const fold = (c: Cl, p: HuellaPt) => { c.sumLat += p.lat; c.sumLng += p.lng; c.n++; c.acc = Math.min(c.acc, p.acc); c.ts = p.ts; };
 
   let modo: "stop" | "move" = "stop";
   let cl: Cl | null = null;   // stop: cluster de parada · move: cluster candidato de re-parada
@@ -147,13 +176,13 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
       } else {
         pend.push(p);
         if (pend.length >= ESCAPE_N) {                        // salida confirmada
-          emitir(cLat(cl), cLng(cl), 0, cl.acc);              // el lugar de la parada
-          for (const q of pend) emitir(q.lat, q.lng, q.velocidad, q.acc);
+          emitir(cLat(cl), cLng(cl), 0, cl.acc, cl.ts);       // el lugar de la parada
+          for (const q of pend) emitir(q.lat, q.lng, q.velocidad, q.acc, q.ts);
           modo = "move"; cl = null; pend = []; dwell = 0;
         }
       }
     } else { // move
-      emitir(p.lat, p.lng, p.velocidad, p.acc);
+      emitir(p.lat, p.lng, p.velocidad, p.acc, p.ts);
       if (!cl) { cl = nuevoCl(p); dwell = 1; }
       else if (distM(cLat(cl), cLng(cl), p.lat, p.lng) < radioDwell(p.acc)) {
         fold(cl, p); dwell++;
@@ -163,7 +192,7 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
       }
     }
   }
-  if (modo === "stop" && cl) emitir(cLat(cl), cLng(cl), 0, cl.acc); // cola: parada final
+  if (modo === "stop" && cl) emitir(cLat(cl), cLng(cl), 0, cl.acc, cl.ts); // cola: parada final
 
   // FALLBACK: si el filtro colapsó todo a ≤1 punto pero había suficientes datos, el cluster
   // era demasiado grande para la velocidad del bus (GPS pobre + ciudad lenta). Devolver la
@@ -225,6 +254,39 @@ export async function matchVentana(ventana: MatchPt[], token: string): Promise<[
 // mapa. Holgado (300 m) para no cortar avance real: la huella buena densa nunca lo alcanza
 // (#1138, chip GPS a 4 s: máx ~138 m), solo lo superan los saltos imposibles del GPS pobre.
 export const MAX_SEG_M = 300;
+
+// Rellena los HUECOS de la huella (pérdida de señal en paradas/tráfico) con puntos interpolados,
+// SOLO si la velocidad implícita del salto es plausible para un bus (≤VMAX_BUS_KMH). Así un tramo
+// donde el GPS calló 15-70 s pero el bus avanzó 300 m-2 km a velocidad real se dibuja CONTINUO
+// (recta densa) en vez de cortado; los saltos IMPOSIBLES (teleport/glitch que el gate no quitó) NO
+// se rellenan → el corte por MAX_SEG_M downstream los deja como hueco honesto. La velocidad del
+// puente = la implícita → el tramo se colorea como movimiento real (no "parado" rojo). Como deja
+// segmentos ≤ MAX_SEG_M, NO hay que tocar colorearMatched/huellaCrudaFeatures: su corte por
+// distancia ya solo alcanza los teleports. Requiere `ts`; sin él (0/no creciente) se omite. Pura.
+// IMPORTANTE: correr DESPUÉS de limpiarHuella (sobre el prefijo estable) → no rompe el congelado.
+// El umbral de PUENTE (120) es a propósito MENOR que el del gate (VMAX_BUS_KMH=130): un salto de
+// 121-130 km/h pasa el gate (se conserva el punto) pero NO se puentea → cae al corte por MAX_SEG_M
+// (hueco honesto). Solo se rellena lo CLARAMENTE plausible (≤120); la franja dudosa se corta.
+export function puentearHuecos(pts: HuellaPt[], maxSegM = MAX_SEG_M, vmaxKmh = 120): HuellaPt[] {
+  if (pts.length < 2 || !(pts[pts.length - 1].ts > pts[0].ts)) return pts;
+  const vmax = vmaxKmh / 3.6;
+  const out: HuellaPt[] = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const d = distM(a.lat, a.lng, b.lat, b.lng);
+    const dt = (b.ts - a.ts) / 1000;
+    if (d > maxSegM && dt > 0 && d / dt <= vmax) {            // hueco real a velocidad plausible → rellenar
+      const n = Math.ceil(d / (maxSegM * 0.5));               // segmentos ≤ ~150 m (nunca dispara el corte)
+      const kmh = Math.round((d / dt) * 3.6);
+      for (let k = 1; k < n; k++) {
+        const f = k / n;
+        out.push({ lat: a.lat + (b.lat - a.lat) * f, lng: a.lng + (b.lng - a.lng) * f, velocidad: kmh, acc: Math.max(a.acc, b.acc), ts: a.ts + (b.ts - a.ts) * f });
+      }
+    }
+    out.push(b);
+  }
+  return out;
+}
 
 // Reparte la velocidad de la huella cruda sobre la geometría ajustada a la vía: a cada
 // vértice ajustado le asigna la velocidad del punto GPS real más cercano (coloreado leyenda).

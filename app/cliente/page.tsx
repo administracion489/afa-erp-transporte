@@ -8,7 +8,7 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador } from "@/lib/anim-marker";
 import {
-  limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva,
+  limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, puentearHuecos,
 } from "@/lib/huella";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
@@ -1170,7 +1170,7 @@ export default function ClientePortal() {
       if (cancel) return;
       const filas = (data || []).filter((p: any) => p.lat && p.lng);
       // Limpieza de jitter (mismo motor que el modal): colapsa rachas detenidas, dedup en marcha.
-      const limpio = limpiarHuella(filasAPuntos(filas));
+      const limpio = puentearHuecos(limpiarHuella(filasAPuntos(filas)));
       setHuellaGpsMap(prev => ({ ...prev, [rid]: limpio.map(p => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad, ts: null })) }));
       // Map Matching por ventanas (pegado a la pista) — throttle/congelado interno del ajustador.
       if (!ajustadoresRef.current[rid]) ajustadoresRef.current[rid] = crearAjustadorHuella();
