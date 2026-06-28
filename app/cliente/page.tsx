@@ -3316,14 +3316,16 @@ tbody tr:nth-child(even){background:#f9fafb}
                 <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 13 }}>
                   <thead>
                     <tr style={{ background: C.surfaceAlt, borderBottom: `1.5px solid ${C.line2}` }}>
-                      {[["N° orden","78px"],["ID AFA","122px"],["Fecha","120px"],["Hora","70px"],["Ruta","auto"],["Estado","110px"],["Manifiesto","90px"],["Pasajeros","110px"],["SLA","120px"],...(puedeVerMontos ? [["Total","110px"]] : []),["GPS","68px"],["Reporte","80px"]].map(([h,w]) => (
-                        <th key={h} style={{ padding: "10px 14px", textAlign: "left" as const, fontSize: 9.5, fontWeight: 800, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.07em", whiteSpace: "nowrap" as const, width: w !== "auto" ? w : undefined }}>{h}</th>
+                      {[["ID","112px"],["Fecha","88px"],["Hora","56px"],["Ruta","auto"],["Estado","100px"],["Manifiesto","80px"],["Pasajeros","92px"],["SLA","92px"],...(puedeVerMontos ? [["Total","96px"]] : [])].map(([h,w]) => (
+                        <th key={h} style={{ padding: "10px 12px", textAlign: "left" as const, fontSize: 9.5, fontWeight: 800, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.07em", whiteSpace: "nowrap" as const, width: w !== "auto" ? w : undefined }}>{h}</th>
                       ))}
+                      <th style={{ padding: "10px 10px", textAlign: "left" as const, fontSize: 9.5, fontWeight: 800, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.07em", whiteSpace: "nowrap" as const, width: 80, position: "sticky" as const, right: 80, background: C.surfaceAlt, zIndex: 2, boxShadow: "-6px 0 8px -6px rgba(15,23,42,0.12)" }}>GPS</th>
+                      <th style={{ padding: "10px 10px", textAlign: "left" as const, fontSize: 9.5, fontWeight: 800, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "0.07em", whiteSpace: "nowrap" as const, width: 80, position: "sticky" as const, right: 0, background: C.surfaceAlt, zIndex: 2 }}>Ver</th>
                     </tr>
                   </thead>
                   <tbody>
                     {reservasFiltradas.length === 0 ? (
-                      <tr><td colSpan={puedeVerMontos ? 12 : 11} style={{ padding: "56px 20px", textAlign: "center" as const }}>
+                      <tr><td colSpan={puedeVerMontos ? 11 : 10} style={{ padding: "56px 20px", textAlign: "center" as const }}>
                         <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke={C.line2} strokeWidth="1.2" style={{ display: "block", margin: "0 auto 12px" }}><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
                         <p style={{ color: C.mute, fontSize: 14, fontWeight: 600, margin: 0 }}>Sin resultados para los filtros seleccionados</p>
                       </td></tr>
@@ -3336,11 +3338,9 @@ tbody tr:nth-child(even){background:#f9fafb}
                           onMouseEnter={e => (e.currentTarget.style.background = C.navyTint)}
                           onMouseLeave={e => (e.currentTarget.style.background = rowBg)}
                           style={{ borderBottom: `1px solid ${C.line}`, background: rowBg, transition: "background 0.1s" }}>
-                          <td style={{ padding: "10px 14px", fontFamily: C.fontMono, fontSize: 11, fontWeight: 700, color: C.mute, whiteSpace: "nowrap" as const }}>
-                            {String(ordenCliente.get(r.id) ?? 0).padStart(3, "0")}
-                          </td>
-                          <td style={{ padding: "10px 14px", fontFamily: C.fontMono, fontSize: 11, fontWeight: 800, color: C.navy, whiteSpace: "nowrap" as const }} title="Código oficial AFA — úsalo para reportar este servicio">
-                            {idAfa(r)}
+                          <td style={{ padding: "10px 12px", whiteSpace: "nowrap" as const }} title="Código oficial AFA — úsalo para reportar este servicio">
+                            <div style={{ fontFamily: C.fontMono, fontSize: 11.5, fontWeight: 800, color: C.navy }}>{idAfa(r)}</div>
+                            <div style={{ fontFamily: C.fontMono, fontSize: 9.5, color: C.mute2, marginTop: 1 }}>N° {String(ordenCliente.get(r.id) ?? 0).padStart(3, "0")}</div>
                           </td>
                           <td style={{ padding: "10px 14px", whiteSpace: "nowrap" as const }}>
                             <p style={{ fontFamily: C.fontMono, fontSize: 11.5, fontWeight: 700, color: C.ink2, margin: 0 }}>{fmtFecha(r.fecha_servicio)}</p>
@@ -3349,7 +3349,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                           <td style={{ padding: "10px 14px", fontFamily: C.fontMono, fontSize: 11.5, color: C.mute, whiteSpace: "nowrap" as const }}>
                             {r.hora_servicio?.slice(0,5) || "–"}
                           </td>
-                          <td style={{ padding: "10px 14px", maxWidth: 220 }}>
+                          <td style={{ padding: "10px 12px", maxWidth: 180 }}>
                             <p style={{ fontWeight: 700, color: C.ink, margin: 0, fontSize: 12.5, overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>{r.origen}</p>
                             <p style={{ color: C.mute, fontSize: 11, margin: "2px 0 0", overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const }}>→ {r.destino}</p>
                           </td>
@@ -3386,7 +3386,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                               <span style={{ color: C.mute2, fontSize: 11 }}>–</span>
                             )}
                           </td>
-                          <td style={{ padding: "10px 14px", minWidth: 110 }}>
+                          <td style={{ padding: "10px 12px", minWidth: 84 }}>
                             {loadingStats ? (
                               <span style={{ color: C.mute2, fontSize: 11 }}>...</span>
                             ) : sla !== null ? (
@@ -3403,7 +3403,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                             )}
                           </td>
                           {puedeVerMontos && <td style={{ padding: "10px 14px", fontFamily: C.fontMono, fontWeight: 700, color: C.navy, fontSize: 12.5, whiteSpace: "nowrap" as const }}>{fmtSoles(Number(r.precio_cliente))}</td>}
-                          <td style={{ padding: "10px 14px" }}>
+                          <td style={{ padding: "8px 10px", position: "sticky" as const, right: 80, background: rowBg, zIndex: 1, boxShadow: "-6px 0 8px -6px rgba(15,23,42,0.12)" }}>
                             {(r.vehiculo_id || (r as any).vehiculo_tercero_id || (r as any).empresa_tercerizada_id) ? (
                               <button onClick={() => abrirGps(r)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 9px", borderRadius: 7, border: `1px solid ${C.navyTint2}`, background: C.navyTint, color: C.navy, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans, whiteSpace: "nowrap" as const }}>
                                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
@@ -3411,7 +3411,7 @@ tbody tr:nth-child(even){background:#f9fafb}
                               </button>
                             ) : <span style={{ color: C.mute2, fontSize: 11 }}>–</span>}
                           </td>
-                          <td style={{ padding: "10px 14px" }}>
+                          <td style={{ padding: "8px 10px", position: "sticky" as const, right: 0, background: rowBg, zIndex: 1 }}>
                             <button onClick={() => cargarDetalle(r)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 9px", borderRadius: 7, border: `1px solid ${C.line}`, background: C.surface, color: C.ink2, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans, whiteSpace: "nowrap" as const }}>
                               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                               Ver
@@ -3442,7 +3442,8 @@ tbody tr:nth-child(even){background:#f9fafb}
                             {fmtSoles(reservasFiltradas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0))}
                           </td>
                         )}
-                        <td colSpan={2} />
+                        <td style={{ padding: "11px 10px", position: "sticky" as const, right: 80, background: C.navyDeep, zIndex: 1, boxShadow: "-6px 0 8px -6px rgba(0,0,0,0.3)" }} />
+                        <td style={{ padding: "11px 10px", position: "sticky" as const, right: 0, background: C.navyDeep, zIndex: 1 }} />
                       </tr>
                     </tfoot>
                   )}
