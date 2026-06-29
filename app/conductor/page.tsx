@@ -216,7 +216,7 @@ function playBeep(tipo: "ok" | "warn" | "error") {
 function fechaTitulo(): { dow: string; fecha: string } {
   const now = new Date();
   const dow = now.toLocaleDateString("es-PE", { weekday: "long" });
-  const fecha = now.toLocaleDateString("es-PE", { day: "numeric", month: "long" });
+  const fecha = now.toLocaleDateString("es-PE", { day: "numeric", month: "short" }).replace(/\.$/, "");
   return { dow: dow.toUpperCase(), fecha };
 }
 
@@ -1904,6 +1904,8 @@ export default function ConductorApp() {
     { id: "perfil",     label: "Perfil",    icon: <IconUser size={20} /> },
   ];
 
+  const titulo = fechaTitulo();
+
   return (
     <div style={{
       minHeight: "100vh", background: "var(--c-paper)",
@@ -1970,6 +1972,17 @@ export default function ConductorApp() {
             <Chip color="var(--c-success)" bg="var(--c-success-tint)" mono sw>
               {velocidad} KM/H
             </Chip>
+          )}
+          {/* Fecha del día a la derecha (estilo 2b), fuera de ruta. */}
+          {!enRuta && (
+            <div style={{ textAlign: "right" }}>
+              <p style={{ margin: 0, fontFamily: FONT_MONO, fontSize: 9.5, fontWeight: 700, letterSpacing: 1.4, textTransform: "uppercase", color: "var(--c-mute)" }}>
+                {titulo.dow}
+              </p>
+              <p style={{ margin: "2px 0 0", fontSize: 18, fontWeight: 800, letterSpacing: -0.4, color: "var(--c-ink)" }}>
+                {titulo.fecha}
+              </p>
+            </div>
           )}
         </div>
       </header>
