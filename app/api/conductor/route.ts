@@ -16,6 +16,20 @@ const admin = createClient(
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
+// Normaliza el QR escaneado para tolerar el desajuste de layout de un escáner BT (teclado
+// HID): puede teclear el UUID en MAYÚSCULAS y con el guion mal mapeado (p. ej. "-" → "/")
+// según el idioma de teclado del equipo. Como qr_code SIEMPRE es un UUID (32 hex en 8-4-4-4-12,
+// minúsculas) reconstruimos desde los dígitos hex: ignora separadores y mayúsculas. La cámara
+// (lee la imagen del QR) entrega el texto exacto y pasa por aquí sin cambios (idempotente).
+function normalizarQr(raw: string): string {
+  const s = String(raw ?? "").trim().toLowerCase();
+  const hex = s.replace(/[^0-9a-f]/g, "");
+  if (hex.length === 32) {
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  return s; // no parece UUID: usar tal cual (al menos trim + minúsculas)
+}
+
 // Bitácora de abordaje real (tabla boarding_log). Best-effort: si falla, no debe
 // bloquear el embarque. La lee el reporte del portal cliente por reserva_id.
 async function logBoarding(
@@ -158,7 +172,9 @@ export async function POST(req: NextRequest) {
       case "buscar_pasajero": {
         const { qrCode } = body;
         if (!qrCode) return NextResponse.json({ error: "qrCode requerido" }, { status: 400 });
-        const { data, error } = await admin.from("pasajeros").select("*").eq("qr_code", qrCode).maybeSingle();
+        // Normalizar para tolerar el layout del escáner BT (mayúsculas, "-"→"/", etc.).
+        const qr = normalizarQr(qrCode);
+        const { data, error } = await admin.from("pasajeros").select("*").eq("qr_code", qr).maybeSingle();
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ pasajero: data ?? null });
       }
@@ -225,8 +241,10 @@ export async function POST(req: NextRequest) {
         let paxClienteId: number | null = null;
         let paxReservaId: number | null = null;
         if (!pasajeroId && qrCode) {
+          // Mismo motivo que en buscar_pasajero: normalizar el QR tecleado por el escáner BT.
+          const qr = normalizarQr(qrCode);
           const { data: px } = await admin.from("pasajeros")
-            .select("id, nombre, empresa, dni, qr_code, foto_url, cliente_id, reserva_id").eq("qr_code", qrCode).maybeSingle();
+            .select("id, nombre, empresa, dni, qr_code, foto_url, cliente_id, reserva_id").eq("qr_code", qr).maybeSingle();
           if (!px) return NextResponse.json({ ok: false, noEncontrado: true });
           pasajeroId = px.id;
           pasajeroInfo = px;
