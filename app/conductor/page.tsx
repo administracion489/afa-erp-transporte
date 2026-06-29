@@ -545,6 +545,9 @@ export default function ConductorApp() {
   const [resultadoEmbarque, setResultadoEmbarque] = useState<{ pasajero: Pasajero; fueraLista: boolean; otroBus?: boolean; cambioParada?: boolean; empresaAjena?: boolean; paradaOriginalNombre?: string | null } | null>(null);
   const [resultProgreso,    setResultProgreso]    = useState(0);
   const [boardingMsg,       setBoardingMsg]       = useState<{ok: boolean; msg: string} | null>(null);
+  // Feedback OPTIMISTA: se enciende al instante al escanear (antes de la red) y se apaga al
+  // llegar el resultado. Hace que el conductor sienta respuesta inmediata aunque el server tarde.
+  const [leyendo,           setLeyendo]           = useState(false);
   const qrRef               = useRef<any>(null);
   const resultIntervalRef   = useRef<NodeJS.Timeout | null>(null);
   const [btScanFlash,       setBtScanFlash]       = useState(false);
@@ -1342,103 +1345,99 @@ export default function ConductorApp() {
     });
   }, [reservaActiva?.id, tab, escanear]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Procesa un QR (de cámara o escáner BT) en UNA sola llamada al servidor: embarcar_qr
+  // resuelve el pasajero desde el QR, registra el embarque y consolida por "horario de salida",
+  // y devuelve los datos del pasajero para la UI. (Antes eran 2 viajes: buscar_pasajero +
+  // embarcar_qr → la mitad del tiempo de red.) El candado procesandoQRRef lo comparten cámara y BT.
   async function procesarQR(qrCode: string) {
     if (procesandoQRRef.current) return;   // un escaneo (cámara o BT) ya en curso
     procesandoQRRef.current = true;
+    setLeyendo(true);                       // feedback OPTIMISTA inmediato (antes de la red)
     try {
-      let pasajero: Pasajero | null = null;
-      try {
-        const r = await condApi("buscar_pasajero", { qrCode });
-        pasajero = r.pasajero;
-      } catch { /* tratado como no encontrado abajo */ }
-      if (!pasajero) {
+      const paradaActual = paradas[paradaIdx];
+      if (!paradaActual) {
         playBeep("error");
-        // DIAGNÓSTICO TEMPORAL: muestra lo que se leyó (para depurar el escáner BT). Quitar luego.
-        setBoardingMsg({ ok: false, msg: `QR no reconocido (leído: "${qrCode}" · ${qrCode.length} car). Pasajero no encontrado.` });
-        setTimeout(() => setBoardingMsg(null), 6000);
+        setBoardingMsg({ ok: false, msg: "Error: no hay parada activa." });
+        setTimeout(() => setBoardingMsg(null), 4000);
         return;
       }
-      await confirmarEmbarque(pasajero);
+
+      let resp: any;
+      try {
+        resp = await condApi("embarcar_qr", {
+          qrCode,
+          paradaId:  paradaActual.id,
+          reservaId: reservaActiva?.id ?? null,
+        });
+      } catch (e: any) {
+        playBeep("error");
+        setBoardingMsg({ ok: false, msg: `Error al registrar embarque: ${e?.message}` });
+        setTimeout(() => setBoardingMsg(null), 4000);
+        return;
+      }
+
+      if (resp?.noEncontrado || !resp?.ok) {
+        playBeep("error");
+        setBoardingMsg({ ok: false, msg: "QR no reconocido. Pasajero no encontrado en el sistema." });
+        setTimeout(() => setBoardingMsg(null), 4000);
+        return;
+      }
+
+      const pasajero: Pasajero = resp.pasajero ?? { id: 0, nombre: "Pasajero", dni: null, empresa: null, qr_code: qrCode, foto_url: null };
+
+      // Re-escaneo: el server marca yaEmbarcado si ya estaba a bordo en este servicio.
+      if (resp?.yaEmbarcado) {
+        playBeep("warn");
+        setBoardingMsg({ ok: false, msg: `${pasajero.nombre} ya está registrado en este servicio.` });
+        setTimeout(() => setBoardingMsg(null), 4000);
+        return;
+      }
+
+      // Clasificar el resultado desde la respuesta del servidor (es la autoridad).
+      const creado       = !!resp?.creado;                 // no estaba asignado (caminante)
+      const otroBus      = !!resp?.otroBus;                // venía de otro bus del mismo horario
+      const cambioParada = !!resp?.movido && !otroBus;     // movido a otra parada del mismo bus
+      const empresaAjena = !!resp?.empresaAjena;           // QR de otra empresa (red de seguridad)
+      const fueraLista   = creado;
+      const paradaOriginalNombre = cambioParada
+        ? (paradas.find(p => p.id === resp?.paradaOriginalId)?.nombre ?? null)
+        : null;
+
+      // Estado local: dejar UNA sola fila para el pasajero, en la parada real, embarcado.
+      setPasajeros(prev => {
+        const sinPax = prev.filter(p => p.pasajero_id !== pasajero.id);
+        return [...sinPax, {
+          id:          resp?.id ?? 0,
+          parada_id:   paradaActual.id,
+          pasajero_id: pasajero.id,
+          estado:      "abordado",
+          pasajero,
+        }];
+      });
+
+      playBeep(empresaAjena || fueraLista || otroBus ? "warn" : "ok");
+
+      // Mostrar tarjeta resultado con barra de progreso (3 s)
+      if (resultIntervalRef.current) clearInterval(resultIntervalRef.current);
+      setResultadoEmbarque({ pasajero, fueraLista, otroBus, cambioParada, empresaAjena, paradaOriginalNombre });
+      setResultProgreso(0);
+      let prog = 0;
+      resultIntervalRef.current = setInterval(() => {
+        prog++;
+        setResultProgreso(prog);
+        if (prog >= 100) {
+          clearInterval(resultIntervalRef.current!);
+          resultIntervalRef.current = null;
+          setResultadoEmbarque(null);
+          setResultProgreso(0);
+        }
+      }, 30); // 100 pasos × 30 ms = 3 000 ms
     } finally {
       // Soltar al terminar la ida y vuelta al server (NO al cerrarse la tarjeta de
       // resultado, que vive 3 s): así el siguiente pasajero se puede escanear enseguida.
       procesandoQRRef.current = false;
+      setLeyendo(false);
     }
-  }
-
-  async function confirmarEmbarque(pasajero: Pasajero) {
-    const paradaActual = paradas[paradaIdx];
-    if (!paradaActual) {
-      playBeep("error");
-      setBoardingMsg({ ok: false, msg: "Error: no hay parada activa." });
-      setTimeout(() => setBoardingMsg(null), 4000);
-      return;
-    }
-
-    // Re-escaneo: si ya está abordado en este servicio, avisar y salir sin tocar el server.
-    const local = pasajeros.find(p => p.pasajero_id === pasajero.id);
-    if (esAbordado(local?.estado)) {
-      playBeep("warn");
-      setBoardingMsg({ ok: false, msg: `${pasajero.nombre} ya está registrado en este servicio.` });
-      setTimeout(() => setBoardingMsg(null), 4000);
-      return;
-    }
-
-    // Una sola llamada autoritativa al servidor: mueve / registra / consolida según el
-    // "horario de salida" (fecha + hora). Resuelve subir en otra parada o en otro bus.
-    let resp: any;
-    try {
-      resp = await condApi("embarcar_qr", {
-        pasajeroId: pasajero.id,
-        paradaId:   paradaActual.id,
-        reservaId:  reservaActiva?.id ?? null,
-      });
-    } catch (e: any) {
-      playBeep("error");
-      setBoardingMsg({ ok: false, msg: `Error al registrar embarque: ${e?.message}` });
-      setTimeout(() => setBoardingMsg(null), 4000);
-      return;
-    }
-
-    // Clasificar el resultado desde la respuesta del servidor (es la autoridad).
-    const creado       = !!resp?.creado;                 // no estaba asignado (caminante)
-    const otroBus      = !!resp?.otroBus;                // venía de otro bus del mismo horario
-    const cambioParada = !!resp?.movido && !otroBus;     // movido a otra parada del mismo bus
-    const empresaAjena = !!resp?.empresaAjena;           // QR de otra empresa (red de seguridad)
-    const fueraLista   = creado;
-    const paradaOriginalNombre = cambioParada
-      ? (paradas.find(p => p.id === resp?.paradaOriginalId)?.nombre ?? null)
-      : null;
-
-    // Estado local: dejar UNA sola fila para el pasajero, en la parada real, embarcado.
-    setPasajeros(prev => {
-      const sinPax = prev.filter(p => p.pasajero_id !== pasajero.id);
-      return [...sinPax, {
-        id:          resp?.id ?? 0,
-        parada_id:   paradaActual.id,
-        pasajero_id: pasajero.id,
-        estado:      "abordado",
-        pasajero,
-      }];
-    });
-
-    playBeep(empresaAjena || fueraLista || otroBus ? "warn" : "ok");
-
-    // Mostrar tarjeta resultado con barra de progreso (3 s)
-    if (resultIntervalRef.current) clearInterval(resultIntervalRef.current);
-    setResultadoEmbarque({ pasajero, fueraLista, otroBus, cambioParada, empresaAjena, paradaOriginalNombre });
-    setResultProgreso(0);
-    let prog = 0;
-    resultIntervalRef.current = setInterval(() => {
-      prog++;
-      setResultProgreso(prog);
-      if (prog >= 100) {
-        clearInterval(resultIntervalRef.current!);
-        resultIntervalRef.current = null;
-        setResultadoEmbarque(null);
-        setResultProgreso(0);
-      }
-    }, 30); // 100 pasos × 30 ms = 3 000 ms
   }
 
   async function notificarRetraso() {
@@ -4330,6 +4329,24 @@ export default function ConductorApp() {
             ? <IconCheck size={16} color="#fff" sw={2.5} />
             : <IconCircleAlert size={16} color="#fff" />}
           {boardingMsg.msg}
+        </div>
+      )}
+
+      {/* "Leyendo…" — aparece al instante al escanear (feedback optimista) mientras el server responde */}
+      {leyendo && !boardingMsg && !resultadoEmbarque && (
+        <div style={{
+          position: "fixed", top: 78, left: "50%", transform: "translateX(-50%)",
+          background: "var(--c-navy)", color: "#fff", borderRadius: 14, padding: "12px 20px",
+          fontFamily: FONT_SANS, fontWeight: 800, fontSize: 13.5, zIndex: 200,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.25)", display: "flex", alignItems: "center", gap: 10,
+          animation: "sheetIn 0.15s ease-out",
+        }}>
+          <span style={{
+            width: 15, height: 15, borderRadius: "50%", flexShrink: 0,
+            border: "2.5px solid rgba(255,255,255,0.35)", borderTopColor: "#fff",
+            display: "inline-block", animation: "spin 0.7s linear infinite",
+          }} />
+          Leyendo…
         </div>
       )}
 
