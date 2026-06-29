@@ -1326,8 +1326,9 @@ export default function ConductorApp() {
       } catch { /* tratado como no encontrado abajo */ }
       if (!pasajero) {
         playBeep("error");
-        setBoardingMsg({ ok: false, msg: "QR no reconocido. Pasajero no encontrado en el sistema." });
-        setTimeout(() => setBoardingMsg(null), 4000);
+        // DIAGNÓSTICO TEMPORAL: muestra lo que se leyó (para depurar el escáner BT). Quitar luego.
+        setBoardingMsg({ ok: false, msg: `QR no reconocido (leído: "${qrCode}" · ${qrCode.length} car). Pasajero no encontrado.` });
+        setTimeout(() => setBoardingMsg(null), 6000);
         return;
       }
       await confirmarEmbarque(pasajero);

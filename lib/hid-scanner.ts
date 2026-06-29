@@ -32,8 +32,12 @@ export type HidScannerOpts = {
   dedupeMs?: number;
 };
 
-const QUIET_MS = 120;   // quietud real exigida tras el último char para cerrar sin Enter
-const GAP_MAX_MS = 80;  // separación máx. dentro de una ráfaga; mayor ⇒ es OTRO código
+// Respaldo de cierre cuando el escáner NO manda Enter/Tab (sufijo). GENEROSO a propósito:
+// dentro de un WebView con carga (la app conductor corre GPS, timers, mapa) el event loop
+// puede trabarse cientos de ms entre teclas; un umbral corto cerraría el código a la mitad.
+// El terminador real es Enter (lo manda el RED-L8BLS/NETUM por defecto), así que esto casi
+// nunca entra en juego. NO segmentamos por gaps entre teclas: eso partía el UUID en el WebView.
+const QUIET_MS = 600;
 
 const ahora = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
 
@@ -104,14 +108,13 @@ export function attachHidScanner(opts: HidScannerOpts): () => void {
     }
     if (e.key.length !== 1) return; // ignora modificadores (Shift, Control…) y teclas de control
 
-    const t = ahora();
-    // Si el buffer venía cargado y hubo una pausa larga (no es ráfaga), el char nuevo
-    // pertenece a OTRO código → cerrar el anterior antes de acumular.
-    if (buffer && t - lastKeyTs > GAP_MAX_MS) void emitir();
+    // Acumular SIEMPRE: nunca cerramos por gap entre teclas. El WebView puede entregar las
+    // teclas con stalls largos; lo único que cierra el código es el Enter/Tab (o el respaldo
+    // de quietud generoso). Así un UUID nunca se parte aunque el event loop se trabe a mitad.
     buffer += e.key;
-    lastKeyTs = t;
+    lastKeyTs = ahora();
     limpiarTimer();
-    timer = setTimeout(cerrarPorQuietud, QUIET_MS); // respaldo si nunca llega Enter/Tab
+    timer = setTimeout(cerrarPorQuietud, QUIET_MS); // respaldo SOLO si nunca llega Enter/Tab
   };
 
   document.addEventListener("keydown", onKey);
