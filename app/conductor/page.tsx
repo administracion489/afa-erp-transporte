@@ -1505,24 +1505,66 @@ export default function ConductorApp() {
     if (checks.some(c => c.ok === null)) {
       alert(`Faltan ${checks.filter(c => c.ok === null).length} ítems por completar`); return;
     }
+    const payload = { checklist: {
+      conductor_id: conductor.id,
+      vehiculo_id:  vehiculoId,
+      fecha:        getFechaLocal(),
+      items_json:   checks,
+      km_inicio:    kmInicio ? Number(kmInicio) : null,
+      observaciones: checkObs,
+      estado:       checks.some(c => c.ok === false) ? "con_fallas" : "ok",
+    } };
     setCheckSaving(true);
-    try {
-      await condApi("checklist", { checklist: {
-        conductor_id: conductor.id,
-        vehiculo_id:  vehiculoId,
-        fecha:        getFechaLocal(),
-        items_json:   checks,
-        km_inicio:    kmInicio ? Number(kmInicio) : null,
-        observaciones: checkObs,
-        estado:       checks.some(c => c.ok === false) ? "con_fallas" : "ok",
-      } });
-    } catch (e: any) {
-      setCheckSaving(false);
-      alert(`Error al guardar checklist: ${e?.message}`); return;
+    // Reintenta ante fallos de red transitorios ("Failed to fetch"): la tablet a veces pierde
+    // la red un instante (WiFi del depósito, doze de Android). 3 intentos con backoff corto.
+    let ultimoError: any = null;
+    for (let intento = 1; intento <= 3; intento++) {
+      try {
+        await condApi("checklist", payload);
+        try { localStorage.removeItem("afa_checklist_pendiente"); } catch {}
+        setCheckSaving(false);
+        setCheckDone(true);
+        return;
+      } catch (e: any) {
+        ultimoError = e;
+        if (intento < 3) await new Promise(r => setTimeout(r, 1200 * intento));
+      }
     }
     setCheckSaving(false);
-    setCheckDone(true);
+    // Falla persistente de red: el checklist YA está completo y la BD es best-effort (el server
+    // ni siquiera bloquea a terceros). Ofrecer continuar y dejarlo en cola para sincronizar al
+    // volver la conexión — un microcorte de red NO debe impedir arrancar el servicio.
+    const proceder = confirm(
+      `No se pudo guardar el pre-viaje por la conexión (${ultimoError?.message || "sin red"}).\n\n` +
+      `El checklist está completo. ¿Continuar igual? Se guardará automáticamente cuando vuelva la conexión.`
+    );
+    if (proceder) {
+      try { localStorage.setItem("afa_checklist_pendiente", JSON.stringify(payload)); } catch {}
+      setCheckDone(true);
+    }
   }
+
+  // Sincroniza un pre-viaje que quedó pendiente (guardado offline) cuando vuelve la red o el
+  // app pasa a primer plano. Mismo patrón que el drenado de la cola GPS de más arriba.
+  useEffect(() => {
+    const sincronizarChecklist = async () => {
+      let raw: string | null = null;
+      try { raw = localStorage.getItem("afa_checklist_pendiente"); } catch { return; }
+      if (!raw) return;
+      try {
+        await condApi("checklist", JSON.parse(raw));
+        try { localStorage.removeItem("afa_checklist_pendiente"); } catch {}
+      } catch { /* sigue pendiente; se reintenta en el próximo online/visible */ }
+    };
+    sincronizarChecklist();
+    const onVis = () => { if (typeof document !== "undefined" && document.visibilityState === "visible") sincronizarChecklist(); };
+    window.addEventListener("online", sincronizarChecklist);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("online", sincronizarChecklist);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
 
   // ─── Docs ───────────────────────────────────────────────────────────────────
 
