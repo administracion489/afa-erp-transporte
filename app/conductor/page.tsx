@@ -167,6 +167,19 @@ function fmtCountdown(mins: number): string {
   return `${String(mins).padStart(2, "0")}m`;
 }
 
+// Acorta una dirección de Google para la tarjeta: descarta los segmentos finales de "ruido"
+// (plus-codes tipo "VX54+Q5R" y "Distrito 13008" con código postal de 5 dígitos), dejando el
+// nombre del lugar y la vía. Si todo quedara filtrado, cae al primer segmento / al texto original.
+function acortarLugar(dir?: string | null): string {
+  const full = (dir ?? "").trim();
+  if (!full) return "—";
+  const segs = full.split(",").map(s => s.trim()).filter(Boolean);
+  const esPlusCode = (s: string) => /^[0-9A-Z]{2,}\+[0-9A-Z]+$/i.test(s);
+  const esPostal   = (s: string) => /\d{5}\s*$/.test(s); // "... 13008" (postal Perú = 5 dígitos)
+  const utiles = segs.filter(s => !esPlusCode(s) && !esPostal(s));
+  return (utiles.length ? utiles : segs.slice(0, 1)).join(", ") || full;
+}
+
 function fmtDuracion(ms: number): string {
   const total = Math.floor(ms / 1000);
   const h = Math.floor(total / 3600);
@@ -1979,9 +1992,6 @@ export default function ConductorApp() {
             {!enRuta && !conectado && (
               <div style={{ marginBottom: 16 }}>
                 <SlideToConnect onConnect={() => setConectado(true)} />
-                <p style={{ margin: "8px 4px 0", fontSize: 11, lineHeight: 1.5, color: "var(--c-mute)" }}>
-                  Conéctate para que la central te vea y te asigne servicios. Compartimos tu ubicación con una notificación visible.
-                </p>
               </div>
             )}
             {!enRuta && conectado && (
@@ -2163,62 +2173,72 @@ export default function ConductorApp() {
             {/* Hero card — próximo viaje (si no está en ruta) */}
             {!enRuta && proximaReserva && (
               <div style={{
-                background: "var(--c-navy)", color: "#fff",
-                borderRadius: 22, padding: 20, marginBottom: 14,
-                boxShadow: "0 14px 36px -14px rgba(11,49,95,0.5)",
+                background: "linear-gradient(165deg, #163a6b, #0e2748)", color: "#fff",
+                borderRadius: 24, padding: 20, marginBottom: 14,
+                boxShadow: "0 22px 42px -16px rgba(14,39,72,0.5)",
               }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                  <StatusDot color="rgba(255,255,255,0.8)" pulse size={6} />
-                  <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1.2, textTransform: "uppercase", color: "rgba(255,255,255,0.7)" }}>
-                    Próximo viaje · sale en
-                  </span>
-                </div>
-                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-                  <span style={{
-                    fontFamily: FONT_MONO, fontSize: 40, fontWeight: 800, letterSpacing: -1.5, lineHeight: 1,
-                  }}>
-                    {minsHastaProx !== null ? fmtCountdown(minsHastaProx) : "—"}
-                  </span>
+                {/* Cabecera (estilo 2b): eyebrow + cuenta regresiva en columna a la izquierda,
+                    con el eyebrow justificado al ancho del countdown; hora de inicio apilada a la
+                    derecha, en azul acero. */}
+                <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, margin: "0 0 2px" }}>
+                  <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "stretch" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
+                      <IconClock size={13} color="#9db4d4" />
+                      <span style={{
+                        flex: 1, fontFamily: FONT_MONO, fontSize: 10, fontWeight: 700, letterSpacing: 1.2,
+                        textTransform: "uppercase", color: "#9db4d4", textAlign: "justify", textAlignLast: "justify",
+                      }}>
+                        Próximo viaje · sale en
+                      </span>
+                    </div>
+                    <span style={{
+                      fontFamily: FONT_MONO, fontSize: 46, fontWeight: 800, letterSpacing: -1.6, lineHeight: 1, whiteSpace: "nowrap",
+                    }}>
+                      {minsHastaProx !== null ? fmtCountdown(minsHastaProx) : "—"}
+                    </span>
+                  </div>
                   {proximaReserva.hora_servicio && (
-                    <Chip color="#fff" bg="rgba(255,255,255,0.14)" mono sw>
-                      {proximaReserva.hora_servicio.slice(0, 5)}
-                    </Chip>
+                    <div style={{ textAlign: "right", flexShrink: 0, paddingBottom: 8 }}>
+                      <p style={{ margin: 0, fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: "#9db4d4" }}>
+                        Inicia
+                      </p>
+                      <p style={{ margin: "4px 0 0", fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800, letterSpacing: -0.5, lineHeight: 1, color: "#9db4d4" }}>
+                        {proximaReserva.hora_servicio.slice(0, 5)}
+                      </p>
+                    </div>
                   )}
                 </div>
 
-                <div style={{
-                  margin: "16px 0", height: 1, background: "rgba(255,255,255,0.12)",
-                }} />
+                <div style={{ margin: "16px 0", height: 1, background: "rgba(255,255,255,0.12)" }} />
 
-                <p style={{
-                  margin: "0 0 4px", fontSize: 11, fontWeight: 700, letterSpacing: 1.2,
-                  textTransform: "uppercase", color: "rgba(255,255,255,0.6)",
-                }}>
-                  Recorrido
-                </p>
-                <p style={{
-                  margin: 0, fontSize: 18, fontWeight: 800, letterSpacing: -0.4, lineHeight: 1.2,
-                }}>
-                  {proximaReserva.origen} → {proximaReserva.destino}
-                </p>
-
-                <div style={{
-                  display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 16, marginBottom: 16,
-                }}>
-                  {[
-                    { lbl: "Reservas", val: String(reservasHoy.length) },
-                    { lbl: "Vehículo", val: vehSel?.placa || "—", mono: true },
-                    { lbl: "Hora",     val: proximaReserva.hora_servicio?.slice(0, 5) || "—", mono: true },
-                  ].map(s => (
-                    <div key={s.lbl}>
-                      <p style={{ margin: 0, fontSize: 10, fontWeight: 700, letterSpacing: 1.2, textTransform: "uppercase", color: "rgba(255,255,255,0.5)" }}>
-                        {s.lbl}
-                      </p>
-                      <p style={{ margin: "4px 0 0", fontFamily: s.mono ? FONT_MONO : FONT_SANS, fontSize: 14, fontWeight: 700, letterSpacing: -0.2 }}>
-                        {s.val}
-                      </p>
-                    </div>
-                  ))}
+                {/* Recorrido como lista origen → destino: dot + conector + pin, acentos azul
+                    acero, direcciones acortadas (sin la cola de plus-code / código postal). */}
+                <div style={{ marginBottom: 18, display: "flex", flexDirection: "column" }}>
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                    <span style={{ flexShrink: 0, width: 13, display: "flex", justifyContent: "center", marginTop: 4 }}>
+                      <span style={{ width: 10, height: 10, borderRadius: "50%", border: "2px solid #9db4d4", boxSizing: "border-box" }} />
+                    </span>
+                    <span style={{
+                      flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, lineHeight: 1.4, color: "#eaf1fb",
+                      display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
+                    }}>
+                      {acortarLugar(proximaReserva.origen)}
+                    </span>
+                  </div>
+                  <div style={{ width: 13, display: "flex", justifyContent: "center", margin: "4px 0" }}>
+                    <span style={{ width: 2, height: 14, background: "rgba(255,255,255,0.18)", borderRadius: 2 }} />
+                  </div>
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                    <span style={{ flexShrink: 0, width: 13, display: "flex", justifyContent: "center", marginTop: 1 }}>
+                      <IconPin size={14} color="#9db4d4" />
+                    </span>
+                    <span style={{
+                      flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, lineHeight: 1.4, color: "#eaf1fb",
+                      display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
+                    }}>
+                      {acortarLugar(proximaReserva.destino)}
+                    </span>
+                  </div>
                 </div>
 
                 {primeraIniciable && proximaReserva.id !== primeraIniciable.id ? (
@@ -2235,7 +2255,7 @@ export default function ConductorApp() {
                     onClick={() => !checkDone ? setTab("checklist") : confirmarEIniciar(proximaReserva)}
                     disabled={iniciando}
                     style={{
-                      width: "100%", padding: "14px 0", borderRadius: 14, border: "none",
+                      width: "100%", padding: "14px 0", borderRadius: 13, border: "none",
                       background: "#fff", color: "var(--c-navy)",
                       fontFamily: FONT_SANS, fontWeight: 800, fontSize: 15,
                       cursor: iniciando ? "not-allowed" : "pointer",
