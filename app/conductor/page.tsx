@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
 import { supabase } from "@/lib/supabase";
 import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, esAppNativa, backgroundGpsActivo, geoDisponible, type GeoPos, type GeoWatch } from "@/lib/geo";
+import { attachHidScanner } from "@/lib/hid-scanner";
 import {
   CondorMark,
   IconActivity, IconAlert, IconArrowLeft, IconArrowRight, IconBell, IconBus,
@@ -508,6 +509,8 @@ export default function ConductorApp() {
   useEffect(() => { conductorRef.current     = conductor;     }, [conductor]);
   useEffect(() => { reservaActivaRef.current = reservaActiva; }, [reservaActiva]);
   useEffect(() => { paradasRef.current       = paradas;       }, [paradas]);
+  // Sin deps: mantiene el ref apuntando a la versión más reciente (que cierra sobre estado fresco).
+  useEffect(() => { procesarQRRef.current = procesarQR; });
 
   // ── Tick para refrescar countdown y duración (1 minuto) ────────────────────
   const [tick, setTick] = useState(0);
@@ -531,6 +534,13 @@ export default function ConductorApp() {
   const [boardingMsg,       setBoardingMsg]       = useState<{ok: boolean; msg: string} | null>(null);
   const qrRef               = useRef<any>(null);
   const resultIntervalRef   = useRef<NodeJS.Timeout | null>(null);
+  const [btScanFlash,       setBtScanFlash]       = useState(false);
+  // Ref siempre actualizado a procesarQR para evitar closure obsoleto en el listener BT.
+  const procesarQRRef = useRef<(qr: string) => Promise<void>>(async () => {});
+  // Candado de procesamiento COMPARTIDO entre cámara y escáner BT: evita doble embarque
+  // por escaneos solapados (la cámara y el BT llaman ambos a procesarQR). Se toma/suelta
+  // dentro de procesarQR (try/finally), así un solo punto cubre los dos caminos.
+  const procesandoQRRef = useRef(false);
 
   // ── Checklist ──────────────────────────────────────────────────────────────
   const [checks,       setChecks]       = useState<CheckItem[]>(CHECKLIST_ITEMS.map(i => ({ ...i })));
@@ -1286,19 +1296,46 @@ export default function ConductorApp() {
     };
   }, [escanear]);
 
+  // ─── ESCÁNER BLUETOOTH HID ──────────────────────────────────────────────────
+  // El pistol RED-L8BLS (y cualquier escáner BT en modo HID) emula teclado. La lógica de
+  // detección/anti-rebote vive en lib/hid-scanner; aquí solo lo enganchamos y disparamos
+  // el embarque. Solo activo en la pestaña "Ruta" (paradas) y NO mientras la cámara está
+  // abierta — así un disparo accidental en perfil/docs no registra abordajes fantasma, y
+  // cámara y BT no compiten. El candado procesandoQRRef (dentro de procesarQR) evita el
+  // doble embarque si ambos métodos detectan a la vez.
+  useEffect(() => {
+    if (!reservaActiva || tab !== "paradas" || escanear) return;
+    return attachHidScanner({
+      onScan: (code) => {
+        setBtScanFlash(true);
+        setTimeout(() => setBtScanFlash(false), 500);
+        return procesarQRRef.current(code);
+      },
+      isBusy: () => procesandoQRRef.current,
+    });
+  }, [reservaActiva?.id, tab, escanear]); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function procesarQR(qrCode: string) {
-    let pasajero: Pasajero | null = null;
+    if (procesandoQRRef.current) return;   // un escaneo (cámara o BT) ya en curso
+    procesandoQRRef.current = true;
     try {
-      const r = await condApi("buscar_pasajero", { qrCode });
-      pasajero = r.pasajero;
-    } catch { /* tratado como no encontrado abajo */ }
-    if (!pasajero) {
-      playBeep("error");
-      setBoardingMsg({ ok: false, msg: "QR no reconocido. Pasajero no encontrado en el sistema." });
-      setTimeout(() => setBoardingMsg(null), 4000);
-      return;
+      let pasajero: Pasajero | null = null;
+      try {
+        const r = await condApi("buscar_pasajero", { qrCode });
+        pasajero = r.pasajero;
+      } catch { /* tratado como no encontrado abajo */ }
+      if (!pasajero) {
+        playBeep("error");
+        setBoardingMsg({ ok: false, msg: "QR no reconocido. Pasajero no encontrado en el sistema." });
+        setTimeout(() => setBoardingMsg(null), 4000);
+        return;
+      }
+      await confirmarEmbarque(pasajero);
+    } finally {
+      // Soltar al terminar la ida y vuelta al server (NO al cerrarse la tarjeta de
+      // resultado, que vive 3 s): así el siguiente pasajero se puede escanear enseguida.
+      procesandoQRRef.current = false;
     }
-    await confirmarEmbarque(pasajero);
   }
 
   async function confirmarEmbarque(pasajero: Pasajero) {
@@ -1804,6 +1841,14 @@ export default function ConductorApp() {
       display: "flex", flexDirection: "column",
       maxWidth: 520, margin: "0 auto",
     }}>
+
+      {/* Flash visual del escáner BT — aparece instantáneo, desaparece con transición */}
+      <div aria-hidden style={{
+        position: "fixed", inset: 0, zIndex: 9990, pointerEvents: "none",
+        background: "rgba(37,99,235,0.30)",
+        opacity: btScanFlash ? 1 : 0,
+        transition: btScanFlash ? "none" : "opacity 0.5s ease-out",
+      }} />
 
       {/* ── HEADER ───────────────────────────────────────────────────────── */}
       <header style={{
@@ -2645,12 +2690,29 @@ export default function ConductorApp() {
                               </div>
                             )}
 
+                            {/* Indicador escáner BT — siempre activo cuando hay reserva */}
+                            <div style={{
+                              display: "flex", alignItems: "center", gap: 6,
+                              marginBottom: 8, padding: "6px 10px",
+                              borderRadius: 10, background: "var(--c-navy-tint, #EEF2FF)",
+                              border: "1px solid rgba(37,99,235,0.18)",
+                            }}>
+                              <div style={{
+                                width: 7, height: 7, borderRadius: "50%",
+                                background: "#3B82F6", flexShrink: 0,
+                                boxShadow: "0 0 0 2px rgba(59,130,246,0.25)",
+                              }} />
+                              <span style={{ fontSize: 11, fontWeight: 700, color: "#3B82F6", letterSpacing: 0.3 }}>
+                                Escáner BT activo — apunta y dispara
+                              </span>
+                            </div>
+
                             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
                               <PrimaryBtn
                                 onClick={() => setEscanear(true)}
                                 icon={<IconScan size={16} color="#fff" />}
                               >
-                                Escanear QR
+                                Cámara QR
                               </PrimaryBtn>
                               <SecondaryBtn
                                 onClick={notificarRetraso}

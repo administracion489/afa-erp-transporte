@@ -8,6 +8,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { registrarLectura } from "@/lib/odometro";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -363,6 +364,21 @@ export async function POST(req: NextRequest) {
           }
           return NextResponse.json({ error: error.message }, { status: 500 });
         }
+        // Alimentar el odómetro consolidado con el km de inicio (solo flota propia)
+        try {
+          if (checklist.vehiculo_id && checklist.km_inicio) {
+            const { data: veh } = await admin.from("vehiculos").select("id").eq("id", checklist.vehiculo_id).maybeSingle();
+            if (veh) {
+              await registrarLectura(admin, {
+                vehiculo_id: Number(checklist.vehiculo_id),
+                km: Number(checklist.km_inicio),
+                fuente: "checklist",
+                fecha: checklist.fecha,
+                ref_origen: "checklist_conductor",
+              });
+            }
+          }
+        } catch (e) { console.warn("[checklist] lectura odómetro:", e); }
         return NextResponse.json({ ok: true });
       }
 

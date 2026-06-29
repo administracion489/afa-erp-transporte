@@ -9,7 +9,7 @@ type Vehiculo = {
   id: number; placa: string; categoria: string | null;
   marca: string | null; modelo: string | null; anio: number | null;
   color: string | null; capacidad_pasajeros: number | null;
-  carga_maxima: string | null; estado: string | null;
+  carga_maxima: string | null; estado: string | null; nro_serie: string | null;
   kilometraje_actual: number | null; proximo_mantenimiento_km: number | null;
   estado_operativo: string | null; observaciones: string | null;
   equipamiento: string | null;
@@ -79,7 +79,7 @@ const ESTADO_DOC: Record<string, { label: string; bg: string; color: string }> =
 
 const FORM_V = {
   placa: "", categoria: "BUS", marca: "", modelo: "", anio: "",
-  color: "", capacidad: "", carga_maxima: "", estado: "disponible",
+  color: "", capacidad: "", carga_maxima: "", estado: "disponible", nro_serie: "",
   equipamiento: "full_equipo",
   foto_externa_url: "", foto_interna_url: "",
   descripcion_unidad: "",
@@ -305,6 +305,7 @@ export default function VehiculosPage() {
       placa: formV.placa.trim().toUpperCase(), categoria: formV.categoria,
       marca: formV.marca.trim() || null, modelo: formV.modelo.trim() || null,
       anio: formV.anio ? Number(formV.anio) : null, color: formV.color.trim() || null,
+      nro_serie: formV.nro_serie.trim() || null,
       capacidad_pasajeros: formV.capacidad ? Number(formV.capacidad) : null,
       carga_maxima: formV.carga_maxima.trim() || null, estado: formV.estado,
       equipamiento: formV.equipamiento || "full_equipo",
@@ -328,6 +329,7 @@ export default function VehiculosPage() {
       placa: v.placa, categoria: v.categoria || "BUS",
       marca: v.marca || "", modelo: v.modelo || "",
       anio: v.anio ? String(v.anio) : "", color: v.color || "",
+      nro_serie: v.nro_serie || "",
       capacidad: v.capacidad_pasajeros ? String(v.capacidad_pasajeros) : "",
       carga_maxima: v.carga_maxima || "", estado: v.estado || "disponible",
       equipamiento: v.equipamiento || "full_equipo",
@@ -502,6 +504,7 @@ export default function VehiculosPage() {
               <Campo label="Modelo"><input className={inputCls()} placeholder="OF 1721" value={formV.modelo} onChange={fv("modelo")} /></Campo>
               <Campo label="Año"><input type="number" className={inputCls()} placeholder="2020" value={formV.anio} onChange={fv("anio")} /></Campo>
               <Campo label="Color"><input className={inputCls()} placeholder="Blanco" value={formV.color} onChange={fv("color")} /></Campo>
+              <Campo label="Nº serie / chasis"><input className={inputCls()} placeholder="VIN / serie" value={formV.nro_serie} onChange={fv("nro_serie")} /></Campo>
               <Campo label="Capacidad pasajeros">
                 <input type="number" className={inputCls()} placeholder="45"
                   value={formV.capacidad}

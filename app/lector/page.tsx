@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
+import { attachHidScanner } from "@/lib/hid-scanner";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -189,6 +190,7 @@ export default function LectorQR() {
   const modoManualRef     = useRef(false);
   const cambiarParadaRef  = useRef<((p: ParadaItem) => void) | null>(null);
   const tickRef           = useRef<() => void>(() => {});
+  const handleScanRef     = useRef<(qr: string) => Promise<void>>(async () => {});
 
   useEffect(() => { paradaRef.current       = paradaActual;  }, [paradaActual]);
   useEffect(() => { todasParadasRef.current = todasParadas;  }, [todasParadas]);
@@ -485,6 +487,22 @@ export default function LectorQR() {
   }, [estado, startScanner, stopScanner]);
 
   useEffect(() => () => { stopScanner(); }, [stopScanner]);
+
+  // Sin deps: handleScan lee desde refs internamente, pero se redefine cada render.
+  // El ref garantiza que el listener BT siempre llame a la versión más reciente.
+  useEffect(() => { handleScanRef.current = handleScan; });
+
+  // ─── ESCÁNER BLUETOOTH HID ──────────────────────────────────────────────────
+  // El pistol RED-L8BLS emula teclado: la detección/anti-rebote vive en lib/hid-scanner.
+  // Solo activo en estado "espera" (la pantalla de escaneo). Comparte processingRef con la
+  // cámara como candado, así ambos métodos no registran el mismo abordaje dos veces.
+  useEffect(() => {
+    if (estado !== "espera") return;
+    return attachHidScanner({
+      onScan: (code) => { processingRef.current = true; return handleScanRef.current(code); },
+      isBusy: () => processingRef.current,
+    });
+  }, [estado]);
 
   // ── SCAN HANDLER ──────────────────────────────────────────────────────────
   async function handleScan(qrText: string) {
@@ -876,9 +894,17 @@ export default function LectorQR() {
         background: "linear-gradient(to top, rgba(0,0,0,.9) 0%, transparent 100%)",
         padding: "40px 20px 30px", display: "flex", flexDirection: "column", alignItems: "center", gap: 14,
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#4ADE80", boxShadow: "0 0 10px #4ADE80", animation: "lqr-blink 2s ease-in-out infinite" }} />
-          <span style={{ color: "rgba(255,255,255,.7)", fontSize: 15, fontWeight: 500 }}>Apunta al QR del pasajero</span>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#4ADE80", boxShadow: "0 0 10px #4ADE80", animation: "lqr-blink 2s ease-in-out infinite" }} />
+            <span style={{ color: "rgba(255,255,255,.7)", fontSize: 15, fontWeight: 500 }}>Apunta al QR del pasajero</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#60A5FA", boxShadow: "0 0 6px #60A5FA" }} />
+            <span style={{ color: "rgba(96,165,250,.85)", fontSize: 11, fontWeight: 700, letterSpacing: 0.4 }}>
+              Escáner BT activo — dispara sin tocar la pantalla
+            </span>
+          </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", maxWidth: 420 }}>
           <button onClick={sincronizar} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, background: "rgba(96,165,250,.16)", border: "1px solid rgba(96,165,250,.32)", borderRadius: 12, padding: "11px 14px", color: "#93C5FD", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: FONT }}>

@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { registrarLectura } from "@/lib/odometro";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -213,9 +214,21 @@ export default function CombustiblePage() {
     if (error) { alert(error.message); setGuardando(false); return; }
 
     if (form.kilometraje) {
-      const v = vehiculos.find(v => v.id === Number(form.vehiculo_id));
-      if (v && Number(form.kilometraje) > Number(v.kilometraje_actual || 0)) {
-        await supabase.from("vehiculos").update({ kilometraje_actual: Number(form.kilometraje) }).eq("id", Number(form.vehiculo_id));
+      if (editandoId) {
+        // Edición: ajustar el vigente sin duplicar lectura en el historial
+        const v = vehiculos.find(v => v.id === Number(form.vehiculo_id));
+        if (v && Number(form.kilometraje) > Number(v.kilometraje_actual || 0)) {
+          await supabase.from("vehiculos").update({ kilometraje_actual: Number(form.kilometraje) }).eq("id", Number(form.vehiculo_id));
+        }
+      } else {
+        // Registro nuevo: pasa por la consolidación de odómetro (anti-retroceso)
+        await registrarLectura(supabase, {
+          vehiculo_id: Number(form.vehiculo_id),
+          km: Number(form.kilometraje),
+          fuente: "combustible",
+          fecha: form.fecha,
+          ref_origen: "combustible",
+        });
       }
     }
     limpiar(); cargarDatos(); setGuardando(false);
