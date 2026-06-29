@@ -58,6 +58,16 @@ function esColumnaInexistente(err: any): boolean {
   return /could not find the .* column|column .* does not exist/i.test(err.message || "");
 }
 
+// ¿El error es una violación de UNIQUE (23505)? Lo usa embarcar_qr para tratar un INSERT
+// de "caminante" que choca con el índice único (pasajero_id, parada_id) como "ya existía"
+// (carrera multi-dispositivo) en vez de error. Si el índice aún no se creó en la BD, este
+// 23505 nunca ocurre y el flujo degrada al comportamiento previo (sin protección).
+function esViolacionUnica(err: any): boolean {
+  if (!err) return false;
+  if (err.code === "23505") return true;
+  return /duplicate key value violates unique constraint/i.test(err.message || "");
+}
+
 export async function POST(req: NextRequest) {
   try {
     // Gate de acceso: si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está configurada, exigir el header
@@ -307,6 +317,10 @@ export async function POST(req: NextRequest) {
         );
 
         // 5a) Caminante: no estaba asignado en este horario → insertar en el bus actual.
+        // IDEMPOTENTE ante concurrencia: el índice único (pasajero_id, parada_id) hace que un
+        // segundo INSERT simultáneo del mismo walk-on falle con 23505. En ese caso recuperamos
+        // la fila existente y NO volvemos a registrar boarding_log → sin fila duplicada ni doble
+        // conteo. (Si el índice aún no se creó, no hay 23505 y degrada al comportamiento previo.)
         if (filas.length === 0) {
           const insertar = async (extra: Record<string, any> = {}) =>
             admin.from("pasajeros_parada")
@@ -315,6 +329,12 @@ export async function POST(req: NextRequest) {
               .select("id").single();
           let { data: nuevo, error: eIns } = await insertar({ reserva_id: reservaId });
           if (eIns && esColumnaInexistente(eIns)) ({ data: nuevo, error: eIns } = await insertar());
+          if (eIns && esViolacionUnica(eIns)) {
+            // Otra llamada concurrente ya insertó esta misma fila → recuperarla y no re-loguear.
+            const { data: ya } = await admin.from("pasajeros_parada")
+              .select("id").eq("pasajero_id", pasajeroId).eq("parada_id", paradaId).maybeSingle();
+            return NextResponse.json({ ok: true, id: ya?.id ?? null, creado: false, empresaAjena, pasajero: pasajeroInfo });
+          }
           if (eIns) return NextResponse.json({ error: eIns.message }, { status: 500 });
           await logBoarding(pasajeroId, paradaId, reservaId);
           return NextResponse.json({ ok: true, id: nuevo?.id, creado: true, empresaAjena, pasajero: pasajeroInfo });

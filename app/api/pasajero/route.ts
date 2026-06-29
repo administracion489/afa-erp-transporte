@@ -554,7 +554,13 @@ export async function POST(req: NextRequest) {
           parada_id:   Number(parada_id),
           estado_abordaje: "Pendiente",
         });
-        if (insErr) return NextResponse.json({ error: insErr.message }, { status: 500 });
+        if (insErr) {
+          // Doble envío concurrente: el índice único (pasajero_id, parada_id) rechazó el
+          // segundo INSERT (23505). Mismo mensaje que el pre-check de arriba (no es un 500).
+          if (insErr.code === "23505" || /duplicate key value violates unique constraint/i.test(insErr.message || ""))
+            return NextResponse.json({ error: "Ya tienes una parada asignada en este servicio" }, { status: 409 });
+          return NextResponse.json({ error: insErr.message }, { status: 500 });
+        }
         return NextResponse.json({ ok: true });
       }
 

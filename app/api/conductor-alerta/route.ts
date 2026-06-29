@@ -84,6 +84,17 @@ export async function POST(req: NextRequest) {
         ({ data: nuevo, error: errIns } = await insertar());
       }
 
+      // Carrera multi-dispositivo: el índice único (pasajero_id, parada_id) rechazó el INSERT
+      // (23505) porque otra llamada ya insertó esta fila (su "winner" ya marcó abordado y
+      // registró boarding_log). Recuperar el id y devolver ok sin re-loguear → sin doble conteo.
+      // (Si el índice aún no existe, no hay 23505 y degrada al comportamiento previo.)
+      if (errIns && (errIns.code === "23505" || /duplicate key value violates unique constraint/i.test(errIns.message || ""))) {
+        const { data: ya } = await supabaseAdmin
+          .from("pasajeros_parada").select("id")
+          .eq("parada_id", parada_id).eq("pasajero_id", pasajero_id).maybeSingle();
+        return NextResponse.json({ ok: true, id: ya?.id, ya_embarcado: true });
+      }
+
       if (errIns) {
         console.error("[conductor-alerta] Error insertando pasajero_parada:", errIns.message);
         return NextResponse.json({ error: errIns.message }, { status: 500 });
