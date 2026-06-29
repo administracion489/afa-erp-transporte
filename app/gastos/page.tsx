@@ -257,7 +257,7 @@ export default function GastosPage() {
         monto: Number(m.costo || 0),
         vehiculo_id: m.vehiculo_id, reserva_id: null,
         estado: m.estado || "pagado", editable: false,
-        href: "/mantenimiento", raw: m,
+        href: "/mantenimiento?tab=historial", raw: m,
       });
     });
 
@@ -413,7 +413,7 @@ export default function GastosPage() {
         {[
           { label: "💸 Gastos directos", valor: totalGastosP, count: gastosP.length,      color: "#4b5563", bg: "#f3f4f6", href: null         },
           { label: "⛽ Combustible",      valor: totalCombust, count: combustible.length,  color: "#ea580c", bg: "#fff7ed", href: "/combustible" },
-          { label: "🔧 Mantenimiento",   valor: totalMant,    count: mantenimien.filter(m => m.costo > 0).length, color: "#854d0e", bg: "#fef9c3", href: "/mantenimiento" },
+          { label: "🔧 Mantenimiento",   valor: totalMant,    count: mantenimien.filter(m => m.costo > 0).length, color: "#854d0e", bg: "#fef9c3", href: "/mantenimiento?tab=historial" },
           { label: "🛞 Neumáticos",      valor: totalNeu,     count: neumaticos.filter(n => (n.costo_compra||0) > 0).length, color: "#0f766e", bg: "#f0fdfa", href: "/neumaticos" },
         ].map(k => (
           <div key={k.label} className={`rounded-xl p-3 border transition-all ${k.href ? "cursor-pointer hover:shadow-md" : ""}`}
@@ -496,7 +496,7 @@ export default function GastosPage() {
           <div className="grid grid-cols-3 gap-2">
             {[
               { label: "Registrar combustible", icon: "⛽", color: "#ea580c", bg: "#fff7ed", href: "/combustible" },
-              { label: "Registrar mantenimiento", icon: "🔧", color: "#854d0e", bg: "#fef9c3", href: "/mantenimiento" },
+              { label: "Registrar mantenimiento", icon: "🔧", color: "#854d0e", bg: "#fef9c3", href: "/mantenimiento?tab=historial" },
               { label: "Registrar neumático", icon: "🛞", color: "#0f766e", bg: "#f0fdfa", href: "/neumaticos" },
             ].map(m => (
               <button key={m.href} onClick={() => router.push(m.href)}

@@ -65,7 +65,7 @@ function inputCls(extra = "") {
 
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
-export default function ProgramaMantenimientoPage() {
+export default function ProgramaTab() {
   const [vehiculos, setVehiculos] = useState<Vehiculo[]>([]);
   const [terceros, setTerceros]   = useState<Vehiculo[]>([]);
   const [enrol, setEnrol]         = useState<Enrol[]>([]);

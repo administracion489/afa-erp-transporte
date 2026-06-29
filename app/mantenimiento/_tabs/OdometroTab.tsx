@@ -52,7 +52,7 @@ function fileToAdjunto(file: File): Promise<{ tipo: "image"; media_type: string;
 
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
-export default function OdometroPage() {
+export default function OdometroTab() {
   const [vehiculos, setVehiculos] = useState<Vehiculo[]>([]);
   const [lecturas, setLecturas]   = useState<Lectura[]>([]);
   const [kmDiaMax, setKmDiaMax]   = useState(1500);

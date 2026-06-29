@@ -115,7 +115,7 @@ function fmtFecha(f: string | null) {
 
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
-export default function OrdenesTrabajoPag() {
+export default function OrdenesTab() {
   const [vista, setVista]           = useState<Vista>("ordenes");
   const [vehiculos,   setVehiculos] = useState<Vehiculo[]>([]);
   const [plantillas,  setPlantillas]= useState<Plantilla[]>([]);

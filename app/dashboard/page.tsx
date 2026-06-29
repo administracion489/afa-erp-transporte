@@ -643,8 +643,8 @@ export default function DashboardPage() {
   if (docsVenc>0)            alertas.push({ tipo:"atencion", texto:`${docsVenc} documento(s) de vehículo vencido(s)`,                       href:"/documentos-vehiculares",  orden:11 });
   if (segPorVenc>0)          alertas.push({ tipo:"atencion", texto:`${segPorVenc} seguro(s) vence(n) en 30 días`,                           href:"/seguros",                 orden:12 });
   if (licPorVenc>0)          alertas.push({ tipo:"atencion", texto:`${licPorVenc} licencia(s) de conductor por vencer`,                     href:"/conductores",             orden:13 });
-  if (mantPend>0)            alertas.push({ tipo:"atencion", texto:`${mantPend} mantenimiento(s) pendiente(s)`,                             href:"/mantenimiento",           orden:14 });
-  if (mantProx>0)            alertas.push({ tipo:"atencion", texto:`${mantProx} mantenimiento(s) en 15 días`,                               href:"/mantenimiento",           orden:15 });
+  if (mantPend>0)            alertas.push({ tipo:"atencion", texto:`${mantPend} mantenimiento(s) pendiente(s)`,                             href:"/mantenimiento?tab=historial",           orden:14 });
+  if (mantProx>0)            alertas.push({ tipo:"atencion", texto:`${mantProx} mantenimiento(s) en 15 días`,                               href:"/mantenimiento?tab=historial",           orden:15 });
   if (neuPorVenc>0)          alertas.push({ tipo:"atencion", texto:`${neuPorVenc} neumático(s) entre 70–90% de vida útil`,                  href:"/neumaticos",              orden:16 });
   if (empPorVenc>0)          alertas.push({ tipo:"atencion", texto:`${empPorVenc} empresa(s) tercerizada(s) con docs por vencer`,           href:"/tercerizadas",            orden:17 });
   if (amarillos>0)           alertas.push({ tipo:"atencion", texto:`${amarillos} vehículo(s) próximo(s) a mantenimiento`,                   href:"/vehiculos",               orden:18 });
@@ -864,7 +864,7 @@ export default function DashboardPage() {
           intent={empConRiesgo > 0 ? "danger" : "neutral"} onClick={() => router.push("/tercerizadas")}/>
         <AreaTile icon={I.Wrench} label="Mantenimiento"
           value={mantPend > 0 ? `${mantPend} pend.` : "Al día"}
-          sub={`${mantProx} en 15 días`} intent={areaIntentMant} onClick={() => router.push("/mantenimiento")}/>
+          sub={`${mantProx} en 15 días`} intent={areaIntentMant} onClick={() => router.push("/mantenimiento?tab=historial")}/>
       </div>
 
       {/* ── 6. EFICIENCIA + SEMÁFORO + ALERTAS ── */}
@@ -1115,7 +1115,7 @@ export default function DashboardPage() {
           </h3>
           {[
             { label:"Combustible",      value:gastoCombustible, dot:C.danger, href:"/combustible" },
-            { label:"Mantenimiento",    value:gastoManten,      dot:C.warn,   href:"/mantenimiento" },
+            { label:"Mantenimiento",    value:gastoManten,      dot:C.warn,   href:"/mantenimiento?tab=historial" },
             { label:"Gastos generales", value:totalGastosGen,   dot:C.navy,   href:"/gastos" },
           ].map((c, i, arr) => (
             <div key={c.label} onClick={() => router.push(c.href)}
@@ -1242,7 +1242,7 @@ export default function DashboardPage() {
                 Mantenimientos programados
               </h3>
             </div>
-            <button onClick={() => router.push("/mantenimiento")}
+            <button onClick={() => router.push("/mantenimiento?tab=historial")}
               style={{ fontSize:11, fontWeight:700, color:C.blue, background:"none", border:"none",
                 cursor:"pointer", display:"inline-flex", alignItems:"center", gap:3, fontFamily:"var(--font-sans)" }}>
               Ver todos <I.Arrow size={11} sw={2} color={C.blue}/>
