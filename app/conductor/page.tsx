@@ -1074,6 +1074,20 @@ export default function ConductorApp() {
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [mostrarAjustesGps]);
 
+  // Mantener el SEMÁFORO de la tarjeta de ajustes al día: re-leer la exención de batería al
+  // volver a primer plano (p.ej. tras concederla en Ajustes) aunque la hoja esté cerrada. Es
+  // SOLO LECTURA (no abre nada): solo refresca el color verde/ámbar. La lógica de mostrar o
+  // auto-reaparecer la guía vive en evaluarAjustesGps, intacta → cero riesgo de nagueo.
+  useEffect(() => {
+    if (!conductor || !esAppNativa()) return;
+    const onVis = async () => {
+      if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+      try { setExentaBat(await bateriaExenta()); } catch {}
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [conductor?.id]);
+
   async function iniciarRecorrido(reserva: Reserva) {
     if (reservaActiva) { alert("Hay un servicio en curso. Finalízalo antes de iniciar otro."); return; }
     if (!checkDone) { alert("Debes completar el pre-viaje antes de iniciar el recorrido"); setTab("checklist"); return; }
@@ -2078,37 +2092,73 @@ export default function ConductorApp() {
               </div>
             )}
 
-            {/* En la app nativa: atajo a Ajustes para conceder "Permitir todo el tiempo"
-                (requisito de Android 11+ para rastrear con Waze/pantalla bloqueada). */}
-            {esAppNativa() && (
-              <button
-                onClick={() => abrirAjustesUbicacion()}
-                style={{
-                  width: "100%", marginBottom: 14, padding: "9px 14px",
-                  background: "transparent", border: "1px dashed var(--c-line)",
-                  borderRadius: 12, color: "var(--c-mute)", fontWeight: 700, fontSize: 12,
-                  cursor: "pointer", fontFamily: FONT_SANS,
-                }}
-              >
-                ¿No rastrea con la pantalla bloqueada? Permitir ubicación “Todo el tiempo”
-              </button>
-            )}
+            {/* Acceso único a los ajustes que evitan que el SO corte el rastreo: ubicación
+                "todo el tiempo" + batería/autostart, unificados en una sola hoja. La tarjeta es
+                un SEMÁFORO según la exención de batería REAL del equipo (única señal legible hoy):
+                  • protegido (verde, colapsado a una línea) — exentaBat===true; tranquiliza sin estorbar.
+                  • atención (ámbar) — exentaBat===false o se detectó un corte de GPS en viaje.
+                  • neutro — exentaBat===null (APK viejo/sin plugin): no afirmamos un estado que no sabemos.
+                Tocar abre la hoja con las dos acciones (mostrarAjustesGps). */}
+            {esAppNativa() && (() => {
+              const estado: "protegido" | "atencion" | "neutro" =
+                cortePendiente || exentaBat === false ? "atencion"
+                : exentaBat === true ? "protegido"
+                : "neutro";
 
-            {/* Guía de ajustes del equipo (autostart/batería/recientes) para que el
-                fabricante no corte el rastreo — la causa #1 de cortes en MIUI/Oppo/etc. */}
-            {esAppNativa() && (
-              <button
-                onClick={() => setMostrarAjustesGps(true)}
-                style={{
-                  width: "100%", marginBottom: 14, padding: "9px 14px",
-                  background: "transparent", border: "1px dashed var(--c-line)",
-                  borderRadius: 12, color: "var(--c-mute)", fontWeight: 700, fontSize: 12,
-                  cursor: "pointer", fontFamily: FONT_SANS,
-                }}
-              >
-                ⚙️ Ajustes para que NO se corte el rastreo (autostart · batería)
-              </button>
-            )}
+              // Protegido: línea fina, mínimo footprint. Sigue siendo tocable para revisar/re-conceder.
+              if (estado === "protegido") {
+                return (
+                  <button
+                    onClick={() => setMostrarAjustesGps(true)}
+                    style={{
+                      width: "100%", marginBottom: 14, padding: "8px 12px",
+                      display: "flex", alignItems: "center", gap: 8,
+                      background: "var(--c-success-tint)", border: "1px solid var(--c-success)",
+                      borderRadius: 12, cursor: "pointer", fontFamily: FONT_SANS,
+                    }}
+                  >
+                    <IconShield size={15} color="var(--c-success)" />
+                    <span style={{ flex: 1, textAlign: "left", fontSize: 12.5, fontWeight: 800, color: "var(--c-success)" }}>
+                      Rastreo protegido
+                    </span>
+                    <IconChevronRight size={15} color="var(--c-success)" />
+                  </button>
+                );
+              }
+
+              const atencion = estado === "atencion";
+              return (
+                <button
+                  onClick={() => setMostrarAjustesGps(true)}
+                  style={{
+                    width: "100%", marginBottom: 14, padding: "12px 14px",
+                    display: "flex", alignItems: "center", gap: 12, textAlign: "left",
+                    background: atencion ? "var(--c-warn-tint)" : "var(--c-surface)",
+                    border: atencion ? "1px solid var(--c-warn)" : "1px solid var(--c-line)",
+                    borderRadius: 14, cursor: "pointer", fontFamily: FONT_SANS,
+                  }}
+                >
+                  <span style={{
+                    flexShrink: 0, width: 34, height: 34, borderRadius: 10,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    background: atencion ? "var(--c-warn)" : "var(--c-navy-tint)",
+                  }}>
+                    {atencion
+                      ? <IconCircleAlert size={18} color="#fff" />
+                      : <IconPin size={18} color="var(--c-navy)" />}
+                  </span>
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ display: "block", fontSize: 13.5, fontWeight: 800, color: atencion ? "var(--c-warn)" : "var(--c-ink)" }}>
+                      {atencion ? "Revisa los ajustes de rastreo" : "Ajustes de rastreo"}
+                    </span>
+                    <span style={{ display: "block", marginTop: 1, fontSize: 11.5, color: atencion ? "#92400E" : "var(--c-mute)" }}>
+                      {atencion ? "El equipo puede cortar el GPS" : "Ubicación · batería · autostart"}
+                    </span>
+                  </span>
+                  <IconChevronRight size={18} color={atencion ? "var(--c-warn)" : "var(--c-mute)"} />
+                </button>
+              );
+            })()}
 
             {/* Hero card — próximo viaje (si no está en ruta) */}
             {!enRuta && proximaReserva && (
@@ -3443,35 +3493,76 @@ export default function ConductorApp() {
                   : <>Tu equipo (<strong>{guia.marca}</strong>) puede cerrar la app en segundo plano y cortar el GPS. Protégelo con <strong>un toque</strong>:</>}
               </p>
 
-              {/* Acción principal: exención de batería en 1 toque (solo APK con plugin, no exento). */}
-              {exentaBat === false && (
-                <button
-                  onClick={() => solicitarExencionBateria()}
-                  style={{
-                    width: "100%", padding: "13px 14px", borderRadius: 12,
-                    border: "none", background: "var(--c-success, #1f9d55)",
-                    color: "#fff", fontWeight: 800, fontSize: 14,
-                    cursor: "pointer", fontFamily: FONT_SANS,
-                  }}
-                >
-                  🔋 Proteger rastreo (1 toque)
-                </button>
-              )}
+              {/* Dos concerns, dos filas. La batería tiene ESTADO real (legible vía exentaBat);
+                  la ubicación "todo el tiempo" es ACCIÓN — su estado no es legible con los plugins
+                  actuales, así que no pintamos un check que no podemos verificar. */}
 
-              {/* En APK viejo (sin plugin, exentaBat===null) el 1-toque no existe → ajustes de la app. */}
-              {esAppNativa() && exentaBat !== false && (
+              {/* Fila 1 — Batería y autostart (no cerrar la app en segundo plano). */}
+              <div style={{ border: "1px solid var(--c-line-2)", borderRadius: 12, padding: 12, marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: exentaBat === true ? 0 : 8 }}>
+                  <IconGauge size={18} color="var(--c-mute)" />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ margin: 0, fontSize: 13, fontWeight: 800, color: "var(--c-ink)" }}>Batería y autostart</p>
+                    <p style={{ margin: "1px 0 0", fontSize: 11, color: "var(--c-mute)" }}>No cerrar la app en segundo plano</p>
+                  </div>
+                  <span style={{
+                    flexShrink: 0, fontSize: 11, fontWeight: 800, borderRadius: 999, padding: "2px 10px",
+                    color: exentaBat === true ? "var(--c-success)" : exentaBat === false ? "var(--c-warn)" : "var(--c-mute)",
+                    background: exentaBat === true ? "var(--c-success-tint)" : exentaBat === false ? "var(--c-warn-tint)" : "var(--c-paper)",
+                  }}>
+                    {exentaBat === true ? "Protegido" : exentaBat === false ? "Expuesto" : "—"}
+                  </span>
+                </div>
+                {/* No exento (APK con plugin): exención en 1 toque, el camino que de verdad resuelve. */}
+                {exentaBat === false && (
+                  <button
+                    onClick={() => solicitarExencionBateria()}
+                    style={{
+                      width: "100%", padding: "11px 14px", borderRadius: 10, border: "none",
+                      background: "var(--c-success)", color: "#fff", fontWeight: 800, fontSize: 13.5,
+                      cursor: "pointer", fontFamily: FONT_SANS,
+                    }}
+                  >
+                    🔋 Proteger rastreo (1 toque)
+                  </button>
+                )}
+                {/* APK viejo (sin plugin, exentaBat===null): el 1-toque no existe → ajustes de la app. */}
+                {exentaBat === null && (
+                  <button
+                    onClick={() => abrirAjustesUbicacion()}
+                    style={{
+                      width: "100%", padding: "11px 14px", borderRadius: 10,
+                      border: "1px solid var(--c-navy)", background: "transparent",
+                      color: "var(--c-navy)", fontWeight: 800, fontSize: 13.5,
+                      cursor: "pointer", fontFamily: FONT_SANS,
+                    }}
+                  >
+                    Abrir ajustes de la app
+                  </button>
+                )}
+              </div>
+
+              {/* Fila 2 — Ubicación "todo el tiempo" (seguir rastreando con la pantalla bloqueada). */}
+              <div style={{ border: "1px solid var(--c-line-2)", borderRadius: 12, padding: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                  <IconPin size={18} color="var(--c-mute)" />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ margin: 0, fontSize: 13, fontWeight: 800, color: "var(--c-ink)" }}>Ubicación: todo el tiempo</p>
+                    <p style={{ margin: "1px 0 0", fontSize: 11, color: "var(--c-mute)" }}>Rastrear con la pantalla bloqueada</p>
+                  </div>
+                </div>
                 <button
                   onClick={() => abrirAjustesUbicacion()}
                   style={{
-                    width: "100%", padding: "13px 14px", borderRadius: 12,
+                    width: "100%", padding: "11px 14px", borderRadius: 10,
                     border: "1px solid var(--c-navy)", background: "transparent",
-                    color: "var(--c-navy)", fontWeight: 800, fontSize: 14,
+                    color: "var(--c-navy)", fontWeight: 800, fontSize: 13.5,
                     cursor: "pointer", fontFamily: FONT_SANS,
                   }}
                 >
-                  Abrir ajustes de la app
+                  Permitir todo el tiempo
                 </button>
-              )}
+              </div>
 
               {/* Pasos manuales: expandidos en OEM agresivos; colapsados (tras "ver pasos") en el resto. */}
               {!mostrarPasos && (
