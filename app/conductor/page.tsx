@@ -1664,6 +1664,8 @@ export default function ConductorApp() {
   const primeraIniciable = esModoOtraFecha ? null : reservasHoy.find(r => !esServicioCerrado(r.estado));
   const proximaReserva = !enRuta ? reservasHoy.find(r => !esServicioCerrado(r.estado) && (minutosAlServicio(r.hora_servicio) ?? -1) >= 0) : null;
   const minsHastaProx  = proximaReserva ? minutosAlServicio(proximaReserva.hora_servicio) : null;
+  // El próximo se muestra como tarjeta-hero del timeline → no repetirlo en la lista de pendientes.
+  const pendientesAgenda = reservasPendientesSection.filter(r => r.id !== proximaReserva?.id);
   void tick; // forzar re-render con el setInterval del minuto
 
   const totalReservados = pasajeros.length;
@@ -1902,8 +1904,6 @@ export default function ConductorApp() {
     { id: "perfil",     label: "Perfil",    icon: <IconUser size={20} /> },
   ];
 
-  const titulo = fechaTitulo();
-
   return (
     <div style={{
       minHeight: "100vh", background: "var(--c-paper)",
@@ -1980,13 +1980,56 @@ export default function ConductorApp() {
         {/* ═══ HOY ═══ */}
         {tab === "ruta" && (
           <section style={{ padding: "16px 18px 0" }}>
-            <Eyebrow>{titulo.dow}</Eyebrow>
-            <h1 style={{
-              fontFamily: FONT_SANS, fontSize: 32, fontWeight: 800, letterSpacing: -1.1,
-              color: "var(--c-ink)", margin: "4px 0 18px",
-            }}>
-              {titulo.fecha}
-            </h1>
+            {/* Fila vehículo asignado + estado de pre-viaje (estilo 2b). Solo fuera de ruta:
+                en ruta el vehículo ya se ve en el chip del header superior. */}
+            {!enRuta && (
+              <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+                {/* Botón de vehículo: placa + modelo; el <select> nativo invisible abre el
+                    selector al tocar (mantiene la lógica de setVehiculoId). */}
+                <label style={{
+                  flex: 1, minWidth: 0, position: "relative", background: "var(--c-surface)",
+                  border: `1px solid ${vehiculoId ? "var(--c-line)" : "var(--c-warn)"}`, borderRadius: 13,
+                  padding: "10px 13px", display: "flex", alignItems: "center", gap: 9, cursor: "pointer",
+                }}>
+                  <IconBus size={19} color="var(--c-navy)" />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ margin: 0, fontFamily: FONT_MONO, fontSize: 12.5, fontWeight: 800, color: "var(--c-ink)", letterSpacing: 0.3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {vehSel?.placa || "Elegir vehículo"}
+                    </p>
+                    <p style={{ margin: "3px 0 0", fontSize: 10.5, fontWeight: 500, color: "var(--c-mute)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {vehSel ? ([vehSel.categoria, vehSel.marca].filter(Boolean).join(" · ") || "Vehículo") : "Toca para asignar"}
+                    </p>
+                  </div>
+                  <IconChevronRight size={16} color="var(--c-mute)" style={{ transform: "rotate(90deg)", flexShrink: 0 }} />
+                  <select
+                    value={vehiculoId || ""}
+                    onChange={e => setVehiculoId(Number(e.target.value) || null)}
+                    aria-label="Seleccionar vehículo"
+                    style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer", border: "none", appearance: "none", WebkitAppearance: "none" }}
+                  >
+                    <option value="">Seleccionar vehículo…</option>
+                    {vehiculos.map(v => (
+                      <option key={v.id} value={v.id}>{v.placa} — {v.categoria} {v.marca || ""}</option>
+                    ))}
+                  </select>
+                </label>
+                {/* Estado de pre-viaje: verde "listo" / ámbar "pendiente" (toca → checklist). */}
+                <button
+                  onClick={() => { if (!checkDone) setTab("checklist"); }}
+                  style={{
+                    flexShrink: 0, display: "flex", alignItems: "center", gap: 7, borderRadius: 13,
+                    padding: "10px 14px", cursor: checkDone ? "default" : "pointer", fontFamily: FONT_SANS,
+                    background: checkDone ? "var(--c-success-tint)" : "var(--c-warn-tint)",
+                    border: `1px solid ${checkDone ? "var(--c-success)" : "var(--c-warn)"}`,
+                  }}
+                >
+                  <IconShield size={17} color={checkDone ? "var(--c-success)" : "var(--c-warn)"} />
+                  <span style={{ fontSize: 11, fontWeight: 700, lineHeight: 1.2, textAlign: "left", color: checkDone ? "var(--c-success)" : "var(--c-warn)" }}>
+                    Pre-viaje<br />{checkDone ? "listo" : "pendiente"}
+                  </span>
+                </button>
+              </div>
+            )}
 
             {/* ── Conectarse / estado de rastreo (estilo Uber/Cabify) ───────────── */}
             {!enRuta && !conectado && (
@@ -2029,29 +2072,7 @@ export default function ConductorApp() {
               </div>
             )}
 
-            {/* Banner pre-viaje pendiente */}
-            {!checkDone && (
-              <button
-                onClick={() => setTab("checklist")}
-                style={{
-                  width: "100%", textAlign: "left",
-                  background: "var(--c-warn-tint)", border: "1px solid var(--c-warn)",
-                  borderRadius: 14, padding: "12px 14px", marginBottom: 14, cursor: "pointer",
-                  display: "flex", alignItems: "center", gap: 10, fontFamily: FONT_SANS,
-                }}
-              >
-                <IconShield size={20} color="var(--c-warn)" />
-                <div style={{ flex: 1 }}>
-                  <p style={{ margin: 0, color: "var(--c-warn)", fontWeight: 800, fontSize: 13 }}>
-                    Pre-viaje pendiente
-                  </p>
-                  <p style={{ margin: "2px 0 0", color: "#92400E", fontSize: 11 }}>
-                    Completa la inspección antes de iniciar
-                  </p>
-                </div>
-                <IconChevronRight size={16} color="var(--c-warn)" />
-              </button>
-            )}
+            {/* (El estado de pre-viaje pendiente ahora vive en el chip de la fila de vehículo). */}
 
             {/* Alerta licencia */}
             {conductor.vencimiento_licencia && (diasPara(conductor.vencimiento_licencia) ?? 999) <= 60 && (
@@ -2170,11 +2191,48 @@ export default function ConductorApp() {
               );
             })()}
 
-            {/* Hero card — próximo viaje (si no está en ruta) */}
+            {/* ── Agenda del día: encabezado + navegación de fecha (estilo 2b) ── */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, marginTop: 2 }}>
+              <div style={{ minWidth: 0 }}>
+                <p style={{ margin: 0, fontFamily: FONT_MONO, fontSize: 10, fontWeight: 700, letterSpacing: 1.4, textTransform: "uppercase", color: "var(--c-mute)" }}>
+                  Agenda{esModoOtraFecha ? "" : " de hoy"}
+                </p>
+                <label style={{ position: "relative", display: "inline-block", cursor: "pointer" }}>
+                  <p style={{ margin: "6px 0 0", fontSize: 12.5, fontWeight: 700, color: "var(--c-ink)", whiteSpace: "nowrap" }}>
+                    {new Date(fechaVista + "T12:00:00").toLocaleDateString("es-PE", { weekday: "short", day: "numeric", month: "short" })}
+                    {" · "}{reservasMostrar.length} servicio{reservasMostrar.length === 1 ? "" : "s"}
+                    {esModoOtraFecha && (
+                      <span onClick={(e) => { e.preventDefault(); irAHoy(); }} style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, color: "var(--c-navy)" }}>volver a HOY</span>
+                    )}
+                  </p>
+                  <input
+                    type="date" value={fechaVista}
+                    onChange={e => { const v = e.target.value; if (!v) return; setFechaVista(v); if (v === hoyLocal) setReservasOtraFecha(null); else cargarOtraFecha(v); }}
+                    style={{ position: "absolute", opacity: 0, pointerEvents: "none", width: 0, height: 0 }}
+                  />
+                </label>
+              </div>
+              <div style={{ display: "flex", gap: 7, flexShrink: 0 }}>
+                <button onClick={() => cambiarFecha(-1)} style={{ width: 32, height: 32, borderRadius: 9, border: "1px solid var(--c-line)", background: "var(--c-surface)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <IconArrowLeft size={15} color="var(--c-ink)" />
+                </button>
+                <button onClick={() => cambiarFecha(+1)} style={{ width: 32, height: 32, borderRadius: 9, border: "1px solid var(--c-line)", background: "var(--c-surface)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <IconArrowRight size={15} color="var(--c-ink)" />
+                </button>
+              </div>
+            </div>
+
+            {/* Timeline · ítem PRÓXIMO (hero, si no está en ruta): rail verde + tarjeta azul */}
             {!enRuta && proximaReserva && (
+              <div style={{ display: "flex", gap: 12 }}>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
+                  <div style={{ width: 13, height: 13, borderRadius: "50%", background: "var(--c-success)", boxShadow: "0 0 0 4px var(--c-success-tint)", marginTop: 6 }} />
+                  <div style={{ flex: 1, width: 2, background: "var(--c-line)", margin: "4px 0" }} />
+                </div>
+                <div style={{ flex: 1, minWidth: 0, paddingBottom: 16 }}>
               <div style={{
                 background: "linear-gradient(165deg, #163a6b, #0e2748)", color: "#fff",
-                borderRadius: 24, padding: 20, marginBottom: 14,
+                borderRadius: 24, padding: 20,
                 boxShadow: "0 22px 42px -16px rgba(14,39,72,0.5)",
               }}>
                 {/* Cabecera (estilo 2b): eyebrow + cuenta regresiva en columna a la izquierda,
@@ -2272,6 +2330,8 @@ export default function ConductorApp() {
                   </button>
                 )}
               </div>
+                </div>
+              </div>
             )}
 
             {/* Hero card — viaje en curso */}
@@ -2316,93 +2376,6 @@ export default function ConductorApp() {
               </div>
             )}
 
-            {/* Selector vehículo */}
-            {!enRuta && (
-              <div style={{
-                background: "var(--c-surface)", border: "1px solid var(--c-line)",
-                borderRadius: 18, padding: 16, marginBottom: 14,
-              }}>
-                <Eyebrow><IconBus size={11} color="var(--c-mute)" /> &nbsp;Vehículo asignado</Eyebrow>
-                <select
-                  value={vehiculoId || ""}
-                  onChange={e => setVehiculoId(Number(e.target.value) || null)}
-                  style={{
-                    width: "100%", marginTop: 10, padding: "12px 14px",
-                    borderRadius: 12, border: `1.5px solid ${vehiculoId ? "var(--c-navy)" : "var(--c-line)"}`,
-                    fontFamily: FONT_SANS, fontSize: 14, fontWeight: 700,
-                    color: "var(--c-ink)", background: "var(--c-surface)", outline: "none",
-                    boxSizing: "border-box",
-                  }}
-                >
-                  <option value="">Seleccionar vehículo…</option>
-                  {vehiculos.map(v => (
-                    <option key={v.id} value={v.id}>
-                      {v.placa} — {v.categoria} {v.marca || ""}
-                    </option>
-                  ))}
-                </select>
-                {vehSel && (
-                  <div style={{
-                    marginTop: 10, padding: "10px 14px", borderRadius: 12,
-                    background: "var(--c-soft)",
-                    display: "flex", justifyContent: "space-between", alignItems: "center",
-                  }}>
-                    <span style={{ color: "var(--c-mute)", fontSize: 12, fontWeight: 500 }}>Placa</span>
-                    <span style={{ fontFamily: FONT_MONO, color: "var(--c-navy)", fontWeight: 800, fontSize: 15, letterSpacing: 0.5 }}>
-                      {vehSel.placa}
-                    </span>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ── Barra de navegación de fechas ── */}
-            <div style={{
-              display: "flex", alignItems: "center", justifyContent: "space-between",
-              background: "var(--c-surface)", border: "1px solid var(--c-line)",
-              borderRadius: 14, padding: "8px 10px", marginBottom: 12,
-            }}>
-              <button
-                onClick={() => cambiarFecha(-1)}
-                style={{ width: 36, height: 36, borderRadius: 10, border: "1px solid var(--c-line)", background: "var(--c-soft)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
-              >
-                <IconArrowLeft size={16} color="var(--c-ink)" />
-              </button>
-
-              <div style={{ textAlign: "center", flex: 1 }}>
-                <label style={{ cursor: "pointer" }}>
-                  <p style={{ margin: 0, fontWeight: 800, fontSize: 14, letterSpacing: -0.2, color: "var(--c-ink)" }}>
-                    {new Date(fechaVista + "T12:00:00").toLocaleDateString("es-PE", { weekday: "short", day: "numeric", month: "short" }).toUpperCase()}
-                  </p>
-                  {esModoOtraFecha ? (
-                    <span style={{ fontSize: 10, fontWeight: 700, color: "var(--c-navy)", letterSpacing: 0.5, cursor: "pointer" }}
-                      onClick={irAHoy}>
-                      volver a HOY
-                    </span>
-                  ) : (
-                    <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: "var(--c-success)" }}>HOY</span>
-                  )}
-                  <input
-                    type="date" value={fechaVista}
-                    onChange={e => {
-                      const v = e.target.value;
-                      if (!v) return;
-                      setFechaVista(v);
-                      if (v === hoyLocal) { setReservasOtraFecha(null); }
-                      else { cargarOtraFecha(v); }
-                    }}
-                    style={{ position: "absolute", opacity: 0, pointerEvents: "none", width: 0, height: 0 }}
-                  />
-                </label>
-              </div>
-
-              <button
-                onClick={() => cambiarFecha(+1)}
-                style={{ width: 36, height: 36, borderRadius: 10, border: "1px solid var(--c-line)", background: "var(--c-soft)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
-              >
-                <IconArrowRight size={16} color="var(--c-ink)" />
-              </button>
-            </div>
 
             {/* Lista de servicios */}
             {(esModoOtraFecha ? cargandoOtraFecha : cargando) ? (
@@ -2444,16 +2417,17 @@ export default function ConductorApp() {
                 )}
               </div>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", flexDirection: "column" }}>
 
-                {/* ── PENDIENTES / PROGRAMADOS ── */}
-                {reservasPendientesSection.length > 0 && (
-                  <>
-                    <Eyebrow style={{ marginBottom: 6 }}>
-                      {esModoOtraFecha ? "Programados" : "Servicios del día"}
-                    </Eyebrow>
-                    {reservasPendientesSection.map(r => (
-                      <div key={r.id} style={{
+                {/* Pendientes / programados (el próximo va arriba como hero del timeline). */}
+                {pendientesAgenda.map(r => (
+                  <div key={r.id} style={{ display: "flex", gap: 12 }}>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
+                      <div style={{ width: 13, height: 13, borderRadius: "50%", border: "2px solid var(--c-navy)", background: "var(--c-surface)", boxSizing: "border-box", marginTop: 6 }} />
+                      <div style={{ flex: 1, width: 2, background: "var(--c-line)", margin: "4px 0" }} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0, paddingBottom: 14 }}>
+                      <div style={{
                         background: "var(--c-surface)", border: "1px solid var(--c-line)",
                         borderRadius: 16, padding: 14, boxShadow: "0 1px 3px rgba(0,0,0,0.03)",
                         opacity: esModoOtraFecha ? 0.85 : 1,
@@ -2473,67 +2447,53 @@ export default function ConductorApp() {
                           )}
                         </div>
                         {esModoOtraFecha ? (
-                          <div style={{
-                            padding: "10px 14px", borderRadius: 12,
-                            background: "var(--c-soft)", border: "1px solid var(--c-line)",
-                            textAlign: "center", color: "var(--c-mute)", fontSize: 13, fontWeight: 600,
-                          }}>
+                          <div style={{ padding: "10px 14px", borderRadius: 12, background: "var(--c-soft)", border: "1px solid var(--c-line)", textAlign: "center", color: "var(--c-mute)", fontSize: 13, fontWeight: 600 }}>
                             Solo lectura — los servicios solo se inician el mismo día
                           </div>
                         ) : primeraIniciable && r.id !== primeraIniciable.id ? (
-                          <div style={{
-                            padding: "10px 14px", borderRadius: 12,
-                            background: "var(--c-soft)", border: "1px solid var(--c-line)",
-                            textAlign: "center", color: "var(--c-mute)", fontSize: 13, fontWeight: 600,
-                          }}>
+                          <div style={{ padding: "10px 14px", borderRadius: 12, background: "var(--c-soft)", border: "1px solid var(--c-line)", textAlign: "center", color: "var(--c-mute)", fontSize: 13, fontWeight: 600 }}>
                             🔒 Disponible al terminar el servicio de las {primeraIniciable.hora_servicio?.slice(0, 5) ?? "—"}
                           </div>
                         ) : (
                           <PrimaryBtn
                             onClick={() => !checkDone ? setTab("checklist") : confirmarEIniciar(r)}
                             disabled={iniciando}
-                            icon={!checkDone
-                              ? <IconShield size={15} color="#fff" />
-                              : <IconPlay size={15} color="#fff" />}
+                            icon={!checkDone ? <IconShield size={15} color="#fff" /> : <IconPlay size={15} color="#fff" />}
                           >
-                            {iniciando
-                              ? "Iniciando…"
-                              : !checkDone
-                                ? "Completar pre-viaje primero"
-                                : "Iniciar recorrido"}
+                            {iniciando ? "Iniciando…" : !checkDone ? "Completar pre-viaje primero" : "Iniciar recorrido"}
                           </PrimaryBtn>
                         )}
                       </div>
-                    ))}
-                  </>
-                )}
+                    </div>
+                  </div>
+                ))}
 
-                {/* ── FINALIZADOS ── */}
-                {reservasFinalizadasSection.length > 0 && (
-                  <>
-                    <Eyebrow style={{ marginTop: reservasPendientesSection.length > 0 ? 14 : 0, marginBottom: 6, color: "var(--c-mute)" }}>
-                      Finalizados
-                    </Eyebrow>
-                    {reservasFinalizadasSection.map(r => (
-                      <div key={r.id} style={{
-                        background: "var(--c-soft)", border: "1px solid var(--c-line)",
-                        borderRadius: 16, padding: 14, opacity: 0.75,
-                      }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                          <div>
-                            <p style={{ margin: 0, fontWeight: 700, fontSize: 15, letterSpacing: -0.3, color: "var(--c-mute)" }}>{r.origen}</p>
-                            <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--c-mute)" }}>→ {r.destino}</p>
-                          </div>
-                          <Chip color="var(--c-success)" bg="var(--c-success-tint)" sw>FINALIZADO</Chip>
-                        </div>
+                {/* Finalizados (estilo 2b: tarjeta gris con badge + hora + origen → destino). */}
+                {reservasFinalizadasSection.map(r => (
+                  <div key={r.id} style={{ display: "flex", gap: 12 }}>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
+                      <div style={{ width: 13, height: 13, borderRadius: "50%", background: "var(--c-mute-2)", display: "flex", alignItems: "center", justifyContent: "center", marginTop: 6 }}>
+                        <IconCheck size={9} color="#fff" sw={3} />
                       </div>
-                    ))}
-                  </>
-                )}
+                      <div style={{ flex: 1, width: 2, background: "var(--c-line)", margin: "4px 0" }} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0, paddingBottom: 14 }}>
+                      <div style={{ background: "var(--c-soft)", border: "1px solid var(--c-line)", borderRadius: 16, padding: 14 }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                          <span style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700, letterSpacing: 1.2, color: "var(--c-mute)", background: "var(--c-line-2)", padding: "5px 8px", borderRadius: 6 }}>FINALIZADO</span>
+                          <span style={{ fontFamily: FONT_MONO, fontSize: 13, fontWeight: 700, color: "var(--c-mute-2)" }}>{r.hora_servicio?.slice(0, 5) ?? "—"}</span>
+                        </div>
+                        <p style={{ margin: "11px 0 0", fontSize: 13, fontWeight: 600, lineHeight: 1.45, color: "var(--c-mute)" }}>
+                          {acortarLugar(r.origen)} <span style={{ color: "var(--c-mute-2)" }}>→</span> {acortarLugar(r.destino)}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
 
                 {/* Todos los servicios del día ya finalizados */}
                 {reservasPendientesSection.length === 0 && !esModoOtraFecha && !reservaActiva && reservasFinalizadasSection.length > 0 && (
-                  <p style={{ textAlign: "center", color: "var(--c-mute)", fontSize: 13, margin: "8px 0 0" }}>
+                  <p style={{ textAlign: "center", color: "var(--c-mute)", fontSize: 13, margin: "4px 0 0" }}>
                     Todos los servicios del día completados
                   </p>
                 )}
