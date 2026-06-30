@@ -124,6 +124,9 @@ const ACC_MAX_TRAIL = 300;
 // y el puenteo (decidir si un hueco se rellena o se corta).
 const VMAX_BUS_KMH = 130;
 
+// ⚠️ SIN USO (revertido en commit posterior a 5423ec6): junto con puentearHuecos invitaba a
+// dibujar rutas inventadas en GPS pobre de terceros (#786/#946: trazo por calles donde el bus no
+// fue). Se conserva por si se retoma con un enfoque más conservador. NO re-cablear sin re-evaluar.
 // Gate de velocidad: descarta los fixes que implican una velocidad IMPOSIBLE (>VMAX) desde el
 // último fix BUENO — el glitch que "teletransporta" la posición y luego vuelve. Re-ancla tras N
 // seguidos (una relocalización REAL tras pérdida de señal larga). Quitar el punto-glitch hace que
@@ -149,8 +152,7 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
   // se conservan los crudos finitos: una estela degradada es mejor que NINGUNA.
   const finitos = pts.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
   const precisos = finitos.filter((p) => p.acc <= ACC_MAX_TRAIL);
-  // Gate de velocidad: quita los glitches de salto imposible (la precisión no siempre los delata).
-  const base = gateVelocidad(precisos.length >= 2 ? precisos : finitos);
+  const base = precisos.length >= 2 ? precisos : finitos;
 
   const out: HuellaPt[] = [];
   const emitir = (lat: number, lng: number, velocidad: number, acc: number, ts: number) => {
@@ -255,6 +257,9 @@ export async function matchVentana(ventana: MatchPt[], token: string): Promise<[
 // (#1138, chip GPS a 4 s: máx ~138 m), solo lo superan los saltos imposibles del GPS pobre.
 export const MAX_SEG_M = 300;
 
+// ⚠️ SIN USO (revertido): el puente con línea recta INVENTABA recorridos por donde el bus no fue
+// (GPS pobre de terceros — la recta cruzaba calles que la unidad no tomó). El "se corta" honesto
+// (hueco) resultó preferible a una ruta inventada. Se conserva para una posible v2 más conservadora.
 // Rellena los HUECOS de la huella (pérdida de señal en paradas/tráfico) con puntos interpolados,
 // SOLO si la velocidad implícita del salto es plausible para un bus (≤VMAX_BUS_KMH). Así un tramo
 // donde el GPS calló 15-70 s pero el bus avanzó 300 m-2 km a velocidad real se dibuja CONTINUO
