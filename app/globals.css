@@ -25,6 +25,7 @@
   --c-success-tint:  #E8F5E9;
   --c-warn:          #B45309;
   --c-warn-tint:     #FDF3D7;
+  --c-warn-ink:      #92400E;
   --c-danger:        #B91C1C;
   --c-danger-tint:   #FCEBEA;
 
@@ -58,6 +59,7 @@
   --c-success-tint:  rgba(52, 211, 153, 0.15);
   --c-warn:          #fbbf24;
   --c-warn-tint:     rgba(251, 191, 36, 0.15);
+  --c-warn-ink:      #FCD34D;
   --c-danger:        #f87171;
   --c-danger-tint:   rgba(248, 113, 113, 0.18);
 

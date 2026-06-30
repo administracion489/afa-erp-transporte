@@ -214,7 +214,7 @@ export function TabBar<T extends string>({
             )}
             <span
               style={{
-                color: isActive ? "var(--c-navy)" : "var(--c-mute-2)",
+                color: isActive ? "var(--c-navy)" : "var(--c-mute)",
                 position: "relative", display: "inline-flex",
               }}
             >
@@ -231,8 +231,8 @@ export function TabBar<T extends string>({
             </span>
             <span
               style={{
-                fontSize: 10, fontWeight: isActive ? 700 : 600,
-                color: isActive ? "var(--c-navy)" : "var(--c-mute-2)",
+                fontSize: 11, fontWeight: isActive ? 700 : 600,
+                color: isActive ? "var(--c-navy)" : "var(--c-mute)",
                 letterSpacing: 0.2,
               }}
             >

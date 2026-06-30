@@ -213,11 +213,13 @@ function playBeep(tipo: "ok" | "warn" | "error") {
   } catch { /* AudioContext no disponible */ }
 }
 
-function fechaTitulo(): { dow: string; fecha: string } {
-  const now = new Date();
-  const dow = now.toLocaleDateString("es-PE", { weekday: "long" });
-  const fecha = now.toLocaleDateString("es-PE", { day: "numeric", month: "short" }).replace(/\.$/, "");
-  return { dow: dow.toUpperCase(), fecha };
+// Formato corto y limpio de fecha para la agenda: "Lun 29 jun" (día con inicial mayúscula,
+// sin coma ni punto tras la abreviatura del mes). Recibe la fecha ISO (YYYY-MM-DD) visible.
+function fmtFechaCorta(iso: string): string {
+  const d = new Date(iso + "T12:00:00");
+  const dow = d.toLocaleDateString("es-PE", { weekday: "short" }).replace(/\.$/, "");
+  const dm  = d.toLocaleDateString("es-PE", { day: "numeric", month: "short" }).replace(/\.$/, "");
+  return dow.charAt(0).toUpperCase() + dow.slice(1) + " " + dm;
 }
 
 // ─── Ritmo de envío GPS ADAPTATIVO ────────────────────────────────────────────
@@ -1903,8 +1905,6 @@ export default function ConductorApp() {
     { id: "perfil",     label: "Perfil",    icon: <IconUser size={20} /> },
   ];
 
-  const titulo = fechaTitulo();
-
   return (
     <div style={{
       minHeight: "100vh", background: "var(--c-paper)",
@@ -1944,17 +1944,17 @@ export default function ConductorApp() {
             </p>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
               <StatusDot color={compartiendo ? "var(--c-success)" : "var(--c-mute-2)"} pulse={compartiendo} size={6} />
-              <span style={{ fontSize: 11, fontWeight: 600, color: "var(--c-mute)" }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--c-ink-2)" }}>
                 {enRuta ? "En servicio" : conectado ? "Conectado" : "Disponible"}
               </span>
             </div>
             {gpsError && (
-              <p style={{ margin: "2px 0 0", fontSize: 9, color: "var(--c-danger)", fontFamily: FONT_MONO, maxWidth: 220, wordBreak: "break-word" }}>
+              <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--c-danger)", fontFamily: FONT_MONO, maxWidth: 220, overflowWrap: "anywhere" }}>
                 GPS: ⚠ {gpsError}
               </p>
             )}
             {envioError && (
-              <p style={{ margin: "2px 0 0", fontSize: 9, fontWeight: 800, color: "var(--c-danger)", fontFamily: FONT_MONO, maxWidth: 220, wordBreak: "break-word" }}>
+              <p style={{ margin: "2px 0 0", fontSize: 11, fontWeight: 800, color: "var(--c-danger)", fontFamily: FONT_MONO, maxWidth: 220, overflowWrap: "anywhere" }}>
                 Envío ⚠ {envioError}{pendientes > 0 ? ` · ${pendientes} en cola` : ""}
               </p>
             )}
@@ -1971,17 +1971,6 @@ export default function ConductorApp() {
             <Chip color="var(--c-success)" bg="var(--c-success-tint)" mono sw>
               {velocidad} KM/H
             </Chip>
-          )}
-          {/* Fecha del día a la derecha (estilo 2b), fuera de ruta. */}
-          {!enRuta && (
-            <div style={{ textAlign: "right" }}>
-              <p style={{ margin: 0, fontFamily: FONT_MONO, fontSize: 9.5, fontWeight: 700, letterSpacing: 1.4, textTransform: "uppercase", color: "var(--c-mute)" }}>
-                {titulo.dow}
-              </p>
-              <p style={{ margin: "2px 0 0", fontSize: 18, fontWeight: 800, letterSpacing: -0.4, color: "var(--c-ink)" }}>
-                {titulo.fecha}
-              </p>
-            </div>
           )}
         </div>
       </header>
@@ -2008,7 +1997,7 @@ export default function ConductorApp() {
                     <p style={{ margin: 0, fontFamily: FONT_MONO, fontSize: 12.5, fontWeight: 800, color: "var(--c-ink)", letterSpacing: 0.3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                       {vehSel?.placa || "Elegir vehículo"}
                     </p>
-                    <p style={{ margin: "3px 0 0", fontSize: 10.5, fontWeight: 500, color: "var(--c-mute)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    <p style={{ margin: "3px 0 0", fontSize: 12, fontWeight: 600, color: "var(--c-mute)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                       {vehSel ? ([vehSel.categoria, vehSel.marca].filter(Boolean).join(" · ") || "Vehículo") : "Toca para asignar"}
                     </p>
                   </div>
@@ -2036,8 +2025,8 @@ export default function ConductorApp() {
                   }}
                 >
                   <IconShield size={17} color={checkDone ? "var(--c-success)" : "var(--c-warn)"} />
-                  <span style={{ fontSize: 11, fontWeight: 700, lineHeight: 1.2, textAlign: "left", color: checkDone ? "var(--c-success)" : "var(--c-warn)" }}>
-                    Pre-viaje<br />{checkDone ? "listo" : "pendiente"}
+                  <span style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.2, textAlign: "left", color: checkDone ? "var(--c-success)" : "var(--c-warn)" }}>
+                    Pre-viaje<br />{checkDone ? "Listo" : "Pendiente"}
                   </span>
                 </button>
               </div>
@@ -2055,7 +2044,7 @@ export default function ConductorApp() {
                   if (window.confirm("¿Desconectarte?\n\nDejarás de compartir tu ubicación y la central no podrá verte hasta que te conectes de nuevo.")) setConectado(false);
                 }}
                 style={{
-                  width: "100%", marginBottom: 16, padding: "12px 15px", borderRadius: 16,
+                  width: "100%", marginBottom: 16, padding: "14px 16px", borderRadius: 16,
                   background: "var(--c-success-tint)", border: "1px solid var(--c-success)",
                   display: "flex", alignItems: "center", justifyContent: "space-between",
                   cursor: "pointer", fontFamily: FONT_SANS,
@@ -2112,7 +2101,7 @@ export default function ConductorApp() {
                 <IconPin size={18} color="var(--c-warn)" />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <p style={{ margin: 0, color: "var(--c-warn)", fontWeight: 800, fontSize: 13 }}>Ubicación: {gpsError}</p>
-                  <p style={{ margin: "2px 0 0", color: "#92400E", fontSize: 11 }}>
+                  <p style={{ margin: "2px 0 0", color: "var(--c-warn-ink)", fontSize: 11 }}>
                     Activa el GPS del teléfono y concede el permiso de ubicación.
                   </p>
                 </div>
@@ -2129,7 +2118,7 @@ export default function ConductorApp() {
                       setGpsError(p === "denied" ? "Permiso denegado" : "GPS no disponible");
                     }
                   }}
-                  style={{ flexShrink: 0, background: "var(--c-warn)", border: "none", borderRadius: 10, padding: "8px 12px", color: "#fff", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
+                  style={{ flexShrink: 0, minWidth: 92, background: "var(--c-warn)", border: "none", borderRadius: 12, padding: "11px 16px", color: "#fff", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>
                   Activar
                 </button>
               </div>
@@ -2154,7 +2143,7 @@ export default function ConductorApp() {
                   <button
                     onClick={() => setMostrarAjustesGps(true)}
                     style={{
-                      width: "100%", marginBottom: 14, padding: "8px 12px",
+                      width: "100%", marginBottom: 14, padding: "8px 12px", minHeight: 44, boxSizing: "border-box",
                       display: "flex", alignItems: "center", gap: 8,
                       background: "var(--c-success-tint)", border: "1px solid var(--c-success)",
                       borderRadius: 12, cursor: "pointer", fontFamily: FONT_SANS,
@@ -2194,7 +2183,7 @@ export default function ConductorApp() {
                     <span style={{ display: "block", fontSize: 13.5, fontWeight: 800, color: atencion ? "var(--c-warn)" : "var(--c-ink)" }}>
                       {atencion ? "Revisa los ajustes de rastreo" : "Ajustes de rastreo"}
                     </span>
-                    <span style={{ display: "block", marginTop: 1, fontSize: 11.5, color: atencion ? "#92400E" : "var(--c-mute)" }}>
+                    <span style={{ display: "block", marginTop: 1, fontSize: 11.5, color: atencion ? "var(--c-warn-ink)" : "var(--c-mute)" }}>
                       {atencion ? "El equipo puede cortar el GPS" : "Ubicación · batería · autostart"}
                     </span>
                   </span>
@@ -2203,33 +2192,46 @@ export default function ConductorApp() {
               );
             })()}
 
-            {/* ── Agenda del día: encabezado + navegación de fecha (estilo 2b) ── */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, marginTop: 2 }}>
+            {/* ── Agenda del día: eyebrow + chip de fecha TOCABLE (abre el selector) + conteo
+                + navegación con áreas de toque de 44px. La fecha vive solo acá (no en el header). ── */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12, marginTop: 2 }}>
               <div style={{ minWidth: 0 }}>
-                <p style={{ margin: 0, fontFamily: FONT_MONO, fontSize: 10, fontWeight: 700, letterSpacing: 1.4, textTransform: "uppercase", color: "var(--c-mute)" }}>
-                  Agenda{esModoOtraFecha ? "" : " de hoy"}
+                <p style={{ margin: 0, fontFamily: FONT_MONO, fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: "var(--c-mute)" }}>
+                  Agenda
                 </p>
-                <label style={{ position: "relative", display: "inline-block", cursor: "pointer" }}>
-                  <p style={{ margin: "6px 0 0", fontSize: 12.5, fontWeight: 700, color: "var(--c-ink)", whiteSpace: "nowrap" }}>
-                    {new Date(fechaVista + "T12:00:00").toLocaleDateString("es-PE", { weekday: "short", day: "numeric", month: "short" })}
-                    {" · "}{reservasMostrar.length} servicio{reservasMostrar.length === 1 ? "" : "s"}
-                    {esModoOtraFecha && (
-                      <span onClick={(e) => { e.preventDefault(); irAHoy(); }} style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, color: "var(--c-navy)" }}>volver a HOY</span>
-                    )}
-                  </p>
-                  <input
-                    type="date" value={fechaVista}
-                    onChange={e => { const v = e.target.value; if (!v) return; setFechaVista(v); if (v === hoyLocal) setReservasOtraFecha(null); else cargarOtraFecha(v); }}
-                    style={{ position: "absolute", opacity: 0, pointerEvents: "none", width: 0, height: 0 }}
-                  />
-                </label>
+                <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, marginTop: 7 }}>
+                  {/* Chip de fecha: el input date invisible (inset 0) lo hace tocable en toda su área. */}
+                  <label style={{
+                    position: "relative", display: "inline-flex", alignItems: "center", gap: 6,
+                    background: "var(--c-navy-tint)", borderRadius: 999, padding: "6px 12px", cursor: "pointer",
+                  }}>
+                    <IconCalendar size={14} color="var(--c-navy)" />
+                    <span style={{ fontSize: 15, fontWeight: 800, color: "var(--c-navy)", whiteSpace: "nowrap" }}>
+                      {fmtFechaCorta(fechaVista)}
+                    </span>
+                    <input
+                      type="date" value={fechaVista}
+                      aria-label="Elegir fecha"
+                      onChange={e => { const v = e.target.value; if (!v) return; setFechaVista(v); if (v === hoyLocal) setReservasOtraFecha(null); else cargarOtraFecha(v); }}
+                      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer", border: "none" }}
+                    />
+                  </label>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "var(--c-mute)", whiteSpace: "nowrap" }}>
+                    {reservasMostrar.length} servicio{reservasMostrar.length === 1 ? "" : "s"}
+                  </span>
+                  {esModoOtraFecha && (
+                    <button onClick={irAHoy} style={{ flexShrink: 0, fontSize: 12, fontWeight: 800, color: "var(--c-navy)", background: "transparent", border: "1px solid var(--c-navy)", borderRadius: 999, padding: "5px 12px", cursor: "pointer", fontFamily: FONT_SANS }}>
+                      Ir a hoy
+                    </button>
+                  )}
+                </div>
               </div>
-              <div style={{ display: "flex", gap: 7, flexShrink: 0 }}>
-                <button onClick={() => cambiarFecha(-1)} style={{ width: 32, height: 32, borderRadius: 9, border: "1px solid var(--c-line)", background: "var(--c-surface)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <IconArrowLeft size={15} color="var(--c-ink)" />
+              <div style={{ display: "flex", gap: 9, flexShrink: 0 }}>
+                <button onClick={() => cambiarFecha(-1)} aria-label="Día anterior" style={{ width: 44, height: 44, borderRadius: 13, border: "1px solid var(--c-line)", background: "var(--c-soft)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <IconArrowLeft size={18} color="var(--c-ink)" />
                 </button>
-                <button onClick={() => cambiarFecha(+1)} style={{ width: 32, height: 32, borderRadius: 9, border: "1px solid var(--c-line)", background: "var(--c-surface)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <IconArrowRight size={15} color="var(--c-ink)" />
+                <button onClick={() => cambiarFecha(+1)} aria-label="Día siguiente" style={{ width: 44, height: 44, borderRadius: 13, border: "1px solid var(--c-line)", background: "var(--c-soft)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <IconArrowRight size={18} color="var(--c-ink)" />
                 </button>
               </div>
             </div>
@@ -2247,16 +2249,16 @@ export default function ConductorApp() {
                 borderRadius: 24, padding: 20,
                 boxShadow: "0 22px 42px -16px rgba(14,39,72,0.5)",
               }}>
-                {/* Cabecera (estilo 2b): eyebrow + cuenta regresiva en columna a la izquierda,
-                    con el eyebrow justificado al ancho del countdown; hora de inicio apilada a la
-                    derecha, en azul acero. */}
+                {/* Cabecera (estilo 2b): eyebrow + cuenta regresiva en columna a la izquierda;
+                    hora de salida apilada a la derecha (label en azul acero claro, valor en BLANCO
+                    para que la hora real resalte tanto como el countdown). */}
                 <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, margin: "0 0 2px" }}>
-                  <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "stretch" }}>
+                  <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "stretch", minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
-                      <IconClock size={13} color="#9db4d4" />
+                      <IconClock size={13} color="#b9cbe6" />
                       <span style={{
-                        flex: 1, fontFamily: FONT_MONO, fontSize: 10, fontWeight: 700, letterSpacing: 1.2,
-                        textTransform: "uppercase", color: "#9db4d4", textAlign: "justify", textAlignLast: "justify",
+                        minWidth: 0, fontFamily: FONT_MONO, fontSize: 11, fontWeight: 700, letterSpacing: 1,
+                        textTransform: "uppercase", color: "#b9cbe6",
                       }}>
                         Próximo viaje · sale en
                       </span>
@@ -2269,10 +2271,10 @@ export default function ConductorApp() {
                   </div>
                   {proximaReserva.hora_servicio && (
                     <div style={{ textAlign: "right", flexShrink: 0, paddingBottom: 8 }}>
-                      <p style={{ margin: 0, fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: "#9db4d4" }}>
-                        Inicia
+                      <p style={{ margin: 0, fontFamily: FONT_MONO, fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: "#b9cbe6" }}>
+                        Salida
                       </p>
-                      <p style={{ margin: "4px 0 0", fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800, letterSpacing: -0.5, lineHeight: 1, color: "#9db4d4" }}>
+                      <p style={{ margin: "4px 0 0", fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800, letterSpacing: -0.5, lineHeight: 1, color: "#fff" }}>
                         {proximaReserva.hora_servicio.slice(0, 5)}
                       </p>
                     </div>
@@ -2451,7 +2453,7 @@ export default function ConductorApp() {
                           </div>
                           {r.hora_servicio && (
                             <div style={{ textAlign: "right", flexShrink: 0 }}>
-                              <p style={{ margin: 0, fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: "var(--c-mute)" }}>Hora</p>
+                              <p style={{ margin: 0, fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: "var(--c-mute)" }}>Hora</p>
                               <p style={{ margin: "1px 0 0", fontFamily: FONT_MONO, fontSize: 28, fontWeight: 800, letterSpacing: -1.5, lineHeight: 1, color: "var(--c-navy)" }}>
                                 {r.hora_servicio.slice(0, 5)}
                               </p>
@@ -2492,8 +2494,8 @@ export default function ConductorApp() {
                     <div style={{ flex: 1, minWidth: 0, paddingBottom: 14 }}>
                       <div style={{ background: "var(--c-soft)", border: "1px solid var(--c-line)", borderRadius: 16, padding: 14 }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                          <span style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700, letterSpacing: 1.2, color: "var(--c-mute)", background: "var(--c-line-2)", padding: "5px 8px", borderRadius: 6 }}>FINALIZADO</span>
-                          <span style={{ fontFamily: FONT_MONO, fontSize: 13, fontWeight: 700, color: "var(--c-mute-2)" }}>{r.hora_servicio?.slice(0, 5) ?? "—"}</span>
+                          <span style={{ fontFamily: FONT_MONO, fontSize: 11, fontWeight: 700, letterSpacing: 0.8, color: "var(--c-mute)", background: "var(--c-line-2)", padding: "5px 9px", borderRadius: 6 }}>FINALIZADO</span>
+                          <span style={{ fontFamily: FONT_MONO, fontSize: 13, fontWeight: 700, color: "var(--c-mute)" }}>{r.hora_servicio?.slice(0, 5) ?? "—"}</span>
                         </div>
                         <p style={{ margin: "11px 0 0", fontSize: 13, fontWeight: 600, lineHeight: 1.45, color: "var(--c-mute)" }}>
                           {acortarLugar(r.origen)} <span style={{ color: "var(--c-mute-2)" }}>→</span> {acortarLugar(r.destino)}
@@ -2506,7 +2508,7 @@ export default function ConductorApp() {
                 {/* Todos los servicios del día ya finalizados */}
                 {reservasPendientesSection.length === 0 && !esModoOtraFecha && !reservaActiva && reservasFinalizadasSection.length > 0 && (
                   <p style={{ textAlign: "center", color: "var(--c-mute)", fontSize: 13, margin: "4px 0 0" }}>
-                    Todos los servicios del día completados
+                    Todos los servicios del día finalizados
                   </p>
                 )}
 
@@ -2521,7 +2523,7 @@ export default function ConductorApp() {
               }}>
                 <Eyebrow style={{ marginBottom: 10 }}>Sesión GPS</Eyebrow>
                 {gpsError && (
-                  <p style={{ margin: "0 0 10px", fontSize: 11, color: "var(--c-danger)", fontFamily: FONT_MONO, wordBreak: "break-word" }}>
+                  <p style={{ margin: "0 0 10px", fontSize: 11, color: "var(--c-danger)", fontFamily: FONT_MONO, overflowWrap: "anywhere" }}>
                     ⚠ {gpsError}
                   </p>
                 )}
@@ -2534,7 +2536,7 @@ export default function ConductorApp() {
                     { lbl: "En cola",      val: String(pendientes), mono: true, color: pendientes > 0 ? "var(--c-danger)" : "var(--c-mute)" },
                   ].map(s => (
                     <div key={s.lbl} style={{ background: "var(--c-soft)", borderRadius: 12, padding: "10px 12px" }}>
-                      <p style={{ margin: 0, fontSize: 10, fontWeight: 700, letterSpacing: 1.2, textTransform: "uppercase", color: "var(--c-mute)" }}>
+                      <p style={{ margin: 0, fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: "var(--c-mute)" }}>
                         {s.lbl}
                       </p>
                       <p style={{
@@ -2543,7 +2545,7 @@ export default function ConductorApp() {
                         fontSize: 18, fontWeight: 800, letterSpacing: -0.3,
                         color: s.color || "var(--c-ink)",
                       }}>
-                        {s.val}{s.suf && <span style={{ fontSize: 11, fontWeight: 600, color: "var(--c-mute)", marginLeft: 4 }}>{s.suf}</span>}
+                        {s.val}{s.suf && <span style={{ fontSize: 12, fontWeight: 600, color: "var(--c-mute)", marginLeft: 4 }}>{s.suf}</span>}
                       </p>
                     </div>
                   ))}
