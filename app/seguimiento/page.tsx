@@ -45,6 +45,9 @@ type ServicioView = {
   estado_visual: EstadoVisual; paradas: Parada[]; paradas_total: number;
   paradas_completadas: number; pasajeros_total: number; pasajeros_abordados: number;
   pasajeros_total_real: number; seguro_vence_hoy: boolean;
+  gastos_total: number; docs_vencidos: string[];
+  // Alertas de flota cruzadas (se rellenan en un segundo memo sobre todos los servicios):
+  conflicto_vehiculo?: boolean; conflicto_conductor?: boolean; jornada_extensa?: boolean;
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -119,6 +122,79 @@ function riesgoEmpresaDocs(docs: DocTer[], empresaId: number|null): boolean {
 function seguroVehiculoVenceHoy(docs: DocVeh[], vehiculoId: number|null): boolean {
   if (!vehiculoId) return false;
   return docs.some(d => d.vehiculo_id === vehiculoId && d.tipo.toLowerCase().includes("soat") && d.fecha_vencimiento === hoyISO());
+}
+
+// Hora local de Perú (UTC-5, sin DST). No usar new Date().toTimeString() para registrar
+// horas operativas: depende del reloj del dispositivo, no de la hora de Lima.
+function horaPeru(): string {
+  const utc  = Date.now() + new Date().getTimezoneOffset() * 60000;
+  const lima = new Date(utc - 5 * 3600000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(lima.getHours())}:${p(lima.getMinutes())}:${p(lima.getSeconds())}`;
+}
+
+// Fuente de verdad del abordaje en TODO el ERP (igual que app/cliente y el manifiesto):
+// vive en pasajeros_parada (estado + estado_abordaje), NO en reservas.pasajeros_abordados.
+const esAbordado = (pp?: { estado?: string|null; estado_abordaje?: string|null } | null): boolean =>
+  pp?.estado_abordaje === "Abordado" || pp?.estado === "abordado" || pp?.estado === "embarcado";
+
+// Documentos vencidos (fecha de vencimiento ya pasada): bloquean la salida.
+function docsVencidosVehiculo(docs: DocVeh[], vehiculoId: number|null): string[] {
+  if (!vehiculoId) return [];
+  return docs.filter(d => d.vehiculo_id === vehiculoId && (diasPara(d.fecha_vencimiento) ?? 1) < 0).map(d => d.tipo);
+}
+function docsVencidosEmpresa(docs: DocTer[], empresaId: number|null): string[] {
+  if (!empresaId) return [];
+  const OBL = ["SOAT","Revisión Técnica (CITV)","Habilitación SUTRAN","Permiso Operación MTC"];
+  return docs.filter(d => d.empresa_id === empresaId && OBL.includes(d.tipo) && (diasPara(d.fecha_vencimiento) ?? 1) < 0).map(d => d.tipo);
+}
+
+// ── Alertas de flota cruzadas entre servicios (solape de recurso + jornada del conductor) ──
+// No hay campo de duración en reservas, así que el fin se estima con un bloque por defecto
+// cuando aún no hay hora_real_fin. Son alertas ADVERTENCIA (heurística), no certezas.
+const DUR_ESTIMADA_MIN        = 240; // 4 h: bloque por defecto para estimar el fin de un servicio
+const JORNADA_MAX_H           = 13;  // jornada (1ª salida → último fin) que dispara alerta de fatiga
+const MAX_SERVICIOS_CONDUCTOR = 4;   // nº de servicios/día que dispara alerta de fatiga
+
+function aMin(hhmm?: string|null): number|null {
+  if (!hhmm) return null;
+  const [h, m] = hhmm.split(":").map(Number);
+  return Number.isNaN(h) ? null : h * 60 + (m || 0);
+}
+
+function detectarAlertasFlota(base: ServicioView[]): { vehiculo: Set<number>; conductor: Set<number>; fatiga: Set<number> } {
+  const vehiculo = new Set<number>(), conductor = new Set<number>(), fatiga = new Set<number>();
+  const intervalo = (s: ServicioView): [number, number] | null => {
+    const ini = aMin(s.reserva.hora_servicio);
+    if (ini == null) return null;
+    const fin = aMin(s.reserva.hora_real_fin) ?? ini + DUR_ESTIMADA_MIN;
+    return [ini, Math.max(fin, ini + 1)];
+  };
+  const agrupar = (key: (s: ServicioView) => string | null, marca: Set<number>) => {
+    const grupos: Record<string, ServicioView[]> = {};
+    base.forEach(s => {
+      if (s.reserva.estado === "cancelada") return;
+      const k = key(s); if (!k) return;
+      (grupos[k] ||= []).push(s);
+    });
+    Object.values(grupos).forEach(g => {
+      for (let i = 0; i < g.length; i++) for (let j = i + 1; j < g.length; j++) {
+        const a = intervalo(g[i]), b = intervalo(g[j]);
+        if (a && b && a[0] < b[1] && b[0] < a[1]) { marca.add(g[i].reserva.id); marca.add(g[j].reserva.id); }
+      }
+    });
+    return grupos;
+  };
+  agrupar(s => s.reserva.vehiculo_id ? `v${s.reserva.vehiculo_id}` : s.reserva.vehiculo_tercero_id ? `vt${s.reserva.vehiculo_tercero_id}` : null, vehiculo);
+  const gruposCond = agrupar(s => s.reserva.conductor_id ? `c${s.reserva.conductor_id}` : null, conductor);
+  Object.values(gruposCond).forEach(g => {
+    const inicios = g.map(s => aMin(s.reserva.hora_servicio)).filter((x): x is number => x != null);
+    const fines   = g.map(s => intervalo(s)?.[1]).filter((x): x is number => x != null);
+    if (!inicios.length || !fines.length) return;
+    const spanH = (Math.max(...fines) - Math.min(...inicios)) / 60;
+    if (spanH > JORNADA_MAX_H || g.length >= MAX_SERVICIOS_CONDUCTOR) g.forEach(s => fatiga.add(s.reserva.id));
+  });
+  return { vehiculo, conductor, fatiga };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -389,31 +465,25 @@ function ModalChecklist({ reservaId, cliente, onClose, onSaved }: { reservaId: n
 // TARJETA FIJA
 // ══════════════════════════════════════════════════════════════════════════════
 
-function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () => void; onGps: (s: ServicioView) => void }) {
-  const [expandida,        setExpandida]        = useState(false);
+function TarjetaFija({ s, onRefresh, onGps, enFicha = false }: { s: ServicioView; onRefresh: () => void; onGps: (s: ServicioView) => void; enFicha?: boolean }) {
+  const [expandida,        setExpandida]        = useState(enFicha);
   const [modalReemplazo,   setModalReemplazo]   = useState(false);
   const [modalGastos,      setModalGastos]      = useState(false);
   const [modalChecklist,   setModalChecklist]   = useState(false);
-  const [totalGastos,      setTotalGastos]      = useState(0);
   const [guardandoCheckin, setGuardandoCheckin] = useState(false);
   const [horaInicio,       setHoraInicio]       = useState(s.reserva.hora_real_inicio || "");
   const [horaFin,          setHoraFin]          = useState(s.reserva.hora_real_fin || "");
-  const r      = s.reserva;
-  const estado = ESTADO_VIS[s.estado_visual];
-  const progreso   = s.paradas_total > 0 ? Math.round((s.paradas_completadas/s.paradas_total)*100) : 0;
-  const asistencia = s.pasajeros_total_real > 0 ? Math.round((s.pasajeros_abordados/s.pasajeros_total_real)*100) : 0;
-  const cap        = s.pasajeros_total_real || (r as any).pasajeros_total || 0;
-
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.from("gastos").select("monto").eq("reserva_id", r.id);
-      setTotalGastos((data || []).reduce((sum: number, g: any) => sum + Number(g.monto), 0));
-    })();
-  }, [r.id]);
+  const r           = s.reserva;
+  const estado      = ESTADO_VIS[s.estado_visual];
+  const totalGastos = s.gastos_total;
+  const bloqueado   = s.docs_vencidos.length > 0;
+  const progreso    = s.paradas_total > 0 ? Math.round((s.paradas_completadas/s.paradas_total)*100) : 0;
+  const asistencia  = s.pasajeros_total_real > 0 ? Math.round((s.pasajeros_abordados/s.pasajeros_total_real)*100) : 0;
+  const cap         = s.pasajeros_total_real || (r as any).pasajeros_total || 0;
 
   const hacerCheckin = async () => {
     setGuardandoCheckin(true);
-    const ahora = new Date().toTimeString().slice(0, 8);
+    const ahora = horaPeru();
     const { error } = await supabase.from("reservas").update({ checkin_realizado: true, hora_real_inicio: ahora, estado: "en_curso" as EstadoReserva }).eq("id", r.id);
     setGuardandoCheckin(false);
     if (error) { alert("Error: " + error.message); return; }
@@ -431,20 +501,21 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
     onRefresh();
   };
 
-  const recargarGastos = async () => {
-    const { data } = await supabase.from("gastos").select("monto").eq("reserva_id", r.id);
-    setTotalGastos((data || []).reduce((s: number, g: any) => s + Number(g.monto), 0));
-  };
-
   return (
     <>
       {modalReemplazo && <ModalReemplazo reservaId={r.id} placaOriginal={s.vehiculo_placa} onClose={() => setModalReemplazo(false)} onSaved={onRefresh} />}
-      {modalGastos    && <ModalGastos reservaId={r.id} vehiculoId={r.vehiculo_id} cliente={s.cliente_nombre} onClose={() => setModalGastos(false)} onSaved={() => { onRefresh(); recargarGastos(); }} />}
+      {modalGastos    && <ModalGastos reservaId={r.id} vehiculoId={r.vehiculo_id} cliente={s.cliente_nombre} onClose={() => setModalGastos(false)} onSaved={onRefresh} />}
       {modalChecklist && <ModalChecklist reservaId={r.id} cliente={s.cliente_nombre} onClose={() => setModalChecklist(false)} onSaved={onRefresh} />}
 
-      <div className={`bg-white rounded-2xl shadow-sm border transition-all duration-200 ${s.estado_visual === "alerta" ? "border-red-200 shadow-red-50" : "border-gray-100 hover:border-gray-200"}`}>
+      <div className={enFicha ? "" : `bg-white rounded-2xl shadow-sm border transition-all duration-200 ${s.estado_visual === "alerta" ? "border-red-200 shadow-red-50" : "border-gray-100 hover:border-gray-200"}`}>
+        {bloqueado && (
+          <div className={`flex items-center gap-2 bg-red-100 border-b border-red-200 px-4 py-2 ${enFicha ? "" : "rounded-t-2xl"}`}>
+            <Ic.Shield size={13} color="#b91c1c" />
+            <span className="text-red-700 text-xs font-black">⛔ DOCUMENTOS VENCIDOS: {s.docs_vencidos.join(", ")} — No despachar la unidad</span>
+          </div>
+        )}
         {s.seguro_vence_hoy && (
-          <div className="flex items-center gap-2 bg-red-50 border-b border-red-100 px-4 py-2 rounded-t-2xl">
+          <div className={`flex items-center gap-2 bg-red-50 border-b border-red-100 px-4 py-2 ${enFicha || bloqueado ? "" : "rounded-t-2xl"}`}>
             <Ic.Shield size={13} color="#dc2626" />
             <span className="text-red-600 text-xs font-bold">SEGURO DE LA UNIDAD VENCE HOY — Verificar antes de salir</span>
           </div>
@@ -469,9 +540,11 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
               <span className="text-[11px] font-black px-2.5 py-1 rounded-full" style={{ color: estado.color, background: estado.bg }}>{estado.label}</span>
-              <button onClick={() => setExpandida(v => !v)} className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center transition-colors">
-                {expandida ? <Ic.ChevronUp size={13} /> : <Ic.ChevronDown size={13} />}
-              </button>
+              {!enFicha && (
+                <button onClick={() => setExpandida(v => !v)} className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center transition-colors">
+                  {expandida ? <Ic.ChevronUp size={13} /> : <Ic.ChevronDown size={13} />}
+                </button>
+              )}
             </div>
           </div>
 
@@ -530,9 +603,10 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
 
           <div className="flex gap-2 flex-wrap">
             {!r.checkin_realizado && r.estado !== "finalizada" && r.estado !== "cancelada" && (
-              <button onClick={hacerCheckin} disabled={guardandoCheckin}
-                className="flex-1 flex items-center justify-center gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs font-bold py-2 rounded-xl transition-colors disabled:opacity-50">
-                <Ic.Check size={13} color="white" />{guardandoCheckin ? "..." : "Hacer Check-in"}
+              <button onClick={hacerCheckin} disabled={guardandoCheckin || bloqueado}
+                title={bloqueado ? "No se puede despachar: documentos vencidos" : undefined}
+                className="flex-1 flex items-center justify-center gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs font-bold py-2 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                <Ic.Check size={13} color="white" />{guardandoCheckin ? "..." : bloqueado ? "Salida bloqueada" : "Hacer Check-in"}
               </button>
             )}
             {/* GPS */}
@@ -621,20 +695,14 @@ function TarjetaFija({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () =
 // TARJETA EVENTUAL
 // ══════════════════════════════════════════════════════════════════════════════
 
-function TarjetaEventual({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: () => void; onGps: (s: ServicioView) => void }) {
-  const [expandida,     setExpandida]     = useState(false);
+function TarjetaEventual({ s, onRefresh, onGps, enFicha = false }: { s: ServicioView; onRefresh: () => void; onGps: (s: ServicioView) => void; enFicha?: boolean }) {
+  const [expandida,     setExpandida]     = useState(enFicha);
   const [modalGastos,   setModalGastos]   = useState(false);
   const [modalChecklist,setModalChecklist]= useState(false);
-  const [totalGastos,   setTotalGastos]   = useState(0);
-  const r      = s.reserva;
-  const estado = ESTADO_VIS[s.estado_visual];
-
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.from("gastos").select("monto").eq("reserva_id", r.id);
-      setTotalGastos((data||[]).reduce((sum:number,g:any)=>sum+Number(g.monto),0));
-    })();
-  }, [r.id]);
+  const r           = s.reserva;
+  const estado      = ESTADO_VIS[s.estado_visual];
+  const totalGastos = s.gastos_total;
+  const bloqueado   = s.docs_vencidos.length > 0;
 
   const toggleFlag = async (campo: keyof Reserva, valor: boolean) => {
     const { error } = await supabase.from("reservas").update({ [campo]: valor }).eq("id", r.id);
@@ -642,19 +710,20 @@ function TarjetaEventual({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: 
     onRefresh();
   };
 
-  const recargarGastos = async () => {
-    const { data } = await supabase.from("gastos").select("monto").eq("reserva_id", r.id);
-    setTotalGastos((data||[]).reduce((s:number,g:any)=>s+Number(g.monto),0));
-  };
-
   return (
     <>
-      {modalGastos    && <ModalGastos reservaId={r.id} vehiculoId={r.vehiculo_id} cliente={s.cliente_nombre} onClose={()=>setModalGastos(false)} onSaved={()=>{ onRefresh(); recargarGastos(); }} />}
+      {modalGastos    && <ModalGastos reservaId={r.id} vehiculoId={r.vehiculo_id} cliente={s.cliente_nombre} onClose={()=>setModalGastos(false)} onSaved={onRefresh} />}
       {modalChecklist && <ModalChecklist reservaId={r.id} cliente={s.cliente_nombre} onClose={()=>setModalChecklist(false)} onSaved={onRefresh} />}
 
-      <div className={`bg-white rounded-2xl shadow-sm border transition-all duration-200 ${s.estado_visual==="alerta"?"border-red-200":s.seguro_vence_hoy?"border-amber-200":"border-gray-100 hover:border-gray-200"}`}>
+      <div className={enFicha ? "" : `bg-white rounded-2xl shadow-sm border transition-all duration-200 ${s.estado_visual==="alerta"?"border-red-200":s.seguro_vence_hoy?"border-amber-200":"border-gray-100 hover:border-gray-200"}`}>
+        {bloqueado && (
+          <div className={`flex items-center gap-2 bg-red-100 border-b border-red-200 px-4 py-2 ${enFicha ? "" : "rounded-t-2xl"}`}>
+            <Ic.Shield size={13} color="#b91c1c" />
+            <span className="text-red-700 text-xs font-black">⛔ DOCUMENTOS VENCIDOS: {s.docs_vencidos.join(", ")} — No despachar la unidad</span>
+          </div>
+        )}
         {s.seguro_vence_hoy && (
-          <div className="flex items-center gap-2 bg-amber-50 border-b border-amber-100 px-4 py-2 rounded-t-2xl">
+          <div className={`flex items-center gap-2 bg-amber-50 border-b border-amber-100 px-4 py-2 ${enFicha || bloqueado ? "" : "rounded-t-2xl"}`}>
             <Ic.Shield size={13} color="#d97706" />
             <span className="text-amber-700 text-xs font-bold">⚠ SEGURO DE LA UNIDAD VENCE HOY — No despachar sin renovación</span>
           </div>
@@ -679,9 +748,11 @@ function TarjetaEventual({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: 
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
               <span className="text-[11px] font-black px-2.5 py-1 rounded-full" style={{ color: estado.color, background: estado.bg }}>{estado.label}</span>
-              <button onClick={()=>setExpandida(v=>!v)} className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center transition-colors">
-                {expandida ? <Ic.ChevronUp size={13}/> : <Ic.ChevronDown size={13}/>}
-              </button>
+              {!enFicha && (
+                <button onClick={()=>setExpandida(v=>!v)} className="w-7 h-7 rounded-lg bg-gray-50 hover:bg-gray-100 flex items-center justify-center transition-colors">
+                  {expandida ? <Ic.ChevronUp size={13}/> : <Ic.ChevronDown size={13}/>}
+                </button>
+              )}
             </div>
           </div>
 
@@ -787,6 +858,106 @@ function TarjetaEventual({ s, onRefresh, onGps }: { s: ServicioView; onRefresh: 
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// LISTA (TORRE DE CONTROL) + FICHA EN DRAWER
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Chips de alerta para la fila de la lista (resumen de un vistazo; el detalle va en la ficha).
+function chipsAlerta(s: ServicioView): { label: string; color: string; bg: string; title: string }[] {
+  const out: { label: string; color: string; bg: string; title: string }[] = [];
+  if (s.docs_vencidos.length)     out.push({ label: "DOC",      color: "#b91c1c", bg: "#fee2e2", title: `Documentos vencidos: ${s.docs_vencidos.join(", ")}` });
+  if (s.estado_visual === "alerta") out.push({ label: "RETRASO",  color: "#dc2626", bg: "#fef2f2", title: "No inició a la hora pactada" });
+  if (s.conflicto_vehiculo)       out.push({ label: "UNIDAD×2", color: "#b45309", bg: "#fef3c7", title: "Posible solape: el vehículo está en otro servicio a la misma hora" });
+  if (s.conflicto_conductor)      out.push({ label: "CHOFER×2", color: "#b45309", bg: "#fef3c7", title: "Posible solape: el conductor está en otro servicio a la misma hora" });
+  if (s.jornada_extensa)          out.push({ label: "JORNADA",  color: "#9a3412", bg: "#ffedd5", title: "Jornada del conductor extensa o demasiados servicios — riesgo de fatiga" });
+  if (s.seguro_vence_hoy)         out.push({ label: "SOAT HOY", color: "#dc2626", bg: "#fef2f2", title: "El seguro de la unidad vence hoy" });
+  return out;
+}
+
+function FilaServicio({ s, onOpen, onGps }: { s: ServicioView; onOpen: () => void; onGps: () => void }) {
+  const est      = ESTADO_VIS[s.estado_visual];
+  const progreso = s.paradas_total > 0 ? Math.round((s.paradas_completadas / s.paradas_total) * 100) : 0;
+  const alertas  = chipsAlerta(s);
+  return (
+    <div onClick={onOpen} role="button" tabIndex={0}
+      onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
+      className="group flex items-center gap-3 px-4 py-3 hover:bg-[#f6f9fd] cursor-pointer transition-colors outline-none focus-visible:bg-[#eef4fb]">
+      <div className="w-1.5 h-10 rounded-full flex-shrink-0" style={{ background: est.dot }} />
+      <div className="w-12 flex-shrink-0 text-center">
+        <div className="font-black text-[#0b315f] text-sm font-mono leading-none">{s.reserva.hora_servicio?.slice(0, 5) || "—"}</div>
+        <div className="text-[9px] font-bold uppercase mt-1 leading-none" style={{ color: est.color }}>{est.label.replace("⚠ ", "")}</div>
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-bold text-[#0b315f] text-sm truncate">{s.cliente_nombre}</span>
+          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${!s.es_eventual ? "bg-[#EFF6FF] text-[#0b315f]" : "bg-indigo-50 text-indigo-600"}`}>{!s.es_eventual ? "Fijo" : "Eventual"}</span>
+          <span className="text-[10px] font-black text-gray-400">{idAfa(s.reserva)}</span>
+        </div>
+        <div className="flex items-center gap-2 text-xs text-gray-500 mt-0.5">
+          <span className="font-mono font-bold text-gray-400">{s.vehiculo_placa}</span>
+          <span className="text-gray-200">·</span>
+          <span className="truncate">{s.conductor_nombre}</span>
+        </div>
+      </div>
+      <div className="hidden sm:flex items-center gap-4 flex-shrink-0">
+        <div className="text-center w-14">
+          <div className="text-[9px] font-bold uppercase text-gray-400">Check-in</div>
+          <div className={`text-xs font-black ${s.reserva.checkin_realizado ? "text-green-600" : "text-gray-300"}`}>{s.reserva.checkin_realizado ? (s.reserva.hora_real_inicio?.slice(0, 5) || "✓") : "—"}</div>
+        </div>
+        <div className="text-center w-14">
+          <div className="text-[9px] font-bold uppercase text-gray-400">Pasaj.</div>
+          <div className="text-xs font-black text-[#0b315f]">{s.pasajeros_abordados}<span className="text-gray-300 font-normal">/{s.pasajeros_total_real || "?"}</span></div>
+        </div>
+        <div className="w-16">
+          <div className="text-[9px] font-bold uppercase text-gray-400 text-center mb-1 leading-none">{progreso}%</div>
+          <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden"><div className="h-full rounded-full" style={{ width: `${progreso}%`, background: progreso === 100 ? "#16a34a" : "#0b315f" }} /></div>
+        </div>
+      </div>
+      {alertas.length > 0 && (
+        <div className="hidden md:flex items-center gap-1 flex-shrink-0 max-w-[180px] flex-wrap justify-end">
+          {alertas.map((a, i) => (<span key={i} title={a.title} className="text-[9px] font-black px-1.5 py-1 rounded-md whitespace-nowrap" style={{ color: a.color, background: a.bg }}>{a.label}</span>))}
+        </div>
+      )}
+      <div className="flex items-center gap-1.5 flex-shrink-0" onClick={e => e.stopPropagation()}>
+        <button onClick={onGps} title="GPS en vivo" className="flex items-center gap-1 bg-[#EFF6FF] hover:bg-[#DBEAFE] text-[#1d4ed8] text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors">
+          <Ic.Map size={11} color="#1d4ed8" /><span className="hidden lg:inline">GPS</span>
+        </button>
+        <Ic.ChevronDown size={15} className="-rotate-90 text-gray-300 group-hover:text-[#0b315f] transition-colors" />
+      </div>
+    </div>
+  );
+}
+
+function FichaServicio({ s, onClose, onRefresh, onGps }: { s: ServicioView; onClose: () => void; onRefresh: () => void; onGps: (s: ServicioView) => void }) {
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+  const est = ESTADO_VIS[s.estado_visual];
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end">
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative h-full w-full max-w-lg bg-[#eef3f8] shadow-2xl flex flex-col">
+        <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-gray-100 flex-shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-[11px] font-black px-2 py-0.5 rounded-full flex-shrink-0" style={{ color: est.color, background: est.bg }}>{est.label}</span>
+            <span className="font-black text-[#0b315f] text-sm flex-shrink-0">{idAfa(s.reserva)}</span>
+            <span className="text-xs text-gray-400 font-mono flex-shrink-0">{s.reserva.hora_servicio?.slice(0, 5) || "—"}</span>
+            <span className="text-xs text-gray-500 truncate">· {s.cliente_nombre}</span>
+          </div>
+          <button onClick={onClose} className="w-8 h-8 rounded-lg bg-gray-100 hover:bg-gray-200 flex items-center justify-center flex-shrink-0"><Ic.X size={15} /></button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-3">
+          {s.es_eventual
+            ? <TarjetaEventual s={s} onRefresh={onRefresh} onGps={onGps} enFicha />
+            : <TarjetaFija     s={s} onRefresh={onRefresh} onGps={onGps} enFicha />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // PÁGINA PRINCIPAL
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -798,7 +969,9 @@ export default function SeguimientoPage() {
   const [empresas,    setEmpresas]    = useState<EmpTer[]>([]);
   const [vehsTer,     setVehsTer]     = useState<VehTer[]>([]);
   const [paradas,     setParadas]     = useState<Parada[]>([]);
-  const [pasajPar,    setPasajPar]    = useState<{parada_id:number}[]>([]);
+  const [pasajPar,    setPasajPar]    = useState<{parada_id:number; pasajero_id:number; estado?:string|null; estado_abordaje?:string|null}[]>([]);
+  const [paxAdhoc,    setPaxAdhoc]    = useState<{id:number; reserva_id:number}[]>([]);
+  const [gastosRows,  setGastosRows]  = useState<{reserva_id:number; monto:number}[]>([]);
   const [docsTer,     setDocsTer]     = useState<DocTer[]>([]);
   const [docsVeh,     setDocsVeh]     = useState<DocVeh[]>([]);
   const [loading,     setLoading]     = useState(true);
@@ -807,6 +980,7 @@ export default function SeguimientoPage() {
   const [filtroEstado,setFiltroEstado]= useState<"todos"|EstadoVisual>("todos");
   const [busqueda,    setBusqueda]    = useState("");
   const [gpsModal,    setGpsModal]    = useState<ServicioView | null>(null);
+  const [drawer,      setDrawer]      = useState<ServicioView | null>(null);
 
   const cargar = useCallback(async () => {
     setLoading(true);
@@ -830,11 +1004,16 @@ export default function SeguimientoPage() {
       const { data: parData } = await supabase.from("paradas").select("*").in("reserva_id",reservaIds).order("orden");
       setParadas((parData as Parada[])||[]);
       const paradaIds = (parData||[]).map((p:any)=>p.id);
-      if (paradaIds.length>0) {
-        const { data: pasData } = await supabase.from("pasajeros_parada").select("parada_id").in("parada_id",paradaIds);
-        setPasajPar(pasData||[]);
-      } else setPasajPar([]);
-    } else { setParadas([]); setPasajPar([]); }
+      // Abordaje real (estado + estado_abordaje), roster ad-hoc y gastos: todo en lote (sin N+1 por tarjeta).
+      const [ppRes, paxRes, gastosRes] = await Promise.all([
+        paradaIds.length
+          ? supabase.from("pasajeros_parada").select("parada_id,pasajero_id,estado,estado_abordaje").in("parada_id",paradaIds)
+          : Promise.resolve({ data: [] as any[] }),
+        supabase.from("pasajeros").select("id,reserva_id").in("reserva_id",reservaIds),
+        supabase.from("gastos").select("reserva_id,monto").in("reserva_id",reservaIds),
+      ]);
+      setPasajPar(ppRes.data||[]); setPaxAdhoc(paxRes.data||[]); setGastosRows(gastosRes.data||[]);
+    } else { setParadas([]); setPasajPar([]); setPaxAdhoc([]); setGastosRows([]); }
 
     try {
       const { data: docVehData } = await supabase.from("documentos_vehiculo").select("id,vehiculo_id,tipo,fecha_vencimiento");
@@ -854,7 +1033,22 @@ export default function SeguimientoPage() {
     return ()=>{ supabase.removeChannel(ch); };
   },[cargar]);
 
-  const servicios: ServicioView[] = useMemo(()=>{
+  const serviciosBase: ServicioView[] = useMemo(()=>{
+    // Roster y abordaje (unión A∪B, deduped por pasajero_id) calculado una vez para todos los servicios.
+    const paradaToReserva = new Map<number, number>();
+    paradas.forEach(p => paradaToReserva.set(p.id, p.reserva_id));
+    const esperados: Record<number, Set<number>> = {};
+    const abordados: Record<number, Set<number>> = {};
+    const ensure = (rid:number) => { (esperados[rid] ||= new Set()); (abordados[rid] ||= new Set()); };
+    paxAdhoc.forEach(p => { ensure(p.reserva_id); esperados[p.reserva_id].add(p.id); });
+    pasajPar.forEach(pp => {
+      const rid = paradaToReserva.get(pp.parada_id); if (rid == null) return;
+      ensure(rid); esperados[rid].add(pp.pasajero_id);
+      if (esAbordado(pp)) abordados[rid].add(pp.pasajero_id);
+    });
+    const gastosPorReserva: Record<number, number> = {};
+    gastosRows.forEach(g => { gastosPorReserva[g.reserva_id] = (gastosPorReserva[g.reserva_id]||0) + Number(g.monto||0); });
+
     return reservas.map(r=>{
       const cliente        = clientes.find(c=>c.id===r.cliente_id);
       const cliente_nombre = cliente?.empresa||cliente?.nombre||"Sin cliente";
@@ -865,20 +1059,37 @@ export default function SeguimientoPage() {
       const conductor_nombre = esTer?(empresa?.razon_social||"Tercero"):(conductor?.nombre||"—");
       const conductor_tel    = esTer?(empresa?.telefono||""):(conductor?.telefono||"");
       const paradasR         = paradas.filter(p=>p.reserva_id===r.id);
-      const paradaIdsR       = paradasR.map(p=>p.id);
-      const pasajeros_total_real = pasajPar.filter(pp=>paradaIdsR.includes(pp.parada_id)).length;
+      const esperadosN       = esperados[r.id]?.size || 0;
       const seguro_vence_hoy = esTer ? riesgoEmpresaDocs(docsTer,r.empresa_tercerizada_id) : seguroVehiculoVenceHoy(docsVeh,r.vehiculo_id);
+      const docs_vencidos    = esTer ? docsVencidosEmpresa(docsTer,r.empresa_tercerizada_id) : docsVencidosVehiculo(docsVeh,r.vehiculo_id);
       return {
         reserva: r, cliente_nombre, vehiculo_placa, conductor_nombre, conductor_tel,
         es_eventual: esEventual(r), estado_visual: calcularEstadoVisual(r),
         paradas: paradasR, paradas_total: paradasR.length,
         paradas_completadas: paradasR.filter(p=>p.estado==="completada").length,
-        pasajeros_total: pasajeros_total_real||(vehiculos.find(v=>v.id===r.vehiculo_id)?.capacidad_pasajeros||0),
-        pasajeros_abordados: Number(r.pasajeros_abordados||0),
-        pasajeros_total_real, seguro_vence_hoy,
+        pasajeros_total: esperadosN||(vehiculos.find(v=>v.id===r.vehiculo_id)?.capacidad_pasajeros||0),
+        pasajeros_abordados: abordados[r.id]?.size || 0,
+        pasajeros_total_real: esperadosN, seguro_vence_hoy,
+        gastos_total: gastosPorReserva[r.id]||0, docs_vencidos,
       };
     });
-  },[reservas,clientes,vehiculos,conductores,empresas,vehsTer,paradas,pasajPar,docsTer,docsVeh]);
+  },[reservas,clientes,vehiculos,conductores,empresas,vehsTer,paradas,pasajPar,paxAdhoc,gastosRows,docsTer,docsVeh]);
+
+  // Segundo paso: alertas que dependen de TODOS los servicios del día (solape de recurso, jornada).
+  const servicios: ServicioView[] = useMemo(()=>{
+    const { vehiculo, conductor, fatiga } = detectarAlertasFlota(serviciosBase);
+    return serviciosBase.map(s => ({
+      ...s,
+      conflicto_vehiculo:  vehiculo.has(s.reserva.id),
+      conflicto_conductor: conductor.has(s.reserva.id),
+      jornada_extensa:     fatiga.has(s.reserva.id),
+    }));
+  },[serviciosBase]);
+
+  // El drawer guarda una instantánea; al recargar datos, refrescarla con la versión vigente.
+  useEffect(() => {
+    setDrawer(prev => prev ? (servicios.find(s => s.reserva.id === prev.reserva.id) ?? prev) : prev);
+  }, [servicios]);
 
   const totalFijos      = servicios.filter(s=>!s.es_eventual).length;
   const totalEventuales = servicios.filter(s=>s.es_eventual).length;
@@ -886,6 +1097,9 @@ export default function SeguimientoPage() {
   const alertas         = servicios.filter(s=>s.estado_visual==="alerta").length;
   const sinCheckin      = servicios.filter(s=>!s.reserva.checkin_realizado&&s.estado_visual!=="finalizado"&&s.estado_visual!=="cancelado").length;
   const seguroHoy       = servicios.filter(s=>s.seguro_vence_hoy).length;
+  const docsVenc        = servicios.filter(s=>s.docs_vencidos.length>0).length;
+  const conflictos      = servicios.filter(s=>s.conflicto_vehiculo||s.conflicto_conductor).length;
+  const fatigaCount     = servicios.filter(s=>s.jornada_extensa).length;
 
   const filtrados = servicios.filter(s=>{
     if (filtroTipo==="fijo"&&s.es_eventual) return false;
@@ -897,9 +1111,6 @@ export default function SeguimientoPage() {
     }
     return true;
   });
-
-  const fijos      = filtrados.filter(s=>!s.es_eventual);
-  const eventuales = filtrados.filter(s=>s.es_eventual);
 
   return (
     <div className="min-h-screen bg-[#eef3f8]">
@@ -958,6 +1169,23 @@ export default function SeguimientoPage() {
           </div>
         )}
 
+        {(conflictos > 0 || fatigaCount > 0 || docsVenc > 0) && (
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl px-5 py-3.5 flex items-start gap-3">
+            <div className="w-8 h-8 rounded-xl bg-amber-100 flex items-center justify-center flex-shrink-0"><Ic.Shield size={16} color="#b45309"/></div>
+            <div className="text-sm">
+              <p className="font-black text-amber-800">Riesgos de flota detectados</p>
+              <p className="text-amber-700 text-xs mt-0.5">
+                {[
+                  docsVenc>0    ? `${docsVenc} con documentos vencidos`            : null,
+                  conflictos>0  ? `${conflictos} con posible solape de unidad/conductor` : null,
+                  fatigaCount>0 ? `${fatigaCount} con jornada extensa del conductor`     : null,
+                ].filter(Boolean).join("  ·  ")}
+              </p>
+              <p className="text-amber-600/80 text-[11px] mt-1">Documentos vencidos bloquean la salida. El solape y la jornada son estimaciones (no hay duración registrada en la reserva): verifícalos en cada servicio marcado.</p>
+            </div>
+          </div>
+        )}
+
         {/* ── FILTROS ── */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
           <div className="flex flex-col md:flex-row gap-3">
@@ -991,119 +1219,36 @@ export default function SeguimientoPage() {
             <div className="w-8 h-8 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin mx-auto mb-3"/>
             <p className="font-bold text-gray-500 text-sm">Cargando servicios...</p>
           </div>
+        ) : filtrados.length === 0 ? (
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-12 text-center">
+            <p className="text-4xl mb-3">🔍</p>
+            <p className="font-bold text-gray-600">Sin servicios para los filtros seleccionados</p>
+            <p className="text-sm text-gray-400 mt-1">
+              {reservas.length===0
+                ? <>No hay reservas para el {new Date(fechaFiltro+"T00:00:00").toLocaleDateString("es-PE")}. Programa servicios desde <Link href="/programacion" className="text-[#0b315f] font-bold underline">Programación</Link>.</>
+                : "Intenta cambiar el tipo, estado o búsqueda."}
+            </p>
+          </div>
         ) : (
-          <>
-            {(filtroTipo==="todos"||filtroTipo==="fijo") && fijos.length>0 && (
-              <section>
-                <div className="flex items-center gap-2.5 mb-4">
-                  <div className="w-8 h-8 rounded-xl bg-[#EFF6FF] flex items-center justify-center"><Ic.Bus size={16} color="#0b315f"/></div>
+          <section>
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+              <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-[#EFF6FF] flex items-center justify-center"><Ic.List size={16} color="#0b315f"/></div>
                   <div>
-                    <h2 className="font-black text-[#0b315f] text-base leading-none">Servicios Fijos</h2>
-                    <p className="text-[11px] text-gray-400 mt-0.5">Transporte de personal · Contratos Marco</p>
+                    <h2 className="font-black text-[#0b315f] text-sm leading-none">Servicios del día</h2>
+                    <p className="text-[11px] text-gray-400 mt-1">Toca un servicio para ver el detalle: GPS, manifiesto, gastos, checklist y reemplazo</p>
                   </div>
-                  <span className="ml-auto text-[11px] font-black bg-[#EFF6FF] text-[#0b315f] px-2.5 py-1 rounded-full">{fijos.length}</span>
                 </div>
-                <div className="grid gap-3 md:grid-cols-2">
-                  {fijos.map(s=><TarjetaFija key={s.reserva.id} s={s} onRefresh={cargar} onGps={setGpsModal}/>)}
-                </div>
-              </section>
-            )}
-
-            {(filtroTipo==="todos"||filtroTipo==="eventual") && eventuales.length>0 && (
-              <section>
-                <div className="flex items-center gap-2.5 mb-4">
-                  <div className="w-8 h-8 rounded-xl bg-indigo-50 flex items-center justify-center"><Ic.List size={16} color="#6366f1"/></div>
-                  <div>
-                    <h2 className="font-black text-[#0b315f] text-base leading-none">Servicios Discrecionales (Eventuales)</h2>
-                    <p className="text-[11px] text-gray-400 mt-0.5">Logística, gastos e hitos de agenda · Liquidación por evento</p>
-                  </div>
-                  <span className="ml-auto text-[11px] font-black bg-indigo-50 text-indigo-600 px-2.5 py-1 rounded-full">{eventuales.length}</span>
-                </div>
-                <div className="grid gap-3 md:grid-cols-2">
-                  {eventuales.map(s=><TarjetaEventual key={s.reserva.id} s={s} onRefresh={cargar} onGps={setGpsModal}/>)}
-                </div>
-              </section>
-            )}
-
-            {filtrados.length===0 && (
-              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-12 text-center">
-                <p className="text-4xl mb-3">🔍</p>
-                <p className="font-bold text-gray-600">Sin servicios para los filtros seleccionados</p>
-                <p className="text-sm text-gray-400 mt-1">
-                  {reservas.length===0
-                    ? <>No hay reservas para el {new Date(fechaFiltro+"T00:00:00").toLocaleDateString("es-PE")}. Programa servicios desde <Link href="/programacion" className="text-[#0b315f] font-bold underline">Programación</Link>.</>
-                    : "Intenta cambiar el tipo, estado o búsqueda."}
-                </p>
+                <span className="text-xs text-gray-400 font-semibold">{filtrados.length} de {servicios.length}</span>
               </div>
-            )}
-
-            {/* ── TABLA RESUMEN ── */}
-            {servicios.length>0 && (
-              <section>
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                  <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-                    <h2 className="font-black text-[#0b315f] text-sm">Resumen general del día</h2>
-                    <span className="text-xs text-gray-400">{servicios.length} servicios total</span>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
-                      <thead>
-                        <tr className="bg-gray-50">
-                          {["Reserva","Tipo","Vehículo","Conductor","Cliente","Estado","Hora","Acciones"].map(h=>(
-                            <th key={h} className="text-left px-4 py-3 text-[10px] font-black text-gray-400 uppercase tracking-wider">{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-50">
-                        {servicios.map(s=>{
-                          const est=ESTADO_VIS[s.estado_visual];
-                          return (
-                            <tr key={s.reserva.id} className="hover:bg-gray-50 transition-colors">
-                              <td className="px-4 py-3 font-black text-[#0b315f] text-xs">{idAfa(s.reserva)}</td>
-                              <td className="px-4 py-3">
-                                <span className={`text-[10px] font-bold px-2 py-1 rounded-lg ${!s.es_eventual?"bg-[#EFF6FF] text-[#0b315f]":"bg-indigo-50 text-indigo-600"}`}>
-                                  {!s.es_eventual?"Fijo":"Eventual"}
-                                </span>
-                              </td>
-                              <td className="px-4 py-3 font-mono font-bold text-[#0b315f] text-xs">{s.vehiculo_placa}</td>
-                              <td className="px-4 py-3 text-xs text-gray-600 font-medium">{s.conductor_nombre}</td>
-                              <td className="px-4 py-3 text-xs text-gray-700 font-semibold">{s.cliente_nombre}</td>
-                              <td className="px-4 py-3">
-                                <div className="flex items-center gap-1.5">
-                                  <div className="w-1.5 h-1.5 rounded-full" style={{background:est.dot}}/>
-                                  <span className="text-xs font-semibold" style={{color:est.color}}>{est.label}</span>
-                                </div>
-                              </td>
-                              <td className="px-4 py-3 text-xs text-gray-500 font-mono">{s.reserva.hora_servicio?.slice(0,5)||"—"}</td>
-                              <td className="px-4 py-3">
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  {/* GPS en vivo */}
-                                  <button onClick={() => setGpsModal(s)}
-                                    className="flex items-center gap-1 bg-[#EFF6FF] hover:bg-[#DBEAFE] text-[#1d4ed8] text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap">
-                                    <Ic.Map size={11} color="#1d4ed8"/> GPS en vivo
-                                  </button>
-                                  {/* Manifiesto de pasajeros */}
-                                  <Link href={`/programacion?reserva=${s.reserva.id}`}
-                                    className="flex items-center gap-1 bg-purple-50 hover:bg-purple-100 text-purple-700 text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap">
-                                    <Ic.FileText size={11}/> Manifiesto
-                                  </Link>
-                                  {/* Editar en Programación */}
-                                  <Link href="/programacion"
-                                    className="flex items-center gap-1 bg-gray-50 hover:bg-gray-100 text-gray-500 text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap">
-                                    <Ic.Calendar size={11}/> Programación
-                                  </Link>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </section>
-            )}
-          </>
+              <div className="divide-y divide-gray-50">
+                {[...filtrados].sort((a,b)=>(a.reserva.hora_servicio||"").localeCompare(b.reserva.hora_servicio||"")).map(s=>(
+                  <FilaServicio key={s.reserva.id} s={s} onOpen={()=>setDrawer(s)} onGps={()=>setGpsModal(s)} />
+                ))}
+              </div>
+            </div>
+          </section>
         )}
       </div>
 
@@ -1127,6 +1272,11 @@ export default function SeguimientoPage() {
           }))}
           onClose={() => setGpsModal(null)}
         />
+      )}
+
+      {/* ── DRAWER: FICHA DEL SERVICIO ── */}
+      {drawer && (
+        <FichaServicio s={drawer} onClose={() => setDrawer(null)} onRefresh={cargar} onGps={setGpsModal} />
       )}
     </div>
   );
