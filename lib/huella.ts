@@ -234,10 +234,16 @@ export async function mapMatchTrail(
     if (!res.ok) return null;
     const json = await res.json();
     const m = json?.matchings;
-    if (!Array.isArray(m) || m.length !== 1) return null;
-    const c: [number, number][] = m[0]?.geometry?.coordinates;
+    if (!Array.isArray(m) || m.length === 0) return null;
+    // Concatenar TODAS las sub-trazas. Mapbox parte el `trace` en varias `matchings` donde pierde
+    // certeza, pero CADA fragmento es geometría REAL de vía. Antes se exigía exactamente 1 y se
+    // descartaban ventanas con confianza 0.9+ solo por venir fragmentadas (terceros con GPS
+    // ruidoso) → caían a huella cruda en ZIGZAG. Concatenarlas las pega a la pista; los huecos
+    // entre fragmentos (donde Mapbox dudó) los corta MAX_SEG_M aguas abajo si son grandes (no se
+    // inventa una recta larga). El gate de confianza (m[0], la traza primaria) vive en matchVentana.
+    const via: [number, number][] = m.flatMap((x: any) => (x?.geometry?.coordinates as [number, number][]) || []);
     const confidence = Number(m[0]?.confidence) || 0;
-    return c?.length >= 2 ? { coords: c, confidence } : null;
+    return via.length >= 2 ? { coords: via, confidence } : null;
   } catch { return null; }
 }
 
