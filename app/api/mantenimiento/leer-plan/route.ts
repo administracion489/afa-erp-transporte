@@ -5,7 +5,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { extraerPlanFabricante, type Adjunto } from "@/lib/vision-ia";
 
-export const maxDuration = 60;
+export const maxDuration = 300; // Vercel lo recorta al máximo del plan; da aire en Pro
 
 export async function POST(req: NextRequest) {
   try {

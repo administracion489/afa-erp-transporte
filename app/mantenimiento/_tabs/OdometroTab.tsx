@@ -92,8 +92,15 @@ export default function OdometroTab() {
       const res = await fetch("/api/mantenimiento/leer-odometro", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ adjunto: adj }),
       });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || "No se pudo leer");
+      const raw = await res.text();
+      let data: any;
+      try { data = JSON.parse(raw); }
+      catch {
+        if (res.status === 504 || /timeout|FUNCTION_INVOCATION/i.test(raw))
+          throw new Error("El servidor tardó demasiado leyendo la foto. Intenta de nuevo con una imagen más nítida.");
+        throw new Error(`El servidor respondió ${res.status}. ${raw.slice(0, 140)}`);
+      }
+      if (!res.ok || !data.ok) throw new Error(data?.error || `Error ${res.status}`);
       if (!data.km) { alert("La IA no pudo leer el km con seguridad. Ingrésalo manualmente."); }
       else {
         setForm(f => ({ ...f, km: String(data.km), fuente: "whatsapp_foto" }));

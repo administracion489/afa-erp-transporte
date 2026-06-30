@@ -7,7 +7,19 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 
-const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
+// Cliente perezoso. Si ANTHROPIC_API_KEY no está configurada, NO debe reventar al
+// cargar el módulo: eso haría que el route devuelva un 500 SIN JSON (antes del
+// try/catch), y el cliente vería "Unexpected token ... is not valid JSON".
+// Al crearlo dentro de la función, el error sale limpio como { ok:false, error }.
+let _anthropic: Anthropic | null = null;
+function getAnthropic(): Anthropic {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error(
+      "Falta ANTHROPIC_API_KEY en el servidor. Configúrala en Vercel → Settings → Environment Variables y vuelve a desplegar."
+    );
+  }
+  return (_anthropic ??= new Anthropic());
+}
 const MODELO_VISION = "claude-opus-4-8";
 
 export type Adjunto = {
@@ -77,8 +89,12 @@ Incluye TODAS las filas de tareas y TODAS las columnas de km que se vean. Si un 
 
 export async function extraerPlanFabricante(adjuntos: Adjunto[]): Promise<any> {
   const content: any[] = [{ type: "text", text: PROMPT_PLAN }, ...adjuntos.map(bloqueAdjunto)];
-  const req: any = { model: MODELO_VISION, max_tokens: 16000, messages: [{ role: "user", content }] };
-  const resp: any = await anthropic.messages.create(req);
+  // Streaming: la salida puede ser larga (hasta 16k tokens). Mantiene viva la
+  // conexión mientras el modelo genera y evita timeouts de petición.
+  const stream = getAnthropic().messages.stream({
+    model: MODELO_VISION, max_tokens: 16000, messages: [{ role: "user", content }],
+  } as any);
+  const resp: any = await stream.finalMessage();
   const plan = extraerJSON(textoDe(resp));
 
   // Normalización: derivar km_intervalo / cada_servicio por tarea para el cálculo de vencimientos.
@@ -108,7 +124,7 @@ export async function extraerOdometro(
     max_tokens: 300,
     messages: [{ role: "user", content: [{ type: "text", text: PROMPT_ODO }, bloqueAdjunto(adjunto)] }],
   };
-  const resp: any = await anthropic.messages.create(reqOdo);
+  const resp: any = await getAnthropic().messages.create(reqOdo);
   const r = extraerJSON(textoDe(resp));
   return {
     km: Math.round(Number(r.km || 0)),

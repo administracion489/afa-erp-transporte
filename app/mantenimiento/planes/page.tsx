@@ -97,8 +97,17 @@ export default function PlanesPage() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ adjuntos: [adj] }),
       });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || "No se pudo leer el plan");
+      // El servidor puede devolver una página de error NO-JSON (timeout/crash de
+      // la función). Leer como texto y parsear con cuidado para mostrar la causa real.
+      const raw = await res.text();
+      let data: any;
+      try { data = JSON.parse(raw); }
+      catch {
+        if (res.status === 504 || /timeout|FUNCTION_INVOCATION/i.test(raw))
+          throw new Error("El servidor tardó demasiado leyendo el plan (límite de tiempo). Prueba con una imagen más nítida o recortada al cuadro de mantenimiento.");
+        throw new Error(`El servidor respondió ${res.status}. ${raw.slice(0, 140)}`);
+      }
+      if (!res.ok || !data.ok) throw new Error(data?.error || `Error ${res.status}`);
       const p = data.plan;
       setDraft({
         marca: p.marca || "", modelo: p.modelo || "", motor: p.motor || "",
