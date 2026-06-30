@@ -204,6 +204,31 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
   return out;
 }
 
+// Velocidad para COLOREAR la huella (leyenda Parado/Lento/Moderado/Rápido). Muchos equipos de
+// terceros NO reportan velocidad por Doppler → mandan `velocidad`=0 SIEMPRE, y la huella salía
+// TODA ROJA aunque el bus fuera a 70 km/h (la flota propia sí trae Doppler y se ve bien). Aquí: si
+// el campo `velocidad` no es fiable (0 o absurdo), se DERIVA del desplazamiento sobre una ventana
+// de tiempo (~±6 s, robusta al jitter; punto-a-punto daría velocidades fantasma), mismo criterio
+// que velocidadPorVentana del recuadro en vivo. Si el equipo SÍ da Doppler, se respeta. Requiere
+// `ts`; sin él (0/no creciente) no toca nada. Solo cambia el COLOR, no la geometría.
+export function conVelocidadColor(pts: HuellaPt[], ventanaMs = 6000, maxKmh = 130): HuellaPt[] {
+  const tsFiable = pts.length >= 2 && pts[pts.length - 1].ts > pts[0].ts;
+  return pts.map((p, i) => {
+    if (p.velocidad > 0 && p.velocidad <= maxKmh) return p;   // Doppler fiable (flota propia) → respetar
+    if (!tsFiable) return p;
+    // Incluir SIEMPRE los vecinos inmediatos (i-1, i+1) y extender hasta ventanaMs. Sin esto, si la
+    // cadencia es espaciada (el throttle cree "parado" porque el equipo da velocidad 0), los vecinos
+    // quedan a >ventanaMs → la ventana colapsaba a 1 punto (dt=0) → no derivaba → seguía rojo.
+    let a = Math.max(0, i - 1), b = Math.min(pts.length - 1, i + 1);
+    while (a > 0 && p.ts - pts[a - 1].ts < ventanaMs) a--;
+    while (b < pts.length - 1 && pts[b + 1].ts - p.ts < ventanaMs) b++;
+    const dt = (pts[b].ts - pts[a].ts) / 1000;
+    if (dt <= 0) return p;
+    const kmh = (distM(pts[a].lat, pts[a].lng, pts[b].lat, pts[b].lng) / dt) * 3.6;
+    return kmh > maxKmh ? p : { ...p, velocidad: Math.round(kmh) };   // absurdo → conservar; si no, derivada
+  });
+}
+
 // Prepara una ventana para Map Matching: deduplica y limita a 100 (máximo de la API),
 // conservando primero y último. Se llama por ventana, que ya viene ≤100.
 export function prepararPuntos(pts: MatchPt[]): MatchPt[] {

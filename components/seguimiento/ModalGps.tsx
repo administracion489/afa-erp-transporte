@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import {
   calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
-  crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana,
+  crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
 } from "@/lib/huella";
 
 declare global { interface Window { mapboxgl: any; } }
@@ -400,7 +400,7 @@ export default function ModalGps({
 
         // Limpiar UNA sola vez (colapsa rachas detenidas + dedup en marcha). El mismo set
         // limpio alimenta el dibujo (setHuella) y el ajuste por ventanas → coherentes.
-        const limpio = limpiarHuella(filasAPuntos(arr));
+        const limpio = conVelocidadColor(limpiarHuella(filasAPuntos(arr)));
         setHuella(limpio.map(p => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad })));
 
         // Map Matching por ventanas (lib/huella.ts): throttle 60 s + congelado interno.
