@@ -167,17 +167,21 @@ function fmtCountdown(mins: number): string {
   return `${String(mins).padStart(2, "0")}m`;
 }
 
-// Acorta una dirección de Google para la tarjeta: descarta los segmentos finales de "ruido"
-// (plus-codes tipo "VX54+Q5R" y "Distrito 13008" con código postal de 5 dígitos), dejando el
-// nombre del lugar y la vía. Si todo quedara filtrado, cae al primer segmento / al texto original.
+// Acorta una dirección de Google para la tarjeta SIN perder información útil. Quita solo el RUIDO
+// puro: el plus-code (código abierto de ubicación, tipo "VX54+Q5R") y el país final ("Perú"). La
+// "cola" final de localidad + código postal ("Distrito 13008") se descarta SOLO cuando la dirección
+// es rica (>=3 segmentos): así una dirección pobre como "D, XVXJ+5GV, Callao 07031, Perú" conserva
+// el distrito ("D, Callao 07031") en vez de quedar en un muñón inútil ("D, Perú"). Fallback: original.
 function acortarLugar(dir?: string | null): string {
   const full = (dir ?? "").trim();
   if (!full) return "—";
-  const segs = full.split(",").map(s => s.trim()).filter(Boolean);
-  const esPlusCode = (s: string) => /^[0-9A-Z]{2,}\+[0-9A-Z]+$/i.test(s);
-  const esPostal   = (s: string) => /\d{5}\s*$/.test(s); // "... 13008" (postal Perú = 5 dígitos)
-  const utiles = segs.filter(s => !esPlusCode(s) && !esPostal(s));
-  return (utiles.length ? utiles : segs.slice(0, 1)).join(", ") || full;
+  let segs = full.split(",").map(s => s.trim()).filter(Boolean);
+  const esPlusCode   = (s: string) => /^[0-9A-Z]{2,}\+[0-9A-Z]+$/i.test(s);
+  const esPais       = (s: string) => /^per[uú]$/i.test(s);
+  const esColaPostal = (s: string) => /\d{5}\s*$/.test(s); // "... 13008" (postal Perú = 5 dígitos)
+  segs = segs.filter(s => !esPlusCode(s) && !esPais(s));
+  if (segs.length >= 3 && esColaPostal(segs[segs.length - 1])) segs = segs.slice(0, -1);
+  return segs.join(", ") || full;
 }
 
 function fmtDuracion(ms: number): string {
