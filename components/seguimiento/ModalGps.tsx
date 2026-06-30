@@ -84,6 +84,7 @@ export default function ModalGps({
   const [sinSenal,       setSinSenal]       = useState(false);
   const [congeladoMin,   setCongeladoMin]   = useState(0); // min con la MISMA coord Y buena precisión = fix viejo reenviado (GPS congelado real)
   const [precBajaM,      setPrecBajaM]      = useState(0); // ±m cuando la coord está fija por baja precisión (red/FUSED, bus quieto) — NO es congelado
+  const [precDebilM,     setPrecDebilM]     = useState(0); // ±m: precisión mediana reciente de RED (≥60m) — cubre el bus EN MOVIMIENTO con GPS débil (equipo del conductor)
   const [mapListo,       setMapListo]       = useState(false);
   const [ruta,              setRuta]              = useState<RutaData | null>(null);
   const [cargandoRuta,      setCargandoRuta]      = useState(false);
@@ -388,6 +389,14 @@ export default function ModalGps({
             setPrecBajaM(estancado && !accBuena && cong.acc != null ? Math.round(cong.acc) : 0);
           }
         }
+
+        // GPS DÉBIL del conductor (cubre el bus EN MOVIMIENTO con baja precisión, que NO dispara
+        // congelado/precBajaM porque la coord sí cambia): si la precisión MEDIANA reciente es de
+        // red (≥60 m), avisar al operador → es el EQUIPO del conductor (debe activar Alta precisión
+        // / usar la app nativa), no un fallo del sistema. Un GPS satelital sano da ≤15 m.
+        const accsRec = (arr as any[]).slice(-25).map(r => Number(r.precision_m)).filter(a => Number.isFinite(a)).sort((a, b) => a - b);
+        const medAccRec = accsRec.length ? accsRec[Math.floor(accsRec.length / 2)] : 0;
+        if (!cancel) setPrecDebilM(medAccRec >= 60 ? Math.round(medAccRec) : 0);
 
         // Limpiar UNA sola vez (colapsa rachas detenidas + dedup en marcha). El mismo set
         // limpio alimenta el dibujo (setHuella) y el ajuste por ventanas → coherentes.
@@ -754,16 +763,20 @@ export default function ModalGps({
             <div>
               <p className="text-white font-black text-sm">{clienteNombre} · Reserva #{reservaId}</p>
               <div className="flex items-center gap-2 flex-wrap">
-                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${sinSenal ? "bg-red-400" : congeladoMin > 0 ? "bg-amber-400 animate-pulse" : "bg-green-400 animate-pulse"}`} />
-                <p className={`text-[11px] ${congeladoMin > 0 && !sinSenal ? "text-amber-300 font-bold" : "text-blue-200"}`}>
+                {(() => { const debilM = Math.max(precBajaM, precDebilM); const alerta = (congeladoMin > 0 || debilM > 0) && !sinSenal; return (
+                <p
+                  className={`text-[11px] flex items-center gap-2 ${alerta ? "text-amber-300 font-bold" : "text-blue-200"}`}
+                  title={debilM > 0 ? "GPS de baja precisión del equipo del conductor: pídele activar Alta precisión (GPS satelital) o usar la app nativa." : undefined}
+                >
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${sinSenal ? "bg-red-400" : alerta ? "bg-amber-400 animate-pulse" : "bg-green-400 animate-pulse"}`} />
                   {sinSenal
                     ? "Sin señal GPS"
                     : congeladoMin > 0
                       ? `⚠ GPS del conductor congelado · hace ${congeladoMin} min`
                       : ultimaActualiz
-                        ? `GPS en vivo · hace ${segsDesdeUlt}s${precBajaM > 0 ? ` · ±${precBajaM}m baja precisión` : ""}`
+                        ? `GPS en vivo · hace ${segsDesdeUlt}s${debilM > 0 ? ` · ⚠ GPS débil ±${debilM}m (activar Alta precisión)` : ""}`
                         : "Conectando..."}
-                </p>
+                </p> ); })()}
                 {ruta && (
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${hayTrafico ? "bg-orange-500 text-white" : "bg-green-600 text-white"}`}>
                     {hayTrafico ? `⚠ Tráfico · ${ruta.total_min} min` : `✓ Ruta libre · ${ruta.total_min} min`}
