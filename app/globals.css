@@ -87,6 +87,11 @@ body {
   60%  { transform: scale(1.1); opacity: 1; }
   100% { transform: scale(1);   opacity: 1; }
 }
+/* Pista del slider "Desliza para conectarte": los chevrons respiran y empujan a la derecha. */
+@keyframes hintpulse {
+  0%, 100% { opacity: 0.25; transform: translateX(0); }
+  50%      { opacity: 0.6;  transform: translateX(4px); }
+}
 @keyframes sheetIn {
   from { transform: translateY(-30px); opacity: 0; }
   to   { transform: translateY(0);     opacity: 1; }

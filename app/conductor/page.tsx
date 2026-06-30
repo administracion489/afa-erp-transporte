@@ -441,8 +441,21 @@ function SlideToConnect({ onConnect }: { onConnect: () => void }) {
       }}>
         <IconArrowRight size={22} color="#fff" />
       </div>
+      {/* Pista animada: dos chevrons que "respiran" y empujan a la derecha, indicando hacia
+          dónde deslizar. Se desvanecen a medida que el knob avanza (no estorban al arrastrar). */}
+      <div aria-hidden style={{
+        position: "absolute", right: 18, top: 0, bottom: 0, zIndex: 1,
+        display: "flex", alignItems: "center", pointerEvents: "none",
+        opacity: Math.max(0, 1 - dragX / 80),
+        transition: dragging ? "none" : "opacity .2s ease",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", animation: "hintpulse 1.8s ease-in-out infinite" }}>
+          <IconChevronRight size={20} color="#fff" sw={2.6} />
+          <IconChevronRight size={20} color="#fff" sw={2.6} style={{ marginLeft: -10 }} />
+        </div>
+      </div>
       <div style={{
-        textAlign: "center", padding: "14px 12px 14px 52px", position: "relative", zIndex: 1,
+        textAlign: "center", padding: "14px 44px 14px 52px", position: "relative", zIndex: 1,
         color: "rgba(255,255,255,0.88)", fontSize: 14, fontWeight: 800, fontFamily: FONT_SANS,
         letterSpacing: -0.2, pointerEvents: "none",
       }}>
