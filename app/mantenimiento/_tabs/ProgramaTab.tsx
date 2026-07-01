@@ -126,15 +126,22 @@ export default function ProgramaTab() {
       const plan = e.plan; const v = vehMap.get(e.vehiculo_id);
       if (!plan || !v) continue;
       const um = ultMant[e.vehiculo_id];
-      // Ancla: último mnto preventivo, o el km/fecha base del enrolamiento.
-      const baseKm: number | null = um?.kilometraje ?? e.km_base ?? null;
       const baseFecha = um?.fecha ?? e.fecha_base ?? null;
       const kmActual = Number(v.kilometraje_actual ?? 0);
       const kmDia = kmPorDia(lectPorVeh[e.vehiculo_id] || []);
 
+      // Próximo servicio por KM. El plan del fabricante es por odómetro ABSOLUTO
+      // (5k, 10k, 15k…). Si hay un servicio preventivo registrado, el calendario se
+      // re-ancla a él (próximo = servicio + intervalo, puede quedar vencido). Si no
+      // hay historial, se toma el siguiente hito de la rejilla MAYOR al km actual
+      // (una unidad con 7 217 km y plan de 5 000 → próximo 10 000, no 12 217).
       let dueKm: number | null = null, faltanKm: number | null = null, diasPorKm: number | null = null;
-      if (plan.intervalo_base_km && baseKm !== null) {
-        dueKm = Number(baseKm) + Number(plan.intervalo_base_km);
+      const inter = Number(plan.intervalo_base_km || 0);
+      if (inter > 0) {
+        const ultServ = um?.kilometraje ?? null;
+        dueKm = ultServ !== null
+          ? Number(ultServ) + inter
+          : (Math.floor(kmActual / inter) + 1) * inter;
         faltanKm = dueKm - kmActual;
         diasPorKm = kmDia && kmDia > 0 && faltanKm > 0 ? Math.round(faltanKm / kmDia) : null;
       }

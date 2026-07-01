@@ -108,16 +108,21 @@ async function handler(req: NextRequest) {
       if (!plan || !v) continue;
 
       const um = ultMant[e.vehiculo_id];
-      // Ancla: último mnto preventivo, o el km/fecha base del enrolamiento.
-      // NO usar kilometraje_actual (haría faltanKm == intervalo siempre).
-      const baseKm: number | null = um?.kilometraje ?? e.km_base ?? null;
       const baseFecha: string | null = um?.fecha ?? e.fecha_base ?? null;
       const kmActual = Number(v.kilometraje_actual ?? 0);
       const kmDia = kmPorDia(lectPorVeh[e.vehiculo_id] || []);
 
+      // Próximo servicio por KM = rejilla del fabricante (odómetro absoluto). Si hay
+      // servicio preventivo registrado, se re-ancla a él (puede quedar vencido); si
+      // no, se toma el siguiente hito MAYOR al km actual. (Debe coincidir con la
+      // pestaña Próximos en ProgramaTab.)
       let dueKm: number | null = null, faltanKm: number | null = null, diasPorKm: number | null = null;
-      if (plan.intervalo_base_km && baseKm !== null) {
-        dueKm = Number(baseKm) + Number(plan.intervalo_base_km);
+      const inter = Number(plan.intervalo_base_km || 0);
+      if (inter > 0) {
+        const ultServ = um?.kilometraje ?? null;
+        dueKm = ultServ !== null
+          ? Number(ultServ) + inter
+          : (Math.floor(kmActual / inter) + 1) * inter;
         faltanKm = dueKm - kmActual;
         diasPorKm = kmDia && kmDia > 0 && faltanKm > 0 ? Math.round(faltanKm / kmDia) : null;
       }
