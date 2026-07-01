@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
 import { supabase } from "@/lib/supabase";
-import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, esAppNativa, backgroundGpsActivo, geoDisponible, type GeoPos, type GeoWatch } from "@/lib/geo";
+import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, esAppNativa, backgroundGpsActivo, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision } from "@/lib/geo";
 import { attachHidScanner } from "@/lib/hid-scanner";
 import {
   CondorMark,
@@ -614,6 +614,11 @@ export default function ConductorApp() {
   // Exención de batería del equipo: true=ya protegido (no molestar), false=expuesto (mostrar guía),
   // null=desconocido (web / APK viejo sin plugin).
   const [exentaBat, setExentaBat] = useState<boolean | null>(null);
+  // Precisión del permiso de ubicación: "precisa"=FINE, "aproximada"=solo COARSE (±150 m),
+  // "desconocida"=web / sin permiso / chequeo colgado (no afirmar). Legible por JS (@capacitor/geolocation).
+  const [precUbic, setPrecUbic] = useState<GeoPrecision>("desconocida");
+  // Gate FUERTE-SUAVE al iniciar servicio: reserva bloqueada por precisión aproximada (null=sin gate).
+  const [gatePrecision, setGatePrecision] = useState<Reserva | null>(null);
   // true si la guía reaparece porque DETECTAMOS que el SO MATÓ la app a mitad de un viaje.
   const [cortePendiente, setCortePendiente] = useState(false);
   // Expandir los pasos manuales (en equipos no-agresivos van colapsados tras "ver pasos").
@@ -1057,6 +1062,7 @@ export default function ConductorApp() {
     if (!esAppNativa()) return;
     const exenta = await bateriaExenta();
     setExentaBat(exenta);
+    try { setPrecUbic(await precisionUbicacion()); } catch {}
     try {
       if (exenta === true) {
         localStorage.removeItem("afa_gps_corte_pendiente");
@@ -1099,6 +1105,7 @@ export default function ConductorApp() {
       if (typeof document === "undefined" || document.visibilityState !== "visible") return;
       const ex = await bateriaExenta();
       setExentaBat(ex);
+      try { setPrecUbic(await precisionUbicacion()); } catch {}
       if (ex === true) {
         try { localStorage.setItem("afa_gps_ajustes_v1", "1"); localStorage.removeItem("afa_gps_corte_pendiente"); } catch {}
         setCortePendiente(false);
@@ -1118,15 +1125,25 @@ export default function ConductorApp() {
     const onVis = async () => {
       if (typeof document === "undefined" || document.visibilityState !== "visible") return;
       try { setExentaBat(await bateriaExenta()); } catch {}
+      try { setPrecUbic(await precisionUbicacion()); } catch {}
     };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [conductor?.id]);
 
-  async function iniciarRecorrido(reserva: Reserva) {
+  async function iniciarRecorrido(reserva: Reserva, forzar = false) {
     if (reservaActiva) { alert("Hay un servicio en curso. Finalízalo antes de iniciar otro."); return; }
     if (!checkDone) { alert("Debes completar el pre-viaje antes de iniciar el recorrido"); setTab("checklist"); return; }
     if (!vehiculoId) { alert("Selecciona el vehículo primero"); return; }
+    // Gate FUERTE-SUAVE de precisión: si el permiso quedó en APROXIMADO, el rastreo saldría a
+    // ±150 m TODA la ruta (posiciones falsas a la central y a los pasajeros). Bloquea SOLO si es
+    // inequívocamente aproximado; precisionUbicacion() devuelve "desconocida" ante web/hang/sin
+    // permiso → fail-open (deja iniciar). El conductor puede forzar desde el modal (gatePrecision).
+    if (!forzar && esAppNativa() && (await precisionUbicacion()) === "aproximada") {
+      setPrecUbic("aproximada");
+      setGatePrecision(reserva);
+      return;
+    }
     setIniciando(true);
     await cargarParadas(reserva.id);
     // Transición INMEDIATA a la ruta — NO esperar al GPS. El servicio AUTO-CONECTA el
@@ -1160,6 +1177,25 @@ export default function ConductorApp() {
     );
     if (ok) iniciarRecorrido(reserva);
   }
+
+  // Gate de precisión abierto: si el conductor vuelve de Ajustes con la precisión ya en ALTA,
+  // cerrar el gate y arrancar el servicio automáticamente (forzar=true: ya está verificado preciso).
+  useEffect(() => {
+    if (!gatePrecision || !esAppNativa()) return;
+    const onVis = async () => {
+      if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+      const r = await precisionUbicacion();
+      setPrecUbic(r);
+      if (r === "precisa") {
+        const reserva = gatePrecision;
+        setGatePrecision(null);
+        iniciarRecorrido(reserva, true);
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gatePrecision]);
 
   // Recuperación: el conductor inició un servicio por error o aún no está listo.
   // Lo devuelve a su lista SIN registrarlo como finalizado, RESTAURANDO el estado del
@@ -2149,8 +2185,11 @@ export default function ConductorApp() {
                   • neutro — exentaBat===null (APK viejo/sin plugin): no afirmamos un estado que no sabemos.
                 Tocar abre la hoja con las dos acciones (mostrarAjustesGps). */}
             {esAppNativa() && (() => {
+              // Precisión APROXIMADA (solo COARSE) degrada CADA fix → cuenta como "atención" aunque
+              // la batería esté protegida. verde "protegido" exige batería exenta Y precisión no-aproximada.
+              const precMala = precUbic === "aproximada";
               const estado: "protegido" | "atencion" | "neutro" =
-                cortePendiente || exentaBat === false ? "atencion"
+                cortePendiente || exentaBat === false || precMala ? "atencion"
                 : exentaBat === true ? "protegido"
                 : "neutro";
 
@@ -2198,10 +2237,10 @@ export default function ConductorApp() {
                   </span>
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ display: "block", fontSize: 13.5, fontWeight: 800, color: atencion ? "var(--c-warn)" : "var(--c-ink)" }}>
-                      {atencion ? "Revisa los ajustes de rastreo" : "Ajustes de rastreo"}
+                      {!atencion ? "Ajustes de rastreo" : precMala ? "Activa la ubicación precisa" : "Revisa los ajustes de rastreo"}
                     </span>
                     <span style={{ display: "block", marginTop: 1, fontSize: 11.5, color: atencion ? "var(--c-warn-ink)" : "var(--c-mute)" }}>
-                      {atencion ? "El equipo puede cortar el GPS" : "Ubicación · batería · autostart"}
+                      {!atencion ? "Ubicación · batería · autostart" : precMala ? "Tu GPS sale a ±150 m" : "El equipo puede cortar el GPS"}
                     </span>
                   </span>
                   <IconChevronRight size={18} color={atencion ? "var(--c-warn)" : "var(--c-mute)"} />
@@ -3469,6 +3508,63 @@ export default function ConductorApp() {
         </div>
       )}
 
+      {/* Gate FUERTE-SUAVE de precisión: interrumpe el inicio del servicio si el permiso quedó en
+          APROXIMADO. Empuja a activar preciso, pero con válvula de escape ("Iniciar de todos modos")
+          para no dejar varado a nadie (p.ej. ROM que reporta mal / conductor que no puede activarlo). */}
+      {gatePrecision && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 140, background: "rgba(11,49,95,0.72)",
+          display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+        }}>
+          <div style={{
+            background: "var(--c-surface)", borderRadius: 20, padding: 24, maxWidth: 400, width: "100%",
+            boxShadow: "0 20px 60px rgba(0,0,0,0.4)", textAlign: "center",
+          }}>
+            <div style={{
+              width: 56, height: 56, borderRadius: 16, margin: "0 auto 14px",
+              display: "flex", alignItems: "center", justifyContent: "center", background: "var(--c-warn-tint)",
+            }}>
+              <IconNav size={28} color="var(--c-warn)" />
+            </div>
+            <h2 style={{ margin: "0 0 8px", fontSize: 19, fontWeight: 800, letterSpacing: -0.4 }}>
+              Activa tu ubicación precisa
+            </h2>
+            <p style={{ margin: "0 0 20px", fontSize: 14, lineHeight: 1.55, color: "var(--c-mute)" }}>
+              Tu ubicación está en modo <strong style={{ color: "var(--c-warn)" }}>aproximado</strong>. El
+              rastreo saldría a <strong>±150 m</strong> toda la ruta y marcaría posiciones falsas a la
+              central y a los pasajeros. Actívala en <strong>Preciso</strong> antes de iniciar.
+            </p>
+            <button
+              onClick={async () => {
+                const reserva = gatePrecision;
+                if (!reserva) return;
+                const r = await pedirPrecisionAlta();
+                setPrecUbic(r);
+                if (r === "precisa") { setGatePrecision(null); iniciarRecorrido(reserva, true); }
+                else { abrirAjustesUbicacion(); }
+              }}
+              style={{
+                width: "100%", padding: "14px 0", borderRadius: 14, border: "none",
+                background: "var(--c-navy)", color: "#fff", fontWeight: 800, fontSize: 15,
+                cursor: "pointer", fontFamily: FONT_SANS, marginBottom: 10,
+              }}
+            >
+              Activar ubicación precisa
+            </button>
+            <button
+              onClick={() => { const reserva = gatePrecision; if (!reserva) return; setGatePrecision(null); iniciarRecorrido(reserva, true); }}
+              style={{
+                width: "100%", padding: "10px 0", borderRadius: 12, border: "none",
+                background: "transparent", color: "var(--c-mute)", fontWeight: 700, fontSize: 13,
+                cursor: "pointer", fontFamily: FONT_SANS,
+              }}
+            >
+              Iniciar de todos modos
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Guía de ajustes del equipo para que el fabricante no corte el rastreo */}
       {mostrarAjustesGps && (() => {
         const fab = detectarFabricanteGps();
@@ -3504,9 +3600,48 @@ export default function ConductorApp() {
                   : <>Tu equipo (<strong>{guia.marca}</strong>) puede cerrar la app en segundo plano y cortar el GPS. Protégelo con <strong>un toque</strong>:</>}
               </p>
 
-              {/* Dos concerns, dos filas. La batería tiene ESTADO real (legible vía exentaBat);
-                  la ubicación "todo el tiempo" es ACCIÓN — su estado no es legible con los plugins
-                  actuales, así que no pintamos un check que no podemos verificar. */}
+              {/* Tres concerns. Precisión (Fila 0) y batería (Fila 1) tienen ESTADO real legible
+                  (precisión por JS vía @capacitor/geolocation; batería por el plugin nativo) → pill
+                  semáforo. La ubicación "todo el tiempo" (Fila 2) es ACCIÓN: su estado NO es legible
+                  con los plugins actuales (haría falta un método nativo → APK nuevo), así que no
+                  pintamos un check que no podemos verificar. */}
+
+              {/* Fila 0 — Precisión de la ubicación. En APROXIMADA cada fix sale a ±150 m (lo más
+                  impactante), por eso va primero. Solo se muestra si el estado es legible. */}
+              {precUbic !== "desconocida" && (
+                <div style={{ border: "1px solid var(--c-line-2)", borderRadius: 12, padding: 12, marginBottom: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: precUbic === "precisa" ? 0 : 8 }}>
+                    <IconNav size={18} color="var(--c-mute)" />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <p style={{ margin: 0, fontSize: 13, fontWeight: 800, color: "var(--c-ink)" }}>Ubicación precisa</p>
+                      <p style={{ margin: "1px 0 0", fontSize: 11, color: "var(--c-mute)" }}>GPS satelital, no aproximado por red</p>
+                    </div>
+                    <span style={{
+                      flexShrink: 0, fontSize: 11, fontWeight: 800, borderRadius: 999, padding: "2px 10px",
+                      color: precUbic === "precisa" ? "var(--c-success)" : "var(--c-warn)",
+                      background: precUbic === "precisa" ? "var(--c-success-tint)" : "var(--c-warn-tint)",
+                    }}>
+                      {precUbic === "precisa" ? "Precisa" : "Aproximada"}
+                    </span>
+                  </div>
+                  {precUbic === "aproximada" && (
+                    <button
+                      onClick={async () => {
+                        const r = await pedirPrecisionAlta();
+                        setPrecUbic(r);
+                        if (r !== "precisa") abrirAjustesUbicacion();
+                      }}
+                      style={{
+                        width: "100%", padding: "11px 14px", borderRadius: 10, border: "none",
+                        background: "var(--c-success)", color: "#fff", fontWeight: 800, fontSize: 13.5,
+                        cursor: "pointer", fontFamily: FONT_SANS,
+                      }}
+                    >
+                      📍 Activar ubicación precisa
+                    </button>
+                  )}
+                </div>
+              )}
 
               {/* Fila 1 — Batería y autostart (no cerrar la app en segundo plano). */}
               <div style={{ border: "1px solid var(--c-line-2)", borderRadius: 12, padding: 12, marginBottom: 10 }}>

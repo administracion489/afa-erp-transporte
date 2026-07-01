@@ -27,6 +27,9 @@ export type GeoPos = {
 
 export type GeoPermiso = "granted" | "denied" | "prompt" | "unavailable";
 export type GeoWatch = { clear: () => void };
+// Precisión del permiso concedido: "precisa" = FINE (GPS satelital), "aproximada" = solo COARSE
+// (red/celda, ±100-200 m), "desconocida" = web, sin permiso aún, o el chequeo no respondió.
+export type GeoPrecision = "precisa" | "aproximada" | "desconocida";
 
 const esNativo = () => Capacitor.isNativePlatform();
 
@@ -65,6 +68,46 @@ export async function pedirPermisoUbicacion(): Promise<GeoPermiso> {
     }
   } catch { /* algunos navegadores no soportan permissions.query para geolocation */ }
   return "prompt";
+}
+
+/**
+ * Lee si el permiso de ubicación concedido es PRECISO (FINE) o APROXIMADO (COARSE). En Android 12+
+ * el diálogo del sistema deja elegir "Preciso/Aproximado"; si el conductor eligió Aproximado, el
+ * rastreo sale a ±100-200 m sin importar enableHighAccuracy. Devuelve:
+ *   • "precisa"     → FINE concedido (checkPermissions().location === "granted").
+ *   • "aproximada"  → SOLO COARSE concedido (coarseLocation "granted", location no).
+ *   • "desconocida" → web, sin permiso aún, o el chequeo no respondió (NO afirmar nada).
+ * Es SOLO LECTURA: no abre ningún diálogo.
+ */
+export async function precisionUbicacion(): Promise<GeoPrecision> {
+  if (!esNativo()) return "desconocida";
+  try {
+    const Geolocation = await plugin();
+    const p = await conTimeout(Geolocation.checkPermissions(), 6000);
+    if (p.location === "granted") return "precisa";
+    if (p.coarseLocation === "granted") return "aproximada";
+    return "desconocida";
+  } catch {
+    return "desconocida";
+  }
+}
+
+/**
+ * Intenta SUBIR la precisión a alta re-pidiendo el permiso FINE. En Android 12+, si hoy solo hay
+ * COARSE, esto puede mostrar el diálogo del sistema de "cambiar a Preciso" (un número LIMITADO de
+ * veces; después Android lo silencia). Devuelve el estado RESULTANTE: si sigue "aproximada", el
+ * caller debe caer a abrirAjustesUbicacion(). DEBE invocarse en respuesta a una ACCIÓN del
+ * conductor (un botón).
+ */
+export async function pedirPrecisionAlta(): Promise<GeoPrecision> {
+  if (!esNativo()) return "desconocida";
+  try {
+    const Geolocation = await plugin();
+    await conTimeout(Geolocation.requestPermissions({ permissions: ["location"] }), 60000);
+    return await precisionUbicacion();
+  } catch {
+    return "desconocida";
+  }
 }
 
 const OPC_DEFAULT = { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 };
