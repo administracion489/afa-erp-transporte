@@ -260,12 +260,22 @@ export async function mapMatchTrail(
     const json = await res.json();
     const m = json?.matchings;
     if (!Array.isArray(m) || m.length === 0) return null;
-    // Concatenar TODAS las sub-trazas. Mapbox parte el `trace` en varias `matchings` donde pierde
-    // certeza, pero CADA fragmento es geometría REAL de vía. Antes se exigía exactamente 1 y se
-    // descartaban ventanas con confianza 0.9+ solo por venir fragmentadas (terceros con GPS
-    // ruidoso) → caían a huella cruda en ZIGZAG. Concatenarlas las pega a la pista; los huecos
-    // entre fragmentos (donde Mapbox dudó) los corta MAX_SEG_M aguas abajo si son grandes (no se
-    // inventa una recta larga). El gate de confianza (m[0], la traza primaria) vive en matchVentana.
+    // Concatenar las sub-trazas. Mapbox parte el `trace` en varias `matchings` donde pierde certeza;
+    // cada fragmento es geometría REAL de vía. Concatenarlas pega a la pista las ventanas de conf
+    // alta que venían fragmentadas (antes se tiraban a huella cruda en zigzag).
+    // PERO: solo si los EMPALMES entre fragmentos son APRETADOS (≤ EMPALME_MAX). Si Mapbox dejó un
+    // hueco grande entre fragmentos, ahí NO supo conectar → el conector recto cruzaría manzanas
+    // (distorsión en X que reaparecía al re-matchear la cola). En ese caso se RECHAZA la ventana
+    // entera → cae a huella cruda suavizada (lisa, sin inventar el conector). Verificado #947:
+    // empalmes de 173-285 m producían la X; #944 empalma ≤71 m y se mantiene pegado a la vía.
+    const EMPALME_MAX = 100;
+    for (let i = 0; i < m.length - 1; i++) {
+      const a = m[i]?.geometry?.coordinates as [number, number][] | undefined;
+      const b = m[i + 1]?.geometry?.coordinates as [number, number][] | undefined;
+      if (!a?.length || !b?.length) continue;
+      const fin = a[a.length - 1], ini = b[0];
+      if (distM(fin[1], fin[0], ini[1], ini[0]) > EMPALME_MAX) return null; // empalme dudoso → raw fallback
+    }
     const via: [number, number][] = m.flatMap((x: any) => (x?.geometry?.coordinates as [number, number][]) || []);
     const confidence = Number(m[0]?.confidence) || 0;
     return via.length >= 2 ? { coords: via, confidence } : null;
