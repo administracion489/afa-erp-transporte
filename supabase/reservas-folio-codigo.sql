@@ -36,9 +36,16 @@ alter table public.reservas add column if not exists codigo text;
 create unique index if not exists idx_reservas_codigo on public.reservas (codigo);
 
 -- 4) Función generadora del folio (corre en cada INSERT de reservas).
+--    SECURITY DEFINER: el contador `folio_secuencia` tiene RLS activado y NINGUNA policy
+--    (tabla interna, nunca expuesta al API). El trigger la escribe en nombre del dueño
+--    (postgres), saltándose RLS — igual que sync_reserva_origen_destino. Sin esto, el
+--    INSERT lo corre el rol `authenticated` del navegador y RLS lo bloquea:
+--    "new row violates row-level security policy for table folio_secuencia".
 create or replace function public.fn_reservas_set_codigo()
 returns trigger
 language plpgsql
+security definer
+set search_path = public, pg_temp
 as $$
 declare
   v_anio    int;
