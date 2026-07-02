@@ -240,8 +240,22 @@ export function prepararPuntos(pts: MatchPt[]): MatchPt[] {
   return out;
 }
 
-// Ajusta la huella GPS a la red vial usando Mapbox Map Matching API.
-// Devuelve { coords, confidence } o null. RECHAZA (null) cuando hay 0 ó >1 matchings.
+// Ajusta la huella GPS a la red vial usando Mapbox Map Matching API — HÍBRIDO POR FRAGMENTO.
+//
+// Mapbox parte el trace en varias `matchings` cuando duda, y era común que m[0] fuera un stub
+// basura (conf 0.00, el arranque parado) mientras el fragmento GRANDE tenía conf 0.87-0.98 (#948:
+// f0=0.00/48pts + f1=0.87/52pts; #947 W3: 0.97 + basura + 0.98). Los enfoques todo-o-nada
+// fallaban en ambos sentidos: exigir 1 matching (o gate por m[0]) tiraba media ventana BUENA a
+// crudo-zigzag; concatenar todo dibujaba conectores rectos de 173-285 m cruzando manzanas (la
+// "X" reportada en #947/#948).
+//
+// AQUÍ: `tracepoints` dice qué punto del sample pertenece a qué fragmento. Se recorren los puntos
+// EN ORDEN: los tramos cuyos fragmentos son CONFIABLES (conf ≥ 0.4) emiten su geometría pegada a
+// la vía; los tramos de fragmentos dudosos emiten el PUNTO GPS REAL (crudo). Así el hueco entre
+// fragmentos buenos se rellena con los puntos reales del bus — NUNCA con un conector inventado.
+// Cada coordenada del resultado es o geometría de vía de Mapbox o un fix real → no inventa rutas.
+// `confidence` devuelta = FRACCIÓN de puntos cubiertos por fragmentos confiables (0..1); el gate
+// de matchVentana (≥0.4 = al menos 40% pegado) decide si vale frente al crudo suavizado.
 // El radio de búsqueda por punto se deriva de la precisión GPS (acc·1.5, acotado 5–50 m).
 export async function mapMatchTrail(
   pts: MatchPt[],
@@ -260,31 +274,44 @@ export async function mapMatchTrail(
     const json = await res.json();
     const m = json?.matchings;
     if (!Array.isArray(m) || m.length === 0) return null;
-    // Concatenar las sub-trazas. Mapbox parte el `trace` en varias `matchings` donde pierde certeza;
-    // cada fragmento es geometría REAL de vía. Concatenarlas pega a la pista las ventanas de conf
-    // alta que venían fragmentadas (antes se tiraban a huella cruda en zigzag).
-    // PERO: solo si los EMPALMES entre fragmentos son APRETADOS (≤ EMPALME_MAX). Si Mapbox dejó un
-    // hueco grande entre fragmentos, ahí NO supo conectar → el conector recto cruzaría manzanas
-    // (distorsión en X que reaparecía al re-matchear la cola). En ese caso se RECHAZA la ventana
-    // entera → cae a huella cruda suavizada (lisa, sin inventar el conector). Verificado #947:
-    // empalmes de 173-285 m producían la X; #944 empalma ≤71 m y se mantiene pegado a la vía.
-    const EMPALME_MAX = 100;
-    for (let i = 0; i < m.length - 1; i++) {
-      const a = m[i]?.geometry?.coordinates as [number, number][] | undefined;
-      const b = m[i + 1]?.geometry?.coordinates as [number, number][] | undefined;
-      if (!a?.length || !b?.length) continue;
-      const fin = a[a.length - 1], ini = b[0];
-      if (distM(fin[1], fin[0], ini[1], ini[0]) > EMPALME_MAX) return null; // empalme dudoso → raw fallback
+
+    const tp = json?.tracepoints;
+    if (!Array.isArray(tp) || tp.length !== sample.length) {
+      // Sin tracepoints utilizables → conservador: solo aceptar el caso simple de 1 matching.
+      if (m.length !== 1) return null;
+      const c: [number, number][] = m[0]?.geometry?.coordinates || [];
+      const conf = Number(m[0]?.confidence) || 0;
+      return c.length >= 2 && conf > 0 ? { coords: c, confidence: conf } : null;
     }
-    const via: [number, number][] = m.flatMap((x: any) => (x?.geometry?.coordinates as [number, number][]) || []);
-    const confidence = Number(m[0]?.confidence) || 0;
+
+    const CONF_FRAG = 0.4;
+    const keep = m.map((x: any) => (Number(x?.confidence) || 0) >= CONF_FRAG);
+    const emitidos = new Set<number>();   // cada fragmento se emite UNA vez (1ª aparición en orden)
+    const via: [number, number][] = [];
+    let cubiertos = 0;
+    for (let k = 0; k < sample.length; k++) {
+      const t: any = tp[k];
+      const mi: number | null = t && t.matchings_index != null ? t.matchings_index : null;
+      if (mi != null && keep[mi]) {
+        cubiertos++;
+        if (!emitidos.has(mi)) {
+          emitidos.add(mi);
+          const g = (m[mi]?.geometry?.coordinates as [number, number][]) || [];
+          via.push(...g);
+        }
+      } else if (mi != null) {
+        via.push([sample[k].lng, sample[k].lat]);   // fragmento dudoso → el fix REAL del bus
+      }
+      // mi == null: tidy lo descartó como outlier/redundante → omitir (rechazo de outliers gratis)
+    }
+    const confidence = cubiertos / sample.length;
     return via.length >= 2 ? { coords: via, confidence } : null;
   } catch { return null; }
 }
 
-// Ajusta UNA ventana (≤100 puntos densos) a la vía. Si Map Matching falla o devuelve baja
-// confianza (típico en GPS pobre de terceros: la ventana se fragmenta), cae a la huella cruda
-// suavizada por DISTANCIA: aplana el zigzag de los tramos lentos sin recortar las curvas rápidas.
+// Ajusta UNA ventana (≤100 puntos densos) a la vía. `confidence` = fracción de la ventana pegada
+// a fragmentos confiables; si ni el 40% se pudo pegar (GPS pobre / parado en red), cae a la huella
+// cruda suavizada por DISTANCIA: aplana el zigzag lento sin recortar las curvas rápidas.
 export async function matchVentana(ventana: MatchPt[], token: string): Promise<[number, number][]> {
   const r = await mapMatchTrail(ventana, token);
   if (r && r.confidence >= 0.4 && r.coords.length >= 2) return r.coords;
