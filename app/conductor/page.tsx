@@ -1135,12 +1135,12 @@ export default function ConductorApp() {
     if (reservaActiva) { alert("Hay un servicio en curso. Finalízalo antes de iniciar otro."); return; }
     if (!checkDone) { alert("Debes completar el pre-viaje antes de iniciar el recorrido"); setTab("checklist"); return; }
     if (!vehiculoId) { alert("Selecciona el vehículo primero"); return; }
-    // Gate FUERTE-SUAVE de precisión: si el permiso quedó en APROXIMADO, el rastreo saldría a
-    // ±150 m TODA la ruta (posiciones falsas a la central y a los pasajeros). Bloquea SOLO si es
-    // inequívocamente aproximado; precisionUbicacion() devuelve "desconocida" ante web/hang/sin
-    // permiso → fail-open (deja iniciar). El conductor puede forzar desde el modal (gatePrecision).
-    if (!forzar && esAppNativa() && (await precisionUbicacion()) === "aproximada") {
-      setPrecUbic("aproximada");
+    // Gate FUERTE-SUAVE de precisión: si el permiso quedó en APROXIMADO, el rastreo saldría a ±150 m
+    // TODA la ruta. Usamos el estado `precUbic` (refrescado al montar y en cada visibilitychange),
+    // NO un await aquí: checkPermissions() puede COLGARSE en MIUI/HyperOS y dejaría el botón sin
+    // responder. Bloquea solo si la última lectura fue "aproximada"; "precisa"/"desconocida" → deja
+    // iniciar (fail-open). El conductor puede forzar desde el modal (gatePrecision).
+    if (!forzar && precUbic === "aproximada") {
       setGatePrecision(reserva);
       return;
     }
