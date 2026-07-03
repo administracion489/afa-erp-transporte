@@ -339,6 +339,46 @@ export async function bateriaExenta(): Promise<boolean | null> {
   }
 }
 
+/**
+ * ¿La app ya tiene ubicación EN SEGUNDO PLANO ("Permitir todo el tiempo")? Solo con el plugin
+ * nativo AfaNative (APK 29+). Devuelve:
+ *   • true  → concedido (rastreo sobrevive con pantalla bloqueada/Waze encima).
+ *   • false → falta (Android puede cortar la ubicación en 2º plano).
+ *   • null  → no se puede saber: web o APK viejo sin el método.
+ */
+export async function ubicacionTodoElTiempo(): Promise<boolean | null> {
+  if (!esNativo()) return null;
+  try {
+    const { registerPlugin } = await import("@capacitor/core");
+    const AfaNative = registerPlugin<{ hasBackgroundLocation: () => Promise<{ value: boolean }> }>("AfaNative");
+    const r = await AfaNative.hasBackgroundLocation();
+    return !!r?.value;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pide "Permitir TODO EL TIEMPO" de forma NATIVA (ACCESS_BACKGROUND_LOCATION, APK 29+). En
+ * Android 11+ el sistema abre automáticamente su pantalla de ajustes de ubicación de la app —
+ * el conductor solo toca "Permitir todo el tiempo". Ningún plugin del stack lo pedía: el
+ * diálogo normal de Android 11+ ya no ofrece esa opción, por eso "antes salía" solo en MIUI
+ * viejos. DEBE ir después de la divulgación destacada y del permiso de 1er plano (petición
+ * incremental, política de Google Play). Devuelve true si el método nativo EXISTE y respondió
+ * (APK 29+); false en web/APK viejo — el caller usa esto para no re-intentar en vano.
+ */
+export async function pedirUbicacionTodoElTiempo(): Promise<boolean> {
+  if (!esNativo()) return false;
+  try {
+    const { registerPlugin } = await import("@capacitor/core");
+    const AfaNative = registerPlugin<{ requestBackgroundLocation: () => Promise<{ requested: boolean }> }>("AfaNative");
+    await AfaNative.requestBackgroundLocation();
+    return true;
+  } catch {
+    return false; // plugin/método ausente (APK viejo) → la guía manual cubre el caso
+  }
+}
+
 /** true si hay alguna forma de geolocalización disponible. */
 export function geoDisponible(): boolean {
   if (esNativo()) return true;

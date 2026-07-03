@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
 import { supabase } from "@/lib/supabase";
-import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, esAppNativa, backgroundGpsActivo, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision } from "@/lib/geo";
+import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, ubicacionTodoElTiempo, pedirUbicacionTodoElTiempo, esAppNativa, backgroundGpsActivo, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision } from "@/lib/geo";
 import { attachHidScanner } from "@/lib/hid-scanner";
 import {
   CondorMark,
@@ -301,7 +301,6 @@ const GUIA_AJUSTES_GPS: Record<string, GuiaFabricante> = {
   ]},
   samsung: { marca: "Samsung (One UI)", pasos: [
     { titulo: "Quita “Poner en suspensión”", detalle: "Ajustes → Batería → Límites de uso en segundo plano → asegúrate que AFA Conductores NO esté en “Apps en suspensión” ni “Suspensión profunda”." },
-    { titulo: "Batería: “Sin restricciones”", detalle: "Ajustes → Apps → AFA Conductores → Batería → Sin restricciones." },
     ...PASOS_COMUNES,
   ]},
   oppo:    { marca: "Oppo / OnePlus (ColorOS)", pasos: [
@@ -320,10 +319,7 @@ const GUIA_AJUSTES_GPS: Record<string, GuiaFabricante> = {
     { titulo: "Gestión manual de la app", detalle: "Ajustes → Batería → Inicio de apps → AFA Conductores → Gestionar manualmente → activar Inicio automático, Inicio secundario y Ejecución en segundo plano." },
     ...PASOS_COMUNES,
   ]},
-  motorola:{ marca: "Motorola", pasos: [
-    { titulo: "Batería: “Sin restricciones”", detalle: "Ajustes → Apps → AFA Conductores → Batería → Sin restricciones." },
-    ...PASOS_COMUNES,
-  ]},
+  motorola:{ marca: "Motorola", pasos: PASOS_COMUNES },
   generico:{ marca: "tu equipo", pasos: PASOS_COMUNES },
 };
 
@@ -983,6 +979,19 @@ export default function ConductorApp() {
       pedirPermisoUbicacion()
         .then((p) => { if (p === "denied" && !recibioPos) setGpsError("Permiso de ubicación denegado"); })
         .catch(() => {});
+      // Red de seguridad al CONECTAR (flota existente que ya pasó el onboarding): si aún
+      // falta "Permitir todo el tiempo", disparar UNA sola vez la pantalla nativa del
+      // sistema (Android 11+ la abre automáticamente al pedir el permiso de fondo). Esto
+      // restaura el flujo "se activaba solo al conectar". Solo APK 29+; en APK viejo el
+      // chequeo devuelve null y no se hace nada (la guía manual cubre).
+      (async () => {
+        try {
+          if (localStorage.getItem("afa_bg_loc_pedido_v1")) return;
+          if ((await ubicacionTodoElTiempo()) === false) {
+            if (await pedirUbicacionTodoElTiempo()) localStorage.setItem("afa_bg_loc_pedido_v1", "1");
+          }
+        } catch { /* noop */ }
+      })();
       // Sin setInterval en nativo: el plugin entrega updates y el SO regula la
       // frecuencia; el interval no corre con el WebView suspendido en background.
     } else {
@@ -3576,6 +3585,14 @@ export default function ConductorApp() {
                 // Pedir permiso AQUÍ — diálogo Android aparece DESPUÉS de nuestro
                 // aviso, cumpliendo el requisito de Google Play.
                 await pedirPermisoUbicacion().catch(() => {});
+                // "Permitir TODO EL TIEMPO" NATIVO (APK 29+): tras conceder 1er plano, Android
+                // 11+ abre la pantalla del sistema con esa opción — exactamente lo que anuncia
+                // el texto de esta divulgación ("En la siguiente pantalla selecciona..."). En
+                // APK viejo el método no existe → devuelve false y NO se marca (para que se
+                // dispare al conectar cuando actualicen la app).
+                try {
+                  if (await pedirUbicacionTodoElTiempo()) localStorage.setItem("afa_bg_loc_pedido_v1", "1");
+                } catch {}
                 setGpsHabilitado(true);
                 // Tras conceder el permiso, evaluar si hace falta la guía (según exención real).
                 evaluarAjustesGps();
