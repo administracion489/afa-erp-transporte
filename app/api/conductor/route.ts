@@ -7,8 +7,11 @@
 // Todas las acciones llegan por POST: { accion, ...params }.
 
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { registrarLectura } from "@/lib/odometro";
+import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm } from "@/lib/push";
+import { evaluarProximidad } from "@/lib/proximidad";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -46,6 +49,22 @@ async function logBoarding(
   } catch (e: any) {
     console.warn("[api/conductor] boarding_log no registrado:", e?.message);
   }
+}
+
+// Push "embarque confirmado" al pasajero escaneado. Corre en after() (post-respuesta):
+// jamás retrasa ni rompe el embarque. Dedupe por (reserva, 'embarcado', pasajero) en
+// push_eventos_viaje → mover de bus/parada o re-escanear no re-notifica.
+async function pushEmbarcado(pasajeroId: any, reservaId: any) {
+  const pid = Number(pasajeroId), rid = Number(reservaId);
+  if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(rid) || rid <= 0) return;
+  try {
+    const { data: pax } = await admin.from("pasajeros").select("nombre").eq("id", pid).maybeSingle();
+    const nombre = String(pax?.nombre || "").trim().split(/\s+/)[0] || "pasajero";
+    await emitirEventoViaje({
+      reservaId: rid, evento: "embarcado", pasajeroId: pid, destinatarios: [pid],
+      payload: payloadsViaje.embarcado(rid, nombre, horaLimaHHmm()), ttl: 900,
+    });
+  } catch (e: any) { console.warn("[push embarcado]", e?.message); }
 }
 
 // ¿El error de Supabase/PostgREST es por una columna que NO existe en la tabla?
@@ -207,6 +226,15 @@ export async function POST(req: NextRequest) {
         if (filas.length === 0) return NextResponse.json({ error: "payload inválido" }, { status: 400 });
         const { error } = await admin.from("ubicaciones_gps").insert(filas);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        // Motor de proximidad del push del pasajero ("llega en ~5 min" / "ya llegó").
+        // Corre POST-respuesta (after) → la latencia del heartbeat no cambia. El
+        // throttle real vive en BD (claim atómico dentro de evaluarProximidad).
+        const reservaIds = [...new Set(
+          filas.map((f: any) => Number(f.reserva_id)).filter((n: number) => Number.isFinite(n) && n > 0)
+        )];
+        if (reservaIds.length > 0) {
+          after(() => Promise.allSettled(reservaIds.map((rid) => evaluarProximidad(rid))));
+        }
         return NextResponse.json({ ok: true, insertados: filas.length });
       }
 
@@ -216,6 +244,28 @@ export async function POST(req: NextRequest) {
         if (!paradaId) return NextResponse.json({ error: "paradaId requerido" }, { status: 400 });
         const { error } = await admin.from("paradas").update({ estado: "completada" }).eq("id", paradaId);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        // Push "quedan 2 paradas": tras completar una parada, avisar a la parada
+        // pendiente que quedó con EXACTAMENTE 2 pendientes por delante. Solo N=2
+        // (anti-spam) y dedupe por parada en push_eventos_viaje.
+        after(async () => {
+          try {
+            const { data: pMarcada } = await admin.from("paradas").select("reserva_id").eq("id", paradaId).maybeSingle();
+            const rid = Number(pMarcada?.reserva_id);
+            if (!Number.isFinite(rid) || rid <= 0) return;
+            const { data: ps } = await admin.from("paradas")
+              .select("id, nombre, orden, estado").eq("reserva_id", rid).order("orden");
+            const pendientes = (ps || []).filter((p: any) => p.estado !== "completada");
+            for (const p of pendientes) {
+              const antes = pendientes.filter((q: any) => (q.orden ?? 0) < (p.orden ?? 0)).length;
+              if (antes !== 2) continue;
+              const dest = await pasajerosEsperandoDeParada(p.id);
+              await emitirEventoViaje({
+                reservaId: rid, evento: "quedan_paradas", paradaId: p.id, destinatarios: dest,
+                payload: payloadsViaje.quedanParadas(p.id, p.nombre || "tu paradero"), ttl: 900,
+              });
+            }
+          } catch (e: any) { console.warn("[push quedan_paradas]", e?.message); }
+        });
         return NextResponse.json({ ok: true });
       }
 
@@ -233,6 +283,7 @@ export async function POST(req: NextRequest) {
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         // Bitácora real de abordaje (la lee el reporte del portal cliente).
         await logBoarding(pasajeroId ?? null, paradaIdReal ?? null, reservaId ?? null);
+        after(() => pushEmbarcado(pasajeroId, reservaId));
         return NextResponse.json({ ok: true });
       }
 
@@ -337,6 +388,7 @@ export async function POST(req: NextRequest) {
           }
           if (eIns) return NextResponse.json({ error: eIns.message }, { status: 500 });
           await logBoarding(pasajeroId, paradaId, reservaId);
+          after(() => pushEmbarcado(pasajeroId, reservaId));
           return NextResponse.json({ ok: true, id: nuevo?.id, creado: true, empresaAjena, pasajero: pasajeroInfo });
         }
 
@@ -373,7 +425,10 @@ export async function POST(req: NextRequest) {
         }
 
         // 7) Bitácora solo si es un abordaje nuevo (evita inflar el reporte en re-escaneos).
-        if (!yaEmbarcado) await logBoarding(pasajeroId, paradaId, reservaId);
+        if (!yaEmbarcado) {
+          await logBoarding(pasajeroId, paradaId, reservaId);
+          after(() => pushEmbarcado(pasajeroId, reservaId));
+        }
 
         return NextResponse.json({ ok: true, id: target.id, movido, otroBus, paradaOriginalId, eliminados, yaEmbarcado, empresaAjena, pasajero: pasajeroInfo });
       }
@@ -442,6 +497,26 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: "El conductor solo puede marcar 'en_curso' o 'finalizada'" }, { status: 403 });
         const { error } = await admin.from("reservas").update({ estado }).eq("id", reservaId);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        // Push "¡tu bus ya salió!" a todos los pasajeros no cancelados de la reserva.
+        // Insert-once: si el conductor revierte y vuelve a iniciar, NO se re-notifica
+        // (preferible a spamear por un arranque equivocado). También siembra la fila
+        // del throttle del motor de proximidad.
+        if (estado === "en_curso") {
+          const rid = Number(reservaId);
+          after(async () => {
+            try {
+              await admin.from("push_eval_estado").insert({ reserva_id: rid }); // 23505 = ya sembrada
+              const [dest, r] = await Promise.all([
+                pasajerosDeReserva(rid),
+                admin.from("reservas").select("origen, destino").eq("id", rid).maybeSingle(),
+              ]);
+              await emitirEventoViaje({
+                reservaId: rid, evento: "salio", destinatarios: dest,
+                payload: payloadsViaje.salio(rid, r.data?.origen, r.data?.destino), ttl: 1800,
+              });
+            } catch (e: any) { console.warn("[push salio]", e?.message); }
+          });
+        }
         return NextResponse.json({ ok: true });
       }
 

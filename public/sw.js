@@ -7,7 +7,7 @@
 // `activate` borra todos los cachés cuya clave no termine en VERSION, forzando que los
 // navegadores ya instalados re-descarguen los chunks de Next (evita quedar pegado en una
 // versión vieja del ERP/app tras un deploy).
-const VERSION = "afa-v4";
+const VERSION = "afa-v5";
 const STATIC_CACHE = `afa-static-${VERSION}`;
 const SHELL_CACHE = `afa-shell-${VERSION}`;
 
@@ -62,4 +62,35 @@ self.addEventListener("fetch", (e) => {
   }
 
   // 3) Todo lo demás (ERP, APIs, etc.): red normal, sin interceptar.
+});
+
+// ── PUSH NATIVO (app pasajero) ────────────────────────────────────────────────
+// El servidor (lib/push.ts) manda un JSON { title, body, tag, url, renotify,
+// requireInteraction }. Mismo tag → las notificaciones colapsan en la bandeja
+// (un "ya llegó" reemplaza al "~5 min" pendiente de la misma parada).
+self.addEventListener("push", (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch {}
+  e.waitUntil(self.registration.showNotification(d.title || "AFA Transportes", {
+    body: d.body || "",
+    tag: d.tag || "afa",
+    renotify: !!d.renotify,
+    requireInteraction: !!d.requireInteraction,
+    icon: "/icon-afa-pasajero.png",
+    badge: "/icon-afa-pasajero.png",
+    vibrate: [300, 100, 300],
+    data: { url: d.url || "/pasajero" },
+  }));
+});
+
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const url = (e.notification.data && e.notification.data.url) || "/pasajero";
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const w of wins) {
+      if (w.url.includes("/pasajero") && "focus" in w) return w.focus();
+    }
+    return self.clients.openWindow(url);
+  })());
 });

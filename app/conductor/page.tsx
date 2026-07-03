@@ -147,15 +147,16 @@ function ini(n: string): string {
   return n.split(" ").slice(0, 2).map(w => w[0]).join("").toUpperCase();
 }
 
-function minutosAlServicio(hora: string | null | undefined): number | null {
+// Minutos RELATIVOS a ahora para una hora "HH:MM" del día actual: POSITIVO si aún falta,
+// NEGATIVO si ya pasó (conserva el signo para mostrar "atrasado" sin esconder el servicio).
+function minutosRelativos(hora: string | null | undefined): number | null {
   if (!hora) return null;
   const [h, m] = hora.split(":").map(Number);
   if (isNaN(h) || isNaN(m)) return null;
   const now = new Date();
   const target = new Date(now);
   target.setHours(h, m, 0, 0);
-  const diff = target.getTime() - now.getTime();
-  return diff < 0 ? null : Math.floor(diff / 60000);
+  return Math.floor((target.getTime() - now.getTime()) / 60000);
 }
 
 function fmtCountdown(mins: number): string {
@@ -512,6 +513,10 @@ export default function ConductorApp() {
   const [totalEnvios,  setTotalEnvios]  = useState(0);
   const [ultimoEnvio,  setUltimoEnvio]  = useState<Date | null>(null);
   const [gpsError,     setGpsError]     = useState<string | null>(null);
+  // GPS ATASCADO: el proveedor del equipo repite el MISMO fix (callbacks vivos, contenido
+  // clavado) y los re-arms no lo destrabaron → solo lo cura el propio teléfono (apagar y
+  // encender la Ubicación reinicia el motor GMS; más rápido que reiniciar el equipo).
+  const [gpsAtascado,  setGpsAtascado]  = useState(false);
   const [envioError,   setEnvioError]   = useState<string | null>(null);
   const [pendientes,   setPendientes]   = useState(0);
   const [iniciando,          setIniciando]          = useState(false);
@@ -523,6 +528,15 @@ export default function ConductorApp() {
   const posRef           = useRef<GeoPos | null>(null);
   const ultimoFixRef     = useRef<number>(0); // ms del último fix RECIBIDO (watchdog de auto-recuperación)
   const ultimoReArmRef   = useRef<number>(0); // ms del último re-arm del GPS (coalesce: máx 1 cada 10 s)
+  // Detector de fix CONGELADO (caso Motorola/FUSED atascado): el proveedor sigue entregando
+  // callbacks pero con el MISMO fix cacheado. ultimoFixRef no lo distingue (mide llegadas);
+  // estos refs miran el CONTENIDO. fixPrevRef sobrevive a los re-arms A PROPÓSITO: el seed
+  // stale:true del plugin re-entrega el mismo fix tras cada stop→start, y si lo olvidáramos
+  // contaría como "fix nuevo" y enmascararía el atasco.
+  const fixPrevRef       = useRef<{ t: number | null; lat: number; lng: number } | null>(null);
+  const ultimoAvanceRef  = useRef<number>(0); // ms (reloj) de la última vez que el CONTENIDO del fix avanzó
+  const fixRealTsRef     = useRef<number>(0); // timestamp del PROVEEDOR del último fix que avanzó → fix_ts honesto
+  const reArmsCongeladoRef = useRef(0);       // re-arms por congelado sin que el fix avance (escala al banner)
   // Cola/reintentos de envío GPS
   const drenandoRef      = useRef(false);
   const reintentoRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -901,15 +915,42 @@ export default function ConductorApp() {
       precision_m:  pos.coords.accuracy,
       estado:       estadoFinal,
       created_at:   new Date().toISOString(),
-      // Hora del ÚLTIMO fix REAL recibido (ultimoFixRef solo se actualiza en el callback del
-      // GPS, NUNCA en el backstop). Así, al re-enviar el mismo punto, fix_ts NO avanza → el
-      // lector detecta "congelado" sin confundirlo con un bus parado en GPS de baja precisión
-      // (ese sí produce fixes frescos con fix_ts que avanza). Ver supabase/ubicaciones-gps-fix-ts.sql.
-      fix_ts:       ultimoFixRef.current ? new Date(ultimoFixRef.current).toISOString() : null,
+      // Hora del ÚLTIMO fix REAL: timestamp del PROVEEDOR (registrarFix), que solo avanza
+      // cuando el CONTENIDO del fix avanza. Cubre los dos modos de congelado: el backstop que
+      // re-envía el mismo punto Y el proveedor atascado que re-entrega el mismo fix cacheado
+      // (antes ese caso avanzaba fix_ts — hora de recepción — y el ERP quedaba ciego). Un bus
+      // parado con GPS vivo sí produce fixes frescos (timestamp avanza) → no es falso positivo.
+      // Fallback a ultimoFixRef para fixes sin timestamp. Ver supabase/ubicaciones-gps-fix-ts.sql.
+      fix_ts:       fixRealTsRef.current ? new Date(fixRealTsRef.current).toISOString()
+                  : ultimoFixRef.current ? new Date(ultimoFixRef.current).toISOString() : null,
     });
     setPendientes(leerCola().length);
     drenarColaRef.current();
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Registra la LLEGADA de un fix y evalúa si su CONTENIDO avanzó. Un proveedor atascado
+  // (p.ej. FUSED en Motorola tras Doze) sigue disparando callbacks pero re-entrega el MISMO
+  // fix cacheado: pos.timestamp (location.time del proveedor) no avanza. Un proveedor VIVO
+  // re-mide y avanza el timestamp aunque el bus esté quieto — por eso el timestamp es el
+  // discriminador principal (no confunde bus parado con GPS pegado) y coords solo son
+  // fallback si no hay timestamp. Alimenta el watchdog (ultimoAvanceRef) y fix_ts (que lee
+  // el detector "congelado" del ERP en ModalGps).
+  const registrarFix = useCallback((pos: GeoPos) => {
+    ultimoFixRef.current = Date.now();
+    const t = pos.timestamp ?? null;
+    const prev = fixPrevRef.current;
+    const avanzo = !prev
+      || (t != null && prev.t != null && t > prev.t)
+      || (t != null && prev.t == null)
+      || (t == null && (pos.coords.latitude !== prev.lat || pos.coords.longitude !== prev.lng));
+    if (avanzo) {
+      fixPrevRef.current = { t, lat: pos.coords.latitude, lng: pos.coords.longitude };
+      ultimoAvanceRef.current = Date.now();
+      fixRealTsRef.current = t ?? Date.now();
+      reArmsCongeladoRef.current = 0;
+      setGpsAtascado(false);
+    }
   }, []);
 
   // ─── GPS: activo SÓLO mientras el conductor esté CONECTADO o EN SERVICIO ───────
@@ -930,7 +971,7 @@ export default function ConductorApp() {
       // App nativa: rastreo en SEGUNDO PLANO (sigue con Waze encima o pantalla
       // bloqueada). Si el plugin no está en este build, cae a primer plano solo.
       observarUbicacionBackground(
-        (pos) => { recibioPos = true; ultimoFixRef.current = Date.now(); posRef.current = pos; setPosActual(pos); setGpsError(null); enviarUbicacion(pos); },
+        (pos) => { recibioPos = true; registrarFix(pos); posRef.current = pos; setPosActual(pos); setGpsError(null); enviarUbicacion(pos); },
         (e) => { if (!recibioPos) setGpsError(e.message); },
       )
         .then((w) => { if (cancelado) w.clear(); else watchIdRef.current = w; })
@@ -947,7 +988,7 @@ export default function ConductorApp() {
         try {
           const w = await observarUbicacion(
             (pos) => {
-              recibioPos = true; ultimoFixRef.current = Date.now();
+              recibioPos = true; registrarFix(pos);
               posRef.current = pos; setPosActual(pos); setGpsError(null);
               enviarUbicacion(pos); // el throttle adaptativo decide el ritmo real
             },
@@ -1015,19 +1056,35 @@ export default function ConductorApp() {
       setGpsNonce((n) => n + 1);
     };
     const edadFix = () => Date.now() - (ultimoFixRef.current || 0);
+    // Fix CONGELADO (caso Motorola): callbacks vivos (edadFix chico, así que reArmar nunca
+    // dispara por silencio) pero el CONTENIDO del fix clavado >3 min — mismo umbral que el
+    // detector del ERP (ModalGps). Escala: hasta 2 re-arms (stop→start re-registra el listener
+    // nativo); si ni así avanza, el atasco está en el motor de ubicación del EQUIPO (GMS) y
+    // re-armar en bucle es inútil → banner al conductor (apagar/encender la Ubicación).
+    // Sin avance previo (ultimoAvanceRef=0) no aplica: ese es el caso silencio, ya cubierto.
+    const CONGELADO_MS = 180_000;
+    const chequearCongelado = () => {
+      if (!ultimoAvanceRef.current || Date.now() - ultimoAvanceRef.current <= CONGELADO_MS) return;
+      if (reArmsCongeladoRef.current >= 2) { setGpsAtascado(true); return; }
+      reArmsCongeladoRef.current += 1;
+      reArmar();
+    };
     // Latido "app viva": el watchdog lo refresca mientras el proceso corre en 1er plano. Sirve
     // para detectar la MUERTE del proceso por batería (cold start con latido viejo) y distinguirla
     // de un túnel (que NO mata el proceso → el latido sigue fresco). Ver evaluarAjustesGps.
     const latir = () => { try { localStorage.setItem("afa_gps_latido", String(Date.now())); } catch {} };
     latir(); // marca vivo al armar el watchdog
     const onVis = () => {
-      if (typeof document !== "undefined" && document.visibilityState === "visible" && edadFix() > VIEJO_RESUME) reArmar();
+      if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+      if (edadFix() > VIEJO_RESUME) reArmar();
+      chequearCongelado();
     };
     document.addEventListener("visibilitychange", onVis);
     const iv = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") return; // en 2º plano el timer está throttleado igual
       latir(); // app viva en 1er plano
       if (edadFix() > VIEJO_PERIODICO) reArmar();
+      chequearCongelado();
     }, 30_000);
     return () => { document.removeEventListener("visibilitychange", onVis); clearInterval(iv); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1716,8 +1773,13 @@ export default function ConductorApp() {
   // reservasHoy ya viene ordenado por hora_servicio desde el API.
   const esServicioCerrado = (e?: string | null) => e === "finalizada" || e === "cancelada";
   const primeraIniciable = esModoOtraFecha ? null : reservasHoy.find(r => !esServicioCerrado(r.estado));
-  const proximaReserva = !enRuta ? reservasHoy.find(r => !esServicioCerrado(r.estado) && (minutosAlServicio(r.hora_servicio) ?? -1) >= 0) : null;
-  const minsHastaProx  = proximaReserva ? minutosAlServicio(proximaReserva.hora_servicio) : null;
+  // El hero "Próximo viaje" = primeraIniciable (el servicio más temprano NO cerrado, por orden),
+  // AUNQUE su hora ya haya pasado. Antes se filtraba por hora futura (>= 0): si el conductor
+  // arrancaba tarde, el hero saltaba al SIGUIENTE servicio y dejaba el atrasado escondido en la
+  // lista → confusión de orden. Ahora hero e iniciable COINCIDEN; el countdown marca "atrasado".
+  const proximaReserva = !enRuta ? primeraIniciable : null;
+  const minsHastaProx  = proximaReserva ? minutosRelativos(proximaReserva.hora_servicio) : null; // + falta / − atrasado
+  const proxAtrasado   = minsHastaProx !== null && minsHastaProx < 0;
   // El próximo se muestra como tarjeta-hero del timeline → no repetirlo en la lista de pendientes.
   const pendientesAgenda = reservasPendientesSection.filter(r => r.id !== proximaReserva?.id);
   void tick; // forzar re-render con el setInterval del minuto
@@ -2311,18 +2373,19 @@ export default function ConductorApp() {
                 <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, margin: "0 0 2px" }}>
                   <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "stretch", minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
-                      <IconClock size={13} color="#b9cbe6" />
+                      <IconClock size={13} color={proxAtrasado ? "#ffcf6b" : "#b9cbe6"} />
                       <span style={{
                         minWidth: 0, fontFamily: FONT_MONO, fontSize: 11, fontWeight: 700, letterSpacing: 1,
-                        textTransform: "uppercase", color: "#b9cbe6",
+                        textTransform: "uppercase", color: proxAtrasado ? "#ffcf6b" : "#b9cbe6",
                       }}>
-                        Próximo viaje · sale en
+                        {proxAtrasado ? "Próximo viaje · atrasado" : "Próximo viaje · sale en"}
                       </span>
                     </div>
                     <span style={{
                       fontFamily: FONT_MONO, fontSize: 46, fontWeight: 800, letterSpacing: -1.6, lineHeight: 1, whiteSpace: "nowrap",
+                      color: proxAtrasado ? "#ffcf6b" : "#fff",
                     }}>
-                      {minsHastaProx !== null ? fmtCountdown(minsHastaProx) : "—"}
+                      {minsHastaProx === null ? "—" : fmtCountdown(Math.abs(minsHastaProx))}
                     </span>
                   </div>
                   {proximaReserva.hora_servicio && (
@@ -2506,6 +2569,15 @@ export default function ConductorApp() {
                           <div style={{ minWidth: 0 }}>
                             <p style={{ margin: 0, fontWeight: 800, fontSize: 16, letterSpacing: -0.3 }}>{r.origen}</p>
                             <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--c-mute)" }}>→ {r.destino}</p>
+                            {!esModoOtraFecha && (minutosRelativos(r.hora_servicio) ?? 0) < 0 && (
+                              <span style={{
+                                display: "inline-block", marginTop: 6, fontSize: 10.5, fontWeight: 800,
+                                letterSpacing: 0.4, textTransform: "uppercase", color: "var(--c-warn)",
+                                background: "var(--c-warn-tint)", borderRadius: 999, padding: "2px 8px",
+                              }}>
+                                Atrasado
+                              </span>
+                            )}
                           </div>
                           {r.hora_servicio && (
                             <div style={{ textAlign: "right", flexShrink: 0 }}>
@@ -3505,6 +3577,42 @@ export default function ConductorApp() {
               Entendido, continuar
             </button>
           </div>
+        </div>
+      )}
+
+      {/* GPS ATASCADO: el equipo repite el mismo fix pese a 2 re-arms → el atasco está en el motor
+          de ubicación del teléfono (GMS) y solo lo destraba el propio equipo. Apagar y encender la
+          Ubicación lo reinicia SIN reiniciar el celular. Fijo sobre la TabBar (se ve en cualquier
+          pestaña durante el viaje); se auto-oculta apenas llega un fix que avanza (registrarFix). */}
+      {gpsAtascado && compartiendo && (
+        <div style={{
+          position: "fixed", left: 12, right: 12, bottom: 80, zIndex: 120,
+          background: "var(--c-warn-tint)", border: "1.5px solid var(--c-warn)",
+          borderRadius: 16, padding: "12px 14px", boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
+          fontFamily: FONT_SANS,
+        }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+            <IconCircleAlert size={20} color="var(--c-warn)" />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <p style={{ margin: 0, fontSize: 13.5, fontWeight: 800, color: "var(--c-warn)" }}>
+                GPS del equipo atascado
+              </p>
+              <p style={{ margin: "3px 0 0", fontSize: 12.5, lineHeight: 1.45, color: "var(--c-ink)" }}>
+                El teléfono repite la misma ubicación. <strong>Apaga y enciende la Ubicación</strong> del
+                equipo (barra de ajustes rápidos) para destrabarlo — no hace falta reiniciar el celular.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => abrirAjustesUbicacion()}
+            style={{
+              width: "100%", marginTop: 10, padding: "10px 0", borderRadius: 11, border: "none",
+              background: "var(--c-warn)", color: "#fff", fontWeight: 800, fontSize: 13,
+              cursor: "pointer", fontFamily: FONT_SANS,
+            }}
+          >
+            Abrir ajustes de ubicación
+          </button>
         </div>
       )}
 

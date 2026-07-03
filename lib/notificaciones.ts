@@ -3,6 +3,7 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { enviarWhatsAppPlantilla } from "@/lib/crm-meta";
+import { enviarPushAPasajeros, payloadsViaje } from "@/lib/push";
 
 // Admin client para escribir logs sin RLS
 const supabaseAdmin = createClient(
@@ -12,7 +13,7 @@ const supabaseAdmin = createClient(
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
-export type TipoCanal   = "email" | "whatsapp" | "sms";
+export type TipoCanal   = "email" | "whatsapp" | "sms" | "push";
 export type TipoTrigger = "manual" | "cron_recordatorio";
 
 export type DatosNotificacion = {
@@ -424,6 +425,28 @@ export async function notificarReserva(
       }
     }
 
+    // Canal 3: Push nativo (ADITIVO — no reemplaza email/WhatsApp). Solo cuenta
+    // como canal si el pasajero tiene alguna suscripción registrada; si el envío
+    // a esa suscripción falla, se loguea como error.
+    try {
+      const payloadPush = esRecordatorio
+        ? payloadsViaje.recordatorio(reservaId, datosN.fecha, datosN.hora, datosN.paradaNombre)
+        : payloadsViaje.confirmacion(reservaId, datosN.fecha, datosN.hora, datosN.paradaNombre);
+      const rPush = await enviarPushAPasajeros([pas.id], payloadPush, { ttl: 43200 });
+      if (rPush.enviados > 0) {
+        resultado.canales.push({ tipo: "push", estado: "enviado" });
+        enviados++;
+        await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "push", estado: "enviado", destinatario: "push", trigger });
+      } else if (rPush.fallidos > 0) {
+        resultado.canales.push({ tipo: "push", estado: "error", detalle: "entrega push falló" });
+        errores++;
+        await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "push", estado: "error", destinatario: "push", trigger, error: "entrega push falló" });
+      }
+      // sin suscripción → no es un canal del pasajero: no se loguea ni bloquea sin_canal
+    } catch (e: any) {
+      console.warn("[notificaciones] canal push:", e?.message);
+    }
+
     // Sin canal disponible
     if (resultado.canales.length === 0) {
       sinCanal++;
@@ -453,7 +476,7 @@ async function logNotificacion({
   destinatario?: string;
   error?:       string;
 }) {
-  await supabaseAdmin.from("notificaciones_enviadas").insert({
+  const { error: eLog } = await supabaseAdmin.from("notificaciones_enviadas").insert({
     reserva_id:     reservaId,
     pasajero_id:    pasajeroId,
     tipo,
@@ -462,4 +485,7 @@ async function logNotificacion({
     trigger_origen: trigger,
     error_detalle:  error ?? null,
   });
+  // No tragar el error en silencio: si un CHECK de la tabla rechaza un tipo nuevo
+  // (p.ej. 'push'), el dedupe diario del cron dejaría de ver la reserva sin ruido.
+  if (eLog) console.warn("[notificaciones] log falló:", eLog.message);
 }

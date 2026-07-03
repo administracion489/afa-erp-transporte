@@ -564,6 +564,79 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
+      // ── Registrar suscripción push (Web Push o FCM de la app nativa) ─────────
+      // La suscripción queda keyed por pasajero_id (del TOKEN, nunca del body).
+      // Upsert check-then-insert con captura de 23505: los índices únicos de
+      // push_suscripciones son PARCIALES (endpoint / fcm_token) y PostgREST no
+      // puede usarlos como árbitro de ON CONFLICT (misma nota que
+      // supabase/pasajeros-parada-unique.sql). Si el aparato cambió de dueño
+      // (un familiar se loguea en el mismo teléfono), la fila se reasigna al pid nuevo.
+      case "suscribir_push": {
+        const pid = pidDeToken(body.token);
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        const tipo = body.tipo === "fcm" ? "fcm" : body.tipo === "webpush" ? "webpush" : null;
+        if (!tipo) return NextResponse.json({ error: "tipo inválido" }, { status: 400 });
+
+        const ua = (req.headers.get("user-agent") || "").slice(0, 300) || null;
+        const plataforma = typeof body.plataforma === "string" ? body.plataforma.slice(0, 40) : null;
+
+        let fila: Record<string, any>;
+        let claveCol: "endpoint" | "fcm_token";
+        let claveVal: string;
+        if (tipo === "webpush") {
+          const sub = body.sub || {};
+          const endpoint = String(sub.endpoint || "");
+          const p256dh = String(sub.keys?.p256dh || "");
+          const auth = String(sub.keys?.auth || "");
+          if (!endpoint.startsWith("https://") || endpoint.length > 1000 ||
+              !p256dh || p256dh.length > 300 || !auth || auth.length > 100) {
+            return NextResponse.json({ error: "Suscripción inválida" }, { status: 400 });
+          }
+          fila = { pasajero_id: pid, tipo, endpoint, p256dh, auth, fcm_token: null };
+          claveCol = "endpoint"; claveVal = endpoint;
+        } else {
+          const t = String(body.fcmToken || "");
+          if (!t || t.length > 500) return NextResponse.json({ error: "Token FCM inválido" }, { status: 400 });
+          fila = { pasajero_id: pid, tipo, fcm_token: t, endpoint: null, p256dh: null, auth: null };
+          claveCol = "fcm_token"; claveVal = t;
+        }
+        fila = { ...fila, user_agent: ua, plataforma, activo: true, fallos: 0, updated_at: new Date().toISOString() };
+
+        const { data: exist } = await admin
+          .from("push_suscripciones").select("id").eq(claveCol, claveVal).maybeSingle();
+        if (exist) {
+          const { error } = await admin.from("push_suscripciones").update(fila).eq("id", exist.id);
+          if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+          return NextResponse.json({ ok: true, actualizada: true });
+        }
+        const { error: eIns } = await admin.from("push_suscripciones").insert(fila);
+        if (eIns) {
+          if (eIns.code === "23505" || /duplicate key value/i.test(eIns.message || "")) {
+            const { error: eUpd } = await admin.from("push_suscripciones").update(fila).eq(claveCol, claveVal);
+            if (eUpd) return NextResponse.json({ error: eUpd.message }, { status: 500 });
+            return NextResponse.json({ ok: true, actualizada: true });
+          }
+          return NextResponse.json({ error: eIns.message }, { status: 500 });
+        }
+        return NextResponse.json({ ok: true, creada: true });
+      }
+
+      // ── Desactivar suscripción push (solo las filas del propio pasajero) ─────
+      case "desuscribir_push": {
+        const pid = pidDeToken(body.token);
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        const endpoint = typeof body.endpoint === "string" ? body.endpoint : null;
+        const fcmToken = typeof body.fcmToken === "string" ? body.fcmToken : null;
+        if (!endpoint && !fcmToken) return NextResponse.json({ error: "endpoint o fcmToken requerido" }, { status: 400 });
+        let q = admin.from("push_suscripciones")
+          .update({ activo: false, updated_at: new Date().toISOString() })
+          .eq("pasajero_id", pid);
+        q = endpoint ? q.eq("endpoint", endpoint) : q.eq("fcm_token", fcmToken);
+        const { error } = await q;
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ ok: true });
+      }
+
       default:
         return NextResponse.json({ error: `Acción desconocida: ${accion}` }, { status: 400 });
     }

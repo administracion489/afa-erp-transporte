@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, geoDisponible, esAppNativa, type GeoWatch } from "@/lib/geo";
+import { detectarSoportePush, activarPushWeb, activarPushNativo, desactivarPush, resincronizarSuscripcion, permisoBloqueado, type SoportePush } from "@/lib/push-cliente";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
@@ -537,6 +538,14 @@ export default function AppPasajero() {
   const [gpsPropio,      setGpsPropio]      = useState<{ lat: number; lng: number } | null>(null);
   const [mostrarModalGPS, setMostrarModalGPS] = useState(false);
 
+  // ── AVISOS PUSH (lock screen) ───────────────────────────────────────────────
+  const [pushSoporte,        setPushSoporte]        = useState<SoportePush>("no-soportado");
+  const [pushActivo,         setPushActivo]         = useState(false);
+  const [pushDenegado,       setPushDenegado]       = useState(false);
+  const [pushLoading,        setPushLoading]        = useState(false);
+  const [mostrarPromptPush,  setMostrarPromptPush]  = useState(false);
+  const [mostrarGuiaIOS,     setMostrarGuiaIOS]     = useState(false);
+
   // ── REPORTE AL OPERADOR ─────────────────────────────────────────────────────
   const [mostrarReporte,  setMostrarReporte]  = useState(false);
   const [reporteMensaje,  setReporteMensaje]  = useState("");
@@ -586,6 +595,15 @@ export default function AppPasajero() {
     // Service Worker: cachea el shell para arranques instantáneos y resistencia a red.
     if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
+    // Push: detectar qué transporte soporta este runtime y, si ya hay permiso +
+    // suscripción, re-sincronizarla con el servidor (los endpoints ROTAN y el SW
+    // no puede re-registrarse solo — no tiene el token de sesión). Best-effort.
+    setPushSoporte(detectarSoportePush());
+    if (saved) {
+      void resincronizarSuscripcion(paxApi)
+        .then((ok) => { if (ok) setPushActivo(true); })
+        .catch(() => {});
     }
   }, []);
 
@@ -1177,10 +1195,57 @@ export default function AppPasajero() {
     }, 2500);
   }
 
+  // ── AVISOS PUSH ─────────────────────────────────────────────────────────────
+  // El prompt aparece justo DESPUÉS de confirmar el paradero (contexto de valor
+  // obvio), nunca al cargar la app. "Ahora no" silencia la oferta por 7 días.
+  const PUSH_PROMPT_LS = "afa_push_prompt_v1";
+
+  function ofrecerPush() {
+    const s = detectarSoportePush();
+    setPushSoporte(s);
+    if (pushActivo || pushDenegado) return;
+    if (s !== "webpush" && s !== "fcm") return;
+    if (s === "webpush" && permisoBloqueado()) return; // el navegador ya lo bloqueó: no insistir
+    try {
+      const raw = localStorage.getItem(PUSH_PROMPT_LS);
+      if (raw && Date.now() - Number(raw) < 7 * 86400000) return;
+    } catch {}
+    setMostrarPromptPush(true);
+  }
+
+  function posponerPromptPush() {
+    try { localStorage.setItem(PUSH_PROMPT_LS, String(Date.now())); } catch {}
+    setMostrarPromptPush(false);
+  }
+
+  // Debe nacer de un TAP del usuario (iOS rechaza el permiso pedido sin gesto).
+  async function activarPush() {
+    if (pushLoading) return;
+    setPushLoading(true);
+    try {
+      const r = pushSoporte === "fcm" ? await activarPushNativo(paxApi) : await activarPushWeb(paxApi);
+      if (r === "activo") { setPushActivo(true); setPushDenegado(false); }
+      else if (r === "denegado") setPushDenegado(true);
+    } finally {
+      setPushLoading(false);
+      setMostrarPromptPush(false);
+    }
+  }
+
+  async function quitarPush() {
+    if (pushLoading) return;
+    setPushLoading(true);
+    try {
+      await desactivarPush(paxApi);
+      setPushActivo(false);
+    } finally { setPushLoading(false); }
+  }
+
   function confirmarParadero() {
     saveParaderoOk();
     setParaderoConfirmado(true);
     setMostrarConfirmarParadero(false);
+    ofrecerPush();
   }
 
   async function avisarOperadorSinSenal() {
@@ -1220,6 +1285,7 @@ export default function AppPasajero() {
       setMostrarConfirmarParadero(false);
       setCambioParaderoLoad(false);
       await cargarMiRuta(pasajero.id);
+      ofrecerPush();
     }
   }
 
@@ -1239,12 +1305,18 @@ export default function AppPasajero() {
     }
   }
 
-  function salir() {
+  async function salir() {
+    // Privacidad en teléfonos compartidos: cortar el push ANTES de destruir la
+    // sesión (desuscribir_push necesita el token vigente). Best-effort: si falla,
+    // el servidor poda la suscripción sola con 410 en el próximo envío.
+    try { if (pushActivo) await desactivarPush(paxApi); } catch {}
+    try { localStorage.removeItem(PUSH_PROMPT_LS); } catch {} // el silencio de 7 días era del usuario anterior
     clearSession(); setPasajero(null); setMiParada(null); setBusPosicion(null); setRutaParadas([]);
     setVehiculo(null); setConductor(null); setGpsPropio(null); setGpsPermiso("unknown");
     setDniInput(""); setPinInput("");
     alertaRef.current = false; setAlerta5min(false); setTab("ruta");
     setParaderoConfirmado(false); setParaderoPostpuesto(false); setMostrarConfirmarParadero(false);
+    setPushActivo(false); setPushDenegado(false); setMostrarPromptPush(false); setMostrarGuiaIOS(false);
   }
 
   // Derivados
@@ -1588,6 +1660,72 @@ export default function AppPasajero() {
       )}
 
       {/* ── MODAL CONFIRMAR PARADERO ── */}
+      {/* ── PROMPT AVISOS PUSH (aparece tras confirmar el paradero) ── */}
+      {mostrarPromptPush && (
+        <div className="afa-modal-overlay" onClick={posponerPromptPush}>
+          <div className="afa-para-sheet" onClick={e => e.stopPropagation()}>
+            <div className="afa-modal-handle" />
+            <div style={{ padding: "0 20px 20px" }}>
+              <div style={{ width: 52, height: 52, borderRadius: 16, background: "var(--navy-tint)", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
+                <IconBell sz={26} c="var(--navy)" />
+              </div>
+              <p style={{ margin: "0 0 6px", fontWeight: 800, fontSize: 19, color: "var(--ink)", letterSpacing: -0.4 }}>
+                ¿Te avisamos cuando tu bus esté llegando?
+              </p>
+              <p style={{ margin: "0 0 18px", fontSize: 13, color: "var(--mute)", lineHeight: 1.55 }}>
+                Recibirás una notificación en tu pantalla cuando el bus salga, esté a ~5 minutos y <strong>llegue a tu paradero</strong> — aunque tengas el teléfono bloqueado.
+              </p>
+              <button
+                onClick={() => void activarPush()}
+                disabled={pushLoading}
+                style={{ width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: "var(--navy)", color: "white", fontWeight: 700, fontSize: 15, fontFamily: "var(--f)", cursor: pushLoading ? "wait" : "pointer", opacity: pushLoading ? 0.7 : 1 }}
+              >
+                {pushLoading ? "Activando…" : "Sí, avisarme"}
+              </button>
+              <button
+                onClick={posponerPromptPush}
+                style={{ width: "100%", marginTop: 8, padding: "12px 0", borderRadius: 14, border: "none", background: "transparent", color: "var(--mute)", fontWeight: 700, fontSize: 14, fontFamily: "var(--f)", cursor: "pointer" }}
+              >
+                Ahora no
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── GUÍA iOS: el Web Push exige la PWA instalada en pantalla de inicio ── */}
+      {mostrarGuiaIOS && (
+        <div className="afa-modal-overlay" onClick={() => setMostrarGuiaIOS(false)}>
+          <div className="afa-para-sheet" onClick={e => e.stopPropagation()}>
+            <div className="afa-modal-handle" />
+            <div style={{ padding: "0 20px 20px" }}>
+              <p style={{ margin: "0 0 5px", fontWeight: 800, fontSize: 19, color: "var(--ink)", letterSpacing: -0.4 }}>
+                Instala AFA Pasajero en tu iPhone
+              </p>
+              <p style={{ margin: "0 0 16px", fontSize: 13, color: "var(--mute)", lineHeight: 1.55 }}>
+                En iPhone, los avisos del bus solo funcionan con la app instalada en tu pantalla de inicio (iOS 16.4 o más nuevo):
+              </p>
+              {[
+                ["1", "En Safari, toca el botón Compartir (el cuadrito con la flecha hacia arriba)."],
+                ["2", "Elige “Añadir a pantalla de inicio” y confirma."],
+                ["3", "Abre AFA Pasajero desde el nuevo icono y activa los avisos en tu Perfil."],
+              ].map(([n, txt]) => (
+                <div key={n} style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 12 }}>
+                  <div style={{ width: 26, height: 26, borderRadius: "50%", background: "var(--navy)", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, flexShrink: 0 }}>{n}</div>
+                  <p style={{ margin: 0, fontSize: 13.5, color: "var(--ink)", lineHeight: 1.5 }}>{txt}</p>
+                </div>
+              ))}
+              <button
+                onClick={() => setMostrarGuiaIOS(false)}
+                style={{ width: "100%", marginTop: 6, padding: "13px 0", borderRadius: 14, border: "none", background: "var(--navy)", color: "white", fontWeight: 700, fontSize: 15, fontFamily: "var(--f)", cursor: "pointer" }}
+              >
+                Entendido
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {mostrarConfirmarParadero && miParada && rutaParadas.length > 0 && (
         <div className="afa-modal-overlay" onClick={posponerParadero}>
           <div className="afa-para-sheet" onClick={e => e.stopPropagation()}>
@@ -2399,6 +2537,41 @@ export default function AppPasajero() {
                   </button>
                 </div>
               )}
+
+              {/* Avisos push del viaje (lock screen) */}
+              <div style={{ marginTop: 12, background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ width: 32, height: 32, borderRadius: 10, background: "var(--navy-tint)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <IconBell sz={18} c="var(--navy)" />
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{ margin: 0, fontSize: 10.5, color: "var(--mute)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>Avisos de tu viaje</p>
+                  <p style={{ margin: "2px 0 0", fontSize: 13, color: "var(--ink)", fontWeight: 700, letterSpacing: -0.2 }}>
+                    {pushActivo ? "Activados en este teléfono"
+                      : (pushDenegado || (pushSoporte === "webpush" && permisoBloqueado())) ? "Bloqueados — actívalos en los ajustes del navegador"
+                      : pushSoporte === "ios-instalar" ? "Instala la app para activarlos"
+                      : pushSoporte === "app-desactualizada" ? "Actualiza la app de Play Store"
+                      : pushSoporte === "no-soportado" ? "No disponibles en este navegador"
+                      : "Bus saliendo, a ~5 min y llegando a tu paradero"}
+                  </p>
+                </div>
+                {pushActivo ? (
+                  <button onClick={() => void quitarPush()} disabled={pushLoading} style={{ background: "var(--soft)", border: "1px solid var(--line)", borderRadius: 8, padding: "6px 12px", color: "var(--mute)", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>
+                    Quitar
+                  </button>
+                ) : (pushSoporte === "webpush" || pushSoporte === "fcm") && !pushDenegado && !(pushSoporte === "webpush" && permisoBloqueado()) ? (
+                  <button onClick={() => void activarPush()} disabled={pushLoading} style={{ background: "var(--navy)", border: "none", borderRadius: 8, padding: "6px 12px", color: "white", fontSize: 12, fontWeight: 700, cursor: pushLoading ? "wait" : "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>
+                    {pushLoading ? "…" : "Activar"}
+                  </button>
+                ) : pushSoporte === "ios-instalar" ? (
+                  <button onClick={() => setMostrarGuiaIOS(true)} style={{ background: "var(--navy)", border: "none", borderRadius: 8, padding: "6px 12px", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>
+                    Cómo
+                  </button>
+                ) : pushSoporte === "app-desactualizada" ? (
+                  <a href="https://play.google.com/store/apps/details?id=com.transportesafa.pasajero" style={{ background: "var(--navy)", borderRadius: 8, padding: "6px 12px", color: "white", fontSize: 12, fontWeight: 700, textDecoration: "none", flexShrink: 0 }}>
+                    Play Store
+                  </a>
+                ) : null}
+              </div>
             </div>
 
             {/* Soporte */}
