@@ -637,6 +637,10 @@ export default function ConductorApp() {
   const [cortePendiente, setCortePendiente] = useState(false);
   // Expandir los pasos manuales (en equipos no-agresivos van colapsados tras "ver pasos").
   const [verPasosGps, setVerPasosGps] = useState(false);
+  // Paso de ONBOARDING "batería" (APK 28+ con plugin): pantalla breve + botón que dispara el
+  // diálogo NATIVO de exención del sistema, encadenado tras el permiso de ubicación. Reemplaza
+  // a la guía manual la primera vez. Flag: afa_bat_paso_v1 (consumido al responder el paso).
+  const [pasoBateria, setPasoBateria] = useState(false);
   // Contador para FORZAR re-armar el watch de GPS (watchdog/resume). Cambiarlo re-ejecuta el
   // effect de GPS: limpia (stop) y vuelve a arrancar (start). Recupera el rastreo cuando el
   // listener nativo se quedó mudo (Doze / app en 2º plano largo rato) sin tener que reiniciar.
@@ -1135,6 +1139,14 @@ export default function ConductorApp() {
         localStorage.setItem("afa_gps_corte_pendiente", "1");
       }
       localStorage.removeItem("afa_gps_latido"); // consumido: este cold start ya se evaluó
+      // ONBOARDING (solo APK 28+, exenta === false ⇒ el plugin respondió): la PRIMERA vez que
+      // sabemos que el equipo NO está exento, mostrar el paso de batería (botón → diálogo
+      // NATIVO del sistema) en lugar de la guía manual. Se encadena tras el permiso de
+      // ubicación en la primera instalación → se siente como un permiso más.
+      if (exenta === false && !localStorage.getItem("afa_bat_paso_v1")) {
+        setPasoBateria(true);
+        return;
+      }
       const descartado = localStorage.getItem("afa_gps_ajustes_v1") === "1";
       const corte = localStorage.getItem("afa_gps_corte_pendiente") === "1";
       setCortePendiente(corte);
@@ -3668,6 +3680,64 @@ export default function ConductorApp() {
               }}
             >
               Iniciar de todos modos
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Paso de onboarding: exención de batería con diálogo NATIVO (APK 28+, 1ª vez).
+          Encadenado tras el permiso de ubicación → se siente como un permiso más. */}
+      {pasoBateria && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 131, background: "rgba(11,49,95,0.6)",
+          display: "flex", alignItems: "flex-end", justifyContent: "center", padding: 16,
+        }}>
+          <div style={{
+            background: "var(--c-surface)", borderRadius: 20, padding: 22,
+            maxWidth: 440, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.35)",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <span style={{ fontSize: 22 }}>🔋</span>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, letterSpacing: -0.4 }}>
+                Un último permiso
+              </h2>
+            </div>
+            <p style={{ margin: "0 0 14px", fontSize: 13, lineHeight: 1.5, color: "var(--c-mute)" }}>
+              Para que el rastreo <strong>no se corte</strong> con la pantalla bloqueada o con Waze
+              encima, Android te va a preguntar si permites que la app siga activa. Toca{" "}
+              <strong>Permitir</strong> en el aviso del sistema.
+            </p>
+            <button
+              onClick={async () => {
+                try { localStorage.setItem("afa_bat_paso_v1", "1"); } catch {}
+                setPasoBateria(false);
+                // Dispara el diálogo NATIVO del sistema (política Play: tras acción del usuario).
+                await solicitarExencionBateria();
+                // Al volver del diálogo, refrescar el estado real (si concedió → exento y la
+                // guía no volverá a aparecer nunca).
+                try { setExentaBat(await bateriaExenta()); } catch {}
+              }}
+              style={{
+                width: "100%", padding: "13px 14px", borderRadius: 12,
+                border: "none", background: "var(--c-success, #1f9d55)",
+                color: "#fff", fontWeight: 800, fontSize: 14,
+                cursor: "pointer", fontFamily: FONT_SANS,
+              }}
+            >
+              🔋 Activar ahora
+            </button>
+            <button
+              onClick={() => {
+                try { localStorage.setItem("afa_bat_paso_v1", "1"); } catch {}
+                setPasoBateria(false);
+              }}
+              style={{
+                width: "100%", marginTop: 10, padding: "11px 0", borderRadius: 12, border: "none",
+                background: "transparent", color: "var(--c-mute)", fontWeight: 700, fontSize: 13,
+                cursor: "pointer", fontFamily: FONT_SANS,
+              }}
+            >
+              Ahora no
             </button>
           </div>
         </div>
