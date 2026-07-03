@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
-import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, geoDisponible, esAppNativa, type GeoWatch } from "@/lib/geo";
+import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, geoDisponible, esAppNativa, bateriaExenta, solicitarExencionBateria, type GeoWatch } from "@/lib/geo";
 import { detectarSoportePush, activarPushWeb, activarPushNativo, desactivarPush, resincronizarSuscripcion, permisoBloqueado, type SoportePush } from "@/lib/push-cliente";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
@@ -113,6 +113,60 @@ function telHref(tel: string | null | undefined): string { return `tel:${String(
 function esIOS(): boolean {
   return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform==="MacIntel" && navigator.maxTouchPoints>1);
 }
+
+// Fabricante del equipo por User-Agent (para elegir la guía de batería correcta).
+// Mismo criterio que detectarFabricanteGps() del conductor.
+function detectarFabricante(): string {
+  const ua = (typeof navigator !== "undefined" ? navigator.userAgent : "").toLowerCase();
+  if (/xiaomi|redmi|poco|miui|hyperos/.test(ua)) return "xiaomi";
+  if (/samsung|sm-/.test(ua))                    return "samsung";
+  if (/oppo|cph/.test(ua))                        return "oppo";
+  if (/vivo/.test(ua))                            return "vivo";
+  if (/realme|rmx/.test(ua))                      return "realme";
+  if (/huawei|honor/.test(ua))                    return "huawei";
+  if (/motorola|moto /.test(ua))                  return "motorola";
+  return "generico";
+}
+
+// Pasos manuales por fabricante para que los avisos lleguen siempre (sin restricción de
+// batería + inicio automático). Se usan cuando el APK no trae el plugin de "1 toque".
+const GUIA_BATERIA: Record<string, { marca: string; pasos: string[] }> = {
+  xiaomi: { marca: "Xiaomi / Redmi / POCO", pasos: [
+    "Ajustes → Aplicaciones → AFA Pasajero.",
+    "Ahorro de batería → elige “Sin restricciones”.",
+    "Vuelve y activa “Inicio automático”.",
+    "En Notificaciones, activa “Mostrar en pantalla de bloqueo”.",
+  ]},
+  samsung: { marca: "Samsung", pasos: [
+    "Ajustes → Aplicaciones → AFA Pasajero → Batería.",
+    "Elige “Sin restricciones”.",
+    "Ajustes → Batería → “Límites de uso en segundo plano”: quita AFA Pasajero de “apps en suspensión”.",
+  ]},
+  oppo:  { marca: "OPPO / realme", pasos: [
+    "Ajustes → Batería → AFA Pasajero → permite “Ejecución en segundo plano”.",
+    "Activa “Inicio automático” para AFA Pasajero.",
+  ]},
+  vivo:  { marca: "vivo", pasos: [
+    "Ajustes → Batería → Consumo en segundo plano → permite AFA Pasajero.",
+    "Ajustes → Más ajustes → Permisos → Inicio automático: activa AFA Pasajero.",
+  ]},
+  realme: { marca: "realme", pasos: [
+    "Ajustes → Batería → AFA Pasajero → permite “Ejecución en segundo plano”.",
+    "Activa “Inicio automático” para AFA Pasajero.",
+  ]},
+  huawei: { marca: "Huawei / Honor", pasos: [
+    "Ajustes → Batería → Inicio de aplicaciones → AFA Pasajero.",
+    "Desactiva “Gestión automática” y activa las 3 opciones (inicio automático, inicio secundario, ejecución en segundo plano).",
+  ]},
+  motorola: { marca: "Motorola", pasos: [
+    "Ajustes → Aplicaciones → AFA Pasajero → Batería → “Sin restricciones”.",
+  ]},
+  generico: { marca: "tu teléfono", pasos: [
+    "Ajustes → Aplicaciones → AFA Pasajero → Batería.",
+    "Elige la opción “Sin restricciones” (o “No optimizar”).",
+    "Si existe, activa el “Inicio automático” de la app.",
+  ]},
+};
 
 // ── DOCUMENTO DE IDENTIDAD ──────────────────────────────────────────────────
 // El valor canónico que se guarda en BD (columna pasajeros.tipo_documento) es el
@@ -545,6 +599,11 @@ export default function AppPasajero() {
   const [pushLoading,        setPushLoading]        = useState(false);
   const [mostrarPromptPush,  setMostrarPromptPush]  = useState(false);
   const [mostrarGuiaIOS,     setMostrarGuiaIOS]     = useState(false);
+  // Exención de batería (solo app nativa): true=protegida, false=expuesta (APK con
+  // plugin), null=desconocido (web o APK sin plugin → guía manual). Igual que el conductor.
+  const [batExenta,          setBatExenta]          = useState<boolean | null>(null);
+  const [mostrarGuiaBateria, setMostrarGuiaBateria] = useState(false);
+  const [mostrarGuiaBloqueado, setMostrarGuiaBloqueado] = useState(false);
 
   // ── REPORTE AL OPERADOR ─────────────────────────────────────────────────────
   const [mostrarReporte,  setMostrarReporte]  = useState(false);
@@ -605,6 +664,13 @@ export default function AppPasajero() {
         .then((ok) => { if (ok) setPushActivo(true); })
         .catch(() => {});
     }
+    // Estado de exención de batería (solo app nativa con el plugin). Se relee al volver
+    // a primer plano por si el usuario concedió la exención en el diálogo del sistema.
+    const leerBateria = () => { void bateriaExenta().then(setBatExenta).catch(() => {}); };
+    leerBateria();
+    const onVis = () => { if (!document.hidden) leerBateria(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
 
   // ── SOLICITAR GPS DEL DISPOSITIVO ──────────────────────────────────────────
@@ -1241,6 +1307,16 @@ export default function AppPasajero() {
     } finally { setPushLoading(false); }
   }
 
+  // Exención de batería en 1 toque (APK con el plugin AfaNative). Abre el diálogo nativo
+  // del sistema y al volver relee el estado real. Si el plugin no existe, no pasa nada
+  // (la tarjeta cae al botón "Cómo" con la guía manual).
+  async function protegerBateria() {
+    try {
+      await solicitarExencionBateria();
+      setBatExenta(await bateriaExenta());
+    } catch { /* degrada a la guía manual */ }
+  }
+
   function confirmarParadero() {
     saveParaderoOk();
     setParaderoConfirmado(true);
@@ -1692,6 +1768,89 @@ export default function AppPasajero() {
           </div>
         </div>
       )}
+
+      {/* ── GUÍA: reactivar avisos bloqueados (permiso denegado) ── */}
+      {mostrarGuiaBloqueado && (() => {
+        const nativa = esAppNativa();
+        const pasos = nativa
+          ? [
+              "Abre Ajustes del teléfono → Aplicaciones.",
+              "Busca y entra a “AFA Pasajero”.",
+              "Entra a Notificaciones y actívalas.",
+              "Vuelve a la app y toca “Activar”.",
+            ]
+          : [
+              "En el navegador, toca el candado 🔒 junto a la dirección.",
+              "Entra a “Permisos” o “Configuración del sitio”.",
+              "En “Notificaciones”, elige “Permitir”.",
+              "Recarga la página y toca “Activar”.",
+            ];
+        return (
+          <div className="afa-modal-overlay" onClick={() => setMostrarGuiaBloqueado(false)}>
+            <div className="afa-para-sheet" onClick={e => e.stopPropagation()}>
+              <div className="afa-modal-handle" />
+              <div style={{ padding: "0 20px 20px" }}>
+                <div style={{ width: 52, height: 52, borderRadius: 16, background: "var(--danger-tint)", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
+                  <IconBell sz={26} c="var(--danger)" />
+                </div>
+                <p style={{ margin: "0 0 6px", fontWeight: 800, fontSize: 19, color: "var(--ink)", letterSpacing: -0.4 }}>
+                  Reactiva los avisos
+                </p>
+                <p style={{ margin: "0 0 16px", fontSize: 13, color: "var(--mute)", lineHeight: 1.55 }}>
+                  Las notificaciones están bloqueadas. Para volver a recibir los avisos de tu bus, actívalas así:
+                </p>
+                {pasos.map((paso, i) => (
+                  <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 12 }}>
+                    <div style={{ width: 26, height: 26, borderRadius: "50%", background: "var(--navy)", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, flexShrink: 0 }}>{i + 1}</div>
+                    <p style={{ margin: 0, fontSize: 13.5, color: "var(--ink)", lineHeight: 1.5 }}>{paso}</p>
+                  </div>
+                ))}
+                <button
+                  onClick={() => setMostrarGuiaBloqueado(false)}
+                  style={{ width: "100%", marginTop: 6, padding: "13px 0", borderRadius: 14, border: "none", background: "var(--navy)", color: "white", fontWeight: 700, fontSize: 15, fontFamily: "var(--f)", cursor: "pointer" }}
+                >
+                  Entendido
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── GUÍA DE BATERÍA por fabricante (avisos que no se cortan) ── */}
+      {mostrarGuiaBateria && (() => {
+        const g = GUIA_BATERIA[detectarFabricante()] ?? GUIA_BATERIA.generico;
+        return (
+          <div className="afa-modal-overlay" onClick={() => setMostrarGuiaBateria(false)}>
+            <div className="afa-para-sheet" onClick={e => e.stopPropagation()}>
+              <div className="afa-modal-handle" />
+              <div style={{ padding: "0 20px 20px" }}>
+                <div style={{ width: 52, height: 52, borderRadius: 16, background: "var(--warn-tint)", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
+                  <span style={{ fontSize: 26 }}>🔋</span>
+                </div>
+                <p style={{ margin: "0 0 6px", fontWeight: 800, fontSize: 19, color: "var(--ink)", letterSpacing: -0.4 }}>
+                  Que los avisos lleguen siempre
+                </p>
+                <p style={{ margin: "0 0 16px", fontSize: 13, color: "var(--mute)", lineHeight: 1.55 }}>
+                  En <strong>{g.marca}</strong>, el sistema puede cerrar la app en segundo plano para ahorrar batería y entonces los avisos del bus no llegan. Ajusta esto una sola vez:
+                </p>
+                {g.pasos.map((paso, i) => (
+                  <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 12 }}>
+                    <div style={{ width: 26, height: 26, borderRadius: "50%", background: "var(--navy)", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, flexShrink: 0 }}>{i + 1}</div>
+                    <p style={{ margin: 0, fontSize: 13.5, color: "var(--ink)", lineHeight: 1.5 }}>{paso}</p>
+                  </div>
+                ))}
+                <button
+                  onClick={() => setMostrarGuiaBateria(false)}
+                  style={{ width: "100%", marginTop: 6, padding: "13px 0", borderRadius: 14, border: "none", background: "var(--navy)", color: "white", fontWeight: 700, fontSize: 15, fontFamily: "var(--f)", cursor: "pointer" }}
+                >
+                  Entendido
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── GUÍA iOS: el Web Push exige la PWA instalada en pantalla de inicio ── */}
       {mostrarGuiaIOS && (
@@ -2538,40 +2697,88 @@ export default function AppPasajero() {
                 </div>
               )}
 
-              {/* Avisos push del viaje (lock screen) */}
-              <div style={{ marginTop: 12, background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ width: 32, height: 32, borderRadius: 10, background: "var(--navy-tint)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <IconBell sz={18} c="var(--navy)" />
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <p style={{ margin: 0, fontSize: 10.5, color: "var(--mute)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>Avisos de tu viaje</p>
-                  <p style={{ margin: "2px 0 0", fontSize: 13, color: "var(--ink)", fontWeight: 700, letterSpacing: -0.2 }}>
-                    {pushActivo ? "Activados en este teléfono"
-                      : (pushDenegado || (pushSoporte === "webpush" && permisoBloqueado())) ? "Bloqueados — actívalos en los ajustes del navegador"
-                      : pushSoporte === "ios-instalar" ? "Instala la app para activarlos"
-                      : pushSoporte === "app-desactualizada" ? "Actualiza la app de Play Store"
-                      : pushSoporte === "no-soportado" ? "No disponibles en este navegador"
-                      : "Bus saliendo, a ~5 min y llegando a tu paradero"}
-                  </p>
-                </div>
-                {pushActivo ? (
-                  <button onClick={() => void quitarPush()} disabled={pushLoading} style={{ background: "var(--soft)", border: "1px solid var(--line)", borderRadius: 8, padding: "6px 12px", color: "var(--mute)", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>
-                    Quitar
+              {/* Avisos de tu viaje — SEMÁFORO unificado (activación + confiabilidad en
+                  un solo estado). Responde "¿voy a recibir los avisos de mi bus?":
+                  verde = listo · ámbar = falta una acción · rojo = bloqueado · gris = no
+                  disponible. Fusiona la batería: cuando está activo pero el equipo puede
+                  cortarlo por ahorro de energía, pasa a ámbar con "Proteger"/"Cómo". */}
+              {(() => {
+                const nativa = esAppNativa();
+                const oemAgresivo = ["xiaomi", "oppo", "vivo", "huawei", "realme"].includes(detectarFabricante());
+                const bloqueado = pushDenegado || (pushSoporte === "webpush" && permisoBloqueado());
+
+                let tono: "verde" | "ambar" | "rojo" | "gris" = "gris";
+                let eyebrow = "No disponible";
+                let titulo = "Ábrela en la app o en Chrome";
+                let boton: React.ReactNode = null;
+
+                // Botón sólido del color del estado (como el de "GPS denegado").
+                const btn = (txt: string, onClick: () => void, color: string) => (
+                  <button onClick={onClick} disabled={pushLoading}
+                    style={{ background: color, border: "none", borderRadius: 8, padding: "7px 13px", color: "white", fontSize: 12, fontWeight: 700, cursor: pushLoading ? "wait" : "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>
+                    {txt}
                   </button>
-                ) : (pushSoporte === "webpush" || pushSoporte === "fcm") && !pushDenegado && !(pushSoporte === "webpush" && permisoBloqueado()) ? (
-                  <button onClick={() => void activarPush()} disabled={pushLoading} style={{ background: "var(--navy)", border: "none", borderRadius: 8, padding: "6px 12px", color: "white", fontSize: 12, fontWeight: 700, cursor: pushLoading ? "wait" : "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>
-                    {pushLoading ? "…" : "Activar"}
-                  </button>
-                ) : pushSoporte === "ios-instalar" ? (
-                  <button onClick={() => setMostrarGuiaIOS(true)} style={{ background: "var(--navy)", border: "none", borderRadius: 8, padding: "6px 12px", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>
-                    Cómo
-                  </button>
-                ) : pushSoporte === "app-desactualizada" ? (
-                  <a href="https://play.google.com/store/apps/details?id=com.transportesafa.pasajero" style={{ background: "var(--navy)", borderRadius: 8, padding: "6px 12px", color: "white", fontSize: 12, fontWeight: 700, textDecoration: "none", flexShrink: 0 }}>
-                    Play Store
-                  </a>
-                ) : null}
-              </div>
+                );
+
+                if (pushActivo) {
+                  if (nativa && batExenta === false) {
+                    // APK con plugin, confirmado NO exento → 1 toque.
+                    tono = "ambar"; eyebrow = "Pueden cortarse"; titulo = "Protégelos del ahorro de batería";
+                    boton = btn("Proteger", () => void protegerBateria(), "var(--warn)");
+                  } else if (nativa && batExenta === null && oemAgresivo) {
+                    // No se puede verificar (APK sin plugin) y es un equipo que corta → guía manual.
+                    tono = "ambar"; eyebrow = "Pueden cortarse"; titulo = "Que no los corte tu teléfono";
+                    boton = btn("Cómo", () => setMostrarGuiaBateria(true), "var(--warn)");
+                  } else {
+                    tono = "verde"; eyebrow = "Todo listo"; titulo = "Avisos activados";
+                    boton = (
+                      <button onClick={() => void quitarPush()} disabled={pushLoading}
+                        style={{ background: "var(--soft)", border: "1px solid var(--line)", borderRadius: 8, padding: "6px 12px", color: "var(--mute)", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>
+                        Quitar
+                      </button>
+                    );
+                  }
+                } else if (bloqueado) {
+                  tono = "rojo"; eyebrow = "Bloqueados"; titulo = "Actívalos en los ajustes";
+                  boton = btn("Cómo", () => setMostrarGuiaBloqueado(true), "var(--danger)");
+                } else if (pushSoporte === "ios-instalar") {
+                  tono = "ambar"; eyebrow = "Casi listo"; titulo = "Instala la app para activarlos";
+                  boton = btn("Cómo", () => setMostrarGuiaIOS(true), "var(--warn)");
+                } else if (pushSoporte === "app-desactualizada") {
+                  tono = "ambar"; eyebrow = "Actualiza"; titulo = "Actualiza la app para recibirlos";
+                  boton = (
+                    <a href="https://play.google.com/store/apps/details?id=com.transportesafa.pasajero"
+                      style={{ background: "var(--warn)", borderRadius: 8, padding: "7px 13px", color: "white", fontSize: 12, fontWeight: 700, textDecoration: "none", flexShrink: 0 }}>
+                      Play Store
+                    </a>
+                  );
+                } else if (pushSoporte === "no-soportado") {
+                  tono = "gris"; eyebrow = "No disponible"; titulo = "Ábrela en la app o en Chrome";
+                } else {
+                  tono = "ambar"; eyebrow = "Por activar"; titulo = "Activa los avisos de tu bus";
+                  boton = btn(pushLoading ? "…" : "Activar", () => void activarPush(), "var(--warn)");
+                }
+
+                const pal = ({
+                  verde: { bg: "var(--success-tint)", bd: "rgba(22,163,74,0.25)",  ic: "var(--success)", eb: "var(--success)" },
+                  ambar: { bg: "var(--warn-tint)",    bd: "rgba(180,83,9,0.25)",   ic: "var(--warn)",    eb: "var(--warn)" },
+                  rojo:  { bg: "var(--danger-tint)",  bd: "rgba(185,28,28,0.25)",  ic: "var(--danger)",  eb: "var(--danger)" },
+                  gris:  { bg: "var(--surface)",      bd: "var(--line)",           ic: "var(--soft)",    eb: "var(--mute2)" },
+                })[tono];
+
+                return (
+                  <div style={{ marginTop: 12, background: pal.bg, border: `1px solid ${pal.bd}`, borderRadius: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ width: 34, height: 34, borderRadius: 10, background: pal.ic, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <IconBell sz={18} c={tono === "gris" ? "var(--mute2)" : "white"} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <p style={{ margin: 0, fontSize: 10.5, color: pal.eb, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>{eyebrow}</p>
+                      <p style={{ margin: "2px 0 0", fontSize: 13, color: "var(--ink)", fontWeight: 700, letterSpacing: -0.2 }}>{titulo}</p>
+                    </div>
+                    {boton}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Soporte */}
