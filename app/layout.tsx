@@ -4,6 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactElement } from "react";
 import { Manrope, JetBrains_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabase";
+import EliaPanel from "./_components/elia";
 import "./globals.css";
 
 const manrope = Manrope({
@@ -242,11 +243,6 @@ const Ic = {
   MessageSquare: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-    </svg>
-  ),
-  TrendingUp: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>
     </svg>
   ),
   Bot: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
@@ -542,7 +538,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       (r) => pathname === r || pathname.startsWith(r + "/")
     ) ||
     // /seguimiento/[token] es público — pero /seguimiento (módulo ERP) NO
-    pathname.startsWith("/seguimiento/");
+    pathname.startsWith("/seguimiento/") ||
+    // Banco de pruebas visual de ELIA — solo existe en desarrollo
+    (process.env.NODE_ENV !== "production" && pathname === "/dev/elia");
 
   const [emailUsuario, setEmailUsuario]   = useState("");
   const [nombreUsuario, setNombreUsuario] = useState("Usuario");
@@ -736,6 +734,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </aside>
 
             <main className="flex-1 overflow-y-auto p-6">{children}</main>
+
+            {/* ELIA — asistente de operaciones (solo usuarios internos autenticados) */}
+            <EliaPanel nombre={nombreUsuario} rol={rolUsuario} permisos={permisos} />
           </div>
         )}
       </body>
