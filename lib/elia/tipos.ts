@@ -10,8 +10,16 @@ export type BloqueUI =
   | { tipo: "conductores"; items: ConductorUI[] }
   | { tipo: "kpis"; items: KpiUI[] }
   | { tipo: "ranking"; titulo: string; items: RankingUI[] }
+  | { tipo: "serie"; titulo: string; items: SerieUI[] }
   | { tipo: "link"; href: string; etiqueta: string }
   | { tipo: "accion"; accion: AccionPropuesta };
+
+/** Serie para mini-gráfico de barras horizontales (ej. ventas por mes). */
+export type SerieUI = {
+  label: string;    // ej. "may"
+  valor: number;    // magnitud para escalar la barra
+  etiqueta: string; // valor formateado, ej. "S/ 45.2k"
+};
 
 export type RankingUI = {
   puesto: number;

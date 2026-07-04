@@ -43,6 +43,20 @@ function streamDemo(): Response {
         ],
       },
     },
+    {
+      t: "ui",
+      d: {
+        tipo: "serie",
+        titulo: "Ventas por mes (últimos 5)",
+        items: [
+          { label: "mar", valor: 21500, etiqueta: "S/ 21.5k" },
+          { label: "abr", valor: 34800, etiqueta: "S/ 34.8k" },
+          { label: "may", valor: 28900, etiqueta: "S/ 28.9k" },
+          { label: "jun", valor: 41200, etiqueta: "S/ 41.2k" },
+          { label: "jul", valor: 12400, etiqueta: "S/ 12.4k" },
+        ],
+      },
+    },
     { espera: 250 },
     { t: "texto", d: "Listo, encontré **3 servicios para mañana**. " },
     { espera: 220 },

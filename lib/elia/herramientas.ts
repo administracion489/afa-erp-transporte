@@ -42,6 +42,37 @@ export function horaLima(): string {
 const diasPara = (f?: string | null): number | null =>
   f ? Math.ceil((new Date(f + "T00:00:00-05:00").getTime() - Date.now()) / 86400000) : null;
 
+/** Primer día del mes, `meses` hacia atrás incluyendo el actual (1 = mes en curso). */
+function inicioMeses(meses: number): string {
+  const hoy = fechaLima();
+  const total = Number(hoy.slice(0, 4)) * 12 + (Number(hoy.slice(5, 7)) - 1) - (meses - 1);
+  return `${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, "0")}-01`;
+}
+
+/** "HH:MM[:SS]" → minutos desde medianoche (null si no parsea). */
+const minutosDe = (h?: string | null): number | null => {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(h ?? ""));
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+};
+
+/** Recorre una consulta paginada contra el corte de 1000 filas de Supabase. */
+async function fetchPaginado(consulta: (desde: number, hasta: number) => any, maxPaginas = 5): Promise<any[]> {
+  const filas: any[] = [];
+  for (let p = 0; p < maxPaginas; p++) {
+    const { data } = await consulta(p * 1000, p * 1000 + 999);
+    const lote = (data as any[]) ?? [];
+    filas.push(...lote);
+    if (lote.length < 1000) break;
+  }
+  return filas;
+}
+
+/** Monto compacto para etiquetas de gráfico: "S/ 45.2k". */
+const fmtCorto = (n: number) =>
+  Math.abs(n) >= 10000 ? `S/ ${(n / 1000).toFixed(1)}k` : "S/ " + Math.round(n).toLocaleString("es-PE");
+
+const MES_CORTO = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "set", "oct", "nov", "dic"];
+
 const fmtSoles = (n: number) =>
   "S/ " + Number(n || 0).toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -109,6 +140,12 @@ const MODULOS_TOOL: Record<string, string[]> = {
   ranking_clientes: ["reportes", "facturacion", "clientes", "crm"],
   analisis_combustible: ["combustible", "gastos", "reportes"],
   finanzas: ["facturacion", "gastos", "reportes"],
+  rentabilidad: ["reportes", "facturacion"],
+  desempeno_conductores: ["conductores", "reportes", "seguimiento"],
+  utilizacion_flota: ["vehiculos", "reportes", "programacion"],
+  analisis_cotizaciones: ["cotizaciones", "reportes", "crm"],
+  ocupacion_servicios: ["programacion", "seguimiento", "pasajeros", "reportes"],
+  tendencia_mensual: ["reportes", "facturacion"],
   gps_en_vivo: ["monitoreo", "seguimiento"],
   abrir_modulo: [], // siempre disponible; valida permisos por destino
   proponer_accion: ["programacion", "despachador"],
@@ -125,6 +162,12 @@ export const ETIQUETA_TOOL: Record<string, string> = {
   ranking_clientes: "Armando el ranking de clientes…",
   analisis_combustible: "Analizando el consumo de combustible…",
   finanzas: "Haciendo números…",
+  rentabilidad: "Calculando la rentabilidad real…",
+  desempeno_conductores: "Revisando el desempeño de los conductores…",
+  utilizacion_flota: "Midiendo el uso de la flota…",
+  analisis_cotizaciones: "Analizando las cotizaciones…",
+  ocupacion_servicios: "Midiendo la ocupación de los servicios…",
+  tendencia_mensual: "Trazando la tendencia del negocio…",
   gps_en_vivo: "Mirando el mapa en vivo…",
   abrir_modulo: "Preparando el acceso directo…",
   proponer_accion: "Preparando la acción…",
@@ -240,6 +283,69 @@ const TOOLS_DEF: any[] = [
         tipo: { type: "string", enum: ["por_cobrar", "resumen", "gastos"] },
       },
       required: ["tipo"],
+    },
+  },
+  {
+    name: "rentabilidad",
+    description:
+      "Rentabilidad REAL por ruta, cliente o tipo de servicio en los últimos N meses: ventas − costo de proveedor − gastos asignados al servicio. Detecta rutas o clientes en pérdida. Úsala para '¿qué rutas dejan más margen?', '¿dónde estamos perdiendo plata?'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        dimension: { type: "string", enum: ["ruta", "cliente", "tipo_servicio"], description: "Por defecto 'ruta'." },
+        meses: { type: "integer", description: "Meses hacia atrás incluyendo el actual (1-12, por defecto 1)" },
+      },
+    },
+  },
+  {
+    name: "desempeno_conductores",
+    description:
+      "Desempeño operativo de los conductores propios en los últimos N meses: servicios realizados, salidas tarde (check-in vs. hora programada, umbral 15 min), retraso promedio y duración de jornada. Úsala para '¿qué conductor acumula retrasos?', '¿quién trabajó más este mes?'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        meses: { type: "integer", description: "1-12, por defecto 1" },
+        nombre: { type: "string", description: "Analizar solo un conductor (nombre parcial)" },
+      },
+    },
+  },
+  {
+    name: "utilizacion_flota",
+    description:
+      "Uso de la flota en los últimos N meses: servicios y días activos por unidad propia, km recorridos (odómetro), unidades sin uso, y qué % de servicios se fue a terceros. Úsala para '¿qué unidades están paradas?', '¿cuánto estamos tercerizando?'.",
+    input_schema: {
+      type: "object",
+      properties: { meses: { type: "integer", description: "1-12, por defecto 1" } },
+    },
+  },
+  {
+    name: "analisis_cotizaciones",
+    description:
+      "Embudo comercial de cotizaciones de los últimos N meses: cuántas se cotizaron, aprobaron o rechazaron, tasa de cierre, monto cotizado vs. aprobado, y cotizaciones enviadas que siguen sin respuesta (con días de espera). Úsala para '¿cómo va la conversión?', '¿qué cotizaciones hay que perseguir?'.",
+    input_schema: {
+      type: "object",
+      properties: { meses: { type: "integer", description: "1-12, por defecto 1" } },
+    },
+  },
+  {
+    name: "ocupacion_servicios",
+    description:
+      "Ocupación de pasajeros de los servicios de los últimos N meses: % promedio (abordados vs. capacidad), sobrecupos y servicios con baja ocupación (<50%), con las rutas menos ocupadas. Útil para optimizar unidades en transporte de personal.",
+    input_schema: {
+      type: "object",
+      properties: {
+        meses: { type: "integer", description: "1-12, por defecto 1" },
+        cliente_nombre: { type: "string", description: "Filtrar por cliente (nombre parcial)" },
+      },
+    },
+  },
+  {
+    name: "tendencia_mensual",
+    description:
+      "Evolución mes a mes del negocio (últimos N meses): servicios, ventas, margen, gastos y facturado por mes, con la variación del mes en curso vs. el anterior. Úsala para '¿cómo viene el año?', '¿crecimos respecto al mes pasado?'.",
+    input_schema: {
+      type: "object",
+      properties: { meses: { type: "integer", description: "2-12, por defecto 6" } },
     },
   },
   {
@@ -1152,6 +1258,557 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
               { label: "SOS", valor: String(sos ?? 0), intent: (sos ?? 0) > 0 ? "danger" : "ok" },
             ],
           },
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "rentabilidad": {
+        const meses = Math.min(Math.max(Number(input.meses) || 1, 1), 12);
+        const inicio = inicioMeses(meses);
+        const hoy = fechaLima();
+        const dimension: "ruta" | "cliente" | "tipo_servicio" =
+          input.dimension === "cliente" || input.dimension === "tipo_servicio" ? input.dimension : "ruta";
+
+        const filas = await fetchPaginado((d, h) =>
+          sb
+            .from("reservas")
+            .select("id, origen, destino, cliente_id, tipo_servicio_detalle, precio_cliente, costo_proveedor, margen, estado")
+            .gte("fecha_servicio", inicio)
+            .lte("fecha_servicio", hoy)
+            .neq("estado", "cancelada")
+            .range(d, h)
+        );
+        if (filas.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, desde: inicio, nota: "Sin servicios (no cancelados) en el rango." }) };
+
+        const gastosFilas = await fetchPaginado((d, h) =>
+          sb
+            .from("gastos")
+            .select("reserva_id, monto")
+            .gte("fecha", inicio)
+            .not("reserva_id", "is", null)
+            .neq("estado", "anulado")
+            .range(d, h)
+        );
+        const gastoPorReserva: Record<number, number> = {};
+        for (const g of gastosFilas) gastoPorReserva[g.reserva_id] = (gastoPorReserva[g.reserva_id] || 0) + Number(g.monto || 0);
+
+        const nombresCli =
+          dimension === "cliente" ? await mapaNombres(sb, "clientes", filas.map((r) => r.cliente_id), "id, nombre, empresa") : {};
+
+        const grupos: Record<string, { etiqueta: string; servicios: number; ventas: number; costo: number; gastos: number }> = {};
+        for (const r of filas) {
+          const etiqueta =
+            dimension === "ruta"
+              ? `${(r.origen || "?").trim()} → ${(r.destino || "?").trim()}`
+              : dimension === "cliente"
+              ? r.cliente_id
+                ? nombresCli[r.cliente_id]?.nombre || nombresCli[r.cliente_id]?.empresa || `Cliente #${r.cliente_id}`
+                : "(sin cliente)"
+              : r.tipo_servicio_detalle || "(sin tipo)";
+          const g = (grupos[etiqueta.toLowerCase()] ||= { etiqueta, servicios: 0, ventas: 0, costo: 0, gastos: 0 });
+          g.servicios++;
+          g.ventas += Number(r.precio_cliente || 0);
+          g.costo += Number(r.costo_proveedor || 0);
+          g.gastos += gastoPorReserva[r.id] || 0;
+        }
+        const lista = Object.values(grupos).map((g) => ({ ...g, margen_real: g.ventas - g.costo - g.gastos }));
+        const top = [...lista].sort((a, b) => b.margen_real - a.margen_real).slice(0, 6);
+        const enPerdida = lista.filter((g) => g.margen_real < 0).sort((a, b) => a.margen_real - b.margen_real).slice(0, 5);
+
+        const aRanking = (l: typeof top): RankingUI[] =>
+          l.map((g, i) => ({
+            puesto: i + 1,
+            nombre: g.etiqueta,
+            valor: fmtSoles(g.margen_real),
+            sub: `${g.servicios} serv · ventas ${fmtCorto(g.ventas)}${g.gastos ? ` · gastos ${fmtCorto(g.gastos)}` : ""}`,
+          }));
+
+        const bloques: BloqueUI[] = [{ tipo: "ranking", titulo: `Top ${dimension === "tipo_servicio" ? "tipos de servicio" : dimension + "s"} por margen real`, items: aRanking(top) }];
+        if (enPerdida.length) bloques.push({ tipo: "ranking", titulo: "En pérdida (revisar)", items: aRanking(enPerdida) });
+
+        return {
+          paraModelo: JSON.stringify({
+            desde: inicio,
+            hasta: hoy,
+            dimension,
+            grupos_totales: lista.length,
+            top,
+            en_perdida: enPerdida,
+            nota: "Margen real = precio_cliente − costo_proveedor − gastos con reserva_id asignada. Los gastos sin servicio asignado no se distribuyen.",
+          }),
+          ui: bloques,
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "desempeno_conductores": {
+        const meses = Math.min(Math.max(Number(input.meses) || 1, 1), 12);
+        const inicio = inicioMeses(meses);
+        const hoy = fechaLima();
+
+        let idsFiltro: number[] | null = null;
+        if (input.nombre) {
+          const { data } = await sb.from("conductores").select("id").ilike("nombre", `%${input.nombre}%`);
+          idsFiltro = ((data as any[]) ?? []).map((c) => c.id);
+          if (idsFiltro.length === 0)
+            return { paraModelo: JSON.stringify({ encontrados: 0, nota: `No hay conductores con nombre parecido a "${input.nombre}".` }) };
+        }
+
+        const filas = await fetchPaginado((d, h) => {
+          let q = sb
+            .from("reservas")
+            .select("conductor_id, fecha_servicio, hora_servicio, hora_real_inicio, hora_real_fin, estado")
+            .gte("fecha_servicio", inicio)
+            .lte("fecha_servicio", hoy)
+            .not("conductor_id", "is", null)
+            .neq("estado", "cancelada")
+            .range(d, h);
+          if (idsFiltro) q = q.in("conductor_id", idsFiltro);
+          return q;
+        });
+        if (filas.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, desde: inicio, nota: "Sin servicios con conductor propio asignado en el rango." }) };
+
+        const acc: Record<number, { servicios: number; finalizados: number; conCheckin: number; tarde: number; retrasos: number[]; jornadas: number[] }> = {};
+        for (const r of filas) {
+          const a = (acc[r.conductor_id] ||= { servicios: 0, finalizados: 0, conCheckin: 0, tarde: 0, retrasos: [], jornadas: [] });
+          a.servicios++;
+          if (r.estado === "finalizada") a.finalizados++;
+          const prog = minutosDe(r.hora_servicio);
+          const real = minutosDe(r.hora_real_inicio);
+          if (real !== null) a.conCheckin++;
+          if (prog !== null && real !== null) {
+            const retraso = real - prog;
+            if (retraso > -120 && retraso < 600) {
+              if (retraso > 15) {
+                a.tarde++;
+                a.retrasos.push(retraso);
+              }
+            }
+          }
+          const fin = minutosDe(r.hora_real_fin);
+          if (real !== null && fin !== null) {
+            const jornada = fin - real;
+            if (jornada > 0 && jornada < 20 * 60) a.jornadas.push(jornada);
+          }
+        }
+
+        const nombres = await mapaNombres(sb, "conductores", Object.keys(acc).map(Number), "id, nombre");
+        const detalle = Object.entries(acc)
+          .map(([id, a]) => ({
+            conductor: nombres[Number(id)]?.nombre || `Conductor #${id}`,
+            servicios: a.servicios,
+            finalizados: a.finalizados,
+            con_checkin: a.conCheckin,
+            salidas_tarde: a.tarde,
+            retraso_promedio_min: a.retrasos.length ? Math.round(a.retrasos.reduce((s, n) => s + n, 0) / a.retrasos.length) : null,
+            jornada_promedio_horas: a.jornadas.length
+              ? Math.round((a.jornadas.reduce((s, n) => s + n, 0) / a.jornadas.length / 60) * 10) / 10
+              : null,
+          }))
+          .sort((x, y) => y.servicios - x.servicios);
+
+        const bloques: BloqueUI[] = [
+          {
+            tipo: "ranking",
+            titulo: "Conductores por servicios",
+            items: detalle.slice(0, 6).map((c, i) => ({
+              puesto: i + 1,
+              nombre: c.conductor,
+              valor: `${c.servicios} serv.`,
+              sub: `${c.salidas_tarde} tarde${c.jornada_promedio_horas ? ` · jornada ~${c.jornada_promedio_horas}h` : ""}`,
+            })),
+          },
+        ];
+        const impuntuales = detalle.filter((c) => c.salidas_tarde >= 2).slice(0, 5);
+        if (impuntuales.length)
+          bloques.push({
+            tipo: "conductores",
+            items: impuntuales.map((c) => ({
+              nombre: c.conductor,
+              estado: `${c.servicios} servicios`,
+              telefono: null,
+              alertas: [`${c.salidas_tarde} salidas tarde (prom. +${c.retraso_promedio_min} min sobre la hora programada)`],
+            })),
+          });
+
+        return {
+          paraModelo: JSON.stringify({
+            desde: inicio,
+            hasta: hoy,
+            conductores: detalle,
+            nota: "Retraso = hora_real_inicio (check-in) vs hora_servicio programada, umbral 15 min; solo cuenta servicios con check-in registrado. Presenta los retrasos como tema a conversar con el conductor, no como falta comprobada (puede haber causas operativas).",
+          }),
+          ui: bloques,
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "utilizacion_flota": {
+        const meses = Math.min(Math.max(Number(input.meses) || 1, 1), 12);
+        const inicio = inicioMeses(meses);
+        const hoy = fechaLima();
+
+        const [{ data: vehs }, filas, lecturas] = await Promise.all([
+          sb.from("vehiculos").select("id, placa, categoria, estado"),
+          fetchPaginado((d, h) =>
+            sb
+              .from("reservas")
+              .select("vehiculo_id, vehiculo_tercero_id, tipo_asignacion, fecha_servicio, estado")
+              .gte("fecha_servicio", inicio)
+              .lte("fecha_servicio", hoy)
+              .neq("estado", "cancelada")
+              .range(d, h)
+          ),
+          fetchPaginado((d, h) =>
+            sb
+              .from("lecturas_odometro")
+              .select("vehiculo_id, km, fecha")
+              .gte("fecha", inicio)
+              .eq("estado", "aceptada")
+              .range(d, h)
+          ),
+        ]);
+        const vehiculos = (vehs as any[]) ?? [];
+        if (filas.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, desde: inicio, nota: "Sin servicios en el rango." }) };
+
+        const kmPorVeh: Record<number, { min: number; max: number }> = {};
+        for (const l of lecturas) {
+          const k = (kmPorVeh[l.vehiculo_id] ||= { min: Number(l.km), max: Number(l.km) });
+          k.min = Math.min(k.min, Number(l.km));
+          k.max = Math.max(k.max, Number(l.km));
+        }
+
+        const uso: Record<number, { servicios: number; dias: Set<string> }> = {};
+        let tercerizados = 0;
+        for (const r of filas) {
+          if (r.tipo_asignacion === "tercerizado" || r.vehiculo_tercero_id) tercerizados++;
+          if (r.vehiculo_id) {
+            const u = (uso[r.vehiculo_id] ||= { servicios: 0, dias: new Set() });
+            u.servicios++;
+            u.dias.add(r.fecha_servicio);
+          }
+        }
+        const pctTerceros = Math.round((tercerizados / filas.length) * 100);
+
+        const porUnidad = vehiculos
+          .map((v) => ({
+            placa: v.placa,
+            categoria: v.categoria,
+            estado: v.estado,
+            servicios: uso[v.id]?.servicios || 0,
+            dias_activos: uso[v.id]?.dias.size || 0,
+            km_recorridos: kmPorVeh[v.id] ? Math.max(0, kmPorVeh[v.id].max - kmPorVeh[v.id].min) : null,
+          }))
+          .sort((a, b) => b.servicios - a.servicios);
+        const ociosas = porUnidad.filter((u) => u.servicios === 0 && u.estado !== "inactivo");
+
+        return {
+          paraModelo: JSON.stringify({
+            desde: inicio,
+            hasta: hoy,
+            servicios_totales: filas.length,
+            tercerizados,
+            pct_tercerizado: pctTerceros,
+            por_unidad: porUnidad,
+            unidades_sin_uso: ociosas.map((u) => u.placa),
+          }),
+          ui: [
+            {
+              tipo: "kpis",
+              items: [
+                { label: "Servicios", valor: String(filas.length), sub: `desde ${inicio}`, intent: "info" },
+                { label: "Tercerizados", valor: `${pctTerceros}%`, sub: `${tercerizados} servicios`, intent: pctTerceros > 40 ? "warn" : "ok" },
+                { label: "Unidades sin uso", valor: String(ociosas.length), sub: ociosas.slice(0, 3).map((u) => u.placa).join(", ") || undefined, intent: ociosas.length ? "warn" : "ok" },
+              ],
+            },
+            {
+              tipo: "ranking",
+              titulo: "Unidades más utilizadas",
+              items: porUnidad.slice(0, 5).map((u, i) => ({
+                puesto: i + 1,
+                nombre: u.placa,
+                valor: `${u.servicios} serv.`,
+                sub: `${u.dias_activos} días activos${u.km_recorridos ? ` · ${u.km_recorridos.toLocaleString("es-PE")} km` : ""}`,
+              })),
+            },
+          ],
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "analisis_cotizaciones": {
+        const meses = Math.min(Math.max(Number(input.meses) || 1, 1), 12);
+        const inicio = inicioMeses(meses);
+
+        const filas = await fetchPaginado((d, h) =>
+          sb
+            .from("cotizaciones")
+            .select("id, numero_cotizacion, estado, precio_cliente, cliente_id, created_at, origen, destino, descuento_solicitado")
+            .gte("created_at", inicio)
+            .range(d, h)
+        );
+        if (filas.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, desde: inicio, nota: "Sin cotizaciones creadas en el rango." }) };
+
+        const porEstado: Record<string, number> = {};
+        for (const c of filas) porEstado[c.estado || "borrador"] = (porEstado[c.estado || "borrador"] || 0) + 1;
+        const aprobadas = porEstado["aprobado"] || 0;
+        const rechazadas = porEstado["rechazado"] || 0;
+        const enviadas = porEstado["enviado"] || 0;
+        const decididas = aprobadas + rechazadas + enviadas;
+        const tasaCierre = decididas > 0 ? Math.round((aprobadas / decididas) * 100) : 0;
+        const montoCotizado = filas.reduce((s, c) => s + Number(c.precio_cliente || 0), 0);
+        const montoAprobado = filas.filter((c) => c.estado === "aprobado").reduce((s, c) => s + Number(c.precio_cliente || 0), 0);
+
+        const sinRespuesta = filas
+          .filter((c) => c.estado === "enviado")
+          .sort((a, b) => (a.created_at < b.created_at ? -1 : 1))
+          .slice(0, 5);
+        const nombresCli = await mapaNombres(sb, "clientes", sinRespuesta.map((c) => c.cliente_id), "id, nombre, empresa");
+        const pendientes = sinRespuesta.map((c) => ({
+          numero: c.numero_cotizacion,
+          cliente: c.cliente_id ? nombresCli[c.cliente_id]?.nombre || nombresCli[c.cliente_id]?.empresa : null,
+          ruta: `${c.origen ?? "?"} → ${c.destino ?? "?"}`,
+          monto: Math.round(Number(c.precio_cliente || 0) * 100) / 100,
+          dias_esperando: Math.max(0, Math.floor((Date.now() - new Date(c.created_at).getTime()) / 86400000)),
+        }));
+
+        return {
+          paraModelo: JSON.stringify({
+            desde: inicio,
+            total: filas.length,
+            por_estado: porEstado,
+            tasa_cierre_pct: tasaCierre,
+            monto_cotizado: Math.round(montoCotizado),
+            monto_aprobado: Math.round(montoAprobado),
+            enviadas_sin_respuesta: pendientes,
+            nota: "Tasa de cierre = aprobadas / (aprobadas + rechazadas + enviadas sin respuesta). Sugiere hacer seguimiento a las enviadas con más días de espera.",
+          }),
+          ui: {
+            tipo: "kpis",
+            items: [
+              { label: "Cotizadas", valor: String(filas.length), sub: `desde ${inicio}`, intent: "info" },
+              { label: "Tasa de cierre", valor: `${tasaCierre}%`, sub: `${aprobadas} aprobadas`, intent: tasaCierre >= 40 ? "ok" : "warn" },
+              { label: "Sin respuesta", valor: String(enviadas), sub: "enviadas en espera", intent: enviadas > 0 ? "warn" : "ok" },
+              { label: "Monto aprobado", valor: fmtCorto(montoAprobado), sub: `de ${fmtCorto(montoCotizado)} cotizado`, intent: "ok" },
+            ],
+          },
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "ocupacion_servicios": {
+        const meses = Math.min(Math.max(Number(input.meses) || 1, 1), 12);
+        const inicio = inicioMeses(meses);
+        const hoy = fechaLima();
+
+        let q = (d: number, h: number) =>
+          sb
+            .from("reservas")
+            .select("id, origen, destino, cliente_id, fecha_servicio")
+            .gte("fecha_servicio", inicio)
+            .lte("fecha_servicio", hoy)
+            .neq("estado", "cancelada")
+            .range(d, h);
+        if (input.cliente_nombre) {
+          const { data: clis } = await sb
+            .from("clientes")
+            .select("id")
+            .or(`nombre.ilike.%${input.cliente_nombre}%,empresa.ilike.%${input.cliente_nombre}%`)
+            .limit(20);
+          const ids = ((clis as any[]) ?? []).map((c) => c.id);
+          if (ids.length === 0)
+            return { paraModelo: JSON.stringify({ encontrados: 0, nota: `No encontré clientes con "${input.cliente_nombre}".` }) };
+          const qBase = q;
+          q = (d, h) => qBase(d, h).in("cliente_id", ids);
+        }
+        const reservas = await fetchPaginado(q);
+        if (reservas.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, desde: inicio, nota: "Sin servicios en el rango." }) };
+
+        // Ocupación por tramos de 150 ids (la vista se consulta por reserva_id)
+        const porReserva: Record<number, any> = {};
+        for (let i = 0; i < reservas.length; i += 150) {
+          const ids = reservas.slice(i, i + 150).map((r) => r.id);
+          const { data } = await sb.from("reservas_ocupacion").select("*").in("reserva_id", ids);
+          for (const o of (data as any[]) ?? []) porReserva[o.reserva_id] = o;
+        }
+
+        const conDatos = reservas
+          .map((r) => ({ r, o: porReserva[r.id] }))
+          .filter((x) => x.o && Number(x.o.capacidad) > 0 && Number(x.o.total_pasajeros) > 0);
+        if (conDatos.length === 0)
+          return {
+            paraModelo: JSON.stringify({
+              encontrados: reservas.length,
+              nota: "Hay servicios en el rango pero ninguno tiene pasajeros y capacidad registrados; la ocupación no se puede medir todavía.",
+            }),
+          };
+
+        const pctDe = (o: any) =>
+          o.ocupacion_pct != null ? Number(o.ocupacion_pct) : Math.round((Number(o.total_pasajeros) / Number(o.capacidad)) * 100);
+        let suma = 0, sobrecupos = 0, bajos = 0;
+        const rutas: Record<string, { etiqueta: string; suma: number; n: number }> = {};
+        for (const { r, o } of conDatos) {
+          const pct = pctDe(o);
+          suma += pct;
+          if (o.sobrecupo || pct > 100) sobrecupos++;
+          if (pct < 50) bajos++;
+          const etiqueta = `${(r.origen || "?").trim()} → ${(r.destino || "?").trim()}`;
+          const g = (rutas[etiqueta.toLowerCase()] ||= { etiqueta, suma: 0, n: 0 });
+          g.suma += pct;
+          g.n++;
+        }
+        const promedio = Math.round(suma / conDatos.length);
+        const rutasBajas = Object.values(rutas)
+          .filter((g) => g.n >= 2)
+          .map((g) => ({ ruta: g.etiqueta, ocupacion_pct: Math.round(g.suma / g.n), servicios: g.n }))
+          .sort((a, b) => a.ocupacion_pct - b.ocupacion_pct)
+          .slice(0, 5);
+
+        return {
+          paraModelo: JSON.stringify({
+            desde: inicio,
+            hasta: hoy,
+            servicios_medidos: conDatos.length,
+            ocupacion_promedio_pct: promedio,
+            sobrecupos,
+            servicios_baja_ocupacion: bajos,
+            rutas_menor_ocupacion: rutasBajas,
+            nota: "Baja ocupación sostenida en una ruta = oportunidad de usar una unidad más chica o consolidar horarios.",
+          }),
+          ui: [
+            {
+              tipo: "kpis",
+              items: [
+                { label: "Ocupación promedio", valor: `${promedio}%`, sub: `${conDatos.length} servicios medidos`, intent: promedio >= 70 ? "ok" : "warn" },
+                { label: "Sobrecupos", valor: String(sobrecupos), intent: sobrecupos ? "danger" : "ok" },
+                { label: "Baja ocupación", valor: String(bajos), sub: "servicios <50%", intent: bajos ? "warn" : "ok" },
+              ],
+            },
+            ...(rutasBajas.length
+              ? [
+                  {
+                    tipo: "ranking",
+                    titulo: "Rutas con menor ocupación",
+                    items: rutasBajas.map((g, i) => ({
+                      puesto: i + 1,
+                      nombre: g.ruta,
+                      valor: `${g.ocupacion_pct}%`,
+                      sub: `${g.servicios} servicios`,
+                    })),
+                  } as BloqueUI,
+                ]
+              : []),
+          ],
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "tendencia_mensual": {
+        const meses = Math.min(Math.max(Number(input.meses) || 6, 2), 12);
+        const inicio = inicioMeses(meses);
+        const hoy = fechaLima();
+
+        const [reservas, gastos, facturas] = await Promise.all([
+          fetchPaginado((d, h) =>
+            sb
+              .from("reservas")
+              .select("fecha_servicio, precio_cliente, margen, estado")
+              .gte("fecha_servicio", inicio)
+              .lte("fecha_servicio", hoy)
+              .neq("estado", "cancelada")
+              .range(d, h)
+          ),
+          fetchPaginado((d, h) =>
+            sb.from("gastos").select("fecha, monto").gte("fecha", inicio).neq("estado", "anulado").range(d, h)
+          ),
+          fetchPaginado((d, h) =>
+            sb.from("facturas").select("fecha_emision, total").gte("fecha_emision", inicio).neq("estado", "anulada").range(d, h)
+          ),
+        ]);
+
+        const porMes: Record<string, { servicios: number; ventas: number; margen: number; gastos: number; facturado: number }> = {};
+        const mesDe = (f?: string | null) => (f ? String(f).slice(0, 7) : null);
+        const celda = (m: string) => (porMes[m] ||= { servicios: 0, ventas: 0, margen: 0, gastos: 0, facturado: 0 });
+        for (const r of reservas) {
+          const m = mesDe(r.fecha_servicio);
+          if (!m) continue;
+          const c = celda(m);
+          c.servicios++;
+          c.ventas += Number(r.precio_cliente || 0);
+          c.margen += Number(r.margen || 0);
+        }
+        for (const g of gastos) {
+          const m = mesDe(g.fecha);
+          if (m) celda(m).gastos += Number(g.monto || 0);
+        }
+        for (const f of facturas) {
+          const m = mesDe(f.fecha_emision);
+          if (m) celda(m).facturado += Number(f.total || 0);
+        }
+
+        const mesesOrden = Object.keys(porMes).sort();
+        if (mesesOrden.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, desde: inicio, nota: "Sin actividad registrada en el rango." }) };
+
+        const tabla = mesesOrden.map((m) => ({ mes: m, ...porMes[m] }));
+        const actual = tabla[tabla.length - 1];
+        const anterior = tabla.length > 1 ? tabla[tabla.length - 2] : null;
+        const variacion = (a: number, b: number) => (b > 0 ? Math.round(((a - b) / b) * 100) : a > 0 ? 100 : 0);
+
+        return {
+          paraModelo: JSON.stringify({
+            desde: inicio,
+            hasta: hoy,
+            por_mes: tabla.map((t) => ({
+              ...t,
+              ventas: Math.round(t.ventas),
+              margen: Math.round(t.margen),
+              gastos: Math.round(t.gastos),
+              facturado: Math.round(t.facturado),
+            })),
+            mes_actual_vs_anterior: anterior
+              ? {
+                  ventas_pct: variacion(actual.ventas, anterior.ventas),
+                  servicios_pct: variacion(actual.servicios, anterior.servicios),
+                  gastos_pct: variacion(actual.gastos, anterior.gastos),
+                  nota_parcial: `El mes en curso (${actual.mes}) aún no termina: compara con cuidado.`,
+                }
+              : null,
+          }),
+          ui: [
+            {
+              tipo: "serie",
+              titulo: `Ventas por mes (últimos ${mesesOrden.length})`,
+              items: tabla.map((t) => ({
+                label: MES_CORTO[Number(t.mes.slice(5, 7)) - 1] ?? t.mes.slice(5, 7),
+                valor: t.ventas,
+                etiqueta: fmtCorto(t.ventas),
+              })),
+            },
+            ...(anterior
+              ? [
+                  {
+                    tipo: "kpis",
+                    items: [
+                      {
+                        label: "Ventas vs mes anterior",
+                        valor: `${variacion(actual.ventas, anterior.ventas) > 0 ? "+" : ""}${variacion(actual.ventas, anterior.ventas)}%`,
+                        sub: "mes en curso, parcial",
+                        intent: variacion(actual.ventas, anterior.ventas) >= 0 ? "ok" : "danger",
+                      },
+                      { label: "Servicios", valor: String(actual.servicios), sub: `antes ${anterior.servicios}` },
+                      { label: "Gastos", valor: fmtCorto(actual.gastos), sub: `antes ${fmtCorto(anterior.gastos)}`, intent: "warn" },
+                      { label: "Margen", valor: fmtCorto(actual.margen), intent: actual.margen >= 0 ? "ok" : "danger" },
+                    ],
+                  } as BloqueUI,
+                ]
+              : []),
+          ],
         };
       }
 

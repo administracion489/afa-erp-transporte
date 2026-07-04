@@ -272,6 +272,36 @@ function Bloque({
     );
   }
 
+  if (b.tipo === "serie") {
+    const max = Math.max(...b.items.map((s) => s.valor), 1);
+    return (
+      <TarjetaBloque>
+        <div className="px-3 pt-2.5 pb-1">
+          <p className="text-[9px] font-black uppercase tracking-wider text-[#8693A6]">{b.titulo}</p>
+        </div>
+        <div className="px-3 pb-2.5 space-y-1.5">
+          {b.items.map((s, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <span className="w-8 text-[10px] font-bold text-[#5B6B82] flex-shrink-0 capitalize">{s.label}</span>
+              <div className="flex-1 h-3.5 bg-[#EEF1F4] rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: `${Math.max(3, Math.round((s.valor / max) * 100))}%`,
+                    background: "linear-gradient(90deg, #2f8ee9, #1262bd)",
+                  }}
+                />
+              </div>
+              <span className="w-[74px] text-right text-[10.5px] font-bold text-[#0b315f] flex-shrink-0" style={{ fontFamily: "var(--font-mono)" }}>
+                {s.etiqueta}
+              </span>
+            </div>
+          ))}
+        </div>
+      </TarjetaBloque>
+    );
+  }
+
   if (b.tipo === "link")
     return (
       <button
@@ -585,10 +615,12 @@ export default function EliaPanel({
   const tiene = (m: string) => esAdmin || permisos.includes(m);
   const chips: string[] = [];
   if (tiene("dashboard")) chips.push("¿Cómo vamos hoy?");
+  if (tiene("reportes")) chips.push("¿Cómo viene el mes vs. el anterior?");
   if (tiene("programacion") || tiene("seguimiento")) chips.push("Servicios de mañana");
   if (tiene("vehiculos")) chips.push("¿Documentos por vencer?");
   if (tiene("monitoreo")) chips.push("¿Qué unidades están transmitiendo?");
   if (tiene("facturacion")) chips.push("¿Cuánto tenemos por cobrar?");
+  if (tiene("cotizaciones")) chips.push("¿Cómo va la conversión de cotizaciones?");
   const chipsVisibles = chips.slice(0, 4);
 
   const nivelAlerta = radar?.some((r) => r.nivel === "critico")
