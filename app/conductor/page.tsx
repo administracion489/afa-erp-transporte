@@ -631,6 +631,11 @@ export default function ConductorApp() {
   const [gatePrecision, setGatePrecision] = useState<Reserva | null>(null);
   // true si la guía reaparece porque DETECTAMOS que el SO MATÓ la app a mitad de un viaje.
   const [cortePendiente, setCortePendiente] = useState(false);
+  // ESTADO EN VIVO del servicio de fondo: true = el servicio nativo de segundo plano está
+  // corriendo (rastrea con pantalla bloqueada); false = cayó a "solo con app abierta". A
+  // diferencia de exentaBat (config), esto mide si REALMENTE está activo AHORA. Optimista
+  // por defecto (true) para no parpadear mientras arranca.
+  const [bgServicioActivo, setBgServicioActivo] = useState(true);
   // Expandir los pasos manuales (en equipos no-agresivos van colapsados tras "ver pasos").
   const [verPasosGps, setVerPasosGps] = useState(false);
   // Paso de ONBOARDING "batería" (APK 28+ con plugin): pantalla breve + botón que dispara el
@@ -1116,6 +1121,26 @@ export default function ConductorApp() {
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conductor?.id]);
+
+  // ESTADO EN VIVO del rastreo de fondo: mientras el conductor comparte (conectado o en ruta),
+  // sondea `backgroundGpsActivo()` — true si el servicio nativo de 2º plano corre; false si cayó
+  // a "solo con app abierta". Alimenta el semáforo "Rastreo protegido" (tercer eje, junto a
+  // batería y precisión). Gracia inicial de 8 s (deja arrancar el servicio) + anti-parpadeo:
+  // exige 2 lecturas falsas seguidas antes de marcar inactivo (un re-armado del watchdog deja
+  // _bgActivo en false por 1-2 s → sin esto parpadearía). Solo aplica en la app nativa.
+  useEffect(() => {
+    if (!esAppNativa() || !compartiendo) { setBgServicioActivo(true); return; }
+    setBgServicioActivo(true); // optimista mientras el servicio arranca
+    const desde = Date.now();
+    let fallosSeguidos = 0;
+    const iv = setInterval(() => {
+      if (Date.now() - desde < 8000) return; // gracia: no juzgar antes de que arranque
+      if (backgroundGpsActivo()) { fallosSeguidos = 0; setBgServicioActivo(true); }
+      else { fallosSeguidos += 1; if (fallosSeguidos >= 2) setBgServicioActivo(false); }
+    }, 4000);
+    return () => clearInterval(iv);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compartiendo]);
 
   // Decide si mostrar la guía de ajustes — "detectar, no asumir":
   //  • Si el equipo YA está exento de batería → NUNCA molestar (limpia los flags).
@@ -2271,8 +2296,11 @@ export default function ConductorApp() {
               // Precisión APROXIMADA (solo COARSE) degrada CADA fix → cuenta como "atención" aunque
               // la batería esté protegida. verde "protegido" exige batería exenta Y precisión no-aproximada.
               const precMala = precUbic === "aproximada";
+              // Tercer eje EN VIVO: conectado pero el servicio de fondo NO corre = solo rastrea con
+              // la app abierta. Es lo más urgente (config buena no sirve si ahora no está activo).
+              const bgInactivo = compartiendo && !bgServicioActivo;
               const estado: "protegido" | "atencion" | "neutro" =
-                cortePendiente || exentaBat === false || precMala ? "atencion"
+                cortePendiente || exentaBat === false || precMala || bgInactivo ? "atencion"
                 : exentaBat === true ? "protegido"
                 : "neutro";
 
@@ -2320,10 +2348,10 @@ export default function ConductorApp() {
                   </span>
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ display: "block", fontSize: 13.5, fontWeight: 800, color: atencion ? "var(--c-warn)" : "var(--c-ink)" }}>
-                      {!atencion ? "Ajustes de rastreo" : precMala ? "Activa la ubicación precisa" : "Revisa los ajustes de rastreo"}
+                      {!atencion ? "Ajustes de rastreo" : bgInactivo ? "Rastreo en segundo plano inactivo" : precMala ? "Activa la ubicación precisa" : "Revisa los ajustes de rastreo"}
                     </span>
                     <span style={{ display: "block", marginTop: 1, fontSize: 11.5, color: atencion ? "var(--c-warn-ink)" : "var(--c-mute)" }}>
-                      {!atencion ? "Ubicación · batería · autostart" : precMala ? "Tu GPS sale a ±150 m" : "El equipo puede cortar el GPS"}
+                      {!atencion ? "Ubicación · batería · autostart" : bgInactivo ? "Solo rastrea con la app abierta · revísalo" : precMala ? "Tu GPS sale a ±150 m" : "El equipo puede cortar el GPS"}
                     </span>
                   </span>
                   <IconChevronRight size={18} color={atencion ? "var(--c-warn)" : "var(--c-mute)"} />
