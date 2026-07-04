@@ -121,6 +121,7 @@ export default function ConductorTerceroPage() {
   // ── Permiso de ubicación (web nativo del navegador) ──────────────────────────
   const [errorGps, setErrorGps]                   = useState(false);   // GPS denegado/bloqueado por el navegador
   const [gpsCongelado, setGpsCongelado]           = useState(false);   // watchPosition dejó de dar fixes nuevos (pantalla bloqueada / 2º plano / sin alta precisión)
+  const [gpsDebilM, setGpsDebilM]                 = useState(0);       // mediana ±m de los últimos fixes ≥60 m = ubicación por red (sin satélite): reubicar el teléfono
 
   // ── Estado orientación / brújula ─────────────────────────────────────────────
   const [rumbo, setRumbo]                         = useState(0);       // 0-360, dirección actual del conductor
@@ -166,6 +167,7 @@ export default function ConductorTerceroPage() {
   const lastSentPosRef  = useRef<{ lat: number; lng: number } | null>(null);
   const precisionRef    = useRef<number>(0);           // accuracy (m) del último fix
   const ultimoFixRef    = useRef<number>(0);           // ms del último fix RECIBIDO de watchPosition (watchdog anti-congelado)
+  const accsRecRef      = useRef<number[]>([]);        // accuracy (m) de los últimos fixes RECIBIDOS (detector de GPS débil)
 
   // Sincronizar refs con state
   useEffect(() => { paradaIdxRef.current = paradaIdx; }, [paradaIdx]);
@@ -312,6 +314,7 @@ export default function ConductorTerceroPage() {
         const { latitude: lat, longitude: lng, heading: h, speed: s, accuracy: acc } = pos.coords;
         ultimoFixRef.current = Date.now();   // fix fresco recibido → el watchdog no marca congelado
         setGpsCongelado(false);
+        if (Number.isFinite(acc as number)) { accsRecRef.current.push(acc as number); if (accsRecRef.current.length > 20) accsRecRef.current.shift(); }
         posActualRef.current = { lat, lng };
         speedRef.current = s ?? 0;
         precisionRef.current = acc ?? 0;
@@ -409,6 +412,10 @@ export default function ConductorTerceroPage() {
       const viejo = Date.now() - (ultimoFixRef.current || 0) > STALE_MS;
       setGpsCongelado(viejo);
       if (viejo) { detenerGPS(); iniciarGPS(); solicitarWakeLock(); } // re-armar: pide un fix fresco
+      // GPS DÉBIL medido: mediana de los últimos fixes ≥60 m = red, sin satélite (permiso OK no
+      // basta: el teléfono debe VER el cielo). El chofer puede corregirlo al momento.
+      const a = [...accsRecRef.current].sort((x, y) => x - y);
+      setGpsDebilM(a.length >= 5 && a[Math.floor(a.length / 2)] >= 60 ? Math.round(a[Math.floor(a.length / 2)]) : 0);
     }, 15_000);
     return () => clearInterval(iv);
   }, [fase, detenerGPS, iniciarGPS, solicitarWakeLock]);
@@ -849,6 +856,21 @@ export default function ConductorTerceroPage() {
               <p className="text-sm font-bold" style={{ color: "#92400E" }}>GPS detenido — el bus se ve pegado</p>
               <p className="text-xs mt-0.5" style={{ color: "#92400E" }}>
                 Mantén ESTA pantalla abierta y encendida, y activa la ubicación en <strong>Alta precisión</strong>. No bloquees el teléfono ni cambies de app durante el viaje.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Aviso GPS DÉBIL: el equipo entrega ±60m+ (red, sin satélite) — accionable por el chofer */}
+      {!gpsCongelado && gpsDebilM > 0 && (
+        <div className="px-4 pt-3 flex-shrink-0">
+          <div className="rounded-xl px-4 py-3 flex items-start gap-2" style={{ background: "#FEF3C7", border: "1px solid #F59E0B" }}>
+            <span className="text-lg leading-none flex-shrink-0">📡</span>
+            <div className="min-w-0">
+              <p className="text-sm font-bold" style={{ color: "#92400E" }}>GPS débil: tu ubicación sale a ±{gpsDebilM} m</p>
+              <p className="text-xs mt-0.5" style={{ color: "#92400E" }}>
+                Pon el teléfono <strong>con vista al cielo</strong> (soporte en parabrisas o ventana, no guantera) y desactiva el <strong>ahorro de batería</strong>. La empresa ve tu recorrido impreciso.
               </p>
             </div>
           </div>

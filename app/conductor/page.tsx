@@ -524,6 +524,7 @@ export default function ConductorApp() {
   const posRef           = useRef<GeoPos | null>(null);
   const ultimoFixRef     = useRef<number>(0); // ms del último fix RECIBIDO (watchdog de auto-recuperación)
   const ultimoReArmRef   = useRef<number>(0); // ms del último re-arm del GPS (coalesce: máx 1 cada 10 s)
+  const accsRecRef       = useRef<number[]>([]); // accuracy (m) de los últimos fixes RECIBIDOS (detector de GPS débil medido)
   // Detector de fix CONGELADO (caso Motorola/FUSED atascado): el proveedor sigue entregando
   // callbacks pero con el MISMO fix cacheado. ultimoFixRef no lo distingue (mide llegadas);
   // estos refs miran el CONTENIDO. fixPrevRef sobrevive a los re-arms A PROPÓSITO: el seed
@@ -646,6 +647,12 @@ export default function ConductorApp() {
   // effect de GPS: limpia (stop) y vuelve a arrancar (start). Recupera el rastreo cuando el
   // listener nativo se quedó mudo (Doze / app en 2º plano largo rato) sin tener que reiniciar.
   const [gpsNonce, setGpsNonce] = useState(0);
+  // GPS DÉBIL MEDIDO: mediana de precisión de los fixes REALES recibidos (≥60 m = ubicación por
+  // red, sin satélite). Distinto de `precUbic`, que solo mira el PERMISO: un equipo puede tener
+  // "Ubicación precisa" concedida (permiso OK) y aun así entregar ±100 m porque el teléfono no
+  // ve satélites (guantera / parabrisas polarizado / ahorro de batería). Caso real: BVI124 dio
+  // ±1.8 m el 17-jun y ±100 m desde el 19-jun con el MISMO permiso. Esto mide lo que LLEGA.
+  const [gpsDebilM, setGpsDebilM] = useState(0);
   const [showFinViaje,   setShowFinViaje]   = useState(false);
   const [showFinOverlay, setShowFinOverlay] = useState(false);
   const [datosFinViaje,  setDatosFinViaje]  = useState<{
@@ -943,6 +950,8 @@ export default function ConductorApp() {
   // el detector "congelado" del ERP en ModalGps).
   const registrarFix = useCallback((pos: GeoPos) => {
     ultimoFixRef.current = Date.now();
+    const a = pos.coords.accuracy;
+    if (Number.isFinite(a)) { accsRecRef.current.push(a); if (accsRecRef.current.length > 20) accsRecRef.current.shift(); }
     const t = pos.timestamp ?? null;
     const prev = fixPrevRef.current;
     const avanzo = !prev
@@ -1107,6 +1116,26 @@ export default function ConductorApp() {
     return () => { document.removeEventListener("visibilitychange", onVis); clearInterval(iv); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conductor?.id, gpsHabilitado, compartiendo]);
+
+  // ── Detector de GPS DÉBIL medido (para el semáforo) ──────────────────────────
+  // Cada 20 s, mediana de la precisión de los últimos fixes RECIBIDOS. ≥60 m sostenido =
+  // ubicación por red (sin satélite): el conductor debe reubicar el teléfono con vista al
+  // cielo / quitar ahorro de batería. Mide la CALIDAD REAL entregada, no el permiso.
+  useEffect(() => {
+    if (!conductor || !compartiendo) { setGpsDebilM(0); accsRecRef.current = []; return; }
+    const evaluar = () => {
+      // No acusar con datos VIEJOS: si el GPS calló (>60 s sin fix), eso ya lo cubren el
+      // watchdog/gpsAtascado — el array conserva accuracies rancias que no describen el ahora.
+      if (Date.now() - (ultimoFixRef.current || 0) > 60_000) { setGpsDebilM(0); return; }
+      const a = [...accsRecRef.current].sort((x, y) => x - y);
+      if (a.length < 5) { setGpsDebilM(0); return; }   // muestras insuficientes: no acusar
+      const med = a[Math.floor(a.length / 2)];
+      setGpsDebilM(med >= 60 ? Math.round(med) : 0);
+    };
+    const iv = setInterval(evaluar, 20_000);
+    return () => clearInterval(iv);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conductor?.id, compartiendo]);
 
   // Drenar la cola cuando vuelve la conexión o el app vuelve a primer plano (de Waze).
   useEffect(() => {
@@ -2299,8 +2328,12 @@ export default function ConductorApp() {
               // Tercer eje EN VIVO: conectado pero el servicio de fondo NO corre = solo rastrea con
               // la app abierta. Es lo más urgente (config buena no sirve si ahora no está activo).
               const bgInactivo = compartiendo && !bgServicioActivo;
+              // Cuarto eje EN VIVO: la CALIDAD REAL de los fixes que entrega el equipo. El permiso
+              // puede estar "Preciso" y aun así llegar ±100 m (sin satélite: teléfono en guantera /
+              // parabrisas polarizado / ahorro de batería). Solo se mide compartiendo.
+              const gpsDebil = gpsDebilM > 0;
               const estado: "protegido" | "atencion" | "neutro" =
-                cortePendiente || exentaBat === false || precMala || bgInactivo ? "atencion"
+                cortePendiente || exentaBat === false || precMala || bgInactivo || gpsDebil ? "atencion"
                 : exentaBat === true ? "protegido"
                 : "neutro";
 
@@ -2348,10 +2381,10 @@ export default function ConductorApp() {
                   </span>
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ display: "block", fontSize: 13.5, fontWeight: 800, color: atencion ? "var(--c-warn)" : "var(--c-ink)" }}>
-                      {!atencion ? "Ajustes de rastreo" : bgInactivo ? "Rastreo en segundo plano inactivo" : precMala ? "Activa la ubicación precisa" : "Revisa los ajustes de rastreo"}
+                      {!atencion ? "Ajustes de rastreo" : bgInactivo ? "Rastreo en segundo plano inactivo" : precMala ? "Activa la ubicación precisa" : gpsDebil ? `GPS débil: sale a ±${gpsDebilM} m` : "Revisa los ajustes de rastreo"}
                     </span>
                     <span style={{ display: "block", marginTop: 1, fontSize: 11.5, color: atencion ? "var(--c-warn-ink)" : "var(--c-mute)" }}>
-                      {!atencion ? "Ubicación · batería · autostart" : bgInactivo ? "Solo rastrea con la app abierta · revísalo" : precMala ? "Tu GPS sale a ±150 m" : "El equipo puede cortar el GPS"}
+                      {!atencion ? "Ubicación · batería · autostart" : bgInactivo ? "Solo rastrea con la app abierta · revísalo" : precMala ? "Tu GPS sale a ±150 m" : gpsDebil ? "Pon el teléfono con vista al cielo · sin ahorro de batería" : "El equipo puede cortar el GPS"}
                     </span>
                   </span>
                   <IconChevronRight size={18} color={atencion ? "var(--c-warn)" : "var(--c-mute)"} />
