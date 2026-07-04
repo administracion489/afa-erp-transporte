@@ -81,7 +81,7 @@ function Md({ t }: { t: string }) {
 
 // ── Avatar (orbe con gradiente que "respira") ────────────────────────────────
 
-function OrbeElia({ size = 38, activa = false }: { size?: number; activa?: boolean }) {
+export function OrbeElia({ size = 38, activa = false }: { size?: number; activa?: boolean }) {
   return (
     <div
       className="relative rounded-full flex-shrink-0"

@@ -353,6 +353,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       { href: "/configuracion/perfil",   label: "Perfil Empresa", sub: "Datos · Logo",        icon: Ic.Building, modulo: "configuracion" },
       { href: "/configuracion/costos",   label: "Costos",         sub: "Flota y combustible",  icon: Ic.Settings, modulo: "ajustes"       },
       { href: "/configuracion/usuarios", label: "Usuarios",       sub: "Permisos de acceso",   icon: Ic.Lock,     modulo: "usuarios"      },
+      { href: "/configuracion/elia",     label: "ELIA",           sub: "Asistente IA · gasto", icon: Ic.Bot,      modulo: "configuracion" },
       { href: "/configuracion/sistema",  label: "Sistema",        sub: "Parámetros generales", icon: Ic.Wrench,    modulo: "configuracion" },
       { href: "/configuracion/legal",   label: "Páginas Legales",sub: "Privacidad · Términos",icon: Ic.FileText, modulo: "configuracion" },
     ],
@@ -539,8 +540,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     ) ||
     // /seguimiento/[token] es público — pero /seguimiento (módulo ERP) NO
     pathname.startsWith("/seguimiento/") ||
-    // Banco de pruebas visual de ELIA — solo existe en desarrollo
-    (process.env.NODE_ENV !== "production" && pathname === "/dev/elia");
+    // Bancos de pruebas visuales (/dev/*) — solo existen en desarrollo
+    (process.env.NODE_ENV !== "production" && pathname.startsWith("/dev/"));
 
   const [emailUsuario, setEmailUsuario]   = useState("");
   const [nombreUsuario, setNombreUsuario] = useState("Usuario");

@@ -128,6 +128,7 @@ export const RUTAS_MODULO: { href: string; etiqueta: string; modulo: string; ali
   { href: "/documentos", etiqueta: "Documentos", modulo: "documentos", alias: ["documentos", "sst", "contratos"] },
   { href: "/reportes", etiqueta: "Reportes", modulo: "reportes", alias: ["reportes", "indicadores", "kpi"] },
   { href: "/configuracion/usuarios", etiqueta: "Usuarios", modulo: "usuarios", alias: ["usuarios", "permisos"] },
+  { href: "/configuracion/elia", etiqueta: "Configuración de ELIA", modulo: "configuracion", alias: ["configurar elia", "limite de elia", "presupuesto de elia", "gasto de elia"] },
   { href: "/configuracion/perfil", etiqueta: "Perfil Empresa", modulo: "configuracion", alias: ["perfil", "perfil empresa", "logo"] },
   { href: "/configuracion/costos", etiqueta: "Costos", modulo: "ajustes", alias: ["costos", "parametros de costo"] },
   { href: "/configuracion/sistema", etiqueta: "Sistema", modulo: "configuracion", alias: ["sistema", "parametros", "configuracion"] },
@@ -163,6 +164,7 @@ const MODULOS_TOOL: Record<string, string[]> = {
   consultar_personal: ["personal-administrativo"],
   consultar_documentos_empresa: ["documentos", "vencimientos"],
   consultar_proveedores: ["proveedores"],
+  uso_de_elia: ["configuracion", "usuarios"],
   gps_en_vivo: ["monitoreo", "seguimiento"],
   abrir_modulo: [], // siempre disponible; valida permisos por destino
   proponer_accion: ["programacion", "despachador"],
@@ -195,6 +197,7 @@ export const ETIQUETA_TOOL: Record<string, string> = {
   consultar_personal: "Revisando al personal administrativo…",
   consultar_documentos_empresa: "Revisando los documentos de la empresa…",
   consultar_proveedores: "Buscando en proveedores…",
+  uso_de_elia: "Revisando mi propio consumo…",
   gps_en_vivo: "Mirando el mapa en vivo…",
   abrir_modulo: "Preparando el acceso directo…",
   proponer_accion: "Preparando la acción…",
@@ -490,6 +493,12 @@ const TOOLS_DEF: any[] = [
         tipo: { type: "string", enum: ["taller", "grifo", "repuestos", "seguros", "neumaticos", "lavadero", "vulcanizadora", "electricista", "administrativo", "otro"] },
       },
     },
+  },
+  {
+    name: "uso_de_elia",
+    description:
+      "Cuánto ha costado ELIA este mes: gasto acumulado en US$, límite configurado, respuestas dadas y modelo en uso. Solo para administradores. Úsala si preguntan '¿cuánto has gastado?', '¿cuánto cuesta ELIA?'.",
+    input_schema: { type: "object", properties: {} },
   },
   {
     name: "abrir_modulo",
@@ -2809,6 +2818,49 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
             })),
           },
         };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "uso_de_elia": {
+        const mes = fechaLima().slice(0, 7);
+        try {
+          const [{ data: cfg }, { data: gasto }] = await Promise.all([
+            sb.from("elia_config").select("modelo, limite_mensual_usd, activa").eq("id", 1).maybeSingle(),
+            sb.from("elia_gasto_mensual").select("total_usd, mensajes").eq("mes", mes).maybeSingle(),
+          ]);
+          if (!cfg)
+            return {
+              paraModelo: JSON.stringify({
+                nota: "Las tablas de control de gasto aún no existen: hay que ejecutar supabase/elia-config.sql en Supabase. Sugiere ir a Configuración → ELIA, donde están las instrucciones.",
+              }),
+            };
+          const total = Number((gasto as any)?.total_usd || 0);
+          const limite = Number((cfg as any).limite_mensual_usd || 0);
+          const mensajes = Number((gasto as any)?.mensajes || 0);
+          return {
+            paraModelo: JSON.stringify({
+              mes,
+              gasto_usd: Math.round(total * 100) / 100,
+              limite_usd: limite || "sin límite",
+              pct_usado: limite > 0 ? Math.round((total / limite) * 100) : null,
+              respuestas: mensajes,
+              costo_promedio_usd: mensajes > 0 ? Math.round((total / mensajes) * 1000) / 1000 : null,
+              modelo: (cfg as any).modelo,
+              nota: "El detalle y la configuración están en Configuración → ELIA.",
+            }),
+            ui: {
+              tipo: "kpis",
+              items: [
+                { label: `Gasto ${mes}`, valor: `US$ ${total.toFixed(2)}`, intent: limite > 0 && total >= limite * 0.8 ? "warn" : "info" },
+                { label: "Límite", valor: limite > 0 ? `US$ ${limite.toFixed(0)}` : "Sin límite", intent: "info" },
+                { label: "Respuestas", valor: String(mensajes) },
+                { label: "Modelo", valor: String((cfg as any).modelo).replace("claude-", "") },
+              ],
+            },
+          };
+        } catch {
+          return { paraModelo: JSON.stringify({ nota: "No pude leer el control de gasto (probablemente falta correr supabase/elia-config.sql)." }) };
+        }
       }
 
       // ────────────────────────────────────────────────────────────────────

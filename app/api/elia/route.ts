@@ -11,12 +11,18 @@ import {
   ETIQUETA_TOOL,
   type CtxElia,
 } from "@/lib/elia/herramientas";
+import {
+  cargarConfigElia,
+  registrarUsoElia,
+  extrasModelo,
+  acumularUso,
+  usoVacio,
+} from "@/lib/elia/config";
 import { PROMPT_ELIA, contextoDinamico } from "@/lib/elia/prompt";
 import type { EventoElia, MensajeHistorial } from "@/lib/elia/tipos";
 
 export const maxDuration = 60;
 
-const MODELO = "claude-opus-4-8";
 const MAX_ITERACIONES = 6;
 const MAX_HISTORIAL = 20;
 
@@ -40,6 +46,21 @@ export async function POST(request: Request) {
   if (historial.length === 0 || historial[historial.length - 1].rol !== "usuario") {
     return respuestaError("Falta el mensaje del usuario", 400);
   }
+
+  // ── Configuración: encendido, modelo y límite de presupuesto mensual
+  const config = await cargarConfigElia(usuario.sb);
+  if (!config.activa) {
+    return respuestaSSEUnica(
+      "Ahora mismo estoy **desactivada por el administrador**. Si necesitas que vuelva, pídele que me encienda en Configuración → ELIA. 🙏"
+    );
+  }
+  if (config.limiteMensualUsd > 0 && config.gastoMes >= config.limiteMensualUsd) {
+    return respuestaSSEUnica(
+      `Llegué al **límite de presupuesto de este mes** (US$ ${config.limiteMensualUsd.toFixed(0)}), así que voy a descansar hasta el próximo mes para cuidar los costos. ` +
+        `Si me necesitas antes, un administrador puede ampliar el límite en **Configuración → ELIA**.`
+    );
+  }
+  const MODELO = config.modelo;
 
   const anthropic = new Anthropic();
   const tools = toolsPermitidas(usuario.permisos, usuario.rol);
@@ -75,6 +96,7 @@ export async function POST(request: Request) {
       const emitir = (ev: EventoElia) =>
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
 
+      const uso = usoVacio();
       try {
         for (let iter = 0; iter < MAX_ITERACIONES; iter++) {
           const claudeStream = anthropic.messages.stream({
@@ -83,13 +105,13 @@ export async function POST(request: Request) {
             system,
             tools,
             messages,
-            thinking: { type: "adaptive" },
-            output_config: { effort: "low" },
+            ...extrasModelo(MODELO),
           } as any);
 
           claudeStream.on("text", (delta: string) => emitir({ t: "texto", d: delta }));
 
           const msg: any = await claudeStream.finalMessage();
+          acumularUso(uso, msg.usage);
           const toolUses = (msg.content ?? []).filter((b: any) => b.type === "tool_use");
 
           if (msg.stop_reason !== "tool_use" || toolUses.length === 0) break;
@@ -99,6 +121,7 @@ export async function POST(request: Request) {
 
           const resultados: any[] = [];
           for (const tu of toolUses) {
+            uso.herramientas++;
             emitir({ t: "tool", d: { nombre: tu.name, etiqueta: ETIQUETA_TOOL[tu.name] ?? "Consultando…" } });
             const r = await ejecutarToolElia(tu.name, tu.input, ctx);
             for (const bloque of Array.isArray(r.ui) ? r.ui : r.ui ? [r.ui] : []) emitir({ t: "ui", d: bloque });
@@ -108,6 +131,12 @@ export async function POST(request: Request) {
         }
 
         emitir({ t: "fin", d: null });
+        await registrarUsoElia(usuario.sb, {
+          usuarioId: usuario.usuarioId,
+          usuarioNombre: usuario.nombre,
+          modelo: MODELO,
+          uso,
+        });
       } catch (e: any) {
         emitir({
           t: "error",
@@ -132,5 +161,24 @@ function respuestaError(mensaje: string, status: number) {
   return new Response(JSON.stringify({ error: mensaje }), {
     status,
     headers: { "Content-Type": "application/json" },
+  });
+}
+
+/** Respuesta SSE de un solo mensaje (ELIA apagada o límite alcanzado): no llama al modelo, costo cero. */
+function respuestaSSEUnica(texto: string) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ t: "texto", d: texto })}\n\n`));
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ t: "fin", d: null })}\n\n`));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
   });
 }
