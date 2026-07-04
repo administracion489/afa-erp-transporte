@@ -12,6 +12,7 @@ import type {
   VehiculoUI,
   ConductorUI,
   KpiUI,
+  RankingUI,
   RadarItem,
 } from "./tipos";
 
@@ -105,6 +106,7 @@ const MODULOS_TOOL: Record<string, string[]> = {
   consultar_flota: ["vehiculos", "mantenimiento", "dashboard"],
   consultar_conductores: ["conductores"],
   consultar_clientes: ["clientes", "crm", "cotizaciones"],
+  ranking_clientes: ["reportes", "facturacion", "clientes", "crm"],
   finanzas: ["facturacion", "gastos", "reportes"],
   gps_en_vivo: ["monitoreo", "seguimiento"],
   abrir_modulo: [], // siempre disponible; valida permisos por destino
@@ -119,6 +121,7 @@ export const ETIQUETA_TOOL: Record<string, string> = {
   consultar_flota: "Revisando la flota y sus documentos…",
   consultar_conductores: "Revisando a los conductores…",
   consultar_clientes: "Consultando la cartera de clientes…",
+  ranking_clientes: "Armando el ranking de clientes…",
   finanzas: "Haciendo números…",
   gps_en_vivo: "Mirando el mapa en vivo…",
   abrir_modulo: "Preparando el acceso directo…",
@@ -193,6 +196,23 @@ const TOOLS_DEF: any[] = [
       type: "object",
       properties: { nombre: { type: "string", description: "Nombre o empresa (parcial)" } },
       required: ["nombre"],
+    },
+  },
+  {
+    name: "ranking_clientes",
+    description:
+      "Ranking de clientes por ventas, margen (ganancia) o número de servicios en los últimos N meses. Úsala para '¿qué cliente nos deja más ganancias?', 'top 5 clientes del trimestre', '¿quién nos compra más?'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        criterio: {
+          type: "string",
+          enum: ["ventas", "margen", "servicios"],
+          description: "Por defecto 'ventas'. 'margen' = ganancia neta por cliente.",
+        },
+        meses: { type: "integer", description: "Meses hacia atrás incluyendo el actual (1-12, por defecto 1 = mes en curso)" },
+        top: { type: "integer", description: "Cuántos clientes devolver (por defecto 5, máximo 10)" },
+      },
     },
   },
   {
@@ -667,6 +687,83 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
           };
         }
         return { paraModelo: JSON.stringify({ encontrados: detalle.length, clientes: detalle }), ui };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "ranking_clientes": {
+        const meses = Math.min(Math.max(Number(input.meses) || 1, 1), 12);
+        const top = Math.min(Math.max(Number(input.top) || 5, 1), 10);
+        const hoy = fechaLima();
+        const totalMeses = Number(hoy.slice(0, 4)) * 12 + (Number(hoy.slice(5, 7)) - 1) - (meses - 1);
+        const inicio = `${Math.floor(totalMeses / 12)}-${String((totalMeses % 12) + 1).padStart(2, "0")}-01`;
+
+        const verPrecios = puedeVerPrecios(ctx);
+        const criterio: "ventas" | "margen" | "servicios" =
+          !verPrecios ? "servicios" : input.criterio === "margen" || input.criterio === "servicios" ? input.criterio : "ventas";
+
+        // Paginar: Supabase corta en 1000 filas por consulta
+        const filas: any[] = [];
+        for (let pagina = 0; pagina < 5; pagina++) {
+          const { data } = await sb
+            .from("reservas")
+            .select("cliente_id, precio_cliente, margen")
+            .gte("fecha_servicio", inicio)
+            .lte("fecha_servicio", hoy)
+            .neq("estado", "cancelada")
+            .not("cliente_id", "is", null)
+            .range(pagina * 1000, pagina * 1000 + 999);
+          const lote = (data as any[]) ?? [];
+          filas.push(...lote);
+          if (lote.length < 1000) break;
+        }
+        if (filas.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, desde: inicio, nota: "No hay servicios (no cancelados) en ese rango." }) };
+
+        const acc: Record<number, { servicios: number; ventas: number; margen: number }> = {};
+        for (const r of filas) {
+          const a = (acc[r.cliente_id] ||= { servicios: 0, ventas: 0, margen: 0 });
+          a.servicios++;
+          a.ventas += Number(r.precio_cliente || 0);
+          a.margen += Number(r.margen || 0);
+        }
+        const orden = Object.entries(acc)
+          .map(([id, a]) => ({ cliente_id: Number(id), ...a }))
+          .sort((x, y) => y[criterio] - x[criterio])
+          .slice(0, top);
+
+        const nombres = await mapaNombres(sb, "clientes", orden.map((o) => o.cliente_id), "id, nombre, empresa");
+        const ranking = orden.map((o, i) => ({
+          puesto: i + 1,
+          cliente: nombres[o.cliente_id]?.nombre || nombres[o.cliente_id]?.empresa || `Cliente #${o.cliente_id}`,
+          servicios: o.servicios,
+          ...(verPrecios ? { ventas: Math.round(o.ventas * 100) / 100, margen: Math.round(o.margen * 100) / 100 } : {}),
+        }));
+
+        const items: RankingUI[] = ranking.map((r: any) => ({
+          puesto: r.puesto,
+          nombre: r.cliente,
+          valor:
+            criterio === "servicios" ? `${r.servicios} servicio${r.servicios === 1 ? "" : "s"}` : fmtSoles(criterio === "margen" ? r.margen : r.ventas),
+          sub:
+            criterio === "servicios"
+              ? undefined
+              : `${r.servicios} servicio${r.servicios === 1 ? "" : "s"}${criterio === "ventas" && r.margen != null ? ` · margen ${fmtSoles(r.margen)}` : ""}`,
+        }));
+
+        const etiquetaCriterio = criterio === "ventas" ? "por ventas" : criterio === "margen" ? "por margen" : "por n.º de servicios";
+        return {
+          paraModelo: JSON.stringify({
+            criterio,
+            desde: inicio,
+            hasta: hoy,
+            clientes_con_actividad: Object.keys(acc).length,
+            ranking,
+            ...(!verPrecios && input.criterio && input.criterio !== "servicios"
+              ? { nota: "El usuario no tiene permisos financieros: el ranking es por número de servicios, sin montos." }
+              : {}),
+          }),
+          ui: { tipo: "ranking", titulo: `Top clientes ${etiquetaCriterio}`, items },
+        };
       }
 
       // ────────────────────────────────────────────────────────────────────

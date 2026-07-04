@@ -243,6 +243,35 @@ function Bloque({
       </div>
     );
 
+  if (b.tipo === "ranking") {
+    const colorPuesto = (p: number) =>
+      p === 1 ? "#d4a017" : p === 2 ? "#8693A6" : p === 3 ? "#b0764a" : "#c9d2de";
+    return (
+      <TarjetaBloque>
+        <div className="px-3 pt-2.5 pb-1">
+          <p className="text-[9px] font-black uppercase tracking-wider text-[#8693A6]">{b.titulo}</p>
+        </div>
+        {b.items.map((r, i) => (
+          <div key={i} className={`px-3 py-2 flex items-center gap-2.5 ${i > 0 ? "border-t border-[#EEF1F4]" : ""}`}>
+            <span
+              className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-black text-white flex-shrink-0"
+              style={{ background: colorPuesto(r.puesto) }}
+            >
+              {r.puesto}
+            </span>
+            <div className="flex-1 min-w-0">
+              <p className="text-[12px] font-bold text-[#0c2d52] truncate">{r.nombre}</p>
+              {r.sub && <p className="text-[10px] text-[#8693A6] truncate">{r.sub}</p>}
+            </div>
+            <p className="text-[12px] font-bold text-[#0b315f] flex-shrink-0" style={{ fontFamily: "var(--font-mono)" }}>
+              {r.valor}
+            </p>
+          </div>
+        ))}
+      </TarjetaBloque>
+    );
+  }
+
   if (b.tipo === "link")
     return (
       <button

@@ -9,8 +9,16 @@ export type BloqueUI =
   | { tipo: "vehiculos"; items: VehiculoUI[] }
   | { tipo: "conductores"; items: ConductorUI[] }
   | { tipo: "kpis"; items: KpiUI[] }
+  | { tipo: "ranking"; titulo: string; items: RankingUI[] }
   | { tipo: "link"; href: string; etiqueta: string }
   | { tipo: "accion"; accion: AccionPropuesta };
+
+export type RankingUI = {
+  puesto: number;
+  nombre: string;
+  valor: string; // ej. "S/ 45,200.00" o "18 servicios"
+  sub?: string;  // ej. "12 servicios · margen S/ 8,100"
+};
 
 export type ServicioUI = {
   id: number;

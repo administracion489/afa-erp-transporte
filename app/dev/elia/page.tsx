@@ -31,6 +31,18 @@ function streamDemo(): Response {
     { t: "tool", d: { nombre: "buscar_servicios", etiqueta: "Buscando servicios…" } },
     { espera: 900 },
     { t: "ui", d: { tipo: "servicios", items: SERVICIOS_DEMO as any } },
+    {
+      t: "ui",
+      d: {
+        tipo: "ranking",
+        titulo: "Top clientes por ventas",
+        items: [
+          { puesto: 1, nombre: "Minera Andina SAC", valor: "S/ 48,200.00", sub: "22 servicios · margen S/ 9,150.00" },
+          { puesto: 2, nombre: "Constructora Delta", valor: "S/ 31,750.00", sub: "14 servicios · margen S/ 5,020.00" },
+          { puesto: 3, nombre: "Turismo Pacífico", valor: "S/ 12,400.00", sub: "6 servicios · margen S/ 2,880.00" },
+        ],
+      },
+    },
     { espera: 250 },
     { t: "texto", d: "Listo, encontré **3 servicios para mañana**. " },
     { espera: 220 },
