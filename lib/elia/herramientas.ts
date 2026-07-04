@@ -107,6 +107,7 @@ const MODULOS_TOOL: Record<string, string[]> = {
   consultar_conductores: ["conductores"],
   consultar_clientes: ["clientes", "crm", "cotizaciones"],
   ranking_clientes: ["reportes", "facturacion", "clientes", "crm"],
+  analisis_combustible: ["combustible", "gastos", "reportes"],
   finanzas: ["facturacion", "gastos", "reportes"],
   gps_en_vivo: ["monitoreo", "seguimiento"],
   abrir_modulo: [], // siempre disponible; valida permisos por destino
@@ -122,6 +123,7 @@ export const ETIQUETA_TOOL: Record<string, string> = {
   consultar_conductores: "Revisando a los conductores…",
   consultar_clientes: "Consultando la cartera de clientes…",
   ranking_clientes: "Armando el ranking de clientes…",
+  analisis_combustible: "Analizando el consumo de combustible…",
   finanzas: "Haciendo números…",
   gps_en_vivo: "Mirando el mapa en vivo…",
   abrir_modulo: "Preparando el acceso directo…",
@@ -212,6 +214,19 @@ const TOOLS_DEF: any[] = [
         },
         meses: { type: "integer", description: "Meses hacia atrás incluyendo el actual (1-12, por defecto 1 = mes en curso)" },
         top: { type: "integer", description: "Cuántos clientes devolver (por defecto 5, máximo 10)" },
+      },
+    },
+  },
+  {
+    name: "analisis_combustible",
+    description:
+      "Analiza el consumo de combustible de los últimos N meses: ranking por conductor o por vehículo (gasto, cantidad, rendimiento km/gal) y PATRONES INUSUALES para revisar (cargas que superan la capacidad del tanque, rendimiento muy por debajo del promedio del propio vehículo, kilometraje que no avanza, dobles cargas el mismo día). Úsala para '¿quién consume más combustible?', '¿hay cargas sospechosas?', 'rendimiento de la placa X'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        agrupar: { type: "string", enum: ["conductor", "vehiculo"], description: "Por defecto 'conductor'." },
+        meses: { type: "integer", description: "Meses hacia atrás incluyendo el actual (1-12, por defecto 1)" },
+        placa: { type: "string", description: "Analizar solo un vehículo (placa parcial)" },
       },
     },
   },
@@ -421,7 +436,7 @@ export async function calcularRadar(sb: SB, permisos: string[], rol: string): Pr
 
 // ── Ejecutor ─────────────────────────────────────────────────────────────────
 
-export type ResultadoTool = { paraModelo: string; ui?: BloqueUI };
+export type ResultadoTool = { paraModelo: string; ui?: BloqueUI | BloqueUI[] };
 
 export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia): Promise<ResultadoTool> {
   const { sb } = ctx;
@@ -763,6 +778,204 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
               : {}),
           }),
           ui: { tipo: "ranking", titulo: `Top clientes ${etiquetaCriterio}`, items },
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "analisis_combustible": {
+        const meses = Math.min(Math.max(Number(input.meses) || 1, 1), 12);
+        const hoy = fechaLima();
+        const totalMeses = Number(hoy.slice(0, 4)) * 12 + (Number(hoy.slice(5, 7)) - 1) - (meses - 1);
+        const inicio = `${Math.floor(totalMeses / 12)}-${String((totalMeses % 12) + 1).padStart(2, "0")}-01`;
+        const agrupar: "conductor" | "vehiculo" = input.agrupar === "vehiculo" ? "vehiculo" : "conductor";
+
+        // Vehículos (para placas, categorías y capacidad de tanque)
+        let qVeh = sb.from("vehiculos").select("id, placa, categoria");
+        if (input.placa) qVeh = qVeh.ilike("placa", `%${input.placa}%`);
+        const { data: vehs } = await qVeh;
+        const vehiculos = (vehs as any[]) ?? [];
+        if (input.placa && vehiculos.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, nota: `No hay vehículos con placa parecida a "${input.placa}".` }) };
+        const porVehiculoId: Record<number, any> = {};
+        for (const v of vehiculos) porVehiculoId[v.id] = v;
+
+        // Cargas del período (paginado contra el corte de 1000 filas)
+        const cargas: any[] = [];
+        for (let pagina = 0; pagina < 5; pagina++) {
+          let q = sb
+            .from("combustible")
+            .select("id, vehiculo_id, fecha, kilometraje, galones, precio_galon, total, grifo, conductor, tipo_combustible, unidad")
+            .gte("fecha", inicio)
+            .lte("fecha", hoy)
+            .order("fecha")
+            .range(pagina * 1000, pagina * 1000 + 999);
+          if (input.placa) q = q.in("vehiculo_id", vehiculos.map((v) => v.id));
+          const { data } = await q;
+          const lote = (data as any[]) ?? [];
+          cargas.push(...lote);
+          if (lote.length < 1000) break;
+        }
+        if (cargas.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, desde: inicio, nota: "No hay cargas de combustible registradas en ese rango." }) };
+
+        const gastoDe = (c: any) => Number(c.total || 0) || Number(c.galones || 0) * Number(c.precio_galon || 0);
+
+        // ── Agrupación (conductor = texto libre del registro; puede venir vacío)
+        const grupos: Record<string, { etiqueta: string; cargas: number; cantidad: number; gasto: number; vehiculos: Set<string> }> = {};
+        for (const c of cargas) {
+          const crudo = agrupar === "conductor" ? (c.conductor || "").trim() : porVehiculoId[c.vehiculo_id]?.placa || `Vehículo #${c.vehiculo_id}`;
+          const etiqueta = crudo || "(sin conductor registrado)";
+          const clave = etiqueta.toLowerCase();
+          const g = (grupos[clave] ||= { etiqueta, cargas: 0, cantidad: 0, gasto: 0, vehiculos: new Set() });
+          g.cargas++;
+          g.cantidad += Number(c.galones || 0);
+          g.gasto += gastoDe(c);
+          const placa = porVehiculoId[c.vehiculo_id]?.placa;
+          if (placa) g.vehiculos.add(placa);
+        }
+        const rankingGrupos = Object.values(grupos)
+          .sort((a, b) => b.gasto - a.gasto)
+          .slice(0, 8);
+
+        // ── Rendimiento y anomalías por vehículo+tipo (cargas ordenadas por km)
+        // Capacidades estimadas de tanque (mismas heurísticas que el módulo Combustible)
+        const CAPACIDAD: Record<string, number> = { BUS: 100, CUSTER: 100, MINIBUS: 60, VAN: 20, AUTO: 12, SUV: 15 };
+        const capacidadDe = (categoria?: string | null) => {
+          const cat = (categoria || "").toUpperCase();
+          for (const [k, v] of Object.entries(CAPACIDAD)) if (cat.includes(k)) return v;
+          return 80;
+        };
+
+        type Anomalia = { fecha: string; placa: string; conductor: string | null; detalle: string; monto: number };
+        const anomalias: Anomalia[] = [];
+        const rendimientosPorVehiculo: Record<string, number[]> = {};
+
+        const porSerie: Record<string, any[]> = {};
+        for (const c of cargas) {
+          if (!c.vehiculo_id) continue;
+          const tipo = c.tipo_combustible || "diesel";
+          if (tipo === "urea") continue; // aditivo: no aplica rendimiento km/gal
+          (porSerie[`${c.vehiculo_id}-${tipo}`] ||= []).push(c);
+        }
+
+        for (const [serie, lista] of Object.entries(porSerie)) {
+          const vehId = Number(serie.split("-")[0]);
+          const placa = porVehiculoId[vehId]?.placa || `#${vehId}`;
+          const cap = capacidadDe(porVehiculoId[vehId]?.categoria);
+
+          // Doble carga el mismo día + sobre-capacidad
+          const porDia: Record<string, number> = {};
+          for (const c of lista) {
+            porDia[c.fecha] = (porDia[c.fecha] || 0) + 1;
+            if (Number(c.galones) > cap * 1.1)
+              anomalias.push({
+                fecha: c.fecha,
+                placa,
+                conductor: c.conductor,
+                detalle: `Carga de ${Number(c.galones).toFixed(1)} gal supera la capacidad estimada del tanque (~${cap} gal)`,
+                monto: gastoDe(c),
+              });
+          }
+          for (const [fecha, n] of Object.entries(porDia)) {
+            if (n > 1) {
+              const delDia = lista.filter((c) => c.fecha === fecha);
+              anomalias.push({
+                fecha,
+                placa,
+                conductor: delDia[0]?.conductor ?? null,
+                detalle: `${n} cargas el mismo día (${delDia.map((c) => `${Number(c.galones).toFixed(0)} gal`).join(" + ")})`,
+                monto: delDia.reduce((s, c) => s + gastoDe(c), 0),
+              });
+            }
+          }
+
+          // Rendimiento entre cargas consecutivas (por kilometraje)
+          const conKm = lista.filter((c) => Number(c.kilometraje) > 0).sort((a, b) => Number(a.kilometraje) - Number(b.kilometraje));
+          const deltas: { c: any; rend: number }[] = [];
+          for (let i = 1; i < conKm.length; i++) {
+            const km = Number(conKm[i].kilometraje) - Number(conKm[i - 1].kilometraje);
+            const gal = Number(conKm[i].galones);
+            if (km <= 0 && gal > 0) {
+              anomalias.push({
+                fecha: conKm[i].fecha,
+                placa,
+                conductor: conKm[i].conductor,
+                detalle: `Cargó ${gal.toFixed(1)} gal sin avance de kilometraje registrado`,
+                monto: gastoDe(conKm[i]),
+              });
+              continue;
+            }
+            if (km > 0 && gal > 0) deltas.push({ c: conKm[i], rend: km / gal });
+          }
+          if (deltas.length >= 3) {
+            const prom = deltas.reduce((s, d) => s + d.rend, 0) / deltas.length;
+            (rendimientosPorVehiculo[placa] ||= []).push(prom);
+            for (const d of deltas) {
+              if (d.rend < prom * 0.6)
+                anomalias.push({
+                  fecha: d.c.fecha,
+                  placa,
+                  conductor: d.c.conductor,
+                  detalle: `Rendimiento de ${d.rend.toFixed(1)} km/gal, muy por debajo del promedio de la unidad (${prom.toFixed(1)} km/gal)`,
+                  monto: gastoDe(d.c),
+                });
+            }
+          } else if (deltas.length > 0) {
+            (rendimientosPorVehiculo[placa] ||= []).push(deltas.reduce((s, d) => s + d.rend, 0) / deltas.length);
+          }
+        }
+
+        anomalias.sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
+        const gastoTotal = cargas.reduce((s, c) => s + gastoDe(c), 0);
+
+        const bloqueRanking: BloqueUI = {
+          tipo: "ranking",
+          titulo: `Consumo de combustible por ${agrupar} (gasto)`,
+          items: rankingGrupos.slice(0, 5).map((g, i) => ({
+            puesto: i + 1,
+            nombre: g.etiqueta,
+            valor: fmtSoles(g.gasto),
+            sub: `${g.cargas} carga${g.cargas === 1 ? "" : "s"} · ${g.cantidad.toFixed(0)} gal${agrupar === "conductor" && g.vehiculos.size ? ` · ${[...g.vehiculos].slice(0, 3).join(", ")}` : ""}`,
+          })),
+        };
+
+        return {
+          paraModelo: JSON.stringify({
+            desde: inicio,
+            hasta: hoy,
+            cargas_totales: cargas.length,
+            gasto_total: Math.round(gastoTotal * 100) / 100,
+            agrupado_por: agrupar,
+            ranking: rankingGrupos.map((g) => ({
+              grupo: g.etiqueta,
+              cargas: g.cargas,
+              galones: Math.round(g.cantidad * 10) / 10,
+              gasto: Math.round(g.gasto * 100) / 100,
+              vehiculos: [...g.vehiculos],
+            })),
+            rendimiento_promedio_km_gal: Object.fromEntries(
+              Object.entries(rendimientosPorVehiculo).map(([p, r]) => [p, Math.round((r.reduce((s, n) => s + n, 0) / r.length) * 10) / 10])
+            ),
+            patrones_inusuales: anomalias.slice(0, 12),
+            notas: [
+              "El campo 'conductor' de cada carga es texto libre: puede venir vacío o escrito distinto (agrupa lo evidente y menciónalo si hay '(sin conductor registrado)').",
+              "IMPORTANTE: presenta los patrones inusuales como situaciones PARA REVISAR con el responsable; NUNCA acuses a una persona de robo — los datos no prueban intención.",
+            ],
+          }),
+          ui: anomalias.length
+            ? [
+                bloqueRanking,
+                {
+                  tipo: "conductores",
+                  items: anomalias.slice(0, 6).map((a) => ({
+                    nombre: `${a.placa} · ${a.fecha}`,
+                    estado: a.conductor || "sin conductor",
+                    telefono: null,
+                    alertas: [`${a.detalle} (${fmtSoles(a.monto)})`],
+                  })),
+                } as BloqueUI,
+              ]
+            : bloqueRanking,
         };
       }
 

@@ -101,7 +101,7 @@ export async function POST(request: Request) {
           for (const tu of toolUses) {
             emitir({ t: "tool", d: { nombre: tu.name, etiqueta: ETIQUETA_TOOL[tu.name] ?? "Consultando…" } });
             const r = await ejecutarToolElia(tu.name, tu.input, ctx);
-            if (r.ui) emitir({ t: "ui", d: r.ui });
+            for (const bloque of Array.isArray(r.ui) ? r.ui : r.ui ? [r.ui] : []) emitir({ t: "ui", d: bloque });
             resultados.push({ type: "tool_result", tool_use_id: tu.id, content: r.paraModelo });
           }
           messages.push({ role: "user", content: resultados });
