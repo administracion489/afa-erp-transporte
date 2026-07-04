@@ -100,6 +100,10 @@ export const RUTAS_MODULO: { href: string; etiqueta: string; modulo: string; ali
   { href: "/tarifario", etiqueta: "Tarifas", modulo: "tarifas", alias: ["tarifas", "tarifario"] },
   { href: "/clientes", etiqueta: "Clientes", modulo: "clientes", alias: ["clientes", "cliente", "base comercial"] },
   { href: "/crm", etiqueta: "Inbox CRM", modulo: "crm", alias: ["crm", "inbox", "conversaciones", "whatsapp"] },
+  { href: "/crm/pipeline", etiqueta: "Pipeline CRM", modulo: "crm", alias: ["pipeline", "embudo", "leads"] },
+  { href: "/crm/agente", etiqueta: "Agente IA del CRM", modulo: "crm", alias: ["agente ia", "afita", "agente crm"] },
+  { href: "/cotizaciones/plantillas", etiqueta: "Plantillas PDF", modulo: "cotizaciones", alias: ["plantillas", "plantillas pdf"] },
+  { href: "/mantenimiento/planes", etiqueta: "Planes Fabricante", modulo: "mantenimiento", alias: ["planes fabricante", "plan de mantenimiento"] },
   { href: "/despachador", etiqueta: "Despachador", modulo: "despachador", alias: ["despachador", "despacho", "urgentes"] },
   { href: "/calendario", etiqueta: "Calendario", modulo: "dashboard", alias: ["calendario", "agenda"] },
   { href: "/programacion", etiqueta: "Programación", modulo: "programacion", alias: ["programacion", "reservas", "servicios"] },
@@ -124,6 +128,9 @@ export const RUTAS_MODULO: { href: string; etiqueta: string; modulo: string; ali
   { href: "/documentos", etiqueta: "Documentos", modulo: "documentos", alias: ["documentos", "sst", "contratos"] },
   { href: "/reportes", etiqueta: "Reportes", modulo: "reportes", alias: ["reportes", "indicadores", "kpi"] },
   { href: "/configuracion/usuarios", etiqueta: "Usuarios", modulo: "usuarios", alias: ["usuarios", "permisos"] },
+  { href: "/configuracion/perfil", etiqueta: "Perfil Empresa", modulo: "configuracion", alias: ["perfil", "perfil empresa", "logo"] },
+  { href: "/configuracion/costos", etiqueta: "Costos", modulo: "ajustes", alias: ["costos", "parametros de costo"] },
+  { href: "/configuracion/sistema", etiqueta: "Sistema", modulo: "configuracion", alias: ["sistema", "parametros", "configuracion"] },
 ];
 
 export const TODOS_LOS_MODULOS = [...new Set(RUTAS_MODULO.map((r) => r.modulo))];
@@ -146,6 +153,16 @@ const MODULOS_TOOL: Record<string, string[]> = {
   analisis_cotizaciones: ["cotizaciones", "reportes", "crm"],
   ocupacion_servicios: ["programacion", "seguimiento", "pasajeros", "reportes"],
   tendencia_mensual: ["reportes", "facturacion"],
+  consultar_multas: ["multas", "reportes", "vehiculos"],
+  consultar_incidencias: ["incidencias", "reportes", "seguimiento"],
+  consultar_neumaticos: ["neumaticos", "vehiculos", "mantenimiento"],
+  consultar_seguros: ["seguros", "vehiculos", "reportes"],
+  consultar_mantenimiento: ["mantenimiento", "vehiculos"],
+  buscar_pasajero: ["pasajeros", "programacion", "seguimiento"],
+  consultar_tercerizadas: ["proveedores", "vehiculos", "reportes"],
+  consultar_personal: ["personal-administrativo"],
+  consultar_documentos_empresa: ["documentos", "vencimientos"],
+  consultar_proveedores: ["proveedores"],
   gps_en_vivo: ["monitoreo", "seguimiento"],
   abrir_modulo: [], // siempre disponible; valida permisos por destino
   proponer_accion: ["programacion", "despachador"],
@@ -168,6 +185,16 @@ export const ETIQUETA_TOOL: Record<string, string> = {
   analisis_cotizaciones: "Analizando las cotizaciones…",
   ocupacion_servicios: "Midiendo la ocupación de los servicios…",
   tendencia_mensual: "Trazando la tendencia del negocio…",
+  consultar_multas: "Revisando las multas…",
+  consultar_incidencias: "Revisando las incidencias…",
+  consultar_neumaticos: "Revisando los neumáticos…",
+  consultar_seguros: "Revisando las pólizas de seguro…",
+  consultar_mantenimiento: "Revisando el mantenimiento…",
+  buscar_pasajero: "Buscando al pasajero…",
+  consultar_tercerizadas: "Evaluando a las empresas tercerizadas…",
+  consultar_personal: "Revisando al personal administrativo…",
+  consultar_documentos_empresa: "Revisando los documentos de la empresa…",
+  consultar_proveedores: "Buscando en proveedores…",
   gps_en_vivo: "Mirando el mapa en vivo…",
   abrir_modulo: "Preparando el acceso directo…",
   proponer_accion: "Preparando la acción…",
@@ -212,11 +239,12 @@ const TOOLS_DEF: any[] = [
   {
     name: "consultar_flota",
     description:
-      "Estado de la flota propia: disponibilidad, semáforo documentario (SOAT, CITV, SUTRAN, MTC…), kilometraje y próximo mantenimiento. Con solo_alertas=true devuelve únicamente unidades con problemas.",
+      "Estado de TODA la flota (propia y tercerizada): disponibilidad, semáforo documentario, kilometraje y próximo mantenimiento. Para unidades propias los documentos (SOAT, CITV, SUTRAN, MTC…) son por vehículo; para las tercerizadas, por la EMPRESA dueña. Con solo_alertas=true devuelve únicamente unidades con problemas.",
     input_schema: {
       type: "object",
       properties: {
         placa: { type: "string", description: "Filtrar por placa (parcial)" },
+        flota: { type: "string", enum: ["propia", "terceros", "toda"], description: "Por defecto 'toda'." },
         solo_alertas: { type: "boolean", description: "Solo unidades con documentos vencidos/por vencer o mantenimiento próximo" },
       },
     },
@@ -224,11 +252,12 @@ const TOOLS_DEF: any[] = [
   {
     name: "consultar_conductores",
     description:
-      "Conductores propios: disponibilidad y vencimientos (licencia, SCTR, examen médico, psicosométrico, antecedentes, vida ley). Con solo_alertas=true devuelve solo los que tienen documentos vencidos o por vencer.",
+      "Conductores propios Y de empresas tercerizadas: disponibilidad y vencimientos. Propios: licencia, SCTR, examen médico, psicosométrico, antecedentes, vida ley. Terceros: licencia. Con solo_alertas=true devuelve solo los que tienen documentos vencidos o por vencer.",
     input_schema: {
       type: "object",
       properties: {
         nombre: { type: "string", description: "Filtrar por nombre (parcial)" },
+        flota: { type: "string", enum: ["propia", "terceros", "toda"], description: "Por defecto 'toda'." },
         solo_alertas: { type: "boolean" },
       },
     },
@@ -353,6 +382,114 @@ const TOOLS_DEF: any[] = [
     description:
       "Unidades transmitiendo GPS en los últimos 30 minutos: quién está en línea, con retraso o sin señal, velocidad y SOS activos. Úsala para '¿dónde están los buses?', '¿está transmitiendo la placa X?'.",
     input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "consultar_multas",
+    description:
+      "Multas/papeletas de la flota: pendientes con monto, descuentos por pronto pago que están por vencer (¡ahorro directo!), multas por vencer, y puntos acumulados por conductor (riesgo de suspensión). Filtra por estado o placa.",
+    input_schema: {
+      type: "object",
+      properties: {
+        estado: { type: "string", enum: ["Pendiente", "Pagada", "Impugnada", "Vencida", "En proceso"] },
+        placa: { type: "string" },
+        meses: { type: "integer", description: "Meses hacia atrás por fecha de infracción (1-12, por defecto 3)" },
+      },
+    },
+  },
+  {
+    name: "consultar_incidencias",
+    description:
+      "Incidencias operativas (accidentes, fallas, retrasos, robos…): abiertas con su SLA (vencido o no), conteo por tipo y severidad, impacto económico. Úsala para '¿qué incidencias hay abiertas?', '¿se venció algún SLA?'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        meses: { type: "integer", description: "1-12, por defecto 1" },
+        severidad: { type: "string", enum: ["critico", "alto", "medio", "bajo"] },
+        solo_abiertas: { type: "boolean", description: "Solo no cerradas (por defecto true)" },
+      },
+    },
+  },
+  {
+    name: "consultar_neumaticos",
+    description:
+      "Vida útil de los neumáticos por unidad y posición: % de desgaste (km recorridos vs vida útil), críticos (≥90%), en observación (70-90%) y costo por km. Filtra por placa.",
+    input_schema: {
+      type: "object",
+      properties: { placa: { type: "string" }, solo_alertas: { type: "boolean" } },
+    },
+  },
+  {
+    name: "consultar_seguros",
+    description:
+      "Pólizas de seguro (SOAT, CAT, SCTR, Vida Ley, Todo Riesgo…): vencidas y por vencer, a qué vehículo o empresa protegen, aseguradora y prima. Los tipos soat/cat/sctr_salud/sctr_pension/vida_ley son obligatorios por ley.",
+    input_schema: {
+      type: "object",
+      properties: { solo_alertas: { type: "boolean", description: "Solo vencidas o por vencer (≤30 días)" } },
+    },
+  },
+  {
+    name: "consultar_mantenimiento",
+    description:
+      "Estado del mantenimiento: órdenes de trabajo abiertas/en proceso (taller, días abiertas, costo), mantenimientos pendientes o próximos (por fecha o km) y gasto del período. Úsala para '¿qué unidades están en taller?', '¿qué mantenimiento viene?'.",
+    input_schema: {
+      type: "object",
+      properties: { meses: { type: "integer", description: "1-12, por defecto 3 (para costos e historial)" } },
+    },
+  },
+  {
+    name: "buscar_pasajero",
+    description:
+      "Busca un pasajero por nombre, DNI o empresa y devuelve sus datos y sus últimos servicios asignados (con estado de abordaje). Úsala para '¿en qué ruta está Juan Pérez?', '¿el DNI 12345678 abordó hoy?'.",
+    input_schema: {
+      type: "object",
+      properties: { busqueda: { type: "string", description: "Nombre, DNI o empresa (parcial)" } },
+      required: ["busqueda"],
+    },
+  },
+  {
+    name: "consultar_tercerizadas",
+    description:
+      "Semáforo de riesgo de las EMPRESAS tercerizadas: documentos obligatorios (SOAT, CITV, SUTRAN, MTC, Tarjeta de Propiedad, SCTR) vencidos o por vencer, licencias de sus conductores, tamaño de su flota y servicios que nos hicieron en el período. Úsala para '¿qué empresas tercerizadas están en riesgo?', '¿con quién trabajamos más?'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        nombre: { type: "string", description: "Filtrar por razón social (parcial)" },
+        meses: { type: "integer", description: "Meses para contar servicios (1-12, por defecto 3)" },
+      },
+    },
+  },
+  {
+    name: "consultar_personal",
+    description:
+      "Personal administrativo: datos, cargo, departamento y vencimientos SUNAFIL (contrato a plazo fijo, SCTR salud/pensión, examen médico, antecedentes, Vida Ley). Con solo_alertas=true, solo quienes tienen documentos vencidos o por vencer.",
+    input_schema: {
+      type: "object",
+      properties: { nombre: { type: "string" }, solo_alertas: { type: "boolean" } },
+    },
+  },
+  {
+    name: "consultar_documentos_empresa",
+    description:
+      "Documentos corporativos (contratos, SST, capacitaciones, permisos, legales): vencidos y por vencer, por categoría y alcance (empresa, cliente, proveedor, conductor). Úsala para '¿qué contratos vencen pronto?', '¿los docs de SST están al día?'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        categoria: { type: "string", enum: ["contrato", "guia_remision", "sst", "capacitacion", "permiso", "legal", "factura", "interno", "otro"] },
+        solo_alertas: { type: "boolean" },
+      },
+    },
+  },
+  {
+    name: "consultar_proveedores",
+    description:
+      "Directorio de proveedores (talleres, grifos, repuestos, seguros…): busca por nombre o tipo y devuelve contacto y estado.",
+    input_schema: {
+      type: "object",
+      properties: {
+        busqueda: { type: "string", description: "Nombre (parcial)" },
+        tipo: { type: "string", enum: ["taller", "grifo", "repuestos", "seguros", "neumaticos", "lavadero", "vulcanizadora", "electricista", "administrativo", "otro"] },
+      },
+    },
   },
   {
     name: "abrir_modulo",
@@ -495,6 +632,33 @@ export async function calcularRadar(sb: SB, permisos: string[], rol: string): Pr
     } catch {}
   }
 
+  // Empresas tercerizadas con documentos obligatorios vencidos
+  if (tienePermiso(ctx, ["proveedores", "vehiculos", "dashboard"])) {
+    try {
+      const { data } = await sb.from("documentos_tercero").select("empresa_id, tipo, fecha_vencimiento");
+      const vencidasPorEmpresa = new Set<number>();
+      const porVencerPorEmpresa = new Set<number>();
+      for (const d of (data as any[]) ?? []) {
+        const dias = diasPara(d.fecha_vencimiento);
+        if (dias === null) continue;
+        if (dias < 0) vencidasPorEmpresa.add(d.empresa_id);
+        else if (dias <= 30) porVencerPorEmpresa.add(d.empresa_id);
+      }
+      if (vencidasPorEmpresa.size > 0)
+        items.push({
+          nivel: "critico",
+          texto: `${vencidasPorEmpresa.size} empresa(s) tercerizada(s) con documentos VENCIDOS`,
+          href: "/tercerizadas",
+        });
+      if (porVencerPorEmpresa.size > 0)
+        items.push({
+          nivel: "atencion",
+          texto: `${porVencerPorEmpresa.size} empresa(s) tercerizada(s) con documentos por vencer (≤30 días)`,
+          href: "/tercerizadas",
+        });
+    } catch {}
+  }
+
   // Licencias de conductores
   if (tienePermiso(ctx, ["conductores", "dashboard"])) {
     try {
@@ -508,6 +672,46 @@ export async function calcularRadar(sb: SB, permisos: string[], rol: string): Pr
       }
       if (vencidas > 0) items.push({ nivel: "critico", texto: `${vencidas} licencia(s) de conducir vencida(s)`, href: "/conductores" });
       if (porVencer > 0) items.push({ nivel: "atencion", texto: `${porVencer} licencia(s) vencen en ≤30 días`, href: "/conductores" });
+    } catch {}
+  }
+
+  // Multas: pronto pago por vencer (ahorro directo si se paga a tiempo)
+  if (tienePermiso(ctx, ["multas", "dashboard"])) {
+    try {
+      const { data } = await sb
+        .from("multas")
+        .select("id, monto_original, monto_pronto_pago, fecha_limite_pronto_pago")
+        .eq("estado", "Pendiente")
+        .eq("tiene_pronto_pago", true)
+        .not("fecha_limite_pronto_pago", "is", null);
+      const urgentes = ((data as any[]) ?? []).filter((m) => {
+        const d = diasPara(m.fecha_limite_pronto_pago);
+        return d !== null && d >= 0 && d <= 3;
+      });
+      if (urgentes.length > 0) {
+        const ahorro = urgentes.reduce((s, m) => s + (Number(m.monto_original || 0) - Number(m.monto_pronto_pago || 0)), 0);
+        items.push({
+          nivel: "critico",
+          texto: `${urgentes.length} multa(s) con pronto pago que vence en ≤3 días (ahorro ${fmtSoles(ahorro)})`,
+          href: "/multas",
+        });
+      }
+    } catch {}
+  }
+
+  // Incidencias abiertas con SLA vencido
+  if (tienePermiso(ctx, ["incidencias", "seguimiento", "dashboard"])) {
+    try {
+      const { data } = await sb
+        .from("incidencias")
+        .select("id, sla_limite_h, created_at, estado")
+        .neq("estado", "cerrado")
+        .limit(200);
+      const vencidas = ((data as any[]) ?? []).filter(
+        (i) => i.sla_limite_h && (Date.now() - new Date(i.created_at).getTime()) / 3600000 > Number(i.sla_limite_h)
+      );
+      if (vencidas.length > 0)
+        items.push({ nivel: "atencion", texto: `${vencidas.length} incidencia(s) abierta(s) con SLA vencido`, href: "/incidencias" });
     } catch {}
   }
 
@@ -667,99 +871,224 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
 
       // ────────────────────────────────────────────────────────────────────
       case "consultar_flota": {
-        let q = sb
-          .from("vehiculos")
-          .select("id, placa, categoria, marca, modelo, estado, estado_operativo, kilometraje_actual, proximo_mantenimiento_km, capacidad_pasajeros");
-        if (input.placa) q = q.ilike("placa", `%${input.placa}%`);
-        const { data } = await q.order("placa").limit(60);
-        const flota = (data as any[]) ?? [];
-        if (flota.length === 0) return { paraModelo: JSON.stringify({ encontrados: 0 }) };
+        const alcance: "propia" | "terceros" | "toda" =
+          input.flota === "propia" || input.flota === "terceros" ? input.flota : "toda";
 
-        const { data: docs } = await sb
-          .from("documentos_vehiculo")
-          .select("vehiculo_id, tipo, fecha_vencimiento")
-          .in("vehiculo_id", flota.map((v) => v.id));
+        // ── Flota propia (documentos por vehículo)
+        let itemsPropios: VehiculoUI[] = [];
+        if (alcance !== "terceros") {
+          let q = sb
+            .from("vehiculos")
+            .select("id, placa, categoria, marca, modelo, estado, estado_operativo, kilometraje_actual, proximo_mantenimiento_km, capacidad_pasajeros");
+          if (input.placa) q = q.ilike("placa", `%${input.placa}%`);
+          const { data } = await q.order("placa").limit(60);
+          const flota = (data as any[]) ?? [];
 
-        const porVehiculo: Record<number, { tipo: string; dias: number }[]> = {};
-        for (const d of (docs as any[]) ?? []) {
-          const dias = diasPara(d.fecha_vencimiento);
-          if (dias === null || dias > 30) continue;
-          (porVehiculo[d.vehiculo_id] ||= []).push({ tipo: d.tipo, dias });
+          if (flota.length > 0) {
+            const { data: docs } = await sb
+              .from("documentos_vehiculo")
+              .select("vehiculo_id, tipo, fecha_vencimiento")
+              .in("vehiculo_id", flota.map((v) => v.id));
+
+            const porVehiculo: Record<number, { tipo: string; dias: number }[]> = {};
+            for (const d of (docs as any[]) ?? []) {
+              const dias = diasPara(d.fecha_vencimiento);
+              if (dias === null || dias > 30) continue;
+              (porVehiculo[d.vehiculo_id] ||= []).push({ tipo: d.tipo, dias });
+            }
+
+            itemsPropios = flota.map((v) => {
+              const avisos = (porVehiculo[v.id] ?? []).sort((a, b) => a.dias - b.dias);
+              const alertas: string[] = avisos.map((a) =>
+                a.dias < 0 ? `${a.tipo} VENCIDO hace ${Math.abs(a.dias)} día(s)` : `${a.tipo} vence en ${a.dias} día(s)`
+              );
+              const kmRestante =
+                v.proximo_mantenimiento_km && v.kilometraje_actual
+                  ? Number(v.proximo_mantenimiento_km) - Number(v.kilometraje_actual)
+                  : null;
+              if (kmRestante !== null && kmRestante <= 500)
+                alertas.push(kmRestante < 0 ? `Mantenimiento VENCIDO por ${Math.abs(kmRestante)} km` : `Mantenimiento en ${kmRestante} km`);
+
+              const rojo =
+                v.estado_operativo === "no_apto" ||
+                avisos.some((a) => a.dias < 0 && DOCS_OBLIGATORIOS.has(a.tipo)) ||
+                (kmRestante !== null && kmRestante < 0);
+              const semaforo: VehiculoUI["semaforo"] = rojo ? "rojo" : alertas.length > 0 ? "ambar" : "verde";
+              return {
+                placa: v.placa,
+                categoria: v.categoria,
+                marcaModelo: [v.marca, v.modelo].filter(Boolean).join(" ") || null,
+                estado: v.estado,
+                semaforo,
+                alertas,
+              };
+            });
+          }
         }
 
-        const items: VehiculoUI[] = flota.map((v) => {
-          const avisos = (porVehiculo[v.id] ?? []).sort((a, b) => a.dias - b.dias);
-          const alertas: string[] = avisos.map((a) =>
-            a.dias < 0 ? `${a.tipo} VENCIDO hace ${Math.abs(a.dias)} día(s)` : `${a.tipo} vence en ${a.dias} día(s)`
-          );
-          const kmRestante =
-            v.proximo_mantenimiento_km && v.kilometraje_actual
-              ? Number(v.proximo_mantenimiento_km) - Number(v.kilometraje_actual)
-              : null;
-          if (kmRestante !== null && kmRestante <= 500)
-            alertas.push(kmRestante < 0 ? `Mantenimiento VENCIDO por ${Math.abs(kmRestante)} km` : `Mantenimiento en ${kmRestante} km`);
+        // ── Flota tercerizada (documentos por EMPRESA o por vehículo específico)
+        let itemsTerceros: VehiculoUI[] = [];
+        let resumenEmpresas: any[] = [];
+        if (alcance !== "propia") {
+          const [{ data: emp }, { data: vt }, { data: dt }] = await Promise.all([
+            sb.from("empresas_tercerizadas").select("id, razon_social, ruc, estado, venc_autorizacion, venc_habilitacion"),
+            (() => {
+              let q = sb.from("vehiculos_tercero").select("id, empresa_id, placa, categoria, marca, estado");
+              if (input.placa) q = q.ilike("placa", `%${input.placa}%`);
+              return q.order("placa").limit(80);
+            })(),
+            sb.from("documentos_tercero").select("empresa_id, vehiculo_id, tipo, fecha_vencimiento"),
+          ]);
+          const empresas = (emp as any[]) ?? [];
+          const empresaPorId: Record<number, any> = {};
+          for (const e of empresas) empresaPorId[e.id] = e;
 
-          const rojo =
-            v.estado_operativo === "no_apto" ||
-            avisos.some((a) => a.dias < 0 && DOCS_OBLIGATORIOS.has(a.tipo)) ||
-            (kmRestante !== null && kmRestante < 0);
-          const semaforo: VehiculoUI["semaforo"] = rojo ? "rojo" : alertas.length > 0 ? "ambar" : "verde";
-          return {
-            placa: v.placa,
-            categoria: v.categoria,
-            marcaModelo: [v.marca, v.modelo].filter(Boolean).join(" ") || null,
-            estado: v.estado,
-            semaforo,
-            alertas,
-          };
-        });
+          // Documentos de nivel empresa (vehiculo_id null) + permisos propios de la empresa
+          const docsEmpresa: Record<number, { tipo: string; dias: number }[]> = {};
+          const docsVehiculo: Record<number, { tipo: string; dias: number }[]> = {};
+          for (const d of (dt as any[]) ?? []) {
+            const dias = diasPara(d.fecha_vencimiento);
+            if (dias === null || dias > 30) continue;
+            if (d.vehiculo_id) (docsVehiculo[d.vehiculo_id] ||= []).push({ tipo: d.tipo, dias });
+            else (docsEmpresa[d.empresa_id] ||= []).push({ tipo: d.tipo, dias });
+          }
+          for (const e of empresas) {
+            for (const [campo, etiqueta] of [
+              ["venc_autorizacion", "Autorización MTC"],
+              ["venc_habilitacion", "Habilitación SUTRAN"],
+            ] as [string, string][]) {
+              const dias = diasPara(e[campo]);
+              if (dias !== null && dias <= 30) (docsEmpresa[e.id] ||= []).push({ tipo: etiqueta, dias });
+            }
+          }
 
-        const visibles = input.solo_alertas ? items.filter((i) => i.semaforo !== "verde") : items;
+          itemsTerceros = ((vt as any[]) ?? []).map((v) => {
+            const empresa = empresaPorId[v.empresa_id];
+            const nombreEmpresa = empresa?.razon_social || `Empresa #${v.empresa_id}`;
+            const avisos = [...(docsVehiculo[v.id] ?? []), ...(docsEmpresa[v.empresa_id] ?? [])].sort((a, b) => a.dias - b.dias);
+            const alertas = avisos.map((a) =>
+              a.dias < 0
+                ? `${a.tipo} VENCIDO hace ${Math.abs(a.dias)} día(s)`
+                : `${a.tipo} vence en ${a.dias} día(s)`
+            );
+            const rojo = avisos.some((a) => a.dias < 0);
+            const semaforo: VehiculoUI["semaforo"] = rojo ? "rojo" : alertas.length > 0 ? "ambar" : "verde";
+            return {
+              placa: v.placa || "(sin placa)",
+              categoria: v.categoria,
+              marcaModelo: [v.marca, `· ${nombreEmpresa}`].filter(Boolean).join(" "),
+              estado: v.estado,
+              semaforo,
+              alertas,
+            };
+          });
+
+          resumenEmpresas = empresas.map((e) => {
+            const avisos = docsEmpresa[e.id] ?? [];
+            return {
+              empresa: e.razon_social,
+              estado: e.estado,
+              docs_vencidos: avisos.filter((a) => a.dias < 0).map((a) => a.tipo),
+              docs_por_vencer: avisos.filter((a) => a.dias >= 0).map((a) => `${a.tipo} (${a.dias}d)`),
+            };
+          });
+        }
+
+        const todos = [...itemsPropios, ...itemsTerceros];
+        if (todos.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, alcance, nota: "Sin unidades que coincidan con el filtro." }) };
+        const visibles = input.solo_alertas ? todos.filter((i) => i.semaforo !== "verde") : todos;
+
         return {
           paraModelo: JSON.stringify({
+            alcance,
             encontrados: visibles.length,
-            total_flota: flota.length,
-            vehiculos: visibles.map((i, idx) => ({ ...i })),
+            flota_propia: itemsPropios.length,
+            flota_tercerizada: itemsTerceros.length,
+            vehiculos: visibles,
+            empresas_tercerizadas: resumenEmpresas,
+            nota: "Los documentos de la flota tercerizada (SOAT, CITV, SUTRAN, MTC) se registran por EMPRESA, no por vehículo: un documento vencido afecta a todas las unidades de esa empresa.",
           }),
-          ui: { tipo: "vehiculos", items: visibles.slice(0, 10) },
+          ui: { tipo: "vehiculos", items: visibles.slice(0, 12) },
         };
       }
 
       // ────────────────────────────────────────────────────────────────────
       case "consultar_conductores": {
-        let q = sb
-          .from("conductores")
-          .select(
-            "id, nombre, telefono, estado, licencia, categoria_licencia, vencimiento_licencia, sctr_salud_venc, sctr_pension_venc, examen_medico_venc, psicosometrico_venc, antecedentes_venc, vida_ley_venc"
-          )
-          .neq("estado", "de_baja");
-        if (input.nombre) q = q.ilike("nombre", `%${input.nombre}%`);
-        const { data } = await q.order("nombre").limit(60);
-        const filas = (data as any[]) ?? [];
-        if (filas.length === 0) return { paraModelo: JSON.stringify({ encontrados: 0 }) };
+        const alcance: "propia" | "terceros" | "toda" =
+          input.flota === "propia" || input.flota === "terceros" ? input.flota : "toda";
 
-        const DOCS: [string, string][] = [
-          ["vencimiento_licencia", "Licencia"],
-          ["sctr_salud_venc", "SCTR Salud"],
-          ["sctr_pension_venc", "SCTR Pensión"],
-          ["examen_medico_venc", "Examen médico"],
-          ["psicosometrico_venc", "Psicosométrico"],
-          ["antecedentes_venc", "Antecedentes"],
-          ["vida_ley_venc", "Vida Ley"],
-        ];
-        const items: ConductorUI[] = filas.map((c) => {
-          const alertas: string[] = [];
-          for (const [campo, etiqueta] of DOCS) {
-            const dias = diasPara(c[campo]);
-            if (dias === null) continue;
-            if (dias < 0) alertas.push(`${etiqueta} VENCIDO hace ${Math.abs(dias)} día(s)`);
-            else if (dias <= 30) alertas.push(`${etiqueta} vence en ${dias} día(s)`);
-          }
-          return { nombre: c.nombre, estado: c.estado, telefono: c.telefono, alertas };
-        });
+        let items: ConductorUI[] = [];
+
+        if (alcance !== "terceros") {
+          let q = sb
+            .from("conductores")
+            .select(
+              "id, nombre, telefono, estado, licencia, categoria_licencia, vencimiento_licencia, sctr_salud_venc, sctr_pension_venc, examen_medico_venc, psicosometrico_venc, antecedentes_venc, vida_ley_venc"
+            )
+            .neq("estado", "de_baja");
+          if (input.nombre) q = q.ilike("nombre", `%${input.nombre}%`);
+          const { data } = await q.order("nombre").limit(60);
+
+          const DOCS: [string, string][] = [
+            ["vencimiento_licencia", "Licencia"],
+            ["sctr_salud_venc", "SCTR Salud"],
+            ["sctr_pension_venc", "SCTR Pensión"],
+            ["examen_medico_venc", "Examen médico"],
+            ["psicosometrico_venc", "Psicosométrico"],
+            ["antecedentes_venc", "Antecedentes"],
+            ["vida_ley_venc", "Vida Ley"],
+          ];
+          items = ((data as any[]) ?? []).map((c) => {
+            const alertas: string[] = [];
+            for (const [campo, etiqueta] of DOCS) {
+              const dias = diasPara(c[campo]);
+              if (dias === null) continue;
+              if (dias < 0) alertas.push(`${etiqueta} VENCIDO hace ${Math.abs(dias)} día(s)`);
+              else if (dias <= 30) alertas.push(`${etiqueta} vence en ${dias} día(s)`);
+            }
+            return { nombre: c.nombre, estado: c.estado, telefono: c.telefono, alertas };
+          });
+        }
+
+        if (alcance !== "propia") {
+          let q = sb.from("conductores_tercero").select("id, empresa_id, nombre, licencia, vencimiento_licencia, telefono, estado");
+          if (input.nombre) q = q.ilike("nombre", `%${input.nombre}%`);
+          const [{ data: ct }, { data: emp }] = await Promise.all([
+            q.order("nombre").limit(60),
+            sb.from("empresas_tercerizadas").select("id, razon_social"),
+          ]);
+          const empresaPorId: Record<number, string> = {};
+          for (const e of (emp as any[]) ?? []) empresaPorId[e.id] = e.razon_social;
+
+          items = items.concat(
+            (((ct as any[]) ?? [])).map((c) => {
+              const alertas: string[] = [];
+              const dias = diasPara(c.vencimiento_licencia);
+              if (dias !== null) {
+                if (dias < 0) alertas.push(`Licencia VENCIDA hace ${Math.abs(dias)} día(s)`);
+                else if (dias <= 30) alertas.push(`Licencia vence en ${dias} día(s)`);
+              }
+              return {
+                nombre: c.nombre,
+                estado: `tercero · ${empresaPorId[c.empresa_id] || "empresa #" + c.empresa_id}`,
+                telefono: c.telefono,
+                alertas,
+              };
+            })
+          );
+        }
+
+        if (items.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, alcance, nota: "Sin conductores que coincidan con el filtro." }) };
         const visibles = input.solo_alertas ? items.filter((i) => i.alertas.length > 0) : items;
         return {
-          paraModelo: JSON.stringify({ encontrados: visibles.length, conductores: visibles }),
+          paraModelo: JSON.stringify({
+            alcance,
+            encontrados: visibles.length,
+            conductores: visibles,
+            nota: alcance !== "propia" ? "De los conductores terceros solo se registra la licencia; los demás documentos los gestiona su empresa." : undefined,
+          }),
           ui: { tipo: "conductores", items: visibles.slice(0, 10) },
         };
       }
@@ -1809,6 +2138,676 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
                 ]
               : []),
           ],
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "consultar_multas": {
+        const meses = Math.min(Math.max(Number(input.meses) || 3, 1), 12);
+        const inicio = inicioMeses(meses);
+        let q = sb
+          .from("multas")
+          .select(
+            "id, placa, conductor_nombre, entidad, infraccion, severidad, puntos, monto_original, tiene_pronto_pago, monto_pronto_pago, fecha_limite_pronto_pago, fecha_infraccion, fecha_vencimiento, estado"
+          )
+          .gte("fecha_infraccion", inicio);
+        if (input.estado) q = q.eq("estado", input.estado);
+        if (input.placa) q = q.ilike("placa", `%${input.placa}%`);
+        const { data } = await q.order("fecha_infraccion", { ascending: false }).limit(200);
+        const multas = (data as any[]) ?? [];
+        if (multas.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, desde: inicio, nota: "Sin multas registradas con esos filtros." }) };
+
+        const pendientes = multas.filter((m) => m.estado === "Pendiente");
+        const montoPendiente = pendientes.reduce((s, m) => s + Number(m.monto_original || 0), 0);
+        const prontoPago = pendientes
+          .filter((m) => m.tiene_pronto_pago && m.fecha_limite_pronto_pago && (diasPara(m.fecha_limite_pronto_pago) ?? -1) >= 0)
+          .map((m) => ({
+            placa: m.placa,
+            infraccion: m.infraccion,
+            dias_restantes: diasPara(m.fecha_limite_pronto_pago),
+            pagar: Number(m.monto_pronto_pago || 0),
+            ahorro: Number(m.monto_original || 0) - Number(m.monto_pronto_pago || 0),
+          }))
+          .sort((a, b) => (a.dias_restantes ?? 0) - (b.dias_restantes ?? 0));
+        const ahorroTotal = prontoPago.reduce((s, m) => s + m.ahorro, 0);
+        const porVencer = pendientes.filter((m) => {
+          const d = diasPara(m.fecha_vencimiento);
+          return d !== null && d >= 0 && d <= 5;
+        });
+
+        const puntosPorConductor: Record<string, number> = {};
+        for (const m of multas)
+          if (m.conductor_nombre) puntosPorConductor[m.conductor_nombre] = (puntosPorConductor[m.conductor_nombre] || 0) + Number(m.puntos || 0);
+
+        return {
+          paraModelo: JSON.stringify({
+            desde: inicio,
+            total: multas.length,
+            pendientes: pendientes.length,
+            monto_pendiente: montoPendiente,
+            pronto_pago_activo: prontoPago,
+            ahorro_si_paga_a_tiempo: ahorroTotal,
+            por_vencer_5dias: porVencer.length,
+            puntos_por_conductor: puntosPorConductor,
+            detalle: multas.slice(0, 12).map((m) => ({
+              placa: m.placa,
+              fecha: m.fecha_infraccion,
+              infraccion: m.infraccion,
+              severidad: m.severidad,
+              monto: m.monto_original,
+              estado: m.estado,
+              entidad: m.entidad,
+            })),
+            nota: "Prioriza avisar los pronto pago por vencer: pagarlos a tiempo es ahorro directo. 100 puntos acumulados en la flota = riesgo de suspensión SUTRAN.",
+          }),
+          ui: {
+            tipo: "kpis",
+            items: [
+              { label: "Pendientes", valor: String(pendientes.length), sub: fmtSoles(montoPendiente), intent: pendientes.length ? "warn" : "ok" },
+              { label: "Pronto pago activo", valor: String(prontoPago.length), sub: prontoPago.length ? `ahorra ${fmtSoles(ahorroTotal)}` : undefined, intent: prontoPago.length ? "danger" : "ok" },
+              { label: "Vencen en ≤5 días", valor: String(porVencer.length), intent: porVencer.length ? "danger" : "ok" },
+              { label: "Multas en el período", valor: String(multas.length), sub: `desde ${inicio}`, intent: "info" },
+            ],
+          },
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "consultar_incidencias": {
+        const meses = Math.min(Math.max(Number(input.meses) || 1, 1), 12);
+        const inicio = inicioMeses(meses);
+        const soloAbiertas = input.solo_abiertas !== false;
+
+        let q = sb
+          .from("incidencias")
+          .select("id, tipo, severidad, estado, descripcion, ubicacion, vehiculo_id, conductor_id, cliente, impacto_economico, sla_limite_h, tiempo_resolucion_h, created_at")
+          .gte("created_at", inicio);
+        if (input.severidad) q = q.eq("severidad", input.severidad);
+        if (soloAbiertas) q = q.neq("estado", "cerrado");
+        const { data } = await q.order("created_at", { ascending: false }).limit(100);
+        const incidencias = (data as any[]) ?? [];
+        if (incidencias.length === 0)
+          return {
+            paraModelo: JSON.stringify({ encontrados: 0, desde: inicio, nota: soloAbiertas ? "No hay incidencias abiertas en el rango. 🎉" : "Sin incidencias en el rango." }),
+          };
+
+        const vehiculos = await mapaNombres(sb, "vehiculos", incidencias.map((i) => i.vehiculo_id), "id, placa");
+        const porTipo: Record<string, number> = {};
+        const porSeveridad: Record<string, number> = {};
+        let slaVencidos = 0;
+        let impacto = 0;
+        const detalle = incidencias.map((i) => {
+          porTipo[i.tipo] = (porTipo[i.tipo] || 0) + 1;
+          porSeveridad[i.severidad] = (porSeveridad[i.severidad] || 0) + 1;
+          impacto += Number(i.impacto_economico || 0);
+          const horas = Math.floor((Date.now() - new Date(i.created_at).getTime()) / 3600000);
+          const slaVencido = i.estado !== "cerrado" && i.sla_limite_h && horas > Number(i.sla_limite_h);
+          if (slaVencido) slaVencidos++;
+          return {
+            tipo: i.tipo,
+            severidad: i.severidad,
+            estado: i.estado,
+            placa: i.vehiculo_id ? vehiculos[i.vehiculo_id]?.placa : null,
+            descripcion: (i.descripcion || "").slice(0, 120),
+            horas_abierta: i.estado !== "cerrado" ? horas : null,
+            sla_vencido: !!slaVencido,
+          };
+        });
+
+        return {
+          paraModelo: JSON.stringify({
+            desde: inicio,
+            encontrados: incidencias.length,
+            por_tipo: porTipo,
+            por_severidad: porSeveridad,
+            sla_vencidos: slaVencidos,
+            impacto_economico_total: impacto,
+            detalle: detalle.slice(0, 12),
+          }),
+          ui: [
+            {
+              tipo: "kpis",
+              items: [
+                { label: soloAbiertas ? "Abiertas" : "Incidencias", valor: String(incidencias.length), sub: `desde ${inicio}`, intent: "info" },
+                { label: "SLA vencido", valor: String(slaVencidos), intent: slaVencidos ? "danger" : "ok" },
+                { label: "Críticas/altas", valor: String((porSeveridad["critico"] || 0) + (porSeveridad["alto"] || 0)), intent: (porSeveridad["critico"] || 0) > 0 ? "danger" : "warn" },
+                { label: "Impacto económico", valor: fmtCorto(impacto), intent: impacto > 0 ? "warn" : "ok" },
+              ],
+            },
+            {
+              tipo: "conductores",
+              items: detalle.slice(0, 6).map((d) => ({
+                nombre: `${d.tipo}${d.placa ? ` · ${d.placa}` : ""}`,
+                estado: `${d.severidad} · ${d.estado}`,
+                telefono: null,
+                alertas: [
+                  ...(d.sla_vencido ? [`SLA VENCIDO (${d.horas_abierta}h abierta)`] : []),
+                  ...(d.descripcion ? [d.descripcion] : []),
+                ],
+              })),
+            } as BloqueUI,
+          ],
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "consultar_neumaticos": {
+        let q = sb
+          .from("neumaticos")
+          .select("id, vehiculo_id, marca, medida, posicion, km_actual, km_instalacion, vida_util_km, cocada_actual, cocada_nueva, costo_compra, estado");
+        const { data } = await q.limit(300);
+        let neumaticos = (data as any[]) ?? [];
+        if (input.placa) {
+          const { data: v } = await sb.from("vehiculos").select("id").ilike("placa", `%${input.placa}%`);
+          const ids = new Set(((v as any[]) ?? []).map((x) => x.id));
+          neumaticos = neumaticos.filter((n) => ids.has(n.vehiculo_id));
+        }
+        if (neumaticos.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, nota: "Sin neumáticos registrados con ese filtro." }) };
+
+        const vehiculos = await mapaNombres(sb, "vehiculos", neumaticos.map((n) => n.vehiculo_id), "id, placa");
+        const detalle = neumaticos.map((n) => {
+          const kmRec = Math.max(0, Number(n.km_actual || 0) - Number(n.km_instalacion || 0));
+          const vida = Number(n.vida_util_km || 80000);
+          const pct = Math.min(100, Math.round((kmRec / vida) * 100));
+          const cpk = kmRec > 0 && Number(n.costo_compra) > 0 ? Number(n.costo_compra) / kmRec : null;
+          return {
+            placa: n.vehiculo_id ? vehiculos[n.vehiculo_id]?.placa : null,
+            posicion: n.posicion,
+            marca: n.marca,
+            medida: n.medida,
+            km_recorridos: kmRec,
+            vida_util_pct: pct,
+            cocada_mm: n.cocada_actual,
+            cpk: cpk ? Math.round(cpk * 1000) / 1000 : null,
+            estado: n.estado,
+            nivel: pct >= 90 ? "critico" : pct >= 70 ? "observacion" : "ok",
+          };
+        });
+        const criticos = detalle.filter((d) => d.nivel === "critico");
+        const observacion = detalle.filter((d) => d.nivel === "observacion");
+        const visibles = input.solo_alertas ? [...criticos, ...observacion] : detalle;
+
+        return {
+          paraModelo: JSON.stringify({
+            encontrados: detalle.length,
+            criticos: criticos.length,
+            en_observacion: observacion.length,
+            detalle: visibles.slice(0, 15),
+            nota: "Crítico = ≥90% de la vida útil en km; observación = 70-90%. Cambiar a tiempo evita fallas en ruta.",
+          }),
+          ui: [
+            {
+              tipo: "kpis",
+              items: [
+                { label: "Neumáticos", valor: String(detalle.length), intent: "info" },
+                { label: "Críticos (≥90%)", valor: String(criticos.length), intent: criticos.length ? "danger" : "ok" },
+                { label: "En observación", valor: String(observacion.length), sub: "70-90% de vida útil", intent: observacion.length ? "warn" : "ok" },
+              ],
+            },
+            ...(criticos.length + observacion.length > 0
+              ? [
+                  {
+                    tipo: "conductores",
+                    items: [...criticos, ...observacion].slice(0, 6).map((d) => ({
+                      nombre: `${d.placa ?? "?"} · pos. ${d.posicion ?? "?"}`,
+                      estado: `${d.vida_util_pct}% usado`,
+                      telefono: null,
+                      alertas: [
+                        `${d.nivel === "critico" ? "VENCIDO/crítico" : "En observación"}: ${d.km_recorridos.toLocaleString("es-PE")} km recorridos${d.cocada_mm ? ` · cocada ${d.cocada_mm}mm` : ""}`,
+                      ],
+                    })),
+                  } as BloqueUI,
+                ]
+              : []),
+          ],
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "consultar_seguros": {
+        const { data } = await sb
+          .from("seguros")
+          .select("id, tipo, aseguradora, numero_poliza, vehiculo_id, proveedor_id, fecha_vencimiento, prima_total, cuota_mensual, estado")
+          .limit(200);
+        const seguros = (data as any[]) ?? [];
+        if (seguros.length === 0) return { paraModelo: JSON.stringify({ encontrados: 0, nota: "No hay pólizas registradas." }) };
+
+        const ETIQUETA_TIPO: Record<string, string> = {
+          soat: "SOAT",
+          cat: "CAT",
+          sctr_salud: "SCTR Salud",
+          sctr_pension: "SCTR Pensión",
+          vida_ley: "Vida Ley",
+          todo_riesgo: "Todo Riesgo",
+          responsabilidad_civil: "Resp. Civil",
+          seguro_carga: "Seg. Carga",
+          patrimonio: "Patrimonio",
+          otro: "Otro",
+        };
+        const OBLIGATORIOS = new Set(["soat", "cat", "sctr_salud", "sctr_pension", "vida_ley"]);
+        const vehiculos = await mapaNombres(sb, "vehiculos", seguros.map((s) => s.vehiculo_id), "id, placa");
+
+        const detalle = seguros.map((s) => {
+          const dias = diasPara(s.fecha_vencimiento);
+          return {
+            tipo: ETIQUETA_TIPO[s.tipo] || s.tipo,
+            obligatorio: OBLIGATORIOS.has(s.tipo),
+            aseguradora: s.aseguradora,
+            poliza: s.numero_poliza,
+            placa: s.vehiculo_id ? vehiculos[s.vehiculo_id]?.placa : null,
+            vence: s.fecha_vencimiento,
+            dias_para_vencer: dias,
+            situacion: dias === null ? "sin_fecha" : dias < 0 ? "vencido" : dias <= 30 ? "por_vencer" : "vigente",
+            cuota_mensual: s.cuota_mensual,
+          };
+        });
+        const vencidos = detalle.filter((d) => d.situacion === "vencido");
+        const porVencer = detalle.filter((d) => d.situacion === "por_vencer");
+        const cuotaTotal = seguros.reduce((s, x) => s + Number(x.cuota_mensual || 0), 0);
+        const visibles = input.solo_alertas ? [...vencidos, ...porVencer] : detalle;
+
+        return {
+          paraModelo: JSON.stringify({
+            encontrados: detalle.length,
+            vencidos: vencidos.length,
+            por_vencer_30d: porVencer.length,
+            cuota_mensual_total: cuotaTotal,
+            detalle: visibles.slice(0, 15),
+            nota: "SOAT/CAT, SCTR y Vida Ley son obligatorios por ley: un vencido es riesgo legal inmediato.",
+          }),
+          ui: [
+            {
+              tipo: "kpis",
+              items: [
+                { label: "Pólizas", valor: String(detalle.length), intent: "info" },
+                { label: "Vencidas", valor: String(vencidos.length), intent: vencidos.length ? "danger" : "ok" },
+                { label: "Por vencer (30d)", valor: String(porVencer.length), intent: porVencer.length ? "warn" : "ok" },
+                { label: "Cuota mensual", valor: fmtCorto(cuotaTotal), intent: "info" },
+              ],
+            },
+            ...(vencidos.length + porVencer.length > 0
+              ? [
+                  {
+                    tipo: "conductores",
+                    items: [...vencidos, ...porVencer].slice(0, 6).map((d) => ({
+                      nombre: `${d.tipo}${d.placa ? ` · ${d.placa}` : ""}`,
+                      estado: d.aseguradora,
+                      telefono: null,
+                      alertas: [
+                        d.situacion === "vencido"
+                          ? `VENCIDO hace ${Math.abs(d.dias_para_vencer!)} día(s)${d.obligatorio ? " (OBLIGATORIO)" : ""}`
+                          : `Vence en ${d.dias_para_vencer} día(s)${d.obligatorio ? " (obligatorio)" : ""}`,
+                      ],
+                    })),
+                  } as BloqueUI,
+                ]
+              : []),
+          ],
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "consultar_mantenimiento": {
+        const meses = Math.min(Math.max(Number(input.meses) || 3, 1), 12);
+        const inicio = inicioMeses(meses);
+        const hoy = fechaLima();
+
+        const [{ data: ots }, { data: mants }, { data: vehs }] = await Promise.all([
+          sb
+            .from("ordenes_trabajo")
+            .select("id, vehiculo_id, fecha_apertura, fecha_cierre, mecanico, taller, costo_total, estado")
+            .gte("fecha_apertura", inicio)
+            .order("fecha_apertura", { ascending: false })
+            .limit(100),
+          sb
+            .from("mantenimiento")
+            .select("id, vehiculo_id, fecha, tipo, descripcion, costo, estado, proximo_km, proxima_fecha")
+            .gte("fecha", inicio)
+            .order("fecha", { ascending: false })
+            .limit(150),
+          sb.from("vehiculos").select("id, placa, kilometraje_actual, proximo_mantenimiento_km"),
+        ]);
+        const vehiculos: Record<number, any> = {};
+        for (const v of (vehs as any[]) ?? []) vehiculos[v.id] = v;
+
+        const otsAbiertas = ((ots as any[]) ?? []).filter((o) => o.estado === "abierta" || o.estado === "en_proceso");
+        const costoOts = ((ots as any[]) ?? []).filter((o) => o.estado === "cerrada").reduce((s, o) => s + Number(o.costo_total || 0), 0);
+        const costoMants = ((mants as any[]) ?? []).filter((m) => m.estado === "finalizado").reduce((s, m) => s + Number(m.costo || 0), 0);
+        const pendientes = ((mants as any[]) ?? []).filter((m) => m.estado === "pendiente" || m.estado === "en_proceso");
+
+        // Próximos por km (usando el consolidado del vehículo) y por fecha
+        const proximos: { placa: string; detalle: string }[] = [];
+        for (const v of (vehs as any[]) ?? []) {
+          if (v.proximo_mantenimiento_km && v.kilometraje_actual) {
+            const faltan = Number(v.proximo_mantenimiento_km) - Number(v.kilometraje_actual);
+            if (faltan <= 500)
+              proximos.push({ placa: v.placa, detalle: faltan < 0 ? `VENCIDO por ${Math.abs(faltan)} km` : `en ${faltan} km` });
+          }
+        }
+        for (const m of (mants as any[]) ?? []) {
+          const dias = diasPara(m.proxima_fecha);
+          if (dias !== null && dias <= 15) {
+            const placa = m.vehiculo_id ? vehiculos[m.vehiculo_id]?.placa : "?";
+            proximos.push({ placa, detalle: dias < 0 ? `VENCIDO hace ${Math.abs(dias)} día(s)` : `en ${dias} día(s)` });
+          }
+        }
+
+        return {
+          paraModelo: JSON.stringify({
+            desde: inicio,
+            ots_abiertas: otsAbiertas.map((o) => ({
+              placa: o.vehiculo_id ? vehiculos[o.vehiculo_id]?.placa : null,
+              taller: o.taller,
+              mecanico: o.mecanico,
+              dias_abierta: Math.max(0, Math.floor((Date.now() - new Date(o.fecha_apertura + "T00:00:00-05:00").getTime()) / 86400000)),
+              estado: o.estado,
+            })),
+            mantenimientos_pendientes: pendientes.length,
+            proximos_mantenimientos: proximos,
+            costo_periodo: Math.round((costoOts + costoMants) * 100) / 100,
+          }),
+          ui: {
+            tipo: "kpis",
+            items: [
+              { label: "OTs abiertas", valor: String(otsAbiertas.length), intent: otsAbiertas.length ? "warn" : "ok" },
+              { label: "Próximos", valor: String(proximos.length), sub: "por km o fecha", intent: proximos.length ? "warn" : "ok" },
+              { label: "Pendientes", valor: String(pendientes.length), intent: pendientes.length ? "warn" : "ok" },
+              { label: "Costo del período", valor: fmtCorto(costoOts + costoMants), sub: `desde ${inicio}`, intent: "info" },
+            ],
+          },
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "buscar_pasajero": {
+        const b = String(input.busqueda || "").trim();
+        if (!b) return { paraModelo: JSON.stringify({ error: "Falta el texto de búsqueda." }) };
+        const { data } = await sb
+          .from("pasajeros")
+          .select("id, nombre, dni, empresa, cliente_id, telefono, email, activo")
+          .or(`nombre.ilike.%${b}%,dni.ilike.%${b}%,empresa.ilike.%${b}%`)
+          .limit(8);
+        const pasajeros = (data as any[]) ?? [];
+        if (pasajeros.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, nota: `No encontré pasajeros que coincidan con "${b}".` }) };
+
+        // Últimas asignaciones del primer match
+        const principal = pasajeros[0];
+        const { data: pp } = await sb
+          .from("pasajeros_parada")
+          .select("id, parada_id, estado, estado_abordaje")
+          .eq("pasajero_id", principal.id)
+          .order("id", { ascending: false })
+          .limit(6);
+        const asignaciones = (pp as any[]) ?? [];
+        let viajes: any[] = [];
+        if (asignaciones.length > 0) {
+          const { data: paradas } = await sb
+            .from("paradas")
+            .select("id, reserva_id, nombre, hora_estimada")
+            .in("id", asignaciones.map((a) => a.parada_id));
+          const paradaPorId: Record<number, any> = {};
+          for (const p of (paradas as any[]) ?? []) paradaPorId[p.id] = p;
+          const reservaIds = [...new Set(((paradas as any[]) ?? []).map((p) => p.reserva_id).filter(Boolean))];
+          const reservas = await mapaNombres(sb, "reservas", reservaIds, "id, origen, destino, fecha_servicio, estado");
+          viajes = asignaciones.map((a) => {
+            const parada = paradaPorId[a.parada_id];
+            const r = parada ? reservas[parada.reserva_id] : null;
+            const abordado = a.estado_abordaje === "Abordado" || a.estado === "abordado" || a.estado === "embarcado";
+            return {
+              servicio_id: r?.id ?? null,
+              fecha: r?.fecha_servicio ?? null,
+              ruta: r ? `${r.origen ?? "?"} → ${r.destino ?? "?"}` : null,
+              paradero: parada?.nombre ?? null,
+              hora_paradero: parada?.hora_estimada ?? null,
+              abordo: abordado,
+            };
+          });
+        }
+
+        return {
+          paraModelo: JSON.stringify({
+            encontrados: pasajeros.length,
+            pasajeros: pasajeros.map((p) => ({ nombre: p.nombre, dni: p.dni, empresa: p.empresa, telefono: p.telefono, activo: p.activo })),
+            viajes_recientes_de: principal.nombre,
+            viajes_recientes: viajes,
+          }),
+          ui: {
+            tipo: "conductores",
+            items: pasajeros.slice(0, 5).map((p) => ({
+              nombre: p.nombre,
+              estado: p.empresa || (p.activo ? "activo" : "inactivo"),
+              telefono: p.telefono,
+              alertas: p.dni ? [`DNI ${p.dni}`] : [],
+            })),
+          },
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "consultar_tercerizadas": {
+        const meses = Math.min(Math.max(Number(input.meses) || 3, 1), 12);
+        const inicio = inicioMeses(meses);
+
+        let qe = sb
+          .from("empresas_tercerizadas")
+          .select("id, razon_social, ruc, telefono, contacto_nombre, contacto_telefono, venc_autorizacion, venc_habilitacion, estado");
+        if (input.nombre) qe = qe.ilike("razon_social", `%${input.nombre}%`);
+        const [{ data: emp }, { data: dt }, { data: ct }, { data: vt }, servicios] = await Promise.all([
+          qe.limit(40),
+          sb.from("documentos_tercero").select("empresa_id, tipo, fecha_vencimiento"),
+          sb.from("conductores_tercero").select("empresa_id, vencimiento_licencia"),
+          sb.from("vehiculos_tercero").select("empresa_id"),
+          fetchPaginado((d, h) =>
+            sb
+              .from("reservas")
+              .select("empresa_tercerizada_id")
+              .gte("fecha_servicio", inicio)
+              .neq("estado", "cancelada")
+              .not("empresa_tercerizada_id", "is", null)
+              .range(d, h)
+          ),
+        ]);
+        const empresas = (emp as any[]) ?? [];
+        if (empresas.length === 0)
+          return { paraModelo: JSON.stringify({ encontrados: 0, nota: "Sin empresas tercerizadas con ese filtro." }) };
+
+        const serviciosPorEmpresa: Record<number, number> = {};
+        for (const s of servicios) serviciosPorEmpresa[s.empresa_tercerizada_id] = (serviciosPorEmpresa[s.empresa_tercerizada_id] || 0) + 1;
+        const unidadesPorEmpresa: Record<number, number> = {};
+        for (const v of (vt as any[]) ?? []) unidadesPorEmpresa[v.empresa_id] = (unidadesPorEmpresa[v.empresa_id] || 0) + 1;
+
+        const OBLIG_TERCERO = new Set([
+          "SOAT",
+          "Revisión Técnica (CITV)",
+          "Habilitación SUTRAN",
+          "Permiso Operación MTC",
+          "Tarjeta de Propiedad",
+          "SCTR Salud",
+          "SCTR Pensión",
+        ]);
+        const detalle = empresas.map((e) => {
+          const docs = ((dt as any[]) ?? []).filter((d) => d.empresa_id === e.id);
+          const vencidos: string[] = [];
+          const porVencer: string[] = [];
+          for (const d of docs) {
+            const dias = diasPara(d.fecha_vencimiento);
+            if (dias === null) continue;
+            if (dias < 0 && OBLIG_TERCERO.has(d.tipo)) vencidos.push(d.tipo);
+            else if (dias >= 0 && dias <= 30 && OBLIG_TERCERO.has(d.tipo)) porVencer.push(`${d.tipo} (${dias}d)`);
+          }
+          for (const [campo, etiqueta] of [
+            ["venc_autorizacion", "Autorización MTC"],
+            ["venc_habilitacion", "Habilitación SUTRAN"],
+          ] as [string, string][]) {
+            const dias = diasPara(e[campo]);
+            if (dias === null) continue;
+            if (dias < 0) vencidos.push(etiqueta);
+            else if (dias <= 30) porVencer.push(`${etiqueta} (${dias}d)`);
+          }
+          const licenciasVencidas = ((ct as any[]) ?? []).filter(
+            (c) => c.empresa_id === e.id && (diasPara(c.vencimiento_licencia) ?? 1) < 0
+          ).length;
+          const riesgo = vencidos.length > 0 || licenciasVencidas > 0 ? "ALTO" : porVencer.length > 0 ? "MEDIO" : "OK";
+          return {
+            empresa: e.razon_social,
+            ruc: e.ruc,
+            contacto: e.contacto_nombre,
+            telefono: e.contacto_telefono || e.telefono,
+            estado: e.estado,
+            riesgo,
+            docs_vencidos: vencidos,
+            docs_por_vencer: porVencer,
+            licencias_conductores_vencidas: licenciasVencidas,
+            unidades: unidadesPorEmpresa[e.id] || 0,
+            servicios_periodo: serviciosPorEmpresa[e.id] || 0,
+          };
+        });
+        const enRiesgo = detalle.filter((d) => d.riesgo !== "OK");
+
+        return {
+          paraModelo: JSON.stringify({
+            desde: inicio,
+            encontradas: detalle.length,
+            en_riesgo: enRiesgo.length,
+            empresas: detalle.sort((a, b) => b.servicios_periodo - a.servicios_periodo),
+            nota: "Riesgo ALTO = documento obligatorio o licencia de conductor VENCIDO (no deberían operar servicios nuestros hasta regularizar). MEDIO = por vencer en ≤30 días.",
+          }),
+          ui: [
+            {
+              tipo: "kpis",
+              items: [
+                { label: "Empresas", valor: String(detalle.length), intent: "info" },
+                { label: "En riesgo", valor: String(enRiesgo.length), intent: enRiesgo.some((d) => d.riesgo === "ALTO") ? "danger" : enRiesgo.length ? "warn" : "ok" },
+                { label: "Servicios del período", valor: String(servicios.length), sub: `desde ${inicio}`, intent: "info" },
+              ],
+            },
+            ...(enRiesgo.length
+              ? [
+                  {
+                    tipo: "conductores",
+                    items: enRiesgo.slice(0, 6).map((d) => ({
+                      nombre: d.empresa,
+                      estado: `riesgo ${d.riesgo} · ${d.servicios_periodo} servicios`,
+                      telefono: d.telefono,
+                      alertas: [
+                        ...d.docs_vencidos.map((x: string) => `${x} VENCIDO`),
+                        ...d.docs_por_vencer.map((x: string) => `${x} por vencer`),
+                        ...(d.licencias_conductores_vencidas ? [`${d.licencias_conductores_vencidas} licencia(s) de conductor vencida(s)`] : []),
+                      ],
+                    })),
+                  } as BloqueUI,
+                ]
+              : []),
+          ],
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "consultar_personal": {
+        let q = sb
+          .from("personal_administrativo")
+          .select(
+            "id, nombre, dni, cargo, departamento, telefono, email, estado, tipo_contrato, fecha_venc_contrato, sctr_salud_venc, sctr_pension_venc, examen_medico_venc, antecedentes_venc, vida_ley, vida_ley_venc"
+          )
+          .neq("estado", "de_baja");
+        if (input.nombre) q = q.ilike("nombre", `%${input.nombre}%`);
+        const { data } = await q.order("nombre").limit(60);
+        const personal = (data as any[]) ?? [];
+        if (personal.length === 0) return { paraModelo: JSON.stringify({ encontrados: 0 }) };
+
+        const DOCS: [string, string][] = [
+          ["fecha_venc_contrato", "Contrato"],
+          ["sctr_salud_venc", "SCTR Salud"],
+          ["sctr_pension_venc", "SCTR Pensión"],
+          ["examen_medico_venc", "Examen médico"],
+          ["antecedentes_venc", "Antecedentes"],
+          ["vida_ley_venc", "Vida Ley"],
+        ];
+        const items: ConductorUI[] = personal.map((p) => {
+          const alertas: string[] = [];
+          for (const [campo, etiqueta] of DOCS) {
+            if (campo === "fecha_venc_contrato" && p.tipo_contrato !== "plazo_fijo") continue;
+            const dias = diasPara(p[campo]);
+            if (dias === null) continue;
+            if (dias < 0) alertas.push(`${etiqueta} VENCIDO hace ${Math.abs(dias)} día(s)`);
+            else if (dias <= 30) alertas.push(`${etiqueta} vence en ${dias} día(s)`);
+          }
+          return { nombre: p.nombre, estado: [p.cargo, p.departamento].filter(Boolean).join(" · "), telefono: p.telefono, alertas };
+        });
+        const visibles = input.solo_alertas ? items.filter((i) => i.alertas.length > 0) : items;
+        return {
+          paraModelo: JSON.stringify({ encontrados: visibles.length, personal: visibles }),
+          ui: { tipo: "conductores", items: visibles.slice(0, 10) },
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "consultar_documentos_empresa": {
+        let q = sb
+          .from("documentos_empresa")
+          .select("id, titulo, categoria, alcance, fecha_emision, fecha_vencimiento, created_at");
+        if (input.categoria) q = q.eq("categoria", input.categoria);
+        const { data } = await q.order("created_at", { ascending: false }).limit(200);
+        const docs = (data as any[]) ?? [];
+        if (docs.length === 0) return { paraModelo: JSON.stringify({ encontrados: 0, nota: "Sin documentos con ese filtro." }) };
+
+        const detalle = docs.map((d) => {
+          const dias = diasPara(d.fecha_vencimiento);
+          return {
+            titulo: d.titulo,
+            categoria: d.categoria,
+            alcance: d.alcance,
+            vence: d.fecha_vencimiento,
+            situacion: dias === null ? "sin_vencimiento" : dias < 0 ? "vencido" : dias <= 30 ? "por_vencer" : "vigente",
+            dias,
+          };
+        });
+        const vencidos = detalle.filter((d) => d.situacion === "vencido");
+        const porVencer = detalle.filter((d) => d.situacion === "por_vencer");
+        const visibles = input.solo_alertas ? [...vencidos, ...porVencer] : detalle;
+
+        return {
+          paraModelo: JSON.stringify({
+            encontrados: docs.length,
+            vencidos: vencidos.length,
+            por_vencer_30d: porVencer.length,
+            detalle: visibles.slice(0, 15),
+          }),
+          ui: {
+            tipo: "kpis",
+            items: [
+              { label: "Documentos", valor: String(docs.length), intent: "info" },
+              { label: "Vencidos", valor: String(vencidos.length), intent: vencidos.length ? "danger" : "ok" },
+              { label: "Por vencer (30d)", valor: String(porVencer.length), intent: porVencer.length ? "warn" : "ok" },
+            ],
+          },
+        };
+      }
+
+      // ────────────────────────────────────────────────────────────────────
+      case "consultar_proveedores": {
+        let q = sb
+          .from("proveedores")
+          .select("id, nombre, ruc, telefono, email, tipo, contacto_nombre, contacto_telefono, estado");
+        if (input.busqueda) q = q.ilike("nombre", `%${input.busqueda}%`);
+        if (input.tipo) q = q.eq("tipo", input.tipo);
+        const { data } = await q.order("nombre").limit(30);
+        const provs = (data as any[]) ?? [];
+        if (provs.length === 0) return { paraModelo: JSON.stringify({ encontrados: 0, nota: "Sin proveedores con ese filtro." }) };
+        return {
+          paraModelo: JSON.stringify({ encontrados: provs.length, proveedores: provs }),
+          ui: {
+            tipo: "conductores",
+            items: provs.slice(0, 8).map((p) => ({
+              nombre: p.nombre,
+              estado: [p.tipo, p.estado].filter(Boolean).join(" · "),
+              telefono: p.contacto_telefono || p.telefono,
+              alertas: p.contacto_nombre ? [`Contacto: ${p.contacto_nombre}`] : [],
+            })),
+          },
         };
       }
 

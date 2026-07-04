@@ -621,6 +621,7 @@ export default function EliaPanel({
   if (tiene("monitoreo")) chips.push("¿Qué unidades están transmitiendo?");
   if (tiene("facturacion")) chips.push("¿Cuánto tenemos por cobrar?");
   if (tiene("cotizaciones")) chips.push("¿Cómo va la conversión de cotizaciones?");
+  if (tiene("proveedores")) chips.push("¿Alguna tercerizada en riesgo?");
   const chipsVisibles = chips.slice(0, 4);
 
   const nivelAlerta = radar?.some((r) => r.nivel === "critico")
