@@ -792,7 +792,7 @@ export default function ModalGps({
                   return (
                 <p
                   className={`text-[11px] flex items-center gap-2 ${alerta ? "text-amber-300 font-bold" : "text-blue-200"}`}
-                  title={quieto ? "La unidad no se desplaza con el servicio en curso: verifica que el teléfono esté EN el vehículo (no en la cochera) o si la unidad está varada." : debilM > 0 ? "GPS de baja precisión del equipo del conductor: pídele activar Alta precisión (GPS satelital) o usar la app nativa." : undefined}
+                  title={quieto ? "La unidad no se desplaza con el servicio en curso. Causas: GPS del teléfono PEGADO (pídele apagar/encender la Ubicación; si sigue, reiniciar el celular — caso #951), teléfono fuera del vehículo, o unidad varada. El conductor ya ve esta alerta en su pantalla." : debilM > 0 ? "GPS de baja precisión del equipo del conductor: pídele activar Alta precisión (GPS satelital) o usar la app nativa." : undefined}
                 >
                   <span className={`w-2 h-2 rounded-full flex-shrink-0 ${sinSenal ? "bg-red-400" : alerta ? "bg-amber-400 animate-pulse" : "bg-green-400 animate-pulse"}`} />
                   {sinSenal
@@ -800,7 +800,7 @@ export default function ModalGps({
                     : congeladoMin > 0
                       ? `⚠ GPS del conductor congelado · hace ${congeladoMin} min`
                       : quieto
-                        ? `⚠ Unidad sin movimiento · hace ${sinMovMin} min${debilM > 0 ? ` · ±${debilM}m` : ""} — ¿el teléfono está en el vehículo?`
+                        ? `⚠ Unidad sin movimiento · hace ${sinMovMin} min${debilM > 0 ? ` · ±${debilM}m` : ""} — GPS pegado o teléfono fuera del bus`
                         : ultimaActualiz
                           ? `GPS en vivo · hace ${segsDesdeUlt}s${debilM > 0 ? ` · ⚠ GPS débil ±${debilM}m (activar Alta precisión)` : ""}`
                           : "Conectando..."}

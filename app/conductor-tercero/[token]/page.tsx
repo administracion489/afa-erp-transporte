@@ -122,6 +122,7 @@ export default function ConductorTerceroPage() {
   const [errorGps, setErrorGps]                   = useState(false);   // GPS denegado/bloqueado por el navegador
   const [gpsCongelado, setGpsCongelado]           = useState(false);   // watchPosition dejó de dar fixes nuevos (pantalla bloqueada / 2º plano / sin alta precisión)
   const [gpsDebilM, setGpsDebilM]                 = useState(0);       // mediana ±m de los últimos fixes ≥60 m = ubicación por red (sin satélite): reubicar el teléfono
+  const [gpsPegadoMin, setGpsPegadoMin]           = useState(0);       // min con la POSICIÓN byte-idéntica y fixes frescos = motor de ubicación del equipo colgado (variante #951; se destraba con toggle de Ubicación o reinicio)
 
   // ── Estado orientación / brújula ─────────────────────────────────────────────
   const [rumbo, setRumbo]                         = useState(0);       // 0-360, dirección actual del conductor
@@ -168,6 +169,8 @@ export default function ConductorTerceroPage() {
   const precisionRef    = useRef<number>(0);           // accuracy (m) del último fix
   const ultimoFixRef    = useRef<number>(0);           // ms del último fix RECIBIDO de watchPosition (watchdog anti-congelado)
   const accsRecRef      = useRef<number[]>([]);        // accuracy (m) de los últimos fixes RECIBIDOS (detector de GPS débil)
+  const posPrevStrRef   = useRef<string>("");          // "lat,lng" del último fix (detector de posición clavada)
+  const ultimoCambioPosRef = useRef<number>(0);        // ms de la última vez que la POSICIÓN cambió (variante motor colgado)
 
   // Sincronizar refs con state
   useEffect(() => { paradaIdxRef.current = paradaIdx; }, [paradaIdx]);
@@ -315,6 +318,10 @@ export default function ConductorTerceroPage() {
         ultimoFixRef.current = Date.now();   // fix fresco recibido → el watchdog no marca congelado
         setGpsCongelado(false);
         if (Number.isFinite(acc as number)) { accsRecRef.current.push(acc as number); if (accsRecRef.current.length > 20) accsRecRef.current.shift(); }
+        // Cambio de POSICIÓN (byte a byte): un GPS sano SIEMPRE jitterea; si el motor del equipo
+        // se cuelga sirve la MISMA posición con timestamps frescos (variante #951) → esto no avanza.
+        const posStr = `${lat},${lng}`;
+        if (posStr !== posPrevStrRef.current) { posPrevStrRef.current = posStr; ultimoCambioPosRef.current = Date.now(); setGpsPegadoMin(0); }
         posActualRef.current = { lat, lng };
         speedRef.current = s ?? 0;
         precisionRef.current = acc ?? 0;
@@ -415,7 +422,12 @@ export default function ConductorTerceroPage() {
       // GPS DÉBIL medido: mediana de los últimos fixes ≥60 m = red, sin satélite (permiso OK no
       // basta: el teléfono debe VER el cielo). El chofer puede corregirlo al momento.
       const a = [...accsRecRef.current].sort((x, y) => x - y);
-      setGpsDebilM(a.length >= 5 && a[Math.floor(a.length / 2)] >= 60 ? Math.round(a[Math.floor(a.length / 2)]) : 0);
+      const accMed = a.length >= 5 ? a[Math.floor(a.length / 2)] : 0;
+      setGpsDebilM(accMed >= 60 ? Math.round(accMed) : 0);
+      // GPS PEGADO (motor del equipo colgado): fixes FRESCOS pero posición byte-idéntica ≥8 min
+      // con precisión de red. Un chip sano jitterea siempre → no dispara parado con buen GPS.
+      const clavadoMs = ultimoCambioPosRef.current > 0 && !viejo ? Date.now() - ultimoCambioPosRef.current : 0;
+      setGpsPegadoMin(clavadoMs > 480_000 && accMed >= 60 ? Math.floor(clavadoMs / 60000) : 0);
     }, 15_000);
     return () => clearInterval(iv);
   }, [fase, detenerGPS, iniciarGPS, solicitarWakeLock]);
@@ -862,8 +874,26 @@ export default function ConductorTerceroPage() {
         </div>
       )}
 
+      {/* Aviso GPS PEGADO: el motor de ubicación del equipo está colgado (posición idéntica con
+          fixes frescos) — la central ve al bus detenido aunque esté en ruta. Toggle o reinicio. */}
+      {!gpsCongelado && gpsPegadoMin > 0 && (
+        <div className="px-4 pt-3 flex-shrink-0">
+          <div className="rounded-xl px-4 py-3 flex items-start gap-2" style={{ background: "#FEE2E2", border: "1.5px solid #DC2626" }}>
+            <span className="text-lg leading-none flex-shrink-0">🛑</span>
+            <div className="min-w-0">
+              <p className="text-sm font-bold" style={{ color: "#991B1B" }}>GPS pegado: tu ubicación no cambia hace {gpsPegadoMin} min</p>
+              <p className="text-xs mt-0.5" style={{ color: "#991B1B" }}>
+                La central te ve <strong>detenido</strong> aunque estés en ruta. <strong>1)</strong> Apaga y
+                enciende la <strong>Ubicación</strong> del teléfono. <strong>2)</strong> Si en 2-3 min sigue
+                igual, <strong>reinicia el celular</strong>.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Aviso GPS DÉBIL: el equipo entrega ±60m+ (red, sin satélite) — accionable por el chofer */}
-      {!gpsCongelado && gpsDebilM > 0 && (
+      {!gpsCongelado && gpsPegadoMin === 0 && gpsDebilM > 0 && (
         <div className="px-4 pt-3 flex-shrink-0">
           <div className="rounded-xl px-4 py-3 flex items-start gap-2" style={{ background: "#FEF3C7", border: "1px solid #F59E0B" }}>
             <span className="text-lg leading-none flex-shrink-0">📡</span>

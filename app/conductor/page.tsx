@@ -532,6 +532,7 @@ export default function ConductorApp() {
   // contaría como "fix nuevo" y enmascararía el atasco.
   const fixPrevRef       = useRef<{ t: number | null; lat: number; lng: number } | null>(null);
   const ultimoAvanceRef  = useRef<number>(0); // ms (reloj) de la última vez que el CONTENIDO del fix avanzó
+  const ultimoCambioPosRef = useRef<number>(0); // ms (reloj) de la última vez que la POSICIÓN cambió (variante #951: timestamps frescos con posición clavada)
   const fixRealTsRef     = useRef<number>(0); // timestamp del PROVEEDOR del último fix que avanzó → fix_ts honesto
   const reArmsCongeladoRef = useRef(0);       // re-arms por congelado sin que el fix avance (escala al banner)
   // Cola/reintentos de envío GPS
@@ -941,27 +942,34 @@ export default function ConductorApp() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Registra la LLEGADA de un fix y evalúa si su CONTENIDO avanzó. Un proveedor atascado
-  // (p.ej. FUSED en Motorola tras Doze) sigue disparando callbacks pero re-entrega el MISMO
-  // fix cacheado: pos.timestamp (location.time del proveedor) no avanza. Un proveedor VIVO
-  // re-mide y avanza el timestamp aunque el bus esté quieto — por eso el timestamp es el
-  // discriminador principal (no confunde bus parado con GPS pegado) y coords solo son
-  // fallback si no hay timestamp. Alimenta el watchdog (ultimoAvanceRef) y fix_ts (que lee
-  // el detector "congelado" del ERP en ModalGps).
+  // Registra la LLEGADA de un fix y evalúa si su CONTENIDO avanzó. DOS variantes de atasco
+  // (ambas vistas en campo, ambas se destraban apagando/encendiendo Ubicación o reiniciando):
+  //   1) Motorola/Doze: re-entrega el MISMO fix cacheado con el MISMO pos.timestamp → lo caza
+  //      el eje de TIMESTAMP (ultimoAvanceRef).
+  //   2) #951 (CNQ396, 4-jul): el motor colgado sirve la MISMA posición con timestamps FRESCOS
+  //      — 151 fixes byte-idénticos, ±100, 75 min, con el bus EN MOVIMIENTO (copiloto a bordo).
+  //      El timestamp avanza ⇒ el eje 1 es CIEGO. Se caza por POSICIÓN (ultimoCambioPosRef).
+  // CLAVE: el banner/re-arms se limpian SOLO cuando la POSICIÓN cambia (un GPS sano SIEMPRE
+  // jitterea, incluso parado); antes se limpiaban con cada timestamp fresco → la variante 2
+  // reseteaba su propia alerta en cada callback y nunca podía aparecer.
   const registrarFix = useCallback((pos: GeoPos) => {
     ultimoFixRef.current = Date.now();
     const a = pos.coords.accuracy;
     if (Number.isFinite(a)) { accsRecRef.current.push(a); if (accsRecRef.current.length > 20) accsRecRef.current.shift(); }
     const t = pos.timestamp ?? null;
     const prev = fixPrevRef.current;
+    const cambioPos = !prev || pos.coords.latitude !== prev.lat || pos.coords.longitude !== prev.lng;
     const avanzo = !prev
       || (t != null && prev.t != null && t > prev.t)
       || (t != null && prev.t == null)
-      || (t == null && (pos.coords.latitude !== prev.lat || pos.coords.longitude !== prev.lng));
+      || (t == null && cambioPos);
     if (avanzo) {
       fixPrevRef.current = { t, lat: pos.coords.latitude, lng: pos.coords.longitude };
       ultimoAvanceRef.current = Date.now();
       fixRealTsRef.current = t ?? Date.now();
+    }
+    if (cambioPos) {
+      ultimoCambioPosRef.current = Date.now();
       reArmsCongeladoRef.current = 0;
       setGpsAtascado(false);
     }
@@ -1090,8 +1098,21 @@ export default function ConductorApp() {
     // re-armar en bucle es inútil → banner al conductor (apagar/encender la Ubicación).
     // Sin avance previo (ultimoAvanceRef=0) no aplica: ese es el caso silencio, ya cubierto.
     const CONGELADO_MS = 180_000;
+    // Variante #951: timestamps FRESCOS pero POSICIÓN byte-idéntica — solo cuenta EN SERVICIO
+    // (en ruta se espera movimiento; conectado-libre parado en cochera es normal) y con precisión
+    // de RED (≥60 m): un chip GPS sano jitterea SIEMPRE (coords nunca idénticas 8 min), así que
+    // no dispara en un bus legítimamente parado con buen GPS. 8 min > embarque típico.
+    const POS_CLAVADA_MS = 480_000;
     const chequearCongelado = () => {
-      if (!ultimoAvanceRef.current || Date.now() - ultimoAvanceRef.current <= CONGELADO_MS) return;
+      const ahora = Date.now();
+      const tsClavado = ultimoAvanceRef.current > 0 && ahora - ultimoAvanceRef.current > CONGELADO_MS;
+      const accs = [...accsRecRef.current].sort((x, y) => x - y);
+      const accMed = accs.length >= 5 ? accs[Math.floor(accs.length / 2)] : 0;
+      const posClavada = !!reservaActivaRef.current
+        && ultimoCambioPosRef.current > 0
+        && ahora - ultimoCambioPosRef.current > POS_CLAVADA_MS
+        && accMed >= 60;
+      if (!tsClavado && !posClavada) return;
       if (reArmsCongeladoRef.current >= 2) { setGpsAtascado(true); return; }
       reArmsCongeladoRef.current += 1;
       reArmar();
@@ -1116,6 +1137,17 @@ export default function ConductorApp() {
     return () => { document.removeEventListener("visibilitychange", onVis); clearInterval(iv); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conductor?.id, gpsHabilitado, compartiendo]);
+
+  // Al (re)CONECTAR: sembrar el reloj de posición-clavada y limpiar el estado del atasco de la
+  // sesión anterior. SOLO en el flanco de `compartiendo` (NO en los re-arms por gpsNonce, que
+  // anularía la detección durante la escalada). Evita que un banner viejo o un reloj pre-cargado
+  // de la sesión previa disparen en ~60 s al reconectar parado en el mismo punto.
+  useEffect(() => {
+    if (!compartiendo) return;
+    ultimoCambioPosRef.current = Date.now();
+    reArmsCongeladoRef.current = 0;
+    setGpsAtascado(false);
+  }, [compartiendo]);
 
   // ── Detector de GPS DÉBIL medido (para el semáforo) ──────────────────────────
   // Cada 20 s, mediana de la precisión de los últimos fixes RECIBIDOS. ≥60 m sostenido =
@@ -3688,8 +3720,10 @@ export default function ConductorApp() {
                 GPS del equipo atascado
               </p>
               <p style={{ margin: "3px 0 0", fontSize: 12.5, lineHeight: 1.45, color: "var(--c-ink)" }}>
-                El teléfono repite la misma ubicación. <strong>Apaga y enciende la Ubicación</strong> del
-                equipo (barra de ajustes rápidos) para destrabarlo — no hace falta reiniciar el celular.
+                El teléfono repite la misma ubicación. <strong>1)</strong> Apaga y enciende la{" "}
+                <strong>Ubicación</strong> (barra de ajustes rápidos). <strong>2)</strong> Si en 2-3
+                minutos sigue igual, <strong>reinicia el celular</strong> — la central te ve detenido
+                aunque estés en ruta.
               </p>
             </div>
           </div>
