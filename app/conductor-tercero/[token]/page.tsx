@@ -166,6 +166,7 @@ export default function ConductorTerceroPage() {
   // ── Throttle adaptativo de envío (mismo criterio que la app del conductor) ────
   const lastSentRef     = useRef<number>(0);           // ts del último envío
   const lastSentPosRef  = useRef<{ lat: number; lng: number } | null>(null);
+  const fixesVelRef     = useRef<{ lat: number; lng: number; acc: number; ts: number }[]>([]); // ring → velocidad DERIVADA para la cadencia (equipos sin Doppler)
   const precisionRef    = useRef<number>(0);           // accuracy (m) del último fix
   const ultimoFixRef    = useRef<number>(0);           // ms del último fix RECIBIDO de watchPosition (watchdog anti-congelado)
   const accsRecRef      = useRef<number[]>([]);        // accuracy (m) de los últimos fixes RECIBIDOS (detector de GPS débil)
@@ -211,9 +212,34 @@ export default function ConductorTerceroPage() {
     if (acc > 1500) return;                                   // basura de torre celular
     const vel = Math.round(speedRef.current * 3.6);
     const ahora = Date.now();
+    // Velocidad EFECTIVA para la CADENCIA: equipos sin Doppler reportan speed=0 SIEMPRE → el
+    // throttle creía "detenido" (25 s) con el bus en marcha → puntos a ~100-130 m = zigzag
+    // insuavizable (#871). Derivada del desplazamiento (ventana ≥8 s, ring ≤60 s) restando el
+    // piso de ruido (suma de precisiones): parado con jitter NO cuenta como marcha. Solo afecta
+    // el ritmo de envío; el campo `velocidad` guardado no cambia.
+    const ring = fixesVelRef.current;
+    // Submuestrear a ≥4 s por entrada: watchPosition emite ~1 fix/s + backstop 4 s; sin esto
+    // las 12 entradas cubrían ~9 s y el ruido tapaba la marcha lenta (o la ventana nunca
+    // llegaba a 8 s). Con ≥4 s por entrada, 12 entradas = ventana de 44-60 s.
+    const lastR = ring[ring.length - 1];
+    if (!lastR || ahora - lastR.ts >= 4000) ring.push({ lat: pos.lat, lng: pos.lng, acc: acc || 25, ts: ahora });
+    while (ring.length > 12 || (ring.length && ahora - ring[0].ts > 60_000)) ring.shift();
+    let velCad = vel;
+    if (ring.length >= 2) {
+      const viejo = ring[0];
+      const dtV = (ahora - viejo.ts) / 1000;
+      if (dtV >= 8) {
+        const disp = distanciaMetros(pos.lat, pos.lng, viejo.lat, viejo.lng);
+        const ruido = Math.min(150, (acc || 25) + viejo.acc);
+        if (disp > ruido) {
+          const kmhD = Math.round((disp / dtV) * 3.6);
+          if (kmhD <= 130) velCad = Math.max(velCad, kmhD);
+        }
+      }
+    }
     // Throttle ADAPTATIVO: el intervalo objetivo depende de la marcha; además, si saltó
     // > 60 m desde el último envío, refrescar YA. Piso anti-spam de 2.5 s (protege el API).
-    const objetivo = intervaloEnvioMs(vel, cercaDeParadero(pos.lat, pos.lng, paradasRef.current));
+    const objetivo = intervaloEnvioMs(velCad, cercaDeParadero(pos.lat, pos.lng, paradasRef.current));
     const dt = ahora - lastSentRef.current;
     const distMov = lastSentPosRef.current
       ? distanciaMetros(pos.lat, pos.lng, lastSentPosRef.current.lat, lastSentPosRef.current.lng)

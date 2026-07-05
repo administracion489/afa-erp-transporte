@@ -377,7 +377,10 @@ function leerCola(): PuntoGps[] {
   catch { return []; }
 }
 function guardarCola(arr: PuntoGps[]) {
-  try { localStorage.setItem(SK_COLA, JSON.stringify(arr.slice(-300))); } catch {}
+  // 1200 puntos ≈ 80 min sin señal a la cadencia de marcha (4 s). Con 300, la cadencia por
+  // velocidad derivada (equipos sin Doppler ya no quedan en 25 s) reducía la autonomía
+  // offline de ~2 h a ~20 min. Sigue siendo <500 KB de localStorage.
+  try { localStorage.setItem(SK_COLA, JSON.stringify(arr.slice(-1200))); } catch {}
 }
 function encolar(p: PuntoGps) { const c = leerCola(); c.push(p); guardarCola(c); }
 function nuevoQid(): string {
@@ -541,6 +544,7 @@ export default function ConductorApp() {
   const intentosRef      = useRef(0);
   const lastSentRef      = useRef(0);
   const lastSentPosRef   = useRef<GeoPos | null>(null); // última posición ENVIADA (gate por distancia)
+  const fixesVelRef      = useRef<{ lat: number; lng: number; acc: number; ts: number }[]>([]); // ring de fixes recientes → velocidad DERIVADA para la cadencia (equipos sin Doppler)
   const drenarColaRef    = useRef<() => void>(() => {});
   // Refs estables para GPS (evitan closures obsoletos en setInterval)
   const vehiculoIdRef    = useRef<number | null>(null);
@@ -898,10 +902,38 @@ export default function ConductorApp() {
       // (tablet WiFi-only, FUSED por red) los fixes son >80 m; el suavizado/confianza
       // ya vive en la LECTURA (ModalGps.tsx). Aquí solo cortamos basura de torre celular.
       if (pos.coords.accuracy > 1500) return;
+      // Velocidad EFECTIVA para la CADENCIA (no para el payload): los equipos sin Doppler
+      // reportan speed=0 SIEMPRE → el throttle creía "detenido" (25 s) con el bus EN MARCHA →
+      // puntos a ~100-130 m y huella en zigzag imposible de suavizar (#871, BVI124). Se deriva
+      // del desplazamiento sobre la ventana más larga disponible (≥8 s, ring de ≤60 s), restando
+      // el piso de ruido (2× la precisión, como velocidadPorVentana): un bus PARADO con jitter
+      // de ±30 m NO se clasifica en marcha (no sube el gasto de batería/datos detenido). Se usa
+      // MAX(device, derivada) solo en intervaloEnvioMs; el campo `velocidad` guardado no cambia.
+      const ring = fixesVelRef.current;
+      // Submuestrear a ≥4 s por entrada: la vía web emite ~1 fix/s + backstop 4 s; sin esto las
+      // 12 entradas cubrían solo ~9 s y el piso de ruido tapaba la marcha lenta (o con watch
+      // >1.4 Hz la ventana nunca llegaba a 8 s y la derivada quedaba apagada). Con ≥4 s por
+      // entrada, 12 entradas = ventana de 44-60 s → 10 km/h con ±45 m sí se detecta.
+      const lastR = ring[ring.length - 1];
+      if (!lastR || ahora - lastR.ts >= 4000) ring.push({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy || 25, ts: ahora });
+      while (ring.length > 12 || (ring.length && ahora - ring[0].ts > 60_000)) ring.shift();
+      let velCad = vel;
+      if (ring.length >= 2) {
+        const viejo = ring[0];
+        const dtV = (ahora - viejo.ts) / 1000;
+        if (dtV >= 8) {
+          const disp = distanciaMetros(pos, { coords: { latitude: viejo.lat, longitude: viejo.lng, accuracy: 0 } });
+          const ruido = Math.min(150, ((pos.coords.accuracy || 25) + viejo.acc));
+          if (disp > ruido) {
+            const kmhD = Math.round((disp / dtV) * 3.6);
+            if (kmhD <= 130) velCad = Math.max(velCad, kmhD);
+          }
+        }
+      }
       // Throttle ADAPTATIVO: el intervalo objetivo depende de la marcha (ver
       // intervaloEnvioMs). Además, si el móvil saltó > 60 m desde el último envío,
       // refrescar YA aunque no toque el tiempo. Piso anti-spam de 2.5 s (protege el API).
-      const objetivo = intervaloEnvioMs(vel, cercaDeAlgunParadero(pos, paradasRef.current), false);
+      const objetivo = intervaloEnvioMs(velCad, cercaDeAlgunParadero(pos, paradasRef.current), false);
       const dt = ahora - lastSentRef.current;
       const distMov = lastSentPosRef.current ? distanciaMetros(pos, lastSentPosRef.current) : Infinity;
       if (dt < 2500) return;                      // nunca más de ~1 envío cada 2.5 s

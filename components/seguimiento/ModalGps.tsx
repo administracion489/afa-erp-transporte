@@ -9,6 +9,7 @@ import {
   calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
 } from "@/lib/huella";
+import { animarMarcador } from "@/lib/anim-marker";
 
 declare global { interface Window { mapboxgl: any; } }
 
@@ -538,8 +539,17 @@ export default function ModalGps({
       const json = await res.json();
       const d = (json?.ubicacion ?? null) as UbicGps | null;
       if (d) {
-        ubicRef.current = d;
-        setUbic(d); setUltimaActualiz(new Date());
+        // Solo re-emitir si el FIX cambió: el poll de 10 s con un objeto nuevo pero el mismo
+        // fix re-disparaba el efecto del marcador y cortaba en seco el tween en vuelo
+        // (animarMarcador con destino idéntico hace setLngLat directo) — el "salto seco" que
+        // el tween vino a eliminar. sinSenal sí se recalcula siempre (la edad avanza).
+        const prev = ubicRef.current;
+        const mismoFix = prev && prev.lat === d.lat && prev.lng === d.lng
+          && (prev.created_at || prev.timestamp) === (d.created_at || d.timestamp);
+        if (!mismoFix) {
+          ubicRef.current = d;
+          setUbic(d); setUltimaActualiz(new Date());
+        }
         const fechaRef = d.created_at || d.timestamp;
         setSinSenal(!fechaRef || (Date.now() - new Date(fechaRef).getTime()) / 1000 > 60);
       } else if (!ubicRef.current) {
@@ -616,7 +626,9 @@ export default function ModalGps({
     const color = edadS <= 60 ? "#16a34a" : edadS <= 600 ? "#d97706" : "#dc2626";
 
     if (markerRef.current) {
-      markerRef.current.setLngLat(lngLat);
+      // Deslizar el marcador entre puntos (tween estilo Uber) en vez de saltar seco: paridad
+      // con /monitoreo (animarMarcador) — el salto seco se percibía como "desfase" del modal.
+      animarMarcador(markerRef.current, lngLat);
       markerRef.current.setRotation(rot);
       // Mantener el color del pulso en sync con el estado de señal.
       const elc = markerRef.current.getElement();
