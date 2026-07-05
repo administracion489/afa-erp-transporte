@@ -85,6 +85,7 @@ export default function ModalGps({
   const [congeladoMin,   setCongeladoMin]   = useState(0); // min con la MISMA coord Y buena precisión = fix viejo reenviado (GPS congelado real)
   const [precBajaM,      setPrecBajaM]      = useState(0); // ±m cuando la coord está fija por baja precisión (red/FUSED, bus quieto) — NO es congelado
   const [precDebilM,     setPrecDebilM]     = useState(0); // ±m: precisión mediana reciente de RED (≥60m) — cubre el bus EN MOVIMIENTO con GPS débil (equipo del conductor)
+  const [sinMovMin,      setSinMovMin]      = useState(0); // min que la unidad lleva SIN DESPLAZARSE (>150 m) con servicio en curso — caso "teléfono quedó en la cochera" (#951: 75 min clavado en el origen con las paradas completándose)
   const [mapListo,       setMapListo]       = useState(false);
   const [ruta,              setRuta]              = useState<RutaData | null>(null);
   const [cargandoRuta,      setCargandoRuta]      = useState(false);
@@ -397,6 +398,25 @@ export default function ModalGps({
         const accsRec = (arr as any[]).slice(-25).map(r => Number(r.precision_m)).filter(a => Number.isFinite(a)).sort((a, b) => a - b);
         const medAccRec = accsRec.length ? accsRec[Math.floor(accsRec.length / 2)] : 0;
         if (!cancel) setPrecDebilM(medAccRec >= 60 ? Math.round(medAccRec) : 0);
+
+        // UNIDAD SIN MOVIMIENTO (caso #951: el teléfono quedó en la cochera y el bus hizo la ruta
+        // sin rastreo — 75 min clavado en el origen con fix_ts avanzando, así que NI congelado NI
+        // sin-señal disparan). Mide hace cuántos minutos la posición NO se aleja >150 m de la
+        // actual. El header lo muestra solo con servicio EN CURSO (ubic.estado === "en_ruta"):
+        // parado en carga/embarque es normal unos minutos; >10 min merece la atención del operador.
+        const sinMov = (() => {
+          const pts = (arr as any[])
+            .map(r => ({ t: new Date(r.created_at || r.timestamp || 0).getTime(), lat: Number(r.lat), lng: Number(r.lng) }))
+            .filter(p => p.t > 0 && Number.isFinite(p.lat) && Number.isFinite(p.lng))
+            .sort((a, b) => a.t - b.t);
+          if (pts.length < 3) return 0;
+          const cur = pts[pts.length - 1];
+          for (let i = pts.length - 1; i >= 0; i--) {
+            if (distM(pts[i].lat, pts[i].lng, cur.lat, cur.lng) > 150) return cur.t - pts[i].t; // último movimiento real
+          }
+          return cur.t - pts[0].t; // nunca se movió en toda la ventana
+        })();
+        if (!cancel) setSinMovMin(sinMov > 10 * 60000 ? Math.floor(sinMov / 60000) : 0);
 
         // Limpiar UNA sola vez (colapsa rachas detenidas + dedup en marcha). El mismo set
         // limpio alimenta el dibujo (setHuella) y el ajuste por ventanas → coherentes.
@@ -763,19 +783,27 @@ export default function ModalGps({
             <div>
               <p className="text-white font-black text-sm">{clienteNombre} · Reserva #{reservaId}</p>
               <div className="flex items-center gap-2 flex-wrap">
-                {(() => { const debilM = Math.max(precBajaM, precDebilM); const alerta = (congeladoMin > 0 || debilM > 0) && !sinSenal; return (
+                {(() => {
+                  const debilM = Math.max(precBajaM, precDebilM);
+                  // "Sin movimiento" solo con servicio EN CURSO: quieto en carga/embarque unos min
+                  // es normal; >10 min en_ruta = teléfono fuera del bus (#951) o unidad varada.
+                  const quieto = sinMovMin > 0 && ubic?.estado === "en_ruta";
+                  const alerta = (congeladoMin > 0 || debilM > 0 || quieto) && !sinSenal;
+                  return (
                 <p
                   className={`text-[11px] flex items-center gap-2 ${alerta ? "text-amber-300 font-bold" : "text-blue-200"}`}
-                  title={debilM > 0 ? "GPS de baja precisión del equipo del conductor: pídele activar Alta precisión (GPS satelital) o usar la app nativa." : undefined}
+                  title={quieto ? "La unidad no se desplaza con el servicio en curso: verifica que el teléfono esté EN el vehículo (no en la cochera) o si la unidad está varada." : debilM > 0 ? "GPS de baja precisión del equipo del conductor: pídele activar Alta precisión (GPS satelital) o usar la app nativa." : undefined}
                 >
                   <span className={`w-2 h-2 rounded-full flex-shrink-0 ${sinSenal ? "bg-red-400" : alerta ? "bg-amber-400 animate-pulse" : "bg-green-400 animate-pulse"}`} />
                   {sinSenal
                     ? "Sin señal GPS"
                     : congeladoMin > 0
                       ? `⚠ GPS del conductor congelado · hace ${congeladoMin} min`
-                      : ultimaActualiz
-                        ? `GPS en vivo · hace ${segsDesdeUlt}s${debilM > 0 ? ` · ⚠ GPS débil ±${debilM}m (activar Alta precisión)` : ""}`
-                        : "Conectando..."}
+                      : quieto
+                        ? `⚠ Unidad sin movimiento · hace ${sinMovMin} min${debilM > 0 ? ` · ±${debilM}m` : ""} — ¿el teléfono está en el vehículo?`
+                        : ultimaActualiz
+                          ? `GPS en vivo · hace ${segsDesdeUlt}s${debilM > 0 ? ` · ⚠ GPS débil ±${debilM}m (activar Alta precisión)` : ""}`
+                          : "Conectando..."}
                 </p> ); })()}
                 {ruta && (
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${hayTrafico ? "bg-orange-500 text-white" : "bg-green-600 text-white"}`}>
