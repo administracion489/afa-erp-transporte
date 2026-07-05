@@ -1,5 +1,5 @@
 diff --git a/node_modules/@capgo/background-geolocation/android/src/main/java/com/capgo/capacitor_background_geolocation/BackgroundGeolocationService.java b/node_modules/@capgo/background-geolocation/android/src/main/java/com/capgo/capacitor_background_geolocation/BackgroundGeolocationService.java
-index 97ff3a8..b39bb3e 100644
+index 97ff3a8..d380b09 100644
 --- a/node_modules/@capgo/background-geolocation/android/src/main/java/com/capgo/capacitor_background_geolocation/BackgroundGeolocationService.java
 +++ b/node_modules/@capgo/background-geolocation/android/src/main/java/com/capgo/capacitor_background_geolocation/BackgroundGeolocationService.java
 @@ -1,6 +1,8 @@
@@ -11,7 +11,7 @@ index 97ff3a8..b39bb3e 100644
  import android.app.PendingIntent;
  import android.app.Service;
  import android.content.Context;
-@@ -55,6 +57,103 @@ public class BackgroundGeolocationService extends Service {
+@@ -55,6 +57,181 @@ public class BackgroundGeolocationService extends Service {
          return binder;
      }
  
@@ -36,6 +36,12 @@ index 97ff3a8..b39bb3e 100644
 +        } catch (Exception exception) {
 +            Logger.error("onStartCommand: no se pudo iniciar el servicio en primer plano", exception);
 +        }
++        // Reset del watchdog por CONTENIDO en cada arranque del servicio (una sesión nueva
++        // no hereda el estado de atasco de la anterior).
++        lastLatClavada = Double.NaN;
++        lastLngClavada = Double.NaN;
++        lastPosChangeMs = 0;
++        nivelAtasco = 0;
 +        return START_NOT_STICKY;
 +    }
 +
@@ -78,6 +84,78 @@ index 97ff3a8..b39bb3e 100644
 +    // prioriza autonomía (el envío adaptativo seguirá topando en el piso que se elija).
 +    private static final long HEARTBEAT_INTERVAL_MS = 2000;
 +
++    // ── Watchdog por CONTENIDO (caso #951, 4-jul-2026) ─────────────────────────────────────
++    // El motor FUSED/GMS puede COLGARSE y servir la MISMA posición (lat/lng byte-idénticos) con
++    // timestamps frescos durante todo un servicio — callbacks vivos, watchdog de silencio ciego.
++    // Detección: posición idéntica > POS_CLAVADA_MS con fixes llegando. Escalada silenciosa:
++    //   nivel 1 → re-registrar los proveedores (a veces destraba el pipeline de GMS);
++    //   nivel 2 → añadir GPS_PROVIDER y NETWORK_PROVIDER CRUDOS junto a FUSED (puentea el motor
++    //             fusionado colgado: si el GNSS vivo entrega, cualquier fuente viva gana).
++    // Cualquier cambio de posición resetea el nivel. El aviso al conductor (toggle de Ubicación /
++    // reiniciar el celular) vive en el lado JS; aquí solo intentos de recuperación sin UI.
++    private static final long POS_CLAVADA_MS = 5 * 60_000;
++    private double lastLatClavada = Double.NaN;
++    private double lastLngClavada = Double.NaN;
++    private long lastPosChangeMs = 0;
++    private int nivelAtasco = 0;
++
++    private void chequearPosicionClavada(android.location.Location location) {
++        long ahora = System.currentTimeMillis();
++        double lat = location.getLatitude();
++        double lng = location.getLongitude();
++        if (lat != lastLatClavada || lng != lastLngClavada) {
++            lastLatClavada = lat;
++            lastLngClavada = lng;
++            lastPosChangeMs = ahora;
++            nivelAtasco = 0;
++            return;
++        }
++        if (lastPosChangeMs == 0) {
++            lastPosChangeMs = ahora;
++            return;
++        }
++        if (ahora - lastPosChangeMs < POS_CLAVADA_MS) {
++            return;
++        }
++        if (nivelAtasco == 0) {
++            nivelAtasco = 1;
++            lastPosChangeMs = ahora; // re-armar la ventana antes de volver a escalar
++            Logger.info("Posición clavada >5 min con fixes vivos: re-registrando proveedores (nivel 1)");
++            if (client != null && locationCallback != null) {
++                client.removeUpdates(locationCallback);
++                requestLocationUpdatesMultiProvider(currentDistanceFilter);
++            }
++        } else if (nivelAtasco == 1) {
++            nivelAtasco = 2;
++            lastPosChangeMs = ahora;
++            Logger.info("Posición sigue clavada: añadiendo GPS/NETWORK crudos junto a FUSED (nivel 2)");
++            agregarProveedoresCrudos();
++        }
++        // nivel 2 ya activo: no hay más recuperación posible a nivel app; el JS muestra el banner.
++    }
++
++    // Registra el MISMO listener también en los proveedores crudos (GPS y NETWORK). En API 31+
++    // el registro normal usa solo FUSED; si el motor fusionado está colgado, el GNSS crudo puede
++    // seguir vivo. Registrar el mismo listener en otro proveedor NO duplica el de FUSED (cada
++    // proveedor+listener es un registro independiente; removeUpdates los quita todos).
++    private void agregarProveedoresCrudos() {
++        if (client == null || locationCallback == null) {
++            return;
++        }
++        String[] crudos = { LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER };
++        for (String provider : crudos) {
++            try {
++                if (client.isProviderEnabled(provider)) {
++                    client.requestLocationUpdates(provider, HEARTBEAT_INTERVAL_MS, 0f, locationCallback);
++                }
++            } catch (SecurityException ignore) {
++                // Permisos: se gestionan en el lado JS antes de start().
++            } catch (IllegalArgumentException ignore) {
++                // El proveedor no existe en este dispositivo.
++            }
++        }
++    }
++
 +    private void requestLocationUpdatesMultiProvider(float distanceFilter) {
 +        if (client == null || locationCallback == null) {
 +            return;
@@ -115,7 +193,7 @@ index 97ff3a8..b39bb3e 100644
      // Some devices allow a foreground service to outlive the application's main
      // activity, leading to nasty crashes as reported in issue #59. If we learn
      // that the application has been killed, all watchers are stopped and the
-@@ -139,11 +238,7 @@ public class BackgroundGeolocationService extends Service {
+@@ -139,11 +316,7 @@ public class BackgroundGeolocationService extends Service {
              if (client == null || locationCallback == null) {
                  return;
              }
@@ -128,7 +206,15 @@ index 97ff3a8..b39bb3e 100644
              startWatchdog();
          };
          watchdogHandler.postDelayed(restartRunnable, 10000);
-@@ -213,13 +308,8 @@ public class BackgroundGeolocationService extends Service {
+@@ -168,6 +341,7 @@ public class BackgroundGeolocationService extends Service {
+ 
+     private void handleLocationChanged(android.location.Location location) {
+         startWatchdog();
++        chequearPosicionClavada(location);
+         if (mediaPlayer != null) {
+             double[] point = { location.getLongitude(), location.getLatitude() };
+             var offRoute = distancePointToRoute(point) > distanceThreshold;
+@@ -213,13 +387,8 @@ public class BackgroundGeolocationService extends Service {
  
              locationCallback = createLocationListener(BackgroundGeolocationService.this);
  
