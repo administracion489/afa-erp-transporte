@@ -146,13 +146,54 @@ export function gateVelocidad(pts: HuellaPt[], vmaxKmh = VMAX_BUS_KMH, reanclaN 
   return out;
 }
 
+// PICOS-V (filtro Hampel): un vértice es un pico ida-y-vuelta cuando sus DOS vecinos concuerdan
+// entre sí (prev-next chico) y discrepan de él (legs grandes) — el GPS "saltó" 200-1000 m y
+// REGRESÓ en el siguiente fix (#1147: 9 picos, hasta 1080 m ida / 1016 m vuelta con prev-next a
+// 64 m). Solo se borra si además su precisión es grado-RED (acc ≥ 50): en los datos reales los
+// picos tienen acc mediana 82.5 vs 34.8 global, y así un ápice legítimo de curva/óvalo con chip
+// GPS (acc < 20) queda protegido. Un giro real en U de bus a esta cadencia da legs de 20-40 m,
+// nunca >120 m. NO inventa geometría: solo ELIMINA vértices demostrablemente falsos. Hasta 3
+// pasadas (un pico doble se resuelve por capas). Determinista sobre el prefijo (el último punto
+// no tiene `next` → se juzga recién en el siguiente ciclo, dentro de la cola no congelada).
+function quitarPicosV(pts: HuellaPt[]): HuellaPt[] {
+  // Guard TEMPORAL además del geométrico (hallazgo del review): la población acc≥50 es la de
+  // terceros con cadencia espaciada (30-60 s), donde un RETORNO REAL de avenida da legs de
+  // 300-1000 m a velocidad plausible — geométricamente indistinguible de un pico. Solo se borra
+  // si al menos una pierna implica velocidad IMPOSIBLE (>VMAX_BUS_KMH): el pico de 1080 m en 7 s
+  // (#1147) = 555 km/h → fuera; un retorno a 60 km/h → se conserva (regla de la casa: solo
+  // eliminar lo DEMOSTRABLEMENTE falso). Sin ts fiable no se filtra (conservador, como gateVelocidad).
+  if (pts.length < 3 || !(pts[pts.length - 1].ts > pts[0].ts)) return pts;
+  const vmax = VMAX_BUS_KMH / 3.6;
+  let cur = pts;
+  for (let pasada = 0; pasada < 3; pasada++) {
+    const out: HuellaPt[] = [];
+    let removed = false;
+    for (let i = 0; i < cur.length; i++) {
+      if (i > 0 && i < cur.length - 1 && cur[i].acc >= 50) {
+        const A = distM(cur[i - 1].lat, cur[i - 1].lng, cur[i].lat, cur[i].lng);
+        const B = distM(cur[i].lat, cur[i].lng, cur[i + 1].lat, cur[i + 1].lng);
+        const C = distM(cur[i - 1].lat, cur[i - 1].lng, cur[i + 1].lat, cur[i + 1].lng);
+        const dtA = Math.max(1, (cur[i].ts - cur[i - 1].ts) / 1000);
+        const dtB = Math.max(1, (cur[i + 1].ts - cur[i].ts) / 1000);
+        const imposible = A / dtA > vmax || B / dtB > vmax;
+        if (A > 120 && B > 120 && C < 0.5 * Math.min(A, B) && imposible) { removed = true; continue; } // pico: fuera
+      }
+      out.push(cur[i]);
+    }
+    cur = out;
+    if (!removed) break;
+  }
+  return cur;
+}
+
 export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
   // Pre-filtro: descarta fixes demasiado inciertos para el trazo (torre/WiFi, saltos imposibles).
   // PERO si eso dejaría el trazo casi vacío (equipo legítimo SIN chip, consistentemente >300 m),
   // se conservan los crudos finitos: una estela degradada es mejor que NINGUNA.
   const finitos = pts.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
   const precisos = finitos.filter((p) => p.acc <= ACC_MAX_TRAIL);
-  const base = precisos.length >= 2 ? precisos : finitos;
+  const basePre = precisos.length >= 2 ? precisos : finitos;
+  const base = quitarPicosV(basePre);
 
   const out: HuellaPt[] = [];
   const emitir = (lat: number, lng: number, velocidad: number, acc: number, ts: number) => {
@@ -199,7 +240,10 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
   // FALLBACK: si el filtro colapsó todo a ≤1 punto pero había suficientes datos, el cluster
   // era demasiado grande para la velocidad del bus (GPS pobre + ciudad lenta). Devolver la
   // estela cruda suavizada por distancia — aplana el jitter lento, visible en vez de invisible.
-  if (out.length <= 1 && base.length >= 5) return suavizarPorDistancia(base);
+  // Umbral sobre el conteo PRE-picos (review): una traza minúscula (5-6 fixes) con un pico
+  // borrado no debe perder el fallback — se devuelve la base ya despicada, pero la DECISIÓN de
+  // mostrar "algo antes que nada" se toma sobre lo que llegó del equipo.
+  if (out.length <= 1 && basePre.length >= 5 && base.length >= 2) return suavizarPorDistancia(base);
 
   return out;
 }
@@ -525,7 +569,11 @@ export function crearAjustadorHuella() {
       lastMatchMs = Date.now();
       lastTail = { lat: cola.lat, lng: cola.lng };
 
-      while (limpio.length - congeladoHasta >= NUEVOS) {
+      // NUEVOS + 2 de margen (review): quitarPicosV puede re-juzgar los últimos ~2 puntos de la
+      // cola en el ciclo siguiente (el último no tiene `next` aún). Sin margen, si el resto cae
+      // exacto en 99 la ventana congelada incluiría un punto aún mutable → al eliminarse después,
+      // los índices del prefijo se correrían y el pico quedaría horneado en la geometría congelada.
+      while (limpio.length - congeladoHasta >= NUEVOS + 2) {
         const ini = Math.max(0, congeladoHasta - SOLAPE);
         const ventana = limpio.slice(ini, ini + MAX);   // ≤ MAX SIEMPRE → no se diezma
         const coords = await matchVentana(ventana, token);
