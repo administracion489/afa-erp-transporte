@@ -5,7 +5,20 @@
 // arreglaba y "En vivo" quedaba con la huella cruda en zigzag. Mantener AQUÍ.
 
 export type MatchPt = { lat: number; lng: number; acc: number };
-export type HuellaPt = { lat: number; lng: number; velocidad: number; acc: number; ts: number };
+// `rumbo` (0-360) = dirección REAL que reporta el equipo (columna ubicaciones_gps.rumbo). Solo
+// llega con chip satelital/Doppler; con GPS de red viene 0 y se DERIVA por bearing al mostrarla.
+// Opcional: la máquina de limpiarHuella crea puntos sin rumbo (lo recupera puntosTelemetria del crudo).
+export type HuellaPt = { lat: number; lng: number; velocidad: number; acc: number; ts: number; rumbo?: number };
+
+// Un puntito de telemetría REAL sobre la huella (Idea 2). `velReal`/`rumboReal` = el dato vino del
+// equipo (Doppler); si false, se derivó (velocidad por desplazamiento / rumbo por bearing) → la UI
+// lo etiqueta "aprox.". Nunca se interpola posición: cada puntito cae en una muestra real.
+export type PuntoTelemetria = {
+  lat: number; lng: number;
+  velocidad: number; velReal: boolean;
+  rumbo: number; rumboReal: boolean;
+  acc: number; ts: number;
+};
 
 // Distancia en metros entre dos coordenadas (haversine).
 export function distM(aLat: number, aLng: number, bLat: number, bLng: number): number {
@@ -64,6 +77,7 @@ export function filasAPuntos(filas: any[]): HuellaPt[] {
     velocidad: Number(d.velocidad) || 0,
     acc: d.precision_m != null ? Number(d.precision_m) : 25,
     ts: d.created_at ? new Date(d.created_at).getTime() : (d.timestamp ? new Date(d.timestamp).getTime() : 0),
+    rumbo: Number(d.rumbo) || 0,   // dirección real del equipo (0 si no hay Doppler → se deriva luego)
   }));
 }
 
@@ -271,6 +285,61 @@ export function conVelocidadColor(pts: HuellaPt[], ventanaMs = 6000, maxKmh = 13
     const kmh = (distM(pts[a].lat, pts[a].lng, pts[b].lat, pts[b].lng) / dt) * 3.6;
     return kmh > maxKmh ? p : { ...p, velocidad: Math.round(kmh) };   // absurdo → conservar; si no, derivada
   });
+}
+
+// Puntitos de telemetría REAL a lo largo de la huella (Idea 2). Ancla un puntito a la muestra más
+// cercana a cada hito de ~pasoM metros de recorrido — NUNCA interpola una posición/velocidad que
+// no existió. Si un intervalo de 2 s cubrió 200 m, salen puntitos solo donde hubo muestra real (el
+// espaciado ancho ES la señal honesta de poca telemetría), no puntos inventados a los 100 m.
+//
+// `limpia` (limpiarHuella + conVelocidadColor) da la POSICIÓN sobre el trazo dibujado y la velocidad
+// de color. `crudos` (filasAPuntos, con rumbo) aporta la TELEMETRÍA REAL del equipo: se busca la
+// muestra cruda más cercana a cada puntito y de ahí sale la velocidad Doppler y el rumbo reales.
+// Cuando el equipo no da Doppler (velocidad/rumbo = 0) se deriva (color / bearing) y se marca
+// real=false. Función PURA y determinista sobre el prefijo append-only (mismo trazo → mismos puntos).
+export function puntosTelemetria(limpia: HuellaPt[], crudos: HuellaPt[], pasoM = 100): PuntoTelemetria[] {
+  if (!limpia || limpia.length === 0) return [];
+  const crudosOk = (crudos || []).filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lng));
+  // Cada punto de limpiarHuella conserva el `ts` de SU fix crudo (los "en marcha" son el fix mismo;
+  // los centroides de parada llevan el ts del último fix agrupado). Así el crudo fuente se recupera
+  // por IDENTIDAD de ts (Map O(1)) — no por cercanía geométrica, que en una ruta que se cruza
+  // consigo misma (ida y vuelta por la misma avenida) tomaría el rumbo del pase OPUESTO (~180°
+  // invertido). El barrido espacial queda solo de respaldo (ts=0 / sin match), rara vez usado.
+  const porTs = new Map<number, HuellaPt>();
+  for (const c of crudosOk) { if (c.ts > 0 && !porTs.has(c.ts)) porTs.set(c.ts, c); }
+  const crudoEspacial = (lat: number, lng: number): HuellaPt | null => {
+    let best: HuellaPt | null = null, bd = Infinity;
+    for (const c of crudosOk) { const d = distM(lat, lng, c.lat, c.lng); if (d < bd) { bd = d; best = c; } }
+    return best;
+  };
+  const out: PuntoTelemetria[] = [];
+  const empujar = (i: number) => {
+    const p = limpia[i];
+    const c = (p.ts > 0 && porTs.get(p.ts)) || crudoEspacial(p.lat, p.lng);
+    const velReal = !!c && c.velocidad > 0;                       // velocidad Doppler del equipo
+    const velocidad = velReal ? c!.velocidad : (p.velocidad || 0); // si no, la derivada de color
+    const rumboReal = !!c && (c.rumbo || 0) > 0;                  // rumbo Doppler del equipo
+    let rumbo: number;
+    if (rumboReal) rumbo = c!.rumbo || 0;
+    else if (i + 1 < limpia.length) rumbo = calcBearing(p.lat, p.lng, limpia[i + 1].lat, limpia[i + 1].lng);
+    else if (i > 0) rumbo = calcBearing(limpia[i - 1].lat, limpia[i - 1].lng, p.lat, p.lng);
+    else rumbo = 0;
+    out.push({
+      lat: p.lat, lng: p.lng,
+      velocidad: Math.round(velocidad), velReal,
+      rumbo: Math.round(rumbo), rumboReal,
+      acc: c ? c.acc : p.acc, ts: p.ts,
+    });
+  };
+  empujar(0);                                    // el primer punto siempre
+  let acc = 0;
+  for (let i = 1; i < limpia.length; i++) {
+    acc += distM(limpia[i - 1].lat, limpia[i - 1].lng, limpia[i].lat, limpia[i].lng);
+    if (acc >= pasoM) { empujar(i); acc = 0; }
+  }
+  const last = limpia.length - 1;                 // cerrar con el último si no cayó justo en un hito
+  if (last > 0 && out[out.length - 1].ts !== limpia[last].ts) empujar(last);
+  return out;
 }
 
 // Prepara una ventana para Map Matching: deduplica y limita a 100 (máximo de la API),

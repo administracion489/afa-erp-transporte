@@ -8,6 +8,7 @@ import { supabase } from "@/lib/supabase";
 import {
   calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
+  puntosTelemetria, type PuntoTelemetria,
 } from "@/lib/huella";
 import { animarMarcador } from "@/lib/anim-marker";
 
@@ -60,6 +61,13 @@ const fmtTiempo = (min: number) => {
   return m === 0 ? `${h}h` : `${h}h ${m}min`;
 };
 const fmtDistancia = (m: number) => (m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(1)} km`);
+// Rumbo en grados → punto cardinal (para el popup de los puntitos de telemetría).
+const rumboCardinal = (deg: number) => {
+  const dirs = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"];
+  return dirs[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+};
+const fmtHoraPunto = (ts: number) =>
+  new Date(ts).toLocaleTimeString("es-PE", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZone: "America/Lima" });
 
 // Helpers de huella (distancia, rumbo, suavizado, limpieza de jitter, Map Matching por
 // ventanas) viven en lib/huella.ts — fuente ÚNICA compartida con el mapa "En vivo" del
@@ -95,6 +103,10 @@ export default function ModalGps({
   const [huella,            setHuella]            = useState<{lat:number;lng:number;velocidad:number}[]>([]);
   const [matchedCoords,     setMatchedCoords]     = useState<[number, number][] | null>(null);
   const [velCalc,           setVelCalc]           = useState<number>(0);
+  const [telemetria,        setTelemetria]        = useState<PuntoTelemetria[]>([]); // puntitos de telemetría real
+  const [mostrarPuntos,     setMostrarPuntos]     = useState(true);                  // toggle de la leyenda
+  const geocacheRef = useRef<Map<string, string>>(new Map());                        // caché reverse-geocode por coord redondeada
+  const popupTelemRef = useRef<any>(null);                                           // popup activo de un puntito
   const stopMarkersRef = useRef<any[]>([]);
   // ETA dinámica: posición actual del vehículo → próxima parada (Google Directions)
   const [etaMin, setEtaMin] = useState<number | null>(null);
@@ -421,8 +433,11 @@ export default function ModalGps({
 
         // Limpiar UNA sola vez (colapsa rachas detenidas + dedup en marcha). El mismo set
         // limpio alimenta el dibujo (setHuella) y el ajuste por ventanas → coherentes.
-        const limpio = conVelocidadColor(limpiarHuella(filasAPuntos(arr)));
+        const crudos = filasAPuntos(arr);
+        const limpio = conVelocidadColor(limpiarHuella(crudos));
         setHuella(limpio.map(p => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad })));
+        // Puntitos de telemetría real (~cada 100 m de recorrido, anclados a muestra real).
+        if (!cancel) setTelemetria(puntosTelemetria(limpio, crudos));
 
         // Map Matching por ventanas (lib/huella.ts): throttle 60 s + congelado interno.
         const matched = await ajustador.ajustar(limpio, token, () => cancel);
@@ -467,6 +482,101 @@ export default function ModalGps({
       }
     } catch (e) { console.error("[ModalGps] Error dibujando huella GPS:", e); }
   }, [huella, matchedCoords, mapListo, ubic, velCalc]);
+
+  // ── CAPA 3: Puntitos de telemetría real (velocidad/rumbo/dirección al clic) ──
+  useEffect(() => {
+    if (!mapListo || !mapInst.current) return;
+    const map = mapInst.current;
+    const gl = window.mapboxgl;
+    try {
+      const features = telemetria.map((p) => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [p.lng, p.lat] as [number, number] },
+        // 1/0 en vez de booleanos: las properties de un evento Mapbox pueden llegar como string.
+        properties: {
+          velocidad: p.velocidad, velReal: p.velReal ? 1 : 0,
+          rumbo: p.rumbo, rumboReal: p.rumboReal ? 1 : 0,
+          acc: Math.round(p.acc), ts: p.ts, lat: p.lat, lng: p.lng,
+        },
+      }));
+      const data: any = { type: "FeatureCollection", features };
+      const src = map.getSource("telemetria-puntos");
+      if (src && typeof src.setData === "function") {
+        src.setData(data);
+      } else {
+        map.addSource("telemetria-puntos", { type: "geojson", data });
+        map.addLayer({
+          id: "telemetria-puntos-c", type: "circle", source: "telemetria-puntos",
+          paint: {
+            // Radio y opacidad crecen con el zoom para no saturar en vista lejana.
+            "circle-radius": ["interpolate", ["linear"], ["zoom"], 11, 2.5, 14, 4, 17, 6],
+            "circle-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"],
+            "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.5,
+            "circle-opacity": ["interpolate", ["linear"], ["zoom"], 11, 0.55, 14, 0.9],
+          },
+        });
+
+        // Handlers registrados UNA sola vez (la rama else corre solo al crear la capa).
+        map.on("mouseenter", "telemetria-puntos-c", () => { map.getCanvas().style.cursor = "pointer"; });
+        map.on("mouseleave", "telemetria-puntos-c", () => { map.getCanvas().style.cursor = ""; });
+        map.on("click", "telemetria-puntos-c", async (e: any) => {
+          const f = e.features?.[0]; if (!f) return;
+          const pr = f.properties || {};
+          const vel = Number(pr.velocidad) || 0;
+          const velReal = Number(pr.velReal) === 1;
+          const rumbo = Number(pr.rumbo) || 0;
+          const rumboReal = Number(pr.rumboReal) === 1;
+          const acc = Number(pr.acc) || 0;
+          const ts = Number(pr.ts) || 0;
+          const lat = Number(pr.lat), lng = Number(pr.lng);
+
+          const velTxt = vel <= 0
+            ? `<b>Detenido</b>`
+            : `<b>${vel} km/h</b>${velReal ? "" : ' <span style="color:#94a3b8">aprox.</span>'}`;
+          const rumboTxt = vel <= 0
+            ? "—"
+            : `${rumboCardinal(rumbo)} (${rumbo}°)${rumboReal ? "" : ' <span style="color:#94a3b8">aprox.</span>'}`;
+          const html = (dir: string) => `
+            <div style="font-family:system-ui,sans-serif;font-size:12px;line-height:1.5;min-width:170px">
+              <div style="color:#64748b;font-size:11px">${fmtHoraPunto(ts)}</div>
+              <div style="font-size:14px;margin:2px 0">${velTxt}</div>
+              <div>Dirección: ${rumboTxt}</div>
+              <div style="color:#64748b">Precisión: ±${acc} m</div>
+              <div style="color:#334155;margin-top:3px">${dir}</div>
+            </div>`;
+
+          if (popupTelemRef.current) popupTelemRef.current.remove();
+          const popup = new gl.Popup({ closeButton: true, offset: 10, maxWidth: "240px" })
+            .setLngLat([lng, lat]).setHTML(html('<span style="color:#94a3b8">Ubicando dirección…</span>')).addTo(map);
+          popupTelemRef.current = popup;
+
+          // Reverse-geocode diferido y con caché por coord redondeada (~11 m). Solo al hacer clic.
+          const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+          const pintar = (dir: string) => { if (popupTelemRef.current === popup && popup.isOpen()) popup.setHTML(html(dir)); };
+          if (geocacheRef.current.has(key)) { pintar(geocacheRef.current.get(key)!); return; }
+          try {
+            const res = await fetch("/api/geocodificar-inverso", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ lat, lng }),
+            });
+            const j = await res.json();
+            const dir = j?.direccion || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+            // Cachear solo con dirección o status terminal (ZERO_RESULTS). Un null por cuota
+            // transitoria (OVER_QUERY_LIMIT/REQUEST_DENIED) NO se cachea → reintenta al reabrir.
+            if (j?.direccion || j?.status === "ZERO_RESULTS") geocacheRef.current.set(key, dir);
+            pintar(dir);
+          } catch {
+            pintar(`${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+          }
+        });
+      }
+
+      // Toggle de visibilidad desde la leyenda.
+      if (map.getLayer("telemetria-puntos-c")) {
+        map.setLayoutProperty("telemetria-puntos-c", "visibility", mostrarPuntos ? "visible" : "none");
+      }
+    } catch (e) { console.error("[ModalGps] Error dibujando puntitos de telemetría:", e); }
+  }, [telemetria, mostrarPuntos, mapListo]);
 
   // ── Marcadores numerados con etiqueta de texto ────────────────────────────
 
@@ -881,6 +991,14 @@ export default function ModalGps({
                   <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-yellow-300 inline-block"/>Moderado</span>
                   <span className="flex items-center gap-1"><span className="w-5 h-1.5 rounded bg-green-500 inline-block"/>Rápido</span>
                 </div>
+                {telemetria.length > 0 && (
+                  <button
+                    onClick={() => setMostrarPuntos(v => !v)}
+                    className="mt-1.5 flex items-center gap-1 text-[9px] font-bold text-gray-500 hover:text-gray-800">
+                    <span className={`w-2.5 h-2.5 rounded-full inline-block border-2 border-white ${mostrarPuntos ? "bg-green-500 shadow" : "bg-gray-300"}`}/>
+                    {mostrarPuntos ? "Ocultar" : "Mostrar"} datos por punto
+                  </button>
+                )}
               </div>
             )}
 

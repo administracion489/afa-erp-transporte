@@ -9,6 +9,7 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador } from "@/lib/anim-marker";
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor,
+  puntosTelemetria, type PuntoTelemetria,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
 import { estadoCliente, normalizaEstado } from "@/lib/estados";
@@ -255,6 +256,10 @@ export default function ClientePortal() {
   const [rutaSelId,         setRutaSelId]         = useState<number | null>(null);
   const [rutasEnVivoMap,    setRutasEnVivoMap]    = useState<Record<number, [number,number][]>>({});
   const [huellaGpsMap,      setHuellaGpsMap]      = useState<Record<number, {lat:number;lng:number;velocidad:number;ts:string|null}[]>>({});
+  const [telemetriaMap,     setTelemetriaMap]     = useState<Record<number, PuntoTelemetria[]>>({}); // puntitos de telemetría real por servicio
+  const [mostrarPuntosCli,  setMostrarPuntosCli]  = useState(true);                                  // toggle de la leyenda
+  const geocacheCliRef = useRef<Map<string, string>>(new Map());                                     // caché reverse-geocode
+  const popupTelemCliRef = useRef<any>(null);                                                        // popup activo de un puntito
   // Geometría ajustada a la vía (Map Matching) por servicio — misma calidad que el modal.
   const [matchedEnVivoMap,  setMatchedEnVivoMap]  = useState<Record<number, [number,number][]>>({});
   const [paradasResueltasMap, setParadasResueltasMap] = useState<Record<number, Parada[]>>({});
@@ -1145,15 +1150,18 @@ export default function ClientePortal() {
     const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
     const cargarHuella = async (rid: number) => {
       const { data } = await supabase.from("ubicaciones_gps")
-        .select("lat,lng,velocidad,precision_m,created_at,timestamp")
+        .select("lat,lng,velocidad,rumbo,precision_m,created_at,timestamp")
         .eq("reserva_id", rid)
         .order("created_at", { ascending: true })
         .limit(5000);
       if (cancel) return;
       const filas = (data || []).filter((p: any) => p.lat && p.lng);
       // Limpieza de jitter (mismo motor que el modal): colapsa rachas detenidas, dedup en marcha.
-      const limpio = conVelocidadColor(limpiarHuella(filasAPuntos(filas)));
+      const crudos = filasAPuntos(filas);
+      const limpio = conVelocidadColor(limpiarHuella(crudos));
       setHuellaGpsMap(prev => ({ ...prev, [rid]: limpio.map(p => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad, ts: null })) }));
+      // Puntitos de telemetría real (~cada 100 m, anclados a muestra real) — Idea 2.
+      setTelemetriaMap(prev => ({ ...prev, [rid]: puntosTelemetria(limpio, crudos) }));
       // Map Matching por ventanas (pegado a la pista) — throttle/congelado interno del ajustador.
       if (!ajustadoresRef.current[rid]) ajustadoresRef.current[rid] = crearAjustadorHuella();
       const matched = await ajustadoresRef.current[rid].ajustar(limpio, token, () => cancel);
@@ -1256,6 +1264,73 @@ export default function ClientePortal() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapListoEnVivo, rutasEnVivoMap, huellaGpsMap, matchedEnVivoMap, paradasResueltasMap, paradas, rutaSelId, tab]);
+
+  // ─── En vivo: CAPA 4 — puntitos de telemetría real del servicio seleccionado ─
+  // Capa propia con id FIJO + setData (no el remove/add del efecto de arriba) para no apilar
+  // handlers. Depende de las mismas señales de redibujo para re-subir la capa (moveLayer) por
+  // encima de la línea de huella que el otro efecto re-crea en cada render.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapListoEnVivo || !map) return;
+    const rumboCardinal = (deg: number) => ["N","NE","E","SE","S","SO","O","NO"][Math.round(((deg%360)+360)%360/45)%8];
+    const fmtHoraPunto = (ts: number) => new Date(ts).toLocaleTimeString("es-PE", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZone: "America/Lima" });
+    const puntos = (tab === "activos" && rutaSelId != null) ? (telemetriaMap[rutaSelId] || []) : [];
+    try {
+      const features = puntos.map((p) => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [p.lng, p.lat] as [number, number] },
+        properties: { velocidad: p.velocidad, velReal: p.velReal ? 1 : 0, rumbo: p.rumbo, rumboReal: p.rumboReal ? 1 : 0, acc: Math.round(p.acc), ts: p.ts, lat: p.lat, lng: p.lng },
+      }));
+      const data: any = { type: "FeatureCollection", features };
+      const src: any = map.getSource("telem-cli-src");
+      if (src && typeof src.setData === "function") {
+        src.setData(data);
+      } else {
+        map.addSource("telem-cli-src", { type: "geojson", data });
+        map.addLayer({
+          id: "telem-cli-c", type: "circle", source: "telem-cli-src",
+          paint: {
+            "circle-radius": ["interpolate", ["linear"], ["zoom"], 11, 2.5, 14, 4, 17, 6],
+            "circle-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"],
+            "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.5,
+            "circle-opacity": ["interpolate", ["linear"], ["zoom"], 11, 0.55, 14, 0.9],
+          },
+        });
+        map.on("mouseenter", "telem-cli-c", () => { map.getCanvas().style.cursor = "pointer"; });
+        map.on("mouseleave", "telem-cli-c", () => { map.getCanvas().style.cursor = ""; });
+        map.on("click", "telem-cli-c", async (e: any) => {
+          const f = e.features?.[0]; if (!f) return;
+          const pr = f.properties || {};
+          const vel = Number(pr.velocidad) || 0, velReal = Number(pr.velReal) === 1;
+          const rumbo = Number(pr.rumbo) || 0, rumboReal = Number(pr.rumboReal) === 1;
+          const acc = Number(pr.acc) || 0, ts = Number(pr.ts) || 0;
+          const lat = Number(pr.lat), lng = Number(pr.lng);
+          const velTxt = vel <= 0 ? "<b>Detenido</b>" : `<b>${vel} km/h</b>${velReal ? "" : ' <span style="color:#94a3b8">aprox.</span>'}`;
+          const rumboTxt = vel <= 0 ? "—" : `${rumboCardinal(rumbo)} (${rumbo}°)${rumboReal ? "" : ' <span style="color:#94a3b8">aprox.</span>'}`;
+          const html = (dir: string) => `<div style="font-family:system-ui,sans-serif;font-size:12px;line-height:1.5;min-width:170px"><div style="color:#64748b;font-size:11px">${fmtHoraPunto(ts)}</div><div style="font-size:14px;margin:2px 0">${velTxt}</div><div>Dirección: ${rumboTxt}</div><div style="color:#64748b">Precisión: ±${acc} m</div><div style="color:#334155;margin-top:3px">${dir}</div></div>`;
+          if (popupTelemCliRef.current) popupTelemCliRef.current.remove();
+          const popup = new mapboxgl.Popup({ closeButton: true, offset: 10, maxWidth: "240px" }).setLngLat([lng, lat]).setHTML(html('<span style="color:#94a3b8">Ubicando dirección…</span>')).addTo(map);
+          popupTelemCliRef.current = popup;
+          const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+          const pintar = (dir: string) => { if (popupTelemCliRef.current === popup && popup.isOpen()) popup.setHTML(html(dir)); };
+          if (geocacheCliRef.current.has(key)) { pintar(geocacheCliRef.current.get(key)!); return; }
+          try {
+            const res = await fetch("/api/geocodificar-inverso", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lng }) });
+            const j = await res.json();
+            const dir = j?.direccion || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+            // Cachear solo con dirección o status terminal; no el fallback por cuota transitoria.
+            if (j?.direccion || j?.status === "ZERO_RESULTS") geocacheCliRef.current.set(key, dir);
+            pintar(dir);
+          } catch { pintar(`${lat.toFixed(5)}, ${lng.toFixed(5)}`); }
+        });
+      }
+      if (map.getLayer("telem-cli-c")) {
+        map.setLayoutProperty("telem-cli-c", "visibility", mostrarPuntosCli ? "visible" : "none");
+        try { map.moveLayer("telem-cli-c"); } catch {} // encima de la línea de huella que el otro efecto re-crea
+      }
+    } catch (e) { console.error("[cliente] Error dibujando puntitos:", e); }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapListoEnVivo, telemetriaMap, huellaGpsMap, matchedEnVivoMap, rutaSelId, tab, mostrarPuntosCli]);
 
   // ─── KPIs ─────────────────────────────────────────────────────────────────
   const hoy          = getHoyPeru();
@@ -3042,6 +3117,13 @@ tbody tr:nth-child(even){background:#f9fafb}
                         <span style={{ fontSize: 9, fontWeight: 700, color: "#16a34a" }}>55+</span>
                         <span style={{ fontSize: 8.5, color: "#6b6f7c", fontWeight: 600 }}>km/h</span>
                       </div>
+                      {(telemetriaMap[servicioSel.id]?.length || 0) > 0 && (
+                        <button onClick={() => setMostrarPuntosCli(v => !v)}
+                          style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8, background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" }}>
+                          <span style={{ width: 10, height: 10, borderRadius: "50%", border: "2px solid white", background: mostrarPuntosCli ? "#16a34a" : "#cbd5e1", boxShadow: "0 1px 3px rgba(0,0,0,0.25)", flexShrink: 0 }} />
+                          <span style={{ fontSize: 10, fontWeight: 700, color: "#475569" }}>{mostrarPuntosCli ? "Ocultar" : "Ver"} datos por punto</span>
+                        </button>
+                      )}
                     </>
                   )}
                 </div>
