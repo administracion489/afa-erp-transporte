@@ -406,6 +406,67 @@ export function resumenViaje(limpia: HuellaPt[], crudos: HuellaPt[]): ResumenVia
   };
 }
 
+// ── PUENTE AZUL DE HUECOS (Idea 1) ──────────────────────────────────────────
+// Cuando la huella se CORTA por falta de GPS (túnel / zona muerta), en vez de dejar el hueco o —lo
+// PROHIBIDO— dibujar una recta que cruza casas, se rellena con el camino de CARRETERA real entre el
+// último fix bueno y el primero tras el hueco (Google Directions, en el consumidor), pintado azul
+// punteado y ETIQUETADO como estimado. NUNCA se mezcla con la huella medida ni entra a limpiarHuella/
+// crearAjustadorHuella: es un overlay aparte, inmune al congelado por índice.
+export type PuenteHueco = { aLat: number; aLng: number; bLat: number; bLng: number; dt: number; dRecta: number; iA: number; iB: number };
+
+// Detecta los HUECOS candidatos a puentear en la huella limpia (gates GEOMÉTRICOS y TEMPORALES; los
+// de carretera/ambigüedad se aplican en el consumidor con la respuesta de Directions). Un hueco
+// califica si: (1) el salto recto > MAX_SEG_M (300 m) — lo que hoy se dibuja cortado; (2) el tiempo
+// del hueco está entre 20 s y 5 min (menos casi nunca deja hueco; MÁS = celular apagado / bus
+// estacionado largo → no sabemos qué pasó, NO puentear); (3) la velocidad implícita RECTA es posible
+// (≤ VMAX) — si no, es teleport/glitch, no hueco de bus. Requiere ts fiable (si no, no puentea).
+export function calcularPuentes(limpia: HuellaPt[]): PuenteHueco[] {
+  const DT_MIN_S = 20, DT_MAX_S = 300;
+  const vmax = VMAX_BUS_KMH / 3.6; // m/s
+  const out: PuenteHueco[] = [];
+  for (let i = 1; i < limpia.length; i++) {
+    if (i === limpia.length - 1) continue;             // no puentear el ÚLTIMO par (cola viva mutable): B aún puede moverse → evita que el puente parpadee/salte hasta que B se consolide
+    const A = limpia[i - 1], B = limpia[i];
+    if (!(A.ts > 0 && B.ts > A.ts)) continue;
+    const dRecta = distM(A.lat, A.lng, B.lat, B.lng);
+    if (dRecta <= MAX_SEG_M) continue;                 // no es un hueco cortado
+    const dt = (B.ts - A.ts) / 1000;
+    if (dt < DT_MIN_S || dt > DT_MAX_S) continue;      // muy corto / celular apagado
+    if (dRecta / dt > vmax) continue;                  // velocidad recta imposible = teleport, no hueco
+    out.push({ aLat: A.lat, aLng: A.lng, bLat: B.lat, bLng: B.lng, dt, dRecta, iA: i - 1, iB: i });
+  }
+  return out;
+}
+
+export type NivelPuente = "puente" | "aprox" | "ocultar";
+// Decide, con la respuesta de Directions, cómo mostrar un hueco (degradación en 3 niveles):
+//   • "puente"  → azul punteado pegado a la vía (ruta clara y plausible)
+//   • "aprox"   → recta gris tenue "tramo sin señal" (ruta ambigua o rodeo moderado: no afirmamos la vía)
+//   • "ocultar" → nada, hueco honesto (rodeo enorme / velocidad por carretera imposible / sin ruta)
+// `roadM` = distancia por carretera de la ruta principal; `rutasM` = distancias de TODAS las rutas
+// (para medir ambigüedad geométrica: 2+ caminos parecidos = no sabemos cuál tomó el bus).
+export function decidirPuente(dRecta: number, dt: number, roadM: number, rutasM: number[]): NivelPuente {
+  const vmax = VMAX_BUS_KMH / 3.6;
+  if (!roadM || roadM <= 0) return "ocultar";
+  if (roadM / dt > vmax) return "ocultar";              // por carretera habría necesitado >VMAX → fue por otro lado
+  const detour = roadM / dRecta;                        // roadM = ruta PRINCIPAL (más rápida) de Google; detour y la geometría dibujada son coherentes entre sí
+  if (detour > 2.5) return "ocultar";                   // rodeo enorme → ruta improbable
+  // Ambigüedad sobre el par MÁS CORTO (a propósito): si Google ve 2 caminos casi iguales, no sabemos
+  // cuál tomó el bus. (Asimetría intencional roadM-principal vs alts-más-cortas: sesga hacia "aprox".)
+  const alts = (rutasM || []).filter((a) => a > 0).sort((a, b) => a - b);
+  const ambiguo = alts.length >= 2 && (alts[1] - alts[0]) / alts[0] < 0.20;
+  // "puente" AFIRMA la vía en azul → SOLO con evidencia fuerte: casi recto (detour ≤ 1.5), un único
+  // camino plausible y hueco corto (≤ 150 s). "puente" NO garantiza la vía REAL, solo que es la MÁS
+  // plausible; por eso todo lo demás degrada a "aprox" (recta gris tenue = "hubo hueco, camino incierto").
+  // Regla de la casa: un hueco honesto supera una ruta afirmada en falso — con solo 2 extremos no se
+  // puede distinguir "la ruta de Google" de "la del bus" si ambas son parecidas → se es conservador.
+  if (detour <= 1.5 && !ambiguo && dt <= 150) return "puente";
+  // "aprox" dibuja una RECTA A-B: si es MUY larga (>1500 m) cruzando la ciudad engaña más que un
+  // hueco honesto → mejor ocultar. La recta corta gris+punteada+etiquetada comunica incertidumbre.
+  if (dRecta > 1500) return "ocultar";
+  return "aprox";
+}
+
 // Prepara una ventana para Map Matching: deduplica y limita a 100 (máximo de la API),
 // conservando primero y último. Se llama por ventana, que ya viene ≤100.
 export function prepararPuntos(pts: MatchPt[]): MatchPt[] {

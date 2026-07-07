@@ -9,6 +9,7 @@ import {
   calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
+  calcularPuentes, decidirPuente,
 } from "@/lib/huella";
 import { animarMarcador } from "@/lib/anim-marker";
 
@@ -107,6 +108,8 @@ export default function ModalGps({
   const [velCalc,           setVelCalc]           = useState<number>(0);
   const [telemetria,        setTelemetria]        = useState<PuntoTelemetria[]>([]); // puntitos de telemetría real
   const [resumen,           setResumen]           = useState<ResumenViaje | null>(null); // resumen del viaje (datos reales)
+  const [puentes,           setPuentes]           = useState<any[]>([]);              // features GeoJSON de tramos estimados (puente azul)
+  const puentesCacheRef = useRef<Map<string, { nivel: string; coords: [number, number][]; km: number; dt: number }>>(new Map()); // caché por hueco
   const [mostrarPuntos,     setMostrarPuntos]     = useState(true);                  // toggle de la leyenda
   const geocacheRef = useRef<Map<string, string>>(new Map());                        // caché reverse-geocode por coord redondeada
   const popupTelemRef = useRef<any>(null);                                           // popup activo de un puntito
@@ -447,6 +450,47 @@ export default function ModalGps({
         // Map Matching por ventanas (lib/huella.ts): throttle 60 s + congelado interno.
         const matched = await ajustador.ajustar(limpio, token, () => cancel);
         if (matched && !cancel) setMatchedCoords(matched);
+
+        // PUENTE AZUL: por cada hueco de GPS candidato, pedir el camino de carretera (Directions) y
+        // decidir el nivel (puente/aprox/ocultar). Cacheado por coords del hueco → los huecos ya
+        // cerrados (prefijo estable) no re-llaman a Google. Overlay: no toca la huella medida.
+        const candidatos = calcularPuentes(limpio);
+        const MAX_PUENTES = 15;
+        if (candidatos.length > MAX_PUENTES) console.warn(`[ModalGps] ${candidatos.length} huecos, puenteando los primeros ${MAX_PUENTES}`);
+        const cache = puentesCacheRef.current;
+        const feats: any[] = [];
+        for (const c of candidatos.slice(0, MAX_PUENTES)) {
+          if (cancel) return;
+          const key = `${c.aLat.toFixed(5)},${c.aLng.toFixed(5)}->${c.bLat.toFixed(5)},${c.bLng.toFixed(5)}`;
+          let r = cache.get(key);
+          if (!r) {
+            try {
+              const resp = await fetch("/api/ruta-puente", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ aLat: c.aLat, aLng: c.aLng, bLat: c.bLat, bLng: c.bLng }),
+              });
+              const j = await resp.json();
+              if (j?.ocultar || j?.status !== "OK") {
+                r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt };
+              } else {
+                const nivel = decidirPuente(c.dRecta, c.dt, j.roadM, j.rutasM || []);
+                const coords = nivel === "puente" ? (j.coords || [])
+                  : nivel === "aprox" ? [[c.aLng, c.aLat], [c.bLng, c.bLat]] as [number, number][]
+                  : [];
+                r = { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt };
+              }
+              cache.set(key, r);
+            } catch { r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt }; cache.set(key, r); }
+          }
+          if (r.nivel !== "ocultar" && r.coords.length >= 2) {
+            feats.push({
+              type: "Feature",
+              geometry: { type: "LineString", coordinates: r.coords },
+              properties: { nivel: r.nivel, km: Math.round(r.km * 10) / 10, min: Math.round(c.dt / 60) },
+            });
+          }
+        }
+        if (!cancel) setPuentes(feats);
       } catch { /* conservar estela previa */ }
     };
     cargar();
@@ -582,6 +626,48 @@ export default function ModalGps({
       }
     } catch (e) { console.error("[ModalGps] Error dibujando puntitos de telemetría:", e); }
   }, [telemetria, mostrarPuntos, mapListo]);
+
+  // ── CAPA 4: Puente azul de tramos sin señal (estimado por carretera) ────────
+  useEffect(() => {
+    if (!mapListo || !mapInst.current) return;
+    const map = mapInst.current;
+    const gl = window.mapboxgl;
+    try {
+      const data: any = { type: "FeatureCollection", features: puentes };
+      const src = map.getSource("huella-puente");
+      if (src && typeof src.setData === "function") {
+        src.setData(data);
+      } else {
+        map.addSource("huella-puente", { type: "geojson", data });
+        const layer: any = {
+          id: "huella-puente-l", type: "line", source: "huella-puente",
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: {
+            // celeste = estimado por carretera; gris = ambiguo (recta tenue "aprox").
+            "line-color": ["match", ["get", "nivel"], "aprox", "#94a3b8", "#60a5fa"],
+            "line-width": 4, "line-opacity": 0.6, "line-dasharray": [2, 1.6],
+          },
+        };
+        // Debajo de la huella medida (esa manda visualmente); el puente solo rellena los huecos.
+        if (map.getLayer("huella-gps-line")) map.addLayer(layer, "huella-gps-line");
+        else map.addLayer(layer);
+        map.on("mouseenter", "huella-puente-l", () => { map.getCanvas().style.cursor = "pointer"; });
+        map.on("mouseleave", "huella-puente-l", () => { map.getCanvas().style.cursor = ""; });
+        map.on("click", "huella-puente-l", (e: any) => {
+          const f = e.features?.[0]; if (!f) return;
+          const pr = f.properties || {};
+          const km = Number(pr.km) || 0, min = Number(pr.min) || 0;
+          const titulo = pr.nivel === "aprox" ? "Tramo sin señal (aprox.)" : "Tramo estimado (sin GPS)";
+          const html = `<div style="font-family:system-ui,sans-serif;font-size:12px;line-height:1.5;min-width:160px">
+            <div style="font-weight:700;color:#1d4ed8">${titulo}</div>
+            <div style="color:#334155">Sin señal ~${min} min · ${km} km por carretera</div>
+            <div style="color:#94a3b8;font-size:11px;margin-top:2px">Ruta estimada por Google, no medida por GPS</div></div>`;
+          if (popupTelemRef.current) popupTelemRef.current.remove();
+          popupTelemRef.current = new gl.Popup({ closeButton: true, offset: 8, maxWidth: "240px" }).setLngLat(e.lngLat).setHTML(html).addTo(map);
+        });
+      }
+    } catch (e) { console.error("[ModalGps] Error dibujando puentes:", e); }
+  }, [puentes, mapListo]);
 
   // ── Marcadores numerados con etiqueta de texto ────────────────────────────
 
@@ -1003,6 +1089,12 @@ export default function ModalGps({
                     <span className={`w-2.5 h-2.5 rounded-full inline-block border-2 border-white ${mostrarPuntos ? "bg-green-500 shadow" : "bg-gray-300"}`}/>
                     {mostrarPuntos ? "Ocultar" : "Mostrar"} datos por punto
                   </button>
+                )}
+                {puentes.length > 0 && (
+                  <div className="mt-1.5 flex items-center gap-1 text-[9px] font-bold text-gray-500">
+                    <span className="w-5 inline-block" style={{ borderTop: "2px dashed #60a5fa" }}/>
+                    Tramo estimado (sin señal)
+                  </div>
                 )}
               </div>
             )}

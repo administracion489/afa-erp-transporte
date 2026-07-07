@@ -10,6 +10,7 @@ import { animarMarcador } from "@/lib/anim-marker";
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
+  calcularPuentes, decidirPuente,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
 import { estadoCliente, normalizaEstado } from "@/lib/estados";
@@ -261,6 +262,8 @@ export default function ClientePortal() {
   const [huellaGpsMap,      setHuellaGpsMap]      = useState<Record<number, {lat:number;lng:number;velocidad:number;ts:string|null}[]>>({});
   const [telemetriaMap,     setTelemetriaMap]     = useState<Record<number, PuntoTelemetria[]>>({}); // puntitos de telemetría real por servicio
   const [resumenMap,        setResumenMap]        = useState<Record<number, ResumenViaje | null>>({}); // resumen del viaje por servicio
+  const [puentesMap,        setPuentesMap]        = useState<Record<number, any[]>>({});                // features de tramos estimados (puente azul) por servicio
+  const puentesCacheCliRef = useRef<Map<string, { nivel: string; coords: [number, number][]; km: number; dt: number }>>(new Map());
   const [mostrarPuntosCli,  setMostrarPuntosCli]  = useState(true);                                  // toggle de la leyenda
   const geocacheCliRef = useRef<Map<string, string>>(new Map());                                     // caché reverse-geocode
   const popupTelemCliRef = useRef<any>(null);                                                        // popup activo de un puntito
@@ -1172,6 +1175,39 @@ export default function ClientePortal() {
       if (!ajustadoresRef.current[rid]) ajustadoresRef.current[rid] = crearAjustadorHuella();
       const matched = await ajustadoresRef.current[rid].ajustar(limpio, token, () => cancel);
       if (matched && !cancel) setMatchedEnVivoMap(prev => ({ ...prev, [rid]: matched }));
+
+      // PUENTE AZUL de huecos (Idea 1): camino de carretera estimado por hueco, cacheado por coords.
+      const candidatos = calcularPuentes(limpio);
+      const MAX_PUENTES = 15;
+      if (candidatos.length > MAX_PUENTES) console.warn(`[cliente] ${candidatos.length} huecos, puenteando ${MAX_PUENTES}`);
+      const cache = puentesCacheCliRef.current;
+      const feats: any[] = [];
+      for (const c of candidatos.slice(0, MAX_PUENTES)) {
+        if (cancel) return;
+        const key = `${c.aLat.toFixed(5)},${c.aLng.toFixed(5)}->${c.bLat.toFixed(5)},${c.bLng.toFixed(5)}`;
+        let r = cache.get(key);
+        if (!r) {
+          try {
+            const resp = await fetch("/api/ruta-puente", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ aLat: c.aLat, aLng: c.aLng, bLat: c.bLat, bLng: c.bLng }),
+            });
+            const j = await resp.json();
+            if (j?.ocultar || j?.status !== "OK") r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt };
+            else {
+              const nivel = decidirPuente(c.dRecta, c.dt, j.roadM, j.rutasM || []);
+              const coords = nivel === "puente" ? (j.coords || [])
+                : nivel === "aprox" ? [[c.aLng, c.aLat], [c.bLng, c.bLat]] as [number, number][] : [];
+              r = { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt };
+            }
+            cache.set(key, r);
+          } catch { r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt }; cache.set(key, r); }
+        }
+        if (r.nivel !== "ocultar" && r.coords.length >= 2) {
+          feats.push({ type: "Feature", geometry: { type: "LineString", coordinates: r.coords }, properties: { nivel: r.nivel, km: Math.round(r.km * 10) / 10, min: Math.round(c.dt / 60) } });
+        }
+      }
+      if (!cancel) setPuentesMap(prev => ({ ...prev, [rid]: feats }));
     };
     cargarHuella(rutaSelId);
     // Refresca cada 12s (para servicios en curso)
@@ -1337,6 +1373,42 @@ export default function ClientePortal() {
     } catch (e) { console.error("[cliente] Error dibujando puntitos:", e); }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapListoEnVivo, telemetriaMap, huellaGpsMap, matchedEnVivoMap, rutaSelId, tab, mostrarPuntosCli]);
+
+  // ─── En vivo: CAPA 5 — puente azul de tramos sin señal (estimado por carretera) ─
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapListoEnVivo || !map) return;
+    const feats = (tab === "activos" && rutaSelId != null) ? (puentesMap[rutaSelId] || []) : [];
+    try {
+      const data: any = { type: "FeatureCollection", features: feats };
+      const src: any = map.getSource("puente-cli-src");
+      if (src && typeof src.setData === "function") {
+        src.setData(data);
+      } else {
+        map.addSource("puente-cli-src", { type: "geojson", data });
+        map.addLayer({
+          id: "puente-cli-l", type: "line", source: "puente-cli-src",
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: {
+            "line-color": ["match", ["get", "nivel"], "aprox", "#94a3b8", "#60a5fa"],
+            "line-width": 4, "line-opacity": 0.6, "line-dasharray": [2, 1.6],
+          },
+        });
+        map.on("mouseenter", "puente-cli-l", () => { map.getCanvas().style.cursor = "pointer"; });
+        map.on("mouseleave", "puente-cli-l", () => { map.getCanvas().style.cursor = ""; });
+        map.on("click", "puente-cli-l", (e: any) => {
+          const f = e.features?.[0]; if (!f) return;
+          const pr = f.properties || {};
+          const km = Number(pr.km) || 0, min = Number(pr.min) || 0;
+          const titulo = pr.nivel === "aprox" ? "Tramo sin señal (aprox.)" : "Tramo estimado (sin GPS)";
+          const html = `<div style="font-family:system-ui,sans-serif;font-size:12px;line-height:1.5;min-width:160px"><div style="font-weight:700;color:#1d4ed8">${titulo}</div><div style="color:#334155">Sin señal ~${min} min · ${km} km por carretera</div><div style="color:#94a3b8;font-size:11px;margin-top:2px">Ruta estimada por Google, no medida por GPS</div></div>`;
+          if (popupTelemCliRef.current) popupTelemCliRef.current.remove();
+          popupTelemCliRef.current = new mapboxgl.Popup({ closeButton: true, offset: 8, maxWidth: "240px" }).setLngLat(e.lngLat).setHTML(html).addTo(map);
+        });
+      }
+    } catch (e) { console.error("[cliente] Error dibujando puentes:", e); }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapListoEnVivo, puentesMap, rutaSelId, tab]);
 
   // ─── KPIs ─────────────────────────────────────────────────────────────────
   const hoy          = getHoyPeru();
@@ -3129,6 +3201,12 @@ tbody tr:nth-child(even){background:#f9fafb}
                           <span style={{ width: 10, height: 10, borderRadius: "50%", border: "2px solid white", background: mostrarPuntosCli ? "#16a34a" : "#cbd5e1", boxShadow: "0 1px 3px rgba(0,0,0,0.25)", flexShrink: 0 }} />
                           <span style={{ fontSize: 10, fontWeight: 700, color: "#475569" }}>{mostrarPuntosCli ? "Ocultar" : "Ver"} datos por punto</span>
                         </button>
+                      )}
+                      {(puentesMap[servicioSel.id]?.length || 0) > 0 && (
+                        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 8 }}>
+                          <span style={{ width: 22, height: 0, borderTop: "2px dashed #60a5fa", flexShrink: 0 }} />
+                          <span style={{ fontSize: 10, fontWeight: 700, color: "#475569" }}>Tramo estimado (sin señal)</span>
+                        </div>
                       )}
                     </>
                   )}
