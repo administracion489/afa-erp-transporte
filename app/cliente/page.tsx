@@ -230,6 +230,7 @@ export default function ClientePortal() {
   const [vistaAgenda,    setVistaAgenda]    = useState(false);
   const [reservaStats,   setReservaStats]   = useState<Record<number, { embarcados: number; esperados: number }>>({});
   const [loadingStats,   setLoadingStats]   = useState(false);
+  const [exportando,     setExportando]     = useState(false);
 
   // Modales
   const [gpsModalOpen, setGpsModalOpen] = useState(false);
@@ -3115,16 +3116,155 @@ tbody tr:nth-child(even){background:#f9fafb}
             ? Math.round((reservas.filter(r => esCancelado(r.estado)).length / reservas.length) * 100)
             : 0;
           const slaColor = (pct: number) => pct >= 95 ? C.success : pct >= 85 ? C.warn : C.danger;
-          const exportCSV = () => {
-            const headers = ["#","Fecha","Hora","Ruta","Estado","Pasajeros",...(puedeVerMontos ? ["Total"] : [])];
-            const rows = [headers];
-            reservasFiltradas.forEach(r => {
-              const st = reservaStats[r.id];
-              const base = [String(r.id), fmtFecha(r.fecha_servicio), r.hora_servicio?.slice(0,5)||"–", `${r.origen} → ${r.destino}`, r.estado, st ? `${st.embarcados}/${st.esperados}` : "–"];
-              rows.push(puedeVerMontos ? [...base, fmtSoles(Number(r.precio_cliente))] : base);
-            });
-            const csv = rows.map(r => r.map(v => `"${v}"`).join(",")).join("\n");
-            const a = document.createElement("a"); a.href = "data:text/csv;charset=utf-8," + encodeURIComponent(csv); a.download = `historial_${hoy}.csv`; a.click();
+          // Exporta el historial (respetando filtro/búsqueda activos) a un .xlsx REAL con
+          // estilos: banners de marca, cabecera navy, filas cebra, estado coloreado según
+          // el design system (estadoCliente), SLA/Total con formato numérico y colores,
+          // anchos por contenido con Origen/Destino en columnas separadas (texto completo,
+          // wrap) y fila TOTAL. xlsx-js-style se carga on-demand para no cargar el bundle.
+          // (Un CSV no puede llevar colores/anchos y Excel además rompía los acentos UTF-8.)
+          const exportarExcel = async () => {
+            if (exportando) return;
+            if (reservasFiltradas.length === 0) { alert("No hay servicios para exportar con los filtros actuales."); return; }
+            setExportando(true);
+            try {
+              const mod: any = await import("xlsx-js-style");
+              const XLSX = mod.default ?? mod;
+              const A = (hex: string) => "FF" + hex.replace("#", "").toUpperCase();
+              const Bd = { style: "thin", color: { rgb: A(C.line) } };
+              const border = { top: Bd, bottom: Bd, left: Bd, right: Bd };
+
+              const cols: { k: string; h: string; min: number; max: number; al: string; wrap?: boolean; nf?: string }[] = [
+                { k: "id",      h: "ID AFA",     min: 15, max: 18, al: "left"   },
+                { k: "orden",   h: "N°",         min: 6,  max: 9,  al: "center" },
+                { k: "fecha",   h: "Fecha",      min: 11, max: 13, al: "center" },
+                { k: "dia",     h: "Día",        min: 7,  max: 10, al: "center" },
+                { k: "hora",    h: "Hora",       min: 7,  max: 9,  al: "center" },
+                { k: "origen",  h: "Origen",     min: 22, max: 42, al: "left",  wrap: true },
+                { k: "destino", h: "Destino",    min: 22, max: 42, al: "left",  wrap: true },
+                { k: "estado",  h: "Estado",     min: 12, max: 14, al: "center" },
+                { k: "emb",     h: "Emb.",       min: 6,  max: 9,  al: "center", nf: "0" },
+                { k: "esp",     h: "Pax",        min: 6,  max: 9,  al: "center", nf: "0" },
+                { k: "sla",     h: "SLA",        min: 7,  max: 9,  al: "center", nf: '0"%"' },
+                ...(puedeVerMontos ? [{ k: "total", h: "Total (S/)", min: 13, max: 16, al: "right", nf: '"S/ "#,##0.00' }] : []),
+              ];
+              const nC = cols.length;
+              const empresaNom = cliente?.empresa || cliente?.nombre || "AFA Transportes";
+              const generado = fmtFecha(hoy);
+
+              const aoa: any[][] = [];
+              aoa.push(["AFA Transportes  ·  Historial de servicios", ...Array(nC - 1).fill("")]);
+              aoa.push([`${empresaNom}     —     ${reservasFiltradas.length} servicio${reservasFiltradas.length !== 1 ? "s" : ""}     ·     Generado ${generado}`, ...Array(nC - 1).fill("")]);
+              aoa.push(Array(nC).fill(""));
+              aoa.push(cols.map(c => c.h));
+              const dataStart = aoa.length;
+
+              reservasFiltradas.forEach(r => {
+                const st = reservaStats[r.id];
+                const sla = st && st.esperados > 0 ? Math.round((st.embarcados / st.esperados) * 100) : "";
+                aoa.push(cols.map(c => {
+                  switch (c.k) {
+                    case "id":      return idAfa(r);
+                    case "orden":   return String(ordenCliente.get(r.id) ?? 0).padStart(3, "0");
+                    case "fecha":   return fmtFecha(r.fecha_servicio);
+                    case "dia":     return fmtFechaLrg(r.fecha_servicio).split(",")[0];
+                    case "hora":    return r.hora_servicio?.slice(0, 5) || "";
+                    case "origen":  return r.origen || "";
+                    case "destino": return r.destino || "";
+                    case "estado":  return estadoCliente(efectivoEstado(r)).label;
+                    case "emb":     return st ? st.embarcados : "";
+                    case "esp":     return st ? st.esperados : "";
+                    case "sla":     return sla;
+                    case "total":   return Number(r.precio_cliente || 0);
+                    default:        return "";
+                  }
+                }));
+              });
+              const dataEnd = aoa.length - 1;
+
+              aoa.push(cols.map((c, i) => {
+                if (i === 0) return "TOTAL";
+                if (c.k === "emb")   return reservasFiltradas.reduce((s, r) => s + (reservaStats[r.id]?.embarcados || 0), 0);
+                if (c.k === "esp")   return reservasFiltradas.reduce((s, r) => s + (reservaStats[r.id]?.esperados || 0), 0);
+                if (c.k === "total") return reservasFiltradas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
+                return "";
+              }));
+              const totalRowIdx = aoa.length - 1;
+
+              const ws = XLSX.utils.aoa_to_sheet(aoa);
+              const enc = (r: number, c: number) => XLSX.utils.encode_cell({ r, c });
+              ws["!merges"] = [
+                { s: { r: 0, c: 0 }, e: { r: 0, c: nC - 1 } },
+                { s: { r: 1, c: 0 }, e: { r: 1, c: nC - 1 } },
+              ];
+
+              const titleStyle = { font: { bold: true, sz: 15, color: { rgb: "FFFFFFFF" } }, fill: { fgColor: { rgb: A(C.navyDeep) } }, alignment: { horizontal: "left", vertical: "center", indent: 1 } };
+              const subStyle   = { font: { sz: 10.5, color: { rgb: "FFD5DDEA" } }, fill: { fgColor: { rgb: A(C.navy) } }, alignment: { horizontal: "left", vertical: "center", indent: 1 } };
+              const headStyle  = { font: { bold: true, sz: 10, color: { rgb: "FFFFFFFF" } }, fill: { fgColor: { rgb: A(C.navy) } }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border };
+              for (let c = 0; c < nC; c++) {
+                if (ws[enc(0, c)]) ws[enc(0, c)].s = titleStyle;
+                if (ws[enc(1, c)]) ws[enc(1, c)].s = subStyle;
+                if (ws[enc(3, c)]) ws[enc(3, c)].s = headStyle;
+              }
+
+              for (let ri = dataStart; ri <= dataEnd; ri++) {
+                const r = reservasFiltradas[ri - dataStart];
+                const st = reservaStats[r.id];
+                const sla = st && st.esperados > 0 ? Math.round((st.embarcados / st.esperados) * 100) : null;
+                const zebra = (ri - dataStart) % 2 === 0 ? "#FFFFFF" : C.paper;
+                cols.forEach((c, ci) => {
+                  const cell = ws[enc(ri, ci)]; if (!cell) return;
+                  const s: any = { font: { sz: 10, color: { rgb: A(C.ink2) } }, fill: { fgColor: { rgb: A(zebra) } }, alignment: { horizontal: c.al, vertical: "center", wrapText: !!c.wrap }, border };
+                  if (c.nf) s.numFmt = c.nf;
+                  if (c.k === "id") s.font = { ...s.font, bold: true, color: { rgb: A(C.navy) } };
+                  if (c.k === "estado") {
+                    const ec = estadoCliente(efectivoEstado(r));
+                    s.fill = { fgColor: { rgb: A(ec.bg) } };
+                    s.font = { ...s.font, bold: true, color: { rgb: A(ec.c) } };
+                  }
+                  if (c.k === "sla" && sla !== null) s.font = { ...s.font, bold: true, color: { rgb: A(slaColor(sla)) } };
+                  if (c.k === "total") s.font = { ...s.font, bold: true, color: { rgb: A(C.navy) } };
+                  cell.s = s;
+                });
+              }
+
+              for (let c = 0; c < nC; c++) {
+                const cell = ws[enc(totalRowIdx, c)]; if (!cell) continue;
+                const s: any = { font: { bold: true, sz: 10.5, color: { rgb: "FFFFFFFF" } }, fill: { fgColor: { rgb: A(C.navyDeep) } }, alignment: { horizontal: cols[c].al, vertical: "center" }, border };
+                if (cols[c].nf) s.numFmt = cols[c].nf;
+                cell.s = s;
+              }
+
+              ws["!cols"] = cols.map((c, ci) => {
+                let mx = c.h.length;
+                for (let ri = dataStart; ri <= dataEnd; ri++) {
+                  const v = aoa[ri][ci];
+                  const len = v == null ? 0 : String(v).length + (c.k === "total" ? 4 : c.k === "sla" ? 1 : 0);
+                  if (len > mx) mx = len;
+                }
+                return { wch: Math.min(Math.max(mx + 2, c.min), c.max) };
+              });
+              ws["!rows"] = [];
+              ws["!rows"][0] = { hpt: 26 };
+              ws["!rows"][1] = { hpt: 18 };
+              ws["!rows"][3] = { hpt: 20 };
+              ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 3, c: 0 }, e: { r: dataEnd, c: nC - 1 } }) };
+
+              const wb = XLSX.utils.book_new();
+              XLSX.utils.book_append_sheet(wb, ws, "Historial");
+              const buf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+              const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = `Historial_${empresaNom.replace(/[^\w]+/g, "_").replace(/^_+|_+$/g, "")}_${hoy}.xlsx`;
+              a.click();
+              setTimeout(() => URL.revokeObjectURL(url), 1500);
+            } catch (e) {
+              console.error("[exportarExcel]", e);
+              alert("No se pudo generar el Excel. Intenta de nuevo.");
+            } finally {
+              setExportando(false);
+            }
           };
           return (
           <div style={{ display: "flex", flexDirection: "column" as const, gap: 16 }}>
@@ -3143,9 +3283,11 @@ tbody tr:nth-child(even){background:#f9fafb}
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                   Actualizar
                 </button>
-                <button onClick={exportCSV} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 10, border: `1.5px solid ${C.line2}`, background: C.surface, color: C.ink2, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                  Exportar CSV
+                <button onClick={exportarExcel} disabled={exportando} title="Descargar el historial filtrado en Excel (.xlsx) con formato" style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 10, border: `1.5px solid ${C.line2}`, background: C.surface, color: C.ink2, fontSize: 12, fontWeight: 700, cursor: exportando ? "default" : "pointer", opacity: exportando ? 0.6 : 1, fontFamily: C.fontSans }}>
+                  {exportando
+                    ? <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: "spin 0.7s linear infinite" }}><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    : <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>}
+                  {exportando ? "Generando…" : "Exportar Excel"}
                 </button>
                 <button onClick={() => window.open("https://wa.me/51966707225?text=Hola%2C+quiero+solicitar+un+nuevo+servicio", "_blank")} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 10, border: "none", background: C.navy, color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
