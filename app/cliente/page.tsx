@@ -10,7 +10,7 @@ import { animarMarcador } from "@/lib/anim-marker";
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
-  calcularPuentes, decidirPuente,
+  calcularPuentes, decidirPuente, anclarImprecisos,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
 import { estadoCliente, normalizaEstado } from "@/lib/estados";
@@ -1163,8 +1163,9 @@ export default function ClientePortal() {
         .limit(5000);
       if (cancel) return;
       const filas = (data || []).filter((p: any) => p.lat && p.lng);
-      // Limpieza de jitter (mismo motor que el modal): colapsa rachas detenidas, dedup en marcha.
-      const crudos = filasAPuntos(filas);
+      // Anclar imprecisos al corredor confiable (mata el zigzag off-road) + limpieza de jitter
+      // (mismo motor que el modal): colapsa rachas detenidas, dedup en marcha.
+      const crudos = anclarImprecisos(filasAPuntos(filas));
       const limpio = conVelocidadColor(limpiarHuella(crudos));
       setHuellaGpsMap(prev => ({ ...prev, [rid]: limpio.map(p => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad, ts: null })) }));
       // Puntitos de telemetría real (~cada 100 m, anclados a muestra real) — Idea 2.

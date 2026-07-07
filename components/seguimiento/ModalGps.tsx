@@ -9,7 +9,7 @@ import {
   calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
-  calcularPuentes, decidirPuente,
+  calcularPuentes, decidirPuente, anclarImprecisos,
 } from "@/lib/huella";
 import { animarMarcador } from "@/lib/anim-marker";
 
@@ -437,9 +437,11 @@ export default function ModalGps({
         })();
         if (!cancel) setSinMovMin(sinMov > 10 * 60000 ? Math.floor(sinMov / 60000) : 0);
 
-        // Limpiar UNA sola vez (colapsa rachas detenidas + dedup en marcha). El mismo set
-        // limpio alimenta el dibujo (setHuella) y el ajuste por ventanas → coherentes.
-        const crudos = filasAPuntos(arr);
+        // Anclar los fixes IMPRECISOS al corredor de los confiables ANTES de todo (mata el zigzag
+        // off-road de un fix de red de ±100 m). Luego limpiar UNA sola vez (colapsa rachas detenidas
+        // + dedup en marcha). El mismo set limpio alimenta el dibujo (setHuella) y el ajuste por
+        // ventanas → coherentes. crudos (ya anclado) alimenta telemetría/resumen/puentes.
+        const crudos = anclarImprecisos(filasAPuntos(arr));
         const limpio = conVelocidadColor(limpiarHuella(crudos));
         setHuella(limpio.map(p => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad })));
         // Puntitos de telemetría real (~cada 100 m de recorrido, anclados a muestra real).

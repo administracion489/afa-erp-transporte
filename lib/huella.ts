@@ -81,6 +81,63 @@ export function filasAPuntos(filas: any[]): HuellaPt[] {
   }));
 }
 
+// Precisión (precision_m) por debajo de la cual un fix es CONFIABLE (chip satelital: la flota buena
+// da ~3-8 m). Por encima es red/torre: la posición cruda puede estar a 50-700 m de la real. El
+// usuario pidió "±10", pero el GPS satelital sano jitterea hasta ~10-12 m; 20 m separa limpio el
+// satélite (≤8 m en los datos) del degradado (≥48 m) sin tocar el jitter normal.
+const ACC_CONFIABLE_M = 20;
+
+// Proyecta (lat,lng) sobre el segmento A-B en metros locales (equirectangular). Devuelve el punto
+// del segmento más cercano y la distancia perpendicular (dist) — usada para decidir si anclar.
+function proyectarEnSegmento(lat: number, lng: number, A: { lat: number; lng: number }, B: { lat: number; lng: number }): { lat: number; lng: number; dist: number } {
+  const mLat = 111320, mLng = 111320 * Math.cos(lat * Math.PI / 180);
+  const ax = A.lng * mLng, ay = A.lat * mLat, bx = B.lng * mLng, by = B.lat * mLat;
+  const px = lng * mLng, py = lat * mLat;
+  const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+  let t = L2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / L2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  const qx = ax + t * dx, qy = ay + t * dy;
+  return { lat: qy / mLat, lng: qx / mLng, dist: Math.hypot(px - qx, py - qy) };
+}
+
+// ANCLA los fixes IMPRECISOS a la trayectoria de los CONFIABLES (Idea del usuario, jul-2026): un fix
+// de red de ±100 m dibujado en su posición cruda hace zigzags imposibles — cruza al carril de sentido
+// contrario, por casas, por el río. Aquí, un fix con acc > ACC_CONFIABLE_M se PROYECTA sobre la cuerda
+// entre su vecino confiable ANTES y el DESPUÉS — sobre el CARRIL correcto, porque el objetivo es la
+// propia traza buena, no la vía más cercana (que podría ser la opuesta). DOS candados que impiden
+// borrar geometría REAL (regla de la casa: nunca fabricar un recorrido):
+//   1. Corredor CORTO: ambas anclas a ≤ maxGapM. Sin corredor confiable cerca (zona larga degradada)
+//      no se ancla → ahí decide Map Matching.
+//   2. Candado PERPENDICULAR: solo se ancla si el fix crudo está a una distancia de la cuerda
+//      CONSISTENTE con su propia imprecisión (≤ max(70, 1.5·acc)). Si está mucho más lejos, NO es
+//      ruido lateral: es un DESVÍO real por calle secundaria o el exterior de una CURVA → se deja
+//      intacto (anclarlo dibujaría por la avenida donde el bus no fue, o cortaría la esquina).
+// Ancla solo la POSICIÓN; deja acc/velocidad/rumbo/ts intactos (la precisión sigue honesta en el
+// popup). NO agrega/quita puntos (out = pts.slice, solo muta lat/lng) → índices y congelado por
+// índice de crearAjustadorHuella intactos. Estabilidad: un punto con SUS DOS anclas ya fijas es
+// determinista entre re-fetch; los de la COLA sin ancla-posterior aún se dejan intactos y pueden
+// re-anclar (asentarse) cuando llega un confiable después — mutación tardía normal de la cola viva.
+export function anclarImprecisos(pts: HuellaPt[], umbral = ACC_CONFIABLE_M, maxGapM = 200): HuellaPt[] {
+  const n = pts.length;
+  if (n < 3) return pts;
+  const relB = new Array<number>(n).fill(-1), relA = new Array<number>(n).fill(-1);
+  let last = -1;
+  for (let i = 0; i < n; i++) { relB[i] = last; if (pts[i].acc <= umbral) last = i; }
+  last = -1;
+  for (let i = n - 1; i >= 0; i--) { relA[i] = last; if (pts[i].acc <= umbral) last = i; }
+  const out = pts.slice();
+  for (let i = 0; i < n; i++) {
+    if (pts[i].acc <= umbral) continue;                                          // confiable → intacto
+    const jb = relB[i], ja = relA[i];
+    if (jb < 0 || ja < 0) continue;                                              // extremo sin ancla de un lado
+    if (distM(pts[jb].lat, pts[jb].lng, pts[ja].lat, pts[ja].lng) > maxGapM) continue; // corredor largo → no anclar
+    const q = proyectarEnSegmento(pts[i].lat, pts[i].lng, pts[jb], pts[ja]);
+    if (q.dist > Math.max(70, 1.5 * pts[i].acc)) continue;                       // lejos de la cuerda vs su precisión = desvío/curva real → dejar
+    out[i] = { ...pts[i], lat: q.lat, lng: q.lng };                             // ruido lateral → anclar al corredor confiable
+  }
+  return out;
+}
+
 // Colapsa los clusters estacionarios: descarta puntos a <minM del último conservado.
 // Prefijo estable (append-only): los ya conservados no cambian al añadir puntos al final.
 export function dedupCercanos(pts: MatchPt[], minM = 8): MatchPt[] {
