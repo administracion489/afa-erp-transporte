@@ -9,7 +9,7 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador } from "@/lib/anim-marker";
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor,
-  puntosTelemetria, type PuntoTelemetria,
+  puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
 import { estadoCliente, normalizaEstado } from "@/lib/estados";
@@ -130,6 +130,9 @@ function getHoyPeru() {
   // Siempre UTC-5 fijo, independiente del timezone del navegador/servidor
   return new Date(Date.now() - 5 * 3600000).toISOString().split("T")[0];
 }
+// Formato de duración (min → "1h 05m") y hora Perú, para el resumen del viaje.
+const fmtDur = (m: number) => (m < 60 ? `${m} min` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`);
+const fmtHoraPe = (ts: number) => new Date(ts).toLocaleTimeString("es-PE", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/Lima" });
 
 // ─── FAQ ──────────────────────────────────────────────────────────────────
 const FAQ_ITEMS = [
@@ -257,6 +260,7 @@ export default function ClientePortal() {
   const [rutasEnVivoMap,    setRutasEnVivoMap]    = useState<Record<number, [number,number][]>>({});
   const [huellaGpsMap,      setHuellaGpsMap]      = useState<Record<number, {lat:number;lng:number;velocidad:number;ts:string|null}[]>>({});
   const [telemetriaMap,     setTelemetriaMap]     = useState<Record<number, PuntoTelemetria[]>>({}); // puntitos de telemetría real por servicio
+  const [resumenMap,        setResumenMap]        = useState<Record<number, ResumenViaje | null>>({}); // resumen del viaje por servicio
   const [mostrarPuntosCli,  setMostrarPuntosCli]  = useState(true);                                  // toggle de la leyenda
   const geocacheCliRef = useRef<Map<string, string>>(new Map());                                     // caché reverse-geocode
   const popupTelemCliRef = useRef<any>(null);                                                        // popup activo de un puntito
@@ -1162,6 +1166,8 @@ export default function ClientePortal() {
       setHuellaGpsMap(prev => ({ ...prev, [rid]: limpio.map(p => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad, ts: null })) }));
       // Puntitos de telemetría real (~cada 100 m, anclados a muestra real) — Idea 2.
       setTelemetriaMap(prev => ({ ...prev, [rid]: puntosTelemetria(limpio, crudos) }));
+      // Resumen del viaje (km, tiempos, paradas, calidad) — datos reales.
+      setResumenMap(prev => ({ ...prev, [rid]: resumenViaje(limpio, crudos) }));
       // Map Matching por ventanas (pegado a la pista) — throttle/congelado interno del ajustador.
       if (!ajustadoresRef.current[rid]) ajustadoresRef.current[rid] = crearAjustadorHuella();
       const matched = await ajustadoresRef.current[rid].ajustar(limpio, token, () => cancel);
@@ -3129,6 +3135,42 @@ tbody tr:nth-child(even){background:#f9fafb}
                 </div>
               )}
             </div>
+
+            {/* Resumen del viaje (datos reales) del servicio seleccionado */}
+            {servicioSel && resumenMap[servicioSel.id] && resumenMap[servicioSel.id]!.kmRecorridos > 0 && (() => {
+              const r = resumenMap[servicioSel.id]!;
+              const badgeBg = r.medidoPct >= 90 ? "#dcfce7" : r.medidoPct >= 70 ? "#fef9c3" : "#fee2e2";
+              const badgeFg = r.medidoPct >= 90 ? "#15803d" : r.medidoPct >= 70 ? "#a16207" : "#b91c1c";
+              // Función (no componente): se invoca como Item({...}), sin crear un fiber nuevo por render.
+              const Item = (l: string, v: string) => (
+                <div key={l}><p style={{ fontSize: 9, color: C.mute, fontWeight: 700, textTransform: "uppercase" as const, margin: 0 }}>{l}</p><p style={{ fontSize: 14, color: C.ink, fontWeight: 800, margin: "1px 0 0" }}>{v}</p></div>
+              );
+              return (
+                <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: 14 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                    <p style={{ fontWeight: 700, fontSize: 12, color: C.ink, margin: 0 }}>Resumen del viaje</p>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: badgeBg, color: badgeFg }}>Rastreo {r.medidoPct}% medido</span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                    {Item("Recorrido", `${r.kmRecorridos} km`)}
+                    {Item("Duración", fmtDur(r.tiempoTotalMin))}
+                    {Item("Detenciones", String(r.paradas))}
+                    {Item("En marcha", fmtDur(r.tiempoMovimientoMin))}
+                    {Item("Detenido", fmtDur(r.tiempoDetenidoMin))}
+                    {Item("Vel. máx", `${r.velMaxKmh} km/h`)}
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.line}`, fontSize: 11, color: C.mute }}>
+                    <span>Salida <b style={{ color: C.ink }}>{fmtHoraPe(r.horaSalida)}</b></span>
+                    <span>Última señal <b style={{ color: C.ink }}>{fmtHoraPe(r.horaLlegada)}</b></span>
+                  </div>
+                  {r.medidoPct < 90 && (
+                    <p style={{ fontSize: 10, color: C.mute, margin: "8px 0 0", lineHeight: 1.4 }}>
+                      {100 - r.medidoPct}% del trayecto sin señal (huecos de GPS). Precisión mediana ±{r.precisionMedianaM} m.
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Lista de vehículos del cliente */}
             {vehiculosCliente.length > 0 && (

@@ -342,6 +342,70 @@ export function puntosTelemetria(limpia: HuellaPt[], crudos: HuellaPt[], pasoM =
   return out;
 }
 
+// Resumen del viaje derivado de datos REALES (Idea/mejora extra 3). Solo agrega/cuenta lo medido —
+// no infiere posición. `limpia` (huella dibujada) da km y velocidad máx; `crudos` (todos los fixes,
+// con sus ts) dan el tiempo, el detenido y las paradas (la limpia colapsa cada parada a 1 vértice y
+// pierde su duración). El badge `medidoPct` = fracción del recorrido efectivamente rastreada frente
+// a los huecos (> MAX_SEG_M, tramos donde se perdió señal) → "Rastreo X% medido".
+export type ResumenViaje = {
+  kmRecorridos: number; tiempoTotalMin: number; tiempoMovimientoMin: number; tiempoDetenidoMin: number;
+  velMaxKmh: number; paradas: number;
+  horaSalida: number; horaLlegada: number;            // ms epoch (la UI formatea en hora Perú)
+  medidoPct: number; precisionMedianaM: number; puntosTotales: number;
+};
+export function resumenViaje(limpia: HuellaPt[], crudos: HuellaPt[]): ResumenViaje | null {
+  const cru = (crudos || []).filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lng) && c.ts > 0).sort((a, b) => a.ts - b.ts);
+  if (cru.length < 2 || !limpia || limpia.length < 2) return null;
+
+  // km recorridos + calidad, sobre la huella limpia (cortando huecos > MAX_SEG_M = tramos perdidos).
+  let distMedida = 0, distHuecos = 0;
+  for (let i = 1; i < limpia.length; i++) {
+    const d = distM(limpia[i - 1].lat, limpia[i - 1].lng, limpia[i].lat, limpia[i].lng);
+    if (d > MAX_SEG_M) distHuecos += d; else distMedida += d;
+  }
+  // velMax ROBUSTO: p95 de las velocidades creíbles, con tope de bus realista (110, NO el VMAX de
+  // imposibilidad 130). El p95 ignora un pico aislado — el proveedor FUSED reporta velocidad
+  // FANTASMA en el jitter de un bus parado y conVelocidadColor puede derivar picos por saltos de
+  // GPS pobre; un único glitch NO debe volverse el "Vel. máx" que ve el cliente. Prefiere Doppler
+  // real (crudos.velocidad>0) si el equipo lo trae; si no, la derivada de la huella coloreada.
+  const VMAX_DISPLAY = 110;
+  const dopplers = cru.map((c) => c.velocidad).filter((v) => v > 0 && v <= VMAX_BUS_KMH);
+  const velsCreibles = (dopplers.length >= 3 ? dopplers : limpia.map((p) => p.velocidad))
+    .filter((v) => v > 0 && v <= VMAX_DISPLAY).sort((a, b) => a - b);
+  const velMax = velsCreibles.length ? velsCreibles[Math.floor((velsCreibles.length - 1) * 0.95)] : 0;
+
+  // Tiempo, detenido y detenciones desde los crudos (retienen todos los timestamps). "Detenido" =
+  // desplazamiento dentro de la precisión (jitter, no movimiento), CON TECHO de 60 m: con GPS de
+  // red (acc 100-500 m) un umbral = acc se tragaría la marcha lenta urbana (40-90 m/fix) y la
+  // contaría como detenida. Los huecos de señal (> 5 min) no cuentan ni marcha ni detenido.
+  const GAP_MAX_S = 300, MIN_PARADA_S = 90, JITTER_MAX_M = 60;
+  let tMovS = 0, tDetS = 0, paradas = 0, rachaDetS = 0;
+  for (let i = 1; i < cru.length; i++) {
+    const dt = (cru[i].ts - cru[i - 1].ts) / 1000;
+    if (dt <= 0 || dt > GAP_MAX_S) { if (rachaDetS >= MIN_PARADA_S) paradas++; rachaDetS = 0; continue; }
+    const d = distM(cru[i - 1].lat, cru[i - 1].lng, cru[i].lat, cru[i].lng);
+    const detenido = d < Math.min(JITTER_MAX_M, Math.max(25, cru[i - 1].acc || 25, cru[i].acc || 25));
+    if (detenido) { tDetS += dt; rachaDetS += dt; }
+    else { tMovS += dt; if (rachaDetS >= MIN_PARADA_S) paradas++; rachaDetS = 0; }
+  }
+  if (rachaDetS >= MIN_PARADA_S) paradas++;
+
+  const accs = cru.map((c) => c.acc || 25).sort((a, b) => a - b);
+  const total = distMedida + distHuecos;
+  return {
+    kmRecorridos: Math.round(distMedida / 100) / 10,
+    tiempoTotalMin: Math.round((cru[cru.length - 1].ts - cru[0].ts) / 60000),
+    tiempoMovimientoMin: Math.round(tMovS / 60),
+    tiempoDetenidoMin: Math.round(tDetS / 60),
+    velMaxKmh: Math.round(velMax),
+    paradas,
+    horaSalida: cru[0].ts, horaLlegada: cru[cru.length - 1].ts,
+    medidoPct: total > 0 ? Math.round((distMedida / total) * 100) : 100,
+    precisionMedianaM: Math.round(accs[Math.floor(accs.length / 2)]),
+    puntosTotales: cru.length,
+  };
+}
+
 // Prepara una ventana para Map Matching: deduplica y limita a 100 (máximo de la API),
 // conservando primero y último. Se llama por ventana, que ya viene ≤100.
 export function prepararPuntos(pts: MatchPt[]): MatchPt[] {

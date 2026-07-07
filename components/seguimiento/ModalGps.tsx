@@ -8,7 +8,7 @@ import { supabase } from "@/lib/supabase";
 import {
   calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
-  puntosTelemetria, type PuntoTelemetria,
+  puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
 } from "@/lib/huella";
 import { animarMarcador } from "@/lib/anim-marker";
 
@@ -68,6 +68,8 @@ const rumboCardinal = (deg: number) => {
 };
 const fmtHoraPunto = (ts: number) =>
   new Date(ts).toLocaleTimeString("es-PE", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZone: "America/Lima" });
+const fmtHoraTs = (ts: number) => // sin segundos, para el resumen del viaje
+  new Date(ts).toLocaleTimeString("es-PE", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/Lima" });
 
 // Helpers de huella (distancia, rumbo, suavizado, limpieza de jitter, Map Matching por
 // ventanas) viven en lib/huella.ts — fuente ÚNICA compartida con el mapa "En vivo" del
@@ -104,6 +106,7 @@ export default function ModalGps({
   const [matchedCoords,     setMatchedCoords]     = useState<[number, number][] | null>(null);
   const [velCalc,           setVelCalc]           = useState<number>(0);
   const [telemetria,        setTelemetria]        = useState<PuntoTelemetria[]>([]); // puntitos de telemetría real
+  const [resumen,           setResumen]           = useState<ResumenViaje | null>(null); // resumen del viaje (datos reales)
   const [mostrarPuntos,     setMostrarPuntos]     = useState(true);                  // toggle de la leyenda
   const geocacheRef = useRef<Map<string, string>>(new Map());                        // caché reverse-geocode por coord redondeada
   const popupTelemRef = useRef<any>(null);                                           // popup activo de un puntito
@@ -438,6 +441,8 @@ export default function ModalGps({
         setHuella(limpio.map(p => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad })));
         // Puntitos de telemetría real (~cada 100 m de recorrido, anclados a muestra real).
         if (!cancel) setTelemetria(puntosTelemetria(limpio, crudos));
+        // Resumen del viaje (km, tiempos, paradas, calidad de rastreo) — datos reales.
+        if (!cancel) setResumen(resumenViaje(limpio, crudos));
 
         // Map Matching por ventanas (lib/huella.ts): throttle 60 s + congelado interno.
         const matched = await ajustador.ajustar(limpio, token, () => cancel);
@@ -1075,6 +1080,39 @@ export default function ModalGps({
               <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-1">Vehículo</p>
               <p className="text-[#0b315f] font-black text-2xl font-mono tracking-widest">{vehiculoPlaca}</p>
             </div>
+
+            {resumen && resumen.kmRecorridos > 0 && (
+              <div className="bg-white rounded-xl border p-3" style={{ borderColor: "#e2e8f0" }}>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400">Resumen del viaje</p>
+                  {/* Badge de calidad de rastreo: % del recorrido efectivamente medido (vs huecos). */}
+                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                    style={{
+                      background: resumen.medidoPct >= 90 ? "#dcfce7" : resumen.medidoPct >= 70 ? "#fef9c3" : "#fee2e2",
+                      color: resumen.medidoPct >= 90 ? "#15803d" : resumen.medidoPct >= 70 ? "#a16207" : "#b91c1c",
+                    }}>
+                    Rastreo {resumen.medidoPct}%
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-2 gap-y-2">
+                  <div><p className="text-[9px] text-gray-400 uppercase font-bold">Recorrido</p><p className="text-sm font-black text-gray-800">{resumen.kmRecorridos} km</p></div>
+                  <div><p className="text-[9px] text-gray-400 uppercase font-bold">Duración</p><p className="text-sm font-black text-gray-800">{fmtTiempo(resumen.tiempoTotalMin)}</p></div>
+                  <div><p className="text-[9px] text-gray-400 uppercase font-bold">En marcha</p><p className="text-sm font-bold text-gray-700">{fmtTiempo(resumen.tiempoMovimientoMin)}</p></div>
+                  <div><p className="text-[9px] text-gray-400 uppercase font-bold">Detenido</p><p className="text-sm font-bold text-gray-700">{fmtTiempo(resumen.tiempoDetenidoMin)}</p></div>
+                  <div><p className="text-[9px] text-gray-400 uppercase font-bold">Vel. máx</p><p className="text-sm font-bold text-gray-700">{resumen.velMaxKmh} km/h</p></div>
+                  <div><p className="text-[9px] text-gray-400 uppercase font-bold">Detenciones</p><p className="text-sm font-bold text-gray-700">{resumen.paradas}</p></div>
+                </div>
+                <div className="flex items-center justify-between mt-2 pt-2 border-t text-[10px] text-gray-500" style={{ borderColor: "#f1f5f9" }}>
+                  <span>Salida <b className="text-gray-700">{fmtHoraTs(resumen.horaSalida)}</b></span>
+                  <span>Última señal <b className="text-gray-700">{fmtHoraTs(resumen.horaLlegada)}</b></span>
+                </div>
+                {resumen.medidoPct < 90 && (
+                  <p className="text-[9px] text-gray-400 mt-1.5 leading-snug">
+                    {100 - resumen.medidoPct}% del trayecto sin señal (huecos de GPS). Precisión mediana ±{resumen.precisionMedianaM} m.
+                  </p>
+                )}
+              </div>
+            )}
 
             <div className="bg-white rounded-xl border p-3" style={{ borderColor: "#e2e8f0" }}>
               <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mb-1">Velocidad real</p>
