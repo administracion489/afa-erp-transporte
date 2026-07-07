@@ -323,6 +323,37 @@ const GUIA_AJUSTES_GPS: Record<string, GuiaFabricante> = {
   generico:{ marca: "tu equipo", pasos: PASOS_COMUNES },
 };
 
+// ─── CHAT CON PASAJEROS ───────────────────────────────────────────────────────
+
+// Respuestas rápidas del conductor.
+const RESP_RAPIDAS_COND = [
+  "Ya voy en camino 🚌",
+  "Llego en ~5 minutos.",
+  "Estoy llegando a tu paradero.",
+  "Por favor acércate al punto de recojo.",
+  "Entendido, gracias por avisar.",
+];
+
+// Agrupa los mensajes del servicio en hilos por pasajero (bandeja del conductor).
+function agruparThreadsCond(msgs: any[]) {
+  const map = new Map<number, { paxId: number; nombre: string; empresa: string | null; msgs: any[]; ultimo: any; noLeidos: number }>();
+  for (const m of msgs) {
+    const pid = m.pasajero_id;
+    if (pid == null) continue;
+    const prev = map.get(pid);
+    if (!prev) {
+      map.set(pid, {
+        paxId: pid, nombre: m.pasajero?.nombre || "Pasajero", empresa: m.pasajero?.empresa || null,
+        msgs: [m], ultimo: m, noLeidos: m.remitente === "pasajero" && !m.leido ? 1 : 0,
+      });
+    } else {
+      prev.msgs.push(m); prev.ultimo = m;
+      if (m.remitente === "pasajero" && !m.leido) prev.noLeidos++;
+    }
+  }
+  return [...map.values()].sort((a, b) => new Date(b.ultimo.created_at).getTime() - new Date(a.ultimo.created_at).getTime());
+}
+
 // ─── SESSION ──────────────────────────────────────────────────────────────────
 
 const SK = "afa_cond_v2";
@@ -498,6 +529,14 @@ export default function ConductorApp() {
   const [fechaVista,        setFechaVista]        = useState<string>(getFechaLocal());
   const [reservasOtraFecha, setReservasOtraFecha] = useState<Reserva[] | null>(null);
   const [cargandoOtraFecha, setCargandoOtraFecha] = useState(false);
+
+  // ── CHAT CON PASAJEROS (solo del servicio activo; responder a quien escribe) ──
+  const [chatOpen,     setChatOpen]     = useState(false);
+  const [chatMsgs,     setChatMsgs]     = useState<any[]>([]);
+  const [chatPaxSel,   setChatPaxSel]   = useState<number | null>(null); // hilo abierto
+  const [chatBorrador, setChatBorrador] = useState("");
+  const [chatEnviando, setChatEnviando] = useState(false);
+  const chatFinRef = useRef<HTMLDivElement | null>(null);
 
   // ── GPS ────────────────────────────────────────────────────────────────────
   const [enRuta,       setEnRuta]       = useState(false);
@@ -801,6 +840,43 @@ export default function ConductorApp() {
     }
     setCargandoOtraFecha(false);
   }
+
+  // ── CHAT: responder a un pasajero de MI servicio ────────────────────────────
+  async function responderPax(pasajeroId: number, texto: string) {
+    const t = texto.trim();
+    const rid = reservaActiva?.id;
+    if (!t || !rid || !conductor || chatEnviando) return;
+    setChatEnviando(true);
+    try {
+      const { mensaje } = await condApi("responder_mensaje", {
+        cid: conductor.id, tabla: conductor._tabla ?? "conductores",
+        reservaId: rid, pasajero_id: pasajeroId, texto: t,
+      });
+      if (mensaje) setChatMsgs(prev => [...prev, mensaje]);
+      setChatBorrador("");
+    } catch {} finally { setChatEnviando(false); }
+  }
+
+  // Poll del hilo del servicio activo (rápido si el chat está abierto; lento si no → badge).
+  useEffect(() => {
+    const rid = reservaActiva?.id;
+    if (!rid) { setChatMsgs([]); return; }
+    let vivo = true;
+    const tick = async () => {
+      try {
+        const { mensajes } = await condApi("mensajes_servicio", { reservaId: rid });
+        if (vivo && Array.isArray(mensajes)) setChatMsgs(mensajes);
+      } catch {}
+    };
+    void tick();
+    const id = setInterval(tick, chatOpen ? 12000 : 30000);
+    return () => { vivo = false; clearInterval(id); };
+  }, [reservaActiva?.id, chatOpen]);
+
+  // Auto-scroll al fondo del hilo abierto.
+  useEffect(() => {
+    if (chatOpen && chatPaxSel != null) chatFinRef.current?.scrollIntoView({ behavior: "auto" });
+  }, [chatMsgs.length, chatPaxSel, chatOpen]);
 
   function cambiarFecha(delta: number) {
     const d = new Date(fechaVista + "T12:00:00");
@@ -4825,6 +4901,132 @@ export default function ConductorApp() {
           Leyendo…
         </div>
       )}
+
+      {/* ── CHAT CON PASAJEROS: botón flotante (solo en servicio activo) ── */}
+      {conductor && reservaActiva && enRuta && !chatOpen && !escanear && (
+        <button onClick={() => { setChatOpen(true); setChatPaxSel(null); }} aria-label="Mensajes de pasajeros"
+          style={{ position: "fixed", right: 16, bottom: 96, zIndex: 110, width: 56, height: 56, borderRadius: "50%", background: "#0b315f", color: "#fff", border: "none", boxShadow: "0 6px 18px rgba(11,49,95,.4)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, cursor: "pointer" }}>
+          💬
+          {(() => {
+            const n = chatMsgs.filter((m: any) => m.remitente === "pasajero" && !m.leido).length;
+            return n > 0 ? (
+              <span style={{ position: "absolute", top: -2, right: -2, minWidth: 21, height: 21, padding: "0 5px", borderRadius: 11, background: "#ef4444", color: "#fff", fontSize: 11.5, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", border: "2px solid #0b315f" }}>
+                {n > 9 ? "9+" : n}
+              </span>
+            ) : null;
+          })()}
+        </button>
+      )}
+
+      {/* ── CHAT CON PASAJEROS: overlay (bandeja → hilo) ── */}
+      {chatOpen && (() => {
+        const threads = agruparThreadsCond(chatMsgs);
+        const threadSel = chatPaxSel != null ? (threads.find(t => t.paxId === chatPaxSel) || null) : null;
+        return (
+          <div onClick={() => setChatOpen(false)}
+            style={{ position: "fixed", inset: 0, zIndex: 210, background: "rgba(11,49,95,0.55)", display: "flex", flexDirection: "column", justifyContent: "flex-end", fontFamily: FONT_SANS }}>
+            <div onClick={e => e.stopPropagation()}
+              style={{ background: "#fff", borderRadius: "20px 20px 0 0", maxHeight: "88vh", display: "flex", flexDirection: "column", boxShadow: "0 -8px 30px rgba(0,0,0,0.2)" }}>
+
+              {/* Header */}
+              <div style={{ background: "#0b315f", color: "#fff", padding: "13px 14px", borderRadius: "20px 20px 0 0", display: "flex", alignItems: "center", gap: 10 }}>
+                {threadSel && (
+                  <button onClick={() => setChatPaxSel(null)} aria-label="Volver"
+                    style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(255,255,255,0.12)", border: "none", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
+                    <IconArrowLeft size={18} color="#fff" />
+                  </button>
+                )}
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontWeight: 800, fontSize: 15.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {threadSel ? threadSel.nombre : "Mensajes de pasajeros"}
+                  </div>
+                  <div style={{ fontSize: 11.5, opacity: 0.82 }}>
+                    {threadSel ? (threadSel.empresa || "Toca para responder") : `${threads.length} conversación(es)`}
+                  </div>
+                </div>
+                <button onClick={() => setChatOpen(false)} aria-label="Cerrar"
+                  style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(255,255,255,0.12)", border: "none", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
+                  <IconClose size={18} color="#fff" />
+                </button>
+              </div>
+
+              {/* Bandeja de hilos */}
+              {!threadSel ? (
+                <div style={{ overflowY: "auto", maxHeight: "72vh" }}>
+                  {threads.length === 0 ? (
+                    <div style={{ padding: "44px 20px", textAlign: "center", color: "#64748b" }}>
+                      <div style={{ fontSize: 40, marginBottom: 8 }}>💬</div>
+                      <div style={{ fontWeight: 700, color: "#334155" }}>Sin mensajes</div>
+                      <div style={{ fontSize: 13, marginTop: 4 }}>Aquí verás lo que te escriban los pasajeros de este servicio</div>
+                    </div>
+                  ) : threads.map(t => (
+                    <button key={t.paxId} onClick={() => setChatPaxSel(t.paxId)}
+                      style={{ width: "100%", textAlign: "left", display: "flex", gap: 12, alignItems: "center", padding: "13px 16px", borderBottom: "1px solid #f1f5f9", background: t.noLeidos > 0 ? "#f8fafc" : "#fff", border: "none", cursor: "pointer" }}>
+                      <div style={{ width: 40, height: 40, borderRadius: 12, background: "#0b315f", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, flexShrink: 0 }}>
+                        {t.nombre.charAt(0).toUpperCase()}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 700, color: "#0f172a", fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.nombre}</div>
+                        <div style={{ fontSize: 13, color: "#64748b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {t.ultimo.remitente !== "pasajero" ? "Tú: " : ""}{t.ultimo.mensaje}
+                        </div>
+                      </div>
+                      {t.noLeidos > 0 && (
+                        <span style={{ background: "#ef4444", color: "#fff", borderRadius: 999, minWidth: 20, height: 20, padding: "0 6px", fontSize: 11, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          {t.noLeidos > 9 ? "9+" : t.noLeidos}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <>
+                  {/* Burbujas */}
+                  <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px", background: "#f8fafc", display: "flex", flexDirection: "column", gap: 8, minHeight: 220 }}>
+                    {threadSel.msgs.map((m: any) => {
+                      const suyo = m.remitente !== "pasajero";
+                      const hora = m.created_at ? new Date(m.created_at).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit", hour12: false }) : "";
+                      return (
+                        <div key={m.id} style={{ display: "flex", justifyContent: suyo ? "flex-end" : "flex-start" }}>
+                          <div style={{ maxWidth: "82%" }}>
+                            <div style={{ padding: "9px 12px", borderRadius: 14, fontSize: 14, lineHeight: 1.4, wordBreak: "break-word", ...(suyo ? { background: "#0b315f", color: "#fff", borderBottomRightRadius: 4 } : { background: "#fff", color: "#0f172a", border: "1px solid #e5e7eb", borderBottomLeftRadius: 4 }) }}>
+                              {m.mensaje}
+                            </div>
+                            <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 2, textAlign: suyo ? "right" : "left" }}>{hora}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div ref={chatFinRef} />
+                  </div>
+
+                  {/* Respuestas rápidas */}
+                  <div style={{ display: "flex", gap: 8, overflowX: "auto", padding: "8px 12px", borderTop: "1px solid #eef2f7" }}>
+                    {RESP_RAPIDAS_COND.map((r, i) => (
+                      <button key={i} disabled={chatEnviando} onClick={() => responderPax(threadSel.paxId, r)}
+                        style={{ flexShrink: 0, fontSize: 12.5, fontWeight: 600, padding: "7px 12px", borderRadius: 999, border: "1px solid #e2e8f0", background: "#fff", color: "#475569", whiteSpace: "nowrap", cursor: "pointer", opacity: chatEnviando ? 0.5 : 1 }}>
+                        {r}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Caja de texto */}
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-end", padding: "10px 12px", borderTop: "1px solid #eef2f7", paddingBottom: "calc(10px + env(safe-area-inset-bottom))" }}>
+                    <textarea rows={1} value={chatBorrador} onChange={e => setChatBorrador(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); responderPax(threadSel.paxId, chatBorrador); } }}
+                      placeholder="Escribe una respuesta…"
+                      style={{ flex: 1, resize: "none", padding: "11px 13px", borderRadius: 14, border: "1.5px solid #e2e8f0", fontSize: 16, fontFamily: FONT_SANS, outline: "none", maxHeight: 110, boxSizing: "border-box" }} />
+                    <button onClick={() => responderPax(threadSel.paxId, chatBorrador)} disabled={chatEnviando || !chatBorrador.trim()}
+                      style={{ flexShrink: 0, height: 44, padding: "0 16px", borderRadius: 14, background: "#0b315f", color: "#fff", border: "none", fontWeight: 800, fontSize: 14, cursor: "pointer", opacity: (chatEnviando || !chatBorrador.trim()) ? 0.4 : 1 }}>
+                      {chatEnviando ? "…" : "Enviar"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }

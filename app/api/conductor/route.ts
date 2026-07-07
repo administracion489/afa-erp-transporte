@@ -10,7 +10,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { registrarLectura } from "@/lib/odometro";
-import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm } from "@/lib/push";
+import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm, enviarPushAPasajeros, payloadRespuestaChat } from "@/lib/push";
 import { evaluarProximidad } from "@/lib/proximidad";
 
 const admin = createClient(
@@ -195,6 +195,67 @@ export async function POST(req: NextRequest) {
           .select("*, pasajero:pasajeros(*)").in("parada_id", paradaIds);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ pasajeros: data || [] });
+      }
+
+      // ── Chat: mensajes de los pasajeros de MI servicio (para la bandeja) ──────
+      case "mensajes_servicio": {
+        const { reservaId } = body;
+        if (!reservaId) return NextResponse.json({ mensajes: [] });
+        const { data, error } = await admin.from("mensajes_pasajero")
+          .select("id, pasajero_id, remitente, autor_nombre, tipo, mensaje, leido, leido_pasajero, created_at, " +
+            "pasajero:pasajeros(id, nombre, empresa)")
+          .eq("reserva_id", reservaId)
+          .order("created_at", { ascending: true })
+          .limit(300);
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ mensajes: data || [] });
+      }
+
+      // ── Chat: el conductor responde a un pasajero de SU servicio ─────────────
+      case "responder_mensaje": {
+        const { cid, tabla, reservaId, pasajero_id } = body;
+        const texto = String(body.texto ?? "").trim().slice(0, 1000);
+        const tablaC = tabla === "conductores_tercero" ? "conductores_tercero" : "conductores";
+        if (!cid || !reservaId || !pasajero_id) return NextResponse.json({ error: "cid, reservaId y pasajero_id requeridos" }, { status: 400 });
+        if (!texto) return NextResponse.json({ error: "mensaje vacío" }, { status: 400 });
+
+        // El conductor solo puede responder en SU servicio (evita responder ajenos).
+        const condField = tablaC === "conductores_tercero" ? "conductor_tercero_id" : "conductor_id";
+        const { data: rsv } = await admin.from("reservas").select(`id, ${condField}`).eq("id", reservaId).maybeSingle();
+        if (!rsv || Number((rsv as any)[condField]) !== Number(cid)) {
+          return NextResponse.json({ error: "Este servicio no te pertenece" }, { status: 403 });
+        }
+
+        const { data: cond } = await admin.from(tablaC).select("nombre").eq("id", cid).maybeSingle();
+        const primerNombre = String(cond?.nombre || "").trim().split(/\s+/)[0] || "Conductor";
+        const autorNombre = `Conductor ${primerNombre}`;
+
+        const { data: fila, error } = await admin.from("mensajes_pasajero").insert({
+          pasajero_id: Number(pasajero_id),
+          reserva_id: Number(reservaId),
+          tipo: "respuesta",
+          mensaje: texto,
+          remitente: "conductor",
+          autor_nombre: autorNombre,
+          autor_id: String(cid),
+          leido: true,
+          leido_at: new Date().toISOString(),
+          leido_pasajero: false,
+        }).select("*").single();
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+        // Responder = atender: marca leídos los mensajes pendientes del pasajero en el hilo.
+        await admin.from("mensajes_pasajero")
+          .update({ leido: true, leido_por: autorNombre, leido_at: new Date().toISOString() })
+          .eq("pasajero_id", Number(pasajero_id)).eq("reserva_id", Number(reservaId))
+          .eq("remitente", "pasajero").eq("leido", false);
+
+        // Push al pasajero, sin retrasar la respuesta (nunca lanza).
+        after(async () => {
+          await enviarPushAPasajeros([Number(pasajero_id)], payloadRespuestaChat(autorNombre, texto, Number(pasajero_id)), { urgencia: "high", ttl: 3600 });
+        });
+
+        return NextResponse.json({ ok: true, mensaje: fila });
       }
 
       // ── Buscar pasajero por QR ───────────────────────────────────────────────

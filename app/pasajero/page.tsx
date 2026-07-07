@@ -605,12 +605,17 @@ export default function AppPasajero() {
   const [mostrarGuiaBateria, setMostrarGuiaBateria] = useState(false);
   const [mostrarGuiaBloqueado, setMostrarGuiaBloqueado] = useState(false);
 
-  // ── REPORTE AL OPERADOR ─────────────────────────────────────────────────────
+  // ── CHAT CON EL OPERADOR ────────────────────────────────────────────────────
+  // Antes era un reporte de 1 vía; ahora es un hilo bidireccional (central/conductor
+  // responden y el pasajero sigue escribiendo). reporteMensaje = borrador de la caja,
+  // reporteEnviando = enviando. mostrarReporte abre el chat.
   const [mostrarReporte,  setMostrarReporte]  = useState(false);
   const [reporteMensaje,  setReporteMensaje]  = useState("");
-  const [reporteTipo,     setReporteTipo]     = useState("");
   const [reporteEnviando, setReporteEnviando] = useState(false);
-  const [reporteEnviado,  setReporteEnviado]  = useState(false);
+  const [chatMsgs,        setChatMsgs]        = useState<any[]>([]);
+  const [chatCargando,    setChatCargando]    = useState(false);
+  const [chatSinLeer,     setChatSinLeer]     = useState(0);
+  const chatFinRef = useRef<HTMLDivElement | null>(null);
 
   // ── MODAL NAVEGACIÓN ────────────────────────────────────────────────────────
   const [mostrarNavModal,    setMostrarNavModal]    = useState(false);
@@ -1234,32 +1239,92 @@ export default function AppPasajero() {
       setDatosErr(e?.message || "No se pudo guardar. Reintenta.");
     } finally { setSavingDatos(false); }
   }
-  async function enviarReporte() {
-    if (!pasajero || !miParada) return;
-    const texto = reporteMensaje.trim() || reporteTipo;
-    if (!texto) return;
+  // Carga el hilo del pasajero (sus mensajes + respuestas de central/conductor).
+  const cargarChat = useCallback(async () => {
+    if (!pasajero) return;
+    try {
+      const { mensajes } = await paxApi("mensajes", miParada?.reserva_id ? { reserva_id: miParada.reserva_id } : {});
+      setChatMsgs(Array.isArray(mensajes) ? mensajes : []);
+    } catch {}
+  }, [pasajero, miParada?.reserva_id]);
+
+  async function marcarChatLeido() {
+    setChatSinLeer(0);
+    setChatMsgs(prev => prev.map(m => m.remitente !== "pasajero" ? { ...m, leido_pasajero: true } : m));
+    try { await paxApi("mensajes_leidos", miParada?.reserva_id ? { reserva_id: miParada.reserva_id } : {}); } catch {}
+  }
+
+  function abrirChat() {
+    setMostrarReporte(true);
+    setChatCargando(true);
+    void cargarChat().then(() => { setChatCargando(false); void marcarChatLeido(); });
+  }
+
+  // Envía un mensaje del pasajero al hilo. `tipo` solo aplica al primer motivo elegido.
+  async function enviarChat(texto: string, tipo?: string) {
+    const t = texto.trim();
+    if (!t || !pasajero || reporteEnviando) return;
     setReporteEnviando(true);
     try {
-      await paxApi("mensaje", { mensaje: {
+      const { mensaje } = await paxApi("mensaje", { mensaje: {
         pasajero_id: pasajero.id,
-        reserva_id:  miParada.reserva_id,
-        parada_id:   miParada.id,
-        tipo:        reporteTipo || "novedad",
-        mensaje:     texto,
+        reserva_id:  miParada?.reserva_id ?? null,
+        parada_id:   miParada?.id ?? null,
+        tipo:        tipo || "novedad",
+        mensaje:     t,
       } });
-    } catch (e: any) {
-      setReporteEnviando(false);
-      return; // no marcar como enviado si falló
-    }
-    setReporteEnviando(false);
-    setReporteEnviado(true);
-    setReporteMensaje("");
-    setReporteTipo("");
-    setTimeout(() => {
-      setReporteEnviado(false);
-      setMostrarReporte(false);
-    }, 2500);
+      if (mensaje) setChatMsgs(prev => [...prev, mensaje]);
+      else await cargarChat();
+      setReporteMensaje("");
+    } catch {}
+    finally { setReporteEnviando(false); }
   }
+
+  // Poll del hilo mientras el chat está ABIERTO (respuestas en vivo + marcar leído).
+  useEffect(() => {
+    if (!mostrarReporte || !pasajero) return;
+    let vivo = true;
+    const tick = async () => {
+      try {
+        const { mensajes } = await paxApi("mensajes", miParada?.reserva_id ? { reserva_id: miParada.reserva_id } : {});
+        if (!vivo || !Array.isArray(mensajes)) return;
+        setChatMsgs(mensajes);
+        if (mensajes.some((m: any) => m.remitente !== "pasajero" && !m.leido_pasajero)) void marcarChatLeido();
+      } catch {}
+    };
+    const id = setInterval(tick, 12000);
+    return () => { vivo = false; clearInterval(id); };
+  }, [mostrarReporte, pasajero, miParada?.reserva_id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll ligero del contador de no-leídos mientras el chat está CERRADO (badge).
+  useEffect(() => {
+    if (mostrarReporte || !pasajero) return;
+    let vivo = true;
+    const tick = async () => {
+      try {
+        const { mensajes } = await paxApi("mensajes", miParada?.reserva_id ? { reserva_id: miParada.reserva_id } : {});
+        if (!vivo || !Array.isArray(mensajes)) return;
+        setChatSinLeer(mensajes.filter((m: any) => m.remitente !== "pasajero" && !m.leido_pasajero).length);
+      } catch {}
+    };
+    void tick();
+    const id = setInterval(tick, 30000);
+    return () => { vivo = false; clearInterval(id); };
+  }, [mostrarReporte, pasajero, miParada?.reserva_id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-scroll al fondo cuando llegan/salen mensajes.
+  useEffect(() => {
+    if (mostrarReporte) chatFinRef.current?.scrollIntoView({ behavior: "auto" });
+  }, [chatMsgs.length, mostrarReporte]);
+
+  // Deep-link desde el push ("/pasajero?chat=1") → abre el chat directo.
+  useEffect(() => {
+    if (!pasajero || typeof window === "undefined") return;
+    if (new URLSearchParams(window.location.search).get("chat") === "1") {
+      abrirChat();
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, [pasajero]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── AVISOS PUSH ─────────────────────────────────────────────────────────────
   // El prompt aparece justo DESPUÉS de confirmar el paradero (contexto de valor
@@ -1679,58 +1744,92 @@ export default function AppPasajero() {
       })()}
 
       {/* ── MODAL REPORTE AL OPERADOR ── */}
+      {/* Botón flotante de chat con central (badge de respuestas sin leer) */}
+      {pasajero && miParada && !mostrarReporte && (
+        <button onClick={abrirChat} aria-label="Mensajes con central"
+          style={{ position: "fixed", right: 16, bottom: "calc(86px + env(safe-area-inset-bottom))", zIndex: 25, width: 54, height: 54, borderRadius: "50%", background: "var(--navy)", color: "white", border: "none", boxShadow: "0 6px 18px rgba(11,31,58,.35)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <IconMessageCircle sz={24} c="white" />
+          {chatSinLeer > 0 && (
+            <span style={{ position: "absolute", top: -2, right: -2, minWidth: 20, height: 20, padding: "0 5px", borderRadius: 10, background: "#ef4444", color: "white", fontSize: 11, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", border: "2px solid var(--navy)" }}>
+              {chatSinLeer > 9 ? "9+" : chatSinLeer}
+            </span>
+          )}
+        </button>
+      )}
+
       {mostrarReporte && (
         <div className="afa-modal-overlay" onClick={() => !reporteEnviando && setMostrarReporte(false)}>
-          <div className="afa-modal-sheet" onClick={e => e.stopPropagation()}>
+          <div className="afa-modal-sheet" onClick={e => e.stopPropagation()}
+            style={{ display: "flex", flexDirection: "column", maxHeight: "86vh" }}>
             <div className="afa-modal-handle" />
-            {reporteEnviado ? (
-              <div style={{ padding: "20px 24px 32px", textAlign: "center" }}>
-                <div style={{ width: 72, height: 72, borderRadius: 24, background: "var(--success-tint)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
-                  <IconCheck sz={32} c="var(--success)" sw={2.5} />
-                </div>
-                <p style={{ color: "var(--ink)", fontWeight: 800, fontSize: 18, margin: "0 0 8px", letterSpacing: -0.3 }}>Mensaje enviado</p>
-                <p style={{ color: "var(--mute)", fontSize: 13 }}>El operador fue notificado y te ayudará a la brevedad</p>
+
+            {/* Encabezado */}
+            <div style={{ padding: "0 20px 12px", display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 44, height: 44, background: "var(--navy-tint)", borderRadius: 14, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <IconMessageCircle sz={22} c="var(--navy)" />
               </div>
-            ) : (
-              <>
-                <div style={{ padding: "0 24px 16px", textAlign: "center" }}>
-                  <div style={{ width: 56, height: 56, background: "var(--navy-tint)", borderRadius: 18, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}>
-                    <IconMessageCircle sz={26} c="var(--navy)" />
-                  </div>
-                  <div className="afa-modal-title">Reportar al operador</div>
-                  <div className="afa-modal-desc">Selecciona el motivo. El operador lo recibe al instante.</div>
-                </div>
-                <div style={{ padding: "0 24px", marginBottom: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 800, fontSize: 16, color: "var(--ink)", letterSpacing: -0.3 }}>Central AFA</div>
+                <div style={{ fontSize: 12.5, color: "var(--mute)" }}>Escríbenos, te respondemos aquí mismo</div>
+              </div>
+              <button onClick={() => setMostrarReporte(false)} aria-label="Cerrar"
+                style={{ marginLeft: "auto", width: 32, height: 32, borderRadius: 10, background: "var(--surface)", border: "1px solid var(--line)", color: "var(--mute)", cursor: "pointer", fontSize: 16, flexShrink: 0 }}>✕</button>
+            </div>
+
+            {/* Hilo de mensajes */}
+            <div style={{ flex: 1, overflowY: "auto", padding: "6px 16px 10px", background: "var(--surface)", display: "flex", flexDirection: "column", gap: 8, minHeight: 200 }}>
+              {chatCargando && chatMsgs.length === 0 && (
+                <p style={{ textAlign: "center", color: "var(--mute)", fontSize: 13, padding: "24px 0" }}>Cargando…</p>
+              )}
+              {!chatCargando && chatMsgs.length === 0 && (
+                <div style={{ padding: "8px 0 4px" }}>
+                  <p style={{ textAlign: "center", color: "var(--mute)", fontSize: 13, marginBottom: 12 }}>¿Qué necesitas? Toca una opción o escribe abajo.</p>
                   {[
                     { tipo: "tardanza",    txt: "Llegaré tarde a mi paradero" },
                     { tipo: "cancelacion", txt: "No podré tomar el servicio hoy" },
                     { tipo: "incidencia",  txt: "El bus ya pasó sin recogerme" },
-                    { tipo: "otro",        txt: "Otro motivo..." },
                   ].map(op => (
-                    <button key={op.tipo} className={`afa-reporte-opt${reporteTipo === op.tipo ? " sel" : ""}`}
-                      onClick={() => { setReporteTipo(op.tipo); if (op.tipo !== "otro") setReporteMensaje(""); }}>
+                    <button key={op.tipo} disabled={reporteEnviando} onClick={() => enviarChat(op.txt, op.tipo)}
+                      className="afa-reporte-opt" style={{ marginBottom: 8, width: "100%" }}>
                       {op.txt}
-                      {reporteTipo === op.tipo && <span style={{ marginLeft: "auto" }}><IconCheck sz={16} c="var(--navy)" /></span>}
                     </button>
                   ))}
                 </div>
-                {(reporteTipo === "otro" || reporteTipo) && (
-                  <div style={{ padding: "0 24px", marginBottom: 16 }}>
-                    <textarea rows={3} aria-label="Detalle del reporte" placeholder={reporteTipo === "otro" ? "Describe tu situación..." : "Agregar detalle (opcional)..."}
-                      value={reporteMensaje} onChange={e => setReporteMensaje(e.target.value)}
-                      style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: "1.5px solid var(--line)", fontSize: 16, fontFamily: "var(--f)", resize: "none", outline: "none", color: "var(--ink)", boxSizing: "border-box" }} />
+              )}
+              {chatMsgs.map((m: any) => {
+                const suyo = m.remitente === "pasajero";
+                const autor = m.remitente === "conductor" ? (m.autor_nombre || "Conductor") : "Central AFA";
+                const hora = m.created_at ? new Date(m.created_at).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit", hour12: false }) : "";
+                return (
+                  <div key={m.id} style={{ display: "flex", justifyContent: suyo ? "flex-end" : "flex-start" }}>
+                    <div style={{ maxWidth: "82%" }}>
+                      {!suyo && <p style={{ fontSize: 10.5, color: "var(--mute)", margin: "0 0 2px 6px", fontWeight: 700 }}>{autor}</p>}
+                      <div style={{
+                        padding: "9px 13px", borderRadius: 16, fontSize: 14.5, lineHeight: 1.4, wordBreak: "break-word",
+                        ...(suyo
+                          ? { background: "var(--navy)", color: "white", borderBottomRightRadius: 5 }
+                          : { background: "white", color: "var(--ink)", border: "1px solid var(--line)", borderBottomLeftRadius: 5 }),
+                      }}>{m.mensaje}</div>
+                      <p style={{ fontSize: 10, color: "var(--mute)", margin: "2px 6px 0", textAlign: suyo ? "right" : "left" }}>{hora}</p>
+                    </div>
                   </div>
-                )}
-                <div className="afa-modal-btns">
-                  <button className="afa-modal-btn-p" disabled={reporteEnviando || (!reporteTipo && !reporteMensaje.trim())}
-                    style={{ opacity: (!reporteTipo && !reporteMensaje.trim()) ? 0.4 : 1 }} onClick={enviarReporte}>
-                    {reporteEnviando ? "Enviando..." : "Enviar al operador"}
-                  </button>
-                  <button className="afa-modal-btn-s" onClick={() => setMostrarReporte(false)}>Cancelar</button>
-                </div>
-                <div style={{ height: 8 }} />
-              </>
-            )}
+                );
+              })}
+              <div ref={chatFinRef} />
+            </div>
+
+            {/* Caja de texto */}
+            <div style={{ padding: "10px 14px", display: "flex", gap: 8, alignItems: "flex-end", borderTop: "1px solid var(--line)" }}>
+              <textarea rows={1} aria-label="Escribe un mensaje" placeholder="Escribe un mensaje…"
+                value={reporteMensaje} onChange={e => setReporteMensaje(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); enviarChat(reporteMensaje); } }}
+                style={{ flex: 1, padding: "11px 14px", borderRadius: 14, border: "1.5px solid var(--line)", fontSize: 16, fontFamily: "var(--f)", resize: "none", outline: "none", color: "var(--ink)", boxSizing: "border-box", maxHeight: 110 }} />
+              <button onClick={() => enviarChat(reporteMensaje)} disabled={reporteEnviando || !reporteMensaje.trim()} aria-label="Enviar"
+                style={{ width: 46, height: 46, borderRadius: "50%", background: "var(--navy)", color: "white", border: "none", cursor: "pointer", flexShrink: 0, opacity: (reporteEnviando || !reporteMensaje.trim()) ? 0.4 : 1, fontSize: 18, fontFamily: "var(--f)" }}>
+                {reporteEnviando ? "…" : "➤"}
+              </button>
+            </div>
+            <div style={{ height: 6 }} />
           </div>
         </div>
       )}
@@ -2057,7 +2156,7 @@ export default function AppPasajero() {
                         <IconPhone sz={13} c="white" /> Llamar al conductor
                       </a>
                     )}
-                    <button onClick={() => setMostrarReporte(true)} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 10, background: "rgba(180,83,9,0.1)", border: "none", color: "#92400e", cursor: "pointer", fontWeight: 700, fontSize: 12, fontFamily: "var(--f)" }}>
+                    <button onClick={abrirChat} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 10, background: "rgba(180,83,9,0.1)", border: "none", color: "#92400e", cursor: "pointer", fontWeight: 700, fontSize: 12, fontFamily: "var(--f)" }}>
                       <IconMessageCircle sz={13} c="#92400e" /> Avisar al operador
                     </button>
                   </div>
@@ -2304,7 +2403,7 @@ export default function AppPasajero() {
                     <a href="tel:013453707" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--line2)", textDecoration: "none", color: "var(--ink)", fontWeight: 600, fontSize: 13, fontFamily: "var(--f)" }}>
                       <IconPhone sz={15} c="var(--navy)" /> Central AFA · 01 345 3707
                     </a>
-                    <button onClick={() => setMostrarReporte(true)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--line2)", cursor: "pointer", color: "var(--mute)", fontWeight: 600, fontSize: 13, fontFamily: "var(--f)" }}>
+                    <button onClick={abrirChat} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--line2)", cursor: "pointer", color: "var(--mute)", fontWeight: 600, fontSize: 13, fontFamily: "var(--f)" }}>
                       <IconMessageCircle sz={15} c="var(--mute)" /> Enviar mensaje al operador
                     </button>
                   </div>
@@ -2392,7 +2491,7 @@ export default function AppPasajero() {
                     <a href="tel:013453707" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--line2)", textDecoration: "none", color: "var(--ink)", fontWeight: 600, fontSize: 13, fontFamily: "var(--f)" }}>
                       <IconPhone sz={15} c="var(--navy)" /> Central AFA · 01 345 3707
                     </a>
-                    <button onClick={() => setMostrarReporte(true)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--line2)", cursor: "pointer", color: "var(--mute)", fontWeight: 600, fontSize: 13, fontFamily: "var(--f)" }}>
+                    <button onClick={abrirChat} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--line2)", cursor: "pointer", color: "var(--mute)", fontWeight: 600, fontSize: 13, fontFamily: "var(--f)" }}>
                       <IconMessageCircle sz={15} c="var(--mute)" /> Enviar mensaje al operador
                     </button>
                   </div>

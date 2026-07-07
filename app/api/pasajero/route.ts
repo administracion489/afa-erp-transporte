@@ -296,8 +296,40 @@ export async function POST(req: NextRequest) {
           parada_id:   m.parada_id ?? null,
           tipo:        typeof m.tipo === "string" ? m.tipo.slice(0, 40) : "novedad",
           mensaje:     texto,
+          // remitente lo pone la BD por defecto ('pasajero'); no lo mandamos para no
+          // depender de la columna nueva si el deploy llega antes que la migración.
         };
-        const { error } = await admin.from("mensajes_pasajero").insert(fila);
+        const { data: ins, error } = await admin.from("mensajes_pasajero").insert(fila).select("*").single();
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ ok: true, mensaje: ins });
+      }
+
+      // ── Hilo de chat del pasajero (sus mensajes + respuestas de central/conductor) ──
+      case "mensajes": {
+        const pid = pidDeToken(body.token);
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        let q = admin.from("mensajes_pasajero")
+          .select("id, remitente, autor_nombre, tipo, mensaje, leido_pasajero, created_at, reserva_id")
+          .eq("pasajero_id", pid)
+          .order("created_at", { ascending: true })
+          .limit(200);
+        if (body.reserva_id != null) q = q.eq("reserva_id", Number(body.reserva_id));
+        const { data, error } = await q;
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ mensajes: data || [] });
+      }
+
+      // ── Marcar como leídas las respuestas de central/conductor ───────────────
+      case "mensajes_leidos": {
+        const pid = pidDeToken(body.token);
+        if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        let q = admin.from("mensajes_pasajero")
+          .update({ leido_pasajero: true, leido_pasajero_at: new Date().toISOString() })
+          .eq("pasajero_id", pid)
+          .in("remitente", ["operador", "conductor"])
+          .eq("leido_pasajero", false);
+        if (body.reserva_id != null) q = q.eq("reserva_id", Number(body.reserva_id));
+        const { error } = await q;
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ ok: true });
       }

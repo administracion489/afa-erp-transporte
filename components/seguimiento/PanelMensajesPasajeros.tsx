@@ -1,11 +1,15 @@
 "use client";
 
 // PanelMensajesPasajeros.tsx
-// Panel en tiempo real para el operador — recibe mensajes de pasajeros
+// Bandeja de conversaciones 1-a-1 con los pasajeros (chat bidireccional).
+// El operador ve los hilos (agrupados por pasajero+servicio), abre uno y RESPONDE.
+// La respuesta llega al pasajero por push (POST /api/mensajes/responder).
 // Colocar en: components/seguimiento/PanelMensajesPasajeros.tsx
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+
+type Remitente = "pasajero" | "operador" | "conductor";
 
 type MensajePasajero = {
   id: number;
@@ -14,14 +18,30 @@ type MensajePasajero = {
   parada_id: number | null;
   tipo: string;
   mensaje: string;
+  remitente: Remitente;
+  autor_nombre: string | null;
   leido: boolean;
   leido_por: string | null;
   leido_at: string | null;
+  leido_pasajero: boolean;
   created_at: string;
   // joins
   pasajero?: { nombre: string; empresa: string | null } | null;
   parada?: { nombre: string } | null;
   reserva?: { origen: string; destino: string } | null;
+};
+
+type Convo = {
+  key: string;
+  pasajeroId: number | null;
+  reservaId: number | null;
+  nombre: string;
+  empresa: string | null;
+  ruta: { origen: string; destino: string } | null;
+  parada: string | null;
+  mensajes: MensajePasajero[]; // asc
+  ultimo: MensajePasajero;
+  noLeidos: number; // mensajes del pasajero sin atender
 };
 
 const TIPO_CFG: Record<string, { ico: string; color: string; bg: string; label: string }> = {
@@ -32,6 +52,15 @@ const TIPO_CFG: Record<string, { ico: string; color: string; bg: string; label: 
   otro:        { ico: "✏️", color: "#374151", bg: "#F3F4F6", label: "Otro" },
 };
 
+// Respuestas de un toque (operador). Se envían al instante al tocarlas.
+const RESP_RAPIDAS = [
+  "Ya vamos en camino 🚌",
+  "Tu bus llega en ~5 minutos, por favor espera en tu paradero.",
+  "Estamos atendiendo tu solicitud ahora mismo.",
+  "Gracias por avisar, lo estamos revisando.",
+  "Confirmado ✅",
+];
+
 function fmtTime(s: string) {
   const d = new Date(s);
   const diff = Math.floor((Date.now() - d.getTime()) / 1000);
@@ -41,9 +70,12 @@ function fmtTime(s: string) {
 }
 
 export default function PanelMensajesPasajeros() {
-  const [mensajes,    setMensajes]    = useState<MensajePasajero[]>([]);
-  const [abierto,     setAbierto]     = useState(false);
-  const [marcando,    setMarcando]    = useState<number | null>(null);
+  const [mensajes, setMensajes] = useState<MensajePasajero[]>([]);
+  const [abierto, setAbierto] = useState(false);
+  const [convoKey, setConvoKey] = useState<string | null>(null); // hilo abierto
+  const [borrador, setBorrador] = useState("");
+  const [enviando, setEnviando] = useState(false);
+  const finRef = useRef<HTMLDivElement | null>(null);
 
   const cargar = useCallback(async () => {
     const { data } = await supabase
@@ -55,44 +87,108 @@ export default function PanelMensajesPasajeros() {
         reserva:reservas(origen, destino)
       `)
       .order("created_at", { ascending: false })
-      .limit(50);
+      .limit(200);
     setMensajes((data as MensajePasajero[]) || []);
   }, []);
 
   useEffect(() => { cargar(); }, [cargar]);
 
-  // Realtime — nuevo mensaje llega al instante
+  // Realtime — nuevo mensaje o cambio de estado
   useEffect(() => {
     const ch = supabase
       .channel("mensajes-pasajero-erp")
-      .on("postgres_changes", {
-        event: "INSERT", schema: "public", table: "mensajes_pasajero",
-      }, () => cargar())
+      .on("postgres_changes", { event: "*", schema: "public", table: "mensajes_pasajero" }, () => cargar())
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, [cargar]);
 
-  async function marcarLeido(id: number) {
-    setMarcando(id);
-    await supabase.from("mensajes_pasajero").update({
-      leido: true,
-      leido_at: new Date().toISOString(),
-    }).eq("id", id);
-    setMensajes(prev => prev.map(m => m.id === id ? { ...m, leido: true } : m));
-    setMarcando(null);
+  // Agrupar en conversaciones por (pasajero + servicio)
+  const convos = useMemo<Convo[]>(() => {
+    const mapa = new Map<string, Convo>();
+    // mensajes viene desc; recorrer al revés para construir asc
+    for (const m of [...mensajes].reverse()) {
+      const key = `${m.pasajero_id ?? "?"}__${m.reserva_id ?? "?"}`;
+      const prev = mapa.get(key);
+      if (!prev) {
+        mapa.set(key, {
+          key,
+          pasajeroId: m.pasajero_id,
+          reservaId: m.reserva_id,
+          nombre: m.pasajero?.nombre || "Pasajero",
+          empresa: m.pasajero?.empresa || null,
+          ruta: m.reserva || null,
+          parada: m.parada?.nombre || null,
+          mensajes: [m],
+          ultimo: m,
+          noLeidos: m.remitente === "pasajero" && !m.leido ? 1 : 0,
+        });
+      } else {
+        prev.mensajes.push(m);
+        prev.ultimo = m;
+        if (m.remitente === "pasajero" && !m.leido) prev.noLeidos++;
+        if (!prev.ruta && m.reserva) prev.ruta = m.reserva;
+        if (!prev.parada && m.parada?.nombre) prev.parada = m.parada.nombre;
+      }
+    }
+    return [...mapa.values()].sort(
+      (a, b) => new Date(b.ultimo.created_at).getTime() - new Date(a.ultimo.created_at).getTime()
+    );
+  }, [mensajes]);
+
+  const convoAbierta = useMemo(
+    () => convos.find(c => c.key === convoKey) || null,
+    [convos, convoKey]
+  );
+
+  const totalNoLeidos = useMemo(
+    () => mensajes.filter(m => m.remitente === "pasajero" && !m.leido).length,
+    [mensajes]
+  );
+  const hayNuevos = totalNoLeidos > 0;
+
+  // Auto-scroll al fondo al abrir un hilo o al llegar mensajes
+  useEffect(() => {
+    if (convoAbierta) finRef.current?.scrollIntoView({ behavior: "auto" });
+  }, [convoAbierta?.mensajes.length, convoKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function responder(texto: string) {
+    const t = texto.trim();
+    if (!t || !convoAbierta?.pasajeroId || enviando) return;
+    setEnviando(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) { setEnviando(false); return; }
+      const res = await fetch("/api/mensajes/responder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          pasajero_id: convoAbierta.pasajeroId,
+          reserva_id: convoAbierta.reservaId,
+          texto: t,
+        }),
+      });
+      if (res.ok) { setBorrador(""); await cargar(); }
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  async function marcarConvoAtendida(c: Convo) {
+    const ids = c.mensajes.filter(m => m.remitente === "pasajero" && !m.leido).map(m => m.id);
+    if (!ids.length) return;
+    await supabase.from("mensajes_pasajero")
+      .update({ leido: true, leido_at: new Date().toISOString() }).in("id", ids);
+    setMensajes(prev => prev.map(m => ids.includes(m.id) ? { ...m, leido: true } : m));
   }
 
   async function marcarTodosLeidos() {
-    const ids = noLeidos.map(m => m.id);
+    const ids = mensajes.filter(m => m.remitente === "pasajero" && !m.leido).map(m => m.id);
     if (!ids.length) return;
     await supabase.from("mensajes_pasajero")
-      .update({ leido: true, leido_at: new Date().toISOString() })
-      .in("id", ids);
-    setMensajes(prev => prev.map(m => ({ ...m, leido: true })));
+      .update({ leido: true, leido_at: new Date().toISOString() }).in("id", ids);
+    setMensajes(prev => prev.map(m => ({ ...m, leido: m.remitente === "pasajero" ? true : m.leido })));
   }
-
-  const noLeidos = mensajes.filter(m => !m.leido);
-  const hayNuevos = noLeidos.length > 0;
 
   return (
     <>
@@ -114,12 +210,12 @@ export default function PanelMensajesPasajeros() {
             display: "flex", alignItems: "center", justifyContent: "center",
             fontSize: 11, fontWeight: 900,
           }}>
-            {noLeidos.length > 9 ? "9+" : noLeidos.length}
+            {totalNoLeidos > 9 ? "9+" : totalNoLeidos}
           </span>
         )}
       </button>
 
-      {/* ── PANEL LATERAL / MODAL ── */}
+      {/* ── PANEL LATERAL ── */}
       {abierto && (
         <div
           className="fixed inset-0 z-50 flex justify-end"
@@ -127,118 +223,178 @@ export default function PanelMensajesPasajeros() {
           onClick={() => setAbierto(false)}>
           <div
             className="h-full bg-white flex flex-col shadow-2xl"
-            style={{ width: "100%", maxWidth: 420 }}
+            style={{ width: "100%", maxWidth: 440 }}
             onClick={e => e.stopPropagation()}>
 
             {/* Header */}
             <div className="flex-shrink-0 px-5 py-4 border-b flex items-center justify-between"
               style={{ background: "#0b315f" }}>
-              <div>
-                <p className="text-white font-black text-base">Mensajes de pasajeros</p>
-                <p className="text-blue-200 text-xs mt-0.5">
-                  {hayNuevos ? `${noLeidos.length} sin leer` : "Todos leídos"} · En tiempo real
-                </p>
+              <div className="flex items-center gap-3 min-w-0">
+                {convoAbierta && (
+                  <button onClick={() => setConvoKey(null)}
+                    className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center text-white flex-shrink-0">
+                    ←
+                  </button>
+                )}
+                <div className="min-w-0">
+                  <p className="text-white font-black text-base truncate">
+                    {convoAbierta ? convoAbierta.nombre : "Mensajes de pasajeros"}
+                  </p>
+                  <p className="text-blue-200 text-xs mt-0.5 truncate">
+                    {convoAbierta
+                      ? (convoAbierta.empresa || "En tiempo real")
+                      : (hayNuevos ? `${totalNoLeidos} sin leer · En tiempo real` : "Todos atendidos · En tiempo real")}
+                  </p>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                {hayNuevos && (
-                  <button
-                    onClick={marcarTodosLeidos}
+              <div className="flex items-center gap-2 flex-shrink-0">
+                {!convoAbierta && hayNuevos && (
+                  <button onClick={marcarTodosLeidos}
                     className="text-xs font-bold text-blue-200 hover:text-white px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 transition-colors">
                     Marcar todos leídos
                   </button>
                 )}
-                <button onClick={() => setAbierto(false)}
+                <button onClick={() => { setAbierto(false); setConvoKey(null); }}
                   className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition-colors">
                   ✕
                 </button>
               </div>
             </div>
 
-            {/* Lista */}
-            <div className="flex-1 overflow-y-auto">
-              {mensajes.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-center px-6">
-                  <p style={{ fontSize: 48, marginBottom: 12 }}>💬</p>
-                  <p className="font-bold text-gray-700">Sin mensajes aún</p>
-                  <p className="text-sm text-gray-400 mt-2">Los reportes de pasajeros aparecerán aquí en tiempo real</p>
-                </div>
-              ) : (
-                <div className="divide-y" style={{ borderColor: "#f1f5f9" }}>
-                  {mensajes.map(m => {
+            {/* ── LISTA DE CONVERSACIONES ── */}
+            {!convoAbierta && (
+              <div className="flex-1 overflow-y-auto">
+                {convos.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-full text-center px-6">
+                    <p style={{ fontSize: 48, marginBottom: 12 }}>💬</p>
+                    <p className="font-bold text-gray-700">Sin mensajes aún</p>
+                    <p className="text-sm text-gray-400 mt-2">Las conversaciones con pasajeros aparecerán aquí en tiempo real</p>
+                  </div>
+                ) : (
+                  <div className="divide-y" style={{ borderColor: "#f1f5f9" }}>
+                    {convos.map(c => {
+                      const cfg = TIPO_CFG[c.ultimo.tipo] || TIPO_CFG.novedad;
+                      const suyo = c.ultimo.remitente !== "pasajero";
+                      return (
+                        <button key={c.key} onClick={() => { setConvoKey(c.key); setBorrador(""); }}
+                          className="w-full text-left px-5 py-4 flex items-start gap-3 hover:bg-slate-50 transition-colors"
+                          style={{ background: c.noLeidos > 0 ? "#f8fafc" : "white" }}>
+                          <div className="w-10 h-10 rounded-xl bg-[#0b315f] flex items-center justify-center text-white text-sm font-black flex-shrink-0">
+                            {c.nombre.charAt(0).toUpperCase()}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-sm font-bold text-gray-900 truncate">{c.nombre}</p>
+                              <span className="text-xs text-gray-400 flex-shrink-0">{fmtTime(c.ultimo.created_at)}</span>
+                            </div>
+                            {c.empresa && <p className="text-xs text-gray-400 truncate">{c.empresa}</p>}
+                            <p className="text-sm text-gray-600 truncate mt-0.5">
+                              {suyo && <span className="text-[#0b315f] font-semibold">Tú: </span>}
+                              {!suyo && <span>{cfg.ico} </span>}
+                              {c.ultimo.mensaje}
+                            </p>
+                          </div>
+                          {c.noLeidos > 0 && (
+                            <span className="flex-shrink-0 mt-1" style={{
+                              background: "#ef4444", color: "white", borderRadius: "50%",
+                              minWidth: 20, height: 20, padding: "0 6px", fontSize: 11, fontWeight: 900,
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                            }}>
+                              {c.noLeidos > 9 ? "9+" : c.noLeidos}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── HILO ── */}
+            {convoAbierta && (
+              <>
+                {/* Contexto ruta/parada */}
+                {(convoAbierta.ruta || convoAbierta.parada) && (
+                  <div className="flex-shrink-0 px-5 py-2.5 border-b bg-slate-50 flex items-center gap-3 text-xs text-gray-500 flex-wrap">
+                    {convoAbierta.ruta && <span>🚌 {convoAbierta.ruta.origen} → {convoAbierta.ruta.destino}</span>}
+                    {convoAbierta.parada && <span>📍 {convoAbierta.parada}</span>}
+                    {convoAbierta.noLeidos > 0 && (
+                      <button onClick={() => marcarConvoAtendida(convoAbierta)}
+                        className="ml-auto text-xs font-bold text-[#0b315f] hover:underline">
+                        ✓ Marcar atendido
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Burbujas */}
+                <div className="flex-1 overflow-y-auto px-4 py-4 space-y-2" style={{ background: "#f8fafc" }}>
+                  {convoAbierta.mensajes.map(m => {
+                    const suyo = m.remitente !== "pasajero";
                     const cfg = TIPO_CFG[m.tipo] || TIPO_CFG.novedad;
                     return (
-                      <div key={m.id}
-                        className="px-5 py-4 transition-colors"
-                        style={{ background: m.leido ? "white" : "#f8fafc" }}>
-
-                        {/* Cabecera del mensaje */}
-                        <div className="flex items-start justify-between gap-3 mb-2">
-                          <div className="flex items-center gap-2">
-                            {/* Pill tipo */}
-                            <span className="text-xs font-bold px-2 py-0.5 rounded-full"
+                      <div key={m.id} className={`flex ${suyo ? "justify-end" : "justify-start"}`}>
+                        <div className="max-w-[80%]">
+                          {suyo && (
+                            <p className="text-[10px] text-gray-400 text-right mb-0.5 pr-1 font-semibold">
+                              {m.remitente === "conductor" ? (m.autor_nombre || "Conductor") : (m.autor_nombre || "Central AFA")}
+                            </p>
+                          )}
+                          {!suyo && m.tipo && TIPO_CFG[m.tipo] && m.tipo !== "novedad" && (
+                            <span className="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full mb-1"
                               style={{ background: cfg.bg, color: cfg.color }}>
                               {cfg.ico} {cfg.label}
                             </span>
-                            {!m.leido && (
-                              <span className="w-2 h-2 rounded-full bg-blue-500 flex-shrink-0" />
-                            )}
+                          )}
+                          <div className="rounded-2xl px-3.5 py-2 text-sm"
+                            style={suyo
+                              ? { background: "#0b315f", color: "white", borderTopRightRadius: 4 }
+                              : { background: "white", color: "#1f2937", border: "1px solid #e5e7eb", borderTopLeftRadius: 4 }}>
+                            {m.mensaje}
                           </div>
-                          <span className="text-xs text-gray-400 flex-shrink-0">{fmtTime(m.created_at)}</span>
-                        </div>
-
-                        {/* Pasajero */}
-                        <div className="flex items-center gap-2 mb-2">
-                          <div className="w-7 h-7 rounded-lg bg-[#0b315f] flex items-center justify-center text-white text-xs font-black flex-shrink-0">
-                            {m.pasajero?.nombre?.charAt(0).toUpperCase() || "?"}
-                          </div>
-                          <div>
-                            <p className="text-sm font-bold text-gray-900 leading-tight">{m.pasajero?.nombre || "Pasajero"}</p>
-                            {m.pasajero?.empresa && <p className="text-xs text-gray-400">{m.pasajero.empresa}</p>}
-                          </div>
-                        </div>
-
-                        {/* Mensaje */}
-                        <div className="rounded-xl px-3 py-2.5 mb-3"
-                          style={{ background: cfg.bg, border: `1px solid ${cfg.color}22` }}>
-                          <p className="text-sm font-medium" style={{ color: cfg.color }}>{m.mensaje}</p>
-                        </div>
-
-                        {/* Contexto ruta/parada */}
-                        {(m.reserva || m.parada) && (
-                          <div className="flex items-center gap-3 mb-3 text-xs text-gray-500">
-                            {m.reserva && (
-                              <span className="flex items-center gap-1">
-                                🚌 {m.reserva.origen} → {m.reserva.destino}
-                              </span>
-                            )}
-                            {m.parada && (
-                              <span className="flex items-center gap-1">
-                                📍 {m.parada.nombre}
-                              </span>
-                            )}
-                          </div>
-                        )}
-
-                        {/* Acción */}
-                        {!m.leido ? (
-                          <button
-                            onClick={() => marcarLeido(m.id)}
-                            disabled={marcando === m.id}
-                            className="w-full py-2 rounded-lg text-xs font-bold transition-colors disabled:opacity-50"
-                            style={{ background: "#0b315f", color: "white" }}>
-                            {marcando === m.id ? "Marcando..." : "✓ Marcar como atendido"}
-                          </button>
-                        ) : (
-                          <p className="text-xs text-gray-400 text-center">
-                            ✓ Atendido {m.leido_at ? fmtTime(m.leido_at) : ""}
+                          <p className={`text-[10px] text-gray-400 mt-0.5 ${suyo ? "text-right pr-1" : "pl-1"}`}>
+                            {fmtTime(m.created_at)}
+                            {suyo && m.leido_pasajero && " · Visto"}
                           </p>
-                        )}
+                        </div>
                       </div>
                     );
                   })}
+                  <div ref={finRef} />
                 </div>
-              )}
-            </div>
+
+                {/* Respuestas rápidas */}
+                <div className="flex-shrink-0 px-3 pt-2 flex gap-2 overflow-x-auto border-t bg-white">
+                  {RESP_RAPIDAS.map((r, i) => (
+                    <button key={i} disabled={enviando} onClick={() => responder(r)}
+                      className="flex-shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap">
+                      {r.length > 26 ? r.slice(0, 24) + "…" : r}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Caja de texto */}
+                <div className="flex-shrink-0 px-3 py-3 bg-white flex items-end gap-2">
+                  <textarea
+                    value={borrador}
+                    onChange={e => setBorrador(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); responder(borrador); } }}
+                    placeholder="Escribe una respuesta…"
+                    rows={1}
+                    className="flex-1 resize-none rounded-2xl border border-slate-200 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/30"
+                    style={{ maxHeight: 120 }}
+                  />
+                  <button
+                    onClick={() => responder(borrador)}
+                    disabled={enviando || !borrador.trim()}
+                    className="flex-shrink-0 w-11 h-11 rounded-full flex items-center justify-center text-white disabled:opacity-40 transition-opacity"
+                    style={{ background: "#0b315f" }}>
+                    {enviando ? "…" : "➤"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

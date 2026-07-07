@@ -317,6 +317,21 @@ export const payloadsViaje = {
   }),
 };
 
+// ─── CHAT (respuesta operador/conductor → pasajero) ───────────────────────────
+// NO usa el dedupe insert-once de emitirEventoViaje: cada respuesta DEBE notificar.
+// Se envía con enviarPushAPasajeros() directo. tag por pasajero → las respuestas
+// seguidas colapsan en una sola notificación; renotify re-alerta igual.
+export function payloadRespuestaChat(autor: string, texto: string, pasajeroId: number): PushPayload {
+  const cuerpo = texto.length > 120 ? `${texto.slice(0, 117)}…` : texto;
+  return {
+    title: `💬 ${autor} te respondió`,
+    body: cuerpo,
+    tag: `afa-chat-${pasajeroId}`,
+    url: "/pasajero?chat=1",
+    renotify: true,
+  };
+}
+
 /** Hora actual de Lima "HH:mm" (para el texto de embarque). */
 export function horaLimaHHmm(): string {
   return new Date().toLocaleTimeString("es-PE", {
