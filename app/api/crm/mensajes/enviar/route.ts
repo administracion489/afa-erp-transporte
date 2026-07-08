@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { enviarWhatsApp } from "@/lib/crm-meta";
-import { enviarMessenger } from "@/lib/crm-meta";
-import { enviarInstagram } from "@/lib/crm-meta";
+import { enviarWhatsApp, enviarWhatsAppPlantilla, enviarMessenger, enviarInstagram } from "@/lib/crm-meta";
 import { enviarEmail } from "@/lib/crm-gmail";
 
 const db = () =>
@@ -35,7 +33,9 @@ export async function POST(req: NextRequest) {
 
     try {
       if (conv.canal === "whatsapp" && contacto?.wa_id) {
-        metaId = await enviarWhatsApp(contacto.wa_id, texto);
+        // Reemplazamos la función de texto plano por la de plantilla (Template)
+        // Usamos 'hello_world' que viene por defecto activa y aprobada en todas las cuentas de Meta
+        metaId = await enviarWhatsAppPlantilla(contacto.wa_id, "hello_world", "en");
       } else if (conv.canal === "messenger" && contacto?.fb_psid) {
         metaId = await enviarMessenger(contacto.fb_psid, texto);
       } else if (conv.canal === "instagram" && contacto?.ig_id) {
