@@ -647,11 +647,14 @@ export async function mapMatchTrail(
 // Ajusta UNA ventana (≤100 puntos densos) a la vía. `confidence` = fracción de la ventana pegada
 // a fragmentos confiables; si ni el 40% se pudo pegar (GPS pobre / parado en red), cae a la huella
 // cruda suavizada por DISTANCIA: aplana el zigzag lento sin recortar las curvas rápidas.
-export async function matchVentana(ventana: MatchPt[], token: string): Promise<[number, number][]> {
+// `snapped` = si logró pegar a la vía (confianza ≥ 0.4) o cayó al crudo → el ajustador lo usa para
+// NO revertir a zigzag un tramo ya pegado (stickiness: con GPS de red la confianza baila y sin esto
+// la cola parpadea entre pegada y cruda cada ciclo).
+export async function matchVentana(ventana: MatchPt[], token: string): Promise<{ coords: [number, number][]; snapped: boolean }> {
   const r = await mapMatchTrail(ventana, token);
-  if (r && r.confidence >= 0.4 && r.coords.length >= 2) return r.coords;
+  if (r && r.confidence >= 0.4 && r.coords.length >= 2) return { coords: r.coords, snapped: true };
   const suav = suavizarPorDistancia(ventana);
-  return suav.length >= 2 ? suav.map(p => [p.lng, p.lat] as [number, number]) : [];
+  return { coords: suav.length >= 2 ? suav.map(p => [p.lng, p.lat] as [number, number]) : [], snapped: false };
 }
 
 // Tramo máximo que se DIBUJA entre dos vértices consecutivos. Más largo que esto = teleport
@@ -845,6 +848,8 @@ export function crearAjustadorHuella() {
   let congeladoHasta = 0;
   let lastMatchMs = 0;
   let lastTail: { lat: number; lng: number } | null = null;
+  let lastCola: [number, number][] = [];   // stickiness: última geometría de la COLA (para no revertir a crudo lo ya pegado)
+  let lastColaSnapped = false;              // ¿la última cola conservada estaba pegada a la vía?
 
   return {
     async ajustar(
@@ -878,19 +883,31 @@ export function crearAjustadorHuella() {
       // cola en el ciclo siguiente (el último no tiene `next` aún). Sin margen, si el resto cae
       // exacto en 99 la ventana congelada incluiría un punto aún mutable → al eliminarse después,
       // los índices del prefijo se correrían y el pico quedaría horneado en la geometría congelada.
+      const congeladoAntes = congeladoHasta;
       while (limpio.length - congeladoHasta >= NUEVOS + 2) {
         const ini = Math.max(0, congeladoHasta - SOLAPE);
         const ventana = limpio.slice(ini, ini + MAX);   // ≤ MAX SIEMPRE → no se diezma
-        const coords = await matchVentana(ventana, token);
+        const { coords } = await matchVentana(ventana, token);
         if (cancelado?.()) return null;
         congeladas.push(coords);
         congeladoHasta += NUEVOS;
       }
-      const colaVentana = limpio.slice(Math.max(0, congeladoHasta - SOLAPE));
-      const coordsCola = colaVentana.length >= 2 ? await matchVentana(colaVentana, token) : [];
-      if (cancelado?.()) return null;
+      // Si congeló una ventana, la cola arranca de nuevo (otra región) → resetear la stickiness.
+      if (congeladoHasta !== congeladoAntes) { lastCola = []; lastColaSnapped = false; }
 
-      const todo = [...congeladas, coordsCola].flat() as [number, number][];
+      const colaVentana = limpio.slice(Math.max(0, congeladoHasta - SOLAPE));
+      if (colaVentana.length >= 2) {
+        const rc = await matchVentana(colaVentana, token);
+        if (cancelado?.()) return null;
+        // STICKINESS: no revertir a CRUDO (zigzag) un tramo que ya se pegó a la vía. Con GPS de red la
+        // confianza de la cola baila alrededor de 0.4 → sin esto, un ciclo pega y el siguiente cae a
+        // crudo = PARPADEO. Se toma el match nuevo si pegó (o si aún no había nada pegado); si el nuevo
+        // NO pegó pero la cola ya estaba pegada, se conserva la pegada (la punta nueva la extiende la
+        // cola viva). Así el tramo grande queda estable en la vía y solo el extremo reciente se ajusta.
+        if (rc.snapped || !lastColaSnapped) { lastCola = rc.coords; lastColaSnapped = rc.snapped; }
+      }
+
+      const todo = [...congeladas, lastCola].flat() as [number, number][];
       return todo.length >= 2 ? todo : null;
     },
   };
