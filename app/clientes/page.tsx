@@ -3,6 +3,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { parsearManifiesto, descargarPlantilla } from "@/lib/manifiesto-csv";
+import { parsearPortalUsuarios, descargarPlantillaPortalUsuarios, descargarCredencialesPortal, type CredencialExport } from "@/lib/portal-usuarios-csv";
 
 /* ══════════════════════════════════════════════
    TYPES
@@ -734,6 +735,16 @@ export default function ClientesPage() {
   const [showPuPass,     setShowPuPass]     = useState(false);
   const [puContactosTab, setPuContactosTab] = useState<"admin"|"op">("admin");
   const [puImportadoDe,  setPuImportadoDe]  = useState("");
+  // Carga masiva de usuarios del portal por Excel
+  const puImportInputRef = useRef<HTMLInputElement>(null);
+  const [importandoPU,   setImportandoPU]   = useState(false);
+  const [enviandoCredsPU,setEnviandoCredsPU]= useState(false);
+  const [resultadoImportPU, setResultadoImportPU] = useState<null | {
+    insertados: number; actualizados: number; errores: number;
+    mensajesError: string[];
+    credenciales: (CredencialExport & { id: number | null; tipo_doc: "DNI"|"CE"|"Celular" })[];
+    avisos: string[];
+  }>(null);
 
   // Documentos
   const [expandDocs,   setExpandDocs]   = useState<DocCliente[]>([]);
@@ -1001,6 +1012,85 @@ export default function ClientesPage() {
     if (error) { toast(error.message, "error"); }
     else { toast(`"${toDeletePU.nombre}" eliminado`, "ok"); await cargarPortalUsers(accesoCliente.id); }
     setToDeletePU(null);
+  }
+
+  // ── Carga masiva de usuarios del portal por Excel ──
+  async function handlePortalUsuariosArchivo(file: File, clienteId: number) {
+    setImportandoPU(true);
+    try {
+      const resultado = await parsearPortalUsuarios(file, MODULOS_CTRL);
+      if (resultado.ok.length === 0) {
+        toast("El archivo no tiene usuarios válidos" + (resultado.errores[0] ? `: ${resultado.errores[0].motivo}` : ""), "error");
+        return;
+      }
+
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/portal/importar-usuarios", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${session?.access_token ?? ""}` },
+        body: JSON.stringify({
+          clienteId,
+          usuarios: resultado.ok.map(u => ({
+            nombre: u.nombre, dni: u.dni, tipo_doc: u.tipo_doc,
+            email: u.email, cargo: u.cargo, rol: u.rol,
+            password: u.password, modulos_permitidos: u.modulos_permitidos,
+          })),
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) { toast(json.error || "Error al importar", "error"); return; }
+
+      // Errores por fila del parseo + módulos desconocidos → avisos informativos
+      const avisos: string[] = [];
+      resultado.errores.forEach(e => avisos.push(`Fila ${e.fila}: ${e.motivo}`));
+      const modsDesc = Array.from(new Set(resultado.ok.flatMap(u => u.modulos_desconocidos)));
+      if (modsDesc.length) avisos.push(`Módulos no reconocidos (ignorados): ${modsDesc.join(", ")}`);
+      (json.mensajesError || []).forEach((m: string) => avisos.push(m));
+
+      setResultadoImportPU({
+        insertados: json.insertados || 0,
+        actualizados: json.actualizados || 0,
+        errores: json.errores || 0,
+        mensajesError: json.mensajesError || [],
+        credenciales: json.credenciales || [],
+        avisos,
+      });
+
+      const partes: string[] = [];
+      if (json.insertados)   partes.push(`${json.insertados} nuevo(s)`);
+      if (json.actualizados) partes.push(`${json.actualizados} actualizado(s)`);
+      if (json.errores)      partes.push(`⚠ ${json.errores} error(es)`);
+      toast(partes.join(" · ") + (json.errores ? "" : " ✓"), json.errores ? "error" : "ok");
+      await cargarPortalUsers(clienteId);
+    } finally {
+      setImportandoPU(false);
+    }
+  }
+
+  // Envía por correo las credenciales de los usuarios recién creados/actualizados
+  // que tienen email y una contraseña conocida (no "(sin cambio)").
+  async function enviarCredencialesImportadas() {
+    if (!resultadoImportPU) return;
+    const conEmail = resultadoImportPU.credenciales.filter(
+      c => c.id && c.email && c.password && c.password !== "(sin cambio)",
+    );
+    if (conEmail.length === 0) { toast("Ningún usuario tiene correo + contraseña para enviar", "info"); return; }
+    setEnviandoCredsPU(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const bearer = session?.access_token ?? "";
+      const results = await Promise.all(conEmail.map(c =>
+        fetch("/api/portal/enviar-credenciales", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${bearer}` },
+          body: JSON.stringify({ usuario_id: c.id, password: c.password, tipo_doc: c.tipo_doc }),
+        }).then(r => r.ok).catch(() => false),
+      ));
+      const enviados = results.filter(Boolean).length;
+      toast(`${enviados} de ${conEmail.length} correo(s) enviado(s)` + (enviados < conEmail.length ? " · algunos fallaron" : " ✓"), enviados > 0 ? "ok" : "error");
+    } finally {
+      setEnviandoCredsPU(false);
+    }
   }
 
   /* ══════════════════════════════════════════
@@ -1347,6 +1437,101 @@ export default function ClientesPage() {
           </div>
         </div>
       )}
+
+      {/* ── Resultado de la carga masiva de usuarios del portal ── */}
+      {resultadoImportPU && (() => {
+        const r = resultadoImportPU;
+        const enviables = r.credenciales.filter(c => c.id && c.email && c.password && c.password !== "(sin cambio)");
+        const conClave  = r.credenciales.filter(c => c.password && c.password !== "(sin cambio)");
+        const nombreCli = accesoCliente?.empresa || accesoCliente?.nombre || "Cliente";
+        return (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.5)", zIndex: 9100, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+            <div style={{ background: "white", borderRadius: 20, padding: 28, maxWidth: 620, width: "100%", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 64px rgba(0,0,0,.22)", animation: "scaleIn .18s ease" }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16 }}>
+                <div>
+                  <h3 style={{ fontWeight: 800, fontSize: 17, color: "#0f172a", margin: 0 }}>Carga masiva completada</h3>
+                  <p style={{ fontSize: 12, color: "#94a3b8", margin: "3px 0 0" }}>{nombreCli} · Acceso al portal</p>
+                </div>
+                <button onClick={() => setResultadoImportPU(null)} style={{ background: "transparent", border: "none", fontSize: 18, cursor: "pointer", color: "#94a3b8" }}>✕</button>
+              </div>
+
+              {/* Resumen */}
+              <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: 120, background: "#f0fdf4", border: "1px solid #dcfce7", borderRadius: 12, padding: "12px 14px" }}>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: "#166534" }}>{r.insertados}</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#16a34a" }}>Nuevos</div>
+                </div>
+                <div style={{ flex: 1, minWidth: 120, background: "#eff6ff", border: "1px solid #dbeafe", borderRadius: 12, padding: "12px 14px" }}>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: "#1e40af" }}>{r.actualizados}</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#2563eb" }}>Actualizados</div>
+                </div>
+                <div style={{ flex: 1, minWidth: 120, background: r.errores ? "#fef2f2" : "#f8fafc", border: `1px solid ${r.errores ? "#fecaca" : "#f1f5f9"}`, borderRadius: 12, padding: "12px 14px" }}>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: r.errores ? "#991b1b" : "#94a3b8" }}>{r.avisos.length}</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: r.errores ? "#dc2626" : "#94a3b8" }}>Errores / avisos</div>
+                </div>
+              </div>
+
+              {/* Credenciales (destaca las autogeneradas) */}
+              {conClave.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <p style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "#6b7280", margin: "0 0 8px" }}>
+                    Credenciales de acceso ({conClave.length})
+                  </p>
+                  <div style={{ border: "1px solid #f1f5f9", borderRadius: 12, overflow: "hidden", maxHeight: 220, overflowY: "auto" }}>
+                    {conClave.map((c, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderTop: i ? "1px solid #f1f5f9" : "none", background: "white" }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <span style={{ fontWeight: 700, fontSize: 12, color: "#0f172a" }}>{c.nombre}</span>
+                          <span style={{ fontSize: 11, color: "#94a3b8", marginLeft: 8, fontFamily: "monospace" }}>{c.dni}</span>
+                        </div>
+                        <span style={{ fontSize: 12, fontWeight: 800, color: "#0b315f", fontFamily: "ui-monospace,monospace", background: "#eef3f8", padding: "2px 8px", borderRadius: 6 }}>{c.password}</span>
+                        {c.email
+                          ? <span style={{ fontSize: 10, color: "#16a34a", flexShrink: 0 }} title={c.email}>✓ correo</span>
+                          : <span style={{ fontSize: 10, color: "#f59e0b", flexShrink: 0 }}>sin correo</span>}
+                      </div>
+                    ))}
+                  </div>
+                  <p style={{ fontSize: 11, color: "#94a3b8", margin: "6px 0 0" }}>
+                    🔒 Comparte estas contraseñas con cada usuario. Podrán cambiarla desde el portal.
+                  </p>
+                </div>
+              )}
+
+              {/* Avisos / errores */}
+              {r.avisos.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <p style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: "#6b7280", margin: "0 0 8px" }}>Avisos ({r.avisos.length})</p>
+                  <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 12, padding: "10px 14px", maxHeight: 160, overflowY: "auto" }}>
+                    {r.avisos.map((a, i) => (
+                      <p key={i} style={{ fontSize: 12, color: "#92400e", margin: i ? "6px 0 0" : 0 }}>• {a}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Acciones */}
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap", paddingTop: 16, borderTop: "1px solid #f1f5f9" }}>
+                {conClave.length > 0 && (
+                  <button onClick={() => descargarCredencialesPortal(nombreCli, r.credenciales.map(c => ({ nombre: c.nombre, dni: c.dni, email: c.email, password: c.password, rol: c.rol, estado: c.estado })))}
+                    style={{ padding: "9px 16px", borderRadius: 10, border: "1px solid #e5e7eb", background: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}>
+                    ↓ Descargar credenciales
+                  </button>
+                )}
+                {enviables.length > 0 && (
+                  <button onClick={enviarCredencialesImportadas} disabled={enviandoCredsPU}
+                    style={{ padding: "9px 16px", borderRadius: 10, border: "none", background: enviandoCredsPU ? "#94a3b8" : "#16a34a", color: "white", fontSize: 12, fontWeight: 700, cursor: enviandoCredsPU ? "not-allowed" : "pointer" }}>
+                    {enviandoCredsPU ? "Enviando..." : `✉ Enviar credenciales (${enviables.length})`}
+                  </button>
+                )}
+                <button onClick={() => setResultadoImportPU(null)}
+                  style={{ padding: "9px 22px", borderRadius: 10, border: "none", background: "#0b315f", color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                  Cerrar
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       <main style={{ padding: "28px 24px", maxWidth: 1320, margin: "0 auto", fontFamily: "system-ui,-apple-system,sans-serif", color: "#0f172a" }}>
 
@@ -1789,10 +1974,20 @@ export default function ClientesPage() {
 
                               {/* ── Acceso al Portal ── */}
                               <div style={{ borderTop: "1px solid #e2e8f0", marginTop: 16, paddingTop: 16 }}>
-                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                                  <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#64748b", margin: 0 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                                  <p style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".07em", color: "#64748b", margin: 0, flex: 1 }}>
                                     Acceso al Portal {loadingPU ? "…" : `(${portalUsers.length})`}
                                   </p>
+                                  <button onClick={e => { e.stopPropagation(); descargarPlantillaPortalUsuarios(MODULOS_CTRL); }}
+                                    style={{ padding: "5px 12px", borderRadius: 8, border: "1px solid #e5e7eb", background: "white", fontSize: 11, fontWeight: 600, cursor: "pointer", color: "#374151" }}>
+                                    ↓ Plantilla
+                                  </button>
+                                  <button onClick={e => { e.stopPropagation(); puImportInputRef.current?.click(); }} disabled={importandoPU}
+                                    style={{ padding: "5px 12px", borderRadius: 8, border: "1px solid #e5e7eb", background: importandoPU ? "#94a3b8" : "white", fontSize: 11, fontWeight: 600, cursor: importandoPU ? "not-allowed" : "pointer", color: importandoPU ? "white" : "#374151" }}>
+                                    {importandoPU ? "Importando..." : "⇪ Subir Excel"}
+                                  </button>
+                                  <input ref={puImportInputRef} type="file" accept=".xls,.xlsx,.csv" style={{ display: "none" }}
+                                    onChange={e => { e.stopPropagation(); const file = e.target.files?.[0]; if (file && expandidoId) handlePortalUsuariosArchivo(file, expandidoId); e.target.value = ""; }} />
                                   <button onClick={e => { e.stopPropagation(); resetPUForm(); setModalPU(true); }}
                                     style={{ padding: "5px 14px", borderRadius: 8, border: "none", background: "#0b315f", color: "white", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
                                     + Nuevo usuario
