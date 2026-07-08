@@ -1179,7 +1179,7 @@ export default function ClientePortal() {
 
       // PUENTE AZUL de huecos (Idea 1): camino de carretera estimado por hueco, cacheado por coords.
       const candidatos = calcularPuentes(limpio);
-      const MAX_PUENTES = 15;
+      const MAX_PUENTES = 30;
       if (candidatos.length > MAX_PUENTES) console.warn(`[cliente] ${candidatos.length} huecos, puenteando ${MAX_PUENTES}`);
       const cache = puentesCacheCliRef.current;
       const feats: any[] = [];
@@ -1196,9 +1196,8 @@ export default function ClientePortal() {
             const j = await resp.json();
             if (j?.ocultar || j?.status !== "OK") r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt };
             else {
-              const nivel = decidirPuente(c.dRecta, c.dt, j.roadM, j.rutasM || []);
-              const coords = nivel === "puente" ? (j.coords || [])
-                : nivel === "aprox" ? [[c.aLng, c.aLat], [c.bLng, c.bLat]] as [number, number][] : [];
+              const nivel = decidirPuente(j.roadM, c.dRecta);   // unir todo por carretera (corte solo si sin ruta o rodeo absurdo >8×)
+              const coords = nivel === "puente" ? (j.coords || []) : [];
               r = { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt };
             }
             cache.set(key, r);
@@ -1390,23 +1389,15 @@ export default function ClientePortal() {
         map.addLayer({
           id: "puente-cli-l", type: "line", source: "puente-cli-src",
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: {
-            "line-color": ["match", ["get", "nivel"], "aprox", "#94a3b8", "#60a5fa"],
-            "line-width": 4, "line-opacity": 0.6, "line-dasharray": [2, 1.6],
-          },
-        });
-        map.on("mouseenter", "puente-cli-l", () => { map.getCanvas().style.cursor = "pointer"; });
-        map.on("mouseleave", "puente-cli-l", () => { map.getCanvas().style.cursor = ""; });
-        map.on("click", "puente-cli-l", (e: any) => {
-          const f = e.features?.[0]; if (!f) return;
-          const pr = f.properties || {};
-          const km = Number(pr.km) || 0, min = Number(pr.min) || 0;
-          const titulo = pr.nivel === "aprox" ? "Tramo sin señal (aprox.)" : "Tramo estimado (sin GPS)";
-          const html = `<div style="font-family:system-ui,sans-serif;font-size:12px;line-height:1.5;min-width:160px"><div style="font-weight:700;color:#1d4ed8">${titulo}</div><div style="color:#334155">Sin señal ~${min} min · ${km} km por carretera</div><div style="color:#94a3b8;font-size:11px;margin-top:2px">Ruta estimada por Google, no medida por GPS</div></div>`;
-          if (popupTelemCliRef.current) popupTelemCliRef.current.remove();
-          popupTelemCliRef.current = new mapboxgl.Popup({ closeButton: true, offset: 8, maxWidth: "240px" }).setLngLat(e.lngLat).setHTML(html).addTo(map);
+          // Azul oscuro SÓLIDO: el cliente ve una ruta continua. SIN popup ni etiqueta "estimado"
+          // (a diferencia del modal admin) — el tecnicismo del tramo sin señal queda solo en /seguimiento.
+          paint: { "line-color": "#1d4ed8", "line-width": 5, "line-opacity": 0.9 },
         });
       }
+      // Puente DEBAJO de la huella medida (el otro efecto re-crea gps-l-* al tope cada render): orden
+      // estable sin importar cuál efecto corra primero. En los huecos no hay huella encima → visible.
+      const lidGps = rutaSelId != null ? `gps-l-${rutaSelId}` : null;
+      if (lidGps && map.getLayer("puente-cli-l") && map.getLayer(lidGps)) { try { map.moveLayer("puente-cli-l", lidGps); } catch {} }
     } catch (e) { console.error("[cliente] Error dibujando puentes:", e); }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapListoEnVivo, puentesMap, rutaSelId, tab]);
@@ -3203,12 +3194,8 @@ tbody tr:nth-child(even){background:#f9fafb}
                           <span style={{ fontSize: 10, fontWeight: 700, color: "#475569" }}>{mostrarPuntosCli ? "Ocultar" : "Ver"} datos por punto</span>
                         </button>
                       )}
-                      {(puentesMap[servicioSel.id]?.length || 0) > 0 && (
-                        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 8 }}>
-                          <span style={{ width: 22, height: 0, borderTop: "2px dashed #60a5fa", flexShrink: 0 }} />
-                          <span style={{ fontSize: 10, fontWeight: 700, color: "#475569" }}>Tramo estimado (sin señal)</span>
-                        </div>
-                      )}
+                      {/* El cliente NO ve la leyenda "Tramo estimado" (decisión del usuario): la línea
+                          azul continua se integra como la ruta; el tecnicismo queda solo en /seguimiento. */}
                     </>
                   )}
                 </div>

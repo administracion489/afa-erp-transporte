@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
       destination:  `${bLat},${bLng}`,
       key,
       mode:         "driving",
-      alternatives: "true",   // varias rutas → medir ambigüedad geométrica en el consumidor
+      avoid:        "ferries",   // el puente NUNCA debe incluir un leg de transbordador (línea sobre agua) → siempre por puente carretero, o sin ruta
       language:     "es",
       region:       "pe",
     });

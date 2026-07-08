@@ -548,33 +548,20 @@ export function calcularPuentes(limpia: HuellaPt[]): PuenteHueco[] {
   return out;
 }
 
-export type NivelPuente = "puente" | "aprox" | "ocultar";
-// Decide, con la respuesta de Directions, cómo mostrar un hueco (degradación en 3 niveles):
-//   • "puente"  → azul punteado pegado a la vía (ruta clara y plausible)
-//   • "aprox"   → recta gris tenue "tramo sin señal" (ruta ambigua o rodeo moderado: no afirmamos la vía)
-//   • "ocultar" → nada, hueco honesto (rodeo enorme / velocidad por carretera imposible / sin ruta)
-// `roadM` = distancia por carretera de la ruta principal; `rutasM` = distancias de TODAS las rutas
-// (para medir ambigüedad geométrica: 2+ caminos parecidos = no sabemos cuál tomó el bus).
-export function decidirPuente(dRecta: number, dt: number, roadM: number, rutasM: number[]): NivelPuente {
-  const vmax = VMAX_BUS_KMH / 3.6;
-  if (!roadM || roadM <= 0) return "ocultar";
-  if (roadM / dt > vmax) return "ocultar";              // por carretera habría necesitado >VMAX → fue por otro lado
-  const detour = roadM / dRecta;                        // roadM = ruta PRINCIPAL (más rápida) de Google; detour y la geometría dibujada son coherentes entre sí
-  if (detour > 2.5) return "ocultar";                   // rodeo enorme → ruta improbable
-  // Ambigüedad sobre el par MÁS CORTO (a propósito): si Google ve 2 caminos casi iguales, no sabemos
-  // cuál tomó el bus. (Asimetría intencional roadM-principal vs alts-más-cortas: sesga hacia "aprox".)
-  const alts = (rutasM || []).filter((a) => a > 0).sort((a, b) => a - b);
-  const ambiguo = alts.length >= 2 && (alts[1] - alts[0]) / alts[0] < 0.20;
-  // "puente" AFIRMA la vía en azul → SOLO con evidencia fuerte: casi recto (detour ≤ 1.5), un único
-  // camino plausible y hueco corto (≤ 150 s). "puente" NO garantiza la vía REAL, solo que es la MÁS
-  // plausible; por eso todo lo demás degrada a "aprox" (recta gris tenue = "hubo hueco, camino incierto").
-  // Regla de la casa: un hueco honesto supera una ruta afirmada en falso — con solo 2 extremos no se
-  // puede distinguir "la ruta de Google" de "la del bus" si ambas son parecidas → se es conservador.
-  if (detour <= 1.5 && !ambiguo && dt <= 150) return "puente";
-  // "aprox" dibuja una RECTA A-B: si es MUY larga (>1500 m) cruzando la ciudad engaña más que un
-  // hueco honesto → mejor ocultar. La recta corta gris+punteada+etiquetada comunica incertidumbre.
-  if (dRecta > 1500) return "ocultar";
-  return "aprox";
+export type NivelPuente = "puente" | "ocultar";
+// UNIR TODO (decisión del usuario, jul-2026): todo hueco REAL —ya filtrado por calcularPuentes:
+// salto > 300 m, hueco 20-300 s, velocidad recta plausible (< 130) → NO es un teleport/glitch ni un
+// celular apagado— se rellena con el camino de CARRETERA de Google (`roadM`/`coords`). Al ir SIEMPRE
+// por calles (nunca una recta A-B), el puente JAMÁS cruza el río: Google rodea por el puente real.
+// Se aceptó el RODEO GRANDE a cambio de una huella continua (por eso NO hay tope de detour "normal").
+// ÚNICO corte: (a) Google no devuelve ruta (roadM ≤ 0), o (b) el detour es ABSURDO (> 8× la recta):
+// eso ya no es un rodeo real sino que un extremo del hueco quedó al otro lado de un río/barrera (GPS
+// residual) → unir ahí dibujaría un lazo de kms cruzando el río a un punto equivocado (contradice
+// "nunca cruzar el río"). El filtro de excursiones ya limpia casi todos esos extremos; esto es la red.
+export function decidirPuente(roadM: number, dRecta: number): NivelPuente {
+  if (roadM <= 0) return "ocultar";
+  if (dRecta > 0 && roadM / dRecta > 8) return "ocultar";   // rodeo absurdo = extremo al otro lado del río
+  return "puente";
 }
 
 // Prepara una ventana para Map Matching: deduplica y limita a 100 (máximo de la API),
