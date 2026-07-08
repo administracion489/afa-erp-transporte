@@ -17,9 +17,13 @@ type UbicacionGPS = {
   estado: string; timestamp: string;
 };
 type AlertaSOS = {
-  id: number; conductor_id: number | null; vehiculo_id: number | null;
-  lat: number; lng: number; mensaje: string; atendido: boolean; created_at: string;
+  id: number; reserva_id: number | null;
+  lat: number | null; lng: number | null;
+  motivo: string | null; estado: string;
+  atendida_por: number | null; atendida_at: string | null; created_at: string;
 };
+// Una alerta sigue "abierta" mientras su estado sea "pendiente".
+const sosPendiente = (a: AlertaSOS) => a.estado === "pendiente";
 type Vehiculo  = { id: number; placa: string; categoria: string | null; marca: string | null; modelo: string | null; };
 type Conductor = { id: number; nombre: string; telefono: string | null; };
 type VehiculoTercero  = { id: number; placa: string | null; categoria: string | null; marca: string | null; modelo: string | null; empresa_id: number | null; };
@@ -348,7 +352,7 @@ export default function MonitoreoPage() {
     if (!mapListo || !map.current) return;
     sosMarkers.current.forEach(m => m.remove());
     sosMarkers.current = [];
-    alertasSOS.filter(a => !a.atendido).forEach(a => {
+    alertasSOS.filter(a => sosPendiente(a) && a.lat != null && a.lng != null).forEach(a => {
       const el = document.createElement("div");
       el.style.cssText = "width:38px;height:38px;border-radius:12px;background:#dc2626;border:3px solid #fca5a5;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 0 22px rgba(220,38,38,0.85);cursor:pointer;color:white;font-weight:900;";
       el.innerHTML = "⚠";
@@ -366,8 +370,26 @@ export default function MonitoreoPage() {
   };
 
   const atenderSOS = async (id: number) => {
-    await supabase.from("alertas_sos").update({ atendido: true }).eq("id", id);
-    setAlertasSOS(prev => prev.map(a => a.id === id ? { ...a, atendido: true } : a));
+    // El UPDATE directo desde el cliente lo bloquea RLS (afecta 0 filas). Se persiste
+    // vía API con service-role; solo tocamos el estado local si el servidor confirma.
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token;
+    if (!token) { alert("Sesión expirada. Vuelve a iniciar sesión."); return; }
+    try {
+      const res = await fetch("/api/monitoreo/atender-sos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ id }),
+      });
+      if (!res.ok) {
+        const { error } = await res.json().catch(() => ({ error: "Error" }));
+        alert("No se pudo marcar como atendido: " + (error || res.status));
+        return;
+      }
+      setAlertasSOS(prev => prev.map(a => a.id === id ? { ...a, estado: "atendida", atendida_at: new Date().toISOString() } : a));
+    } catch {
+      alert("No se pudo marcar como atendido (sin conexión).");
+    }
   };
 
   // ─── FLOTA UNIFICADA (propia + tercero) ───────────────────────────────────
@@ -379,7 +401,7 @@ export default function MonitoreoPage() {
   const ubicDeMovil = (m: Movil): UbicacionGPS | undefined =>
     ubicaciones.find(u => (m.esTercero ? u.vehiculo_tercero_id === m.id : u.vehiculo_id === m.id));
 
-  const sosPendientes = alertasSOS.filter(a => !a.atendido).length;
+  const sosPendientes = alertasSOS.filter(sosPendiente).length;
 
   const nombreEmpresa = (id: number | null) => (id != null ? empresasTercero.find(e => e.id === id)?.razon_social : null) || null;
 
@@ -522,19 +544,20 @@ export default function MonitoreoPage() {
               </div>
               <div className="max-h-48 overflow-y-auto">
                 {alertasSOS.map(a => {
-                  const cond = conductores.find(c => c.id === a.conductor_id);
-                  const veh  = vehiculos.find(v => v.id === a.vehiculo_id);
+                  const pendiente = sosPendiente(a);
                   return (
-                    <div key={a.id} className="px-3 py-2.5 border-b" style={{ background: a.atendido ? "#111827" : "#1c0202", borderColor: "#1e293b" }}>
+                    <div key={a.id} className="px-3 py-2.5 border-b" style={{ background: pendiente ? "#1c0202" : "#111827", borderColor: "#1e293b" }}>
                       <div className="flex justify-between items-start gap-2">
-                        <div>
-                          <p className="text-xs font-black" style={{ color: a.atendido ? "#6b7280" : "#f87171" }}>
-                            {a.atendido ? "Atendido" : "PENDIENTE"}
+                        <div className="min-w-0">
+                          <p className="text-xs font-black" style={{ color: pendiente ? "#f87171" : "#6b7280" }}>
+                            {pendiente ? "PENDIENTE" : "Atendido"}
                           </p>
-                          <p className="text-[11px] text-gray-300 mt-0.5">{cond?.nombre || "-"}</p>
-                          <p className="text-[10px] text-gray-500">{veh?.placa} · {new Date(a.created_at).toLocaleTimeString("es-PE")}</p>
+                          <p className="text-[11px] text-gray-300 mt-0.5 truncate">{a.motivo || "Alerta SOS"}</p>
+                          <p className="text-[10px] text-gray-500">
+                            {a.reserva_id ? `Reserva #${a.reserva_id} · ` : ""}{new Date(a.created_at).toLocaleTimeString("es-PE")}
+                          </p>
                         </div>
-                        {!a.atendido && (
+                        {pendiente && (
                           <button onClick={() => atenderSOS(a.id)} className="px-2 py-1 rounded-lg text-[10px] font-bold text-white flex-shrink-0" style={{ background: "#166534" }}>
                             Atendido
                           </button>

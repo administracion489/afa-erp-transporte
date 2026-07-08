@@ -30,7 +30,7 @@ type DocTercero    = { id:number; empresa_id:number; tipo:string; fecha_vencimie
 type Factura       = { id:number; total:number; estado:string; fecha_emision:string|null; };
 type Gasto         = { id:number; monto:number; categoria:string|null; fecha:string|null; };
 type ServicioHoy   = { id:number; origen:string; destino:string; hora_servicio:string|null; estado:string; cliente:string; placa:string|null; conductor:string|null; };
-type AlertaSOS     = { id:number; conductor_id:number|null; vehiculo_id:number|null; mensaje:string; atendido:boolean; created_at:string; };
+type AlertaSOS     = { id:number; reserva_id:number|null; lat:number|null; lng:number|null; motivo:string|null; estado:string; atendida_por:number|null; atendida_at:string|null; created_at:string; };
 
 // ─── ICONOS LOCALES ───────────────────────────────────────────────────────────
 type IP = { size?:number; sw?:number; color?:string; className?:string };
@@ -541,7 +541,7 @@ export default function DashboardPage() {
           safe(supabase.from("facturas").select("id,total,estado,fecha_emision")),
           safe(supabase.from("gastos").select("id,monto,categoria,fecha")),
           safe(supabase.from("reservas").select("id,origen,destino,hora_servicio,estado,cliente:clientes(nombre,empresa),vehiculo:vehiculos(placa),conductor:conductores(nombre)").eq("fecha_servicio", hoy).order("hora_servicio")),
-          safe(supabase.from("alertas_sos").select("*").eq("atendido", false).order("created_at", { ascending: false })),
+          safe(supabase.from("alertas_sos").select("*").eq("estado", "pendiente").order("created_at", { ascending: false })),
         ]);
         setReservas(rRes.data      || []);
         setVehiculos(vRes.data     || []);
@@ -780,7 +780,7 @@ export default function DashboardPage() {
             <p style={{ margin: 0, color: C.danger, fontWeight: 800, fontSize: 15 }}>
               ALERTA SOS ACTIVA — {sosActivos} sin atender
             </p>
-            {alertasSOS[0] && <p style={{ margin: "3px 0 0", color: "#b91c1c", fontSize: 12 }}>{alertasSOS[0].mensaje}</p>}
+            {alertasSOS[0] && <p style={{ margin: "3px 0 0", color: "#b91c1c", fontSize: 12 }}>{alertasSOS[0].motivo}</p>}
           </div>
           <button onClick={() => router.push("/monitoreo")}
             style={{ padding: "9px 18px", borderRadius: 9, background: C.danger, border: "none",

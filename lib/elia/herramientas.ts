@@ -596,7 +596,7 @@ export async function calcularRadar(sb: SB, permisos: string[], rol: string): Pr
       const { count } = await sb
         .from("alertas_sos")
         .select("id", { count: "exact", head: true })
-        .eq("atendido", false);
+        .eq("estado", "pendiente");
       if ((count ?? 0) > 0)
         items.push({ nivel: "critico", texto: `${count} alerta(s) SOS sin atender`, href: "/monitoreo" });
     } catch {}
@@ -1583,7 +1583,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
           };
         });
 
-        const { count: sos } = await sb.from("alertas_sos").select("id", { count: "exact", head: true }).eq("atendido", false);
+        const { count: sos } = await sb.from("alertas_sos").select("id", { count: "exact", head: true }).eq("estado", "pendiente");
 
         return {
           paraModelo: JSON.stringify({ transmitiendo: unidades.length, en_linea: enLinea, con_retraso: retraso, sin_senal: sinSenal, sos_activos: sos ?? 0, unidades: detalle.slice(0, 20) }),

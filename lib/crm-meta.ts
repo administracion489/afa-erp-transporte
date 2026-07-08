@@ -2,7 +2,7 @@
 // Env vars: META_WA_TOKEN (WhatsApp system user token), META_PAGE_TOKEN (Messenger/Instagram page token)
 // Legacy: META_ACCESS_TOKEN se usa como fallback si los nuevos no están definidos
 
-const GRAPH = "https://graph.facebook.com/v19.0";
+const GRAPH = "https://graph.facebook.com/v25.0";
 const WA_TOKEN = () => process.env.META_WA_TOKEN ?? process.env.META_ACCESS_TOKEN!;
 const PAGE_TOKEN = () => process.env.META_PAGE_TOKEN ?? process.env.META_ACCESS_TOKEN!;
 
