@@ -261,6 +261,49 @@ function quitarPicosV(pts: HuellaPt[]): HuellaPt[] {
   return cur;
 }
 
+// Por encima de esta velocidad, un "ir y volver" NO es un giro real (los buses FRENAN para girar,
+// van a 10-30 km/h) sino un SPIKE de GPS. Separa la U-turn/hairpin legítima (lenta) del salto de red.
+const VELOCIDAD_GIRO_KMH = 50;
+
+// Quita EXCURSIONES ida-y-vuelta de fixes IMPRECISOS (regla del usuario, jul-2026: un vehículo NO
+// cruza un río ni salta al carril de sentido contrario; la huella solo se desvía donde hay una vía
+// real de salida). quitarPicosV solo mata los picos a velocidad IMPOSIBLE (>130); estos son
+// geométricamente imposibles pero a velocidad PLAUSIBLE (88-123 km/h en #793): un fix de red que
+// se aleja ~200 m de la pista y VUELVE (perpendicular grande a la cuerda prev-next, con la cuerda
+// CORTA = los vecinos concuerdan). Se borra el vértice si además: (a) es impreciso (acc > CONFIABLE
+// — un chip satelital ni se evalúa); y (b) el ir-y-volver fue RÁPIDO (> VELOCIDAD_GIRO_KMH) — un bus
+// no invierte su dirección a 88 km/h; una U-turn/hairpin REAL es lenta (<50) y se CONSERVA (hallazgo
+// del review). Al quitar el vértice falso, los vecinos (sobre la vía) se unen en recta corta → la
+// huella se mantiene en la pista. Un giro/curva que PROGRESA tiene cuerda prev-next larga (C ≥
+// perp·1.5) → se conserva. Sin ts fiable no filtra (conservador, como quitarPicosV). Hasta 4 pasadas
+// (excursiones multi-punto por capas). Determinista sobre el prefijo (local: prev/punto/next).
+function quitarExcursiones(pts: HuellaPt[]): HuellaPt[] {
+  if (pts.length < 3 || !(pts[pts.length - 1].ts > pts[0].ts)) return pts;
+  const vGiro = VELOCIDAD_GIRO_KMH / 3.6;
+  let cur = pts;
+  for (let pasada = 0; pasada < 4; pasada++) {
+    const out: HuellaPt[] = [];
+    let removed = false;
+    for (let i = 0; i < cur.length; i++) {
+      if (i > 0 && i < cur.length - 1 && cur[i].acc > ACC_CONFIABLE_M) {
+        const perp = proyectarEnSegmento(cur[i].lat, cur[i].lng, cur[i - 1], cur[i + 1]).dist;
+        const C = distM(cur[i - 1].lat, cur[i - 1].lng, cur[i + 1].lat, cur[i + 1].lng);
+        const A = distM(cur[i - 1].lat, cur[i - 1].lng, cur[i].lat, cur[i].lng);
+        const B = distM(cur[i].lat, cur[i].lng, cur[i + 1].lat, cur[i + 1].lng);
+        const dtA = Math.max(1, (cur[i].ts - cur[i - 1].ts) / 1000);
+        const dtB = Math.max(1, (cur[i + 1].ts - cur[i].ts) / 1000);
+        const rapido = Math.max(A / dtA, B / dtB) > vGiro;   // ir-y-volver veloz = spike; giro real es lento → se conserva
+        // jut lateral mayor que su imprecisión, con vecinos que concuerdan (cuerda corta) y rápido = spike
+        if (perp > Math.max(60, 1.2 * cur[i].acc) && C < perp * 1.5 && rapido) { removed = true; continue; }
+      }
+      out.push(cur[i]);
+    }
+    cur = out;
+    if (!removed) break;
+  }
+  return cur;
+}
+
 export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
   // Pre-filtro: descarta fixes demasiado inciertos para el trazo (torre/WiFi, saltos imposibles).
   // PERO si eso dejaría el trazo casi vacío (equipo legítimo SIN chip, consistentemente >300 m),
@@ -268,7 +311,9 @@ export function limpiarHuella(pts: HuellaPt[]): HuellaPt[] {
   const finitos = pts.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
   const precisos = finitos.filter((p) => p.acc <= ACC_MAX_TRAIL);
   const basePre = precisos.length >= 2 ? precisos : finitos;
-  const base = quitarPicosV(basePre);
+  // quitarPicosV mata los picos a velocidad IMPOSIBLE; quitarExcursiones mata las excursiones
+  // ida-y-vuelta de fixes IMPRECISOS a velocidad plausible (el salto que cruza el río y vuelve).
+  const base = quitarExcursiones(quitarPicosV(basePre));
 
   const out: HuellaPt[] = [];
   const emitir = (lat: number, lng: number, velocidad: number, acc: number, ts: number) => {
