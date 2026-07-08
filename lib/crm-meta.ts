@@ -3,8 +3,6 @@
 // Legacy: META_ACCESS_TOKEN se usa como fallback si los nuevos no están definidos
 
 const GRAPH = "https://graph.facebook.com/v25.0";
-const WA_TOKEN = () => process.env.META_WA_TOKEN ?? process.env.META_ACCESS_TOKEN!;
-// Forzamos a que use estrictamente el token nuevo de producción
 const WA_TOKEN = () => process.env.META_WA_TOKEN!;
 // ── WhatsApp ──────────────────────────────────────────────────────────────
 
