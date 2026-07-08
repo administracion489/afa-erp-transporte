@@ -86,6 +86,10 @@ export function filasAPuntos(filas: any[]): HuellaPt[] {
 // usuario pidió "±10", pero el GPS satelital sano jitterea hasta ~10-12 m; 20 m separa limpio el
 // satélite (≤8 m en los datos) del degradado (≥48 m) sin tocar el jitter normal.
 const ACC_CONFIABLE_M = 20;
+// Precisión mediana reciente por encima de la cual la cola se considera DEGRADADA (la que zigzaguea):
+// activa el Map Matching rápido (12 s) y el umbral de movimiento consciente del jitter. Entre el
+// confiable (20) y el aviso de "GPS débil" al operador (60).
+const ACC_DEGRADADO_M = 30;
 
 // Proyecta (lat,lng) sobre el segmento A-B en metros locales (equirectangular). Devuelve el punto
 // del segmento más cercano y la distancia perpendicular (dist) — usada para decidir si anclar.
@@ -814,8 +818,22 @@ export function crearAjustadorHuella() {
     ): Promise<[number, number][] | null> {
       if (!token || limpio.length < 2) return null;
       const cola = limpio[limpio.length - 1];
-      const seMovio = !lastTail || distM(lastTail.lat, lastTail.lng, cola.lat, cola.lng) >= 8;
-      if (Date.now() - lastMatchMs < 60000) return null;
+      // Cadencia ADAPTATIVA de Map Matching. El throttle fijo de 60 s hacía que la cola reciente se
+      // dibujara CRUDA (zigzag off-road de fixes de red) hasta ~1 min, "arreglándose sola" al
+      // siguiente ajuste. Ahora: si la precisión reciente es DEGRADADA (la que zigzaguea) se re-ajusta
+      // casi cada fetch (12 s) → pegado a la vía casi al instante; con GPS bueno el crudo ya va sobre
+      // la pista y basta 60 s (no dispara llamadas a Mapbox en el caso común).
+      const rec = limpio.slice(-12);
+      const accsR = rec.map((p) => p.acc).sort((a, b) => a - b);
+      const accMedR = accsR.length ? accsR[Math.floor(accsR.length / 2)] : 25;
+      const throttleMs = accMedR > ACC_DEGRADADO_M ? 12000 : 60000;
+      if (Date.now() - lastMatchMs < throttleMs) return null;
+      // "Se movió" con umbral CONSCIENTE de la precisión: un bus PARADO con GPS de red jitterea
+      // decenas de metros; con umbral fijo de 8 m eso contaría como movimiento y gastaría un match
+      // ocioso cada 12 s. En degradado el umbral sube a la precisión mediana → el jitter no cuenta,
+      // solo el avance REAL (a 46 km/h son ~150 m/ciclo, muy por encima).
+      const umbralMov = Math.max(8, accMedR);
+      const seMovio = !lastTail || distM(lastTail.lat, lastTail.lng, cola.lat, cola.lng) >= umbralMov;
       if (!seMovio && congeladas.length) return null;
       lastMatchMs = Date.now();
       lastTail = { lat: cola.lat, lng: cola.lng };
