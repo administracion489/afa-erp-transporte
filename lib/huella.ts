@@ -265,36 +265,40 @@ function quitarPicosV(pts: HuellaPt[]): HuellaPt[] {
 // van a 10-30 km/h) sino un SPIKE de GPS. Separa la U-turn/hairpin legítima (lenta) del salto de red.
 const VELOCIDAD_GIRO_KMH = 50;
 
-// Quita EXCURSIONES ida-y-vuelta de fixes IMPRECISOS (regla del usuario, jul-2026: un vehículo NO
-// cruza un río ni salta al carril de sentido contrario; la huella solo se desvía donde hay una vía
-// real de salida). quitarPicosV solo mata los picos a velocidad IMPOSIBLE (>130); estos son
-// geométricamente imposibles pero a velocidad PLAUSIBLE (88-123 km/h en #793): un fix de red que
-// se aleja ~200 m de la pista y VUELVE (perpendicular grande a la cuerda prev-next, con la cuerda
-// CORTA = los vecinos concuerdan). Se borra el vértice si además: (a) es impreciso (acc > CONFIABLE
-// — un chip satelital ni se evalúa); y (b) el ir-y-volver fue RÁPIDO (> VELOCIDAD_GIRO_KMH) — un bus
-// no invierte su dirección a 88 km/h; una U-turn/hairpin REAL es lenta (<50) y se CONSERVA (hallazgo
-// del review). Al quitar el vértice falso, los vecinos (sobre la vía) se unen en recta corta → la
-// huella se mantiene en la pista. Un giro/curva que PROGRESA tiene cuerda prev-next larga (C ≥
-// perp·1.5) → se conserva. Sin ts fiable no filtra (conservador, como quitarPicosV). Hasta 4 pasadas
-// (excursiones multi-punto por capas). Determinista sobre el prefijo (local: prev/punto/next).
+// Quita OUTLIERS LATERALES de fixes IMPRECISOS (regla del usuario, jul-2026: un vehículo NO cruza un
+// río ni salta al carril de sentido contrario; la huella solo se desvía donde hay una vía real). Un
+// fix de red que se aleja mucho de la línea entre sus vecinos —cruzando el río y volviendo, O
+// yéndose de lado aunque el bus progrese— es imposible: un bus no se desplaza 130-250 m PERPENDICULAR
+// a su marcha en unos segundos. Se borra el vértice si TODO: (a) es impreciso (acc > ACC_CONFIABLE —
+// un chip satelital ni se evalúa); (b) su distancia PERPENDICULAR a la cuerda prev-next supera su
+// imprecisión (perp > max(60, 1.2·acc) → es un desvío, no ruido chico); (c) el desvío fue RÁPIDO
+// (> VELOCIDAD_GIRO_KMH): un bus no se va de lado a 90 km/h; una U-turn/giro cerrado REAL es LENTO
+// (<50) → se CONSERVA; y (d) es un DESVÍO LATERAL, no una CURVA que progresa. (d) se mide con la
+// cuerda: en un desvío lateral (ida-y-vuelta o cruce con retorno) la cuerda prev-next es CORTA
+// respecto a las piernas (C < 1.5·max(A,B)); en una curva ancha real que avanza, ambas piernas
+// suman avance → C ≈ A+B ≈ 2·max(A,B) > 1.5·max → se CONSERVA (hallazgo del review: sin este candado,
+// una curva de autopista de un tercero a >50 km/h con cadencia espaciada tiene sagitta grande y se
+// rectificaba). Al borrar el vértice falso, los vecinos (sobre la vía) se unen → la huella se
+// mantiene en la pista. Sin ts fiable no filtra. Hasta 5 pasadas (multi-punto por capas). Determinista
+// sobre el prefijo (local: prev/punto/next), como quitarPicosV.
 function quitarExcursiones(pts: HuellaPt[]): HuellaPt[] {
   if (pts.length < 3 || !(pts[pts.length - 1].ts > pts[0].ts)) return pts;
   const vGiro = VELOCIDAD_GIRO_KMH / 3.6;
   let cur = pts;
-  for (let pasada = 0; pasada < 4; pasada++) {
+  for (let pasada = 0; pasada < 5; pasada++) {
     const out: HuellaPt[] = [];
     let removed = false;
     for (let i = 0; i < cur.length; i++) {
       if (i > 0 && i < cur.length - 1 && cur[i].acc > ACC_CONFIABLE_M) {
         const perp = proyectarEnSegmento(cur[i].lat, cur[i].lng, cur[i - 1], cur[i + 1]).dist;
-        const C = distM(cur[i - 1].lat, cur[i - 1].lng, cur[i + 1].lat, cur[i + 1].lng);
         const A = distM(cur[i - 1].lat, cur[i - 1].lng, cur[i].lat, cur[i].lng);
         const B = distM(cur[i].lat, cur[i].lng, cur[i + 1].lat, cur[i + 1].lng);
+        const C = distM(cur[i - 1].lat, cur[i - 1].lng, cur[i + 1].lat, cur[i + 1].lng);
         const dtA = Math.max(1, (cur[i].ts - cur[i - 1].ts) / 1000);
         const dtB = Math.max(1, (cur[i + 1].ts - cur[i].ts) / 1000);
-        const rapido = Math.max(A / dtA, B / dtB) > vGiro;   // ir-y-volver veloz = spike; giro real es lento → se conserva
-        // jut lateral mayor que su imprecisión, con vecinos que concuerdan (cuerda corta) y rápido = spike
-        if (perp > Math.max(60, 1.2 * cur[i].acc) && C < perp * 1.5 && rapido) { removed = true; continue; }
+        const rapido = Math.max(A / dtA, B / dtB) > vGiro;   // desvío veloz = spike; giro real es lento → se conserva
+        const desvioLateral = C < 1.5 * Math.max(A, B);      // cuerda corta vs piernas = NO una curva que progresa
+        if (perp > Math.max(60, 1.2 * cur[i].acc) && rapido && desvioLateral) { removed = true; continue; }
       }
       out.push(cur[i]);
     }
