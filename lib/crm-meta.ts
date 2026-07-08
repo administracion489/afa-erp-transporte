@@ -14,12 +14,19 @@ export async function enviarWhatsApp(to: string, texto: string, phoneId?: string
   const phone = phoneId ?? process.env.META_PHONE_NUMBER_ID;
   if (!phone) throw new Error("META_PHONE_NUMBER_ID no configurado");
 
+  // Limpieza y formateo del número para Perú
+  let limpioTo = to.replace(/\D/g, ""); 
+
+  if (limpioTo.startsWith("51") && limpioTo.length === 11) {
+    limpioTo = "519" + limpioTo.substring(2);
+  }
+
   const res = await fetch(`${GRAPH}/${phone}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${WA_TOKEN()}` },
     body: JSON.stringify({
       messaging_product: "whatsapp",
-      to,
+      to: limpioTo, 
       type: "text",
       text: { body: texto },
     }),
