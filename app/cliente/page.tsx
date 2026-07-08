@@ -10,7 +10,7 @@ import { animarMarcador } from "@/lib/anim-marker";
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
-  calcularPuentes, decidirPuente, anclarImprecisos,
+  calcularPuentes, decidirPuente, anclarImprecisos, puentePorRuta, distM,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
 import { estadoCliente, normalizaEstado } from "@/lib/estados";
@@ -259,6 +259,7 @@ export default function ClientePortal() {
   const [mapListoEnVivo,    setMapListoEnVivo]    = useState(false);
   const [rutaSelId,         setRutaSelId]         = useState<number | null>(null);
   const [rutasEnVivoMap,    setRutasEnVivoMap]    = useState<Record<number, [number,number][]>>({});
+  const rutasEnVivoRef = useRef<Record<number, [number,number][]>>({}); // espejo para leer la ruta planificada en el loop del puente
   const [huellaGpsMap,      setHuellaGpsMap]      = useState<Record<number, {lat:number;lng:number;velocidad:number;ts:string|null}[]>>({});
   const [telemetriaMap,     setTelemetriaMap]     = useState<Record<number, PuntoTelemetria[]>>({}); // puntitos de telemetría real por servicio
   const [resumenMap,        setResumenMap]        = useState<Record<number, ResumenViaje | null>>({}); // resumen del viaje por servicio
@@ -1150,6 +1151,8 @@ export default function ClientePortal() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, mapListoEnVivo, JSON.stringify(Object.keys(paradas)), reservas.length]);
 
+  useEffect(() => { rutasEnVivoRef.current = rutasEnVivoMap; }, [rutasEnVivoMap]); // el loop del puente lee rutasEnVivoRef
+
   // ─── En vivo: CAPA 2 — huella GPS real del servicio SELECCIONADO ─────────
   useEffect(() => {
     if (tab !== "activos" || rutaSelId == null) return;
@@ -1177,14 +1180,25 @@ export default function ClientePortal() {
       const matched = await ajustadoresRef.current[rid].ajustar(limpio, token, () => cancel);
       if (matched && !cancel) setMatchedEnVivoMap(prev => ({ ...prev, [rid]: matched }));
 
-      // PUENTE AZUL de huecos (Idea 1): camino de carretera estimado por hueco, cacheado por coords.
+      // TRAMO ESTIMADO por hueco. Primero SIGUE la ruta planificada (sobre la vía, sin cruzar río, sin
+      // llamar a Google); si el bus se desvió (o no hay ruta), FALLBACK al camino fresco de Directions.
       const candidatos = calcularPuentes(limpio);
       const MAX_PUENTES = 30;
       if (candidatos.length > MAX_PUENTES) console.warn(`[cliente] ${candidatos.length} huecos, puenteando ${MAX_PUENTES}`);
+      const rutaPlan = rutasEnVivoRef.current[rid] || [];
       const cache = puentesCacheCliRef.current;
       const feats: any[] = [];
       for (const c of candidatos.slice(0, MAX_PUENTES)) {
         if (cancel) return;
+        // 1) Seguir la ruta planificada si el bus está cerca de ella.
+        const porRuta = puentePorRuta({ lat: c.aLat, lng: c.aLng }, { lat: c.bLat, lng: c.bLng }, rutaPlan);
+        if (porRuta && porRuta.length >= 2) {
+          let mts = 0;
+          for (let k = 1; k < porRuta.length; k++) mts += distM(porRuta[k - 1][1], porRuta[k - 1][0], porRuta[k][1], porRuta[k][0]);
+          feats.push({ type: "Feature", geometry: { type: "LineString", coordinates: porRuta }, properties: { nivel: "puente", km: Math.round(mts / 100) / 10, min: Math.round(c.dt / 60) } });
+          continue;
+        }
+        // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco).
         const key = `${c.aLat.toFixed(5)},${c.aLng.toFixed(5)}->${c.bLat.toFixed(5)},${c.bLng.toFixed(5)}`;
         let r = cache.get(key);
         if (!r) {

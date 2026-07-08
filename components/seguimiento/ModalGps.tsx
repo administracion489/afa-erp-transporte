@@ -9,7 +9,7 @@ import {
   calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
-  calcularPuentes, decidirPuente, anclarImprecisos,
+  calcularPuentes, decidirPuente, anclarImprecisos, puentePorRuta,
 } from "@/lib/huella";
 import { animarMarcador } from "@/lib/anim-marker";
 
@@ -100,6 +100,7 @@ export default function ModalGps({
   const [sinMovMin,      setSinMovMin]      = useState(0); // min que la unidad lleva SIN DESPLAZARSE (>150 m) con servicio en curso — caso "teléfono quedó en la cochera" (#951: 75 min clavado en el origen con las paradas completándose)
   const [mapListo,       setMapListo]       = useState(false);
   const [ruta,              setRuta]              = useState<RutaData | null>(null);
+  const rutaRef = useRef<RutaData | null>(null);   // espejo de `ruta` para leerla en el loop del puente
   const [cargandoRuta,      setCargandoRuta]      = useState(false);
   const [errorRuta,         setErrorRuta]         = useState<string | null>(null);
   const [paradasResueltas,  setParadasResueltas]  = useState<Parada[]>([]);
@@ -306,6 +307,7 @@ export default function ModalGps({
   }, [paradas, paradasJson, origen, destino, geocodificarParadas]); // eslint-disable-line
 
   useEffect(() => { cargarRuta(); }, [cargarRuta]);
+  useEffect(() => { rutaRef.current = ruta; }, [ruta]);   // el loop del puente lee rutaRef.current
 
   // ── Dibujar ruta en Mapbox ────────────────────────────────────────────────
 
@@ -453,9 +455,10 @@ export default function ModalGps({
         const matched = await ajustador.ajustar(limpio, token, () => cancel);
         if (matched && !cancel) setMatchedCoords(matched);
 
-        // PUENTE AZUL: por cada hueco de GPS candidato, pedir el camino de carretera (Directions) y
-        // decidir el nivel (puente/aprox/ocultar). Cacheado por coords del hueco → los huecos ya
-        // cerrados (prefijo estable) no re-llaman a Google. Overlay: no toca la huella medida.
+        // TRAMO ESTIMADO (sin señal): por cada hueco de GPS candidato. NUEVA REGLA: primero se SIGUE
+        // la RUTA PLANIFICADA (la línea discontinua azul) — sobre la vía prevista, sin cruzar el río,
+        // sin llamar a Google. Si el bus se desvió de la ruta (o no hay ruta), FALLBACK al camino
+        // fresco de Directions (cacheado). Overlay: no toca la huella medida.
         const candidatos = calcularPuentes(limpio);
         const MAX_PUENTES = 30;
         if (candidatos.length > MAX_PUENTES) console.warn(`[ModalGps] ${candidatos.length} huecos, puenteando los primeros ${MAX_PUENTES}`);
@@ -463,6 +466,15 @@ export default function ModalGps({
         const feats: any[] = [];
         for (const c of candidatos.slice(0, MAX_PUENTES)) {
           if (cancel) return;
+          // 1) Seguir la ruta planificada si el bus está cerca de ella.
+          const porRuta = puentePorRuta({ lat: c.aLat, lng: c.aLng }, { lat: c.bLat, lng: c.bLng }, rutaRef.current?.coordenadas || []);
+          if (porRuta && porRuta.length >= 2) {
+            let mts = 0;
+            for (let k = 1; k < porRuta.length; k++) mts += distM(porRuta[k - 1][1], porRuta[k - 1][0], porRuta[k][1], porRuta[k][0]);
+            feats.push({ type: "Feature", geometry: { type: "LineString", coordinates: porRuta }, properties: { nivel: "puente", km: Math.round(mts / 100) / 10, min: Math.round(c.dt / 60) } });
+            continue;
+          }
+          // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco).
           const key = `${c.aLat.toFixed(5)},${c.aLng.toFixed(5)}->${c.bLat.toFixed(5)},${c.bLng.toFixed(5)}`;
           let r = cache.get(key);
           if (!r) {

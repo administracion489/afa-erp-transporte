@@ -261,29 +261,32 @@ function quitarPicosV(pts: HuellaPt[]): HuellaPt[] {
   return cur;
 }
 
-// Por encima de esta velocidad, un "ir y volver" NO es un giro real (los buses FRENAN para girar,
-// van a 10-30 km/h) sino un SPIKE de GPS. Separa la U-turn/hairpin legítima (lenta) del salto de red.
-const VELOCIDAD_GIRO_KMH = 50;
+// Aceleración lateral máxima CREÍBLE para un bus de pasajeros (m/s²). Un giro cómodo va ~1.5-2; por
+// encima de ~0.3 g el "giro" es físicamente implausible para un bus con pasajeros (derraparía/volcaría).
+const ACC_LAT_MAX = 3.0;
+// Radio del arco por 3 puntos = radio CIRCUNSCRITO EXACTO. Con lados A, B y flecha perp del punto
+// medio a la cuerda: R = A·B / (2·perp). Se usa este exacto (no la aproximación de flecha C²/(8·perp))
+// porque esa aproximación EXPLOTA cuando una pierna abarca gran parte del arco (rampa cerrada
+// muestreada a cadencia lenta de un tercero) → daría aceleraciones de miles y borraría una rampa REAL
+// (hallazgo del review). El exacto da la aceleración física verdadera en todo el rango.
+const radioArco = (A: number, B: number, perp: number) => (perp > 0 ? (A * B) / (2 * perp) : Infinity);
 
 // Quita OUTLIERS LATERALES de fixes IMPRECISOS (regla del usuario, jul-2026: un vehículo NO cruza un
 // río ni salta al carril de sentido contrario; la huella solo se desvía donde hay una vía real). Un
-// fix de red que se aleja mucho de la línea entre sus vecinos —cruzando el río y volviendo, O
-// yéndose de lado aunque el bus progrese— es imposible: un bus no se desplaza 130-250 m PERPENDICULAR
-// a su marcha en unos segundos. Se borra el vértice si TODO: (a) es impreciso (acc > ACC_CONFIABLE —
-// un chip satelital ni se evalúa); (b) su distancia PERPENDICULAR a la cuerda prev-next supera su
-// imprecisión (perp > max(60, 1.2·acc) → es un desvío, no ruido chico); (c) el desvío fue RÁPIDO
-// (> VELOCIDAD_GIRO_KMH): un bus no se va de lado a 90 km/h; una U-turn/giro cerrado REAL es LENTO
-// (<50) → se CONSERVA; y (d) es un DESVÍO LATERAL, no una CURVA que progresa. (d) se mide con la
-// cuerda: en un desvío lateral (ida-y-vuelta o cruce con retorno) la cuerda prev-next es CORTA
-// respecto a las piernas (C < 1.5·max(A,B)); en una curva ancha real que avanza, ambas piernas
-// suman avance → C ≈ A+B ≈ 2·max(A,B) > 1.5·max → se CONSERVA (hallazgo del review: sin este candado,
-// una curva de autopista de un tercero a >50 km/h con cadencia espaciada tiene sagitta grande y se
-// rectificaba). Al borrar el vértice falso, los vecinos (sobre la vía) se unen → la huella se
-// mantiene en la pista. Sin ts fiable no filtra. Hasta 5 pasadas (multi-punto por capas). Determinista
-// sobre el prefijo (local: prev/punto/next), como quitarPicosV.
+// fix de red que se aleja de la línea entre sus vecinos —cruzando el río, O yéndose de lado aunque el
+// bus progrese— implica un GIRO que a la velocidad del tramo sería FÍSICAMENTE IMPOSIBLE para un bus.
+// Se borra el vértice si: (a) es impreciso (acc > ACC_CONFIABLE — un chip satelital ni se evalúa);
+// (b) su distancia PERPENDICULAR a la cuerda prev-next supera su imprecisión (perp > max(60, 1.2·acc)
+// → es un desvío real, no ruido chico); y (c) la ACELERACIÓN LATERAL implícita de pasar por ese
+// vértice supera ACC_LAT_MAX. El arco por los 3 puntos tiene radio R ≈ C²/(8·perp) (C=cuerda, perp=
+// flecha) y la aceleración lateral a = v²/R = 8·perp·v²/C². Un SOLO test físico que subsume el piso de
+// velocidad (giro LENTO → a baja → se conserva, ej. U-turn de bus) y la cuerda (curva ANCHA real →
+// R grande → a baja → se conserva); solo un desvío CERRADO y RÁPIDO (spike/cruce de río a 84 km/h con
+// 107 m de flecha = ~0.5 g, imposible) se borra. Al quitar el vértice falso, los vecinos (sobre la
+// vía) se unen → la huella se mantiene en la pista. Sin ts fiable no filtra. Hasta 5 pasadas
+// (multi-punto por capas). Determinista sobre el prefijo (local: prev/punto/next), como quitarPicosV.
 function quitarExcursiones(pts: HuellaPt[]): HuellaPt[] {
   if (pts.length < 3 || !(pts[pts.length - 1].ts > pts[0].ts)) return pts;
-  const vGiro = VELOCIDAD_GIRO_KMH / 3.6;
   let cur = pts;
   for (let pasada = 0; pasada < 5; pasada++) {
     const out: HuellaPt[] = [];
@@ -293,12 +296,11 @@ function quitarExcursiones(pts: HuellaPt[]): HuellaPt[] {
         const perp = proyectarEnSegmento(cur[i].lat, cur[i].lng, cur[i - 1], cur[i + 1]).dist;
         const A = distM(cur[i - 1].lat, cur[i - 1].lng, cur[i].lat, cur[i].lng);
         const B = distM(cur[i].lat, cur[i].lng, cur[i + 1].lat, cur[i + 1].lng);
-        const C = distM(cur[i - 1].lat, cur[i - 1].lng, cur[i + 1].lat, cur[i + 1].lng);
         const dtA = Math.max(1, (cur[i].ts - cur[i - 1].ts) / 1000);
         const dtB = Math.max(1, (cur[i + 1].ts - cur[i].ts) / 1000);
-        const rapido = Math.max(A / dtA, B / dtB) > vGiro;   // desvío veloz = spike; giro real es lento → se conserva
-        const desvioLateral = C < 1.5 * Math.max(A, B);      // cuerda corta vs piernas = NO una curva que progresa
-        if (perp > Math.max(60, 1.2 * cur[i].acc) && rapido && desvioLateral) { removed = true; continue; }
+        const v = Math.max(A / dtA, B / dtB);                    // m/s (la pierna más rápida)
+        const latA = (v * v) / radioArco(A, B, perp);            // aceleración lateral = v²/R (R exacto)
+        if (perp > Math.max(60, 1.2 * cur[i].acc) && latA > ACC_LAT_MAX) { removed = true; continue; }
       }
       out.push(cur[i]);
     }
@@ -562,6 +564,44 @@ export function decidirPuente(roadM: number, dRecta: number): NivelPuente {
   if (roadM <= 0) return "ocultar";
   if (dRecta > 0 && roadM / dRecta > 8) return "ocultar";   // rodeo absurdo = extremo al otro lado del río
   return "puente";
+}
+
+// Rellena un hueco (A→B) SIGUIENDO LA RUTA PLANIFICADA (la línea discontinua azul) en vez de una ruta
+// fresca de Google (decisión del usuario, jul-2026): el tramo estimado queda EXACTAMENTE sobre la vía
+// prevista (misma pista, nunca cruza el río, sin rodeos raros), reutilizando la ruta que ya tenemos.
+// Proyecta A y B al vértice más cercano de la polilínea de la ruta y devuelve el sub-tramo entre ambas
+// proyecciones, con A y B como extremos (para cerrar la unión con la huella medida). Devuelve null si
+// no hay ruta o si A/B caen demasiado lejos de ella (el bus se DESVIÓ de lo planificado → el consumidor
+// cae al puente por Google). `ruta` viene en [lng, lat] (convención Mapbox).
+export function puentePorRuta(
+  A: { lat: number; lng: number }, B: { lat: number; lng: number },
+  ruta: [number, number][], maxDesvioM = 200,   // 200 m: los conectores rectos A→ruta y ruta→B quedan cortos (el resto cae a Google)
+): [number, number][] | null {
+  if (!ruta || ruta.length < 2) return null;
+  // Distancia acumulada a lo largo de la ruta (para medir "hacia adelante" y longitud del tramo).
+  const cum = [0];
+  for (let i = 1; i < ruta.length; i++) cum[i] = cum[i - 1] + distM(ruta[i - 1][1], ruta[i - 1][0], ruta[i][1], ruta[i][0]);
+  // A: vértice más cercano en TODA la ruta.
+  let ia = -1, da = Infinity;
+  for (let i = 0; i < ruta.length; i++) { const d = distM(A.lat, A.lng, ruta[i][1], ruta[i][0]); if (d < da) { da = d; ia = i; } }
+  if (ia < 0 || da > maxDesvioM) return null;
+  // B: vértice más cercano pero SOLO hacia ADELANTE de A y dentro de una longitud PLAUSIBLE del tramo.
+  // Esto evita el pase equivocado cuando la ruta se cruza consigo misma (que tomaría un lazo gigante).
+  // El tramo de ruta entre A y B no debe exceder ~3× la recta del hueco (+1 km de holgura para huecos
+  // cortos): la ruta planificada entre dos puntos consecutivos del bus nunca da una vuelta enorme.
+  const dRecta = distM(A.lat, A.lng, B.lat, B.lng);
+  const maxSegM = Math.max(dRecta * 3, dRecta + 1000);
+  let ib = -1, db = Infinity;
+  for (let i = ia; i < ruta.length; i++) {
+    const along = cum[i] - cum[ia];
+    if (along > maxSegM) break;                                   // pasado el rango plausible → parar
+    const d = distM(B.lat, B.lng, ruta[i][1], ruta[i][0]);
+    if (d < db) { db = d; ib = i; }
+  }
+  if (ib < 0 || db > maxDesvioM) return null;                     // B no cae cerca hacia adelante → fallback a Google
+  const seg = ruta.slice(ia, ib + 1);
+  if (seg.length < 2) return null;
+  return [[A.lng, A.lat], ...seg, [B.lng, B.lat]];
 }
 
 // Prepara una ventana para Map Matching: deduplica y limita a 100 (máximo de la API),
