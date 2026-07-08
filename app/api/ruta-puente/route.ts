@@ -59,10 +59,23 @@ export async function POST(req: NextRequest) {
       (r.legs || []).reduce((s: number, l: any) => s + (l.distance?.value || 0), 0)
     );
     const principal = data.routes[0];
-    const coords = principal?.overview_polyline?.points ? decodePoly(principal.overview_polyline.points) : [];
-    if (coords.length < 2) return NextResponse.json({ ocultar: true, status: "SIN_GEOMETRIA" });
+    // Geometría DETALLADA por `steps` (no el overview_polyline simplificado que corta esquinas): el
+    // tramo estimado también va SIEMPRE dentro de la calle. Fallback al overview si no hay steps.
+    const coords: [number, number][] = [];
+    for (const leg of (principal?.legs || [])) {
+      for (const step of (leg.steps || [])) {
+        if (!step.polyline?.points) continue;
+        for (const c of decodePoly(step.polyline.points)) {
+          const last = coords[coords.length - 1];
+          if (!last || last[0] !== c[0] || last[1] !== c[1]) coords.push(c);
+        }
+      }
+    }
+    const coordsFinal = coords.length >= 2 ? coords
+      : (principal?.overview_polyline?.points ? decodePoly(principal.overview_polyline.points) : []);
+    if (coordsFinal.length < 2) return NextResponse.json({ ocultar: true, status: "SIN_GEOMETRIA" });
 
-    return NextResponse.json({ coords, roadM: rutasM[0] || 0, rutasM, status: "OK" });
+    return NextResponse.json({ coords: coordsFinal, roadM: rutasM[0] || 0, rutasM, status: "OK" });
   } catch (e: any) {
     return NextResponse.json({ ocultar: true, status: e?.message || "error" });
   }

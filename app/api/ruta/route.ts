@@ -117,8 +117,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Ruta sin tramos — respuesta incompleta de Google" }, { status: 422 });
     }
 
-    const coordenadas = decodePoly(route.overview_polyline.points);
     const legs = route.legs;
+
+    // Geometría DETALLADA por `steps` en vez de `overview_polyline` (esta última es una versión
+    // SIMPLIFICADA/diezmada que corta esquinas y se sale de la calle en curvas). Cada step trae su
+    // polilínea de alta resolución pegada a la vía; se concatenan y se deduplican los puntos repetidos
+    // en las uniones de step. Así la ruta planificada va SIEMPRE dentro de la pista.
+    const detallada: [number, number][] = [];
+    for (const leg of legs) {
+      for (const step of (leg.steps || [])) {
+        if (!step.polyline?.points) continue;
+        for (const c of decodePoly(step.polyline.points)) {
+          const last = detallada[detallada.length - 1];
+          if (!last || last[0] !== c[0] || last[1] !== c[1]) detallada.push(c);
+        }
+      }
+    }
+    // Fallback al overview solo si (raro) no vinieron steps.
+    const coordenadas = detallada.length >= 2 ? detallada : decodePoly(route.overview_polyline.points);
 
     const tramos = legs.map((leg: any, i: number) => ({
       desde:                paradas[i]?.nombre || `Punto ${i + 1}`,
