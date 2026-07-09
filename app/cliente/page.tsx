@@ -8,7 +8,7 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador } from "@/lib/anim-marker";
 import {
-  limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor,
+  limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, anclarImprecisos, puentePorRuta, distM,
 } from "@/lib/huella";
@@ -270,6 +270,7 @@ export default function ClientePortal() {
   const popupTelemCliRef = useRef<any>(null);                                                        // popup activo de un puntito
   // Geometría ajustada a la vía (Map Matching) por servicio — misma calidad que el modal.
   const [matchedEnVivoMap,  setMatchedEnVivoMap]  = useState<Record<number, [number,number][]>>({});
+  const [suprimirCrudoMap,  setSuprimirCrudoMap]  = useState<Record<number, Array<[number, number]>>>({}); // rangos crudos ruteados por servicio → no dibujar como medido
   const [paradasResueltasMap, setParadasResueltasMap] = useState<Record<number, Parada[]>>({});
   // Dashboard — info enriquecida por servicio destacado
   const [condInfoMap,   setCondInfoMap]   = useState<Record<number, {nombre: string; tel: string}>>({});
@@ -277,6 +278,7 @@ export default function ClientePortal() {
   const [gpsCardMap,    setGpsCardMap]    = useState<Record<number, {lat:number;lng:number;velocidad:number} | null>>({});
   const [etaDestinoMap, setEtaDestinoMap] = useState<Record<number, string | null>>({});
   const ajustadoresRef   = useRef<Record<number, ReturnType<typeof crearAjustadorHuella>>>({}); // 1 ajustador de Map Matching por servicio
+  const matchedEnVivoRefMap = useRef<Record<number, [number, number][]>>({}); // última geometría ajustada por servicio (para puentesCrudos aunque el ciclo devuelva null)
   const dibujoLayersRef  = useRef<string[]>([]);
   const dibujoSourcesRef = useRef<string[]>([]);
   const stopMarkersRef   = useRef<mapboxgl.Marker[]>([]);
@@ -1173,16 +1175,20 @@ export default function ClientePortal() {
       setHuellaGpsMap(prev => ({ ...prev, [rid]: limpio.map(p => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad, ts: null })) }));
       // Puntitos de telemetría real (~cada 100 m, anclados a muestra real) — Idea 2.
       setTelemetriaMap(prev => ({ ...prev, [rid]: puntosTelemetria(limpio, crudos) }));
-      // Resumen del viaje (km, tiempos, paradas, calidad) — datos reales.
-      setResumenMap(prev => ({ ...prev, [rid]: resumenViaje(limpio, crudos) }));
+      // Resumen del viaje: se calcula MÁS ABAJO (tras el loop de puentes) para que el badge "Rastreo %"
+      // cuente los tramos ruteados como ESTIMADO, no como medido.
       // Map Matching por ventanas (pegado a la pista) — throttle/congelado interno del ajustador.
       if (!ajustadoresRef.current[rid]) ajustadoresRef.current[rid] = crearAjustadorHuella();
       const matched = await ajustadoresRef.current[rid].ajustar(limpio, token, () => cancel);
-      if (matched && !cancel) setMatchedEnVivoMap(prev => ({ ...prev, [rid]: matched }));
+      if (matched && !cancel) { setMatchedEnVivoMap(prev => ({ ...prev, [rid]: matched })); matchedEnVivoRefMap.current[rid] = matched; }
 
-      // TRAMO ESTIMADO por hueco. Primero SIGUE la ruta planificada (sobre la vía, sin cruzar río, sin
-      // llamar a Google); si el bus se desvió (o no hay ruta), FALLBACK al camino fresco de Directions.
-      const candidatos = calcularPuentes(limpio);
+      // TRAMO ESTIMADO por RUTA: HUECOS de señal (calcularPuentes) + CORRIDAS CRUDAS CONGELADAS (ventanas
+      // que Map Matching no pegó = zigzag del GPS de red). Ambas por la ruta prevista→Google. Las crudas
+      // ruteadas se añaden a `suprimir` para no dibujarlas también como medido (crudas).
+      const crudoRanges = ajustadoresRef.current[rid].leerCrudoRanges();
+      const cruditos = puentesCrudos(matchedEnVivoRefMap.current[rid] || [], crudoRanges);
+      const candidatos = [...calcularPuentes(limpio), ...cruditos];
+      const suprimir: Array<[number, number]> = [];
       const MAX_PUENTES = 30;
       if (candidatos.length > MAX_PUENTES) console.warn(`[cliente] ${candidatos.length} huecos, puenteando ${MAX_PUENTES}`);
       const rutaPlan = rutasEnVivoRef.current[rid] || [];
@@ -1196,6 +1202,7 @@ export default function ClientePortal() {
           let mts = 0;
           for (let k = 1; k < porRuta.length; k++) mts += distM(porRuta[k - 1][1], porRuta[k - 1][0], porRuta[k][1], porRuta[k][0]);
           feats.push({ type: "Feature", geometry: { type: "LineString", coordinates: porRuta }, properties: { nivel: "puente", km: Math.round(mts / 100) / 10, min: Math.round(c.dt / 60) } });
+          if (c.origen === "crudo") suprimir.push([c.iA + 1, c.iB - 1]);
           continue;
         }
         // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco).
@@ -1219,9 +1226,19 @@ export default function ClientePortal() {
         }
         if (r.nivel !== "ocultar" && r.coords.length >= 2) {
           feats.push({ type: "Feature", geometry: { type: "LineString", coordinates: r.coords }, properties: { nivel: r.nivel, km: Math.round(r.km * 10) / 10, min: Math.round(c.dt / 60) } });
+          if (c.origen === "crudo") suprimir.push([c.iA + 1, c.iB - 1]);
         }
       }
-      if (!cancel) setPuentesMap(prev => ({ ...prev, [rid]: feats }));
+      if (!cancel) { setPuentesMap(prev => ({ ...prev, [rid]: feats })); setSuprimirCrudoMap(prev => ({ ...prev, [rid]: suprimir })); }
+      // Badge honesto: medido = línea medida sin los tramos crudos ruteados; estimado = petróleo (baja el % en degradados).
+      const largoCoordsC = (cs: any[]) => { let m = 0; for (let k = 1; k < (cs?.length || 0); k++) m += distM(cs[k - 1][1], cs[k - 1][0], cs[k][1], cs[k][0]); return m; };
+      const largoFeatsC = (fs: any[]) => fs.reduce((a, f) => a + largoCoordsC(f.geometry?.coordinates || []), 0);
+      const huellaColorC = limpio.map((p) => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad }));
+      const medidoMC = largoFeatsC(colorearMatched(matchedEnVivoRefMap.current[rid] || [], huellaColorC, suprimir));
+      const estimadoMC = largoFeatsC(feats);
+      const rvC = resumenViaje(limpio, crudos);
+      if (rvC && medidoMC + estimadoMC > 0) rvC.medidoPct = Math.round((medidoMC / (medidoMC + estimadoMC)) * 100);
+      if (!cancel) setResumenMap(prev => ({ ...prev, [rid]: rvC }));
     };
     cargarHuella(rutaSelId);
     // Refresca cada 12s (para servicios en curso)
@@ -1282,7 +1299,7 @@ export default function ClientePortal() {
     );
     const live = liveU ? { lat: Number(liveU.lat), lng: Number(liveU.lng), velocidad: Number(liveU.velocidad) || 0 } : null;
     const feats: any[] = (matchedEV && matchedEV.length >= 2)
-      ? [...colorearMatched(matchedEV, huellaPts), ...colaViva(matchedEV, huellaPts, live)]
+      ? [...colorearMatched(matchedEV, huellaPts, suprimirCrudoMap[sel.id]), ...colaViva(matchedEV, huellaPts, live)]
       : huellaCrudaFeatures(huellaPts);   // cruda por tramos (corta teleports/huecos). lib/huella.ts
     if (feats.length > 0) {
       const sid = `gps-s-${sel.id}`, lid = `gps-l-${sel.id}`;
@@ -1319,7 +1336,7 @@ export default function ClientePortal() {
       try { map.fitBounds(bounds, { padding: 60, maxZoom: 14, duration: 700 }); lastFitRef.current = sel.id; } catch {}
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapListoEnVivo, rutasEnVivoMap, huellaGpsMap, matchedEnVivoMap, paradasResueltasMap, paradas, rutaSelId, tab]);
+  }, [mapListoEnVivo, rutasEnVivoMap, huellaGpsMap, matchedEnVivoMap, suprimirCrudoMap, paradasResueltasMap, paradas, rutaSelId, tab]);
 
   // ─── En vivo: CAPA 4 — puntitos de telemetría real del servicio seleccionado ─
   // Capa propia con id FIJO + setData (no el remove/add del efecto de arriba) para no apilar
@@ -1403,9 +1420,9 @@ export default function ClientePortal() {
         map.addLayer({
           id: "puente-cli-l", type: "line", source: "puente-cli-src",
           layout: { "line-join": "round", "line-cap": "round" },
-          // Azul oscuro SÓLIDO: el cliente ve una ruta continua. SIN popup ni etiqueta "estimado"
+          // Verde petróleo SÓLIDO: el cliente ve una ruta continua. SIN popup ni etiqueta "estimado"
           // (a diferencia del modal admin) — el tecnicismo del tramo sin señal queda solo en /seguimiento.
-          paint: { "line-color": "#1d4ed8", "line-width": 5, "line-opacity": 0.9 },
+          paint: { "line-color": "#0f766e", "line-width": 5, "line-opacity": 0.9 },
         });
       }
       // Puente DEBAJO de la huella medida (el otro efecto re-crea gps-l-* al tope cada render): orden
