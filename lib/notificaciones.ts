@@ -87,6 +87,23 @@ export async function enviarEmail({
 const PLANTILLA_RECORDATORIO = "recordatorio_servicio";
 const PLANTILLA_IDIOMA       = "es";
 
+// Plantilla del CONDUCTOR (utility). Variables del cuerpo, EN ESTE ORDEN:
+//   {{1}} nombre del conductor
+//   {{2}} fecha del servicio
+//   {{3}} hora de salida
+//   {{4}} ruta (origen → destino)
+//   {{5}} placa del vehículo
+const PLANTILLA_CONDUCTOR = "recordatorio_conductor";
+
+/**
+ * Phone Number ID del 2do número (avisos a pasajeros + conductores + campañas).
+ * Un solo número para los 3 usos. Nombre canónico META_PHONE_NUMBER_ID_AVISOS,
+ * con fallback al nombre histórico META_PHONE_NUMBER_ID_PASAJEROS.
+ */
+export function phoneAvisos(): string | undefined {
+  return process.env.META_PHONE_NUMBER_ID_AVISOS ?? process.env.META_PHONE_NUMBER_ID_PASAJEROS;
+}
+
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://www.transportesafa.com";
 
 // ─── TEMPLATES ────────────────────────────────────────────────────────────────
@@ -404,8 +421,8 @@ export async function notificarReserva(
       }
     }
 
-    // Canal 2: WhatsApp por plantilla Meta (número de pasajeros)
-    if (pas.telefono && process.env.META_PHONE_NUMBER_ID_PASAJEROS) {
+    // Canal 2: WhatsApp por plantilla Meta (2do número de avisos)
+    if (pas.telefono && phoneAvisos()) {
       const tel = normalizarTelefono(pas.telefono);
       try {
         await enviarWhatsAppPlantilla(
@@ -413,7 +430,7 @@ export async function notificarReserva(
           PLANTILLA_RECORDATORIO,
           PLANTILLA_IDIOMA,
           [datosN.pasajeroNombre, datosN.fecha, datosN.hora, datosN.paradaNombre],
-          process.env.META_PHONE_NUMBER_ID_PASAJEROS,
+          phoneAvisos(),
         );
         resultado.canales.push({ tipo: "whatsapp", estado: "enviado" });
         enviados++;
@@ -463,13 +480,83 @@ export async function notificarReserva(
   };
 }
 
+// ─── AVISO AL CONDUCTOR ────────────────────────────────────────────────────────
+
+/**
+ * Notifica al CONDUCTOR asignado a una reserva por WhatsApp (2do número, plantilla
+ * utility `recordatorio_conductor`). Reutiliza el mismo pipeline/logging que los
+ * pasajeros. Solo aplica a asignación "propio" (los terceros gestionan su flota).
+ * No hace nada si falta el 2do número o si el conductor no tiene teléfono.
+ */
+export async function notificarConductor(
+  reservaId: number,
+  trigger: TipoTrigger = "manual",
+): Promise<{ ok: boolean; estado: "enviado" | "error" | "sin_canal"; detalle?: string }> {
+  if (!phoneAvisos()) return { ok: true, estado: "sin_canal", detalle: "sin 2do número" };
+
+  const { data: reserva } = await supabaseAdmin
+    .from("reservas")
+    .select(`
+      id, fecha_servicio, hora_servicio, tipo_asignacion,
+      conductor_id, vehiculo_id, origen, destino,
+      cliente:clientes(nombre,empresa)
+    `)
+    .eq("id", reservaId)
+    .single();
+
+  if (!reserva) throw new Error(`Reserva ${reservaId} no encontrada`);
+  if (reserva.tipo_asignacion !== "propio" || !reserva.conductor_id) {
+    return { ok: true, estado: "sin_canal", detalle: "no aplica (tercero o sin conductor)" };
+  }
+
+  const { data: cond } = await supabaseAdmin
+    .from("conductores")
+    .select("nombre, telefono")
+    .eq("id", reserva.conductor_id)
+    .single();
+
+  if (!cond?.telefono) {
+    await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "sin_canal", trigger });
+    return { ok: true, estado: "sin_canal", detalle: "conductor sin teléfono" };
+  }
+
+  let placa: string | undefined;
+  if (reserva.vehiculo_id) {
+    const { data: v } = await supabaseAdmin.from("vehiculos").select("placa").eq("id", reserva.vehiculo_id).single();
+    placa = v?.placa;
+  }
+
+  const clienteJoin: any = Array.isArray(reserva.cliente) ? reserva.cliente[0] : reserva.cliente;
+  const ruta = [reserva.origen, reserva.destino].filter(Boolean).join(" → ")
+    || clienteJoin?.empresa || clienteJoin?.nombre || "Servicio";
+  const fechaTexto = reserva.fecha_servicio ? formatFecha(reserva.fecha_servicio) : "-";
+  const horaTexto  = reserva.hora_servicio?.slice(0, 5) ?? "-";
+  const tel        = normalizarTelefono(cond.telefono);
+
+  try {
+    await enviarWhatsAppPlantilla(
+      tel,
+      PLANTILLA_CONDUCTOR,
+      PLANTILLA_IDIOMA,
+      [cond.nombre, fechaTexto, horaTexto, ruta, placa ?? "Por asignar"],
+      phoneAvisos(),
+    );
+    await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "enviado", destinatario: tel, trigger });
+    return { ok: true, estado: "enviado" };
+  } catch (e: any) {
+    await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "error", destinatario: tel, trigger, error: e.message });
+    return { ok: false, estado: "error", detalle: e.message };
+  }
+}
+
 // ─── LOG ─────────────────────────────────────────────────────────────────────
 
 async function logNotificacion({
-  reservaId, pasajeroId, tipo, estado, destinatario, trigger, error,
+  reservaId, pasajeroId, conductorId, tipo, estado, destinatario, trigger, error,
 }: {
   reservaId:    number;
-  pasajeroId:   number;
+  pasajeroId?:  number;
+  conductorId?: number;
   tipo:         TipoCanal;
   estado:       string;
   trigger:      TipoTrigger;
@@ -478,7 +565,11 @@ async function logNotificacion({
 }) {
   const { error: eLog } = await supabaseAdmin.from("notificaciones_enviadas").insert({
     reserva_id:     reservaId,
-    pasajero_id:    pasajeroId,
+    pasajero_id:    pasajeroId ?? null,
+    // Solo incluir conductor_id cuando aplica: si la migración aún no corrió, la
+    // columna no existe y PostgREST rechazaría el insert; los logs de pasajero deben
+    // seguir funcionando (si no, el dedupe del cron se rompe → duplicados masivos).
+    ...(conductorId != null ? { conductor_id: conductorId } : {}),
     tipo,
     estado,
     destinatario:   destinatario ?? null,

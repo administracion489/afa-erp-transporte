@@ -4,6 +4,7 @@
 
 const GRAPH = "https://graph.facebook.com/v25.0";
 const WA_TOKEN = () => process.env.META_WA_TOKEN!;
+const PAGE_TOKEN = () => process.env.META_PAGE_TOKEN!;
 // ── WhatsApp ──────────────────────────────────────────────────────────────
 
 // phoneId opcional: por defecto el número de clientes (META_PHONE_NUMBER_ID).

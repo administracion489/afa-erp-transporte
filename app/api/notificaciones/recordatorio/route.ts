@@ -3,7 +3,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { notificarReserva } from "@/lib/notificaciones";
+import { notificarReserva, notificarConductor } from "@/lib/notificaciones";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -43,20 +43,59 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Filtrar las que ya recibieron recordatorio hoy
+    // Filtrar las que ya recibieron recordatorio hoy. Dedupe INDEPENDIENTE para
+    // pasajeros y conductor (una corrida que muere entre ambos no debe suprimir el
+    // aviso al conductor). Se pagina con .range() porque .in() acota QUÉ reservas se
+    // miran, pero NO cuántas filas devuelve PostgREST (tope ~1000) — sin paginar, un
+    // día de alto volumen truncaría el dedupe y re-notificaría (duplicados).
     const inicioHoy = new Date();
     inicioHoy.setUTCHours(0, 0, 0, 0);
+    const reservaIds = reservas.map(r => r.id);
 
-    const { data: yaNotificadas } = await supabaseAdmin
-      .from("notificaciones_enviadas")
-      .select("reserva_id")
-      .eq("trigger_origen", "cron_recordatorio")
-      .gte("created_at", inicioHoy.toISOString());
+    // Trae todas las filas de dedupe paginando. `cols` puede incluir conductor_id o no
+    // (la columna es nueva: si la migración aún no corrió, se cae a solo pasajero).
+    async function traerDedupe(cols: string): Promise<{ data?: any[]; error?: any }> {
+      const filas: any[] = [];
+      const page = 1000;
+      for (let from = 0; ; from += page) {
+        const { data, error } = await supabaseAdmin
+          .from("notificaciones_enviadas")
+          .select(cols)
+          .eq("trigger_origen", "cron_recordatorio")
+          .gte("created_at", inicioHoy.toISOString())
+          .in("reserva_id", reservaIds)
+          .order("created_at", { ascending: true })
+          .range(from, from + page - 1);
+        if (error) return { error };
+        filas.push(...(data || []));
+        if (!data || data.length < page) break;
+      }
+      return { data: filas };
+    }
 
-    const idsYaNotificadas = new Set((yaNotificadas || []).map(n => n.reserva_id));
-    const pendientes = reservas.filter(r => !idsYaNotificadas.has(r.id));
+    let conductorDisponible = true;
+    let dedupe = await traerDedupe("reserva_id, pasajero_id, conductor_id");
+    if (dedupe.error) {
+      // conductor_id no existe todavía (migración pendiente): dedupe resiliente sin ella.
+      conductorDisponible = false;
+      dedupe = await traerDedupe("reserva_id, pasajero_id");
+    }
 
-    if (pendientes.length === 0) {
+    const conPasajero  = new Set<number>();
+    const conConductor = new Set<number>();
+    for (const n of dedupe.data || []) {
+      if (n.pasajero_id  != null) conPasajero.add(n.reserva_id);
+      if (conductorDisponible && n.conductor_id != null) conConductor.add(n.reserva_id);
+    }
+
+    const pendientesPasajero  = reservas.filter(r => !conPasajero.has(r.id));
+    // Si la columna conductor_id no existe aún, el aviso al conductor no puede loguear
+    // ni deduplicar → se pospone hasta correr la migración (evita duplicados sin dedupe).
+    const pendientesConductor = conductorDisponible
+      ? reservas.filter(r => !conConductor.has(r.id))
+      : [];
+
+    if (pendientesPasajero.length === 0 && pendientesConductor.length === 0) {
       return NextResponse.json({
         ok: true,
         mensaje: "Todas las reservas de mañana ya fueron notificadas hoy",
@@ -64,14 +103,23 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Enviar recordatorios en paralelo (con límite de concurrencia)
-    const resultados = [];
-    for (const reserva of pendientes) {
+    const resultados: any[] = [];
+    // Pasajeros
+    for (const reserva of pendientesPasajero) {
       try {
         const res = await notificarReserva(reserva.id, "cron_recordatorio");
-        resultados.push({ reservaId: reserva.id, ...res.resumen });
+        resultados.push({ reservaId: reserva.id, tipo: "pasajeros", ...res.resumen });
       } catch (e: any) {
-        resultados.push({ reservaId: reserva.id, error: e.message });
+        resultados.push({ reservaId: reserva.id, tipo: "pasajeros", error: e.message });
+      }
+    }
+    // Conductor (dedupe propio)
+    for (const reserva of pendientesConductor) {
+      try {
+        const rc = await notificarConductor(reserva.id, "cron_recordatorio");
+        resultados.push({ reservaId: reserva.id, tipo: "conductor", conductor: rc.estado });
+      } catch (e: any) {
+        resultados.push({ reservaId: reserva.id, tipo: "conductor", error: e.message });
       }
     }
 
@@ -80,7 +128,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       ok:           true,
       fecha:        fechaMañana,
-      procesadas:   pendientes.length,
+      procesadas:   pendientesPasajero.length + pendientesConductor.length,
       totalEnviados,
       detalle:      resultados,
     });

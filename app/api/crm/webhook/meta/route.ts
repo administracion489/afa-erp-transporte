@@ -145,6 +145,34 @@ async function processarMensaje(m: MsgInput): Promise<string | null> {
     contacto = nc;
   }
 
+  // Consentimiento WhatsApp: quien escribe por WhatsApp queda opt-in automático
+  // (relación existente → habilitado para campañas de marketing). Si el texto es
+  // una palabra de baja (BAJA/STOP/CANCELAR…), se marca wa_baja y deja de recibir.
+  if (m.canal === "whatsapp" && contacto) {
+    const t = (m.contenido || "").trim().toLowerCase();
+    // Baja SOLO con intención clara, para no confundir un mensaje operativo normal
+    // ("quiero cancelar mi reserva", "tarifa más baja", "servicio non-stop") con una
+    // baja de marketing. Se acepta: (a) el mensaje ES el comando de baja; o (b) una
+    // frase explícita de no-contactar. Si pide baja NO se reafirma el opt-in.
+    const esBaja =
+      /^(baja|stop|cancelar|unsubscribe|dar(me)? de baja)[.!]?$/.test(t) ||
+      /\bdar(me)?\s+de\s+baja\b/.test(t) ||
+      /\bno\s+me\s+(escriban|env[ií]en|manden|molesten|contacten)\b/.test(t) ||
+      /\bno\s+(quiero|deseo)\s+(recibir|mensajes|m[aá]s\s+mensajes|que\s+me\s+(escriban|contacten))\b/.test(t) ||
+      /\bdejar\s+de\s+recibir\b/.test(t) ||
+      /\bquitar(me)?\s+de\s+la\s+lista\b/.test(t) ||
+      /\bno\s+molestar\b/.test(t);
+    const ahora = new Date().toISOString();
+    await supabase
+      .from("crm_contactos")
+      .update(
+        esBaja
+          ? { wa_baja: true, wa_baja_at: ahora }
+          : { wa_opt_in: true, wa_opt_in_at: ahora },
+      )
+      .eq("id", contacto.id);
+  }
+
   // Buscar o crear conversación abierta
   let { data: conv } = await supabase
     .from("crm_conversaciones")
