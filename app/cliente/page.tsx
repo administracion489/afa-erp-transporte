@@ -272,6 +272,7 @@ export default function ClientePortal() {
   const [matchedEnVivoMap,  setMatchedEnVivoMap]  = useState<Record<number, [number,number][]>>({});
   const [suprimirCrudoMap,  setSuprimirCrudoMap]  = useState<Record<number, Array<[number, number]>>>({}); // rangos crudos ruteados por servicio → no dibujar como medido
   const [colaSnappedMap,    setColaSnappedMap]    = useState<Record<number, boolean>>({});                 // ¿la punta viva pegó a la vía por servicio? (false → colaViva sigue la ruta prevista)
+  const [colaCleanMap,      setColaCleanMap]      = useState<Record<number, number>>({});                  // último índice de VÍA limpia por servicio (frontera de colaViva)
   const [paradasResueltasMap, setParadasResueltasMap] = useState<Record<number, Parada[]>>({});
   // Dashboard — info enriquecida por servicio destacado
   const [condInfoMap,   setCondInfoMap]   = useState<Record<number, {nombre: string; tel: string}>>({});
@@ -1183,6 +1184,7 @@ export default function ClientePortal() {
       const matched = await ajustadoresRef.current[rid].ajustar(limpio, token, () => cancel);
       if (matched && !cancel) { setMatchedEnVivoMap(prev => ({ ...prev, [rid]: matched })); matchedEnVivoRefMap.current[rid] = matched; }
       if (!cancel) setColaSnappedMap(prev => ({ ...prev, [rid]: ajustadoresRef.current[rid].leerColaSnapped() }));   // ¿pegó la punta viva?
+      const colaClean = ajustadoresRef.current[rid].leerColaClean();   // último vértice de VÍA limpia (frontera de colaViva)
 
       // TRAMO ESTIMADO por RUTA: HUECOS de señal (calcularPuentes) + CORRIDAS CRUDAS CONGELADAS (ventanas
       // que Map Matching no pegó = zigzag del GPS de red). Ambas por la ruta prevista→Google. Las crudas
@@ -1220,7 +1222,8 @@ export default function ClientePortal() {
             if (j?.ocultar || j?.status !== "OK") r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt };
             else {
               const nivel = decidirPuente(j.roadM, c.dRecta);   // unir todo por carretera (corte solo si sin ruta o rodeo absurdo >8×)
-              const coords = nivel === "puente" ? (j.coords || []) : [];
+              // Envolver con A/B → el tramo estimado comparte extremos EXACTOS con lo medido (costura sin corte).
+              const coords = nivel === "puente" ? [[c.aLng, c.aLat], ...(j.coords || []), [c.bLng, c.bLat]] : [];
               r = { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt };
             }
             cache.set(key, r);
@@ -1231,7 +1234,10 @@ export default function ClientePortal() {
           if (c.origen === "crudo") suprimir.push([c.iA + 1, c.iB - 1]);
         }
       }
-      if (!cancel) { setPuentesMap(prev => ({ ...prev, [rid]: feats })); setSuprimirCrudoMap(prev => ({ ...prev, [rid]: suprimir })); }
+      // La punta viva CRUDA (después del último vértice limpio) la cubre colaViva por la ruta → NO se dibuja medido.
+      const mLenC = matchedEnVivoRefMap.current[rid]?.length || 0;
+      if (colaClean >= 0 && colaClean < mLenC - 1) suprimir.push([colaClean + 1, mLenC - 1]);
+      if (!cancel) { setPuentesMap(prev => ({ ...prev, [rid]: feats })); setSuprimirCrudoMap(prev => ({ ...prev, [rid]: suprimir })); setColaCleanMap(prev => ({ ...prev, [rid]: colaClean })); }
       // Badge honesto: medido = línea medida sin los tramos crudos ruteados; estimado = petróleo (baja el % en degradados).
       const largoCoordsC = (cs: any[]) => { let m = 0; for (let k = 1; k < (cs?.length || 0); k++) m += distM(cs[k - 1][1], cs[k - 1][0], cs[k][1], cs[k][0]); return m; };
       const largoFeatsC = (fs: any[]) => fs.reduce((a, f) => a + largoCoordsC(f.geometry?.coordinates || []), 0);
@@ -1300,8 +1306,9 @@ export default function ClientePortal() {
       (sa.vehiculo_tercero_id != null && u.vehiculo_tercero_id === sa.vehiculo_tercero_id)
     );
     const live = liveU ? { lat: Number(liveU.lat), lng: Number(liveU.lng), velocidad: Number(liveU.velocidad) || 0 } : null;
+    const cutC = matchedEV ? ((colaCleanMap[sel.id] >= 1 && colaCleanMap[sel.id] < matchedEV.length - 1) ? colaCleanMap[sel.id] : matchedEV.length - 1) : 0;
     const feats: any[] = (matchedEV && matchedEV.length >= 2)
-      ? [...colorearMatched(matchedEV, huellaPts, suprimirCrudoMap[sel.id]), ...colaViva(matchedEV, huellaPts, live, rutasEnVivoMap[sel.id], colaSnappedMap[sel.id] === false)]
+      ? [...colorearMatched(matchedEV, huellaPts, suprimirCrudoMap[sel.id]), ...colaViva(matchedEV.slice(0, cutC + 1), huellaPts, live, rutasEnVivoMap[sel.id], colaSnappedMap[sel.id] === false || cutC < matchedEV.length - 1)]
       : huellaCrudaFeatures(huellaPts);   // cruda por tramos (corta teleports/huecos). lib/huella.ts
     if (feats.length > 0) {
       const sid = `gps-s-${sel.id}`, lid = `gps-l-${sel.id}`;
@@ -1339,7 +1346,7 @@ export default function ClientePortal() {
       try { map.fitBounds(bounds, { padding: 60, maxZoom: 14, duration: 700 }); lastFitRef.current = sel.id; } catch {}
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapListoEnVivo, rutasEnVivoMap, huellaGpsMap, matchedEnVivoMap, suprimirCrudoMap, colaSnappedMap, paradasResueltasMap, paradas, rutaSelId, tab]);
+  }, [mapListoEnVivo, rutasEnVivoMap, huellaGpsMap, matchedEnVivoMap, suprimirCrudoMap, colaSnappedMap, colaCleanMap, paradasResueltasMap, paradas, rutaSelId, tab]);
 
   // ─── En vivo: CAPA 4 — puntitos de telemetría real del servicio seleccionado ─
   // Capa propia con id FIJO + setData (no el remove/add del efecto de arriba) para no apilar

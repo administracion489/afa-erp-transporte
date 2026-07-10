@@ -560,7 +560,7 @@ export function calcularPuentes(limpia: HuellaPt[]): PuenteHueco[] {
 export function puentesCrudos(
   coords: [number, number][],
   crudoRanges: Array<[number, number]>,
-  minRectaM = 120,
+  minRectaM = 40,   // rutea también corridas cortas (una corrida <40m ya hugea la misma calle; menos residual de rectas)
 ): PuenteHueco[] {
   const out: PuenteHueco[] = [];
   for (const [s, e] of crudoRanges) {
@@ -659,7 +659,7 @@ export function prepararPuntos(pts: MatchPt[]): MatchPt[] {
 export async function mapMatchTrail(
   pts: MatchPt[],
   token: string
-): Promise<{ coords: [number, number][]; confidence: number; crudeFrac: number; maxCrudoChordM: number } | null> {
+): Promise<{ coords: [number, number][]; confidence: number; crudeFrac: number; maxCrudoChordM: number; esCrudo: boolean[] } | null> {
   const sample = prepararPuntos(pts);
   if (sample.length < 2) return null;
   const coords = sample.map(p => `${p.lng},${p.lat}`).join(";");
@@ -681,13 +681,17 @@ export async function mapMatchTrail(
       const c: [number, number][] = m[0]?.geometry?.coordinates || [];
       const conf = Number(m[0]?.confidence) || 0;
       // 1 matching nativo = geometría de vía PURA (sin rama de fix crudo) → 0 sucio por construcción.
-      return c.length >= 2 && conf > 0 ? { coords: c, confidence: conf, crudeFrac: 0, maxCrudoChordM: 0 } : null;
+      return c.length >= 2 && conf > 0 ? { coords: c, confidence: conf, crudeFrac: 0, maxCrudoChordM: 0, esCrudo: c.map(() => false) } : null;
     }
 
     const CONF_FRAG = 0.4;
     const keep = m.map((x: any) => (Number(x?.confidence) || 0) >= CONF_FRAG);
     const emitidos = new Set<number>();   // cada fragmento se emite UNA vez (1ª aparición en orden)
     const via: [number, number][] = [];
+    // esCrudo POR VÉRTICE (alineado 1:1 con via): true = fix crudo de RED (acc>ACC_CONFIABLE_M) → se
+    // ruteará por la ruta prevista (nunca recta sobre casas); false = geometría de vía Mapbox O crudo de
+    // CHIP (acc≤20, que hugea la pista → se dibuja medido, como el legacy). Base del "no dibujar rectas".
+    const esCrudo: boolean[] = [];
     let cubiertos = 0;
     // Métricas de SUCIEDAD del match (para la stickiness monótona del ajustador). NO tocan la
     // geometría; solo cuantifican cuánto de la traza es fix crudo (recta) vs vía real:
@@ -711,6 +715,7 @@ export async function mapMatchTrail(
             // Junta con lo previo: solo la mido si el lado previo era crudo (road↔crudo).
             if (lastPt && lastCrude) maxCC = Math.max(maxCC, distM(lastPt[1], lastPt[0], g[0][1], g[0][0]));
             via.push(...g);
+            for (let j = 0; j < g.length; j++) esCrudo.push(false);   // geometría de vía Mapbox
             lastPt = g[g.length - 1];
             lastCrude = false;
           }
@@ -719,6 +724,7 @@ export async function mapMatchTrail(
         const p: [number, number] = [sample[k].lng, sample[k].lat];   // fragmento dudoso → el fix REAL del bus
         if (lastPt) maxCC = Math.max(maxCC, distM(lastPt[1], lastPt[0], p[1], p[0]));
         via.push(p);
+        esCrudo.push((sample[k].acc || 25) > ACC_CONFIABLE_M);   // crudo de RED → rutear; crudo de CHIP (≤20m) → medido
         crudos++;
         lastPt = p;
         lastCrude = true;
@@ -727,7 +733,7 @@ export async function mapMatchTrail(
     }
     const confidence = cubiertos / sample.length;
     const crudeFrac = via.length ? crudos / via.length : 1;
-    return via.length >= 2 ? { coords: via, confidence, crudeFrac, maxCrudoChordM: maxCC } : null;
+    return via.length >= 2 ? { coords: via, confidence, crudeFrac, maxCrudoChordM: maxCC, esCrudo } : null;
   } catch { return null; }
 }
 
@@ -737,11 +743,13 @@ export async function mapMatchTrail(
 // `snapped` = si logró pegar a la vía (confianza ≥ 0.4) o cayó al crudo → el ajustador lo usa para
 // NO revertir a zigzag un tramo ya pegado (stickiness: con GPS de red la confianza baila y sin esto
 // la cola parpadea entre pegada y cruda cada ciclo).
-export async function matchVentana(ventana: MatchPt[], token: string): Promise<{ coords: [number, number][]; snapped: boolean; crudeFrac: number; maxCrudoChordM: number }> {
+export async function matchVentana(ventana: MatchPt[], token: string): Promise<{ coords: [number, number][]; snapped: boolean; crudeFrac: number; maxCrudoChordM: number; esCrudo: boolean[] }> {
   const r = await mapMatchTrail(ventana, token);
-  if (r && r.confidence >= 0.4 && r.coords.length >= 2) return { coords: r.coords, snapped: true, crudeFrac: r.crudeFrac, maxCrudoChordM: r.maxCrudoChordM };
+  if (r && r.confidence >= 0.4 && r.coords.length >= 2) return { coords: r.coords, snapped: true, crudeFrac: r.crudeFrac, maxCrudoChordM: r.maxCrudoChordM, esCrudo: r.esCrudo };
   const suav = suavizarPorDistancia(ventana);   // fallback: crudo suavizado por distancia (no pegó a vía)
-  return { coords: suav.length >= 2 ? suav.map(p => [p.lng, p.lat] as [number, number]) : [], snapped: false, crudeFrac: 1, maxCrudoChordM: 0 };
+  const coords = suav.length >= 2 ? suav.map(p => [p.lng, p.lat] as [number, number]) : [];
+  // Por vértice: crudo de RED (acc>20) se ruteará; un fallback de CHIP (acc≤20) queda medido → protege el oro.
+  return { coords, snapped: false, crudeFrac: 1, maxCrudoChordM: 0, esCrudo: coords.map((_, i) => (suav[i]?.acc || 25) > ACC_CONFIABLE_M) };
 }
 
 // Tramo máximo que se DIBUJA entre dos vértices consecutivos. Más largo que esto = teleport
@@ -939,17 +947,17 @@ export function velocidadPorVentana(
 // la fragmentación (la corrupción de <40 puntos es menor y rara). Exige crudeFrac≤0.1 (limpio de verdad).
 async function congelarPrefijoLimpio(
   ventana: MatchPt[], token: string, cancelado?: () => boolean,
-): Promise<{ len: number; coords: [number, number][] } | null> {
+): Promise<{ len: number; coords: [number, number][]; esCrudo: boolean[] } | null> {
   const MIN = 40;
-  let lo = MIN, hi = ventana.length - 2, bestLen = 0, bestCoords: [number, number][] | null = null;
+  let lo = MIN, hi = ventana.length - 2, bestLen = 0, bestCoords: [number, number][] | null = null, bestEsCrudo: boolean[] | null = null;
   while (lo <= hi) {
     if (cancelado?.()) break;
     const mid = (lo + hi) >> 1;
     const r = await matchVentana(ventana.slice(0, mid), token);
-    if (r.snapped && r.crudeFrac <= 0.1) { bestLen = mid; bestCoords = r.coords; lo = mid + 1; }
+    if (r.snapped && r.crudeFrac <= 0.1) { bestLen = mid; bestCoords = r.coords; bestEsCrudo = r.esCrudo; lo = mid + 1; }
     else hi = mid - 1;
   }
-  return bestLen >= MIN && bestCoords ? { len: bestLen, coords: bestCoords } : null;
+  return bestLen >= MIN && bestCoords ? { len: bestLen, coords: bestCoords, esCrudo: bestEsCrudo || [] } : null;
 }
 
 // ── Ajustador con estado: Map Matching por VENTANAS de ≤100 puntos, con congelado ─────────
@@ -982,9 +990,12 @@ export function crearAjustadorHuella() {
   let lastCola: [number, number][] = [];   // stickiness: última geometría de la COLA (para no revertir a crudo lo ya pegado)
   let lastColaSnapped = false;              // ¿la última cola conservada estaba pegada a la vía?
   let lastColaCrude = 1;                    // crudeFrac de la geometría RETENIDA (1 = nada limpio aún)
-  const congeladasSnapped: boolean[] = [];  // ¿cada ventana CONGELADA pegó a la vía? (false = crudo → candidata a rutear)
-  let ultimoCrudoRanges: Array<[number, number]> = [];  // rangos [ini,fin] de crudo CONGELADO en las coords devueltas (para rellenar por ruta; excluye la cola viva → sin parpadeo)
-  let ultimaColaSnapped = true;             // ¿el ÚLTIMO match de la cola viva pegó a la vía? (false = punta degradada → colaViva sigue la ruta prevista, no el zigzag)
+  const congeladasSnapped: boolean[] = [];  // (histórico; los rangos ahora se derivan de esCrudo POR VÉRTICE)
+  const congeladasEsCrudo: boolean[][] = []; // esCrudo por vértice de cada ventana congelada (LOCKSTEP con congeladas)
+  let lastColaEsCrudo: boolean[] = [];       // esCrudo por vértice de la cola retenida (LOCKSTEP con lastCola)
+  let ultimoCrudoRanges: Array<[number, number]> = [];  // rangos [ini,fin] de crudo POR VÉRTICE (incl. mixtas) a rellenar por ruta; excluye la punta viva
+  let ultimoColaClean = 0;                  // último índice de VÍA limpia en las coords devueltas (frontera de colaViva)
+  let ultimaColaSnapped = true;             // ¿el ÚLTIMO match de la cola viva pegó a la vía? (false = punta degradada)
 
   return {
     async ajustar(
@@ -1028,6 +1039,7 @@ export function crearAjustadorHuella() {
           // Ventana LIMPIA → congelar completa (caso común; GPS bueno #1138 IDÉNTICO al legacy).
           congeladas.push(rw.coords);
           congeladasSnapped.push(true);
+          congeladasEsCrudo.push(rw.esCrudo);
           congeladoHasta += NUEVOS;
         } else {
           // Ventana CRUDA: el re-match completo ARRUINA los puntos viejos-buenos que trae la ventana (bug
@@ -1040,17 +1052,19 @@ export function crearAjustadorHuella() {
           if (pref) {
             congeladas.push(pref.coords);
             congeladasSnapped.push(true);
+            congeladasEsCrudo.push(pref.esCrudo);
             congeladoHasta += Math.max(1, pref.len - SOLAPE);
           } else {
             // Ni el prefijo pega (degradación temprana) → congelar crudo y avanzar normal (genuino).
             congeladas.push(rw.coords);
             congeladasSnapped.push(false);
+            congeladasEsCrudo.push(rw.esCrudo);
             congeladoHasta += NUEVOS;
           }
         }
       }
       // Si congeló una ventana, la cola arranca de nuevo (otra región) → resetear la stickiness.
-      if (congeladoHasta !== congeladoAntes) { lastCola = []; lastColaSnapped = false; lastColaCrude = 1; }
+      if (congeladoHasta !== congeladoAntes) { lastCola = []; lastColaSnapped = false; lastColaCrude = 1; lastColaEsCrudo = []; }
 
       const colaVentana = limpio.slice(Math.max(0, congeladoHasta - SOLAPE));
       if (colaVentana.length >= 2) {
@@ -1069,37 +1083,45 @@ export function crearAjustadorHuella() {
         const nuevoSucio = rc.crudeFrac > CRUDE_SUCIO || rc.maxCrudoChordM > EMPALME_MAX;
         if (rc.snapped) {
           if (!(nuevoSucio && lastColaSnapped && rc.crudeFrac > lastColaCrude)) {
-            lastCola = rc.coords; lastColaSnapped = true; lastColaCrude = rc.crudeFrac;
+            lastCola = rc.coords; lastColaSnapped = true; lastColaCrude = rc.crudeFrac; lastColaEsCrudo = rc.esCrudo;
           }
         } else if (!lastColaSnapped) {
-          lastCola = rc.coords; lastColaSnapped = false; lastColaCrude = 1;
+          lastCola = rc.coords; lastColaSnapped = false; lastColaCrude = 1; lastColaEsCrudo = rc.esCrudo;
         }
       }
-
-      // Rangos de crudo CONGELADO (ventanas que NO pegaron a la vía) en el espacio de `todo`, para que
-      // el consumidor los rellene con la RUTA (planificada→Google). Se EXCLUYE la cola viva (lastCola):
-      // solo lo congelado se rutea → el tramo estimado no parpadea en la punta. Ventanas crudas contiguas
-      // se fusionan en un solo rango.
-      const rangos: Array<[number, number]> = [];
-      let off = 0;
-      for (let i = 0; i < congeladas.length; i++) {
-        const len = congeladas[i].length;
-        if (!congeladasSnapped[i] && len > 0) {
-          const ini = off, fin = off + len - 1;
-          const ult = rangos[rangos.length - 1];
-          if (ult && ini <= ult[1] + 1) ult[1] = fin;   // fusiona con el rango crudo contiguo anterior
-          else rangos.push([ini, fin]);
-        }
-        off += len;
-      }
-      ultimoCrudoRanges = rangos;
 
       const todo = [...congeladas, lastCola].flat() as [number, number][];
+      const esCrudoTodo = [...congeladasEsCrudo, lastColaEsCrudo].flat();   // alineado 1:1 con `todo`
+
+      // Rangos de crudo POR VÉRTICE (esto SÍ incluye las ventanas MIXTAS: snapped=true con fixes crudos
+      // de RED intercalados — el bug #875 de rectas naranjas sobre casas). Corridas contiguas de
+      // esCrudoTodo=true sobre `todo`, fusionando las separadas por ≤1 vértice limpio (evita confeti).
+      // Se EXCLUYE la corrida que toca el ÚLTIMO índice (punta viva → la cubre colaViva, no parpadea).
+      const rangos: Array<[number, number]> = [];
+      const n = Math.min(todo.length, esCrudoTodo.length);
+      let idx = 0;
+      while (idx < n) {
+        if (esCrudoTodo[idx]) {
+          let j = idx;
+          while (j + 1 < n && (esCrudoTodo[j + 1] || (j + 2 < n && esCrudoTodo[j + 2]))) j++;   // fusiona ≤1 limpio
+          rangos.push([idx, j]);
+          idx = j + 1;
+        } else idx++;
+      }
+      ultimoCrudoRanges = rangos.filter(([, e]) => e < n - 1);   // fuera la corrida de la punta viva (colaViva la cubre)
+
+      // Frontera de la cola VIVA = último vértice de VÍA limpia. colaViva ancla ahí y el consumidor
+      // NO dibuja el crudo de la punta como medido (lo rellena por la ruta). GPS bueno → n-1 → sin cambios.
+      ultimoColaClean = n - 1;
+      for (let k = n - 1; k >= 0; k--) { if (!esCrudoTodo[k]) { ultimoColaClean = k; break; } }
+
       return todo.length >= 2 ? todo : null;
     },
-    // Rangos [ini,fin] de crudo CONGELADO en las coords del último `ajustar` (para rutear como estimado).
+    // Rangos [ini,fin] de crudo POR VÉRTICE en las coords del último `ajustar` (para rutear como estimado).
     leerCrudoRanges: () => ultimoCrudoRanges,
     // ¿El último match de la cola VIVA pegó a la vía? (false = punta degradada → colaViva sigue la ruta).
     leerColaSnapped: () => ultimaColaSnapped,
+    // Último índice de VÍA limpia en las coords devueltas (frontera de colaViva; corta el crudo de la punta).
+    leerColaClean: () => ultimoColaClean,
   };
 }
