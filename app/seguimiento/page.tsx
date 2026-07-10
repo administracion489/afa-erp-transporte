@@ -7,6 +7,7 @@ import PanelMensajesPasajeros from "@/components/seguimiento/PanelMensajesPasaje
 import { supabase } from "@/lib/supabase";
 import { ESTADOS_RESERVA, ESTADO_ADMIN_INICIAL } from "@/lib/estados";
 import { idAfa } from "@/lib/folio";
+import { manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado, type DocPasajero } from "@/lib/documentos-servicio";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TIPOS
@@ -133,10 +134,8 @@ function horaPeru(): string {
   return `${p(lima.getHours())}:${p(lima.getMinutes())}:${p(lima.getSeconds())}`;
 }
 
-// Fuente de verdad del abordaje en TODO el ERP (igual que app/cliente y el manifiesto):
-// vive en pasajeros_parada (estado + estado_abordaje), NO en reservas.pasajeros_abordados.
-const esAbordado = (pp?: { estado?: string|null; estado_abordaje?: string|null } | null): boolean =>
-  pp?.estado_abordaje === "Abordado" || pp?.estado === "abordado" || pp?.estado === "embarcado";
+// Fuente de verdad del abordaje (pasajeros_parada, estado + estado_abordaje) → esAbordado()
+// vive en lib/documentos-servicio.ts (compartido con el portal cliente y los documentos).
 
 // Documentos vencidos (fecha de vencimiento ya pasada): bloquean la salida.
 function docsVencidosVehiculo(docs: DocVeh[], vehiculoId: number|null): string[] {
@@ -927,7 +926,225 @@ function FilaServicio({ s, onOpen, onGps }: { s: ServicioView; onOpen: () => voi
   );
 }
 
-function FichaServicio({ s, onClose, onRefresh, onGps }: { s: ServicioView; onClose: () => void; onRefresh: () => void; onGps: (s: ServicioView) => void }) {
+// ── Documentos del servicio (Manifiesto MTC / Reporte) ────────────────────────
+// Carga LAZY por reserva del roster nominal + licencia + RUC. NO va en el batch diario
+// cargar(): esos datos (nombre/DNI/edad + PII) solo se traen al abrir un servicio y se
+// cachean. Réplica del patrón cargarDetalle del portal cliente, con edad resiliente.
+type EmpresaPerfil = { nombre: string|null; logo_url: string|null; telefono: string|null; email: string|null };
+type DocDatos = {
+  roster: DocPasajero[];
+  conductor: { nombre: string|null; licencia: string|null } | null;
+  clienteRuc: string|null;
+  esTer: boolean;
+};
+
+async function cargarDocDatos(s: ServicioView): Promise<DocDatos> {
+  const r = s.reserva;
+  const esTer = r.tipo === "tercerizada";
+  const paradaIds = s.paradas.map(p => p.id);
+
+  // NO pedir "edad" en el join: si la columna faltara, PostgREST devuelve error y el
+  // roster queda vacío (bug "Esperados 0"). La edad se lee aparte, tolerante a fallo.
+  const [ppRes, paxRes] = await Promise.all([
+    paradaIds.length
+      // select("*, …") como en el portal cliente: no nombrar las columnas del abordaje evita
+      // que una columna ausente en algún entorno tumbe TODO el select y vacíe el roster.
+      ? supabase.from("pasajeros_parada").select("*, pasajero:pasajeros(nombre,dni)").in("parada_id", paradaIds)
+      : Promise.resolve({ data: [] as any[] }),
+    supabase.from("pasajeros").select("id,nombre,dni").eq("reserva_id", r.id),
+  ]);
+  const ppRaw = ((ppRes as any).data as any[]) || [];
+  // Deduplicar por pasajero_id: un pasajero puede tener fila en 2+ paradas de la misma
+  // reserva; el manifiesto legal (N° Asiento) no debe listarlo dos veces. Se conserva
+  // preferentemente la fila ABORDADA si la hay.
+  const porPax = new Map<number, any>();
+  for (const x of ppRaw) {
+    const prev = porPax.get(x.pasajero_id);
+    if (!prev || (!esAbordado(prev) && esAbordado(x))) porPax.set(x.pasajero_id, x);
+  }
+  const pp = [...porPax.values()];
+  // Pasajeros sin paradero (existen en pasajeros.reserva_id pero sin fila en pasajeros_parada):
+  // entradas sintéticas (parada_id null) para que cuenten y salgan en el documento.
+  const asignados = new Set(pp.map(x => x.pasajero_id));
+  const sinParada = (((paxRes as any).data as any[]) || [])
+    .filter(p => !asignados.has(p.id))
+    .map(p => ({ parada_id: null, pasajero_id: p.id, estado: "Pendiente", estado_abordaje: null, hora_abordaje: null, pasajero: { nombre: p.nombre, dni: p.dni } }));
+  const roster: DocPasajero[] = [...pp, ...sinParada];
+
+  // Edad para el Manifiesto MTC — consulta AISLADA: si la columna no existe, falla sola
+  // y el manifiesto muestra "–" sin vaciar el roster.
+  const idsPax = [...new Set(roster.map(x => x.pasajero_id).filter(Boolean))];
+  if (idsPax.length > 0) {
+    const { data: edades } = await supabase.from("pasajeros").select("id,edad").in("id", idsPax);
+    if (edades) {
+      const em = new Map((edades as any[]).map(e => [e.id, e.edad]));
+      roster.forEach(x => { if (x.pasajero) (x.pasajero as any).edad = em.get(x.pasajero_id) ?? null; });
+    }
+  }
+
+  // Conductor + licencia: solo servicios propios (los terceros no tienen fila en conductores).
+  let conductor: { nombre: string|null; licencia: string|null } | null = null;
+  if (!esTer && r.conductor_id) {
+    const { data } = await supabase.from("conductores").select("nombre,numero_licencia").eq("id", r.conductor_id).maybeSingle();
+    if (data) conductor = { nombre: (data as any).nombre ?? null, licencia: (data as any).numero_licencia ?? null };
+  }
+
+  // RUC del cliente para la cabecera fiscal del reporte.
+  let clienteRuc: string|null = null;
+  if (r.cliente_id) {
+    const { data } = await supabase.from("clientes").select("ruc").eq("id", r.cliente_id).maybeSingle();
+    if (data) clienteRuc = (data as any).ruc ?? null;
+  }
+
+  return { roster, conductor, clienteRuc, esTer };
+}
+
+function DocBar({ s, empresaPerfil, onGps }: { s: ServicioView; empresaPerfil: EmpresaPerfil|null; onGps: (s: ServicioView) => void }) {
+  const [datos,  setDatos]  = useState<DocDatos | null>(null);
+  const [estado, setEstado] = useState<"cargando"|"listo"|"error">("cargando");
+  const [verRoster, setVerRoster] = useState(false);
+
+  const rid = s.reserva.id;
+  useEffect(() => {
+    let vivo = true;
+    setEstado("cargando"); setDatos(null); setVerRoster(false);
+    cargarDocDatos(s)
+      .then(d => { if (vivo) { setDatos(d); setEstado("listo"); } })
+      .catch(() => { if (vivo) setEstado("error"); });
+    return () => { vivo = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rid, s.pasajeros_total_real]);
+
+  const r = s.reserva;
+  const cargando = estado === "cargando";
+  const placaOk = s.vehiculo_placa && s.vehiculo_placa !== "—" ? s.vehiculo_placa : null;
+  const rosterVacio = !datos || datos.roster.length === 0;
+  const cancelado = r.estado === "cancelada";
+  // El Manifiesto MTC es un documento legal del viaje: NO emitirlo para un servicio anulado.
+  const puedeManifiesto = !cargando && !rosterVacio && !cancelado;
+  const puedeReporte = r.estado === "en_curso" || r.estado === "finalizada";
+
+  const servicioBase = {
+    fecha: r.fecha_servicio, hora: r.hora_servicio, origen: r.origen ?? "", destino: r.destino ?? "",
+  };
+
+  function imprimirManifiesto() {
+    if (!datos) return;
+    abrirImprimible(manifiestoMtcHTML({
+      empresa: { logoUrl: empresaPerfil?.logo_url ?? null },
+      cliente: { nombre: s.cliente_nombre },
+      servicio: servicioBase,
+      conductor: datos.conductor,
+      vehiculo: { placa: placaOk },
+      pasajeros: datos.roster,
+      boarding: [],
+    }));
+  }
+
+  function imprimirReporte() {
+    if (!datos) return;
+    // hora_real_inicio/fin son horas del día ("HH:MM:SS"/"HH:MM"), NO timestamps: se parsean
+    // como minutos del día para la duración y se imprimen recortadas tal cual (no con fmtTs).
+    const toMin = (t: string) => { const [h, m] = t.split(":").map(Number); return (h || 0) * 60 + (m || 0); };
+    const ini = r.hora_real_inicio || null;
+    const fin = r.hora_real_fin || null;
+    const hayOp = !!(ini || fin || (s.gastos_total || 0) > 0);
+    const duracionMin = (ini && fin) ? Math.max(0, toMin(fin) - toMin(ini)) : null;
+    abrirImprimible(reporteServicioHTML({
+      empresa: {
+        nombre: empresaPerfil?.nombre ?? null,
+        telefono: empresaPerfil?.telefono ?? null,
+        email: empresaPerfil?.email ?? null,
+        logoReporteUrl: window.location.origin + "/logoafacotizacion-removebg-preview.png",
+        firmaUrl: window.location.origin + "/firmaJLCA.PNG",
+      },
+      cliente: { nombre: s.cliente_nombre, ruc: datos.clienteRuc },
+      servicio: servicioBase,
+      paradas: s.paradas.map(p => ({ id: p.id, orden: p.orden, nombre: p.nombre, hora_estimada: p.hora_estimada })),
+      pasajeros: datos.roster,
+      boarding: [],
+      operativo: hayOp ? {
+        horaRealInicio: ini ? ini.slice(0, 5) : null,
+        horaRealFin: fin ? fin.slice(0, 5) : null,
+        duracionMin,
+        gastosTotal: s.gastos_total ?? null,
+        gpsUrl: null,
+      } : null,
+    }));
+  }
+
+  const btnBase = "flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-3 mb-3">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[11px] font-black text-[#0b315f] uppercase tracking-wide">Documentos del servicio</span>
+        {cargando && <span className="text-[10px] text-gray-400 font-semibold">Cargando datos…</span>}
+        {estado === "listo" && !rosterVacio && <span className="text-[10px] text-gray-400 font-mono">{datos!.roster.length} pasajero{datos!.roster.length !== 1 ? "s" : ""}</span>}
+        {estado === "error" && <span className="text-[10px] text-red-500 font-semibold">Error al cargar</span>}
+      </div>
+      <div className="flex gap-2 flex-wrap">
+        <button onClick={() => setVerRoster(v => !v)} disabled={cargando || rosterVacio}
+          title={rosterVacio ? "Sin pasajeros registrados" : "Ver la lista de pasajeros"}
+          className={`${btnBase} bg-gray-50 hover:bg-gray-100 text-gray-700`}>
+          <Ic.FileText size={13} /> {verRoster ? "Ocultar" : "Ver manifiesto"}
+        </button>
+        <button onClick={imprimirManifiesto} disabled={!puedeManifiesto}
+          title={cancelado ? "Servicio cancelado: no se emite Manifiesto MTC" : rosterVacio ? "Sin pasajeros registrados" : "Imprimir Manifiesto MTC (R.D. 1946-2009-MTC-15)"}
+          className={`${btnBase} bg-[#E3F1E6] hover:bg-[#cfe8d4] text-[#15803d]`}>
+          <Ic.FileText size={13} color="#15803d" /> Manifiesto MTC
+        </button>
+        <button onClick={imprimirReporte} disabled={cargando || !puedeReporte}
+          title={!puedeReporte ? "Disponible cuando el servicio está en curso o finalizado" : "Imprimir Reporte de Servicio"}
+          className={`${btnBase} bg-[#EAEFF6] hover:bg-[#dbe4f0] text-[#0b315f]`}>
+          <Ic.FileText size={13} color="#0b315f" /> Reporte de Servicio{r.estado === "en_curso" ? " · preliminar" : ""}
+        </button>
+        <button onClick={() => onGps(s)}
+          className={`${btnBase} bg-[#EFF6FF] hover:bg-[#DBEAFE] text-[#1d4ed8]`}>
+          <Ic.Map size={13} color="#1d4ed8" /> Recorrido GPS
+        </button>
+      </div>
+
+      {datos?.esTer && (
+        <p className="text-[10.5px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 mt-2 leading-snug">
+          <b>Servicio tercerizado:</b> el Manifiesto MTC no incluye conductor ni licencia (no hay ese dato del operador tercero). Se imprime con “–” para completar a mano si SUTRAN lo requiere.
+        </p>
+      )}
+
+      {verRoster && datos && (
+        <div className="mt-2 border-t border-gray-100 pt-2 max-h-64 overflow-y-auto">
+          <table className="w-full text-[11px]">
+            <thead>
+              <tr className="text-gray-400 text-[9px] uppercase tracking-wide">
+                <th className="text-left font-bold py-1 w-6">#</th>
+                <th className="text-left font-bold py-1">Pasajero</th>
+                <th className="text-left font-bold py-1">DNI</th>
+                <th className="text-center font-bold py-1 w-10">Edad</th>
+                <th className="text-center font-bold py-1 w-14">Abordó</th>
+              </tr>
+            </thead>
+            <tbody>
+              {datos.roster.map((x, i) => (
+                <tr key={`${x.pasajero_id}-${i}`} className="border-t border-gray-50">
+                  <td className="py-1 text-gray-400 font-mono">{i + 1}</td>
+                  <td className="py-1 text-gray-800 font-semibold">{x.pasajero?.nombre || `#${x.pasajero_id}`}</td>
+                  <td className="py-1 text-gray-500 font-mono text-[10px]">{x.pasajero?.dni || "–"}</td>
+                  <td className="py-1 text-center text-gray-500">{(x.pasajero as any)?.edad ?? "–"}</td>
+                  <td className="py-1 text-center">
+                    {esAbordado(x)
+                      ? <span className="text-[9px] font-bold text-green-700">✓</span>
+                      : <span className="text-[9px] text-gray-300">—</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FichaServicio({ s, onClose, onRefresh, onGps, empresaPerfil }: { s: ServicioView; onClose: () => void; onRefresh: () => void; onGps: (s: ServicioView) => void; empresaPerfil: EmpresaPerfil|null }) {
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", h);
@@ -948,6 +1165,7 @@ function FichaServicio({ s, onClose, onRefresh, onGps }: { s: ServicioView; onCl
           <button onClick={onClose} className="w-8 h-8 rounded-lg bg-gray-100 hover:bg-gray-200 flex items-center justify-center flex-shrink-0"><Ic.X size={15} /></button>
         </div>
         <div className="flex-1 overflow-y-auto p-3">
+          <DocBar s={s} empresaPerfil={empresaPerfil} onGps={onGps} />
           {s.es_eventual
             ? <TarjetaEventual s={s} onRefresh={onRefresh} onGps={onGps} enFicha />
             : <TarjetaFija     s={s} onRefresh={onRefresh} onGps={onGps} enFicha />}
@@ -981,6 +1199,13 @@ export default function SeguimientoPage() {
   const [busqueda,    setBusqueda]    = useState("");
   const [gpsModal,    setGpsModal]    = useState<ServicioView | null>(null);
   const [drawer,      setDrawer]      = useState<ServicioView | null>(null);
+  const [empresaPerfil, setEmpresaPerfil] = useState<EmpresaPerfil | null>(null);
+
+  // Cabecera de los documentos (logo/nombre/contacto AFA). Una sola vez por página.
+  useEffect(() => {
+    supabase.from("empresa_perfil").select("nombre,logo_url,telefono,email").eq("id", 1).maybeSingle()
+      .then(({ data }) => { if (data) setEmpresaPerfil(data as EmpresaPerfil); });
+  }, []);
 
   const cargar = useCallback(async () => {
     setLoading(true);
@@ -1276,7 +1501,7 @@ export default function SeguimientoPage() {
 
       {/* ── DRAWER: FICHA DEL SERVICIO ── */}
       {drawer && (
-        <FichaServicio s={drawer} onClose={() => setDrawer(null)} onRefresh={cargar} onGps={setGpsModal} />
+        <FichaServicio s={drawer} onClose={() => setDrawer(null)} onRefresh={cargar} onGps={setGpsModal} empresaPerfil={empresaPerfil} />
       )}
     </div>
   );
