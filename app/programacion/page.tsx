@@ -1135,7 +1135,7 @@ export default function ReservasPage() {
   const filtradas = useMemo(() => {
     const base = reservas.filter(r => {
       const q     = busqueda.toLowerCase();
-      const numCot = r.cotizacion_id != null ? (cotMapNum[r.cotizacion_id] || "") : "";
+      const numCot = r.cotizacion_id != null ? (cotMapNum[r.cotizacion_id] || String(r.cotizacion_id).padStart(5, "0")) : "";
       const txt = (r.id + " " + numCot + " " + nombreCliente(r.cliente_id) + " " + ((r as any).origen || "") + " " + ((r as any).destino || "")).toLowerCase();
       const passServicio    = filtroServicio === "todos" || (filtroServicio === "fijo" ? !esEventual(r) : esEventual(r));
       const passSentido     = filtroSentido === "todos" || sentidoServicio(r) === filtroSentido;
@@ -2420,7 +2420,9 @@ export default function ReservasPage() {
                 const pctOcup   = ocup?.ocupacion_pct;
                 const esFijo    = !esEventual(r);
                 const sentido   = sentidoServicio(r);
-                const numCot    = r.cotizacion_id != null ? (cotMapNum[r.cotizacion_id] || null) : null;
+                // Muestra el numero_cotizacion real; si está vacío, cae al correlativo
+                // #NNNNN derivado del id (mismo fallback que usa toda la app).
+                const numCot    = r.cotizacion_id != null ? (cotMapNum[r.cotizacion_id] || String(r.cotizacion_id).padStart(5, "0")) : null;
 
                 let ocupBg = "#f8fafc", ocupColor = "#475569";
                 if (sobrecupo) { ocupBg = "#fee2e2"; ocupColor = "#991b1b"; }
@@ -2479,7 +2481,7 @@ export default function ReservasPage() {
                             title="Abrir cotización"
                             className="font-mono font-bold text-xs text-[#0b315f] underline decoration-dotted underline-offset-2 hover:text-blue-600 transition-colors"
                           >
-                            {numCot}
+                            #{numCot}
                           </button>
                         ) : (
                           <span className="text-gray-300 text-xs">—</span>
