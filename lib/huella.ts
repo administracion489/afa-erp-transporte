@@ -564,11 +564,12 @@ export function puentesCrudos(
 ): PuenteHueco[] {
   const out: PuenteHueco[] = [];
   for (const [s, e] of crudoRanges) {
-    if (s <= 0 || e + 1 >= coords.length) continue;   // sin ancla limpia a algún lado (o toca la punta viva)
-    const A = coords[s - 1], B = coords[e + 1];
+    if (e + 1 >= coords.length) continue;   // toca la punta viva (la cubre colaViva) → no rutear aquí
+    const iA = s > 0 ? s - 1 : 0;           // s=0 (el viaje ARRANCA crudo): ancla al primer punto (se proyecta sobre la ruta)
+    const A = coords[iA], B = coords[e + 1];
     const dRecta = distM(A[1], A[0], B[1], B[0]);
     if (dRecta < minRectaM) continue;
-    out.push({ aLat: A[1], aLng: A[0], bLat: B[1], bLng: B[0], dt: 0, dRecta, iA: s - 1, iB: e + 1, origen: "crudo" });
+    out.push({ aLat: A[1], aLng: A[0], bLat: B[1], bLng: B[0], dt: 0, dRecta, iA, iB: e + 1, origen: "crudo" });
   }
   return out;
 }
@@ -860,6 +861,8 @@ export function colaViva(
   matched: [number, number][],
   huella: { lat: number; lng: number; velocidad: number }[],
   live?: { lat: number; lng: number; velocidad?: number } | null,
+  ruta?: [number, number][],        // ruta planificada (para pegar la punta viva a la vía cuando el GPS está degradado)
+  degradado?: boolean,              // el Map Matching NO logró pegar la cola (GPS de red/corte) → seguir la ruta, no el zigzag
 ): any[] {
   if (!matched.length) return [];
   const [endLng, endLat] = matched[matched.length - 1];
@@ -879,6 +882,17 @@ export function colaViva(
     const lastP = pts[pts.length - 1];
     if (!lastP || distM(lastP.lat, lastP.lng, live.lat, live.lng) > 3) {  // evita duplicar el vivo
       pts.push({ lat: live.lat, lng: live.lng, velocidad: live.velocidad ?? lastP?.velocidad ?? 0 });
+    }
+  }
+  // PUNTA VIVA DEGRADADA: si el Map Matching no logró pegar la cola (corte / GPS de red), en vez de
+  // dibujar el zigzag crudo hasta el bus se SIGUE LA RUTA PREVISTA desde la frontera del trazo hasta la
+  // posición en vivo (verde petróleo, `estimado:1`). Es determinista → sin parpadeo, y así la huella no
+  // se rompe ni se corta. Si el bus se desvió de la ruta (o no hay ruta), cae al crudo → nunca inventa
+  // camino fuera de la vía (puentePorRuta devuelve null con desvío >200 m).
+  if (degradado && ruta && ruta.length >= 2 && live && Number.isFinite(live.lat) && Number.isFinite(live.lng)) {
+    const bridge = puentePorRuta({ lat: endLat, lng: endLng }, { lat: live.lat, lng: live.lng }, ruta);
+    if (bridge && bridge.length >= 2) {
+      return [{ type: "Feature", properties: { estimado: 1 }, geometry: { type: "LineString", coordinates: bridge } }];
     }
   }
   return pts.length >= 2 ? huellaCrudaFeatures(pts) : [];
@@ -948,6 +962,7 @@ export function crearAjustadorHuella() {
   let lastColaCrude = 1;                    // crudeFrac de la geometría RETENIDA (1 = nada limpio aún)
   const congeladasSnapped: boolean[] = [];  // ¿cada ventana CONGELADA pegó a la vía? (false = crudo → candidata a rutear)
   let ultimoCrudoRanges: Array<[number, number]> = [];  // rangos [ini,fin] de crudo CONGELADO en las coords devueltas (para rellenar por ruta; excluye la cola viva → sin parpadeo)
+  let ultimaColaSnapped = true;             // ¿el ÚLTIMO match de la cola viva pegó a la vía? (false = punta degradada → colaViva sigue la ruta prevista, no el zigzag)
 
   return {
     async ajustar(
@@ -998,6 +1013,7 @@ export function crearAjustadorHuella() {
       if (colaVentana.length >= 2) {
         const rc = await matchVentana(colaVentana, token);
         if (cancelado?.()) return null;
+        ultimaColaSnapped = rc.snapped;   // señal para colaViva: si NO pegó, la punta viva sigue la ruta prevista
         // STICKINESS POR CONTENIDO-CRUDO: no revertir a rectas/crudo un tramo que ya se pegó a la vía.
         // El bug (#954): con GPS de red la cola puede PEGAR (snapped=true) pero MIXTA — trozos de vía
         // unidos por cuerdas crudas de 120-300 m (las "rectas que cruzan techos"), cobertura ~0.45. El
@@ -1040,5 +1056,7 @@ export function crearAjustadorHuella() {
     },
     // Rangos [ini,fin] de crudo CONGELADO en las coords del último `ajustar` (para rutear como estimado).
     leerCrudoRanges: () => ultimoCrudoRanges,
+    // ¿El último match de la cola VIVA pegó a la vía? (false = punta degradada → colaViva sigue la ruta).
+    leerColaSnapped: () => ultimaColaSnapped,
   };
 }

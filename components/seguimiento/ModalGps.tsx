@@ -111,6 +111,7 @@ export default function ModalGps({
   const [resumen,           setResumen]           = useState<ResumenViaje | null>(null); // resumen del viaje (datos reales)
   const [puentes,           setPuentes]           = useState<any[]>([]);              // features GeoJSON de tramos estimados (ruta prevista, verde petróleo)
   const [suprimirCrudo,     setSuprimirCrudo]     = useState<Array<[number, number]>>([]); // rangos de coords crudas que SÍ se rutearon → no dibujar como medido
+  const [colaSnapped,       setColaSnapped]       = useState(true);                     // ¿la punta viva pegó a la vía? (false → colaViva sigue la ruta prevista, no el zigzag)
   const matchedRef                                = useRef<[number, number][] | null>(null); // última geometría ajustada (para puentesCrudos aunque el ciclo devuelva null por throttle)
   const puentesCacheRef = useRef<Map<string, { nivel: string; coords: [number, number][]; km: number; dt: number }>>(new Map()); // caché por hueco
   const [mostrarPuntos,     setMostrarPuntos]     = useState(true);                  // toggle de la leyenda
@@ -456,6 +457,7 @@ export default function ModalGps({
         // Map Matching por ventanas (lib/huella.ts): throttle 60 s + congelado interno.
         const matched = await ajustador.ajustar(limpio, token, () => cancel);
         if (matched && !cancel) { setMatchedCoords(matched); matchedRef.current = matched; }
+        if (!cancel) setColaSnapped(ajustador.leerColaSnapped());   // ¿pegó la punta viva? (si no, colaViva sigue la ruta)
 
         // TRAMO ESTIMADO por RUTA. Dos fuentes: (1) HUECOS de señal (calcularPuentes) y (2) CORRIDAS
         // CRUDAS CONGELADAS (ventanas que Map Matching no pudo pegar = el zigzag/"rectas que cruzan
@@ -542,7 +544,7 @@ export default function ModalGps({
       // Sin matching aún (GPS de torre / cargando): huella cruda suavizada por tramos.
       const live = ubic ? { lat: ubic.lat, lng: ubic.lng, velocidad: velCalc } : null;
       const features = (matchedCoords && matchedCoords.length >= 2)
-        ? [...colorearMatched(matchedCoords, huella, suprimirCrudo), ...colaViva(matchedCoords, huella, live)]
+        ? [...colorearMatched(matchedCoords, huella, suprimirCrudo), ...colaViva(matchedCoords, huella, live, rutaRef.current?.coordenadas, !colaSnapped)]
         : huellaCrudaFeatures(huella);
       const data: any = { type: "FeatureCollection", features };
 
@@ -557,12 +559,13 @@ export default function ModalGps({
           layout: { "line-join": "round", "line-cap": "round" },
           paint: {
             "line-width": 5, "line-opacity": 0.9,
-            "line-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"],
+            // Punta viva estimada (sigue la ruta) en verde petróleo; el resto por velocidad.
+            "line-color": ["case", ["==", ["get", "estimado"], 1], "#0f766e", ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"]],
           },
         });
       }
     } catch (e) { console.error("[ModalGps] Error dibujando huella GPS:", e); }
-  }, [huella, matchedCoords, mapListo, ubic, velCalc, suprimirCrudo]);
+  }, [huella, matchedCoords, mapListo, ubic, velCalc, suprimirCrudo, colaSnapped]);
 
   // ── CAPA 3: Puntitos de telemetría real (velocidad/rumbo/dirección al clic) ──
   useEffect(() => {

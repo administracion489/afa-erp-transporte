@@ -271,6 +271,7 @@ export default function ClientePortal() {
   // Geometría ajustada a la vía (Map Matching) por servicio — misma calidad que el modal.
   const [matchedEnVivoMap,  setMatchedEnVivoMap]  = useState<Record<number, [number,number][]>>({});
   const [suprimirCrudoMap,  setSuprimirCrudoMap]  = useState<Record<number, Array<[number, number]>>>({}); // rangos crudos ruteados por servicio → no dibujar como medido
+  const [colaSnappedMap,    setColaSnappedMap]    = useState<Record<number, boolean>>({});                 // ¿la punta viva pegó a la vía por servicio? (false → colaViva sigue la ruta prevista)
   const [paradasResueltasMap, setParadasResueltasMap] = useState<Record<number, Parada[]>>({});
   // Dashboard — info enriquecida por servicio destacado
   const [condInfoMap,   setCondInfoMap]   = useState<Record<number, {nombre: string; tel: string}>>({});
@@ -1181,6 +1182,7 @@ export default function ClientePortal() {
       if (!ajustadoresRef.current[rid]) ajustadoresRef.current[rid] = crearAjustadorHuella();
       const matched = await ajustadoresRef.current[rid].ajustar(limpio, token, () => cancel);
       if (matched && !cancel) { setMatchedEnVivoMap(prev => ({ ...prev, [rid]: matched })); matchedEnVivoRefMap.current[rid] = matched; }
+      if (!cancel) setColaSnappedMap(prev => ({ ...prev, [rid]: ajustadoresRef.current[rid].leerColaSnapped() }));   // ¿pegó la punta viva?
 
       // TRAMO ESTIMADO por RUTA: HUECOS de señal (calcularPuentes) + CORRIDAS CRUDAS CONGELADAS (ventanas
       // que Map Matching no pegó = zigzag del GPS de red). Ambas por la ruta prevista→Google. Las crudas
@@ -1299,7 +1301,7 @@ export default function ClientePortal() {
     );
     const live = liveU ? { lat: Number(liveU.lat), lng: Number(liveU.lng), velocidad: Number(liveU.velocidad) || 0 } : null;
     const feats: any[] = (matchedEV && matchedEV.length >= 2)
-      ? [...colorearMatched(matchedEV, huellaPts, suprimirCrudoMap[sel.id]), ...colaViva(matchedEV, huellaPts, live)]
+      ? [...colorearMatched(matchedEV, huellaPts, suprimirCrudoMap[sel.id]), ...colaViva(matchedEV, huellaPts, live, rutasEnVivoMap[sel.id], colaSnappedMap[sel.id] === false)]
       : huellaCrudaFeatures(huellaPts);   // cruda por tramos (corta teleports/huecos). lib/huella.ts
     if (feats.length > 0) {
       const sid = `gps-s-${sel.id}`, lid = `gps-l-${sel.id}`;
@@ -1307,7 +1309,8 @@ export default function ClientePortal() {
         map.addSource(sid, { type: "geojson", data: { type: "FeatureCollection", features: feats } as any });
         map.addLayer({ id: lid, type: "line", source: sid, layout: { "line-join": "round", "line-cap": "round" }, paint: {
           "line-width": 5, "line-opacity": 0.95,
-          "line-color": ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"] as any,
+          // Punta viva estimada (sigue la ruta prevista) en verde petróleo; el resto por velocidad.
+          "line-color": ["case", ["==", ["get", "estimado"], 1], "#0f766e", ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"]] as any,
         } });
         dibujoSourcesRef.current.push(sid); dibujoLayersRef.current.push(lid);
         huellaPts.forEach(p => { bounds.extend([p.lng, p.lat]); hasBounds = true; });
@@ -1336,7 +1339,7 @@ export default function ClientePortal() {
       try { map.fitBounds(bounds, { padding: 60, maxZoom: 14, duration: 700 }); lastFitRef.current = sel.id; } catch {}
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapListoEnVivo, rutasEnVivoMap, huellaGpsMap, matchedEnVivoMap, suprimirCrudoMap, paradasResueltasMap, paradas, rutaSelId, tab]);
+  }, [mapListoEnVivo, rutasEnVivoMap, huellaGpsMap, matchedEnVivoMap, suprimirCrudoMap, colaSnappedMap, paradasResueltasMap, paradas, rutaSelId, tab]);
 
   // ─── En vivo: CAPA 4 — puntitos de telemetría real del servicio seleccionado ─
   // Capa propia con id FIJO + setData (no el remove/add del efecto de arriba) para no apilar
