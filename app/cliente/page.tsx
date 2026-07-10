@@ -2542,6 +2542,26 @@ tbody tr:nth-child(even){background:#f9fafb}
               <button onClick={() => setModalFaq(false)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 10, width: 34, height: 34, color: "white", fontSize: 18, cursor: "pointer" }}>×</button>
             </div>
             <div style={{ overflowY: "auto", padding: "16px 24px 24px" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+                <a href="/manuales/portal-cliente" target="_blank" rel="noopener noreferrer"
+                  style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 16px", borderRadius: 14, border: `1px solid ${C.gray200}`, textDecoration: "none", background: "#eef3f8" }}>
+                  <span style={{ width: 34, height: 34, borderRadius: 9, background: C.navy, color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, flexShrink: 0 }}>📘</span>
+                  <span style={{ flex: 1 }}>
+                    <p style={{ margin: 0, fontWeight: 800, fontSize: 13, color: C.navy }}>Manual del Portal Cliente</p>
+                    <p style={{ margin: "2px 0 0", fontSize: 11.5, color: C.gray600 }}>Guía completa de esta pantalla, paso a paso</p>
+                  </span>
+                  <span style={{ color: C.navy, fontSize: 14 }}>↗</span>
+                </a>
+                <a href="/manuales/pasajero" target="_blank" rel="noopener noreferrer"
+                  style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 16px", borderRadius: 14, border: `1px solid ${C.gray200}`, textDecoration: "none", background: "#f0fdf4" }}>
+                  <span style={{ width: 34, height: 34, borderRadius: 9, background: "#12876F", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, flexShrink: 0 }}>🧳</span>
+                  <span style={{ flex: 1 }}>
+                    <p style={{ margin: 0, fontWeight: 800, fontSize: 13, color: "#0d6455" }}>Manual para tus pasajeros</p>
+                    <p style={{ margin: "2px 0 0", fontSize: 11.5, color: C.gray600 }}>Pásaselo a tu equipo: cómo usar la App Pasajero</p>
+                  </span>
+                  <span style={{ color: "#0d6455", fontSize: 14 }}>↗</span>
+                </a>
+              </div>
               {FAQ_ITEMS.map((item, i) => (
                 <div key={i} style={{ marginBottom: 10, border: `1px solid ${C.gray200}`, borderRadius: 14, overflow: "hidden" }}>
                   <button onClick={() => setFaqOpen(faqOpen === i ? null : i)} style={{ width: "100%", padding: "14px 18px", background: faqOpen === i ? "#eef3f8" : "white", border: "none", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, textAlign: "left" }}>

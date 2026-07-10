@@ -1350,6 +1350,37 @@ export default function DashboardPage() {
           Mostrando {Math.min(5, reservas.length)} de {reservas.length} reservas · AFA ERP · Dashboard
         </div>
       </Card>
+
+      {/* ── 12. CENTRO DE AYUDA ── */}
+      <Card>
+        <Eyebrow>Capacitación</Eyebrow>
+        <h3 style={{ margin:"6px 0 14px", fontFamily:"var(--font-sans)", fontWeight:800, fontSize:16, color:C.ink, letterSpacing:-0.3 }}>
+          Centro de ayuda
+        </h3>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))", gap:12 }}>
+          {[
+            { href:"/manuales/conductor",     label:"Manual App Conductor",   desc:"Conectarse, iniciar viaje, escanear QR" },
+            { href:"/manuales/pasajero",      label:"Manual App Pasajero",    desc:"Ver el bus en vivo, paradero, pase" },
+            { href:"/manuales/portal-cliente",label:"Manual Portal Cliente",  desc:"Dashboard, GPS en vivo, facturación" },
+          ].map((m) => (
+            <a key={m.href} href={m.href} target="_blank" rel="noopener noreferrer"
+              style={{
+                display:"flex", alignItems:"center", gap:12, padding:"14px 16px",
+                borderRadius:11, border:`1px solid ${C.line2}`, textDecoration:"none",
+              }}>
+              <div style={{ width:36, height:36, borderRadius:9, background:C.blueTint,
+                display:"flex", alignItems:"center", justifyContent:"center", flex:"none" }}>
+                <I.FileCheck size={17} sw={2} color={C.navy}/>
+              </div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <p style={{ margin:0, fontSize:12.5, fontWeight:700, color:C.ink }}>{m.label}</p>
+                <p style={{ margin:"2px 0 0", fontSize:11, color:C.mute, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{m.desc}</p>
+              </div>
+              <I.Arrow size={13} sw={2} color={C.mute}/>
+            </a>
+          ))}
+        </div>
+      </Card>
     </div>
   );
 }

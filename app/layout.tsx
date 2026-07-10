@@ -536,7 +536,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const esLogin = pathname === "/login";
   const esPublica =
     // Rutas públicas estándar (raíz + sub-rutas)
-    ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad", "/cliente", "/conductor-tercero"].some(
+    ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad", "/cliente", "/conductor-tercero", "/manuales"].some(
       (r) => pathname === r || pathname.startsWith(r + "/")
     ) ||
     // /seguimiento/[token] es público — pero /seguimiento (módulo ERP) NO

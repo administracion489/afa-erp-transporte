@@ -10,6 +10,9 @@ export function middleware(request: NextRequest) {
     pathname === "/conductor"         || pathname.startsWith("/conductor/") ||
     pathname === "/lector"            || pathname.startsWith("/lector/") ||
     pathname === "/pasajero"          || pathname.startsWith("/pasajero/") ||
+    pathname === "/cliente"           || pathname.startsWith("/cliente/") ||
+    pathname === "/registro"          || pathname.startsWith("/registro/") ||
+    pathname === "/manuales"          || pathname.startsWith("/manuales/") ||
     pathname === "/privacidad"        || pathname.startsWith("/privacidad/") ||
     // Página estática para conectar el número de WhatsApp vía Embedded Signup de Meta
     pathname.startsWith("/conectar-whatsapp") ||
