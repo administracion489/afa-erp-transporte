@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { Calendar, FileText, Pencil, Trash2, X } from "lucide-react";
 import {
@@ -150,6 +151,21 @@ function esEventual(r: Reserva): boolean {
   return !TIPOS_SERVICIO_FIJO.has(r.tipo_servicio_detalle || "");
 }
 
+// Sentido del servicio (IDA / RETORNO). Aplica sobre todo a transporte de personal (fijos).
+// Prioriza el campo canónico `direccion_servicio` (lo escribe ModalGenerarPrograma al crear
+// el par ida+retorno); si falta, cae a una heurística CONSERVADORA solo para fijos:
+//   · fijo_solo_ida            → IDA (por definición es un tramo único de ida)
+//   · reserva_vinculada_id set → RETORNO (el retorno se genera vinculado a su ida)
+// Devuelve null cuando no se puede afirmar con confianza (no se pinta chip).
+function sentidoServicio(r: Reserva): "ida" | "retorno" | null {
+  if (r.direccion_servicio === "ida") return "ida";
+  if (r.direccion_servicio === "retorno") return "retorno";
+  if (esEventual(r)) return null;
+  if (r.tipo_servicio_detalle === "fijo_solo_ida") return "ida";
+  if (r.reserva_vinculada_id != null) return "retorno";
+  return null;
+}
+
 function fmtSoles(n: number) {
   return "S/ " + n.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -237,6 +253,7 @@ async function geocodificar(direccion: string): Promise<{ lat: number; lng: numb
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 export default function ReservasPage() {
+  const router = useRouter();
   const [clientes,     setClientes]     = useState<Cliente[]>([]);
   const [vehiculos,    setVehiculos]    = useState<Vehiculo[]>([]);
   const [conductores,  setConductores]  = useState<Conductor[]>([]);
@@ -245,6 +262,7 @@ export default function ReservasPage() {
   const [condTercero,  setCondTercero]  = useState<ConductorTercero[]>([]);
   const [docsTercero,  setDocsTercero]  = useState<DocumentoTercero[]>([]);
   const [reservas,     setReservas]     = useState<Reserva[]>([]);
+  const [cotMapNum,    setCotMapNum]    = useState<Record<number, string>>({}); // cotizacion_id → numero_cotizacion
   const [ocupacionMap, setOcupacionMap] = useState<Record<number, Ocupacion>>({});
   const [loading,      setLoading]      = useState(false);
   const [guardando,    setGuardando]    = useState(false);
@@ -262,6 +280,7 @@ export default function ReservasPage() {
   const [filtroEstado, setFiltroEstado] = useState("todos");
   const [filtroTipo,   setFiltroTipo]   = useState("todos");
   const [filtroServicio, setFiltroServicio] = useState<"todos" | "fijo" | "eventual">("todos");
+  const [filtroSentido, setFiltroSentido] = useState<"todos" | "ida" | "retorno">("todos");
   const [form, setForm] = useState(FORM_VACIO);
   const [modalReservaId,       setModalReservaId]       = useState<number | null>(null);
   const [mostrarModalPrograma, setMostrarModalPrograma] = useState(false);
@@ -311,6 +330,21 @@ export default function ReservasPage() {
     const map: Record<number, Ocupacion> = {};
     (data || []).forEach((o: any) => { map[o.reserva_id] = o; });
     setOcupacionMap(map);
+  };
+
+  // Carga el numero_cotizacion (texto) de las cotizaciones referenciadas por las reservas.
+  // Se acota a los cotizacion_id presentes (evita el cap de 1000 filas de la tabla completa)
+  // y se trocea la consulta `.in()` para no reventar el largo de la URL.
+  const cargarNumerosCotizacion = async (rows: Reserva[]) => {
+    const cotIds = [...new Set(rows.map(r => r.cotizacion_id).filter((v): v is number => v != null))];
+    if (cotIds.length === 0) { setCotMapNum({}); return; }
+    const m: Record<number, string> = {};
+    for (let i = 0; i < cotIds.length; i += 300) {
+      const chunk = cotIds.slice(i, i + 300);
+      const { data } = await supabase.from("cotizaciones").select("id,numero_cotizacion").in("id", chunk);
+      (data || []).forEach((c: any) => { if (c.numero_cotizacion != null) m[c.id] = String(c.numero_cotizacion); });
+    }
+    setCotMapNum(m);
   };
 
   const cargarPasajerosAsignados = async (reservaId: number, paradaId?: number) => {
@@ -811,6 +845,7 @@ export default function ReservasPage() {
     setCondTercero(ctRes.data  || []);
     setDocsTercero(dtRes.data  || []);
     setReservas(rRes.data      || []);
+    await cargarNumerosCotizacion(rRes.data || []);
     await cargarOcupaciones();
     setLoading(false);
   };
@@ -1099,14 +1134,17 @@ export default function ReservasPage() {
 
   const filtradas = useMemo(() => {
     const base = reservas.filter(r => {
-      const q   = busqueda.toLowerCase();
-      const txt = (r.id + " " + nombreCliente(r.cliente_id) + " " + ((r as any).origen || "") + " " + ((r as any).destino || "")).toLowerCase();
+      const q     = busqueda.toLowerCase();
+      const numCot = r.cotizacion_id != null ? (cotMapNum[r.cotizacion_id] || "") : "";
+      const txt = (r.id + " " + numCot + " " + nombreCliente(r.cliente_id) + " " + ((r as any).origen || "") + " " + ((r as any).destino || "")).toLowerCase();
       const passServicio    = filtroServicio === "todos" || (filtroServicio === "fijo" ? !esEventual(r) : esEventual(r));
+      const passSentido     = filtroSentido === "todos" || sentidoServicio(r) === filtroSentido;
       const passPorAsignar  = !filtroPorAsignar || (r.estado === "pendiente" && !r.vehiculo_id && !r.empresa_tercerizada_id);
       return txt.includes(q) &&
         (filtroEstado === "todos" || r.estado === filtroEstado) &&
         (filtroTipo === "todos" || r.tipo === filtroTipo) &&
         passServicio &&
+        passSentido &&
         (!filtroDesde || (r.fecha_servicio && r.fecha_servicio >= filtroDesde)) &&
         (!filtroHasta || (r.fecha_servicio && r.fecha_servicio <= filtroHasta)) &&
         passPorAsignar;
@@ -1133,7 +1171,7 @@ export default function ReservasPage() {
       }
       return aFut ? -1 : 1;
     });
-  }, [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, filtroDesde, filtroHasta, filtroPorAsignar, clientes, hoy]);
+  }, [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, cotMapNum, filtroDesde, filtroHasta, filtroPorAsignar, clientes, hoy]);
 
   // Agrupación de servicios fijos por contrato (cotizacion_id)
   const gruposContratos = useMemo(() => {
@@ -1933,6 +1971,23 @@ export default function ReservasPage() {
               </button>
             ))}
           </div>
+          {/* Sentido IDA / RETORNO (útil sobre todo en transporte de personal / fijos) */}
+          <div className="flex gap-1 rounded-xl p-1" style={{ background: "#f1f5f9" }} title="Filtrar por sentido del servicio (ida o retorno)">
+            {(["todos", "ida", "retorno"] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => setFiltroSentido(t)}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+                style={{
+                  background: filtroSentido === t ? "white" : "transparent",
+                  color: filtroSentido === t ? "#0b315f" : "#9ca3af",
+                  boxShadow: filtroSentido === t ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+                }}
+              >
+                {t === "todos" ? "Ida y retorno" : t === "ida" ? "Ida" : "Retorno"}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Fila 2: rango de fechas + atajos + toggles */}
@@ -2331,21 +2386,21 @@ export default function ReservasPage() {
             <thead>
               <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
                 <th className="p-3 w-8"></th>
-                {["ID", "Cliente", "Ruta", "Fecha", "Recurso", "Ocupacion", "Estado", "Administrativo", "Acciones"].map(h => (
+                {["ID", "Cotización", "Cliente", "Ruta", "Fecha", "Recurso", "Ocupacion", "Estado", "Administrativo", "Acciones"].map(h => (
                   <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={10} className="p-10 text-center text-gray-400">
+                <tr><td colSpan={11} className="p-10 text-center text-gray-400">
                   <div className="flex items-center justify-center gap-2">
                     <div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />
                     Cargando...
                   </div>
                 </td></tr>
               ) : filtradas.length === 0 ? (
-                <tr><td colSpan={10} className="p-10 text-center text-gray-400">
+                <tr><td colSpan={11} className="p-10 text-center text-gray-400">
                   <p className="text-3xl mb-2">🎫</p>
                   <p className="font-medium">No hay reservas</p>
                 </td></tr>
@@ -2364,6 +2419,8 @@ export default function ReservasPage() {
                 const sobrecupo = ocup?.sobrecupo || false;
                 const pctOcup   = ocup?.ocupacion_pct;
                 const esFijo    = !esEventual(r);
+                const sentido   = sentidoServicio(r);
+                const numCot    = r.cotizacion_id != null ? (cotMapNum[r.cotizacion_id] || null) : null;
 
                 let ocupBg = "#f8fafc", ocupColor = "#475569";
                 if (sobrecupo) { ocupBg = "#fee2e2"; ocupColor = "#991b1b"; }
@@ -2374,7 +2431,7 @@ export default function ReservasPage() {
                   <React.Fragment key={r.id}>
                     {idx === sepIdx && (
                       <tr>
-                        <td colSpan={10} className="px-4 py-2">
+                        <td colSpan={11} className="px-4 py-2">
                           <div className="flex items-center gap-3">
                             <div className="flex-1 h-px" style={{ background: "#bbf7d0" }} />
                             <span className="text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full border" style={{ color: "#166534", background: "#f0fdf4", borderColor: "#bbf7d0" }}>
@@ -2401,11 +2458,32 @@ export default function ReservasPage() {
                         {badge && <div className="text-[9px] font-bold" style={{ color: badge.color }}>{badge.label}</div>}
                         {riesgo === "alto" && <div className="text-[9px] font-bold text-red-600">DOC VENC.</div>}
                         {sobrecupo && <div className="text-[9px] font-bold text-red-600">SOBRECUPO</div>}
-                        <div className="mt-0.5">
+                        <div className="mt-0.5 flex items-center gap-1 flex-wrap">
                           <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: esFijo ? "#eef3f8" : "#ede9fe", color: esFijo ? "#0b315f" : "#6d28d9" }}>
                             {esFijo ? "Fijo" : "Eventual"}
                           </span>
+                          {sentido === "ida" && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: "#dbeafe", color: "#1d4ed8" }}>IDA</span>
+                          )}
+                          {sentido === "retorno" && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: "#ede9fe", color: "#6d28d9" }}>RETORNO</span>
+                          )}
                         </div>
+                      </td>
+
+                      {/* N° de cotización que originó el servicio (clic → abre la cotización) */}
+                      <td className="p-3" onClick={e => e.stopPropagation()}>
+                        {numCot ? (
+                          <button
+                            onClick={() => router.push(`/cotizaciones?buscar=${encodeURIComponent(numCot)}`)}
+                            title="Abrir cotización"
+                            className="font-mono font-bold text-xs text-[#0b315f] underline decoration-dotted underline-offset-2 hover:text-blue-600 transition-colors"
+                          >
+                            {numCot}
+                          </button>
+                        ) : (
+                          <span className="text-gray-300 text-xs">—</span>
+                        )}
                       </td>
 
                       <td className="p-3 font-bold text-gray-800 max-w-[120px]">
@@ -2508,7 +2586,7 @@ export default function ReservasPage() {
 
                     {expandido && (
                       <tr style={{ background: "#f8fafc" }} className="border-t">
-                        <td colSpan={10} className="px-6 py-5">
+                        <td colSpan={11} className="px-6 py-5">
                           {(() => {
                             const paradasR = paradasMap[r.id] || [];
                             const tieneJSON = r.paradas_json && r.paradas_json.length > 0;

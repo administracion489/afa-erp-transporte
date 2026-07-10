@@ -816,6 +816,9 @@ export default function CotizacionesPage(){
   const skipDescRef=useRef(false);
   const skipParadasRef=useRef(false);
   useEffect(()=>{supabase.from("reservas").select("id",{count:"exact",head:true}).eq("origen_despacho",true).is("cotizacion_id",null).then((res: any)=>setPendDespacho((res.count as number)||0));},[]);
+  // Deep-link desde Programación: /cotizaciones?buscar=<N°> siembra el buscador.
+  // Se lee de window.location (cliente) para no requerir <Suspense> de useSearchParams.
+  useEffect(()=>{if(typeof window==="undefined")return;const b=new URLSearchParams(window.location.search).get("buscar");if(b)setBusqueda(b);},[]);
   const mapsLoaded=useGoogleMapsCot();
   const [origenPlace,setOrigenPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
   const [destinoPlace,setDestinoPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
