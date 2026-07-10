@@ -930,6 +930,28 @@ export function velocidadPorVentana(
   return kmh > maxKmh ? null : kmh;                              // implausible → conservar valor previo
 }
 
+// Busca el PREFIJO LIMPIO más largo de una ventana que salió cruda al matchear completa. Clave del
+// fix "no re-editar lo ya dibujado" (#795): una ventana [0,100] puede salir CRUDA porque su cola trae
+// puntos degradados, aunque su prefijo [0,60] pegue LIMPIO por sí solo. Congelar la ventana completa
+// re-dibujaría crudos esos 60 puntos viejos-buenos. En vez de eso se congela solo el prefijo limpio.
+// Búsqueda binaria (monótona en la práctica: agregar cola degradada solo puede ensuciar) → ~6-7 llamadas
+// solo cuando una ventana sale cruda (GPS bueno nunca entra aquí). Piso 40: un prefijo más corto no vale
+// la fragmentación (la corrupción de <40 puntos es menor y rara). Exige crudeFrac≤0.1 (limpio de verdad).
+async function congelarPrefijoLimpio(
+  ventana: MatchPt[], token: string, cancelado?: () => boolean,
+): Promise<{ len: number; coords: [number, number][] } | null> {
+  const MIN = 40;
+  let lo = MIN, hi = ventana.length - 2, bestLen = 0, bestCoords: [number, number][] | null = null;
+  while (lo <= hi) {
+    if (cancelado?.()) break;
+    const mid = (lo + hi) >> 1;
+    const r = await matchVentana(ventana.slice(0, mid), token);
+    if (r.snapped && r.crudeFrac <= 0.1) { bestLen = mid; bestCoords = r.coords; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  return bestLen >= MIN && bestCoords ? { len: bestLen, coords: bestCoords } : null;
+}
+
 // ── Ajustador con estado: Map Matching por VENTANAS de ≤100 puntos, con congelado ─────────
 // La API topa en 100 coords/llamada. Ajustar el viaje entero diezma la huella → rectas en
 // servicios largos. En vez de eso troceamos en ventanas densas, ajustamos cada una y las
@@ -1002,9 +1024,30 @@ export function crearAjustadorHuella() {
         const ventana = limpio.slice(ini, ini + MAX);   // ≤ MAX SIEMPRE → no se diezma
         const rw = await matchVentana(ventana, token);
         if (cancelado?.()) return null;
-        congeladas.push(rw.coords);
-        congeladasSnapped.push(rw.snapped);   // false = la ventana NO pegó a la vía (crudo) → se rellena por ruta
-        congeladoHasta += NUEVOS;
+        if (rw.snapped) {
+          // Ventana LIMPIA → congelar completa (caso común; GPS bueno #1138 IDÉNTICO al legacy).
+          congeladas.push(rw.coords);
+          congeladasSnapped.push(true);
+          congeladoHasta += NUEVOS;
+        } else {
+          // Ventana CRUDA: el re-match completo ARRUINA los puntos viejos-buenos que trae la ventana (bug
+          // #795: [0,60] pega limpio solo, pero [0,100] con la cola degradada sale crudo y RE-DIBUJA crudos
+          // esos 60 buenos = "edita 20 puntos antes"). En vez de hornear crudo sobre lo bueno, se congela
+          // SOLO el PREFIJO LIMPIO más largo (INMUTABLE); el resto degradado queda para el siguiente ciclo
+          // (lo cubre puentesCrudos por la ruta). Así lo ya dibujado NO se re-edita.
+          const pref = await congelarPrefijoLimpio(ventana, token, cancelado);
+          if (cancelado?.()) return null;
+          if (pref) {
+            congeladas.push(pref.coords);
+            congeladasSnapped.push(true);
+            congeladoHasta += Math.max(1, pref.len - SOLAPE);
+          } else {
+            // Ni el prefijo pega (degradación temprana) → congelar crudo y avanzar normal (genuino).
+            congeladas.push(rw.coords);
+            congeladasSnapped.push(false);
+            congeladoHasta += NUEVOS;
+          }
+        }
       }
       // Si congeló una ventana, la cola arranca de nuevo (otra región) → resetear la stickiness.
       if (congeladoHasta !== congeladoAntes) { lastCola = []; lastColaSnapped = false; lastColaCrude = 1; }
