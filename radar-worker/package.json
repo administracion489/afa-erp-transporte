@@ -1,0 +1,26 @@
+{
+  "name": "afa-radar-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Worker del Radar IA: mantiene la sesión de WhatsApp Web (Baileys) y alimenta radar_mensajes en Supabase.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "baileys": "^6.7.18",
+    "dotenv": "^16.4.5",
+    "pino": "^9.4.0",
+    "qrcode": "^1.5.4",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/qrcode": "^1.5.6",
+    "typescript": "^5.5.0"
+  }
+}

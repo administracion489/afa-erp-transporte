@@ -15,6 +15,10 @@
     {
       "path": "/api/campanas/procesar",
       "schedule": "15 13 * * *"
+    },
+    {
+      "path": "/api/radar/procesar",
+      "schedule": "*/15 * * * *"
     }
   ]
 }

@@ -48,6 +48,10 @@ The actual data model lives in Supabase (Postgres). Tables referenced across the
 
 `notificarReserva(reservaId, trigger)` is the single entry point. Per pasajero it tries channels in order: **Email (Resend) → WhatsApp (Twilio) → SMS (Twilio fallback, only when no email and WhatsApp failed)**. Every attempt — including `sin_canal` — is logged to `notificaciones_enviadas`; the cron uses that table to dedupe. Phone numbers are normalized to E.164 assuming Peru (`+51`). Env vars: `RESEND_API_KEY`, `RESEND_FROM`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM`, `TWILIO_SMS_FROM`, `EMPRESA_NOMBRE`.
 
+### Radar IA (`/radar-ia`, `lib/radar/*`, `radar-worker/`)
+
+Módulo independiente que monitorea grupos de WhatsApp con un worker externo (`radar-worker/`, Baileys — cliente **no oficial**; usa un número dedicado, jamás los números de la integración Meta oficial). El worker mantiene la sesión (QR una sola vez, credenciales en `radar-worker/auth/`), escribe crudo en tablas `radar_*` (`supabase/radar-ia.sql`) + bucket `radar-media`, y dispara `POST /api/radar/procesar` (Bearer `RADAR_WORKER_SECRET`; el `GET` es cron cada 15 min con `CRON_SECRET`). El pipeline (`lib/radar/motor.ts`) hace triage con Haiku, extrae con el modelo configurado (visión para fotos/PDFs de vouchers) y ejecuta acciones por categoría (`lib/radar/acciones.ts`): oportunidades → `radar_oportunidades` (+disponibilidad/tarifario), combustible sin anomalías → inserta en `combustible` + odómetro, resto → `radar_alertas`. Config en `radar_config` (fila única). El dashboard `app/radar-ia/page.tsx` (módulo `radar-ia`) lee las tablas directo con RLS. `radar-worker/` es un proyecto Node aparte, excluido del tsconfig raíz — no lo importa nada del ERP.
+
 ### Conventions
 
 - `@/*` in `tsconfig.json` resolves to the repo root, so `@/lib/supabase` ≡ `lib/supabase.ts`.

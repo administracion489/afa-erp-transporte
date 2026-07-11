@@ -287,6 +287,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       { href: "/crm/pipeline", label: "Pipeline",   sub: "Embudo de ventas",    icon: Ic.TrendingUp,    modulo: "crm" },
       { href: "/crm/agente",   label: "Agente IA",  sub: "Asistente con Claude", icon: Ic.Bot,          modulo: "crm" },
       { href: "/crm/campanas", label: "Campañas",   sub: "Envíos masivos WhatsApp/Email", icon: Ic.Bell, modulo: "crm" },
+      { href: "/radar-ia",     label: "Radar IA",   sub: "Grupos WhatsApp → ERP", icon: Ic.Radio,       modulo: "radar-ia" },
     ],
   },
   {

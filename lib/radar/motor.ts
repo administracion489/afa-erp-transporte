@@ -1,0 +1,468 @@
+// lib/radar/motor.ts — Motor del pipeline Radar IA (SOLO servidor).
+//
+// procesarPendientes() es el único punto de entrada (lo llaman /api/radar/procesar —
+// trigger del worker y cron de barrido — y /api/radar/reprocesar). Por cada mensaje
+// pendiente de radar_mensajes:
+//   1. Gates: radar activo, horario de monitoreo, presupuesto diario de IA.
+//   2. Texto → triage con el modelo económico (Haiku) → extracción por categoría.
+//      Imagen/PDF → una sola llamada con visión (clasifica + extrae).
+//      Nota de voz → transcripción opcional (lib/radar/transcripcion.ts) → ruta de texto.
+//   3. lib/radar/acciones.ts ejecuta la acción de la categoría (oportunidad, combustible…).
+//   4. Se persiste todo en la fila: categoría, confianza, resumen, extracción, acción,
+//      tokens y costo. Los errores de un mensaje jamás tumban el lote.
+
+import Anthropic from "@anthropic-ai/sdk";
+import { createClient } from "@supabase/supabase-js";
+import { enviarEmail } from "@/lib/notificaciones";
+import { ejecutarAccion, crearAlerta, fechaLima, horaLima } from "./acciones";
+import { promptTriage, promptExtraccion, promptExtraccionMedia, type ContextoPrompt } from "./prompts";
+import { transcribirAudio } from "./transcripcion";
+import { LISTA_CATEGORIAS, type CategoriaRadar, type RadarConfig, type ResumenProcesamiento } from "./tipos";
+
+// ── Cliente admin (patrón de la casa) ────────────────────────────────────────
+
+const db = () =>
+  createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+
+// Cliente Anthropic perezoso (mismo criterio que lib/vision-ia.ts: el route no debe
+// reventar al cargar el módulo si falta la clave).
+let _anthropic: Anthropic | null = null;
+const getAnthropic = () => (_anthropic ??= new Anthropic());
+
+// ── Costos por millón de tokens (USD) para el freno de presupuesto ───────────
+
+const PRECIOS: Record<string, { entrada: number; salida: number }> = {
+  "claude-haiku-4-5": { entrada: 1, salida: 5 },
+  "claude-sonnet-5": { entrada: 3, salida: 15 },
+  "claude-opus-4-8": { entrada: 5, salida: 25 },
+};
+
+function costoUsd(modelo: string, entrada: number, salida: number): number {
+  const p = PRECIOS[modelo] ?? PRECIOS["claude-sonnet-5"];
+  return (entrada * p.entrada + salida * p.salida) / 1_000_000;
+}
+
+// Parámetros extra por modelo (mismo patrón que extrasModelo() en lib/elia/config.ts)
+function extras(modelo: string): Record<string, unknown> {
+  if (modelo.startsWith("claude-haiku")) return {};
+  return { thinking: { type: "adaptive" }, output_config: { effort: "low" } };
+}
+
+// ── Extracción de JSON de la respuesta del modelo (patrón de lib/vision-ia.ts) ──
+
+function extraerJSON(texto: string): any {
+  const limpio = texto.replace(/```json/gi, "").replace(/```/g, "").replace(/^`+|`+$/g, "").trim();
+  const ini = limpio.indexOf("{");
+  const fin = limpio.lastIndexOf("}");
+  if (ini === -1 || fin === -1) throw new Error("La IA no devolvió un JSON reconocible (respuesta vacía o truncada)");
+  const frag = limpio.slice(ini, fin + 1);
+  try {
+    return JSON.parse(frag);
+  } catch (e: any) {
+    throw new Error(`No se pudo interpretar el JSON de la IA: ${e.message}. Inicio: ${frag.slice(0, 120)}`);
+  }
+}
+
+// ── Config con defaults seguros (si la tabla aún no existe o está vacía) ─────
+
+const CONFIG_DEFECTO: RadarConfig = {
+  id: 1,
+  activo: true,
+  horario_activo: false,
+  hora_inicio: "06:00",
+  hora_fin: "22:00",
+  categorias_activas: LISTA_CATEGORIAS.filter((c) => c !== "otros"),
+  acciones_automaticas: { combustible: true, mantenimiento: false, operaciones: false },
+  palabras_clave: [],
+  umbral_confianza: 0.7,
+  modelo_triage: "claude-haiku-4-5",
+  modelo_extraccion: "claude-sonnet-5",
+  notificar_email: false,
+  correos_alerta: null,
+  limite_diario_usd: 5,
+  updated_at: "",
+};
+
+async function cargarConfig(sb: any): Promise<RadarConfig> {
+  try {
+    const { data } = await sb.from("radar_config").select("*").eq("id", 1).maybeSingle();
+    if (!data) return CONFIG_DEFECTO;
+    return {
+      ...CONFIG_DEFECTO,
+      ...data,
+      categorias_activas: Array.isArray(data.categorias_activas)
+        ? data.categorias_activas
+        : CONFIG_DEFECTO.categorias_activas,
+      acciones_automaticas: data.acciones_automaticas ?? CONFIG_DEFECTO.acciones_automaticas,
+      palabras_clave: Array.isArray(data.palabras_clave) ? data.palabras_clave : [],
+    };
+  } catch {
+    return CONFIG_DEFECTO;
+  }
+}
+
+// ── Llamada al modelo (no streaming) ─────────────────────────────────────────
+
+type RespuestaIA = { texto: string; entrada: number; salida: number };
+
+async function llamarIA(modelo: string, content: any[]): Promise<RespuestaIA> {
+  const resp: any = await getAnthropic().messages.create({
+    model: modelo,
+    max_tokens: 2500,
+    messages: [{ role: "user", content }],
+    ...extras(modelo),
+  } as any);
+  const texto = (resp?.content ?? [])
+    .filter((b: any) => b.type === "text")
+    .map((b: any) => b.text)
+    .join("\n");
+  return {
+    texto,
+    entrada: Number(resp?.usage?.input_tokens ?? 0),
+    salida: Number(resp?.usage?.output_tokens ?? 0),
+  };
+}
+
+// ── Punto de entrada ─────────────────────────────────────────────────────────
+
+export async function procesarPendientes(opts?: {
+  limite?: number;
+  soloMensajeId?: string;
+  forzar?: boolean;
+}): Promise<ResumenProcesamiento> {
+  const sb = db();
+  const limite = Math.min(50, Math.max(1, opts?.limite ?? 20));
+  const forzar = opts?.forzar === true;
+  const resumen: ResumenProcesamiento = { procesados: 0, descartados: 0, errores: 0, omitidos: 0, costo_usd: 0 };
+
+  const config = await cargarConfig(sb);
+
+  // Candidatos (el conteo alimenta "omitidos" cuando un gate frena el lote)
+  let consulta = sb
+    .from("radar_mensajes")
+    .select("*")
+    .eq("estado", "pendiente")
+    .order("recibido_en", { ascending: true })
+    .limit(limite);
+  if (opts?.soloMensajeId) consulta = consulta.eq("id", opts.soloMensajeId);
+  const { data: pendientes, error: errSel } = await consulta;
+  if (errSel) throw new Error(`radar_mensajes: ${errSel.message}`);
+  const lote = (pendientes as any[]) ?? [];
+  if (!lote.length) return resumen;
+
+  // Gate 1: radar apagado → los mensajes quedan pendientes (se procesan al reactivar)
+  if (!config.activo && !forzar) {
+    resumen.omitidos = lote.length;
+    return resumen;
+  }
+
+  // Gate 2: fuera del horario de monitoreo → el cron los recoge dentro de la ventana
+  if (config.horario_activo && !forzar) {
+    const ahora = horaLima();
+    const dentro =
+      config.hora_inicio <= config.hora_fin
+        ? ahora >= config.hora_inicio && ahora <= config.hora_fin
+        : ahora >= config.hora_inicio || ahora <= config.hora_fin; // ventana que cruza medianoche
+    if (!dentro) {
+      resumen.omitidos = lote.length;
+      return resumen;
+    }
+  }
+
+  // Gate 3: presupuesto diario de IA (suma de costo_usd de lo procesado hoy, hora Lima)
+  const inicioDiaUtc = `${fechaLima()}T05:00:00.000Z`; // 00:00 Lima = 05:00 UTC
+  let gastoHoy = 0;
+  try {
+    const { data: gastos } = await sb
+      .from("radar_mensajes")
+      .select("costo_usd")
+      .gte("procesado_en", inicioDiaUtc);
+    gastoHoy = ((gastos as any[]) ?? []).reduce((acc, r) => acc + Number(r.costo_usd || 0), 0);
+  } catch {
+    // sin datos de gasto: seguir con 0
+  }
+  if (gastoHoy >= config.limite_diario_usd && !forzar) {
+    resumen.omitidos = lote.length;
+    await alertaPresupuesto(sb, inicioDiaUtc, config.limite_diario_usd);
+    return resumen;
+  }
+
+  for (const mensaje of lote) {
+    // Freno de presupuesto también a mitad de lote
+    if (!forzar && gastoHoy + resumen.costo_usd >= config.limite_diario_usd) {
+      resumen.omitidos++;
+      continue;
+    }
+
+    // Claim optimista: si el cron y el trigger corren a la vez, solo uno toma el mensaje
+    const { data: claim } = await sb
+      .from("radar_mensajes")
+      .update({ estado: "procesando" })
+      .eq("id", mensaje.id)
+      .eq("estado", "pendiente")
+      .select("id");
+    if (!claim || !(claim as any[]).length) continue;
+
+    try {
+      const r = await procesarMensaje(sb, mensaje, config, forzar);
+      resumen.costo_usd += r.costo;
+      if (r.estado === "procesado") resumen.procesados++;
+      else resumen.descartados++;
+    } catch (e: any) {
+      resumen.errores++;
+      const msg = String(e?.message ?? e).slice(0, 500);
+      console.error("[radar/motor] mensaje", mensaje.id, msg);
+      await sb
+        .from("radar_mensajes")
+        .update({ estado: "error", error: msg, procesado_en: new Date().toISOString() })
+        .eq("id", mensaje.id);
+    }
+  }
+
+  resumen.costo_usd = Math.round(resumen.costo_usd * 10000) / 10000;
+  return resumen;
+}
+
+// Alerta única por día cuando se agota el presupuesto de IA.
+async function alertaPresupuesto(sb: any, inicioDiaUtc: string, limite: number) {
+  try {
+    const { data } = await sb
+      .from("radar_alertas")
+      .select("id")
+      .eq("tipo", "sistema")
+      .gte("created_at", inicioDiaUtc)
+      .limit(1);
+    if ((data as any[])?.length) return;
+    await crearAlerta(sb, {
+      tipo: "sistema",
+      severidad: "atencion",
+      titulo: "🛰️ Radar IA en pausa: límite diario de gasto IA alcanzado",
+      detalle: `Se alcanzó el límite de $${limite} configurado. Los mensajes quedan pendientes y se procesarán mañana, o sube el límite en /radar-ia > Configuración.`,
+      href: "/radar-ia?tab=configuracion",
+    });
+  } catch {
+    // la alerta es cortesía: nunca frena el pipeline
+  }
+}
+
+// ── Procesamiento de un mensaje ──────────────────────────────────────────────
+
+type ResultadoMensaje = { estado: "procesado" | "descartado"; costo: number };
+
+async function procesarMensaje(
+  sb: any,
+  mensaje: any,
+  config: RadarConfig,
+  forzar: boolean
+): Promise<ResultadoMensaje> {
+  const ctx: ContextoPrompt = {
+    grupo: mensaje.grupo_nombre,
+    remitente: mensaje.remitente_nombre ?? mensaje.remitente_wa,
+    fechaHoy: fechaLima(),
+    horaAhora: horaLima(),
+    palabrasClave: config.palabras_clave,
+  };
+
+  let entrada = 0;
+  let salida = 0;
+  let costoTotal = 0;
+  const modeloTriage = config.modelo_triage || "claude-haiku-4-5";
+  const modeloExtraccion = config.modelo_extraccion || "claude-sonnet-5";
+  // Acumula tokens y costo atribuyendo cada llamada a su propio modelo
+  const sumar = (modelo: string, r: RespuestaIA) => {
+    entrada += r.entrada;
+    salida += r.salida;
+    costoTotal += costoUsd(modelo, r.entrada, r.salida);
+  };
+
+  const finalizar = async (
+    estado: "procesado" | "descartado",
+    campos: Record<string, unknown>
+  ): Promise<ResultadoMensaje> => {
+    const costo = Math.round(costoTotal * 10000) / 10000;
+    await sb
+      .from("radar_mensajes")
+      .update({
+        estado,
+        tokens_entrada: entrada,
+        tokens_salida: salida,
+        costo_usd: costo,
+        procesado_en: new Date().toISOString(),
+        error: null,
+        ...campos,
+      })
+      .eq("id", mensaje.id);
+    return { estado, costo };
+  };
+
+  // 1) Resolver el texto a analizar según el tipo de mensaje
+  let texto: string = String(mensaje.texto ?? "").trim();
+
+  if (mensaje.tipo === "audio") {
+    let transcripcion: string | null = mensaje.transcripcion ?? null;
+    if (!transcripcion && mensaje.media_url) {
+      transcripcion = await transcribirAudio(mensaje.media_url, mensaje.media_mime);
+      if (transcripcion) await sb.from("radar_mensajes").update({ transcripcion }).eq("id", mensaje.id);
+    }
+    if (!transcripcion) {
+      return finalizar("descartado", {
+        categoria: "otros",
+        accion: "sin_transcripcion",
+        resumen_ia: "Nota de voz sin transcripción disponible (configura OPENAI_API_KEY para transcribir)",
+      });
+    }
+    texto = transcripcion;
+  }
+
+  if (mensaje.tipo === "video" && !texto) {
+    return finalizar("descartado", {
+      categoria: "otros",
+      accion: "tipo_no_soportado",
+      resumen_ia: "Video sin texto: el Radar no analiza videos",
+    });
+  }
+
+  const esPdf = (mensaje.media_mime ?? "").toLowerCase().includes("pdf");
+  const conVision =
+    !!mensaje.media_url && (mensaje.tipo === "imagen" || (mensaje.tipo === "documento" && esPdf));
+
+  // Documento no-PDF sin caption: nada que analizar
+  if (mensaje.tipo === "documento" && !esPdf && !texto) {
+    return finalizar("descartado", {
+      categoria: "otros",
+      accion: "tipo_no_soportado",
+      resumen_ia: `Documento ${mensaje.media_nombre ?? ""} en formato no analizable (solo PDF)`.trim(),
+    });
+  }
+  if ((mensaje.tipo === "imagen" || mensaje.tipo === "documento") && !mensaje.media_url && !texto) {
+    return finalizar("descartado", {
+      categoria: "otros",
+      accion: "sin_contenido",
+      resumen_ia: "Adjunto sin descargar y sin texto: nada que analizar",
+    });
+  }
+
+  // 2) Clasificar (+ extraer, si aplica)
+  let categoria: CategoriaRadar;
+  let confianza: number;
+  let resumenIa: string;
+  let datos: any = null;
+
+  if (conVision) {
+    // Imagen/PDF: una sola llamada con visión que clasifica y extrae
+    const bloqueMedia = esPdf && mensaje.tipo === "documento"
+      ? { type: "document", source: { type: "url", url: mensaje.media_url } }
+      : mensaje.tipo === "imagen"
+        ? { type: "image", source: { type: "url", url: mensaje.media_url } }
+        : { type: "document", source: { type: "url", url: mensaje.media_url } };
+    const prompt =
+      promptExtraccionMedia(ctx) + (texto ? `\n\nTexto/caption que acompaña al archivo:\n"""${texto}"""` : "");
+    const r = await llamarIA(modeloExtraccion, [bloqueMedia, { type: "text", text: prompt }]);
+    sumar(modeloExtraccion, r);
+    const json = extraerJSON(r.texto);
+    categoria = normalizarCategoria(json?.categoria);
+    confianza = normalizarConfianza(json?.confianza);
+    resumenIa = String(json?.resumen ?? "").slice(0, 300) || "Sin resumen";
+    datos = json?.datos ?? {};
+  } else {
+    // Texto: triage barato primero
+    const t = await llamarIA(modeloTriage, [
+      { type: "text", text: `${promptTriage(ctx)}\n\nMensaje a clasificar:\n"""${texto}"""` },
+    ]);
+    sumar(modeloTriage, t);
+    const triage = extraerJSON(t.texto);
+    categoria = normalizarCategoria(triage?.categoria);
+    confianza = normalizarConfianza(triage?.confianza);
+    resumenIa = String(triage?.resumen ?? "").slice(0, 300) || "Sin resumen";
+
+    if (categoria !== "otros" && (config.categorias_activas.includes(categoria) || forzar)) {
+      const e = await llamarIA(modeloExtraccion, [
+        { type: "text", text: `${promptExtraccion(categoria, ctx)}\n\nMensaje:\n"""${texto}"""` },
+      ]);
+      sumar(modeloExtraccion, e);
+      datos = extraerJSON(e.texto);
+    }
+  }
+
+  // 3) Gates de categoría
+  if (categoria === "otros") {
+    return finalizar("descartado", {
+      categoria,
+      confianza,
+      resumen_ia: resumenIa,
+      accion: "sin_relevancia",
+    });
+  }
+  if (!config.categorias_activas.includes(categoria) && !forzar) {
+    return finalizar("descartado", {
+      categoria,
+      confianza,
+      resumen_ia: resumenIa,
+      accion: "categoria_inactiva",
+    });
+  }
+
+  // 4) Acción de la categoría
+  const resultado = await ejecutarAccion({ sb, mensaje, categoria, datos: datos ?? {}, confianza, config });
+
+  // 5) Notificación por correo (crítico u oportunidad) — cortesía, nunca frena
+  await notificarPorCorreo(config, mensaje, categoria, resumenIa, resultado).catch(() => {});
+
+  return finalizar("procesado", {
+    categoria,
+    confianza,
+    resumen_ia: resumenIa,
+    resultado: { extraccion: datos, accion: resultado },
+    accion: resultado.accion,
+  });
+}
+
+function normalizarCategoria(v: unknown): CategoriaRadar {
+  const c = String(v ?? "").toLowerCase().trim() as CategoriaRadar;
+  return (LISTA_CATEGORIAS as string[]).includes(c) ? c : "otros";
+}
+
+function normalizarConfianza(v: unknown): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0.5;
+  return Math.max(0, Math.min(1, n));
+}
+
+// ── Correo de alerta (Resend vía lib/notificaciones) ─────────────────────────
+
+async function notificarPorCorreo(
+  config: RadarConfig,
+  mensaje: any,
+  categoria: CategoriaRadar,
+  resumenIa: string,
+  resultado: { accion: string; detalle: string; datos?: Record<string, unknown> }
+) {
+  if (!config.notificar_email || !config.correos_alerta) return;
+  const severidad = String((resultado.datos as any)?.severidad ?? "");
+  const esRelevante = severidad === "critico" || categoria === "oportunidad_comercial";
+  if (!esRelevante) return;
+
+  const correos = config.correos_alerta
+    .split(",")
+    .map((c) => c.trim())
+    .filter((c) => c.includes("@"));
+  if (!correos.length) return;
+
+  const titulo = String((resultado.datos as any)?.titulo ?? resumenIa);
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 560px;">
+      <h2 style="color:#0b315f; margin-bottom:4px;">🛰️ Radar IA</h2>
+      <p style="font-size:15px; margin:12px 0;"><strong>${titulo}</strong></p>
+      <p style="color:#444;">${resultado.detalle}</p>
+      <p style="color:#666; font-size:13px;">Grupo: ${mensaje.grupo_nombre ?? "—"} · Remitente: ${mensaje.remitente_nombre ?? "—"}</p>
+      <p style="color:#888; font-size:12px; white-space:pre-wrap;">${String(mensaje.texto ?? "").slice(0, 400)}</p>
+      <p style="font-size:13px;"><a href="${process.env.NEXT_PUBLIC_APP_URL ?? ""}/radar-ia" style="color:#1262bd;">Abrir el Radar IA</a></p>
+    </div>`;
+  for (const to of correos) {
+    await enviarEmail({ to, subject: `🛰️ Radar IA: ${titulo.slice(0, 80)}`, html }).catch((e) =>
+      console.warn("[radar/motor] email falló:", e?.message ?? e)
+    );
+  }
+}

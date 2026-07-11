@@ -35,6 +35,7 @@ const MODULOS = [
   "configuracion",
   "despachador",
   "crm",
+  "radar-ia",
 ];
 
 export async function POST(request: Request) {

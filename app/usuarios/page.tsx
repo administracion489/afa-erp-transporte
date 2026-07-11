@@ -20,7 +20,7 @@ type Permiso = {
 
 const GRUPOS_MODULOS = [
   { label: "General",     icono: "🏠", modulos: ["dashboard", "calendario"] },
-  { label: "Comercial",   icono: "📋", modulos: ["reservas", "cotizaciones", "clientes", "crm"] },
+  { label: "Comercial",   icono: "📋", modulos: ["reservas", "cotizaciones", "clientes", "crm", "radar-ia"] },
   { label: "Operaciones", icono: "🚌", modulos: ["programacion", "seguimiento", "incidencias"] },
   { label: "Proveedores", icono: "🤝", modulos: ["proveedores", "tercerizadas"] },
   { label: "Personal",    icono: "👷", modulos: ["conductores", "personal-administrativo"] },
@@ -35,6 +35,7 @@ const MODULOS = GRUPOS_MODULOS.flatMap((g) => g.modulos);
 const nombresModulo: Record<string, string> = {
   dashboard: "Dashboard", calendario: "Calendario",
   reservas: "Reservas", cotizaciones: "Cotizaciones", clientes: "Clientes", crm: "CRM",
+  "radar-ia": "Radar IA",
   programacion: "Programación", seguimiento: "Seguimiento", incidencias: "Incidencias",
   proveedores: "Proveedores", tercerizadas: "Tercerizadas",
   conductores: "Conductores", "personal-administrativo": "Personal Adm.",

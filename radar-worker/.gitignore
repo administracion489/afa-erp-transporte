@@ -1,0 +1,11 @@
+# Dependencias
+node_modules/
+
+# Sesión de WhatsApp (credenciales Baileys) — NUNCA subirla al repo
+auth/
+
+# Variables de entorno con claves reales
+.env
+
+# Logs
+*.log
