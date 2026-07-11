@@ -130,8 +130,8 @@ export default function Page() {
 
   .shots{display:flex; gap:18px; flex-wrap:wrap; margin:18px 0 6px; justify-content:center;}
   .shots.one{justify-content:flex-start;}
-  figure.shot{margin:0; flex:0 0 auto; width:230px; text-align:center;}
-  figure.shot img{width:100%; display:block; border-radius:16px; border:1px solid var(--c-line); box-shadow:0 10px 28px rgba(11,49,95,.14);}
+  figure.shot{margin:0; flex:1 1 auto; width:100%; max-width:700px; text-align:center;}
+  figure.shot img{width:100%; display:block; border-radius:14px; border:1px solid var(--c-line); box-shadow:0 10px 28px rgba(11,49,95,.14);}
   figure.shot figcaption{margin-top:9px; font-size:12px; color:var(--c-mute); font-style:italic;}
 
   footer{text-align:center; color:var(--c-mute); font-size:12.5px; margin-top:40px;}
