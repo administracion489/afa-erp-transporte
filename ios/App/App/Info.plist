@@ -24,6 +24,19 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>AFA Conductores usa tu ubicación para mostrar tu posición en el mapa mientras registras el servicio.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>AFA Conductores necesita tu ubicación en segundo plano para que la empresa y los pasajeros puedan seguir el recorrido del servicio en tiempo real, incluso con la app minimizada.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>AFA Conductores necesita tu ubicación en segundo plano para que la empresa y los pasajeros puedan seguir el recorrido del servicio en tiempo real, incluso con la app minimizada.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>AFA Conductores usa la cámara para escanear el código QR de embarque de los pasajeros.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
