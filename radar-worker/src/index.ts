@@ -275,7 +275,7 @@ async function conectar(): Promise<void> {
     logger,
     markOnlineOnConnect: false,
     syncFullHistory: false,
-    browser: ["AFA Radar IA", "Chrome", "1.0"],
+    browser: ["Windows", "Chrome", "125.0.6422.142"],
   });
 
   sock.ev.on("creds.update", saveCreds);

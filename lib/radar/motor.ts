@@ -152,6 +152,10 @@ export async function procesarPendientes(opts?: {
   const lote = (pendientes as any[]) ?? [];
   if (!lote.length) return resumen;
 
+  // Contexto por grupo (nota del operador + restricción de categorías) — se carga en lote
+  // para no hacer una consulta por mensaje.
+  const gruposInfo = await cargarGruposInfo(sb, lote);
+
   // Gate 1: radar apagado → los mensajes quedan pendientes (se procesan al reactivar)
   if (!config.activo && !forzar) {
     resumen.omitidos = lote.length;
@@ -206,7 +210,8 @@ export async function procesarPendientes(opts?: {
     if (!claim || !(claim as any[]).length) continue;
 
     try {
-      const r = await procesarMensaje(sb, mensaje, config, forzar);
+      const grupoInfo = mensaje.grupo_id ? gruposInfo.get(mensaje.grupo_id) ?? null : null;
+      const r = await procesarMensaje(sb, mensaje, config, forzar, grupoInfo);
       resumen.costo_usd += r.costo;
       if (r.estado === "procesado") resumen.procesados++;
       else resumen.descartados++;
@@ -223,6 +228,28 @@ export async function procesarPendientes(opts?: {
 
   resumen.costo_usd = Math.round(resumen.costo_usd * 10000) / 10000;
   return resumen;
+}
+
+// Info de radar_grupos necesaria para el pipeline (contexto para el prompt + restricción de categorías).
+type GrupoInfo = { contexto: string | null; categorias_permitidas: CategoriaRadar[] | null };
+
+/** Carga en un solo select el contexto/restricciones de los grupos presentes en el lote. */
+async function cargarGruposInfo(sb: any, lote: any[]): Promise<Map<string, GrupoInfo>> {
+  const mapa = new Map<string, GrupoInfo>();
+  const grupoIds = Array.from(new Set(lote.map((m) => m.grupo_id).filter(Boolean)));
+  if (!grupoIds.length) return mapa;
+  try {
+    const { data } = await sb.from("radar_grupos").select("id, contexto, categorias_permitidas").in("id", grupoIds);
+    for (const g of (data as any[]) ?? []) {
+      mapa.set(g.id, {
+        contexto: g.contexto ?? null,
+        categorias_permitidas: Array.isArray(g.categorias_permitidas) ? g.categorias_permitidas : null,
+      });
+    }
+  } catch {
+    // sin contexto de grupo: el pipeline sigue con las categorías globales
+  }
+  return mapa;
 }
 
 // Alerta única por día cuando se agota el presupuesto de IA.
@@ -255,7 +282,8 @@ async function procesarMensaje(
   sb: any,
   mensaje: any,
   config: RadarConfig,
-  forzar: boolean
+  forzar: boolean,
+  grupoInfo: GrupoInfo | null
 ): Promise<ResultadoMensaje> {
   const ctx: ContextoPrompt = {
     grupo: mensaje.grupo_nombre,
@@ -263,7 +291,15 @@ async function procesarMensaje(
     fechaHoy: fechaLima(),
     horaAhora: horaLima(),
     palabrasClave: config.palabras_clave,
+    contextoGrupo: grupoInfo?.contexto ?? null,
   };
+
+  // Categorías efectivas para ESTE grupo: las globales, restringidas además por
+  // radar_grupos.categorias_permitidas si el operador definió una lista para el grupo.
+  const categoriasEfectivas =
+    grupoInfo?.categorias_permitidas && grupoInfo.categorias_permitidas.length > 0
+      ? config.categorias_activas.filter((c) => grupoInfo.categorias_permitidas!.includes(c))
+      : config.categorias_activas;
 
   let entrada = 0;
   let salida = 0;
@@ -377,7 +413,7 @@ async function procesarMensaje(
     confianza = normalizarConfianza(triage?.confianza);
     resumenIa = String(triage?.resumen ?? "").slice(0, 300) || "Sin resumen";
 
-    if (categoria !== "otros" && (config.categorias_activas.includes(categoria) || forzar)) {
+    if (categoria !== "otros" && (categoriasEfectivas.includes(categoria) || forzar)) {
       const e = await llamarIA(modeloExtraccion, [
         { type: "text", text: `${promptExtraccion(categoria, ctx)}\n\nMensaje:\n"""${texto}"""` },
       ]);
@@ -395,12 +431,14 @@ async function procesarMensaje(
       accion: "sin_relevancia",
     });
   }
-  if (!config.categorias_activas.includes(categoria) && !forzar) {
+  if (!categoriasEfectivas.includes(categoria) && !forzar) {
+    // Distingue si la bloqueó la config global o la restricción propia del grupo (para el feed).
+    const bloqueadaSoloPorGrupo = config.categorias_activas.includes(categoria);
     return finalizar("descartado", {
       categoria,
       confianza,
       resumen_ia: resumenIa,
-      accion: "categoria_inactiva",
+      accion: bloqueadaSoloPorGrupo ? "categoria_no_permitida_en_grupo" : "categoria_inactiva",
     });
   }
 

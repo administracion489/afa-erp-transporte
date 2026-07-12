@@ -55,6 +55,10 @@ export type RadarGrupo = {
   nombre: string;
   participantes: number;
   activo: boolean;
+  /** Nota del operador sobre qué es este grupo (se inyecta en los prompts de ELIA). */
+  contexto: string | null;
+  /** Restringe qué categorías aplican para ESTE grupo; null = usa las globales de radar_config. */
+  categorias_permitidas: CategoriaRadar[] | null;
   created_at: string;
   updated_at: string;
 };

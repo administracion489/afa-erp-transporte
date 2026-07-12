@@ -741,7 +741,13 @@ function TabAlertas({ alertas, onMarcarLeida, onMarcarTodas }: {
 
 // ── Tab: Grupos ──────────────────────────────────────────────────────────────
 
-function TabGrupos({ grupos, onToggle }: { grupos: RadarGrupo[]; onToggle: (g: RadarGrupo) => void }) {
+type PatchGrupo = { contexto: string | null; categorias_permitidas: CategoriaRadar[] | null };
+
+function TabGrupos({ grupos, onToggle, onGuardarContexto }: {
+  grupos: RadarGrupo[];
+  onToggle: (g: RadarGrupo) => void;
+  onGuardarContexto: (g: RadarGrupo, patch: PatchGrupo) => Promise<void>;
+}) {
   const [busqueda, setBusqueda] = useState("");
   const filtrados = grupos.filter((g) => !busqueda.trim() || norm(g.nombre).includes(norm(busqueda)));
 
@@ -751,6 +757,8 @@ function TabGrupos({ grupos, onToggle }: { grupos: RadarGrupo[]; onToggle: (g: R
         <span className="text-xl">ℹ️</span>
         <p className="text-sm text-[#0b315f] font-semibold">
           El número dedicado del Radar debe ser miembro del grupo. Los grupos se sincronizan solos al conectar el worker.
+          Si un grupo NO es de la operación de AFA (p.ej. una red de apoyo entre transportistas), abre la fila y cuéntale
+          el contexto a ELIA para que no clasifique mal sus mensajes.
         </p>
       </div>
 
@@ -779,12 +787,7 @@ function TabGrupos({ grupos, onToggle }: { grupos: RadarGrupo[]; onToggle: (g: R
               </thead>
               <tbody>
                 {filtrados.map((g) => (
-                  <tr key={g.id} className="border-t hover:bg-gray-50 transition-colors" style={{ borderColor: "#f1f5f9" }}>
-                    <td className="p-3 font-bold text-[#0b315f]">{g.nombre || "(sin nombre)"}</td>
-                    <td className="p-3 text-gray-600">{g.participantes}</td>
-                    <td className="p-3 font-mono text-xs text-gray-400">{g.wa_group_id}</td>
-                    <td className="p-3"><Switch on={g.activo} onClick={() => onToggle(g)} /></td>
-                  </tr>
+                  <FilaGrupo key={g.id} g={g} onToggle={onToggle} onGuardar={onGuardarContexto} />
                 ))}
               </tbody>
             </table>
@@ -792,6 +795,98 @@ function TabGrupos({ grupos, onToggle }: { grupos: RadarGrupo[]; onToggle: (g: R
         </section>
       )}
     </div>
+  );
+}
+
+function FilaGrupo({ g, onToggle, onGuardar }: {
+  g: RadarGrupo;
+  onToggle: (g: RadarGrupo) => void;
+  onGuardar: (g: RadarGrupo, patch: PatchGrupo) => Promise<void>;
+}) {
+  const [abierto, setAbierto] = useState(false);
+  const [contexto, setContexto] = useState(g.contexto ?? "");
+  const [cats, setCats] = useState<CategoriaRadar[]>(g.categorias_permitidas ?? []);
+  const [guardando, setGuardando] = useState(false);
+
+  // Si la fila llega actualizada desde afuera (recarga/realtime) y no se está editando, resincroniza el borrador.
+  useEffect(() => {
+    if (!abierto) {
+      setContexto(g.contexto ?? "");
+      setCats(g.categorias_permitidas ?? []);
+    }
+  }, [g.contexto, g.categorias_permitidas, abierto]);
+
+  const toggleCat = (c: CategoriaRadar) =>
+    setCats((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
+
+  const guardar = async () => {
+    setGuardando(true);
+    await onGuardar(g, { contexto: contexto.trim() || null, categorias_permitidas: cats.length ? cats : null });
+    setGuardando(false);
+  };
+
+  const personalizado = !!g.contexto || !!(g.categorias_permitidas && g.categorias_permitidas.length);
+
+  return (
+    <>
+      <tr className="border-t hover:bg-gray-50 transition-colors" style={{ borderColor: "#f1f5f9" }}>
+        <td className="p-3">
+          <button onClick={() => setAbierto((v) => !v)} className="flex items-center gap-2 font-bold text-[#0b315f] text-left">
+            <Ic.Chevron size={13} className={`text-gray-300 transition-transform flex-shrink-0 ${abierto ? "rotate-180" : ""}`} />
+            <span>{g.nombre || "(sin nombre)"}</span>
+            {personalizado && (
+              <span className="w-1.5 h-1.5 rounded-full bg-[#2f8ee9] flex-shrink-0" title="Tiene contexto o categorías personalizadas" />
+            )}
+          </button>
+        </td>
+        <td className="p-3 text-gray-600">{g.participantes}</td>
+        <td className="p-3 font-mono text-xs text-gray-400">{g.wa_group_id}</td>
+        <td className="p-3"><Switch on={g.activo} onClick={() => onToggle(g)} /></td>
+      </tr>
+      {abierto && (
+        <tr className="bg-blue-50/30 border-t" style={{ borderColor: "#f1f5f9" }}>
+          <td colSpan={4} className="p-4 space-y-3">
+            <div>
+              <label className="text-xs font-black text-gray-400 uppercase tracking-wide">Contexto para ELIA (opcional)</label>
+              <textarea
+                value={contexto}
+                onChange={(e) => setContexto(e.target.value)}
+                rows={2}
+                placeholder='Ej: "Red de apoyo entre transportistas independientes, NO es la flota de AFA. Marcar oportunidad_comercial solo si alguien pide un servicio que AFA podría cubrir."'
+                className="w-full mt-1 border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-[#0b315f] transition-colors bg-white"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-black text-gray-400 uppercase tracking-wide">Categorías permitidas en este grupo</label>
+              <p className="text-[11px] text-gray-400 mb-1.5 mt-0.5">Sin selección = usa las categorías activas globales de Configuración.</p>
+              <div className="flex flex-wrap gap-1.5">
+                {LISTA_CATEGORIAS.filter((c) => c !== "otros").map((c) => {
+                  const activa = cats.includes(c);
+                  const cat = CATEGORIAS_RADAR[c];
+                  return (
+                    <button
+                      key={c}
+                      onClick={() => toggleCat(c)}
+                      className={`px-2.5 py-1 rounded-full text-[11px] font-bold border transition-colors ${activa ? "" : "border-gray-200 text-gray-400 bg-white hover:border-gray-300"}`}
+                      style={activa ? { color: cat.color, background: cat.bg, borderColor: cat.color } : undefined}
+                    >
+                      {cat.emoji} {cat.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <button
+              onClick={guardar}
+              disabled={guardando}
+              className="bg-[#0b315f] text-white px-4 py-2 rounded-xl text-xs font-bold hover:bg-[#1262bd] transition-colors disabled:opacity-50"
+            >
+              {guardando ? "Guardando…" : "Guardar"}
+            </button>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 
@@ -1408,6 +1503,20 @@ export default function RadarIAPage() {
     }
   }
 
+  async function guardarContextoGrupo(
+    g: RadarGrupo,
+    patch: { contexto: string | null; categorias_permitidas: CategoriaRadar[] | null }
+  ) {
+    const { error } = await supabase.from("radar_grupos").update(patch).eq("id", g.id);
+    if (error) {
+      console.warn("radar-ia: error guardando contexto de grupo", error);
+      showToast("No se pudo guardar el contexto del grupo", false);
+      return;
+    }
+    setGrupos((prev) => prev.map((x) => (x.id === g.id ? { ...x, ...patch } : x)));
+    showToast(`Contexto de «${g.nombre}» guardado`);
+  }
+
   async function guardarConfig(cfg: RadarConfig) {
     setGuardandoConfig(true);
     const { error } = await supabase
@@ -1582,7 +1691,7 @@ export default function RadarIAPage() {
             {tab === "alertas" && (
               <TabAlertas alertas={alertas} onMarcarLeida={marcarAlertaLeida} onMarcarTodas={marcarTodasLeidas} />
             )}
-            {tab === "grupos" && <TabGrupos grupos={grupos} onToggle={toggleGrupo} />}
+            {tab === "grupos" && <TabGrupos grupos={grupos} onToggle={toggleGrupo} onGuardarContexto={guardarContextoGrupo} />}
             {tab === "configuracion" && (
               config ? (
                 <TabConfiguracion config={config} guardando={guardandoConfig} onGuardar={guardarConfig} />

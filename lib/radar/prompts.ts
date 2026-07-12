@@ -18,6 +18,7 @@ export type ContextoPrompt = {
   fechaHoy: string;            // YYYY-MM-DD hora Lima (UTC-5)
   horaAhora: string;           // HH:MM hora Lima
   palabrasClave?: string[];    // pistas extra configuradas en radar_config.palabras_clave
+  contextoGrupo?: string | null; // nota del operador sobre qué es este grupo (radar_grupos.contexto)
 };
 
 // ── Helpers de fecha (solo formateo, la fecha Lima llega ya resuelta) ────────
@@ -42,9 +43,13 @@ function lineaContexto(ctx: ContextoPrompt): string {
   if (ctx.grupo) partes.push(`Mensaje del grupo de WhatsApp "${ctx.grupo}"`);
   else partes.push("Mensaje de un grupo de WhatsApp de la operación");
   if (ctx.remitente) partes.push(`enviado por "${ctx.remitente}"`);
+  const contextoGrupo = (ctx.contextoGrupo ?? "").trim();
+  const lineaGrupo = contextoGrupo
+    ? `\n\nIMPORTANTE — contexto de este grupo (lo definió el operador de AFA Transportes, tiene prioridad sobre cualquier suposición tuya): ${contextoGrupo}`
+    : "";
   return `${partes.join(" ")}.
 Hoy es ${diaSemana(ctx.fechaHoy)} ${ctx.fechaHoy} y son las ${ctx.horaAhora} en Lima, Perú (UTC-5).
-Resolución de fechas relativas (hora Lima): "hoy" = ${ctx.fechaHoy} · "mañana"/"mñn" = ${manana} · "pasado mañana" = ${pasado}.`;
+Resolución de fechas relativas (hora Lima): "hoy" = ${ctx.fechaHoy} · "mañana"/"mñn" = ${manana} · "pasado mañana" = ${pasado}.${lineaGrupo}`;
 }
 
 function lineaPalabrasClave(ctx: ContextoPrompt): string {
@@ -66,14 +71,16 @@ const GLOSARIO = `Jerga frecuente en estos grupos (español peruano informal):
 
 // ── Descripciones de categorías (compartidas por triage y media) ─────────────
 
-const DESCRIPCION_CATEGORIAS = `- "oportunidad_comercial": alguien pide o consulta un servicio de transporte (cotización, disponibilidad, "¿tienen van para mñn?", full day, traslado, recojo de personal).
-- "combustible": recarga de combustible o voucher de grifo (galones, litros, diésel, GNV, GLP, urea, precio, importe).
-- "mantenimiento": trabajos de taller o mecánica (cambio de aceite, frenos, llantas, repuestos, "la unidad está en el mecánico", scanner, soldadura).
-- "operaciones": novedades del servicio del día ("ya salí", "iniciando ruta", "llegué al punto", "pasajeros abordados", "terminé el servicio", retrasos, cancelaciones).
-- "incidencias": choques, averías en ruta, robos, reclamos de clientes, accidentes, unidad varada.
-- "documentacion": vencimiento o renovación de SOAT, revisión técnica (CITV), licencias de conducir, pólizas, permisos MTC/SUTRAN.
-- "cobranza": pagos de clientes, facturas, depósitos, transferencias, "ya abonó", deudas por cobrar.
-- "otros": saludos, stickers, cadenas, humor, conversación personal o sin valor operativo.`;
+const DESCRIPCION_CATEGORIAS = `- "oportunidad_comercial": alguien pide o consulta un servicio de transporte que AFA Transportes podría cubrir con su flota (cotización, disponibilidad, "¿tienen van para mñn?", full day, traslado, recojo de personal). Incluye pedidos de apoyo/subcontrato de otro transportista SI implican que AFA cubra el servicio con su propia flota.
+- "combustible": recarga de combustible o voucher de grifo DE UNA UNIDAD DE LA FLOTA DE AFA (propia o tercerizada bajo contrato con AFA) — galones, litros, diésel, GNV, GLP, urea, precio, importe. No es de la flota de AFA si no hay ninguna señal de que la unidad/conductor pertenece a la operación de AFA.
+- "mantenimiento": trabajos de taller o mecánica sobre una unidad DE LA FLOTA DE AFA (cambio de aceite, frenos, llantas, repuestos, "la unidad está en el mecánico", scanner, soldadura).
+- "operaciones": novedades de un servicio QUE AFA ESTÁ OPERANDO ese día con su propia flota o la tercerizada bajo contrato ("ya salí", "iniciando ruta", "llegué al punto", "pasajeros abordados", "terminé el servicio", retrasos, cancelaciones).
+- "incidencias": choques, averías en ruta, robos, reclamos de clientes, accidentes, unidad varada — DE LA OPERACIÓN DE AFA.
+- "documentacion": vencimiento o renovación de SOAT, revisión técnica (CITV), licencias de conducir, pólizas, permisos MTC/SUTRAN — de personal o unidades de AFA.
+- "cobranza": pagos de clientes, facturas, depósitos, transferencias, "ya abonó", deudas por cobrar — de clientes de AFA.
+- "otros": saludos, stickers, cadenas, humor, conversación personal o sin valor operativo. TAMBIÉN va aquí cualquier reporte de combustible/mantenimiento/operaciones/incidencia sobre un vehículo o servicio que NO es de AFA (p.ej. otro transportista contando su propio viaje, su propia unidad o su propio abastecimiento).
+
+MUY IMPORTANTE: muchos grupos de WhatsApp del rubro transporte son redes de apoyo ENTRE transportistas/colegas independientes (se avisan entre ellos disponibilidad, pasajeros, viajes de terceros — nada que ver con AFA). Un mensaje de ese tipo de grupo casi siempre es "otros", salvo que alguien pida explícitamente un servicio que AFA podría cubrir (ahí sí es "oportunidad_comercial"). NUNCA clasifiques como "combustible", "mantenimiento", "operaciones" o "incidencias" el reporte de un vehículo o servicio ajeno a AFA solo porque el mensaje "suena" a eso — esas categorías son EXCLUSIVAS de la operación de AFA Transportes.`;
 
 // ── Reglas comunes de extracción ─────────────────────────────────────────────
 
@@ -185,13 +192,13 @@ const ENCABEZADO_EXTRACCION: Record<Exclude<CategoriaRadar, "otros">, string> = 
   oportunidad_comercial:
     "El mensaje es una OPORTUNIDAD COMERCIAL: alguien pide o consulta un servicio de transporte. Extrae los datos del pedido para que el área comercial pueda cotizar.",
   combustible:
-    "El mensaje reporta una RECARGA DE COMBUSTIBLE (texto o datos dictados de un voucher de grifo). Extrae los datos de la recarga.",
+    "El mensaje reporta una RECARGA DE COMBUSTIBLE de una unidad de LA FLOTA DE AFA (texto o datos dictados de un voucher de grifo). Extrae los datos de la recarga.",
   mantenimiento:
-    "El mensaje reporta un trabajo de MANTENIMIENTO o mecánica sobre una unidad de la flota. Extrae los datos del trabajo.",
+    "El mensaje reporta un trabajo de MANTENIMIENTO o mecánica sobre una unidad de LA FLOTA DE AFA. Extrae los datos del trabajo.",
   operaciones:
-    "El mensaje es una novedad de OPERACIONES sobre un servicio del día (inicio, fin, llegada, abordaje, retraso o cancelación). Extrae el evento.",
+    "El mensaje es una novedad de OPERACIONES sobre un servicio del día QUE AFA ESTÁ OPERANDO (inicio, fin, llegada, abordaje, retraso o cancelación). Extrae el evento.",
   incidencias:
-    "El mensaje reporta una INCIDENCIA (choque, avería, robo, reclamo o accidente). Extrae los datos del hecho.",
+    "El mensaje reporta una INCIDENCIA (choque, avería, robo, reclamo o accidente) DE LA OPERACIÓN DE AFA. Extrae los datos del hecho.",
   documentacion:
     "El mensaje habla de DOCUMENTACIÓN habilitante (SOAT, CITV, licencias, pólizas, permisos) y posiblemente de su vencimiento. Extrae los datos del documento.",
   cobranza:
