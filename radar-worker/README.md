@@ -66,11 +66,14 @@ El worker debe quedar corriendo permanentemente. Dos opciones:
 ```bash
 npm install -g pm2
 cd radar-worker
-pm2 start npm --name radar-worker -- start
+npm install
+pm2 start node_modules/tsx/dist/cli.mjs --name radar-worker -- src/index.ts
 pm2 save
 ```
 
-`pm2 logs radar-worker` muestra la consola; `pm2 restart radar-worker` lo reinicia. Para que pm2 arranque con Windows, instalar además `pm2-windows-startup` (`npm i -g pm2-windows-startup && pm2-startup install`).
+⚠️ En Windows, `pm2 start npm -- start` falla (`SyntaxError: Unexpected token ':'`) por un bug conocido de pm2 con los wrappers `.cmd` de npm/npx — por eso se apunta directo al CLI de `tsx` (`node_modules/tsx/dist/cli.mjs`), que es un `.mjs` puro y evita el problema por completo.
+
+`pm2 logs radar-worker` muestra la consola; `pm2 restart radar-worker` lo reinicia. Para que pm2 arranque solo con Windows: `npm i -g pm2-windows-startup && pm2-startup install` (crea una entrada en `HKCU\...\Run` que corre `pm2 resurrect` al iniciar sesión — necesita `pm2 save` hecho de antes).
 
 **En un VPS barato (recomendado para no depender de la PC encendida):** cualquier VPS de ~USD 5/mes con Node 20 sirve; mismo `npm install` + pm2 (`pm2 startup` configura el arranque automático en Linux).
 
