@@ -68,6 +68,27 @@ export async function actualizarEstado(patch: PatchEstado): Promise<void> {
   }
 }
 
+/** ¿El ERP pidió generar un QR nuevo? (botón "Generar QR nuevo" en /radar-ia). */
+export async function debeRelinkear(): Promise<boolean> {
+  try {
+    const { data, error } = await supabase.from("radar_estado").select("solicitar_relink").eq("id", 1).maybeSingle();
+    if (error) return false;
+    return !!(data as any)?.solicitar_relink;
+  } catch {
+    return false;
+  }
+}
+
+/** Baja la bandera de relink apenas se atiende, para no repetir el logout en cada chequeo. */
+export async function limpiarSolicitudRelink(): Promise<void> {
+  try {
+    const { error } = await supabase.from("radar_estado").update({ solicitar_relink: false }).eq("id", 1);
+    if (error) console.error("[radar-worker][db] limpiarSolicitudRelink:", error.message);
+  } catch (e: any) {
+    console.error("[radar-worker][db] limpiarSolicitudRelink:", e?.message ?? e);
+  }
+}
+
 // ── radar_grupos ───────────────────────────────────────────────────────────
 
 /**

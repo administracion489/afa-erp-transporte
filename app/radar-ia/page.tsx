@@ -142,6 +142,12 @@ const Ic = {
       <path d="M15 3h6v6" /><path d="M10 14 21 3" /><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
     </svg>
   ),
+  QrCode: ({ size = 16, className = "" }: IcProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" /><path d="M14 14h3v3" /><path d="M14 21h.01" /><path d="M21 17.5V21" />
+    </svg>
+  ),
 };
 
 // ── Átomos compartidos ───────────────────────────────────────────────────────
@@ -1166,6 +1172,7 @@ export default function RadarIAPage() {
   const [creandoCot, setCreandoCot] = useState<string | null>(null);
   const [registrandoComb, setRegistrandoComb] = useState<string | null>(null);
   const [guardandoConfig, setGuardandoConfig] = useState(false);
+  const [solicitandoQr, setSolicitandoQr] = useState(false);
 
   const showToast = useCallback((msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -1319,6 +1326,28 @@ export default function RadarIAPage() {
       showToast("No se pudo actualizar el estado del Radar", false);
     } else {
       showToast(nuevo ? "Radar activado" : "Radar en pausa");
+    }
+  }
+
+  async function solicitarNuevoQr() {
+    if (
+      !window.confirm(
+        "Esto va a cerrar la sesión de WhatsApp que el Radar tiene activa ahora mismo y va a pedir escanear un QR nuevo. ¿Continuar?"
+      )
+    ) {
+      return;
+    }
+    setSolicitandoQr(true);
+    try {
+      const { error } = await supabase.from("radar_estado").update({ solicitar_relink: true }).eq("id", 1);
+      if (error) {
+        console.warn("radar-ia: error solicitando QR nuevo", error);
+        showToast("No se pudo solicitar el QR nuevo", false);
+        return;
+      }
+      showToast("Solicitado — si el worker está corriendo, el QR nuevo aparece aquí en unos segundos");
+    } finally {
+      setSolicitandoQr(false);
     }
   }
 
@@ -1601,6 +1630,16 @@ export default function RadarIAPage() {
                 {conexion.sub && <p className="text-[10px] text-gray-400 font-semibold leading-tight">{conexion.sub}</p>}
               </div>
             </div>
+            {estado && estado.estado !== "esperando_qr" && (
+              <button
+                onClick={solicitarNuevoQr}
+                disabled={solicitandoQr}
+                title="Cierra la sesión de WhatsApp actual y pide vincular un número (el mismo u otro) escaneando un QR nuevo"
+                className="flex items-center gap-1.5 bg-white border border-gray-100 shadow-sm rounded-xl px-3 py-2 text-xs font-bold text-gray-600 hover:border-gray-300 transition-colors disabled:opacity-50"
+              >
+                <Ic.QrCode size={14} /> {solicitandoQr ? "Solicitando…" : "Generar QR nuevo"}
+              </button>
+            )}
             <div className="flex items-center gap-2.5 bg-white border border-gray-100 shadow-sm rounded-xl px-3.5 py-2">
               <span className="text-xs font-black text-[#0b315f]">Radar activo</span>
               <Switch grande on={Boolean(config?.activo)} onClick={toggleRadarActivo} disabled={!config} />

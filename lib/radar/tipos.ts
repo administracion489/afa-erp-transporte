@@ -46,6 +46,8 @@ export type RadarEstado = {
   version_worker: string | null;
   conectado_desde: string | null;
   ultimo_latido: string | null;
+  /** El dashboard la prende con el botón "Generar QR nuevo"; el worker la apaga apenas la atiende. */
+  solicitar_relink: boolean;
   updated_at: string;
 };
 

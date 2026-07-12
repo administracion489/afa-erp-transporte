@@ -20,6 +20,8 @@ import {
   cargarMapaGruposActivos,
   insertarMensaje,
   subirMedia,
+  debeRelinkear,
+  limpiarSolicitudRelink,
   type FilaMensaje,
   type InfoGrupoActivo,
 } from "./db.js";
@@ -390,6 +392,30 @@ function iniciarLatido(): void {
   }, 60_000);
 }
 
+/**
+ * Revisa cada pocos segundos si el ERP pidió un QR nuevo (botón "Generar QR nuevo"
+ * en /radar-ia). Si sí, cierra la sesión actual de WhatsApp: eso dispara el mismo
+ * evento "loggedOut" que ya maneja connection.update (limpia auth/ y reconecta
+ * mostrando un QR fresco), sin necesidad de tocar el proceso a mano.
+ */
+function iniciarPollRelink(): void {
+  setInterval(async () => {
+    try {
+      if (!(await debeRelinkear())) return;
+      console.log('[radar-worker] Se pidió un QR nuevo desde el ERP — cerrando la sesión actual...');
+      await limpiarSolicitudRelink(); // primero baja la bandera, para no repetir el logout
+      try {
+        await sock?.logout();
+      } catch (e: any) {
+        // El propio logout() cierra el socket; connection.update se encarga del resto.
+        console.warn("[radar-worker] Error al cerrar sesión para relink:", e?.message ?? e);
+      }
+    } catch (e: any) {
+      console.warn("[radar-worker] Error revisando solicitud de relink:", e?.message ?? e);
+    }
+  }, 5_000);
+}
+
 // ── Apagado ordenado y blindaje global ─────────────────────────────────────
 
 async function apagar(senal: string): Promise<void> {
@@ -433,6 +459,7 @@ async function main(): Promise<void> {
     console.log("[radar-worker] Aún no hay grupos activos — actívalos en el ERP: /radar-ia > Grupos.");
   }
   iniciarLatido();
+  iniciarPollRelink();
   await conectar();
 }
 
