@@ -412,7 +412,18 @@ function TabOportunidades({ oportunidades, creando, onCrearCotizacion, onCambiar
                   <p className="text-xs text-gray-500 font-semibold mt-0.5">{[o.distrito, o.ciudad].filter(Boolean).join(", ")}</p>
                 )}
               </div>
-              <ChipEstado {...est} />
+              <div className="flex flex-col items-end gap-1">
+                <ChipEstado {...est} />
+                {o.veces_detectada > 1 && (
+                  <span
+                    className="text-[10px] font-black px-2 py-0.5 rounded-full whitespace-nowrap"
+                    style={{ color: "#B07A0F", background: "#FBF1D8" }}
+                    title="El mismo remitente pidió esta ruta y fecha en más de un grupo/mensaje — se fusionó en una sola tarjeta"
+                  >
+                    🔁 Visto en {o.veces_detectada} grupos
+                  </span>
+                )}
+              </div>
             </div>
 
             {/* Datos del pedido */}

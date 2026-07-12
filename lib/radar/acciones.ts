@@ -170,6 +170,43 @@ export async function matchCliente(
   return null;
 }
 
+type OportunidadDuplicada = { id: string; veces_detectada: number; grupos_json: unknown };
+
+/**
+ * Busca una oportunidad abierta (nueva/revisada) de las últimas 72h con el MISMO
+ * remitente (mismo WhatsApp), la misma ruta normalizada y la misma fecha pedida —
+ * el patrón típico de un transportista reenviando/reposteando el mismo pedido en
+ * varios grupos que el Radar monitorea.
+ */
+async function buscarOportunidadDuplicada(
+  sb: any,
+  ref: { mensaje: any; origen: string; destino: string; fecha: string | null }
+): Promise<OportunidadDuplicada | null> {
+  try {
+    const desde72h = new Date(Date.now() - 72 * 3600 * 1000).toISOString();
+    const { data } = await sb
+      .from("radar_oportunidades")
+      .select("id, origen, destino, fecha_servicio, veces_detectada, grupos_json, radar_mensajes(remitente_wa)")
+      .in("estado", ["nueva", "revisada"])
+      .gte("created_at", desde72h);
+    const filas = (data as any[]) ?? [];
+    const origenNorm = norm(ref.origen);
+    const destinoNorm = norm(ref.destino);
+    const hit = filas.find((o) => {
+      const rel = Array.isArray(o.radar_mensajes) ? o.radar_mensajes[0] : o.radar_mensajes;
+      const mismoRemitente = !!rel?.remitente_wa && rel.remitente_wa === ref.mensaje.remitente_wa;
+      const mismaRuta = norm(String(o.origen ?? "")) === origenNorm && norm(String(o.destino ?? "")) === destinoNorm;
+      const mismaFecha = (o.fecha_servicio ?? null) === ref.fecha;
+      return mismoRemitente && mismaRuta && mismaFecha;
+    });
+    if (!hit) return null;
+    return { id: hit.id, veces_detectada: Number(hit.veces_detectada || 1), grupos_json: hit.grupos_json };
+  } catch {
+    // sin poder verificar duplicado: se registra como nueva oportunidad (mejor un duplicado que perder el lead)
+    return null;
+  }
+}
+
 // ── Punto de entrada ─────────────────────────────────────────────────────────
 
 type ArgsAccion = {
@@ -219,6 +256,29 @@ async function accionOportunidad({ sb, mensaje, datos }: ArgsAccion): Promise<Re
   const manana = fechaLima(1);
   const fechaRef = d.fecha || hoy; // sin fecha pedida, la disponibilidad se calcula para hoy
   const tipo = d.tipo_vehiculo ? String(d.tipo_vehiculo).toUpperCase() : null;
+  const entradaGrupo = { grupo_nombre: mensaje.grupo_nombre ?? null, mensaje_id: mensaje.id, recibido_en: new Date().toISOString() };
+
+  // 0) Deduplicar: transportistas terceros suelen reenviar/repostear el MISMO pedido a
+  //    varios grupos que el Radar monitorea. Si el mismo remitente (mismo WhatsApp) ya
+  //    pidió la misma ruta para la misma fecha en las últimas 72h, fusiona en esa fila
+  //    en vez de crear una tarjeta nueva.
+  if (d.origen && d.destino && mensaje.remitente_wa) {
+    const duplicada = await buscarOportunidadDuplicada(sb, { mensaje, origen: d.origen, destino: d.destino, fecha: d.fecha ?? null });
+    if (duplicada) {
+      const nuevoConteo = Number(duplicada.veces_detectada || 1) + 1;
+      const grupos = Array.isArray(duplicada.grupos_json) ? duplicada.grupos_json : [];
+      const { error: errUpd } = await sb
+        .from("radar_oportunidades")
+        .update({ veces_detectada: nuevoConteo, grupos_json: [...grupos, entradaGrupo] })
+        .eq("id", duplicada.id);
+      if (errUpd) throw new Error(`radar_oportunidades (dedupe): ${errUpd.message}`);
+      return {
+        accion: "oportunidad_duplicada",
+        detalle: `Mismo pedido ya registrado — visto en ${nuevoConteo} grupo(s)/mensaje(s), no se creó una tarjeta nueva`,
+        datos: { oportunidad_id: duplicada.id, veces_detectada: nuevoConteo },
+      };
+    }
+  }
 
   // 1) Recursos ya asignados ese día (excluye canceladas)
   const { data: resDia } = await sb
@@ -306,6 +366,7 @@ async function accionOportunidad({ sb, mensaje, datos }: ArgsAccion): Promise<Re
       precio_referencial: precioRef,
       utilidad_estimada: utilidad,
       probabilidad,
+      grupos_json: [entradaGrupo],
     })
     .select("id")
     .single();

@@ -121,6 +121,10 @@ export type RadarOportunidad = {
   utilidad_estimada: number | null;
   probabilidad: number | null;
   cotizacion_id: number | null;
+  /** Cuántas veces se detectó el mismo pedido (mismo remitente, ruta y fecha) en distintos grupos/mensajes. */
+  veces_detectada: number;
+  /** Rastro de en qué grupos/mensajes se vio este mismo pedido (para mostrar "visto en N grupos"). */
+  grupos_json: { grupo_nombre: string | null; mensaje_id: string; recibido_en: string }[];
   created_at: string;
 };
 
