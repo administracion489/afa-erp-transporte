@@ -19,6 +19,7 @@ type Tarifa = {
   confidencial: boolean;
   incluye_guia: boolean; incluye_peajes: boolean; incluye_alimentacion: boolean;
   notas: string | null; activo: boolean;
+  updated_at?: string;
 };
 
 type CotRef = {
@@ -29,42 +30,57 @@ type CotRef = {
   modo_servicio: string | null;
 };
 
+type ParamVeh = {
+  tipo_vehiculo: string; nombre: string; capacidad: number;
+  icono: string | null; grupo_vehiculo: string | null;
+};
+
+type VehItem = { id: string; label: string; icon: string; pax: number };
+type VehGrupo = { grupo: string; color: string; bg: string; vehs: VehItem[] };
+
 // ══════════════════════════════════════════════════════════════════════════════
 // CONFIG
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Grupos de vehículos (eje horizontal de la matriz)
-const GRUPOS_VEH = [
-  {
-    grupo: "Ligeros", color: "#6366f1", bg: "#eef2ff",
-    vehs: [
-      { id: "AUTO_4",  label: "Auto 4p",  icon: "🚗", pax: 4  },
-      { id: "SUV_4",   label: "SUV 4p",   icon: "🚙", pax: 4  },
-      { id: "SUV_6",   label: "SUV 6p",   icon: "🚙", pax: 6  },
-    ],
-  },
-  {
-    grupo: "Vans", color: "#0891b2", bg: "#ecfeff",
-    vehs: [
-      { id: "MINIVAN_10", label: "Minivan 10p", icon: "🚐", pax: 10 },
-      { id: "VAN_15",     label: "Van 15p",     icon: "🚐", pax: 15 },
-    ],
-  },
-  {
-    grupo: "Buses", color: "#0b315f", bg: "#eef3f8",
-    vehs: [
-      { id: "SPRINTER_17", label: "Sprinter 17p", icon: "🚌", pax: 17 },
-      { id: "SPRINTER_20", label: "Sprinter 20p", icon: "🚌", pax: 20 },
-      { id: "CUSTER_25",   label: "Custer 25p",   icon: "🚌", pax: 25 },
-      { id: "MINIBUS_30",  label: "Minibus 30p",  icon: "🚌", pax: 30 },
-      { id: "MINIBUS_35",  label: "Minibus 35p",  icon: "🚌", pax: 35 },
-      { id: "BUS_45",      label: "Bus 45p",      icon: "🚌", pax: 45 },
-      { id: "BUS_49",      label: "Bus 49p",      icon: "🚌", pax: 49 },
-      { id: "BUS_50",      label: "Bus 50p",      icon: "🚌", pax: 50 },
-    ],
-  },
-];
-const TODOS_VEH = GRUPOS_VEH.flatMap(g => g.vehs);
+// Grupos de vehículos (eje horizontal de la matriz) — se arman en runtime desde
+// `parametros_costos` (ver cargarGruposVeh) para no desincronizarse de la flota real.
+// Este color/orden es solo estético; si aparece un grupo nuevo (ej. "Otros") usa GRUPO_COLOR_DEFAULT.
+const GRUPO_COLOR: Record<string, { color: string; bg: string }> = {
+  Ligeros: { color: "#6366f1", bg: "#eef2ff" },
+  Vans:    { color: "#0891b2", bg: "#ecfeff" },
+  Buses:   { color: "#0b315f", bg: "#eef3f8" },
+};
+const GRUPO_ORDEN = ["Ligeros", "Vans", "Buses"];
+const GRUPO_COLOR_DEFAULT = { color: "#78716c", bg: "#f5f5f4" };
+
+function armarGruposVeh(params: ParamVeh[]): VehGrupo[] {
+  const porGrupo: Record<string, ParamVeh[]> = {};
+  params.forEach(p => {
+    const g = p.grupo_vehiculo || "Otros";
+    (porGrupo[g] ||= []).push(p);
+  });
+  const grupos = Object.keys(porGrupo).sort((a, b) => {
+    const ia = GRUPO_ORDEN.indexOf(a), ib = GRUPO_ORDEN.indexOf(b);
+    if (ia === -1 && ib === -1) return a.localeCompare(b);
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+  return grupos.map(g => {
+    const cfg = GRUPO_COLOR[g] || GRUPO_COLOR_DEFAULT;
+    return {
+      grupo: g, color: cfg.color, bg: cfg.bg,
+      vehs: porGrupo[g]
+        .sort((a, b) => a.capacidad - b.capacidad)
+        .map(p => ({
+          id: p.tipo_vehiculo,
+          label: `${(p.nombre || p.tipo_vehiculo).split(" ")[0]} ${p.capacidad}p`,
+          icon: p.icono || "🚌",
+          pax: p.capacidad,
+        })),
+    };
+  });
+}
 
 // Servicios EVENTUAL
 const TABS_EVENTUAL = [
@@ -130,6 +146,10 @@ const norm = (s: string) =>
 const iCls = (e = "") =>
   `w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all ${e}`;
 
+const MESES_TARIFA_VIEJA = 6;
+const mesesDesde = (iso?: string) =>
+  iso ? (Date.now() - new Date(iso).getTime()) / (1000 * 60 * 60 * 24 * 30) : null;
+
 // ══════════════════════════════════════════════════════════════════════════════
 // CELDA EDITABLE DE LA MATRIZ
 // ══════════════════════════════════════════════════════════════════════════════
@@ -172,11 +192,17 @@ function Celda({
   if (tarifa) {
     const isConf = confidencial || tarifa.confidencial;
     const precioMes = modo === "fijo" ? tarifa.precio * 26 : null;
+    const meses = mesesDesde(tarifa.updated_at);
+    const esVieja = meses !== null && meses >= MESES_TARIFA_VIEJA;
     return (
       <td
         onClick={abrir}
-        className={`border p-0 min-w-[90px] cursor-pointer transition-colors group ${isConf ? "border-purple-100 hover:bg-purple-50" : "border-gray-100 hover:bg-blue-50"}`}
+        className={`border p-0 min-w-[90px] cursor-pointer transition-colors group relative ${isConf ? "border-purple-100 hover:bg-purple-50" : "border-gray-100 hover:bg-blue-50"}`}
       >
+        {esVieja && (
+          <span title={`Sin actualizar hace ${Math.floor(meses!)} meses`}
+            className="absolute top-0.5 right-0.5 text-[9px]">⏰</span>
+        )}
         <div className="px-2 py-2 text-center">
           {isConf ? (
             <p className="text-[10px] font-black text-purple-700">🔒 conf.</p>
@@ -203,13 +229,17 @@ function Celda({
   if (cotRef) {
     const p = Math.round(Number(cotRef.precio_cliente) / 1.18);
     return (
-      <td onClick={abrir}
-        className="border border-amber-100 p-0 min-w-[90px] cursor-pointer hover:bg-amber-50 transition-colors group"
+      <td className="border border-amber-100 p-0 min-w-[90px] group relative"
         title={`Ref. cotización #${cotRef.numero_cotizacion || cotRef.id}`}>
-        <div className="px-2 py-2 text-center">
+        <div onClick={abrir} className="px-2 py-2 text-center cursor-pointer hover:bg-amber-50 transition-colors">
           <p className="text-[10px] font-bold text-amber-700 font-mono">{fmtP(p)}</p>
           <p className="text-[9px] text-amber-500">📋 ref.</p>
         </div>
+        <button
+          onClick={e => { e.stopPropagation(); onGuardar(p); }}
+          title="Fijar esta tarifa oficial con un clic"
+          className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-green-500 text-white text-[9px] font-black leading-4 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-green-600"
+        >✓</button>
       </td>
     );
   }
@@ -288,7 +318,7 @@ const FORM0 = {
 };
 
 function FormTarifa({
-  modo, onGuardado, editando, datoEditar, onCancelar, mapsLoaded,
+  modo, onGuardado, editando, datoEditar, onCancelar, mapsLoaded, grupos,
 }: {
   modo: Modo;
   onGuardado: () => void;
@@ -296,6 +326,7 @@ function FormTarifa({
   datoEditar: Tarifa | null;
   onCancelar: () => void;
   mapsLoaded: boolean;
+  grupos: VehGrupo[];
 }) {
   const [form,     setForm]     = useState(FORM0);
   const [saving,   setSaving]   = useState(false);
@@ -381,7 +412,7 @@ function FormTarifa({
       <div>
         <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2">Vehículo</p>
         <div className="space-y-2">
-          {GRUPOS_VEH.map(g => (
+          {grupos.map(g => (
             <div key={g.grupo}>
               <p className="text-[9px] font-black uppercase tracking-wider mb-1" style={{ color: g.color }}>{g.grupo}</p>
               <div className="flex gap-1.5 flex-wrap">
@@ -506,7 +537,19 @@ export default function TarifarioPage() {
   const [editandoT,   setEditandoT]   = useState<Tarifa | null>(null);
   const [busqueda,    setBusqueda]    = useState("");
   const [mostrarRef,  setMostrarRef]  = useState(true);
+  const [paramsVeh,   setParamsVeh]   = useState<ParamVeh[]>([]);
+  const [filtroVeh,   setFiltroVeh]   = useState("todos");
+  const [precioMin,   setPrecioMin]   = useState("");
+  const [precioMax,   setPrecioMax]   = useState("");
   const csvRef = useRef<HTMLInputElement>(null);
+
+  const gruposVeh = useMemo(() => armarGruposVeh(paramsVeh), [paramsVeh]);
+  const todosVeh  = useMemo(() => gruposVeh.flatMap(g => g.vehs), [gruposVeh]);
+  const idsVehValidos = useMemo(() => new Set(todosVeh.map(v => v.id)), [todosVeh]);
+  const idsServValidos = useMemo(
+    () => new Set([...TABS_EVENTUAL, ...TABS_FIJO].flatMap(t => t.servicios.map(s => s.id))),
+    []
+  );
 
   const tabs = modo === "eventual" ? TABS_EVENTUAL : TABS_FIJO;
   const tabCfg = tabs.find(t => t.tab === tabActivo) || tabs[0];
@@ -528,14 +571,18 @@ export default function TarifarioPage() {
 
   const cargar = async () => {
     setLoading(true);
-    const [tRes, cRes] = await Promise.all([
+    const [tRes, cRes, pRes] = await Promise.all([
       supabase.from("tarifario").select("*").eq("activo", true).order("origen"),
       supabase.from("cotizaciones")
         .select("id,origen,destino,precio_cliente,tipo_vehiculo,tipo_servicio,equipamiento,numero_cotizacion,estado,modo_servicio")
         .in("estado", ["aprobado", "enviado"]).order("id", { ascending: false }),
+      supabase.from("parametros_costos")
+        .select("tipo_vehiculo,nombre,capacidad,icono,grupo_vehiculo")
+        .eq("activo", true).order("grupo_vehiculo").order("capacidad"),
     ]);
     setTarifas(tRes.data || []);
     setCotRefs(cRes.data || []);
+    setParamsVeh(pRes.data || []);
     setLoading(false);
   };
   useEffect(() => { cargar(); }, []);
@@ -583,6 +630,26 @@ export default function TarifarioPage() {
     });
   }, [tarifas, cotRefs, modo, mostrarRef, busqueda]);
 
+  // Cobertura: rutas con al menos una tarifa oficial vs rutas que solo tienen referencia
+  const rutasConOficial = useMemo(() => {
+    const set = new Set<string>();
+    tarifas.filter(t => t.modo === modo).forEach(t => set.add(`${t.origen}|||${t.destino}`));
+    return set;
+  }, [tarifas, modo]);
+  const rutasSoloRef = useMemo(
+    () => rutas.filter(r => !rutasConOficial.has(`${r.origen}|||${r.destino}`)).length,
+    [rutas, rutasConOficial]
+  );
+
+  // Filtro de la tabla "Todas las tarifas activas" (vehículo + rango de precio)
+  const tarifasFiltradas = useMemo(() => tarifas.filter(t => {
+    if (filtroVeh !== "todos" && t.tipo_vehiculo !== filtroVeh) return false;
+    const min = Number(precioMin), max = Number(precioMax);
+    if (precioMin.trim() && !isNaN(min) && t.precio < min) return false;
+    if (precioMax.trim() && !isNaN(max) && t.precio > max) return false;
+    return true;
+  }), [tarifas, filtroVeh, precioMin, precioMax]);
+
   // KPIs
   const kpiEv   = tarifas.filter(t => t.modo === "eventual").length;
   const kpiFijo = tarifas.filter(t => t.modo === "fijo").length;
@@ -624,24 +691,42 @@ export default function TarifarioPage() {
     if (lines.length < 2) { alert("CSV vacío"); return; }
     const hdr = lines[0].toLowerCase().split(",").map(h => h.trim());
     const g = (c: string) => hdr.indexOf(c);
-    const rows = lines.slice(1).map(line => {
+    const candidatas = lines.slice(1).map((line, i) => {
       const c = line.split(",").map(x => x.trim());
       return {
+        fila: i + 2,
         origen: c[g("origen")]?.toUpperCase() || "",
         destino: c[g("destino")]?.toUpperCase() || "",
         modo: c[g("modo")] || "eventual",
-        tipo_vehiculo: c[g("tipo_vehiculo")] || "BUS_49",
+        tipo_vehiculo: c[g("tipo_vehiculo")] || "",
         equipamiento: c[g("equipamiento")] || "full_equipo",
-        tipo_servicio: c[g("tipo_servicio")] || "solo_ida",
+        tipo_servicio: c[g("tipo_servicio")] || "",
         precio: Number(c[g("precio")]) || 0, moneda: "PEN",
         confidencial: false, incluye_guia: false, incluye_peajes: false,
         incluye_alimentacion: false, activo: true,
       };
-    }).filter(r => r.origen && r.destino && r.precio > 0);
-    if (!rows.length) { alert("Sin filas válidas"); return; }
+    });
+
+    const rechazadas: string[] = [];
+    const rows = candidatas.filter(r => {
+      const motivos: string[] = [];
+      if (!r.origen || !r.destino) motivos.push("falta origen/destino");
+      if (!(r.precio > 0)) motivos.push("precio inválido");
+      if (!idsVehValidos.has(r.tipo_vehiculo)) motivos.push(`tipo_vehiculo "${r.tipo_vehiculo}" no existe en Ajuste de Costos`);
+      if (!idsServValidos.has(r.tipo_servicio)) motivos.push(`tipo_servicio "${r.tipo_servicio}" no es válido`);
+      if (motivos.length) { rechazadas.push(`Fila ${r.fila}: ${motivos.join(", ")}`); return false; }
+      return true;
+    }).map(({ fila, ...r }) => r);
+
+    if (!rows.length) {
+      alert("Sin filas válidas.\n\n" + rechazadas.join("\n"));
+      if (csvRef.current) csvRef.current.value = "";
+      return;
+    }
     const { error } = await supabase.from("tarifario").insert(rows);
     if (error) { alert("Error: " + error.message); return; }
-    alert(`✅ ${rows.length} tarifas importadas`);
+    const msg = `✅ ${rows.length} tarifas importadas` + (rechazadas.length ? `\n\n⚠️ ${rechazadas.length} filas rechazadas:\n${rechazadas.join("\n")}` : "");
+    alert(msg);
     cargar();
     if (csvRef.current) csvRef.current.value = "";
   };
@@ -690,6 +775,19 @@ export default function TarifarioPage() {
         ))}
       </div>
 
+      {/* Cobertura de rutas (oficial vs solo referencia) */}
+      {rutas.length > 0 && (
+        <div className="rounded-xl border px-4 py-2.5 flex items-center gap-3 flex-wrap bg-white text-xs">
+          <span className="font-bold text-gray-600">📊 Cobertura {modo === "eventual" ? "EVENTUAL" : "FIJO"}:</span>
+          <span className="font-black text-green-700">{rutasConOficial.size} rutas con tarifa oficial</span>
+          <span className="text-gray-300">·</span>
+          <span className={`font-black ${rutasSoloRef > 0 ? "text-amber-600" : "text-gray-400"}`}>
+            {rutasSoloRef} solo con referencia de cotización
+          </span>
+          {rutasSoloRef > 0 && <span className="text-gray-400">— revísalas y fíjalas con el botón ✓ en la celda</span>}
+        </div>
+      )}
+
       {/* Leyenda */}
       <div className="grid grid-cols-3 gap-3 text-xs">
         {[
@@ -709,7 +807,7 @@ export default function TarifarioPage() {
         <FormTarifa
           modo={modo} editando={!!editandoT} datoEditar={editandoT}
           onGuardado={cargar} onCancelar={() => { setMostrarForm(false); setEditandoT(null); }}
-          mapsLoaded={mapsLoaded}
+          mapsLoaded={mapsLoaded} grupos={gruposVeh}
         />
       )}
 
@@ -836,7 +934,7 @@ export default function TarifarioPage() {
                     {tabCfg.icon} {tabCfg.servicios.find(s => s.id === servActivo)?.label} · {equip === "full_equipo" ? "⭐ Full Equipo" : "📦 Básico"}
                   </div>
                 </th>
-                {GRUPOS_VEH.map(g => (
+                {gruposVeh.map(g => (
                   <th key={g.grupo} colSpan={g.vehs.length}
                     className="border border-gray-200 px-2 py-1.5 text-center text-[10px] font-black uppercase tracking-wide"
                     style={{ background: g.bg, color: g.color }}>
@@ -846,7 +944,7 @@ export default function TarifarioPage() {
               </tr>
               {/* Fila de vehículos */}
               <tr>
-                {TODOS_VEH.map(v => (
+                {todosVeh.map(v => (
                   <th key={v.id} className="border border-gray-200 px-1 py-2 bg-gray-50 text-center min-w-[80px]">
                     <div className="text-base">{v.icon}</div>
                     <div className="text-[9px] font-black text-gray-600 leading-tight">{v.label}</div>
@@ -856,11 +954,11 @@ export default function TarifarioPage() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={TODOS_VEH.length + 1} className="p-10 text-center text-gray-400">
+                <tr><td colSpan={todosVeh.length + 1} className="p-10 text-center text-gray-400">
                   <div className="w-6 h-6 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin mx-auto mb-2" />Cargando...
                 </td></tr>
               ) : rutas.length === 0 ? (
-                <tr><td colSpan={TODOS_VEH.length + 1} className="p-10 text-center text-gray-400">
+                <tr><td colSpan={todosVeh.length + 1} className="p-10 text-center text-gray-400">
                   <p className="text-3xl mb-2">🗺️</p>
                   <p className="font-semibold">Sin rutas registradas</p>
                   <p className="text-xs mt-1">Haz clic en "+ precio" en cualquier celda o usa el botón "Nueva tarifa"</p>
@@ -873,7 +971,7 @@ export default function TarifarioPage() {
                     <span className="text-gray-300 mx-1.5">→</span>
                     <span className="font-bold text-gray-700 text-sm">{destino}</span>
                   </td>
-                  {TODOS_VEH.map(v => {
+                  {todosVeh.map(v => {
                     const tarifa = getTarifa(origen, destino, v.id);
                     const cotRef = !tarifa ? getCotRef(origen, destino, v.id) : null;
                     return (
@@ -898,25 +996,44 @@ export default function TarifarioPage() {
 
       {/* Vista lista */}
       <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
-        <div className="px-5 py-4 border-b flex items-center justify-between">
+        <div className="px-5 py-4 border-b flex items-center justify-between flex-wrap gap-3">
           <h2 className="text-sm font-bold text-gray-700">Todas las tarifas activas</h2>
-          <span className="text-xs text-gray-400">{tarifas.length} total</span>
+          <span className="text-xs text-gray-400">{tarifasFiltradas.length} de {tarifas.length}</span>
+        </div>
+        <div className="px-5 py-3 border-b flex items-center gap-3 flex-wrap bg-gray-50">
+          <select className="border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold text-gray-600 focus:outline-none"
+            value={filtroVeh} onChange={e => setFiltroVeh(e.target.value)}>
+            <option value="todos">Todos los vehículos</option>
+            {todosVeh.map(v => <option key={v.id} value={v.id}>{v.icon} {v.label}</option>)}
+          </select>
+          <div className="flex items-center gap-1.5">
+            <input type="number" placeholder="Precio mín." value={precioMin} onChange={e => setPrecioMin(e.target.value)}
+              className="w-24 border border-gray-200 rounded-xl px-2.5 py-2 text-xs focus:outline-none" />
+            <span className="text-gray-300 text-xs">—</span>
+            <input type="number" placeholder="Precio máx." value={precioMax} onChange={e => setPrecioMax(e.target.value)}
+              className="w-24 border border-gray-200 rounded-xl px-2.5 py-2 text-xs focus:outline-none" />
+          </div>
+          {(filtroVeh !== "todos" || precioMin.trim() || precioMax.trim()) && (
+            <button onClick={() => { setFiltroVeh("todos"); setPrecioMin(""); setPrecioMax(""); }}
+              className="text-xs font-bold text-gray-400 hover:text-gray-600">✕ Limpiar filtros</button>
+          )}
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-gray-50 border-b">
-                {["Modo","Ruta","Servicio","Vehículo","Equip.","Precio","Mes (×26)","Incluye","Acciones"].map(h => (
+                {["Modo","Ruta","Servicio","Vehículo","Equip.","Precio","Mes (×26)","Incluye","Actualizado","Acciones"].map(h => (
                   <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
-              {tarifas.map(t => {
-                const veh   = TODOS_VEH.find(v => v.id === t.tipo_vehiculo);
+              {tarifasFiltradas.map(t => {
+                const veh   = todosVeh.find(v => v.id === t.tipo_vehiculo);
                 const serv  = [...TABS_EVENTUAL, ...TABS_FIJO].flatMap(tab => tab.servicios).find(s => s.id === t.tipo_servicio);
                 const tabOf = [...TABS_EVENTUAL, ...TABS_FIJO].find(tab => tab.servicios.some(s => s.id === t.tipo_servicio));
                 const incluye = [t.incluye_guia && "🎤", t.incluye_peajes && "🛣️", t.incluye_alimentacion && "🍽️"].filter(Boolean).join(" ");
+                const meses = mesesDesde(t.updated_at);
                 return (
                   <tr key={t.id} className="hover:bg-gray-50 transition-colors">
                     <td className="p-3">
@@ -944,6 +1061,17 @@ export default function TarifarioPage() {
                       {t.modo === "fijo" && !t.confidencial ? `~${fmtP(t.precio * 26)}` : "—"}
                     </td>
                     <td className="p-3 text-sm">{incluye || "—"}</td>
+                    <td className="p-3 text-xs">
+                      {meses === null ? (
+                        <span className="text-gray-300">—</span>
+                      ) : meses >= MESES_TARIFA_VIEJA ? (
+                        <span className="font-bold text-red-600">⏰ hace {Math.floor(meses)} meses</span>
+                      ) : meses >= MESES_TARIFA_VIEJA / 2 ? (
+                        <span className="font-bold text-amber-600">hace {Math.floor(meses)} meses</span>
+                      ) : (
+                        <span className="text-green-600">hace {Math.max(0, Math.floor(meses))} meses</span>
+                      )}
+                    </td>
                     <td className="p-3">
                       <div className="flex gap-1.5">
                         <button onClick={() => { setEditandoT(t); setMostrarForm(true); }}

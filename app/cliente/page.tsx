@@ -1636,7 +1636,7 @@ export default function ClientePortal() {
         telefono: empresa?.telefono ?? null,
         email: empresa?.email ?? null,
         logoReporteUrl: window.location.origin + "/logoafacotizacion-removebg-preview.png",
-        firmaUrl: window.location.origin + "/firmaJLCA.PNG",
+        firmaUrl: window.location.origin + "/firmaJLCA.png",
       },
       cliente: { nombre: cliente?.empresa || cliente?.nombre || "", ruc: cliente?.ruc ?? null },
       servicio: { fecha: r.fecha_servicio, hora: r.hora_servicio, origen: r.origen, destino: r.destino },

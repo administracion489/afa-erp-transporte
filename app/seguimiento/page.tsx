@@ -1056,7 +1056,7 @@ function DocBar({ s, empresaPerfil, onGps }: { s: ServicioView; empresaPerfil: E
         telefono: empresaPerfil?.telefono ?? null,
         email: empresaPerfil?.email ?? null,
         logoReporteUrl: window.location.origin + "/logoafacotizacion-removebg-preview.png",
-        firmaUrl: window.location.origin + "/firmaJLCA.PNG",
+        firmaUrl: window.location.origin + "/firmaJLCA.png",
       },
       cliente: { nombre: s.cliente_nombre, ruc: datos.clienteRuc },
       servicio: servicioBase,

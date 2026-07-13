@@ -513,7 +513,6 @@ export default function DashboardPage() {
   const [gastos,        setGastos]        = useState<Gasto[]>([]);
   const [serviciosHoy,  setServiciosHoy]  = useState<ServicioHoy[]>([]);
   const [alertasSOS,    setAlertasSOS]    = useState<AlertaSOS[]>([]);
-  const [sosActivos,    setSosActivos]    = useState(0);
   const [loading,       setLoading]       = useState(true);
   const [modulo,        setModulo]        = useState<"erp"|"apps">("erp");
 
@@ -556,7 +555,6 @@ export default function DashboardPage() {
         setFacturas(fRes.data      || []);
         setGastos(gRes.data        || []);
         setAlertasSOS((sosRes.data || []) as AlertaSOS[]);
-        setSosActivos((sosRes.data || []).length);
         setServiciosHoy(((shRes.data || []) as any[]).map(r => ({
           id: r.id, origen: r.origen, destino: r.destino,
           hora_servicio: r.hora_servicio, estado: r.estado,
@@ -570,12 +568,18 @@ export default function DashboardPage() {
 
     const ch = supabase.channel("dashboard-sos")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "alertas_sos" },
-        (payload: { new: AlertaSOS }) => { setSosActivos(p => p+1); setAlertasSOS(prev => [payload.new, ...prev]); })
+        (payload: { new: AlertaSOS }) => { setAlertasSOS(prev => [payload.new, ...prev]); })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "alertas_sos" },
+        (payload: { new: AlertaSOS }) => { setAlertasSOS(prev => prev.map(a => a.id === payload.new.id ? payload.new : a)); })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "alertas_sos" },
+        (payload: { old: { id: number } }) => { setAlertasSOS(prev => prev.filter(a => a.id !== payload.old.id)); })
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, []);
 
   // ── Cálculos ────────────────────────────────────────────────────────────────
+  const alertasPendientesSOS = alertasSOS.filter(a => a.estado === "pendiente");
+  const sosActivos   = alertasPendientesSOS.length;
   const hoy          = new Date().toISOString().split("T")[0];
   const resHoy       = reservas.filter(r => r.fecha_servicio === hoy);
   const pendientes   = reservas.filter(r => r.estado === "pendiente");
@@ -780,7 +784,7 @@ export default function DashboardPage() {
             <p style={{ margin: 0, color: C.danger, fontWeight: 800, fontSize: 15 }}>
               ALERTA SOS ACTIVA — {sosActivos} sin atender
             </p>
-            {alertasSOS[0] && <p style={{ margin: "3px 0 0", color: "#b91c1c", fontSize: 12 }}>{alertasSOS[0].motivo}</p>}
+            {alertasPendientesSOS[0] && <p style={{ margin: "3px 0 0", color: "#b91c1c", fontSize: 12 }}>{alertasPendientesSOS[0].motivo}</p>}
           </div>
           <button onClick={() => router.push("/monitoreo")}
             style={{ padding: "9px 18px", borderRadius: 9, background: C.danger, border: "none",

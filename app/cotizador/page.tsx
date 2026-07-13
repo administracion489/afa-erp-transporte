@@ -734,6 +734,7 @@ export default function CotizadorPage(){
   },[]);
 
   const [idxVeh,    setIdxVeh]    =useState("");
+  const [equip,     setEquip]     =useState<"full_equipo"|"basico">("full_equipo");
   const [modo,      setModo]      =useState<"eventual"|"fijo">("eventual");
   const [tipoServEv,setTipoServEv]=useState("solo_ida");
   const [tipoServFj,setTipoServFj]=useState("transporte_personal");
@@ -789,6 +790,7 @@ export default function CotizadorPage(){
       origen:metaRuta.origen||null,destino:metaRuta.destino||null,
       km:kmRuta,tipo:modo==="fijo"?"transporte_personal":"eventual",
       estado:"pendiente",modo_servicio:modo,tipo_servicio:tipoServ,
+      tipo_vehiculo:veh.tipo_vehiculo,equipamiento:equip,
       precio_cliente:modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV,
       costo_estimado:resultado.baseCosto,
       margen_estimado:modo==="eventual"?resultado.totalEst20-resultado.baseCosto:resultado.diaEstIGV-resultado.baseCosto,
@@ -941,7 +943,18 @@ export default function CotizadorPage(){
 
             {/* Vehículo */}
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-              <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider mb-3">🚌 Vehículo</p>
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider">🚌 Vehículo</p>
+                <div className="flex rounded-xl border overflow-hidden flex-shrink-0">
+                  {[{val:"full_equipo",icon:"⭐",label:"Full Equipo"},{val:"basico",icon:"📦",label:"Básico"}].map(e=>(
+                    <button key={e.val} onClick={()=>setEquip(e.val as "full_equipo"|"basico")}
+                      className="px-2.5 py-1 text-[10px] font-bold transition-all"
+                      style={{background:equip===e.val?"#0b315f":"white",color:equip===e.val?"white":"#0b315f"}}>
+                      {e.icon} {e.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="space-y-3">
                 {Object.entries(grupos).map(([grupo,vehs])=>{
                   const gc=GRUPO_CFG[grupo]||GRUPO_CFG.Otros;
