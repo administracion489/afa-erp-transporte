@@ -19,7 +19,7 @@ import { manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado } f
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────
-type Cliente        = { id: number; nombre: string; empresa: string | null; ruc: string | null; email: string | null; telefono: string | null; };
+type Cliente        = { id: number; nombre: string; empresa: string | null; ruc: string | null; email: string | null; telefono: string | null; created_at?: string; };
 type Reserva        = { id: number; codigo?: string | null; origen: string; destino: string; fecha_servicio: string | null; hora_servicio: string | null; estado: string; precio_cliente: number; vehiculo_id: number | null; conductor_id: number | null; cotizacion_id: number | null; created_at: string; };
 type Parada         = { id: number; reserva_id: number; orden: number; nombre: string; direccion: string | null; lat: number | null; lng: number | null; hora_estimada: string | null; estado: string; };
 type Boarding       = { id: number; pasajero_id: number; parada_id: number; timestamp: string; metodo: string; pasajero?: { nombre: string; dni: string | null; empresa: string | null; }; };
@@ -4134,7 +4134,7 @@ export default function ClientePortal() {
                 <div>
                   <p style={{ color: C.gray800, fontWeight: 900, fontSize: 22, margin: 0 }}>{cliente.empresa || cliente.nombre}</p>
                   <p style={{ color: C.gray400, fontSize: 13, margin: "4px 0 0" }}>
-                    RUC {cliente.ruc || "–"} &nbsp;·&nbsp; cliente desde {new Date(cliente.id > 0 ? "2024-03-01" : "2024-01-01").toLocaleDateString("es-PE",{month:"short",year:"numeric"})} &nbsp;·&nbsp; {reservas.length} servicios contratados
+                    RUC {cliente.ruc || "–"} &nbsp;·&nbsp; cliente desde {cliente.created_at ? new Date(cliente.created_at).toLocaleDateString("es-PE",{month:"short",year:"numeric"}) : "–"} &nbsp;·&nbsp; {reservas.length} servicios contratados
                   </p>
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
