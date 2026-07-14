@@ -84,7 +84,7 @@ function inputCls() {
 interface Props {
   clientes: Cliente[];
   onClose: () => void;
-  onGenerado: () => void;
+  onGenerado: (info: { lote: string; cantidad: number }) => void;
 }
 
 export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: Props) {
@@ -193,6 +193,9 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
 
     setGenerando(true);
 
+    const lote = crypto.randomUUID();
+    let totalInsertados = 0;
+
     const origenIda      = cot.paradas_json?.find((p: any) => p.tipo === "inicio")?.nombre  || "Sin especificar";
     const destinoIda     = cot.paradas_json?.find((p: any) => p.tipo === "destino")?.nombre || "Sin especificar";
     const paradasRetorno = cot.paradas_retorno_json?.length ? cot.paradas_retorno_json : cot.paradas_json;
@@ -226,6 +229,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
         paradas_json:          cot.paradas_json,
         origen:                origenIda,
         destino:               destinoIda,
+        lote_generacion:       lote,
         ...camposVehiculo,
       };
 
@@ -245,6 +249,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
             return;
           }
         }
+        totalInsertados += filas.length;
 
       } else {
         // ── Par IDA + RETORNO vinculados ────────────────────────────────
@@ -284,6 +289,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
           origen:                origenRetorno,
           destino:               destinoRetorno,
           direccion_servicio:    "retorno",
+          lote_generacion:       lote,
           ...camposVehiculo,
         };
 
@@ -316,11 +322,13 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
               .eq("id", idaId)
           )
         );
+
+        totalInsertados += idasIds.length + retornosIds.length;
       }
     }
 
     setGenerando(false);
-    onGenerado();
+    onGenerado({ lote, cantidad: totalInsertados });
     onClose();
   };
 

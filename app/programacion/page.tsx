@@ -115,6 +115,7 @@ type Reserva = {
   token_expira_at?: string | null;
   reserva_vinculada_id?: number | null;
   direccion_servicio?: string | null;
+  lote_generacion?: string | null;
 };
 
 type Ocupacion = {
@@ -301,6 +302,12 @@ export default function ReservasPage() {
   const [filtroHasta,          setFiltroHasta]          = useState("");
   const [filtroPorAsignar,     setFiltroPorAsignar]     = useState(false);
   const [vistaAgenda,          setVistaAgenda]          = useState(false);
+  // ── Selección múltiple + borrado en grupo ────────────────────────────────
+  const [seleccionados,   setSeleccionados]   = useState<Set<number>>(new Set());
+  const [confirmLote,     setConfirmLote]     = useState<{ aEliminar: Reserva[]; bloqueados: Reserva[]; incluidosVinculados: number } | null>(null);
+  const [textoConfirmLote, setTextoConfirmLote] = useState("");
+  const [eliminandoLote,  setEliminandoLote]  = useState(false);
+  const [ultimoLote,      setUltimoLote]      = useState<{ lote: string; cantidad: number } | null>(null);
   // ── Paradas inline ──────────────────────────────────────────────────────
   const mapsLoaded = useGoogleMapsLoaded();
   const [nuevoParNombre,       setNuevoParNombre]       = useState<Record<number, string>>({});
@@ -1079,10 +1086,116 @@ export default function ReservasPage() {
     cargarDatos();
   };
 
-  const eliminarReserva = async (id: number) => {
-    await supabase.from("reservas").delete().eq("id", id);
+  // ── Selección múltiple ───────────────────────────────────────────────────
+  const toggleSel = (id: number) => {
+    setSeleccionados(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const seleccionarTodosFiltrados = () => setSeleccionados(new Set(filtradas.map(r => r.id)));
+  const limpiarSeleccion = () => setSeleccionados(new Set());
+
+  // ── Borrado (individual y en grupo) ──────────────────────────────────────
+  // Limpia las tablas dependientes antes de borrar la(s) reserva(s), en vez de
+  // dejarlas huérfanas (comportamiento anterior). Sin RPC transaccional (no hay
+  // ninguna en este repo hoy): best-effort secuencial, se acumulan errores y se
+  // avisan en vez de fallar en silencio.
+  const eliminarReservasEnLote = async (ids: number[]) => {
+    if (ids.length === 0) return;
+    setEliminandoLote(true);
+    const CHUNK = 100;
+    const errores: string[] = [];
+
+    const borrarPor = async (tabla: string, columna: string, valores: any[]) => {
+      for (let i = 0; i < valores.length; i += CHUNK) {
+        const { error } = await supabase.from(tabla).delete().in(columna, valores.slice(i, i + CHUNK));
+        if (error) errores.push(`${tabla}: ${error.message}`);
+      }
+    };
+
+    // 1. paradas (necesitamos sus ids primero para limpiar pasajeros_parada, que cuelga de parada_id)
+    const paradaIds: number[] = [];
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const { data, error } = await supabase.from("paradas").select("id").in("reserva_id", ids.slice(i, i + CHUNK));
+      if (error) errores.push(`paradas (lectura): ${error.message}`);
+      paradaIds.push(...(data || []).map((p: any) => p.id));
+    }
+    if (paradaIds.length > 0) await borrarPor("pasajeros_parada", "parada_id", paradaIds);
+    await borrarPor("paradas", "reserva_id", ids);
+
+    // 2. resto de tablas dependientes
+    await borrarPor("pasajeros", "reserva_id", ids);
+    await borrarPor("gastos", "reserva_id", ids);
+    await borrarPor("notificaciones_enviadas", "reserva_id", ids);
+    await borrarPor("boarding_log", "reserva_id", ids);
+    await borrarPor("ubicaciones_gps", "reserva_id", ids);
+    await borrarPor("mensajes_pasajero", "reserva_id", ids);
+    await borrarPor("grupo_aplicado_reserva", "reserva_id", ids);
+    await borrarPor("push_eventos_viaje", "reserva_id", ids);
+    await borrarPor("push_eval_estado", "reserva_id", ids);
+
+    // 3. no dejar reserva_vinculada_id colgante en la pareja IDA/RETORNO que no se borró
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const { error } = await supabase.from("reservas").update({ reserva_vinculada_id: null }).in("reserva_vinculada_id", ids.slice(i, i + CHUNK));
+      if (error) errores.push(`reserva_vinculada_id: ${error.message}`);
+    }
+
+    // 4. las reservas mismas
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const { error } = await supabase.from("reservas").delete().in("id", ids.slice(i, i + CHUNK));
+      if (error) errores.push(`reservas: ${error.message}`);
+    }
+
+    setEliminandoLote(false);
+    if (errores.length > 0) alert(`Hubo errores al eliminar:\n${errores.join("\n")}`);
+
     setConfirmEliminarId(null);
+    setConfirmLote(null);
+    setTextoConfirmLote("");
+    setSeleccionados(new Set());
     cargarDatos();
+  };
+
+  // Prepara el modal de borrado en grupo: expande la pareja IDA/RETORNO vinculada
+  // no seleccionada, y separa las reservas facturadas/cobradas (no se eliminan solas).
+  const prepararEliminacionLote = async (idsBase: number[]) => {
+    if (idsBase.length === 0) return;
+
+    const idsSet = new Set(idsBase);
+    let incluidosVinculados = 0;
+    reservas.forEach(r => {
+      if (idsSet.has(r.id) && r.reserva_vinculada_id && !idsSet.has(r.reserva_vinculada_id)) {
+        idsSet.add(r.reserva_vinculada_id);
+        incluidosVinculados++;
+      }
+    });
+    const idsFinal = Array.from(idsSet);
+
+    const idsConFactura = new Set<number>();
+    const CHUNK = 150;
+    for (let i = 0; i < idsFinal.length; i += CHUNK) {
+      const { data } = await supabase.from("facturas").select("reserva_id").in("reserva_id", idsFinal.slice(i, i + CHUNK));
+      (data || []).forEach((f: any) => { if (f.reserva_id) idsConFactura.add(f.reserva_id); });
+    }
+
+    const bloqueados: Reserva[] = [];
+    const aEliminar: Reserva[] = [];
+    idsFinal.forEach(id => {
+      const r = reservas.find(x => x.id === id);
+      if (!r) return;
+      const bloqueado = r.estado_admin === "facturada" || r.estado_admin === "cobrada" || idsConFactura.has(id);
+      (bloqueado ? bloqueados : aEliminar).push(r);
+    });
+
+    if (aEliminar.length === 0) {
+      alert("Todas las reservas seleccionadas están facturadas/cobradas — ábrelas individualmente si de verdad quieres eliminarlas.");
+      return;
+    }
+
+    setTextoConfirmLote("");
+    setConfirmLote({ aEliminar, bloqueados, incluidosVinculados });
   };
 
   const cambiarEstadoRapido = async (id: number, estado: EstadoReserva) => {
@@ -1250,8 +1363,33 @@ export default function ReservasPage() {
         <ModalGenerarPrograma
           clientes={clientes}
           onClose={() => setMostrarModalPrograma(false)}
-          onGenerado={() => { cargarDatos(); setFiltroServicio("fijo"); }}
+          onGenerado={({ lote, cantidad }) => { cargarDatos(); setFiltroServicio("fijo"); setUltimoLote({ lote, cantidad }); }}
         />
+      )}
+
+      {/* Banner "Deshacer generación" tras usar Programa fijo */}
+      {ultimoLote && (
+        <div className="flex items-center gap-3 px-5 py-3 rounded-2xl border" style={{ background: "#f0fdf4", borderColor: "#bbf7d0" }}>
+          <span className="text-sm" style={{ color: "#166534" }}>
+            Se crearon <b>{ultimoLote.cantidad}</b> servicio{ultimoLote.cantidad !== 1 ? "s" : ""}.
+          </span>
+          <button
+            onClick={async () => {
+              const lote = ultimoLote.lote;
+              const { data } = await supabase.from("reservas").select("id").eq("lote_generacion", lote);
+              const ids = (data || []).map((r: any) => r.id);
+              setUltimoLote(null);
+              await prepararEliminacionLote(ids);
+            }}
+            className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white hover:bg-gray-50 transition-colors"
+            style={{ borderColor: "#bbf7d0", color: "#166534" }}
+          >
+            Deshacer
+          </button>
+          <button onClick={() => setUltimoLote(null)} className="ml-auto text-gray-400 hover:text-gray-600 transition-colors">
+            <X size={16} />
+          </button>
+        </div>
       )}
 
       {/* MODAL APLICAR ASIGNACIÓN MASIVA A SERVICIOS FIJOS */}
@@ -1638,10 +1776,79 @@ export default function ReservasPage() {
                   Cancelar
                 </button>
                 <button
-                  onClick={() => eliminarReserva(confirmEliminarId)}
-                  className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white bg-red-600 hover:bg-red-700 transition-colors"
+                  onClick={() => eliminarReservasEnLote([confirmEliminarId])}
+                  disabled={eliminandoLote}
+                  className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white bg-red-600 hover:bg-red-700 transition-colors disabled:opacity-50"
                 >
-                  Sí, eliminar
+                  {eliminandoLote ? "Eliminando..." : "Sí, eliminar"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {confirmLote && (() => {
+        const { aEliminar, bloqueados, incluidosVinculados } = confirmLote;
+        const cierraSiNoActivo = () => { if (!eliminandoLote) setConfirmLote(null); };
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={cierraSiNoActivo}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+              <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4">
+                <Trash2 size={22} className="text-red-600" />
+              </div>
+              <h3 className="text-lg font-bold text-gray-900 text-center mb-1">
+                ¿Eliminar {aEliminar.length} servicio{aEliminar.length !== 1 ? "s" : ""}?
+              </h3>
+
+              <div className="max-h-32 overflow-y-auto mt-2 mb-3 text-xs text-gray-500 text-center">
+                {aEliminar.slice(0, 8).map(r => (
+                  <div key={r.id}>{idAfa(r)} · {nombreCliente(r.cliente_id)} · {fmtFecha(r.fecha_servicio)}</div>
+                ))}
+                {aEliminar.length > 8 && <div className="font-bold mt-1">y {aEliminar.length - 8} más…</div>}
+              </div>
+
+              {incluidosVinculados > 0 && (
+                <p className="text-xs text-center mb-2 px-3 py-2 rounded-lg" style={{ background: "#eef3f8", color: "#0b315f" }}>
+                  Se incluyeron {incluidosVinculados} viaje{incluidosVinculados !== 1 ? "s" : ""} de ida/retorno vinculado{incluidosVinculados !== 1 ? "s" : ""} automáticamente.
+                </p>
+              )}
+
+              {bloqueados.length > 0 && (
+                <div className="text-xs text-center mb-2 px-3 py-2 rounded-lg" style={{ background: "#fef9c3", color: "#854d0e" }}>
+                  <p className="font-bold">{bloqueados.length} quedaron fuera por estar facturados/cobrados:</p>
+                  <p className="mt-1">Ábrelos individualmente si de verdad quieres eliminarlos.</p>
+                  <p className="mt-1 opacity-80">{bloqueados.slice(0, 5).map(r => idAfa(r)).join(", ")}{bloqueados.length > 5 ? "…" : ""}</p>
+                </div>
+              )}
+
+              <p className="text-xs text-red-600 text-center mb-3 font-medium">Esta acción no se puede deshacer.</p>
+
+              <label className="block text-xs text-gray-500 text-center mb-2">
+                Escribe <b>{aEliminar.length}</b> para confirmar
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={textoConfirmLote}
+                onChange={e => setTextoConfirmLote(e.target.value)}
+                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-center mb-4 focus:outline-none focus:ring-2 focus:ring-red-200 focus:border-red-400"
+                placeholder={String(aEliminar.length)}
+              />
+
+              <div className="flex gap-3">
+                <button
+                  onClick={cierraSiNoActivo}
+                  className="flex-1 py-2.5 rounded-xl font-bold text-sm border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={() => eliminarReservasEnLote(aEliminar.map(r => r.id))}
+                  disabled={eliminandoLote || textoConfirmLote !== String(aEliminar.length)}
+                  className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white bg-red-600 hover:bg-red-700 transition-colors disabled:opacity-40"
+                >
+                  {eliminandoLote ? "Eliminando..." : `Eliminar ${aEliminar.length}`}
                 </button>
               </div>
             </div>
@@ -2399,12 +2606,41 @@ export default function ReservasPage() {
       )}
 
       {/* TABLA PLANA (Todos / Eventuales) */}
+      {filtroServicio !== "fijo" && !vistaAgenda && seleccionados.size > 0 && (
+        <div className="flex items-center gap-3 px-5 py-3 rounded-2xl border" style={{ background: "#eef3f8", borderColor: "#c7d7ea" }}>
+          <span className="text-sm font-bold" style={{ color: "#0b315f" }}>{seleccionados.size} seleccionado{seleccionados.size !== 1 ? "s" : ""}</span>
+          <button onClick={seleccionarTodosFiltrados} className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white hover:bg-gray-50 transition-colors" style={{ borderColor: "#c7d7ea", color: "#0b315f" }}>
+            Seleccionar todos ({filtradas.length})
+          </button>
+          <button onClick={limpiarSeleccion} className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white hover:bg-gray-50 transition-colors" style={{ borderColor: "#c7d7ea", color: "#0b315f" }}>
+            Ninguno
+          </button>
+          <button
+            onClick={() => prepararEliminacionLote(Array.from(seleccionados))}
+            className="ml-auto flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors"
+          >
+            <Trash2 size={13} /> Eliminar seleccionados
+          </button>
+        </div>
+      )}
+
       {filtroServicio !== "fijo" && !vistaAgenda && (
       <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                <th className="p-3 w-8" onClick={e => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    checked={filtradas.length > 0 && filtradas.every(r => seleccionados.has(r.id))}
+                    onChange={() => {
+                      if (filtradas.every(r => seleccionados.has(r.id))) limpiarSeleccion();
+                      else seleccionarTodosFiltrados();
+                    }}
+                    className="cursor-pointer"
+                  />
+                </th>
                 <th className="p-3 w-8"></th>
                 {["ID", "Cotización", "Cliente", "Ruta", "Fecha", "Recurso", "Ocupacion", "Estado", "Administrativo", "Acciones"].map(h => (
                   <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
@@ -2413,14 +2649,14 @@ export default function ReservasPage() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={11} className="p-10 text-center text-gray-400">
+                <tr><td colSpan={12} className="p-10 text-center text-gray-400">
                   <div className="flex items-center justify-center gap-2">
                     <div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />
                     Cargando...
                   </div>
                 </td></tr>
               ) : filtradas.length === 0 ? (
-                <tr><td colSpan={11} className="p-10 text-center text-gray-400">
+                <tr><td colSpan={12} className="p-10 text-center text-gray-400">
                   <p className="text-3xl mb-2">🎫</p>
                   <p className="font-medium">No hay reservas</p>
                 </td></tr>
@@ -2453,7 +2689,7 @@ export default function ReservasPage() {
                   <React.Fragment key={r.id}>
                     {idx === sepIdx && (
                       <tr>
-                        <td colSpan={11} className="px-4 py-2">
+                        <td colSpan={12} className="px-4 py-2">
                           <div className="flex items-center gap-3">
                             <div className="flex-1 h-px" style={{ background: "#bbf7d0" }} />
                             <span className="text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full border" style={{ color: "#166534", background: "#f0fdf4", borderColor: "#bbf7d0" }}>
@@ -2473,6 +2709,9 @@ export default function ReservasPage() {
                         if (nId) { cargarParadasReserva(nId); cargarPasajerosCliente(nId, r.cliente_id); }
                       }}
                     >
+                      <td className="p-3" onClick={e => e.stopPropagation()}>
+                        <input type="checkbox" checked={seleccionados.has(r.id)} onChange={() => toggleSel(r.id)} className="cursor-pointer" />
+                      </td>
                       <td className="p-3 text-gray-300 text-xs">{expandido ? "v" : ">"}</td>
 
                       <td className="p-3">
@@ -2608,7 +2847,7 @@ export default function ReservasPage() {
 
                     {expandido && (
                       <tr style={{ background: "#f8fafc" }} className="border-t">
-                        <td colSpan={11} className="px-6 py-5">
+                        <td colSpan={12} className="px-6 py-5">
                           {(() => {
                             const paradasR = paradasMap[r.id] || [];
                             const tieneJSON = r.paradas_json && r.paradas_json.length > 0;
