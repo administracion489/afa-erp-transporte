@@ -85,6 +85,7 @@ const CONFIG_DEFECTO: RadarConfig = {
   notificar_email: false,
   correos_alerta: null,
   limite_diario_usd: 5,
+  guia_voucher: null,
   updated_at: "",
 };
 
@@ -160,6 +161,8 @@ export async function procesarPendientes(opts?: {
   // Contexto por grupo (nota del operador + restricción de categorías) — se carga en lote
   // para no hacer una consulta por mensaje.
   const gruposInfo = await cargarGruposInfo(sb, lote);
+  // Guías de odómetro por vehículo — solo si el lote trae algo con pinta de combustible.
+  const guiasOdometro = lote.some(pareceCombustible) ? await cargarGuiasOdometro(sb) : [];
 
   // Gate 1: radar apagado → los mensajes quedan pendientes (se procesan al reactivar)
   if (!config.activo && !forzar) {
@@ -216,7 +219,7 @@ export async function procesarPendientes(opts?: {
 
     try {
       const grupoInfo = mensaje.grupo_id ? gruposInfo.get(mensaje.grupo_id) ?? null : null;
-      const r = await procesarMensaje(sb, mensaje, config, forzar, grupoInfo);
+      const r = await procesarMensaje(sb, mensaje, config, forzar, grupoInfo, guiasOdometro);
       resumen.costo_usd += r.costo;
       if (r.estado === "procesado") resumen.procesados++;
       else resumen.descartados++;
@@ -320,6 +323,26 @@ async function resolverCluster(sb: any, mensaje: any): Promise<ResolucionCluster
   return { primaria: false, primariaId: primaria.id };
 }
 
+/**
+ * Guías de lectura del odómetro por vehículo (propio + tercerizado, vehiculos.guia_odometro /
+ * vehiculos_tercero.guia_odometro). Se cargan una sola vez por lote, solo si hay algún
+ * candidato con pinta de combustible (para no gastar la consulta en lotes sin eso).
+ */
+async function cargarGuiasOdometro(sb: any): Promise<{ placa: string; guia: string }[]> {
+  try {
+    const [{ data: propios }, { data: terceros }] = await Promise.all([
+      sb.from("vehiculos").select("placa, guia_odometro").not("guia_odometro", "is", null),
+      sb.from("vehiculos_tercero").select("placa, guia_odometro").not("guia_odometro", "is", null),
+    ]);
+    const filas = [...((propios as any[]) ?? []), ...((terceros as any[]) ?? [])];
+    return filas
+      .filter((f) => String(f.guia_odometro ?? "").trim())
+      .map((f) => ({ placa: String(f.placa ?? ""), guia: String(f.guia_odometro).trim() }));
+  } catch {
+    return [];
+  }
+}
+
 // Alerta única por día cuando se agota el presupuesto de IA.
 async function alertaPresupuesto(sb: any, inicioDiaUtc: string, limite: number) {
   try {
@@ -351,7 +374,8 @@ async function procesarMensaje(
   mensaje: any,
   config: RadarConfig,
   forzar: boolean,
-  grupoInfo: GrupoInfo | null
+  grupoInfo: GrupoInfo | null,
+  guiasOdometro: { placa: string; guia: string }[]
 ): Promise<ResultadoMensaje> {
   const ctx: ContextoPrompt = {
     grupo: mensaje.grupo_nombre,
@@ -360,6 +384,8 @@ async function procesarMensaje(
     horaAhora: horaLima(),
     palabrasClave: config.palabras_clave,
     contextoGrupo: grupoInfo?.contexto ?? null,
+    guiaVoucher: config.guia_voucher,
+    guiasOdometro,
   };
 
   // Categorías efectivas para ESTE grupo: las globales, restringidas además por

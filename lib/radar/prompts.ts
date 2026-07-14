@@ -19,6 +19,8 @@ export type ContextoPrompt = {
   horaAhora: string;           // HH:MM hora Lima
   palabrasClave?: string[];    // pistas extra configuradas en radar_config.palabras_clave
   contextoGrupo?: string | null; // nota del operador sobre qué es este grupo (radar_grupos.contexto)
+  guiaVoucher?: string | null;   // cómo leer los vouchers de grifo (radar_config.guia_voucher)
+  guiasOdometro?: { placa: string; guia: string }[]; // dónde está la lectura en el tablero de cada unidad
 };
 
 // ── Helpers de fecha (solo formateo, la fecha Lima llega ya resuelta) ────────
@@ -258,13 +260,31 @@ Responde únicamente el JSON.`;
 
 // ── 3) EXTRACCIÓN de media (imagen/PDF): clasifica + extrae en una llamada ───
 
+// Guías del operador para leer vouchers/odómetros — solo aplican si el contenido resulta
+// ser de categoría "combustible" (definidas en Radar IA > Configuración).
+function lineaGuiasCombustible(ctx: ContextoPrompt): string {
+  const partes: string[] = [];
+  const guiaVoucher = (ctx.guiaVoucher ?? "").trim();
+  if (guiaVoucher) partes.push(`Cómo leer los vouchers de grifo (indicado por el operador de AFA): ${guiaVoucher}`);
+  const guias = (ctx.guiasOdometro ?? []).filter((g) => g.guia?.trim());
+  if (guias.length) {
+    partes.push(
+      `Dónde está la lectura del odómetro en el tablero de cada unidad (cada vehículo es distinto; usa la que corresponda según la placa que identifiques en el voucher o el texto):\n` +
+        guias.map((g) => `- ${g.placa}: ${g.guia.trim()}`).join("\n")
+    );
+  }
+  return partes.length
+    ? `\n\nSi lo que ves resulta ser de categoría "combustible", ten en cuenta esto:\n${partes.join("\n\n")}`
+    : "";
+}
+
 /** Prompt combinado para mensajes con imagen o PDF (vouchers, documentos, capturas). */
 export function promptExtraccionMedia(ctx: ContextoPrompt): string {
   return `Eres el analista del Radar IA de AFA Transportes (operador de transporte de personal y turismo en Perú). Te entrego una imagen o PDF compartido en un grupo de WhatsApp de la operación (puede venir acompañado de un texto/caption).
 
 ${lineaContexto(ctx)}${lineaPalabrasClave(ctx)}
 
-${GLOSARIO}
+${GLOSARIO}${lineaGuiasCombustible(ctx)}
 
 Haz DOS cosas en una sola respuesta:
 

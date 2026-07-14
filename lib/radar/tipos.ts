@@ -204,6 +204,8 @@ export type RadarConfig = {
   notificar_email: boolean;
   correos_alerta: string | null;
   limite_diario_usd: number;
+  /** Cómo leer los vouchers de grifo (peculiaridades del formato) — se inyecta en la extracción con visión. */
+  guia_voucher: string | null;
   updated_at: string;
 };
 

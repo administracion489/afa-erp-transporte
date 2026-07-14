@@ -119,6 +119,8 @@ type TabId = (typeof TABS)[number]["id"];
 
 type VehiculoLite = { id: number; placa: string; categoria: string | null; estado: string | null };
 
+type VehiculoGuiaOdometro = { tipo: "propio" | "tercero"; id: number; placa: string; categoria: string | null; guia_odometro: string | null };
+
 // ── Iconos SVG inline ────────────────────────────────────────────────────────
 
 type IcProps = { size?: number; className?: string };
@@ -910,10 +912,12 @@ function FilaGrupo({ g, onToggle, onGuardar }: {
 
 // ── Tab: Configuración ───────────────────────────────────────────────────────
 
-function TabConfiguracion({ config, guardando, onGuardar }: {
+function TabConfiguracion({ config, guardando, onGuardar, vehiculosGuia, onGuardarGuiaOdometro }: {
   config: RadarConfig;
   guardando: boolean;
   onGuardar: (cfg: RadarConfig) => void;
+  vehiculosGuia: VehiculoGuiaOdometro[];
+  onGuardarGuiaOdometro: (v: VehiculoGuiaOdometro, guia: string | null) => Promise<void>;
 }) {
   const [cfg, setCfg] = useState<RadarConfig>(() => ({
     ...config,
@@ -1101,7 +1105,50 @@ function TabConfiguracion({ config, guardando, onGuardar }: {
             </select>
             <p className="text-xs text-gray-400 mt-1.5">El triage siempre usa <span className="font-mono">claude-haiku-4-5</span> (rápido y económico); este modelo solo aplica a la extracción de datos.</p>
           </div>
+
+          <div>
+            <p className="text-sm font-bold text-gray-700 mb-1">Guía de lectura de vouchers de combustible</p>
+            <p className="text-xs text-gray-400 mb-2">
+              Explícale a ELIA particularidades de los vouchers que recibes (p.ej. "el monto real dice TOTAL, no
+              SUBTOTAL" o "a veces la placa aparece como UNIDAD"). Se usa en cada foto/PDF de combustible.
+            </p>
+            <textarea
+              value={cfg.guia_voucher ?? ""}
+              onChange={(e) => set("guia_voucher", e.target.value || null)}
+              placeholder='Ej: "El monto a usar es el que dice TOTAL (no SUBTOTAL). El código de la placa a veces aparece como UNIDAD o UND."'
+              rows={3}
+              className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[#0b315f] transition-colors resize-none"
+            />
+          </div>
         </div>
+      </div>
+
+      {/* Guías de odómetro por vehículo */}
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+        <div className="px-5 py-4 border-b border-gray-100">
+          <h3 className="font-black text-[#0b315f] text-sm">Guías de odómetro por vehículo</h3>
+          <p className="text-xs text-gray-400 mt-0.5">Cada tablero es distinto — explícale a ELIA dónde está la lectura y qué ignorar (p.ej. el trip parcial) en cada unidad.</p>
+        </div>
+        {vehiculosGuia.length === 0 ? (
+          <p className="p-5 text-sm text-gray-400">Sin vehículos registrados todavía.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                  {["Placa", "Categoría", "Flota"].map((h) => (
+                    <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {vehiculosGuia.map((v) => (
+                  <FilaGuiaOdometro key={`${v.tipo}-${v.id}`} v={v} onGuardar={onGuardarGuiaOdometro} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Notificaciones y presupuesto */}
@@ -1154,6 +1201,68 @@ function TabConfiguracion({ config, guardando, onGuardar }: {
   );
 }
 
+function FilaGuiaOdometro({ v, onGuardar }: {
+  v: VehiculoGuiaOdometro;
+  onGuardar: (v: VehiculoGuiaOdometro, guia: string | null) => Promise<void>;
+}) {
+  const [abierto, setAbierto] = useState(false);
+  const [guia, setGuia] = useState(v.guia_odometro ?? "");
+  const [guardando, setGuardando] = useState(false);
+
+  useEffect(() => {
+    if (!abierto) setGuia(v.guia_odometro ?? "");
+  }, [v.guia_odometro, abierto]);
+
+  const guardar = async () => {
+    setGuardando(true);
+    await onGuardar(v, guia.trim() || null);
+    setGuardando(false);
+  };
+
+  return (
+    <>
+      <tr className="border-t hover:bg-gray-50 transition-colors" style={{ borderColor: "#f1f5f9" }}>
+        <td className="p-3">
+          <button onClick={() => setAbierto((x) => !x)} className="flex items-center gap-2 font-bold text-[#0b315f] text-left">
+            <Ic.Chevron size={13} className={`text-gray-300 transition-transform flex-shrink-0 ${abierto ? "rotate-180" : ""}`} />
+            <span className="font-mono">{v.placa}</span>
+            {v.guia_odometro && <span className="w-1.5 h-1.5 rounded-full bg-[#2f8ee9] flex-shrink-0" title="Tiene guía configurada" />}
+          </button>
+        </td>
+        <td className="p-3 text-gray-500">{v.categoria ?? "—"}</td>
+        <td className="p-3">
+          <span
+            className="text-[10px] font-black px-2 py-0.5 rounded-full"
+            style={v.tipo === "tercero" ? { color: "#B07A0F", background: "#FBF1D8" } : { color: "#27AE60", background: "#E8F5EC" }}
+          >
+            {v.tipo === "tercero" ? "Tercerizada" : "Propia"}
+          </span>
+        </td>
+      </tr>
+      {abierto && (
+        <tr className="bg-blue-50/30 border-t" style={{ borderColor: "#f1f5f9" }}>
+          <td colSpan={3} className="p-4 space-y-3">
+            <textarea
+              value={guia}
+              onChange={(e) => setGuia(e.target.value)}
+              rows={2}
+              placeholder='Ej: "Pantalla digital superior derecha, formato con puntos (25.434 km). El TRIP de abajo se ignora."'
+              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-[#0b315f] transition-colors bg-white"
+            />
+            <button
+              onClick={guardar}
+              disabled={guardando}
+              className="bg-[#0b315f] text-white px-4 py-2 rounded-xl text-xs font-bold hover:bg-[#1262bd] transition-colors disabled:opacity-50"
+            >
+              {guardando ? "Guardando…" : "Guardar"}
+            </button>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 // ── Página principal ─────────────────────────────────────────────────────────
 
 export default function RadarIAPage() {
@@ -1166,6 +1275,7 @@ export default function RadarIAPage() {
   const [combustibles, setCombustibles] = useState<RadarCombustible[]>([]);
   const [alertas, setAlertas] = useState<RadarAlerta[]>([]);
   const [vehiculos, setVehiculos] = useState<VehiculoLite[]>([]);
+  const [vehiculosGuia, setVehiculosGuia] = useState<VehiculoGuiaOdometro[]>([]);
 
   const [tab, setTab] = useState<TabId>("feed");
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
@@ -1183,7 +1293,7 @@ export default function RadarIAPage() {
   // ── Carga de datos ──
   const cargar = useCallback(async () => {
     try {
-      const [rEstado, rConfig, rGrupos, rMensajes, rOpps, rComb, rAlertas, rVehiculos] = await Promise.all([
+      const [rEstado, rConfig, rGrupos, rMensajes, rOpps, rComb, rAlertas, rVehiculos, rVehTercero] = await Promise.all([
         supabase.from("radar_estado").select("*").eq("id", 1).maybeSingle(),
         supabase.from("radar_config").select("*").eq("id", 1).maybeSingle(),
         supabase.from("radar_grupos").select("*").order("nombre"),
@@ -1191,7 +1301,8 @@ export default function RadarIAPage() {
         supabase.from("radar_oportunidades").select("*").order("created_at", { ascending: false }).limit(60),
         supabase.from("radar_combustible").select("*").order("created_at", { ascending: false }).limit(60),
         supabase.from("radar_alertas").select("*").order("created_at", { ascending: false }).limit(100),
-        supabase.from("vehiculos").select("id, placa, categoria, estado"),
+        supabase.from("vehiculos").select("id, placa, categoria, estado, guia_odometro"),
+        supabase.from("vehiculos_tercero").select("id, placa, categoria, guia_odometro"),
       ]);
       if (rEstado.error) console.warn("radar-ia: error leyendo radar_estado", rEstado.error);
       if (rConfig.error) console.warn("radar-ia: error leyendo radar_config", rConfig.error);
@@ -1203,6 +1314,15 @@ export default function RadarIAPage() {
       setCombustibles(((rComb.data ?? []) as RadarCombustible[]));
       setAlertas(((rAlertas.data ?? []) as RadarAlerta[]));
       setVehiculos(((rVehiculos.data ?? []) as VehiculoLite[]));
+      const guiaPropios: VehiculoGuiaOdometro[] = ((rVehiculos.data ?? []) as any[]).map((v) => ({
+        tipo: "propio", id: v.id, placa: v.placa, categoria: v.categoria ?? null, guia_odometro: v.guia_odometro ?? null,
+      }));
+      const guiaTerceros: VehiculoGuiaOdometro[] = ((rVehTercero.data ?? []) as any[]).map((v) => ({
+        tipo: "tercero", id: v.id, placa: v.placa, categoria: v.categoria ?? null, guia_odometro: v.guia_odometro ?? null,
+      }));
+      setVehiculosGuia(
+        [...guiaPropios, ...guiaTerceros].sort((a, b) => (a.placa ?? "").localeCompare(b.placa ?? ""))
+      );
     } catch (e) {
       console.warn("radar-ia: error cargando datos", e);
     }
@@ -1558,6 +1678,18 @@ export default function RadarIAPage() {
     showToast(`Contexto de «${g.nombre}» guardado`);
   }
 
+  async function guardarGuiaOdometro(v: VehiculoGuiaOdometro, guia: string | null) {
+    const tabla = v.tipo === "tercero" ? "vehiculos_tercero" : "vehiculos";
+    const { error } = await supabase.from(tabla).update({ guia_odometro: guia }).eq("id", v.id);
+    if (error) {
+      console.warn("radar-ia: error guardando guía de odómetro", error);
+      showToast("No se pudo guardar la guía de odómetro", false);
+      return;
+    }
+    setVehiculosGuia((prev) => prev.map((x) => (x.tipo === v.tipo && x.id === v.id ? { ...x, guia_odometro: guia } : x)));
+    showToast(`Guía de ${v.placa} guardada`);
+  }
+
   async function guardarConfig(cfg: RadarConfig) {
     setGuardandoConfig(true);
     const { error } = await supabase
@@ -1575,6 +1707,7 @@ export default function RadarIAPage() {
         notificar_email: cfg.notificar_email,
         correos_alerta: cfg.correos_alerta,
         limite_diario_usd: cfg.limite_diario_usd,
+        guia_voucher: cfg.guia_voucher,
         updated_at: new Date().toISOString(),
       })
       .eq("id", 1);
@@ -1745,7 +1878,13 @@ export default function RadarIAPage() {
             {tab === "grupos" && <TabGrupos grupos={grupos} onToggle={toggleGrupo} onGuardarContexto={guardarContextoGrupo} />}
             {tab === "configuracion" && (
               config ? (
-                <TabConfiguracion config={config} guardando={guardandoConfig} onGuardar={guardarConfig} />
+                <TabConfiguracion
+                  config={config}
+                  guardando={guardandoConfig}
+                  onGuardar={guardarConfig}
+                  vehiculosGuia={vehiculosGuia}
+                  onGuardarGuiaOdometro={guardarGuiaOdometro}
+                />
               ) : (
                 <CardVacia emoji="⚙️" titulo="Sin configuración" detalle="Corre supabase/radar-ia.sql en el editor SQL de Supabase para crear la fila de configuración." />
               )
