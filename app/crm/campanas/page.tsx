@@ -54,6 +54,12 @@ export default function CampanasPage() {
   const [creando, setCreando] = useState(false);
   const [preview, setPreview] = useState<number | null>(null);
 
+  // Probador del 2do número
+  const [telPrueba, setTelPrueba] = useState("");
+  const [tplPrueba, setTplPrueba] = useState("hello_world");
+  const [probando, setProbando] = useState(false);
+  const [resPrueba, setResPrueba] = useState<{ ok: boolean; texto: string } | null>(null);
+
   const showToast = (msg: string, ok = true) => {
     setToast({ msg, ok });
     setTimeout(() => setToast(null), 4000);
@@ -139,6 +145,26 @@ export default function CampanasPage() {
     return { restantes: 0 };
   };
 
+  const probar = async () => {
+    if (!telPrueba.trim()) return showToast("Pon un número para la prueba", false);
+    setProbando(true);
+    setResPrueba(null);
+    try {
+      const res = await fetch("/api/campanas/probar", {
+        method: "POST",
+        headers: await authHeaders(),
+        body: JSON.stringify({ telefono: telPrueba.trim(), plantilla: tplPrueba.trim() }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error ?? "Error");
+      setResPrueba({ ok: true, texto: `✅ Enviado a ${j.enviadoA} con la plantilla "${j.plantilla}" (${j.idioma}). ID: ${j.messageId}` });
+    } catch (e: any) {
+      setResPrueba({ ok: false, texto: `❌ ${e.message}` });
+    } finally {
+      setProbando(false);
+    }
+  };
+
   const enviar = async (c: Campana) => {
     const destino = c.canal === "whatsapp" ? "WhatsApp" : "correo";
     if (!confirm(`¿Enviar la campaña "${c.nombre}" por ${destino}?\nEsto contacta a los destinatarios de verdad.`)) return;
@@ -211,6 +237,39 @@ export default function CampanasPage() {
         <strong>WhatsApp solo a quienes te escribieron.</strong> Por política de Meta, las campañas de WhatsApp
         van únicamente a contactos con consentimiento (los que ya te contactaron). Para prospectos en frío usa el
         canal <strong>Email</strong>. Quien responda “BAJA” deja de recibir automáticamente.
+      </div>
+
+      {/* Probador del 2do número */}
+      <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
+        <h2 className="text-sm font-bold text-gray-700 mb-1">Probar el número de avisos</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          Envía un WhatsApp de prueba desde el 2do número. Usa <code className="font-mono">hello_world</code> (viene
+          aprobada por defecto) para verificar la conexión antes de que aprueben tus plantillas propias.
+        </p>
+        <div className="grid md:grid-cols-3 gap-3">
+          <div>
+            <label className={label}>Número destino</label>
+            <input className={input} value={telPrueba} onChange={(e) => setTelPrueba(e.target.value)} placeholder="987654321" />
+          </div>
+          <div>
+            <label className={label}>Plantilla</label>
+            <input className={input} value={tplPrueba} onChange={(e) => setTplPrueba(e.target.value)} placeholder="hello_world" />
+          </div>
+          <div className="flex items-end">
+            <button
+              onClick={probar}
+              disabled={probando}
+              className="w-full bg-green-600 text-white text-sm font-semibold px-4 py-2.5 rounded-xl hover:bg-green-700 disabled:opacity-50"
+            >
+              {probando ? "Enviando…" : "Enviar prueba"}
+            </button>
+          </div>
+        </div>
+        {resPrueba && (
+          <div className={`mt-3 text-[13px] rounded-xl p-3 border ${resPrueba.ok ? "bg-green-50 border-green-200 text-green-800" : "bg-red-50 border-red-200 text-red-800"}`}>
+            {resPrueba.texto}
+          </div>
+        )}
       </div>
 
       {/* Nueva campaña */}

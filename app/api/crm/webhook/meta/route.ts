@@ -37,6 +37,13 @@ export async function POST(req: NextRequest) {
       for (const change of e.changes ?? []) {
         if (change.field !== "messages") continue;
         const val = change.value;
+        // ¿A QUÉ número llegó? El webhook es a nivel de WABA y ahora hay 2 números:
+        // el de clientes (CRM, lo atiende Afita) y el de AVISOS (recordatorios y
+        // campañas). Un pasajero que responde a un recordatorio NO debe recibir al
+        // bot de ventas: se registra el mensaje y el opt-in/baja, pero sin IA.
+        const phoneId  = val.metadata?.phone_number_id;
+        const esAvisos = !!phoneId && phoneId === process.env.META_PHONE_NUMBER_ID_AVISOS;
+
         for (const msg of val.messages ?? []) {
           const convId = await processarMensaje({
             canal: "whatsapp",
@@ -48,7 +55,7 @@ export async function POST(req: NextRequest) {
             mediaUrl: msg.image?.url ?? msg.audio?.url ?? msg.video?.url ?? msg.document?.url ?? null,
             metaMessageId: msg.id,
           });
-          if (convId) conversacionesNuevas.add(convId);
+          if (convId && !esAvisos) conversacionesNuevas.add(convId);
         }
       }
     }
