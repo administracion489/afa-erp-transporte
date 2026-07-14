@@ -31,6 +31,8 @@ const CATEGORIAS_OC: Record<string, { label: string; icon: string; color: string
   taller:          { label: "Taller mecánico",    icon: "🔧", color: "#854d0e", bg: "#fef9c3" },
   grifo:           { label: "Grifo / combustible", icon: "⛽", color: "#ea580c", bg: "#fff7ed" },
   repuestos:       { label: "Repuestos",           icon: "⚙️", color: "#4b5563", bg: "#f3f4f6" },
+  concesionario:   { label: "Concesionario / venta vehículos", icon: "🚍", color: "#1e40af", bg: "#dbeafe" },
+  leasing:         { label: "Leasing / financiera", icon: "🏦", color: "#9a3412", bg: "#ffedd5" },
   seguros:         { label: "Seguros / broker",    icon: "🛡️", color: "#1d4ed8", bg: "#dbeafe" },
   neumaticos:      { label: "Neumáticos",          icon: "🛞", color: "#0f766e", bg: "#f0fdfa" },
   lavadero:        { label: "Lavadero",            icon: "🚿", color: "#0284c7", bg: "#e0f2fe" },
@@ -59,6 +61,8 @@ const CONDICIONES_PAGO: Record<string, string> = {
 const OC_A_GASTO: Record<string, { categoria: string; tipoGasto: string }> = {
   seguros:        { categoria: "seguro",         tipoGasto: "administrativo" },
   administrativo: { categoria: "administrativo", tipoGasto: "administrativo" },
+  leasing:        { categoria: "administrativo", tipoGasto: "administrativo" },
+  concesionario:  { categoria: "otro",           tipoGasto: "administrativo" },
 };
 
 const UNIDADES = ["und", "gal", "kg", "lt", "juego", "servicio", "km"];
@@ -90,6 +94,201 @@ function fmtMonto(n: number, moneda = "PEN") {
 function fmtFecha(f: string | null) {
   if (!f) return "—";
   return new Date(f).toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+function fmtFechaLarga(f: string | null) {
+  if (!f) return "—";
+  return new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "numeric", month: "long", year: "numeric" }).toUpperCase();
+}
+
+// ─── PDF ──────────────────────────────────────────────────────────────────────
+// Mismo enfoque que /cotizaciones: se abre una ventana con HTML A4 + window.print().
+// El logo y los datos del emisor salen de empresa_perfil (fallback a AFA por defecto).
+
+type EmpresaPerfilPDF = {
+  nombre: string | null; razon_social: string | null; ruc: string | null; logo_url: string | null;
+  telefono: string | null; email: string | null; direccion: string | null; color_primario: string | null; web: string | null;
+};
+type ProveedorPDF = {
+  nombre: string; ruc: string | null; telefono: string | null; email: string | null;
+  direccion: string | null; contacto_nombre: string | null; contacto_telefono: string | null;
+};
+
+const LOGO_OC_DEFAULT = "/logoafacotizacion-removebg-preview.png";
+
+// Convierte un número a letras (español, Perú) para el "SON:" del documento formal.
+function numeroALetras(num: number, moneda = "PEN"): string {
+  const entero = Math.floor(Math.abs(num));
+  const dec = Math.round((Math.abs(num) - entero) * 100);
+  const uni = ["", "UNO", "DOS", "TRES", "CUATRO", "CINCO", "SEIS", "SIETE", "OCHO", "NUEVE"];
+  const esp: Record<number, string> = {
+    10: "DIEZ", 11: "ONCE", 12: "DOCE", 13: "TRECE", 14: "CATORCE", 15: "QUINCE", 16: "DIECISÉIS",
+    17: "DIECISIETE", 18: "DIECIOCHO", 19: "DIECINUEVE", 20: "VEINTE", 21: "VEINTIUNO", 22: "VEINTIDÓS",
+    23: "VEINTITRÉS", 24: "VEINTICUATRO", 25: "VEINTICINCO", 26: "VEINTISÉIS", 27: "VEINTISIETE",
+    28: "VEINTIOCHO", 29: "VEINTINUEVE",
+  };
+  const dec10 = ["", "", "", "TREINTA", "CUARENTA", "CINCUENTA", "SESENTA", "SETENTA", "OCHENTA", "NOVENTA"];
+  const cen = ["", "CIENTO", "DOSCIENTOS", "TRESCIENTOS", "CUATROCIENTOS", "QUINIENTOS", "SEISCIENTOS", "SETECIENTOS", "OCHOCIENTOS", "NOVECIENTOS"];
+  const seccion = (n: number): string => {
+    if (n === 100) return "CIEN";
+    let t = "";
+    const c = Math.floor(n / 100), r = n % 100;
+    if (c > 0) t += cen[c] + " ";
+    if (r < 10) t += uni[r];
+    else if (r < 30) t += esp[r] || "";
+    else { const d = Math.floor(r / 10), u = r % 10; t += dec10[d]; if (u > 0) t += " Y " + uni[u]; }
+    return t.trim();
+  };
+  const convertir = (n: number): string => {
+    if (n === 0) return "CERO";
+    let t = "";
+    const mill = Math.floor(n / 1000000), miles = Math.floor((n % 1000000) / 1000), r = n % 1000;
+    if (mill > 0) t += (mill === 1 ? "UN MILLÓN" : seccion(mill) + " MILLONES") + " ";
+    if (miles > 0) t += (miles === 1 ? "MIL" : seccion(miles) + " MIL") + " ";
+    if (r > 0) t += seccion(r);
+    return t.trim();
+  };
+  const monedaTxt = moneda === "USD" ? "DÓLARES AMERICANOS" : "SOLES";
+  return `${convertir(entero)} CON ${String(dec).padStart(2, "0")}/100 ${monedaTxt}`;
+}
+
+function generarOCPdf(
+  oc: OrdenCompra, itemsOC: ItemOC[], proveedor: ProveedorPDF | null, empresa: EmpresaPerfilPDF | null,
+  catLabel: string, vehiculos: Vehiculo[],
+) {
+  const cp = empresa?.color_primario || "#0b315f";
+  const logoUrl = empresa?.logo_url || LOGO_OC_DEFAULT;
+  const empNombre = empresa?.razon_social || empresa?.nombre || "AFA Tours Peru S.A.C.";
+  const empRuc = empresa?.ruc || "20602117091";
+  const empTel = empresa?.telefono || "(01) 3453707 – 966 707 225";
+  const empEmail = empresa?.email || "transporte@afatoursperu.com";
+  const empDir = empresa?.direccion || "Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima";
+  const empWeb = empresa?.web || "www.afatoursperu.com";
+  const moneda = oc.moneda || "PEN";
+  const vehLabel = (id: number | null) => {
+    const v = vehiculos.find(x => x.id === id);
+    return v ? `${v.placa}${v.marca ? ` · ${v.marca}` : ""}` : "";
+  };
+  const unidadDestinoDoc = vehLabel(oc.vehiculo_id);
+  const condicionesPago: Record<string, string> = {
+    contado: "Contado", credito_15: "Crédito 15 días", credito_30: "Crédito 30 días", detraccion: "Detracción", otro: "Otro",
+  };
+  const anulada = oc.estado === "anulada";
+
+  const filas = itemsOC.map((it, i) => `<tr>
+    <td style="text-align:center;padding:6px;border:1px solid #ccc;">${i + 1}</td>
+    <td style="padding:6px;border:1px solid #ccc;">${it.descripcion}${vehLabel(it.vehiculo_id) ? `<span style="color:#64748b;font-size:9px;"> · ${vehLabel(it.vehiculo_id)}</span>` : ""}</td>
+    <td style="text-align:center;padding:6px;border:1px solid #ccc;">${it.cantidad}</td>
+    <td style="text-align:center;padding:6px;border:1px solid #ccc;">${it.unidad_medida}</td>
+    <td style="text-align:right;padding:6px;border:1px solid #ccc;">${fmtMonto(it.precio_unitario, moneda)}</td>
+    <td style="text-align:right;padding:6px;border:1px solid #ccc;font-weight:bold;">${fmtMonto(it.subtotal, moneda)}</td>
+  </tr>`).join("");
+
+  const totalesHtml = `<table class="totales">
+    ${oc.incluye_igv ? `<tr><td class="label">SUBTOTAL</td><td class="valor">${fmtMonto(oc.subtotal, moneda)}</td></tr>
+    <tr><td class="label">IGV (18%)</td><td class="valor">${fmtMonto(oc.igv, moneda)}</td></tr>` : ""}
+    <tr class="sep"><td class="label total-neto">TOTAL</td><td class="valor total-neto">${fmtMonto(oc.total, moneda)}</td></tr>
+    ${!oc.incluye_igv ? `<tr><td colspan="2" style="text-align:right;font-size:9px;color:#6b7280;padding:2px 10px 0;">No incluye IGV</td></tr>` : ""}
+  </table>`;
+
+  const css = `@page{size:A4;margin:0}*{box-sizing:border-box}
+    body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:11px;color:#1a1a1a;margin:0;padding:82px 15mm 55px;line-height:1.4}
+    .pdf-header{position:fixed;top:0;left:0;right:0;z-index:100;}
+    .pdf-footer{position:fixed;bottom:0;left:0;right:0;z-index:100;}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+    .box{border:1px solid #ccc;border-radius:4px;padding:8px 10px}
+    .box-title{font-weight:900;font-size:10px;color:${cp};text-transform:uppercase;border-bottom:1px solid #e5e7eb;padding-bottom:4px;margin-bottom:6px}
+    .box-row{margin:3px 0;font-size:10.5px}
+    table.items{width:100%;border-collapse:collapse;margin:10px 0;font-size:10.5px}
+    table.items thead{background:${cp};color:white}
+    table.items thead th{padding:6px;text-align:center;font-weight:700;font-size:10px;border:1px solid ${cp}}
+    table.items tbody tr:nth-child(even){background:#f8fafc}
+    .totales{width:100%;border-collapse:collapse}
+    .totales td{padding:4px 10px}
+    .totales .label{text-align:right;color:#555;font-weight:600}
+    .totales .valor{text-align:right;font-weight:700}
+    .totales .total-neto{font-size:13px;font-weight:900;color:${cp}}
+    .totales .sep{border-top:2px solid ${cp}}
+    .son{margin-top:8px;border:1px dashed ${cp}66;border-radius:6px;padding:6px 10px;background:${cp}0a;font-size:10px}
+    .firmas{display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;margin-top:38px}
+    .firma{text-align:center;font-size:9.5px;color:#374151}
+    .firma .linea{border-top:1px solid #6b7280;margin:0 6px 5px;padding-top:5px}
+    .wm{position:fixed;top:45%;left:0;right:0;text-align:center;font-size:110px;font-weight:900;color:#dc262618;transform:rotate(-24deg);z-index:0;letter-spacing:8px}
+    @media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}`;
+
+  const header = `<div class="pdf-header" style="background:${cp};display:flex;align-items:stretch;height:65px;">
+    <div style="background:white;border-radius:0 20px 20px 0;padding:8px 20px 8px 14px;display:flex;align-items:center;min-width:140px;max-width:160px;flex-shrink:0;">
+      <img src="${logoUrl}" style="max-height:46px;max-width:130px;object-fit:contain;"/>
+    </div>
+    <div style="flex:1;display:flex;align-items:center;justify-content:flex-end;padding:0 24px;">
+      <div style="text-align:right;">
+        <p style="font-size:16px;font-weight:900;color:white;margin:0;letter-spacing:.3px;">ORDEN DE COMPRA</p>
+        <p style="font-size:9.5px;color:rgba(255,255,255,0.72);margin:3px 0 0;">N° ${oc.numero || "#" + oc.id} · Emitida: ${fmtFecha(oc.fecha_emision)}</p>
+      </div>
+    </div>
+  </div>`;
+
+  const footer = `<div class="pdf-footer" style="background:${cp};padding:9px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+    <span style="color:white;font-size:8.5px;">&#8962; Dir.: ${empDir}</span>
+    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
+    <span style="color:white;font-size:8.5px;">&#9990; ${empTel}</span>
+    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
+    <span style="color:white;font-size:8.5px;">&#9993; ${empEmail}</span>
+    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
+    <span style="color:white;font-size:8.5px;">&#9741; ${empWeb}</span>
+  </div>`;
+
+  const win = window.open("", "_blank");
+  if (!win) { alert("El navegador bloqueó la ventana emergente. Permite pop-ups para imprimir."); return; }
+  win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Orden de Compra ${oc.numero || oc.id}</title><style>${css}</style></head><body>
+  ${header}
+  ${anulada ? `<div class="wm">ANULADA</div>` : ""}
+  <div class="grid2">
+    <div class="box">
+      <div class="box-title">Proveedor</div>
+      <div class="box-row"><b>${proveedor?.nombre || "—"}</b></div>
+      <div class="box-row"><b>RUC:</b> ${proveedor?.ruc || "—"}</div>
+      <div class="box-row"><b>DIRECCIÓN:</b> ${proveedor?.direccion || "—"}</div>
+      <div class="box-row"><b>CONTACTO:</b> ${proveedor?.contacto_nombre || "—"}${proveedor?.contacto_telefono ? " · " + proveedor.contacto_telefono : ""}</div>
+      <div class="box-row"><b>TEL / EMAIL:</b> ${proveedor?.telefono || "—"}${proveedor?.email ? " · " + proveedor.email : ""}</div>
+    </div>
+    <div class="box">
+      <div class="box-title">${empNombre}</div>
+      <div class="box-row"><b>RUC:</b> ${empRuc}</div>
+      <div class="box-row"><b>DIRECCIÓN:</b> ${empDir}</div>
+      <div class="box-row"><b>TELF:</b> ${empTel}</div>
+      <div class="box-row"><b>EMAIL:</b> ${empEmail}</div>
+    </div>
+  </div>
+  <div class="box" style="margin-bottom:10px;">
+    <div class="box-title">Datos de la orden</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;">
+      <div class="box-row"><b>CATEGORÍA:</b> ${catLabel}</div>
+      <div class="box-row"><b>CONDICIÓN DE PAGO:</b> ${condicionesPago[oc.condicion_pago] || oc.condicion_pago}</div>
+      <div class="box-row"><b>MONEDA:</b> ${moneda === "USD" ? "Dólares (US$)" : "Soles (S/)"}</div>
+      <div class="box-row"><b>FECHA EMISIÓN:</b> ${fmtFechaLarga(oc.fecha_emision)}</div>
+      <div class="box-row"><b>ENTREGA ESPERADA:</b> ${oc.fecha_entrega_esperada ? fmtFechaLarga(oc.fecha_entrega_esperada) : "Por coordinar"}</div>
+      ${unidadDestinoDoc ? `<div class="box-row"><b>UNIDAD DESTINO:</b> ${unidadDestinoDoc}</div>` : ""}
+    </div>
+  </div>
+  <table class="items">
+    <thead><tr>
+      <th style="width:36px;">ÍTEM</th><th style="text-align:left;">DESCRIPCIÓN</th>
+      <th style="width:55px;">CANT.</th><th style="width:60px;">UNIDAD</th>
+      <th style="width:110px;">P. UNIT.</th><th style="width:120px;">SUBTOTAL</th>
+    </tr></thead>
+    <tbody>${filas}<tr><td colspan="6" style="border:1px solid #ccc;padding:0;vertical-align:top;">${totalesHtml}</td></tr></tbody>
+  </table>
+  <div class="son"><b>SON:</b> ${numeroALetras(oc.total, moneda)}</div>
+  ${oc.observaciones ? `<div class="box" style="margin-top:10px;"><div class="box-title">Observaciones</div><div class="box-row">${oc.observaciones}</div></div>` : ""}
+  ${anulada && oc.motivo_anulacion ? `<div class="box" style="margin-top:10px;border-color:#fca5a5;"><div class="box-title" style="color:#991b1b;">Motivo de anulación</div><div class="box-row">${oc.motivo_anulacion}</div></div>` : ""}
+  <div class="firmas">
+    <div class="firma"><div class="linea">${oc.creado_por || "&nbsp;"}</div>Solicitado por</div>
+    <div class="firma"><div class="linea">${oc.aprobado_por || "&nbsp;"}</div>Aprobado por</div>
+    <div class="firma"><div class="linea">&nbsp;</div>Recibí conforme (proveedor)</div>
+  </div>
+  ${footer}
+  <script>window.onload=()=>window.print();</script></body></html>`);
+  win.document.close();
 }
 
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
@@ -283,6 +482,18 @@ export default function OrdenesCompraPage() {
     if (error) { alert(error.message); return; }
     await supabase.from("ordenes_compra").update({ gasto_id: data.id }).eq("id", oc.id);
     cargarDatos();
+  };
+
+  const abrirPdf = async (oc: OrdenCompra) => {
+    const itemsOC = items.filter(it => it.orden_compra_id === oc.id);
+    const [rProv, rEmp] = await Promise.all([
+      oc.proveedor_id
+        ? supabase.from("proveedores").select("nombre,ruc,telefono,email,direccion,contacto_nombre,contacto_telefono").eq("id", oc.proveedor_id).maybeSingle()
+        : Promise.resolve({ data: null }),
+      supabase.from("empresa_perfil").select("nombre,razon_social,ruc,logo_url,telefono,email,direccion,color_primario,web").eq("id", 1).maybeSingle(),
+    ]);
+    const catLabel = CATEGORIAS_OC[oc.categoria]?.label || oc.categoria;
+    generarOCPdf(oc, itemsOC, rProv.data as ProveedorPDF | null, rEmp.data as EmpresaPerfilPDF | null, catLabel, vehiculos);
   };
 
   // ── KPIs ──────────────────────────────────────────────────────────────────
@@ -557,11 +768,13 @@ export default function OrdenesCompraPage() {
                       </td>
                       <td className="p-3" onClick={e => e.stopPropagation()}>
                         <div className="flex gap-1.5">
+                          <button onClick={() => abrirPdf(oc)} title="Imprimir / PDF"
+                            className="px-2.5 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">🖨️</button>
                           {editable && (
-                            <button onClick={() => editar(oc)}
+                            <button onClick={() => editar(oc)} title="Editar"
                               className="px-2.5 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">✏️</button>
                           )}
-                          <button onClick={() => eliminar(oc.id, oc.numero)}
+                          <button onClick={() => eliminar(oc.id, oc.numero)} title="Eliminar"
                             className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50">✕</button>
                         </div>
                       </td>

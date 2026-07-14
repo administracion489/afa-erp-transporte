@@ -19,6 +19,8 @@ const TIPOS_PROVEEDOR: Record<string, { label: string; icon: string; color: stri
   taller:          { label: "Taller mecánico",    icon: "🔧", color: "#854d0e", bg: "#fef9c3" },
   grifo:           { label: "Grifo / combustible", icon: "⛽", color: "#ea580c", bg: "#fff7ed" },
   repuestos:       { label: "Repuestos",           icon: "⚙️", color: "#4b5563", bg: "#f3f4f6" },
+  concesionario:   { label: "Concesionario / venta vehículos", icon: "🚍", color: "#1e40af", bg: "#dbeafe" },
+  leasing:         { label: "Leasing / financiera", icon: "🏦", color: "#9a3412", bg: "#ffedd5" },
   seguros:         { label: "Seguros / broker",    icon: "🛡️", color: "#1d4ed8", bg: "#dbeafe" },
   neumaticos:      { label: "Neumáticos",          icon: "🛞", color: "#0f766e", bg: "#f0fdfa" },
   lavadero:        { label: "Lavadero",            icon: "🚿", color: "#0284c7", bg: "#e0f2fe" },
