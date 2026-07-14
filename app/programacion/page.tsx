@@ -825,6 +825,26 @@ export default function ReservasPage() {
     setAsignando(false);
   };
 
+  // Supabase/PostgREST corta cada respuesta a 1000 filas por defecto. Con >1000
+  // reservas en la tabla (los "Programa fijo" generan meses hacia adelante), un
+  // .select("*") simple se queda solo con las 1000 más futuras (orden desc) y
+  // pierde silenciosamente las de hoy y todo el historial. Se pagina con .range().
+  const fetchAllReservas = async () => {
+    const PAGE = 1000;
+    let from = 0;
+    const all: any[] = [];
+    for (;;) {
+      const { data, error } = await supabase.from("reservas").select("*")
+        .order("fecha_servicio", { ascending: false }).order("id", { ascending: false })
+        .range(from, from + PAGE - 1);
+      if (error || !data) break;
+      all.push(...data);
+      if (data.length < PAGE) break;
+      from += PAGE;
+    }
+    return { data: all };
+  };
+
   const cargarDatos = async () => {
     setLoading(true);
     const [clRes, vRes, cRes, etRes, vtRes, ctRes, dtRes, rRes] = await Promise.all([
@@ -835,7 +855,7 @@ export default function ReservasPage() {
       supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,capacidad,estado,marca").order("placa"),
       supabase.from("conductores_tercero").select("id,empresa_id,nombre,licencia,vencimiento_licencia,telefono,estado").order("nombre"),
       supabase.from("documentos_tercero").select("id,empresa_id,tipo,fecha_vencimiento"),
-      supabase.from("reservas").select("*").order("fecha_servicio", { ascending: false }).order("id", { ascending: false }),
+      fetchAllReservas(),
     ]);
     setClientes(clRes.data     || []);
     setVehiculos(vRes.data     || []);
