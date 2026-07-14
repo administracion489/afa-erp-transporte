@@ -15,7 +15,10 @@ type Vehiculo = {
   equipamiento: string | null;
   foto_externa_url: string | null; foto_interna_url: string | null;
   descripcion_unidad: string | null;
+  tipo_vehiculo_costeo: string | null;
 };
+
+type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null };
 
 type DocVehiculo = {
   id: number; vehiculo_id: number; tipo: string; numero: string | null;
@@ -84,6 +87,7 @@ const FORM_V = {
   foto_externa_url: "", foto_interna_url: "",
   descripcion_unidad: "",
   km: "", proximo_km: "", observaciones: "",
+  tipo_vehiculo_costeo: "",
 };
 
 const FORM_D = {
@@ -209,6 +213,7 @@ function FotoField({ label, hint, value, modo, setModo, onChange, onUpload, subi
 export default function VehiculosPage() {
   const [vehiculos,    setVehiculos]    = useState<Vehiculo[]>([]);
   const [documentos,   setDocumentos]   = useState<DocVehiculo[]>([]);
+  const [paramsVeh,    setParamsVeh]    = useState<ParamVeh[]>([]);
   const [loading,      setLoading]      = useState(false);
   const [vista,        setVista]        = useState<Vista>("flota");
   const [mostrarFormV, setMostrarFormV] = useState(false);
@@ -284,14 +289,16 @@ export default function VehiculosPage() {
 
   const cargarTodo = async () => {
     setLoading(true);
-    const [{ data: vData }, { data: dData }] = await Promise.all([
+    const [{ data: vData }, { data: dData }, { data: pData }] = await Promise.all([
       supabase.from("vehiculos").select("*").order("placa"),
       supabase.from("documentos_vehiculo").select("*").order("fecha_vencimiento"),
+      supabase.from("parametros_costos").select("tipo_vehiculo,nombre,grupo_vehiculo").eq("activo", true).order("grupo_vehiculo").order("capacidad"),
     ]);
     const vList = (vData || []) as Vehiculo[];
     const dList = (dData || []) as DocVehiculo[];
     setVehiculos(vList.map(v => ({ ...v, estado_operativo: calcEstadoOperativo(dList.filter(d => d.vehiculo_id === v.id)) })));
     setDocumentos(dList);
+    setParamsVeh((pData || []) as ParamVeh[]);
     setLoading(false);
   };
   useEffect(() => { cargarTodo(); }, []);
@@ -315,6 +322,7 @@ export default function VehiculosPage() {
       kilometraje_actual: formV.km ? Number(formV.km) : null,
       proximo_mantenimiento_km: formV.proximo_km ? Number(formV.proximo_km) : null,
       observaciones: formV.observaciones.trim() || null,
+      tipo_vehiculo_costeo: formV.tipo_vehiculo_costeo || null,
     };
     const { error } = editandoId
       ? await supabase.from("vehiculos").update(payload).eq("id", editandoId)
@@ -339,6 +347,7 @@ export default function VehiculosPage() {
       km: v.kilometraje_actual ? String(v.kilometraje_actual) : "",
       proximo_km: v.proximo_mantenimiento_km ? String(v.proximo_mantenimiento_km) : "",
       observaciones: v.observaciones || "",
+      tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "",
     });
     setModoFotoExt("url"); setModoFotoInt("url");
     setEditandoId(v.id); setMostrarFormV(true);
@@ -490,6 +499,12 @@ export default function VehiculosPage() {
               <Campo label="Categoría">
                 <select className={inputCls()} value={formV.categoria} onChange={fv("categoria")}>
                   {CATEGORIAS.map(c => <option key={c}>{c}</option>)}
+                </select>
+              </Campo>
+              <Campo label="Categoría de costeo" hint="Vincula esta unidad a su ficha de costos — así las cotizaciones que la usan sirven de referencia en Tarifario">
+                <select className={inputCls()} value={formV.tipo_vehiculo_costeo} onChange={fv("tipo_vehiculo_costeo")}>
+                  <option value="">— sin asignar —</option>
+                  {paramsVeh.map(p => <option key={p.tipo_vehiculo} value={p.tipo_vehiculo}>{p.nombre} ({p.tipo_vehiculo})</option>)}
                 </select>
               </Campo>
               <Campo label="Estado">
@@ -750,6 +765,9 @@ export default function VehiculosPage() {
                             <div>
                               <p className="font-black text-gray-900 font-mono">{v.placa}</p>
                               <p className="text-xs text-gray-400">{v.marca} {v.modelo}{v.anio ? ` · ${v.anio}` : ""}</p>
+                              {v.tipo_vehiculo_costeo
+                                ? <p className="text-[10px] text-gray-400">💰 {paramsVeh.find(p => p.tipo_vehiculo === v.tipo_vehiculo_costeo)?.nombre || v.tipo_vehiculo_costeo}</p>
+                                : <p className="text-[10px] text-amber-500" title="Sin categoría de costeo: sus cotizaciones no servirán de referencia en Tarifario">⚠ sin costeo</p>}
                               {(docsCrit > 0 || docsPorV > 0) && (
                                 <p className="text-[10px] font-bold" style={{ color: docsCrit > 0 ? "#dc2626" : "#854d0e" }}>
                                   {docsCrit > 0 ? `⚠ ${docsCrit} doc. vencido${docsCrit > 1 ? "s" : ""}` : `⏰ ${docsPorV} por vencer`}

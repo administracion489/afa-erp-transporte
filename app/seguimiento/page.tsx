@@ -982,11 +982,15 @@ async function cargarDocDatos(s: ServicioView): Promise<DocDatos> {
     }
   }
 
-  // Conductor + licencia: solo servicios propios (los terceros no tienen fila en conductores).
+  // Conductor + licencia: propio (conductores.numero_licencia) o tercerizado
+  // (conductores_tercero.licencia — columna distinta, mismo dato).
   let conductor: { nombre: string|null; licencia: string|null } | null = null;
   if (!esTer && r.conductor_id) {
     const { data } = await supabase.from("conductores").select("nombre,numero_licencia").eq("id", r.conductor_id).maybeSingle();
     if (data) conductor = { nombre: (data as any).nombre ?? null, licencia: (data as any).numero_licencia ?? null };
+  } else if (esTer && (r as any).conductor_tercero_id) {
+    const { data } = await supabase.from("conductores_tercero").select("nombre,licencia").eq("id", (r as any).conductor_tercero_id).maybeSingle();
+    if (data) conductor = { nombre: (data as any).nombre ?? null, licencia: (data as any).licencia ?? null };
   }
 
   // RUC del cliente para la cabecera fiscal del reporte.

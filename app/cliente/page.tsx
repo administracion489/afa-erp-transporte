@@ -479,16 +479,32 @@ export default function ClientePortal() {
       );
     }
 
+    // Conductor: propio (conductor_id → tabla conductores) o tercerizado
+    // (conductor_tercero_id → tabla conductores_tercero, sin revelar la empresa al cliente).
+    const ra = r as any;
     if (r.conductor_id) {
       tasks.push(
         supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", r.conductor_id).maybeSingle()
           .then(({ data }) => { if (data) setConductorInfo(data as ConductorInfo); })
       );
+    } else if (ra.conductor_tercero_id) {
+      tasks.push(
+        supabase.from("conductores_tercero").select("nombre,licencia,telefono").eq("id", ra.conductor_tercero_id).maybeSingle()
+          .then(({ data }) => { if (data) setConductorInfo({ nombre: (data as any).nombre, numero_licencia: (data as any).licencia ?? null, telefono: (data as any).telefono || "" } as ConductorInfo); })
+      );
+    } else if (ra.empresa_tercerizada_id) {
+      setConductorInfo({ nombre: "Conductor asignado", numero_licencia: null, telefono: "" } as ConductorInfo);
     }
 
+    // Vehículo: propio (vehiculo_id → tabla vehiculos) o tercerizado (vehiculo_tercero_id → vehiculos_tercero).
     if (r.vehiculo_id) {
       tasks.push(
         supabase.from("vehiculos").select("placa").eq("id", r.vehiculo_id).maybeSingle()
+          .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
+      );
+    } else if (ra.vehiculo_tercero_id) {
+      tasks.push(
+        supabase.from("vehiculos_tercero").select("placa").eq("id", ra.vehiculo_tercero_id).maybeSingle()
           .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
       );
     }

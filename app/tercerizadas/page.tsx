@@ -20,7 +20,10 @@ type VehiculoTercero = {
   capacidad: number | null; estado: string;
   foto_externa_url: string | null; foto_interna_url: string | null;
   descripcion_unidad: string | null;
+  tipo_vehiculo_costeo: string | null;
 };
+
+type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null };
 
 type ConductorTercero = {
   id: number; empresa_id: number; nombre: string; dni: string | null;
@@ -111,7 +114,7 @@ const FORM_EMP = {
   venc_autorizacion: "", venc_habilitacion: "",
   estado: "activo", observaciones: "",
 };
-const FORM_VEH = { placa: "", categoria: "BUS", marca: "", modelo: "", capacidad: "", estado: "disponible", foto_externa_url: "", foto_interna_url: "", descripcion_unidad: "" };
+const FORM_VEH = { placa: "", categoria: "BUS", marca: "", modelo: "", capacidad: "", estado: "disponible", foto_externa_url: "", foto_interna_url: "", descripcion_unidad: "", tipo_vehiculo_costeo: "" };
 const FORM_COND = { nombre: "", dni: "", licencia: "", categoria_licencia: "A-IIb", vencimiento_licencia: "", telefono: "", estado: "disponible", pin_acceso: "", activo_app: false };
 const FORM_DOC = { vehiculo_id: "", tipo: "SOAT", numero: "", fecha_vencimiento: "", entidad_emisora: "", archivo_url: "", observaciones: "" };
 
@@ -120,6 +123,7 @@ const FORM_DOC = { vehiculo_id: "", tipo: "SOAT", numero: "", fecha_vencimiento:
 export default function EmpresasTercerizadasPage() {
   const [empresas,    setEmpresas]    = useState<Empresa[]>([]);
   const [vehiculos,   setVehiculos]   = useState<VehiculoTercero[]>([]);
+  const [paramsVeh,   setParamsVeh]   = useState<ParamVeh[]>([]);
   const [conductores, setConductores] = useState<ConductorTercero[]>([]);
   const [documentos,  setDocumentos]  = useState<DocumentoTercero[]>([]);
   const [loading,     setLoading]     = useState(false);
@@ -148,16 +152,18 @@ export default function EmpresasTercerizadasPage() {
 
   const cargarTodo = async () => {
     setLoading(true);
-    const [eRes, vRes, cRes, dRes] = await Promise.all([
+    const [eRes, vRes, cRes, dRes, pRes] = await Promise.all([
       supabase.from("empresas_tercerizadas").select("*").order("razon_social"),
       supabase.from("vehiculos_tercero").select("*").order("placa"),
       supabase.from("conductores_tercero").select("*").order("nombre"),
       supabase.from("documentos_tercero").select("*").order("fecha_vencimiento"),
+      supabase.from("parametros_costos").select("tipo_vehiculo,nombre,grupo_vehiculo").eq("activo", true).order("grupo_vehiculo").order("capacidad"),
     ]);
     setEmpresas(eRes.data   || []);
     setVehiculos(vRes.data  || []);
     setConductores(cRes.data|| []);
     setDocumentos(dRes.data || []);
+    setParamsVeh(pRes.data  || []);
     if (!empresaSel && (eRes.data || []).length > 0) setEmpresaSel((eRes.data || [])[0].id);
     setLoading(false);
   };
@@ -280,6 +286,7 @@ export default function EmpresasTercerizadasPage() {
       foto_externa_url: formVeh.foto_externa_url.trim() || null,
       foto_interna_url: formVeh.foto_interna_url.trim() || null,
       descripcion_unidad: formVeh.descripcion_unidad.trim() || null,
+      tipo_vehiculo_costeo: formVeh.tipo_vehiculo_costeo || null,
     };
     const { error } = editVehId
       ? await supabase.from("vehiculos_tercero").update(payload).eq("id", editVehId)
@@ -593,6 +600,13 @@ export default function EmpresasTercerizadasPage() {
                             {["AUTO","SUV","VAN","MINIBUS","BUS","CUSTER"].map(c => <option key={c}>{c}</option>)}
                           </select>
                         </Campo>
+                        <Campo label="Categoría de costeo">
+                          <select className={inputCls()} value={formVeh.tipo_vehiculo_costeo}
+                            onChange={e => setFormVeh(p => ({ ...p, tipo_vehiculo_costeo: e.target.value }))}>
+                            <option value="">— sin asignar —</option>
+                            {paramsVeh.map(p => <option key={p.tipo_vehiculo} value={p.tipo_vehiculo}>{p.nombre} ({p.tipo_vehiculo})</option>)}
+                          </select>
+                        </Campo>
                         <Campo label="Capacidad pax">
                           <input type="number" className={inputCls()} placeholder="45"
                             value={formVeh.capacidad} onChange={e => setFormVeh(p => ({ ...p, capacidad: e.target.value }))} />
@@ -712,7 +726,7 @@ export default function EmpresasTercerizadasPage() {
                                 style={{ background: v.estado === "disponible" ? "#dcfce7" : "#f3f4f6", color: v.estado === "disponible" ? "#166534" : "#4b5563" }}>
                                 {v.estado}
                               </span>
-                              <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}
+                              <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}
                                 className="text-xs font-bold text-gray-500 hover:text-gray-800">✏️</button>
                               <button onClick={async () => { if (!confirm("¿Eliminar?")) return; await supabase.from("vehiculos_tercero").delete().eq("id", v.id); cargarTodo(); }}
                                 className="text-xs font-bold text-red-400 hover:text-red-600">✕</button>
