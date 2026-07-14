@@ -91,13 +91,18 @@ function fmtMonto(n: number, moneda = "PEN") {
   const simbolo = moneda === "USD" ? "$" : "S/";
   return `${simbolo} ${Number(n || 0).toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
+// Parsea "YYYY-MM-DD" como medianoche LOCAL (no UTC) para no restar un día en Perú (UTC-5).
+// Los timestamps completos (con hora) se dejan tal cual.
+function toFechaLocal(f: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(f) ? new Date(f + "T00:00:00") : new Date(f);
+}
 function fmtFecha(f: string | null) {
   if (!f) return "—";
-  return new Date(f).toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
+  return toFechaLocal(f).toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 function fmtFechaLarga(f: string | null) {
   if (!f) return "—";
-  return new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "numeric", month: "long", year: "numeric" }).toUpperCase();
+  return toFechaLocal(f).toLocaleDateString("es-PE", { day: "numeric", month: "long", year: "numeric" }).toUpperCase();
 }
 
 // ─── PDF ──────────────────────────────────────────────────────────────────────
