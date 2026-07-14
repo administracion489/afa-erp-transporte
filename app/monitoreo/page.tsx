@@ -128,10 +128,20 @@ function keyGps(u: { reserva_id?: number | null; conductor_tercero_id?: number |
   return `id${u.id}`;
 }
 
+// Mismo criterio que /programacion, /seguimiento y /calendario (TIPOS_SERVICIO_FIJO):
+// no solo "transporte_personal" cuenta como fijo, también los reservas fijo_* generadas
+// por ModalGenerarPrograma. Antes solo se comparaba contra "transporte_personal" y los
+// demás tipos fijos salían mal etiquetados como "Eventual" en Monitoreo.
+const TIPOS_SERVICIO_FIJO = new Set([
+  "transporte_personal",
+  "fijo_solo_ida",
+  "fijo_multiparada",
+  "fijo_reten",
+]);
 function esVehiculoEventual(id: number, esTercero: boolean, reservasHoy: ReservaHoy[]): boolean | null {
   const res = reservasHoy.find(r => (esTercero ? r.vehiculo_tercero_id === id : r.vehiculo_id === id));
   if (!res) return null;
-  return res.tipo_servicio_detalle !== "transporte_personal";
+  return !TIPOS_SERVICIO_FIJO.has(res.tipo_servicio_detalle || "");
 }
 
 export default function MonitoreoPage() {
@@ -214,12 +224,16 @@ export default function MonitoreoPage() {
   };
 
   const cargarSOS = async () => {
-    const { data } = await supabase
-      .from("alertas_sos")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(20);
-    setAlertasSOS(data || []);
+    // Las pendientes se traen SIN límite ni corte por antigüedad: si se limitara
+    // por fecha, una pendiente vieja quedaría tapada por atendidas más recientes
+    // y el badge/panel nunca la mostraría (bug real: pasó con 4 alertas de un mes).
+    const [{ data: pendientes }, { data: historial }] = await Promise.all([
+      supabase.from("alertas_sos").select("*").eq("estado", "pendiente").order("created_at", { ascending: false }),
+      supabase.from("alertas_sos").select("*").eq("estado", "atendida").order("created_at", { ascending: false }).limit(20),
+    ]);
+    const combinadas = [...(pendientes || []), ...(historial || [])]
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    setAlertasSOS(combinadas);
   };
 
   useEffect(() => {
