@@ -75,6 +75,7 @@ const ESTADO_MSG_CFG: Record<EstadoMensajeRadar, { label: string; color: string;
   procesado:  { label: "Procesado",  color: "#27AE60", bg: "#E8F5EC" },
   descartado: { label: "Descartado", color: "#5B6B82", bg: "#eef2f7" },
   error:      { label: "Error",      color: "#EB5757", bg: "#FDECEC" },
+  fusionado:  { label: "🔗 Fusionado", color: "#5B6B82", bg: "#eef2f7" },
 };
 
 const ESTADO_OPP_CFG: Record<RadarOportunidad["estado"], { label: string; color: string; bg: string }> = {

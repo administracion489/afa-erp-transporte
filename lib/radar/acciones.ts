@@ -144,6 +144,26 @@ export async function matchVehiculo(sb: any, placa: string | null | undefined): 
   };
 }
 
+/**
+ * Empareja una placa contra la flota TERCERIZADA (`vehiculos_tercero`) — solo para dar un
+ * motivo claro en el mensaje de revisión ("es una unidad tercerizada" en vez de "sin
+ * match", que suena a placa desconocida). El combustible de terceros NUNCA se
+ * auto-registra en `combustible` (esa tabla es el gasto propio de AFA); `vehiculo_id` en
+ * `radar_combustible` sigue reservado para `vehiculos` — este match es solo informativo.
+ */
+async function matchVehiculoTercero(sb: any, placa: string | null | undefined): Promise<{ placa: string; marca: string | null; modelo: string | null } | null> {
+  const objetivo = placaNorm(placa);
+  if (!objetivo) return null;
+  try {
+    const { data } = await sb.from("vehiculos_tercero").select("placa, marca, modelo");
+    const hit = ((data as any[]) ?? []).find((v) => placaNorm(v.placa) === objetivo);
+    if (!hit) return null;
+    return { placa: hit.placa, marca: hit.marca ?? null, modelo: hit.modelo ?? null };
+  } catch {
+    return null;
+  }
+}
+
 /** Empareja contra `clientes` por teléfono (últimos 9 dígitos), empresa o nombre. */
 export async function matchCliente(
   sb: any,
@@ -636,7 +656,14 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
 
   const motivos: string[] = anomalias.map((a) => a.detalle);
   if (config.acciones_automaticas?.combustible !== true) motivos.push("Registro automático de combustible desactivado en la configuración");
-  if (!veh) motivos.push(placa ? `Placa ${placa} sin match en la flota propia` : "Mensaje sin placa identificable");
+  if (!veh) {
+    const tercero = placa ? await matchVehiculoTercero(sb, placa) : null;
+    if (tercero) {
+      motivos.push(`${tercero.placa} es una unidad TERCERIZADA (${[tercero.marca, tercero.modelo].filter(Boolean).join(" ") || "sin marca/modelo"}) — no se registra automático, revisar manualmente si corresponde`);
+    } else {
+      motivos.push(placa ? `Placa ${placa} no está registrada en la flota propia ni en tercerizadas` : "Mensaje sin placa identificable");
+    }
+  }
   if (cantidad == null) motivos.push("Sin cantidad (galones/litros)");
   if (monto == null && precioUnit == null) motivos.push("Sin monto total ni precio unitario");
   if (confianza < umbral) motivos.push(`Confianza ${Math.round(confianza * 100)}% por debajo del umbral ${Math.round(umbral * 100)}%`);

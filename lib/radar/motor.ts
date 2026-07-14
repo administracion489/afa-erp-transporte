@@ -3,6 +3,9 @@
 // procesarPendientes() es el único punto de entrada (lo llaman /api/radar/procesar —
 // trigger del worker y cron de barrido — y /api/radar/reprocesar). Por cada mensaje
 // pendiente de radar_mensajes:
+//   0. Reportes multi-mensaje (p.ej. combustible: texto con la placa + foto del odómetro +
+//      foto del voucher, en cualquier orden): se espera un período de gracia y se fusionan
+//      en una sola extracción combinada — ver "Agrupado de reportes multi-mensaje" abajo.
 //   1. Gates: radar activo, horario de monitoreo, presupuesto diario de IA.
 //   2. Texto → triage con el modelo económico (Haiku) → extracción por categoría.
 //      Imagen/PDF → una sola llamada con visión (clasifica + extrae).
@@ -149,7 +152,9 @@ export async function procesarPendientes(opts?: {
   if (opts?.soloMensajeId) consulta = consulta.eq("id", opts.soloMensajeId);
   const { data: pendientes, error: errSel } = await consulta;
   if (errSel) throw new Error(`radar_mensajes: ${errSel.message}`);
-  const lote = (pendientes as any[]) ?? [];
+  // Los mensajes con pinta de reporte de combustible fragmentado esperan su período de
+  // gracia (para que sus "hermanos" alcancen a llegar) salvo que se fuerce el reproceso.
+  const lote = ((pendientes as any[]) ?? []).filter((m) => forzar || !dentroDeGraciaCluster(m));
   if (!lote.length) return resumen;
 
   // Contexto por grupo (nota del operador + restricción de categorías) — se carga en lote
@@ -252,6 +257,69 @@ async function cargarGruposInfo(sb: any, lote: any[]): Promise<Map<string, Grupo
   return mapa;
 }
 
+// ── Agrupado de reportes multi-mensaje ───────────────────────────────────────
+// Los conductores mandan el reporte de combustible en 2-3 mensajes seguidos, no siempre
+// en orden (texto con la placa, foto del odómetro, foto del voucher — cada una por su
+// lado). Sin esto, cada mensaje se procesaba solo y ninguno tenía el cuadro completo.
+
+// Heurística liviana: ¿este mensaje PODRÍA ser parte de un reporte de combustible
+// fragmentado? (una imagen o documento siempre puede ser voucher u odómetro; un texto
+// solo si menciona algo del rubro). Se usa para el período de gracia y para buscar hermanos.
+const PALABRAS_COMBUSTIBLE =
+  /combustible|grifo|abastec|di[eé]sel|gnv|glp|gal[oó]n|litro|placa|kilometraje|od[oó]metro|voucher|v[au]cher|comprobante/i;
+
+function pareceCombustible(mensaje: any): boolean {
+  if (mensaje.tipo === "imagen" || mensaje.tipo === "documento") return true;
+  if (mensaje.tipo === "texto") return PALABRAS_COMBUSTIBLE.test(String(mensaje.texto ?? ""));
+  return false;
+}
+
+// Antes de procesar un mensaje con pinta de combustible se espera este tiempo, para que
+// sus "hermanos" (enviados en los minutos siguientes) ya estén en la base cuando se arme
+// el reporte combinado. VENTANA_CLUSTER_MS es el radio (antes y después) donde se buscan.
+const GRACIA_CLUSTER_MS = 5 * 60_000;
+const VENTANA_CLUSTER_MS = 10 * 60_000;
+
+function dentroDeGraciaCluster(mensaje: any): boolean {
+  if (!pareceCombustible(mensaje)) return false;
+  return Date.now() - new Date(mensaje.recibido_en).getTime() < GRACIA_CLUSTER_MS;
+}
+
+type ResolucionCluster = { primaria: boolean; primariaId?: string; miembros?: any[] };
+
+/**
+ * Busca otros mensajes del MISMO remitente en el MISMO grupo, dentro de la ventana, que
+ * también "parecen combustible". El más antiguo del grupo se vuelve la "primaria" (la que
+ * dispara la extracción combinada); el resto se fusiona en ella sin generar su propia fila.
+ */
+async function resolverCluster(sb: any, mensaje: any): Promise<ResolucionCluster> {
+  if (!pareceCombustible(mensaje) || !mensaje.remitente_wa || !mensaje.grupo_id) {
+    return { primaria: true };
+  }
+  const centro = new Date(mensaje.recibido_en).getTime();
+  const desde = new Date(centro - VENTANA_CLUSTER_MS).toISOString();
+  const hasta = new Date(centro + VENTANA_CLUSTER_MS).toISOString();
+  const { data } = await sb
+    .from("radar_mensajes")
+    .select("id, recibido_en, estado, tipo, texto, transcripcion, media_url, media_mime")
+    .eq("remitente_wa", mensaje.remitente_wa)
+    .eq("grupo_id", mensaje.grupo_id)
+    .neq("estado", "fusionado")
+    .gte("recibido_en", desde)
+    .lte("recibido_en", hasta);
+  const candidatos = ((data as any[]) ?? []).filter((m) => pareceCombustible(m));
+  if (candidatos.length <= 1) return { primaria: true };
+
+  candidatos.sort((a, b) => new Date(a.recibido_en).getTime() - new Date(b.recibido_en).getTime());
+  const primaria = candidatos[0];
+  if (primaria.id === mensaje.id) return { primaria: true, miembros: candidatos };
+  // Si la "primaria" del cluster ya quedó terminada (p.ej. la descartaron como "otros" antes
+  // de que llegara este hermano), no fusionarlo ahí a ciegas: se evalúa por su cuenta — peor
+  // caso, queda como si no hubiera agrupado; nunca se pierde en un mensaje ya cerrado.
+  if (["procesado", "descartado", "error"].includes(primaria.estado)) return { primaria: true };
+  return { primaria: false, primariaId: primaria.id };
+}
+
 // Alerta única por día cuando se agota el presupuesto de IA.
 async function alertaPresupuesto(sb: any, inicioDiaUtc: string, limite: number) {
   try {
@@ -276,7 +344,7 @@ async function alertaPresupuesto(sb: any, inicioDiaUtc: string, limite: number) 
 
 // ── Procesamiento de un mensaje ──────────────────────────────────────────────
 
-type ResultadoMensaje = { estado: "procesado" | "descartado"; costo: number };
+type ResultadoMensaje = { estado: "procesado" | "descartado" | "fusionado"; costo: number };
 
 async function procesarMensaje(
   sb: any,
@@ -314,7 +382,7 @@ async function procesarMensaje(
   };
 
   const finalizar = async (
-    estado: "procesado" | "descartado",
+    estado: "procesado" | "descartado" | "fusionado",
     campos: Record<string, unknown>
   ): Promise<ResultadoMensaje> => {
     const costo = Math.round(costoTotal * 10000) / 10000;
@@ -332,6 +400,17 @@ async function procesarMensaje(
       .eq("id", mensaje.id);
     return { estado, costo };
   };
+
+  // 0) ¿Es parte de un reporte multi-mensaje (texto+foto odómetro+foto voucher) que ya
+  //    tiene una "primaria" más antigua? Si sí, se fusiona sin gastar IA en esta fila.
+  const cluster = await resolverCluster(sb, mensaje);
+  if (!cluster.primaria) {
+    return finalizar("fusionado", {
+      accion: "fusionado_en_otro_mensaje",
+      resumen_ia: "Mensaje fusionado con otro del mismo reporte (mismo remitente y grupo, pocos minutos de diferencia)",
+      resultado: { fusionado_en: cluster.primariaId },
+    });
+  }
 
   // 1) Resolver el texto a analizar según el tipo de mensaje
   let texto: string = String(mensaje.texto ?? "").trim();
@@ -361,18 +440,38 @@ async function procesarMensaje(
   }
 
   const esPdf = (mensaje.media_mime ?? "").toLowerCase().includes("pdf");
-  const conVision =
-    !!mensaje.media_url && (mensaje.tipo === "imagen" || (mensaje.tipo === "documento" && esPdf));
 
-  // Documento no-PDF sin caption: nada que analizar
-  if (mensaje.tipo === "documento" && !esPdf && !texto) {
+  // 1b) Vista combinada del cluster: si hay "hermanos" (misma ráfaga de reporte), se juntan
+  //     sus textos y sus fotos (voucher + odómetro) en una sola extracción, no una por mensaje.
+  const clusterMiembros = cluster.miembros && cluster.miembros.length > 1 ? cluster.miembros : [mensaje];
+  const textoClusterCombinado = clusterMiembros
+    .map((m) => (m.id === mensaje.id ? texto : String(m.texto ?? m.transcripcion ?? "").trim()))
+    .filter(Boolean)
+    .join("\n");
+  const MAX_MEDIA_CLUSTER = 4;
+  const miembrosConMedia = clusterMiembros
+    .filter(
+      (m) =>
+        !!m.media_url &&
+        (m.tipo === "imagen" || (m.tipo === "documento" && (m.media_mime ?? "").toLowerCase().includes("pdf")))
+    )
+    .slice(0, MAX_MEDIA_CLUSTER);
+  const conVisionCluster = miembrosConMedia.length > 0;
+
+  // Documento no-PDF sin caption y sin nada más útil en el cluster: nada que analizar
+  if (mensaje.tipo === "documento" && !esPdf && !textoClusterCombinado && !conVisionCluster) {
     return finalizar("descartado", {
       categoria: "otros",
       accion: "tipo_no_soportado",
       resumen_ia: `Documento ${mensaje.media_nombre ?? ""} en formato no analizable (solo PDF)`.trim(),
     });
   }
-  if ((mensaje.tipo === "imagen" || mensaje.tipo === "documento") && !mensaje.media_url && !texto) {
+  if (
+    (mensaje.tipo === "imagen" || mensaje.tipo === "documento") &&
+    !mensaje.media_url &&
+    !textoClusterCombinado &&
+    !conVisionCluster
+  ) {
     return finalizar("descartado", {
       categoria: "otros",
       accion: "sin_contenido",
@@ -386,16 +485,22 @@ async function procesarMensaje(
   let resumenIa: string;
   let datos: any = null;
 
-  if (conVision) {
-    // Imagen/PDF: una sola llamada con visión que clasifica y extrae
-    const bloqueMedia = esPdf && mensaje.tipo === "documento"
-      ? { type: "document", source: { type: "url", url: mensaje.media_url } }
-      : mensaje.tipo === "imagen"
-        ? { type: "image", source: { type: "url", url: mensaje.media_url } }
-        : { type: "document", source: { type: "url", url: mensaje.media_url } };
+  if (conVisionCluster) {
+    // Imagen/PDF (uno o varios del mismo reporte): una sola llamada con visión que clasifica y extrae
+    const bloquesMedia = miembrosConMedia.map((m) =>
+      m.tipo === "imagen"
+        ? { type: "image", source: { type: "url", url: m.media_url } }
+        : { type: "document", source: { type: "url", url: m.media_url } }
+    );
+    const notaMultiple =
+      bloquesMedia.length > 1
+        ? `\n\nSe adjuntan ${bloquesMedia.length} archivos que el remitente envió juntos como parte del MISMO reporte (p.ej. foto del voucher + foto del odómetro) — combínalos en una sola extracción, no los trates por separado.`
+        : "";
     const prompt =
-      promptExtraccionMedia(ctx) + (texto ? `\n\nTexto/caption que acompaña al archivo:\n"""${texto}"""` : "");
-    const r = await llamarIA(modeloExtraccion, [bloqueMedia, { type: "text", text: prompt }]);
+      promptExtraccionMedia(ctx) +
+      (textoClusterCombinado ? `\n\nTexto/caption que acompaña al/los archivo(s):\n"""${textoClusterCombinado}"""` : "") +
+      notaMultiple;
+    const r = await llamarIA(modeloExtraccion, [...bloquesMedia, { type: "text", text: prompt }]);
     sumar(modeloExtraccion, r);
     const json = extraerJSON(r.texto);
     categoria = normalizarCategoria(json?.categoria);
@@ -403,9 +508,10 @@ async function procesarMensaje(
     resumenIa = String(json?.resumen ?? "").slice(0, 300) || "Sin resumen";
     datos = json?.datos ?? {};
   } else {
-    // Texto: triage barato primero
+    // Texto: triage barato primero (con el texto combinado del cluster, si lo hay)
+    const textoParaClasificar = textoClusterCombinado || texto;
     const t = await llamarIA(modeloTriage, [
-      { type: "text", text: `${promptTriage(ctx)}\n\nMensaje a clasificar:\n"""${texto}"""` },
+      { type: "text", text: `${promptTriage(ctx)}\n\nMensaje a clasificar:\n"""${textoParaClasificar}"""` },
     ]);
     sumar(modeloTriage, t);
     const triage = extraerJSON(t.texto);
@@ -415,7 +521,7 @@ async function procesarMensaje(
 
     if (categoria !== "otros" && (categoriasEfectivas.includes(categoria) || forzar)) {
       const e = await llamarIA(modeloExtraccion, [
-        { type: "text", text: `${promptExtraccion(categoria, ctx)}\n\nMensaje:\n"""${texto}"""` },
+        { type: "text", text: `${promptExtraccion(categoria, ctx)}\n\nMensaje:\n"""${textoParaClasificar}"""` },
       ]);
       sumar(modeloExtraccion, e);
       datos = extraerJSON(e.texto);
@@ -442,8 +548,29 @@ async function procesarMensaje(
     });
   }
 
-  // 4) Acción de la categoría
-  const resultado = await ejecutarAccion({ sb, mensaje, categoria, datos: datos ?? {}, confianza, config });
+  // 4) Acción de la categoría (si el cluster trajo fotos y esta fila no tiene una propia,
+  //    se usa la primera del cluster como evidencia — p.ej. la foto del odómetro para /combustible)
+  const mensajeParaAccion =
+    mensaje.media_url || !miembrosConMedia.length ? mensaje : { ...mensaje, media_url: miembrosConMedia[0].media_url };
+  const resultado = await ejecutarAccion({ sb, mensaje: mensajeParaAccion, categoria, datos: datos ?? {}, confianza, config });
+
+  // 4b) Fusionar el resto del cluster en esta fila (si los hubo) — ya no se procesan solos.
+  if (clusterMiembros.length > 1) {
+    const otrosIds = clusterMiembros.filter((m) => m.id !== mensaje.id).map((m) => m.id);
+    if (otrosIds.length) {
+      await sb
+        .from("radar_mensajes")
+        .update({
+          estado: "fusionado",
+          accion: "fusionado_en_otro_mensaje",
+          resultado: { fusionado_en: mensaje.id },
+          procesado_en: new Date().toISOString(),
+          error: null,
+        })
+        .in("id", otrosIds)
+        .eq("estado", "pendiente");
+    }
+  }
 
   // 5) Notificación por correo (crítico u oportunidad) — cortesía, nunca frena
   await notificarPorCorreo(config, mensaje, categoria, resumenIa, resultado).catch(() => {});

@@ -66,7 +66,7 @@ export type RadarGrupo = {
 };
 
 export type TipoMensajeRadar = "texto" | "imagen" | "documento" | "audio" | "video" | "otro";
-export type EstadoMensajeRadar = "pendiente" | "procesando" | "procesado" | "descartado" | "error";
+export type EstadoMensajeRadar = "pendiente" | "procesando" | "procesado" | "descartado" | "error" | "fusionado";
 
 export type RadarMensaje = {
   id: string;

@@ -386,6 +386,11 @@ function iniciarLatido(): void {
       await refrescarCacheGrupos();
       // Cada 30 min, re-sincronizar la lista completa de grupos (nombres, miembros, grupos nuevos).
       if (ticksLatido % 30 === 0) await sincronizarListaGrupos();
+      // Barrido de cortesía: el ERP retiene un rato los reportes multi-mensaje (p.ej.
+      // combustible: texto+foto odómetro+foto voucher) esperando a que lleguen todas sus
+      // partes. Si no llega tráfico nuevo en NINGÚN grupo, nada más dispara el reproceso —
+      // este latido asegura que igual se barran dentro del minuto siguiente a que venza esa espera.
+      void notificarErp();
     } catch (e: any) {
       console.warn("[radar-worker] Error en el latido:", e?.message ?? e);
     }
