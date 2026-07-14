@@ -325,8 +325,9 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
   {
     grupo: "Proveedores",
     items: [
-      { href: "/proveedores",  label: "Proveedores",  sub: "Talleres · grifos", icon: Ic.Building,  modulo: "proveedores" },
-      { href: "/tercerizadas", label: "Tercerizadas", sub: "Flota externa",     icon: Ic.Handshake, modulo: "proveedores" },
+      { href: "/proveedores",     label: "Proveedores",      sub: "Talleres · grifos",     icon: Ic.Building,  modulo: "proveedores" },
+      { href: "/tercerizadas",    label: "Tercerizadas",     sub: "Flota externa",         icon: Ic.Handshake, modulo: "proveedores" },
+      { href: "/ordenes-compra", label: "Órdenes de Compra", sub: "Compras a proveedores", icon: Ic.Clipboard, modulo: "ordenes-compra" },
     ],
   },
   {

@@ -20,6 +20,7 @@ const MODULOS = [
   "cotizaciones",
   "clientes",
   "proveedores",
+  "ordenes-compra",
   "conductores",
   "vehiculos",
   "combustible",
