@@ -5,6 +5,12 @@
 const GRAPH = "https://graph.facebook.com/v25.0";
 const WA_TOKEN = () => process.env.META_WA_TOKEN!;
 const PAGE_TOKEN = () => process.env.META_PAGE_TOKEN!;
+
+// Los DOS números con API oficial de Meta:
+//   • CRM       (+51 966707225) → atención al cliente + CAMPAÑAS  → META_PHONE_NUMBER_ID
+//   • AVISOS    (+51 905438216) → notificaciones a pasajeros/conductores → phoneAvisos()
+// (El +51 997683199 del Radar IA NO usa la API oficial — Baileys — y nunca debe pasar por aquí.)
+export const phoneCrm = () => process.env.META_PHONE_NUMBER_ID;
 // ── WhatsApp ──────────────────────────────────────────────────────────────
 
 // phoneId opcional: por defecto el número de clientes (META_PHONE_NUMBER_ID).

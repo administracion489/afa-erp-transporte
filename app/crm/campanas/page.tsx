@@ -54,9 +54,10 @@ export default function CampanasPage() {
   const [creando, setCreando] = useState(false);
   const [preview, setPreview] = useState<number | null>(null);
 
-  // Probador del 2do número
+  // Probador de los números oficiales
   const [telPrueba, setTelPrueba] = useState("");
   const [tplPrueba, setTplPrueba] = useState("hello_world");
+  const [numPrueba, setNumPrueba] = useState<"avisos" | "crm">("avisos");
   const [probando, setProbando] = useState(false);
   const [resPrueba, setResPrueba] = useState<{ ok: boolean; texto: string } | null>(null);
 
@@ -153,11 +154,11 @@ export default function CampanasPage() {
       const res = await fetch("/api/campanas/probar", {
         method: "POST",
         headers: await authHeaders(),
-        body: JSON.stringify({ telefono: telPrueba.trim(), plantilla: tplPrueba.trim() }),
+        body: JSON.stringify({ telefono: telPrueba.trim(), plantilla: tplPrueba.trim(), numero: numPrueba }),
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error ?? "Error");
-      setResPrueba({ ok: true, texto: `✅ Enviado a ${j.enviadoA} con la plantilla "${j.plantilla}" (${j.idioma}). ID: ${j.messageId}` });
+      setResPrueba({ ok: true, texto: `✅ Enviado a ${j.enviadoA} desde ${j.desde} con la plantilla "${j.plantilla}" (${j.idioma}). ID: ${j.messageId}` });
     } catch (e: any) {
       setResPrueba({ ok: false, texto: `❌ ${e.message}` });
     } finally {
@@ -234,19 +235,28 @@ export default function CampanasPage() {
 
       {/* Nota de cumplimiento */}
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-5 text-[13px] text-blue-800 leading-relaxed">
-        <strong>WhatsApp solo a quienes te escribieron.</strong> Por política de Meta, las campañas de WhatsApp
-        van únicamente a contactos con consentimiento (los que ya te contactaron). Para prospectos en frío usa el
-        canal <strong>Email</strong>. Quien responda “BAJA” deja de recibir automáticamente.
+        <strong>Las campañas salen del número del CRM (966707225)</strong>, el mismo por el que el contacto ya
+        conversa contigo. Por política de Meta van <strong>solo a quienes te escribieron</strong> (tienen
+        consentimiento); para prospectos en frío usa el canal <strong>Email</strong>. Quien responda “BAJA” deja de
+        recibir automáticamente. El número de avisos (905438216) queda reservado a pasajeros y conductores.
       </div>
 
-      {/* Probador del 2do número */}
+      {/* Probador de los números oficiales */}
       <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
-        <h2 className="text-sm font-bold text-gray-700 mb-1">Probar el número de avisos</h2>
+        <h2 className="text-sm font-bold text-gray-700 mb-1">Probar envío de WhatsApp</h2>
         <p className="text-xs text-gray-500 mb-4">
-          Envía un WhatsApp de prueba desde el 2do número. Usa <code className="font-mono">hello_world</code> (viene
-          aprobada por defecto) para verificar la conexión antes de que aprueben tus plantillas propias.
+          Manda un WhatsApp de prueba desde cualquiera de tus dos números con API oficial. Usa{" "}
+          <code className="font-mono">hello_world</code> (aprobada por defecto) para verificar la conexión
+          antes de que Meta apruebe tus plantillas propias.
         </p>
-        <div className="grid md:grid-cols-3 gap-3">
+        <div className="grid md:grid-cols-4 gap-3">
+          <div>
+            <label className={label}>Enviar desde</label>
+            <select className={input} value={numPrueba} onChange={(e) => setNumPrueba(e.target.value as "avisos" | "crm")}>
+              <option value="avisos">Avisos · 905438216</option>
+              <option value="crm">CRM · 966707225</option>
+            </select>
+          </div>
           <div>
             <label className={label}>Número destino</label>
             <input className={input} value={telPrueba} onChange={(e) => setTelPrueba(e.target.value)} placeholder="987654321" />

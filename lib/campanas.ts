@@ -1,6 +1,12 @@
 // lib/campanas.ts — SOLO SERVIDOR.
 // Motor de campañas (WhatsApp marketing por plantilla / Email por Resend) sobre
-// los contactos del CRM. Reglas de consentimiento incorporadas:
+// los contactos del CRM.
+//
+// NÚMERO DE SALIDA = el del CRM (+51 966707225, META_PHONE_NUMBER_ID), el mismo por el
+// que el contacto ya conversa con atención al cliente. NO se usa el número de avisos
+// (905438216), que queda reservado a notificaciones de pasajeros/conductores.
+//
+// Reglas de consentimiento incorporadas:
 //   • WhatsApp: SOLO contactos con opt-in (wa_opt_in = quien ya te escribió) y sin
 //     baja (wa_baja). NUNCA outreach en frío por WhatsApp (política de Meta → baneo).
 //   • Email: permitido a cualquier contacto con correo que no se haya dado de baja
@@ -12,8 +18,8 @@
 // doble envío cuando el cron y el botón "Continuar" corren a la vez.
 
 import { createClient } from "@supabase/supabase-js";
-import { enviarWhatsAppPlantilla } from "@/lib/crm-meta";
-import { enviarEmail, phoneAvisos } from "@/lib/notificaciones";
+import { enviarWhatsAppPlantilla, phoneCrm } from "@/lib/crm-meta";
+import { enviarEmail } from "@/lib/notificaciones";
 
 const db = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -147,8 +153,8 @@ export async function procesarCampana(
   if (!c) throw new Error("Campaña no encontrada");
   const campana = c as Campana;
   if (campana.estado === "cancelada") return { ok: false, procesados: 0, restantes: 0, estado: "cancelada" };
-  if (campana.canal === "whatsapp" && !phoneAvisos()) {
-    throw new Error("Falta META_PHONE_NUMBER_ID_AVISOS (2do número no configurado)");
+  if (campana.canal === "whatsapp" && !phoneCrm()) {
+    throw new Error("Falta META_PHONE_NUMBER_ID (número del CRM, +51 966707225)");
   }
 
   // Recuperación: re-encolar filas 'procesando' colgadas (worker que murió a mitad).
@@ -199,7 +205,7 @@ export async function procesarCampana(
           campana.plantilla!,
           campana.idioma ?? "es",
           params,
-          phoneAvisos(),
+          phoneCrm(),   // campañas salen del número del CRM
         );
       } else {
         const asunto = personalizar(campana.asunto ?? "", { nombre, empresa });

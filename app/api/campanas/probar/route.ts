@@ -6,7 +6,7 @@
 // puede probar ANTES de que aprueben las plantillas propias.
 
 import { NextRequest, NextResponse } from "next/server";
-import { enviarWhatsAppPlantilla } from "@/lib/crm-meta";
+import { enviarWhatsAppPlantilla, phoneCrm } from "@/lib/crm-meta";
 import { phoneAvisos } from "@/lib/notificaciones";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 
@@ -22,23 +22,32 @@ export async function POST(req: NextRequest) {
     const auth = await verificarUsuarioApi(req, "crm");
     if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
 
-    const phoneId = phoneAvisos();
+    const { telefono, plantilla, idioma, parametros, numero } = await req.json();
+    if (!telefono) return NextResponse.json({ error: "telefono requerido" }, { status: 400 });
+
+    // Cuál de los 2 números oficiales usar:
+    //   'avisos' → +51 905438216 (notificaciones)  |  'crm' → +51 966707225 (atención + campañas)
+    const usarCrm  = numero === "crm";
+    const phoneId  = usarCrm ? phoneCrm() : phoneAvisos();
     if (!phoneId) {
       return NextResponse.json(
-        { error: "Falta META_PHONE_NUMBER_ID_AVISOS en las variables de entorno (Vercel)." },
+        { error: usarCrm
+            ? "Falta META_PHONE_NUMBER_ID (número del CRM) en las variables de entorno."
+            : "Falta META_PHONE_NUMBER_ID_AVISOS (número de avisos) en las variables de entorno (Vercel)." },
         { status: 400 },
       );
     }
-
-    const { telefono, plantilla, idioma, parametros } = await req.json();
-    if (!telefono) return NextResponse.json({ error: "telefono requerido" }, { status: 400 });
 
     const to = normalizar(String(telefono));
     const tpl = (plantilla || "hello_world").trim();
     const lang = (idioma || (tpl === "hello_world" ? "en" : "es")).trim();
 
     const id = await enviarWhatsAppPlantilla(to, tpl, lang, parametros ?? [], phoneId);
-    return NextResponse.json({ ok: true, enviadoA: to, plantilla: tpl, idioma: lang, phoneId, messageId: id });
+    return NextResponse.json({
+      ok: true, enviadoA: to, plantilla: tpl, idioma: lang,
+      desde: usarCrm ? "CRM (966707225)" : "Avisos (905438216)",
+      phoneId, messageId: id,
+    });
   } catch (e: any) {
     // Devolvemos el mensaje crudo de Meta: es lo que permite diagnosticar
     // (permisos del token sobre la WABA, plantilla inexistente, etc.).
