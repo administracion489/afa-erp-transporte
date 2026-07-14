@@ -319,12 +319,16 @@ export default function ReservasPage() {
   const [modalAplicarMasivo,   setModalAplicarMasivo]   = useState<{
     cotizacion_id: number;
     payload: Record<string, any>;
-    otrasReservas: Reserva[];
-    resumen: string; // "Vehículo · Conductor" para mostrar en el modal
+    otrasReservas: Reserva[];   // todos los servicios activos del contrato (sin filtrar)
+    horaOriginal: string;       // hora del servicio editado, antes de guardar
+    resumen: string;            // "Vehículo · Conductor" para mostrar en el modal
   } | null>(null);
   const [aplicarScope,         setAplicarScope]         = useState<"todos" | "rango">("todos");
   const [aplicarDesde,         setAplicarDesde]         = useState("");
   const [aplicarHasta,         setAplicarHasta]         = useState("");
+  const [aplicarCampos,        setAplicarCampos]        = useState<"todo" | "conductor">("todo");
+  const [aplicarOtraHora,      setAplicarOtraHora]      = useState(false);
+  const [aplicarOtraUnidad,    setAplicarOtraUnidad]    = useState(false);
   const [aplicando,            setAplicando]            = useState(false);
   const [sincCoords,           setSincCoords]           = useState<{ activo: boolean; msg: string }>({ activo: false, msg: "" });
 
@@ -1009,21 +1013,20 @@ export default function ReservasPage() {
     // ── Si es servicio FIJO con contrato, ofrecer aplicar a otros días ──
     if (reservaActual && !esEventual(reservaActual) && reservaActual.cotizacion_id) {
       const horaOriginal = reservaActual.hora_servicio?.slice(0, 5) || "";
-      const otrasReservas = reservas.filter(r => {
-        if (r.cotizacion_id !== reservaActual.cotizacion_id) return false;
-        if (r.id === editandoId) return false;
-        if (r.estado === "cancelada" || r.estado === "finalizada") return false;
-        // Solo misma hora: evita contaminar rutas paralelas del mismo contrato
-        if (r.hora_servicio?.slice(0, 5) !== horaOriginal) return false;
-        if (form.tipo_asignacion === "propio")
-          // Incluir sin asignar (pendiente) + misma placa ya asignada
-          return r.vehiculo_id === null || r.vehiculo_id === Number(form.vehiculo_id);
-        // Tercerizado: incluir sin empresa, o misma empresa (+ vehículo si se especificó)
-        if (r.empresa_tercerizada_id === null) return true;
-        if (r.empresa_tercerizada_id !== Number(form.empresa_tercerizada_id)) return false;
-        if (form.vehiculo_tercero_id && r.vehiculo_tercero_id !== Number(form.vehiculo_tercero_id)) return false;
-        return true;
-      });
+      // Candidatos = lo que queda por operar del contrato. El recorte fino (misma hora,
+      // misma unidad) lo decide el usuario en el modal: antes se filtraba aquí y los
+      // servicios ya asignados a OTRA unidad quedaban fuera para siempre, así que era
+      // imposible reasignar el conductor en bloque sin reasignar también la unidad.
+      // Nunca entran los servicios ya operados (fecha pasada, aunque nadie los haya
+      // marcado "finalizada") ni el que está en ruta ahora mismo: cambiarles la unidad
+      // reescribiría el historial o le cambiaría el bus al conductor a media carretera.
+      const hoyPeru = fechaLima();
+      const otrasReservas = reservas.filter(r =>
+        r.cotizacion_id === reservaActual.cotizacion_id &&
+        r.id !== editandoId &&
+        r.estado !== "cancelada" && r.estado !== "finalizada" && r.estado !== "en_curso" &&
+        (r.fecha_servicio || "") >= hoyPeru
+      );
       if (otrasReservas.length > 0) {
         // Construir resumen legible de lo asignado
         let resumen = "";
@@ -1040,7 +1043,10 @@ export default function ReservasPage() {
         setAplicarScope("todos");
         setAplicarDesde("");
         setAplicarHasta("");
-        setModalAplicarMasivo({ cotizacion_id: reservaActual.cotizacion_id, payload: asignPayload, otrasReservas, resumen });
+        setAplicarCampos("todo");
+        setAplicarOtraHora(false);
+        setAplicarOtraUnidad(false);
+        setModalAplicarMasivo({ cotizacion_id: reservaActual.cotizacion_id, payload: asignPayload, otrasReservas, horaOriginal, resumen });
         cargarDatos();
         return;
       }
@@ -1049,35 +1055,90 @@ export default function ReservasPage() {
     limpiar(); cargarDatos(); setGuardando(false);
   };
 
+  // Un servicio "conserva su unidad" si aplicarle la asignación completa no le cambia
+  // ninguna unidad que YA tenía: los campos vacíos se completan, pero los que tienen valor
+  // no se pisan. Se comparan los tres campos de unidad a la vez, no solo el del tipo del
+  // payload: un servicio tercerizado tiene vehiculo_id = null (miraríamos el campo
+  // equivocado y lo daríamos por "libre") pero su empresa_tercerizada_id sí está puesta, y
+  // una asignación propia se la borraría junto con su unidad, su conductor y su costo.
+  const conservaUnidad = (r: Reserva, payload: Record<string, any>) => {
+    const pisa = (actual: number | null, nuevo: any) =>
+      actual !== null && actual !== undefined && actual !== (nuevo ?? null);
+    return !pisa(r.vehiculo_id,            payload.vehiculo_id)
+        && !pisa(r.empresa_tercerizada_id, payload.empresa_tercerizada_id)
+        && !pisa(r.vehiculo_tercero_id,    payload.vehiculo_tercero_id);
+  };
+
+  // Los servicios que recibirán la asignación, según los filtros elegidos en el modal.
+  // Misma lógica en el render (contador) y en el update, para que el número que se ve
+  // sea exactamente el que se escribe.
+  const targetsAplicar = (m: NonNullable<typeof modalAplicarMasivo>) => {
+    const soloConductor = aplicarCampos === "conductor";
+    return m.otrasReservas.filter(r => {
+      if (!aplicarOtraHora && (r.hora_servicio?.slice(0, 5) || "") !== m.horaOriginal) return false;
+      if (soloConductor) {
+        // No se toca la unidad, así que da igual qué placa tenga; pero no mezclamos
+        // conductor propio con servicios tercerizados (y viceversa)...
+        if (r.tipo_asignacion && r.tipo_asignacion !== m.payload.tipo_asignacion) return false;
+        // ...ni mandamos el conductor de una empresa proveedora a cubrir los servicios
+        // de otra empresa.
+        if (m.payload.tipo_asignacion === "tercerizado" &&
+            r.empresa_tercerizada_id !== m.payload.empresa_tercerizada_id) return false;
+      } else if (!aplicarOtraUnidad && !conservaUnidad(r, m.payload)) return false;
+      if (aplicarScope === "rango") {
+        if (!r.fecha_servicio) return false;
+        if (aplicarDesde && r.fecha_servicio < aplicarDesde) return false;
+        if (aplicarHasta && r.fecha_servicio > aplicarHasta) return false;
+      }
+      return true;
+    });
+  };
+
   const aplicarMasivo = async () => {
     if (!modalAplicarMasivo) return;
-    const { payload, otrasReservas } = modalAplicarMasivo;
-
-    let targets = otrasReservas;
-    if (aplicarScope === "rango") {
-      targets = otrasReservas.filter(r =>
-        r.fecha_servicio &&
-        (!aplicarDesde || r.fecha_servicio >= aplicarDesde) &&
-        (!aplicarHasta  || r.fecha_servicio <= aplicarHasta)
-      );
-      if (targets.length === 0) { alert("No hay servicios en ese rango de fechas"); return; }
-    }
+    const { payload, horaOriginal } = modalAplicarMasivo;
+    const targets = targetsAplicar(modalAplicarMasivo);
+    if (targets.length === 0) { alert("No hay servicios que cumplan esos filtros"); return; }
 
     setAplicando(true);
-    const pendienteIds = targets.filter(r => r.estado === "pendiente").map(r => r.id);
-    const otrosIds     = targets.filter(r => r.estado !== "pendiente").map(r => r.id);
+    const soloConductor = aplicarCampos === "conductor";
 
-    const ops: Promise<any>[] = [];
-    if (pendienteIds.length > 0) {
-      const propioCompleto = payload.tipo_asignacion === "propio" && !!payload.vehiculo_id && !!payload.conductor_id;
-      const tercerizadoCompleto = payload.tipo_asignacion === "tercerizado" && !!payload.empresa_tercerizada_id && !!payload.vehiculo_tercero_id && !!payload.conductor_tercero_id;
-      const estadoPendientes: EstadoReserva = (propioCompleto || tercerizadoCompleto) ? "confirmada" : "programada";
-      ops.push(supabase.from("reservas").update({ ...payload, estado: estadoPendientes }).in("id", pendienteIds));
+    // "Solo el conductor": no se escribe vehículo, empresa, tipo ni hora — cada servicio
+    // conserva su unidad y su horario.
+    const base: Record<string, any> = soloConductor
+      ? (payload.tipo_asignacion === "propio"
+          ? { conductor_id: payload.conductor_id }
+          : { conductor_tercero_id: payload.conductor_tercero_id })
+      : payload;
+
+    const propioCompleto      = payload.tipo_asignacion === "propio" && !!payload.vehiculo_id && !!payload.conductor_id;
+    const tercerizadoCompleto = payload.tipo_asignacion === "tercerizado" && !!payload.empresa_tercerizada_id && !!payload.vehiculo_tercero_id && !!payload.conductor_tercero_id;
+    const estadoPendientes: EstadoReserva = (propioCompleto || tercerizadoCompleto) ? "confirmada" : "programada";
+
+    // Se agrupan los targets por el patch exacto que reciben y se manda un update por lote.
+    const lotes = new Map<string, { patch: Record<string, any>; ids: number[] }>();
+    for (const r of targets) {
+      const patch: Record<string, any> = { ...base };
+      // A los servicios de OTRA hora (el retorno) no se les toca ni el horario ni el costo:
+      // la hora los reescribiría con la de la ida, y la ida y el retorno se le pagan distinto
+      // al proveedor. La hora sí se propaga entre los de la misma hora, que es como se cambia
+      // el horario de todo el contrato.
+      if (!soloConductor && (r.hora_servicio?.slice(0, 5) || "") !== horaOriginal) {
+        delete patch.hora_servicio;
+        delete patch.costo_proveedor;
+      }
+      // Un pendiente que queda completamente asignado se confirma. En "solo conductor" no:
+      // el servicio puede seguir sin unidad.
+      if (!soloConductor && r.estado === "pendiente") patch.estado = estadoPendientes;
+      const key = JSON.stringify(patch);
+      const lote = lotes.get(key) || { patch, ids: [] };
+      lote.ids.push(r.id);
+      lotes.set(key, lote);
     }
-    if (otrosIds.length > 0)
-      ops.push(supabase.from("reservas").update(payload).in("id", otrosIds));
 
-    const results = await Promise.all(ops);
+    const results = await Promise.all(
+      [...lotes.values()].map(l => supabase.from("reservas").update(l.patch).in("id", l.ids))
+    );
     const errores = results.filter(r => r.error);
     if (errores.length > 0) alert(`Error al actualizar ${errores.length} lote(s). Revisa la consola.`);
 
@@ -1394,26 +1455,42 @@ export default function ReservasPage() {
 
       {/* MODAL APLICAR ASIGNACIÓN MASIVA A SERVICIOS FIJOS */}
       {modalAplicarMasivo && (() => {
-        const { otrasReservas, resumen, cotizacion_id } = modalAplicarMasivo;
-        const targets = aplicarScope === "rango"
-          ? otrasReservas.filter(r =>
-              r.fecha_servicio &&
-              (!aplicarDesde || r.fecha_servicio >= aplicarDesde) &&
-              (!aplicarHasta  || r.fecha_servicio <= aplicarHasta))
-          : otrasReservas;
+        const { otrasReservas, resumen, cotizacion_id, payload, horaOriginal } = modalAplicarMasivo;
+        const targets = targetsAplicar(modalAplicarMasivo);
+        const soloConductor = aplicarCampos === "conductor";
+
+        // El calendario se abre a TODO el contrato: limitarlo a las fechas de los
+        // candidatos ya filtrados hacía que se vieran casi todos los días bloqueados.
         const fechas = otrasReservas.map(r => r.fecha_servicio).filter(Boolean).sort() as string[];
         const minF = fechas[0] || "";
         const maxF = fechas[fechas.length - 1] || "";
 
+        // Los conteos de los avisos se calculan sobre el rango de fechas ya elegido: si no,
+        // el modal ofrecería incluir servicios que el rango deja fuera de todos modos.
+        const enRango = (r: Reserva) => aplicarScope !== "rango" || (
+          !!r.fecha_servicio &&
+          (!aplicarDesde || r.fecha_servicio >= aplicarDesde) &&
+          (!aplicarHasta || r.fecha_servicio <= aplicarHasta)
+        );
+        const candidatos = otrasReservas.filter(enRango);
+        const otraHora   = candidatos.filter(r => (r.hora_servicio?.slice(0, 5) || "") !== horaOriginal);
+        const enHora     = aplicarOtraHora ? candidatos : candidatos.filter(r => (r.hora_servicio?.slice(0, 5) || "") === horaOriginal);
+        const otraUnidad = enHora.filter(r => !conservaUnidad(r, payload));
+        const hayConductor = payload.tipo_asignacion === "propio" ? !!payload.conductor_id : !!payload.conductor_tercero_id;
+        // Si se cambió la hora del servicio editado, el masivo la propaga a los de su mismo
+        // horario original: hay que decirlo, no es lo que el operador cree estar aplicando.
+        const horaNueva  = payload.hora_servicio?.slice(0, 5) || "";
+        const cambiaHora = !soloConductor && !!horaNueva && horaNueva !== horaOriginal;
+
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[92vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
               {/* Header */}
               <div className="px-6 py-4 flex items-center gap-3 rounded-t-2xl" style={{ background: "#0b315f" }}>
                 <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center text-lg">📋</div>
                 <div>
                   <p className="font-black text-white text-base">¿Aplicar a más servicios del contrato?</p>
-                  <p className="text-white/60 text-xs">Contrato #{cotizacion_id} · {otrasReservas.length} servicio(s) adicional(es)</p>
+                  <p className="text-white/60 text-xs">Contrato #{cotizacion_id} · {otrasReservas.length} servicio(s) activo(s)</p>
                 </div>
               </div>
 
@@ -1424,6 +1501,29 @@ export default function ReservasPage() {
                   <p className="font-bold text-green-800">{resumen || "—"}</p>
                 </div>
 
+                {/* Qué campos aplicar */}
+                {hayConductor && (
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">¿Qué aplicar?</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${!soloConductor ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
+                        <div className="flex items-center gap-2">
+                          <input type="radio" name="campos" checked={!soloConductor} onChange={() => setAplicarCampos("todo")} className="accent-[#0b315f]" />
+                          <p className="font-bold text-sm text-gray-800">{payload.tipo_asignacion === "propio" ? "Vehículo y conductor" : "Empresa y unidad"}</p>
+                        </div>
+                        <p className="text-[11px] text-gray-500 mt-1 ml-6">Reemplaza la asignación completa.</p>
+                      </label>
+                      <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${soloConductor ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
+                        <div className="flex items-center gap-2">
+                          <input type="radio" name="campos" checked={soloConductor} onChange={() => setAplicarCampos("conductor")} className="accent-[#0b315f]" />
+                          <p className="font-bold text-sm text-gray-800">Solo el conductor</p>
+                        </div>
+                        <p className="text-[11px] text-gray-500 mt-1 ml-6">Cada servicio conserva su unidad.</p>
+                      </label>
+                    </div>
+                  </div>
+                )}
+
                 {/* Opciones */}
                 <div className="space-y-2">
                   <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">¿A cuántos servicios aplicar?</p>
@@ -1431,8 +1531,8 @@ export default function ReservasPage() {
                   <label className={`flex items-start gap-3 p-3 rounded-xl cursor-pointer border-2 transition-all ${aplicarScope === "todos" ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
                     <input type="radio" name="scope" checked={aplicarScope === "todos"} onChange={() => setAplicarScope("todos")} className="mt-0.5 accent-[#0b315f]" />
                     <div>
-                      <p className="font-bold text-sm text-gray-800">Todos los servicios del contrato</p>
-                      <p className="text-xs text-gray-500">{otrasReservas.length} servicio(s) · {minF ? fmtFecha(minF) : "—"} al {maxF ? fmtFecha(maxF) : "—"}</p>
+                      <p className="font-bold text-sm text-gray-800">Todo el contrato</p>
+                      <p className="text-xs text-gray-500">{minF ? fmtFecha(minF) : "—"} al {maxF ? fmtFecha(maxF) : "—"}</p>
                     </div>
                   </label>
 
@@ -1440,7 +1540,7 @@ export default function ReservasPage() {
                     <input type="radio" name="scope" checked={aplicarScope === "rango"} onChange={() => { setAplicarScope("rango"); setAplicarDesde(minF); setAplicarHasta(maxF); }} className="mt-0.5 accent-[#0b315f]" />
                     <div className="flex-1">
                       <p className="font-bold text-sm text-gray-800">Rango de fechas</p>
-                      <p className="text-xs text-gray-500 mb-2">Elige desde qué fecha hasta cuál</p>
+                      <p className="text-xs text-gray-500 mb-2">Del {minF ? fmtFecha(minF) : "—"} al {maxF ? fmtFecha(maxF) : "—"} (todo el contrato)</p>
                       {aplicarScope === "rango" && (
                         <div className="flex gap-2 flex-wrap">
                           <div>
@@ -1456,6 +1556,50 @@ export default function ReservasPage() {
                     </div>
                   </label>
                 </div>
+
+                {/* Qué se incluye / qué se está dejando fuera */}
+                {(otraHora.length > 0 || otraUnidad.length > 0 || soloConductor) && (
+                  <div className="space-y-1.5 rounded-xl border border-gray-200 px-4 py-3">
+                    <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">Incluir también</p>
+
+                    {otraHora.length > 0 && (
+                      <label className="flex items-start gap-2.5 cursor-pointer">
+                        <input type="checkbox" checked={aplicarOtraHora} onChange={e => setAplicarOtraHora(e.target.checked)} className="mt-0.5 accent-[#0b315f]" />
+                        <span className="text-xs text-gray-700">
+                          Los servicios de <b>otro horario</b> (ida y retorno) — {otraHora.length} servicio(s).
+                          <span className="text-gray-400"> Por defecto solo se aplica a los de las {horaOriginal || "—"}.</span>
+                        </span>
+                      </label>
+                    )}
+
+                    {!soloConductor && otraUnidad.length > 0 && (
+                      <label className="flex items-start gap-2.5 cursor-pointer">
+                        <input type="checkbox" checked={aplicarOtraUnidad} onChange={e => setAplicarOtraUnidad(e.target.checked)} className="mt-0.5 accent-[#0b315f]" />
+                        <span className="text-xs text-gray-700">
+                          Los servicios que ya tienen <b>otra unidad</b> asignada — {otraUnidad.length} servicio(s).
+                          <span className="font-bold" style={{ color: "#b45309" }}> Se les sobrescribirá la unidad.</span>
+                        </span>
+                      </label>
+                    )}
+
+                    {soloConductor && (
+                      <p className="text-xs text-gray-500">
+                        Se cambia solo el conductor: la <b>unidad y el horario</b> de cada servicio quedan intactos.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Aviso: la hora también se propaga */}
+                {cambiaHora && (
+                  <div className="rounded-xl px-4 py-2.5 text-xs flex items-start gap-2" style={{ background: "#fffbeb", border: "1px solid #fcd34d", color: "#92400e" }}>
+                    <span>⏰</span>
+                    <span>
+                      Cambiaste la hora de <b>{horaOriginal}</b> a <b>{horaNueva}</b>: también se aplicará
+                      a los servicios que salían a las {horaOriginal}.
+                    </span>
+                  </div>
+                )}
 
                 {/* Preview conteo */}
                 <div className="rounded-xl px-4 py-2.5 text-xs font-bold flex items-center gap-2" style={{ background: "#e0f2fe", color: "#0369a1" }}>
