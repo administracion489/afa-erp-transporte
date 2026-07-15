@@ -62,6 +62,8 @@ export default function CampanasPage() {
   const [resPrueba, setResPrueba] = useState<{ ok: boolean; texto: string } | null>(null);
   const [plantillasReales, setPlantillasReales] = useState<{ name: string; status: string; language: string; category: string }[] | null>(null);
   const [cargandoPlantillas, setCargandoPlantillas] = useState(false);
+  const [estadoNumero, setEstadoNumero] = useState<Record<string, any> | null>(null);
+  const [cargandoEstado, setCargandoEstado] = useState(false);
 
   const showToast = (msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -183,6 +185,21 @@ export default function CampanasPage() {
     }
   };
 
+  const verEstadoNumero = async () => {
+    setCargandoEstado(true);
+    setEstadoNumero(null);
+    try {
+      const res = await fetch(`/api/campanas/diagnostico?numero=${numPrueba}`, { headers: await authHeaders() });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error ?? "Error");
+      setEstadoNumero(j);
+    } catch (e: any) {
+      showToast("Error al consultar estado: " + e.message, false);
+    } finally {
+      setCargandoEstado(false);
+    }
+  };
+
   const enviar = async (c: Campana) => {
     const destino = c.canal === "whatsapp" ? "WhatsApp" : "correo";
     if (!confirm(`¿Enviar la campaña "${c.nombre}" por ${destino}?\nEsto contacta a los destinatarios de verdad.`)) return;
@@ -292,7 +309,7 @@ export default function CampanasPage() {
             </button>
           </div>
         </div>
-        <div className="mt-3">
+        <div className="mt-3 flex gap-4">
           <button
             onClick={verPlantillas}
             disabled={cargandoPlantillas}
@@ -300,7 +317,19 @@ export default function CampanasPage() {
           >
             {cargandoPlantillas ? "Consultando Meta…" : `Ver plantillas reales de "${numPrueba === "crm" ? "CRM" : "Avisos"}"`}
           </button>
+          <button
+            onClick={verEstadoNumero}
+            disabled={cargandoEstado}
+            className="text-xs font-semibold text-[#0b315f] underline disabled:opacity-50"
+          >
+            {cargandoEstado ? "Consultando Meta…" : `Ver estado real del número`}
+          </button>
         </div>
+        {estadoNumero && (
+          <div className="mt-3 border border-gray-200 rounded-xl p-3 text-[12px] font-mono bg-gray-50 overflow-x-auto">
+            <pre className="whitespace-pre-wrap">{JSON.stringify(estadoNumero, null, 2)}</pre>
+          </div>
+        )}
         {resPrueba && (
           <div className={`mt-3 text-[13px] rounded-xl p-3 border ${resPrueba.ok ? "bg-green-50 border-green-200 text-green-800" : "bg-red-50 border-red-200 text-red-800"}`}>
             {resPrueba.texto}
