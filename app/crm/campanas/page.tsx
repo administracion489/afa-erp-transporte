@@ -60,6 +60,8 @@ export default function CampanasPage() {
   const [numPrueba, setNumPrueba] = useState<"avisos" | "crm">("avisos");
   const [probando, setProbando] = useState(false);
   const [resPrueba, setResPrueba] = useState<{ ok: boolean; texto: string } | null>(null);
+  const [plantillasReales, setPlantillasReales] = useState<{ name: string; status: string; language: string; category: string }[] | null>(null);
+  const [cargandoPlantillas, setCargandoPlantillas] = useState(false);
 
   const showToast = (msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -166,6 +168,21 @@ export default function CampanasPage() {
     }
   };
 
+  const verPlantillas = async () => {
+    setCargandoPlantillas(true);
+    setPlantillasReales(null);
+    try {
+      const res = await fetch(`/api/campanas/plantillas?numero=${numPrueba}`, { headers: await authHeaders() });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error ?? "Error");
+      setPlantillasReales(j.plantillas ?? []);
+    } catch (e: any) {
+      showToast("Error al listar plantillas: " + e.message, false);
+    } finally {
+      setCargandoPlantillas(false);
+    }
+  };
+
   const enviar = async (c: Campana) => {
     const destino = c.canal === "whatsapp" ? "WhatsApp" : "correo";
     if (!confirm(`¿Enviar la campaña "${c.nombre}" por ${destino}?\nEsto contacta a los destinatarios de verdad.`)) return;
@@ -265,19 +282,54 @@ export default function CampanasPage() {
             <label className={label}>Plantilla</label>
             <input className={input} value={tplPrueba} onChange={(e) => setTplPrueba(e.target.value)} placeholder="hello_world" />
           </div>
-          <div className="flex items-end">
+          <div className="flex items-end gap-2">
             <button
               onClick={probar}
               disabled={probando}
-              className="w-full bg-green-600 text-white text-sm font-semibold px-4 py-2.5 rounded-xl hover:bg-green-700 disabled:opacity-50"
+              className="flex-1 bg-green-600 text-white text-sm font-semibold px-4 py-2.5 rounded-xl hover:bg-green-700 disabled:opacity-50"
             >
               {probando ? "Enviando…" : "Enviar prueba"}
             </button>
           </div>
         </div>
+        <div className="mt-3">
+          <button
+            onClick={verPlantillas}
+            disabled={cargandoPlantillas}
+            className="text-xs font-semibold text-[#0b315f] underline disabled:opacity-50"
+          >
+            {cargandoPlantillas ? "Consultando Meta…" : `Ver plantillas reales de "${numPrueba === "crm" ? "CRM" : "Avisos"}"`}
+          </button>
+        </div>
         {resPrueba && (
           <div className={`mt-3 text-[13px] rounded-xl p-3 border ${resPrueba.ok ? "bg-green-50 border-green-200 text-green-800" : "bg-red-50 border-red-200 text-red-800"}`}>
             {resPrueba.texto}
+          </div>
+        )}
+        {plantillasReales && (
+          <div className="mt-3 border border-gray-200 rounded-xl overflow-hidden">
+            {plantillasReales.length === 0 ? (
+              <div className="p-3 text-[13px] text-gray-500">
+                Esta cuenta no tiene NINGUNA plantilla todavía (ni siquiera hello_world). Hay que crear una en
+                WhatsApp Manager y esperar su aprobación antes de poder enviar.
+              </div>
+            ) : (
+              <table className="w-full text-[12px]">
+                <thead className="bg-gray-50 text-gray-500">
+                  <tr><th className="text-left p-2">Nombre</th><th className="text-left p-2">Idioma</th><th className="text-left p-2">Categoría</th><th className="text-left p-2">Estado</th></tr>
+                </thead>
+                <tbody>
+                  {plantillasReales.map((p, i) => (
+                    <tr key={i} className="border-t border-gray-100">
+                      <td className="p-2 font-mono">{p.name}</td>
+                      <td className="p-2">{p.language}</td>
+                      <td className="p-2">{p.category}</td>
+                      <td className="p-2">{p.status}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         )}
       </div>
