@@ -40,7 +40,8 @@ export async function POST(req: NextRequest) {
 
     const to = normalizar(String(telefono));
     const tpl = (plantilla || "hello_world").trim();
-    const lang = (idioma || (tpl === "hello_world" ? "en" : "es")).trim();
+    // La plantilla de muestra "hello_world" que Meta precarga está en en_US, no en "en".
+    const lang = (idioma || (tpl === "hello_world" ? "en_US" : "es")).trim();
 
     const id = await enviarWhatsAppPlantilla(to, tpl, lang, parametros ?? [], phoneId);
     return NextResponse.json({
