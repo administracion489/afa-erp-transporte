@@ -14,7 +14,7 @@ const supabaseAdmin = createClient(
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
 export type TipoCanal   = "email" | "whatsapp" | "sms" | "push";
-export type TipoTrigger = "manual" | "cron_recordatorio";
+export type TipoTrigger = "manual" | "cron_recordatorio" | "proximidad_llego";
 
 export type DatosNotificacion = {
   pasajeroNombre:   string;
@@ -105,6 +105,14 @@ const PLANTILLA_IDIOMA       = "es";
 //   {{4}} ruta (origen → destino)
 //   {{5}} placa del vehículo
 const PLANTILLA_CONDUCTOR = "recordatorio_conductor";
+
+// Plantilla de LLEGADA (utility). Se dispara desde el motor de proximidad
+// (lib/proximidad.ts) cuando el bus llega a un paradero — reutiliza esa misma
+// detección (radio adaptativo + velocidad + dedupe), NO tiene lógica propia de
+// GPS. Variables del cuerpo, EN ESTE ORDEN:
+//   {{1}} primer nombre del pasajero (mensaje corto, se lee de un vistazo)
+//   {{2}} nombre del paradero
+const PLANTILLA_LLEGADA = "bus_llego_paradero";
 
 /**
  * Phone Number ID del 2do número (avisos a pasajeros + conductores + campañas).
@@ -574,6 +582,47 @@ export async function notificarConductor(
   } catch (e: any) {
     await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "error", destinatario: tel, trigger, error: e.message });
     return { ok: false, estado: "error", detalle: e.message };
+  }
+}
+
+// ─── AVISO "BUS LLEGÓ AL PARADERO" ─────────────────────────────────────────────
+
+/**
+ * Avisa por WhatsApp a los pasajeros que esperan en un paradero que el bus YA
+ * LLEGÓ. Se llama SOLO desde lib/proximidad.ts, justo cuando emitirEventoViaje
+ * ("llego") acaba de emitirse por PRIMERA vez para ese paradero — el dedupe
+ * (una vez por paradero por viaje) ya está resuelto ahí vía el índice único de
+ * push_eventos_viaje; esta función no vuelve a chequear nada, confía en el llamador.
+ * No lanza: un fallo de WhatsApp no debe afectar el push nativo (canal aditivo).
+ */
+export async function avisarLlegadaWhatsApp(
+  reservaId: number,
+  paradaNombre: string,
+  pasajeroIds: number[],
+): Promise<void> {
+  if (!phoneAvisos() || pasajeroIds.length === 0) return;
+
+  const { data: pasajeros } = await supabaseAdmin
+    .from("pasajeros")
+    .select("id, nombre, telefono")
+    .in("id", pasajeroIds);
+
+  for (const pas of pasajeros || []) {
+    if (!pas.telefono) continue;
+    const tel = normalizarTelefono(pas.telefono);
+    const primerNombre = (pas.nombre || "").trim().split(/\s+/)[0] || "Hola";
+    try {
+      await enviarWhatsAppPlantilla(
+        tel,
+        PLANTILLA_LLEGADA,
+        PLANTILLA_IDIOMA,
+        [primerNombre, paradaNombre],
+        phoneAvisos(),
+      );
+      await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "whatsapp", estado: "enviado", destinatario: tel, trigger: "proximidad_llego" });
+    } catch (e: any) {
+      await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "whatsapp", estado: "error", destinatario: tel, trigger: "proximidad_llego", error: e.message });
+    }
   }
 }
 

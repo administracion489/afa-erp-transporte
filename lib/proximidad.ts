@@ -26,6 +26,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { distM, velocidadPorVentana, type FixVel } from "@/lib/huella";
 import { emitirEventoViaje, pasajerosEsperandoDeParada, payloadsViaje } from "@/lib/push";
+import { avisarLlegadaWhatsApp } from "@/lib/notificaciones";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -146,6 +147,10 @@ export async function evaluarProximidad(reservaId: number): Promise<void> {
           await emitirEventoViaje({
             reservaId, evento: "aproximandose", paradaId: p.id, destinatarios: [], payload: null,
           });
+          // Aviso adicional por WhatsApp (2do número): llega a quien no tiene la
+          // app/push activo. El dedupe ya lo resolvió el `if (emitido)` de arriba —
+          // esta llamada nunca se repite para el mismo paradero/viaje.
+          await avisarLlegadaWhatsApp(reservaId, p.nombre || "tu paradero", dest);
         }
       }
     }
