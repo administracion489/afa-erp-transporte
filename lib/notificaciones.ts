@@ -84,6 +84,9 @@ export async function enviarEmail({
 //   {{2}} fecha del servicio
 //   {{3}} hora de recojo
 //   {{4}} paradero
+//   {{5}} dirección del paradero (fallback "No especificada" si falta)
+//   {{6}} conductor (fallback "Por asignar")
+//   {{7}} vehículo: "PLACA (Color)" (fallback "Por asignar")
 const PLANTILLA_RECORDATORIO = "recordatorio_servicio";
 const PLANTILLA_IDIOMA       = "es";
 
@@ -425,11 +428,22 @@ export async function notificarReserva(
     if (pas.telefono && phoneAvisos()) {
       const tel = normalizarTelefono(pas.telefono);
       try {
+        const vehiculoTexto = datosN.vehiculoPlaca
+          ? `${datosN.vehiculoPlaca}${datosN.vehiculoColor ? ` (${datosN.vehiculoColor})` : ""}`
+          : "Por asignar";
         await enviarWhatsAppPlantilla(
           tel,
           PLANTILLA_RECORDATORIO,
           PLANTILLA_IDIOMA,
-          [datosN.pasajeroNombre, datosN.fecha, datosN.hora, datosN.paradaNombre],
+          [
+            datosN.pasajeroNombre,
+            datosN.fecha,
+            datosN.hora,
+            datosN.paradaNombre,
+            datosN.paradaDireccion ?? "No especificada",
+            datosN.conductorNombre ?? "Por asignar",
+            vehiculoTexto,
+          ],
           phoneAvisos(),
         );
         resultado.canales.push({ tipo: "whatsapp", estado: "enviado" });
