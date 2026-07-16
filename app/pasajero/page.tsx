@@ -1070,7 +1070,7 @@ export default function AppPasajero() {
       r = await paxApi("login", { dni: dniInput.trim(), pin: pinInput });
     } catch (e: any) { setLoginErr(`Error: ${e?.message ?? "no se pudo conectar"}`); setLoginLoad(false); return; }
     // Respuesta uniforme del server (no distingue DNI inexistente de PIN incorrecto).
-    if (r?.credencialesInvalidas) { setLoginErr("DNI o PIN incorrecto. ¿Problemas? Llama a soporte: 01 345 3707"); setLoginLoad(false); return; }
+    if (r?.credencialesInvalidas) { setLoginErr("Documento o PIN incorrecto. ¿Problemas? Llama a soporte: 01 345 3707"); setLoginLoad(false); return; }
     const data = r?.pasajero;
     if (!data || !r?.token) { setLoginErr("No se pudo iniciar sesión. Intenta de nuevo."); setLoginLoad(false); return; }
     saveSession(data, r.token); setPasajero(data); await cargarMiRuta(data.id); setLoginLoad(false);
@@ -1493,7 +1493,7 @@ export default function AppPasajero() {
             Bienvenido a bordo.
           </h1>
           <p style={{ color: "var(--mute)", fontSize: 14, margin: 0, lineHeight: 1.5 }}>
-            Ingresa tu DNI y PIN para ver tu bus en vivo y abordar con QR.
+            Ingresa tu documento (DNI o carné de extranjería) y PIN para ver tu bus en vivo y abordar con QR.
           </p>
         </div>
 
@@ -1506,8 +1506,8 @@ export default function AppPasajero() {
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 4px 10px", borderBottom: `1.5px solid ${dniInput.length >= 7 ? "var(--navy)" : "var(--line)"}`, marginTop: 10, marginBottom: 16 }}>
               <span style={{ fontFamily: "var(--m)", fontSize: 13, color: "var(--mute2)", fontWeight: 600, flexShrink: 0 }}>PE</span>
               <input
-                type="tel" inputMode="numeric" maxLength={8} value={dniInput} autoFocus aria-label="DNI"
-                onChange={e => { setDniInput(e.target.value.replace(/\D/g, "").slice(0, 8)); setLoginErr(""); }}
+                type="tel" inputMode="numeric" maxLength={12} value={dniInput} autoFocus aria-label="Documento de identidad"
+                onChange={e => { setDniInput(e.target.value.replace(/\D/g, "").slice(0, 12)); setLoginErr(""); }}
                 onKeyDown={e => e.key === "Enter" && login()}
                 placeholder="12345678"
                 style={{ fontFamily: "var(--m)", fontSize: 26, fontWeight: 700, color: "var(--ink)", letterSpacing: 3, flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent" }}

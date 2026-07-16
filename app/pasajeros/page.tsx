@@ -8,6 +8,7 @@ type Pasajero = {
   id: number;
   nombre: string;
   dni: string | null;
+  tipo_documento?: string | null;
   empresa: string | null;
   cliente_id: number | null;
   telefono: string | null;
@@ -53,6 +54,7 @@ type Vista = "pasajeros" | "grupos" | "asignaciones";
 const FORM_VACIO = {
   nombre: "",
   dni: "",
+  tipo_documento: "DNI",
   empresa: "",
   telefono: "",
   email: "",
@@ -63,6 +65,21 @@ const FORM_VACIO = {
 function inputCls(extra = "") {
   return "w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all " + extra;
 }
+
+// El número de documento (columna `dni`) es la LLAVE de login del pasajero.
+// No es solo DNI: los extranjeros usan Carné de Extranjería (9 dígitos) y hay
+// pasaportes. Por eso el largo y la sanitización del campo dependen del tipo.
+const DOC_TIPOS: { v: string; label: string }[] = [
+  { v: "DNI", label: "DNI" },
+  { v: "CE", label: "C.E." },
+  { v: "PASAPORTE", label: "Pasap." },
+  { v: "OTRO", label: "Otro" },
+];
+const maxDoc = (tipo: string) => (tipo === "DNI" ? 8 : 20);
+// DNI: solo dígitos (8). Resto: alfanumérico en mayúsculas (CE peruano = 9 dígitos
+// numéricos, pasaporte alfanumérico). Nunca truncamos a 8 lo que no es DNI.
+const sanitizeDoc = (tipo: string, v: string) =>
+  tipo === "DNI" ? v.replace(/\D/g, "") : v.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
 function Campo(props: { label: string; span?: number; hint?: string; children: React.ReactNode }) {
   const cls = props.span === 2 ? "md:col-span-2" : props.span === 3 ? "md:col-span-3" : "";
@@ -117,7 +134,7 @@ function ModalQR(props: { pasajero: Pasajero; onClose: () => void }) {
           {p.qr_code ? <p className="font-mono text-xs font-bold text-gray-600 break-all text-center px-4">{p.qr_code}</p> : null}
         </div>
         <div className="mx-6 mb-4 rounded-xl p-4 space-y-2" style={{ background: "#f8fafc" }}>
-          <div className="flex justify-between text-xs"><span className="text-gray-400 font-bold">DNI</span><span className="text-gray-700 font-medium">{p.dni || "-"}</span></div>
+          <div className="flex justify-between text-xs"><span className="text-gray-400 font-bold">{p.tipo_documento && p.tipo_documento !== "DNI" ? p.tipo_documento : "DNI"}</span><span className="text-gray-700 font-medium">{p.dni || "-"}</span></div>
           <div className="flex justify-between text-xs"><span className="text-gray-400 font-bold">Telefono</span><span className="text-gray-700 font-medium">{p.telefono || "-"}</span></div>
           <div className="flex justify-between text-xs"><span className="text-gray-400 font-bold">Email</span><span className="text-gray-700 font-medium">{p.email || "-"}</span></div>
           <div className="flex justify-between text-xs"><span className="text-gray-400 font-bold">Estado</span><span className="text-gray-700 font-medium">{p.activo ? "Activo" : "Inactivo"}</span></div>
@@ -195,19 +212,33 @@ export default function PasajerosPage() {
   const guardarPasajero = async () => {
     if (!form.nombre.trim()) { alert("El nombre es obligatorio"); return; }
     if (form.email.trim() && !esEmailValido(form.email)) { alert("El formato del email no es valido"); return; }
+    const doc = form.dni.trim();
+    // Aviso suave contra el truncamiento: un DNI peruano tiene 8 dígitos. Si tiene
+    // otro largo, casi siempre es un extranjero cuyo tipo debería ser "C.E.".
+    if (form.tipo_documento === "DNI" && doc && doc.length !== 8) {
+      if (!confirm(`El DNI tiene ${doc.length} dígitos (deberían ser 8). Si es un extranjero, cambia el tipo a "C.E.". ¿Guardar de todas formas?`)) return;
+    }
     setGuardando(true);
-    const payload = {
+    const payload: any = {
       nombre: form.nombre.trim(),
-      dni: form.dni.trim() || null,
+      dni: doc || null,
       empresa: form.empresa.trim() || null,
       telefono: form.telefono.trim() || null,
       email: form.email.trim() || null,
       foto_url: form.foto_url.trim() || null,
       cliente_id: form.cliente_id ? Number(form.cliente_id) : null,
     };
-    const resp = editandoId
-      ? await supabase.from("pasajeros").update(payload).eq("id", editandoId)
-      : await supabase.from("pasajeros").insert({ ...payload, activo: true });
+    // `tipo_documento` puede no existir aún en BD (migración pasajeros-tipo-documento.sql).
+    // Guardamos el número igual (lo crítico) y reintentamos SIN el tipo si la columna falta.
+    const conTipo = { ...payload, tipo_documento: form.tipo_documento || "DNI" };
+    let resp = editandoId
+      ? await supabase.from("pasajeros").update(conTipo).eq("id", editandoId)
+      : await supabase.from("pasajeros").insert({ ...conTipo, activo: true });
+    if (resp.error && /tipo_documento/i.test(resp.error.message || "")) {
+      resp = editandoId
+        ? await supabase.from("pasajeros").update(payload).eq("id", editandoId)
+        : await supabase.from("pasajeros").insert({ ...payload, activo: true });
+    }
     if (resp.error) { alert(resp.error.message); setGuardando(false); return; }
     setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false);
     cargarTodo(); setGuardando(false);
@@ -217,6 +248,7 @@ export default function PasajerosPage() {
     setForm({
       nombre: p.nombre,
       dni: p.dni || "",
+      tipo_documento: p.tipo_documento || "DNI",
       empresa: p.empresa || "",
       telefono: p.telefono || "",
       email: p.email || "",
@@ -394,8 +426,24 @@ export default function PasajerosPage() {
                 <Campo label="Nombre completo *" span={2}>
                   <input className={inputCls()} placeholder="Juan Perez Garcia" value={form.nombre} onChange={f("nombre")} />
                 </Campo>
-                <Campo label="DNI">
-                  <input className={inputCls("font-mono")} placeholder="12345678" maxLength={8} value={form.dni} onChange={f("dni")} />
+                <Campo label={form.tipo_documento === "DNI" ? "DNI" : "N° de documento"} hint="Es el usuario de acceso a la app del pasajero">
+                  <div className="flex gap-2">
+                    <select
+                      className="border border-gray-200 rounded-xl px-2 py-2.5 text-sm font-semibold text-gray-700 bg-white shrink-0 focus:outline-none focus:border-[#0b315f]"
+                      value={form.tipo_documento}
+                      title="Tipo de documento"
+                      onChange={(e) => setForm((p) => ({ ...p, tipo_documento: e.target.value, dni: sanitizeDoc(e.target.value, p.dni) }))}
+                    >
+                      {DOC_TIPOS.map((t) => (<option key={t.v} value={t.v}>{t.label}</option>))}
+                    </select>
+                    <input
+                      className={inputCls("font-mono")}
+                      placeholder={form.tipo_documento === "DNI" ? "12345678" : "Ej: 001234567"}
+                      maxLength={maxDoc(form.tipo_documento)}
+                      value={form.dni}
+                      onChange={(e) => setForm((p) => ({ ...p, dni: sanitizeDoc(p.tipo_documento, e.target.value) }))}
+                    />
+                  </div>
                 </Campo>
                 <Campo label="Cliente registrado" hint="Vincula al cliente registrado en el ERP">
                   <select className={inputCls()} value={form.cliente_id} onChange={(e) => {
