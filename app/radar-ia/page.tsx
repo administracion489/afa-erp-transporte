@@ -105,6 +105,7 @@ const ANOMALIA_LABEL: Record<string, string> = {
   consumo_excesivo:       "Consumo excesivo",
   recarga_madrugada:      "Recarga de madrugada",
   monto_inconsistente:    "Monto inconsistente",
+  galones_coinciden_km:   "Cantidad = kilometraje",
 };
 
 const TABS = [
@@ -945,8 +946,9 @@ function TabConfiguracion({ config, guardando, onGuardar, vehiculosGuia, onGuard
     setPalabra("");
   };
 
-  const ACCIONES: { clave: "combustible" | "mantenimiento" | "operaciones"; titulo: string; riesgo: string }[] = [
+  const ACCIONES: { clave: "combustible" | "odometro" | "mantenimiento" | "operaciones"; titulo: string; riesgo: string }[] = [
     { clave: "combustible",   titulo: "Combustible automático",   riesgo: "Registra recargas sin anomalías directamente en /combustible" },
+    { clave: "odometro",      titulo: "Odómetro automático",      riesgo: "Registra lecturas de kilometraje en /mantenimiento (protegido: una lectura rara nunca corrompe el km vigente, solo queda «por revisar»)" },
     { clave: "mantenimiento", titulo: "Mantenimiento automático", riesgo: "Crea la orden y puede poner la unidad en mantenimiento (bloquea asignaciones)" },
     { clave: "operaciones",   titulo: "Operaciones automáticas",  riesgo: "Cambia el estado del servicio (en curso/finalizada) — recomendado dejarlo apagado" },
   ];

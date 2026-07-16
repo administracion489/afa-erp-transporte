@@ -77,7 +77,7 @@ const CONFIG_DEFECTO: RadarConfig = {
   hora_inicio: "06:00",
   hora_fin: "22:00",
   categorias_activas: LISTA_CATEGORIAS.filter((c) => c !== "otros"),
-  acciones_automaticas: { combustible: true, mantenimiento: false, operaciones: false },
+  acciones_automaticas: { combustible: true, odometro: true, mantenimiento: false, operaciones: false },
   palabras_clave: [],
   umbral_confianza: 0.7,
   modelo_triage: "claude-haiku-4-5",
@@ -93,13 +93,32 @@ async function cargarConfig(sb: any): Promise<RadarConfig> {
   try {
     const { data } = await sb.from("radar_config").select("*").eq("id", 1).maybeSingle();
     if (!data) return CONFIG_DEFECTO;
+
+    // Auto-migración de configs guardadas ANTES de que existiera la categoría "odometro".
+    // Sin esto, la fila de config ya persistida en prod (sin "odometro" en categorias_activas
+    // ni en acciones_automaticas) haría que todo mensaje de odómetro se descarte en silencio
+    // como "categoria_inactiva" — la feature quedaría inerte hasta que alguien la active a mano.
+    // Marcador de versión: la PRESENCIA de la clave "odometro" en acciones_automaticas indica
+    // que esta config ya "conoce" la categoría. Si falta, es una config vieja → activamos
+    // odometro por defecto (paridad con una instalación nueva), UNA sola vez: apenas el operador
+    // guarde desde la UI, la clave queda fijada y a partir de ahí manda su preferencia explícita
+    // (puede apagarla y se respeta). No requiere correr ningún SQL.
+    const accionesGuardadas =
+      data.acciones_automaticas && typeof data.acciones_automaticas === "object" ? data.acciones_automaticas : {};
+    const configConoceOdometro = "odometro" in accionesGuardadas;
+
+    let categorias = Array.isArray(data.categorias_activas) ? data.categorias_activas : CONFIG_DEFECTO.categorias_activas;
+    if (!configConoceOdometro && !categorias.includes("odometro")) {
+      categorias = [...categorias, "odometro"];
+    }
+
     return {
       ...CONFIG_DEFECTO,
       ...data,
-      categorias_activas: Array.isArray(data.categorias_activas)
-        ? data.categorias_activas
-        : CONFIG_DEFECTO.categorias_activas,
-      acciones_automaticas: data.acciones_automaticas ?? CONFIG_DEFECTO.acciones_automaticas,
+      categorias_activas: categorias,
+      // Fusión por clave (no reemplazo del objeto entero): una config vieja hereda el default
+      // odometro:true; una nueva con el operador habiendo apagado algo conserva su elección.
+      acciones_automaticas: { ...CONFIG_DEFECTO.acciones_automaticas, ...accionesGuardadas },
       palabras_clave: Array.isArray(data.palabras_clave) ? data.palabras_clave : [],
     };
   } catch {
@@ -261,11 +280,14 @@ async function cargarGruposInfo(sb: any, lote: any[]): Promise<Map<string, Grupo
 }
 
 // ── Agrupado de reportes multi-mensaje ───────────────────────────────────────
-// Los conductores mandan el reporte de combustible en 2-3 mensajes seguidos, no siempre
-// en orden (texto con la placa, foto del odómetro, foto del voucher — cada una por su
-// lado). Sin esto, cada mensaje se procesaba solo y ninguno tenía el cuadro completo.
+// Los conductores mandan el reporte de combustible (o de solo kilometraje, categoría
+// "odometro") en 2-3 mensajes seguidos, no siempre en orden (texto con la placa, foto del
+// odómetro, foto del voucher — cada una por su lado). Sin esto, cada mensaje se procesaba
+// solo y ninguno tenía el cuadro completo. El nombre quedó "combustible" pero el agrupado
+// aplica igual a "odometro" — la clasificación final (con o sin datos de compra) la decide
+// la extracción combinada, no este heurístico.
 
-// Heurística liviana: ¿este mensaje PODRÍA ser parte de un reporte de combustible
+// Heurística liviana: ¿este mensaje PODRÍA ser parte de un reporte de combustible/odómetro
 // fragmentado? (una imagen o documento siempre puede ser voucher u odómetro; un texto
 // solo si menciona algo del rubro). Se usa para el período de gracia y para buscar hermanos.
 const PALABRAS_COMBUSTIBLE =

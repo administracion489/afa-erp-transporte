@@ -74,15 +74,16 @@ const GLOSARIO = `Jerga frecuente en estos grupos (español peruano informal):
 // ── Descripciones de categorías (compartidas por triage y media) ─────────────
 
 const DESCRIPCION_CATEGORIAS = `- "oportunidad_comercial": alguien pide o consulta un servicio de transporte que AFA Transportes podría cubrir con su flota (cotización, disponibilidad, "¿tienen van para mñn?", full day, traslado, recojo de personal). Incluye pedidos de apoyo/subcontrato de otro transportista SI implican que AFA cubra el servicio con su propia flota.
-- "combustible": recarga de combustible o voucher de grifo DE UNA UNIDAD DE LA FLOTA DE AFA (propia o tercerizada bajo contrato con AFA) — galones, litros, diésel, GNV, GLP, urea, precio, importe. No es de la flota de AFA si no hay ninguna señal de que la unidad/conductor pertenece a la operación de AFA.
+- "combustible": recarga de combustible o voucher de grifo DE UNA UNIDAD DE LA FLOTA DE AFA (propia o tercerizada bajo contrato con AFA) — CON datos de la COMPRA (galones, litros, diésel, GNV, GLP, urea, precio, importe, grifo). No es de la flota de AFA si no hay ninguna señal de que la unidad/conductor pertenece a la operación de AFA. Si el mensaje trae el kilometraje pero NINGÚN dato de compra, es "odometro" en cambio.
+- "odometro": el conductor SOLO informa el kilometraje actual de una unidad de LA FLOTA DE AFA (foto del tablero/odómetro, o texto tipo "unidad 45 va en 82,300 km") — SIN monto, SIN grifo, SIN galones. Si además hay datos de una recarga de combustible, usa "combustible" en su lugar (ahí también se captura el kilometraje).
 - "mantenimiento": trabajos de taller o mecánica sobre una unidad DE LA FLOTA DE AFA (cambio de aceite, frenos, llantas, repuestos, "la unidad está en el mecánico", scanner, soldadura).
 - "operaciones": novedades de un servicio QUE AFA ESTÁ OPERANDO ese día con su propia flota o la tercerizada bajo contrato ("ya salí", "iniciando ruta", "llegué al punto", "pasajeros abordados", "terminé el servicio", retrasos, cancelaciones).
 - "incidencias": choques, averías en ruta, robos, reclamos de clientes, accidentes, unidad varada — DE LA OPERACIÓN DE AFA.
 - "documentacion": vencimiento o renovación de SOAT, revisión técnica (CITV), licencias de conducir, pólizas, permisos MTC/SUTRAN — de personal o unidades de AFA.
 - "cobranza": pagos de clientes, facturas, depósitos, transferencias, "ya abonó", deudas por cobrar — de clientes de AFA.
-- "otros": saludos, stickers, cadenas, humor, conversación personal o sin valor operativo. TAMBIÉN va aquí cualquier reporte de combustible/mantenimiento/operaciones/incidencia sobre un vehículo o servicio que NO es de AFA (p.ej. otro transportista contando su propio viaje, su propia unidad o su propio abastecimiento).
+- "otros": saludos, stickers, cadenas, humor, conversación personal o sin valor operativo. TAMBIÉN va aquí cualquier reporte de combustible/odómetro/mantenimiento/operaciones/incidencia sobre un vehículo o servicio que NO es de AFA (p.ej. otro transportista contando su propio viaje, su propia unidad o su propio abastecimiento).
 
-MUY IMPORTANTE: muchos grupos de WhatsApp del rubro transporte son redes de apoyo ENTRE transportistas/colegas independientes (se avisan entre ellos disponibilidad, pasajeros, viajes de terceros — nada que ver con AFA). Un mensaje de ese tipo de grupo casi siempre es "otros", salvo que alguien pida explícitamente un servicio que AFA podría cubrir (ahí sí es "oportunidad_comercial"). NUNCA clasifiques como "combustible", "mantenimiento", "operaciones" o "incidencias" el reporte de un vehículo o servicio ajeno a AFA solo porque el mensaje "suena" a eso — esas categorías son EXCLUSIVAS de la operación de AFA Transportes.`;
+MUY IMPORTANTE: muchos grupos de WhatsApp del rubro transporte son redes de apoyo ENTRE transportistas/colegas independientes (se avisan entre ellos disponibilidad, pasajeros, viajes de terceros — nada que ver con AFA). Un mensaje de ese tipo de grupo casi siempre es "otros", salvo que alguien pida explícitamente un servicio que AFA podría cubrir (ahí sí es "oportunidad_comercial"). NUNCA clasifiques como "combustible", "odometro", "mantenimiento", "operaciones" o "incidencias" el reporte de un vehículo o servicio ajeno a AFA solo porque el mensaje "suena" a eso — esas categorías son EXCLUSIVAS de la operación de AFA Transportes.`;
 
 // ── Reglas comunes de extracción ─────────────────────────────────────────────
 
@@ -130,6 +131,16 @@ const FORMA_COMBUSTIBLE = `{
   "kilometraje": number|null,           // odómetro si lo reportan
   "conductor": string|null,             // nombre del conductor
   "proveedor": string|null              // razón social de la empresa proveedora del voucher
+}`;
+
+const FORMA_ODOMETRO = `{
+  "placa": string|null,                 // normalizada AAA-123 en MAYÚSCULAS
+  "unidad": string|null,                // referencia informal ("bus 45") si no hay placa
+  "kilometraje": number|null,           // lectura del odómetro (número puro, sin puntos ni comas)
+  "fecha": "YYYY-MM-DD"|null,
+  "hora": "HH:MM"|null,
+  "conductor": string|null,             // nombre del conductor si se menciona
+  "observaciones": string|null          // cualquier detalle relevante adicional
 }`;
 
 const FORMA_MANTENIMIENTO = `{
@@ -182,6 +193,7 @@ const FORMA_COBRANZA = `{
 const FORMAS: Record<Exclude<CategoriaRadar, "otros">, string> = {
   oportunidad_comercial: FORMA_OPORTUNIDAD,
   combustible: FORMA_COMBUSTIBLE,
+  odometro: FORMA_ODOMETRO,
   mantenimiento: FORMA_MANTENIMIENTO,
   operaciones: FORMA_OPERACION,
   incidencias: FORMA_INCIDENCIA,
@@ -195,6 +207,8 @@ const ENCABEZADO_EXTRACCION: Record<Exclude<CategoriaRadar, "otros">, string> = 
     "El mensaje es una OPORTUNIDAD COMERCIAL: alguien pide o consulta un servicio de transporte. Extrae los datos del pedido para que el área comercial pueda cotizar.",
   combustible:
     "El mensaje reporta una RECARGA DE COMBUSTIBLE de una unidad de LA FLOTA DE AFA (texto o datos dictados de un voucher de grifo). Extrae los datos de la recarga.",
+  odometro:
+    "El mensaje SOLO informa el KILOMETRAJE de una unidad de LA FLOTA DE AFA, sin datos de una recarga de combustible. Extrae la placa/unidad y la lectura del odómetro.",
   mantenimiento:
     "El mensaje reporta un trabajo de MANTENIMIENTO o mecánica sobre una unidad de LA FLOTA DE AFA. Extrae los datos del trabajo.",
   operaciones:
@@ -222,7 +236,7 @@ ${DESCRIPCION_CATEGORIAS}
 
 Devuelve SOLO un JSON válido con EXACTAMENTE esta forma (sin texto adicional, sin markdown):
 {
-  "categoria": "oportunidad_comercial"|"combustible"|"mantenimiento"|"operaciones"|"incidencias"|"documentacion"|"cobranza"|"otros",
+  "categoria": "oportunidad_comercial"|"combustible"|"odometro"|"mantenimiento"|"operaciones"|"incidencias"|"documentacion"|"cobranza"|"otros",
   "confianza": number,   // 0..1, qué tan seguro estás de la categoría
   "resumen": string      // UNA sola línea en español que resuma el mensaje
 }
@@ -260,22 +274,25 @@ Responde únicamente el JSON.`;
 
 // ── 3) EXTRACCIÓN de media (imagen/PDF): clasifica + extrae en una llamada ───
 
-// Guías del operador para leer vouchers/odómetros — solo aplican si el contenido resulta
-// ser de categoría "combustible" (definidas en Radar IA > Configuración).
+// Guías del operador para leer vouchers/odómetros (definidas en Radar IA > Configuración).
+// La de vouchers solo aplica a "combustible"; la de odómetro aplica a "combustible" Y a
+// "odometro" (una unidad puede reportar SOLO el kilometraje, sin ninguna recarga).
 function lineaGuiasCombustible(ctx: ContextoPrompt): string {
-  const partes: string[] = [];
+  const bloques: string[] = [];
   const guiaVoucher = (ctx.guiaVoucher ?? "").trim();
-  if (guiaVoucher) partes.push(`Cómo leer los vouchers de grifo (indicado por el operador de AFA): ${guiaVoucher}`);
+  if (guiaVoucher) {
+    bloques.push(
+      `Si lo que ves resulta ser de categoría "combustible", cómo leer los vouchers de grifo (indicado por el operador de AFA): ${guiaVoucher}`
+    );
+  }
   const guias = (ctx.guiasOdometro ?? []).filter((g) => g.guia?.trim());
   if (guias.length) {
-    partes.push(
-      `Dónde está la lectura del odómetro en el tablero de cada unidad (cada vehículo es distinto; usa la que corresponda según la placa que identifiques en el voucher o el texto):\n` +
+    bloques.push(
+      `Si lo que ves resulta ser de categoría "combustible" u "odometro", dónde está la lectura del odómetro en el tablero de cada unidad (cada vehículo es distinto; usa la que corresponda según la placa que identifiques en la imagen o el texto):\n` +
         guias.map((g) => `- ${g.placa}: ${g.guia.trim()}`).join("\n")
     );
   }
-  return partes.length
-    ? `\n\nSi lo que ves resulta ser de categoría "combustible", ten en cuenta esto:\n${partes.join("\n\n")}`
-    : "";
+  return bloques.length ? `\n\n${bloques.join("\n\n")}` : "";
 }
 
 /** Prompt combinado para mensajes con imagen o PDF (vouchers, documentos, capturas). */
@@ -294,6 +311,7 @@ ${DESCRIPCION_CATEGORIAS}
 2) EXTRAE los datos según la categoría elegida. La forma de "datos" depende de la categoría:
 - "oportunidad_comercial" → ${FORMA_OPORTUNIDAD}
 - "combustible" → ${FORMA_COMBUSTIBLE}
+- "odometro" → ${FORMA_ODOMETRO}
 - "mantenimiento" → ${FORMA_MANTENIMIENTO}
 - "operaciones" → ${FORMA_OPERACION}
 - "incidencias" → ${FORMA_INCIDENCIA}
@@ -303,11 +321,13 @@ ${DESCRIPCION_CATEGORIAS}
 
 Caso especial: si la imagen es la FOTO DE UN VOUCHER O COMPROBANTE DE GRIFO (categoría "combustible"), lee TODOS los campos impresos: nombre del grifo, dirección de la estación, razón social del proveedor, número de comprobante (serie-correlativo, ej "B001-004521"), galones o litros despachados, precio unitario, importe total, fecha y hora de la venta, y la placa si aparece.
 
+Caso especial: si la imagen es SOLO una FOTO DEL TABLERO/ODÓMETRO (categoría "odometro"), sin ningún dato de una recarga (sin monto, sin grifo, sin galones/litros), lee la lectura total del odómetro (ignora el "trip"/viaje parcial si el tablero muestra varios contadores) y la placa/unidad si aparece en la foto o en el texto que la acompaña.
+
 ${REGLAS_EXTRACCION}
 
 Devuelve SOLO un JSON válido con EXACTAMENTE esta forma (sin texto adicional, sin markdown):
 {
-  "categoria": "oportunidad_comercial"|"combustible"|"mantenimiento"|"operaciones"|"incidencias"|"documentacion"|"cobranza"|"otros",
+  "categoria": "oportunidad_comercial"|"combustible"|"odometro"|"mantenimiento"|"operaciones"|"incidencias"|"documentacion"|"cobranza"|"otros",
   "confianza": number,   // 0..1
   "resumen": string,     // UNA sola línea en español
   "datos": { … }         // la forma correspondiente a la categoría; {} si es "otros"

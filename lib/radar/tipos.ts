@@ -10,6 +10,7 @@
 export type CategoriaRadar =
   | "oportunidad_comercial"
   | "combustible"
+  | "odometro"
   | "mantenimiento"
   | "operaciones"
   | "incidencias"
@@ -23,6 +24,7 @@ export const CATEGORIAS_RADAR: Record<
 > = {
   oportunidad_comercial: { label: "Oportunidad", emoji: "💼", color: "#1d4ed8", bg: "#dbeafe" },
   combustible:           { label: "Combustible", emoji: "⛽", color: "#B07A0F", bg: "#FBF1D8" },
+  odometro:              { label: "Odómetro", emoji: "🛞", color: "#0891b2", bg: "#cffafe" },
   mantenimiento:         { label: "Mantenimiento", emoji: "🔧", color: "#7c3aed", bg: "#ede9fe" },
   operaciones:           { label: "Operaciones", emoji: "🚌", color: "#0f766e", bg: "#ccfbf1" },
   incidencias:           { label: "Incidencia", emoji: "⚠️", color: "#b91c1c", bg: "#fee2e2" },
@@ -171,7 +173,8 @@ export type AnomaliaCombustible = {
     | "km_menor_al_actual"
     | "consumo_excesivo"
     | "recarga_madrugada"
-    | "monto_inconsistente";
+    | "monto_inconsistente"
+    | "galones_coinciden_km";
   detalle: string;
 };
 
@@ -196,7 +199,7 @@ export type RadarConfig = {
   hora_inicio: string; // "HH:MM" hora Lima
   hora_fin: string;
   categorias_activas: CategoriaRadar[];
-  acciones_automaticas: { combustible?: boolean; mantenimiento?: boolean; operaciones?: boolean };
+  acciones_automaticas: { combustible?: boolean; odometro?: boolean; mantenimiento?: boolean; operaciones?: boolean };
   palabras_clave: string[];
   umbral_confianza: number;
   modelo_triage: string;
@@ -252,6 +255,21 @@ export type ExtraccionCombustible = {
   kilometraje: number | null;
   conductor: string | null;
   proveedor: string | null;
+};
+
+/**
+ * Solo un reporte de kilometraje, SIN datos de compra (sin monto/grifo/galones) — el
+ * conductor solo informa el odómetro. Si el mensaje trae también datos de una recarga,
+ * es "combustible" en cambio, no "odometro" (ver DESCRIPCION_CATEGORIAS en prompts.ts).
+ */
+export type ExtraccionOdometro = {
+  placa: string | null;
+  unidad: string | null;
+  kilometraje: number | null;
+  fecha: string | null;
+  hora: string | null;
+  conductor: string | null;
+  observaciones: string | null;
 };
 
 export type ExtraccionMantenimiento = {

@@ -23,6 +23,7 @@ import type {
   ExtraccionDocumentacion,
   ExtraccionIncidencia,
   ExtraccionMantenimiento,
+  ExtraccionOdometro,
   ExtraccionOperacion,
   ExtraccionOportunidad,
   RadarConfig,
@@ -243,6 +244,7 @@ export async function ejecutarAccion(args: ArgsAccion): Promise<ResultadoAccion>
     switch (args.categoria) {
       case "oportunidad_comercial": return await accionOportunidad(args);
       case "combustible":           return await accionCombustible(args);
+      case "odometro":              return await accionOdometro(args);
       case "mantenimiento":         return await accionMantenimiento(args);
       case "operaciones":           return await accionOperaciones(args);
       case "documentacion":         return await accionDocumentacion(args);
@@ -563,6 +565,23 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     }
   }
 
+  // 8) La cantidad tiene EXACTAMENTE los mismos dígitos que el kilometraje → casi siempre
+  //    la IA copió la lectura del odómetro en el campo de galones (mismo número, solo cambia
+  //    el punto decimal: p.ej. galones "8.173" vs kilometraje "8173"). Un galonaje real y un
+  //    odómetro no comparten dígitos por azar; cuando coinciden, es confusión de campos. Se
+  //    manda a revisión aunque cantidad × precio "cuadre" con el total (ese chequeo puede
+  //    pasar por casualidad cuando galones y precio están mal a la vez).
+  if (cantidad != null && km != null) {
+    const soloDigitos = (n: number) => String(n).replace(/[^0-9]/g, "");
+    const dc = soloDigitos(cantidad);
+    if (dc.length >= 3 && dc === soloDigitos(km)) {
+      anomalias.push({
+        codigo: "galones_coinciden_km",
+        detalle: `La cantidad (${cantidad}) tiene los mismos dígitos que el kilometraje (${km.toLocaleString("es-PE")}) — probable confusión: la lectura del odómetro se registró como galones`,
+      });
+    }
+  }
+
   // Fila base para radar_combustible (se inserta SIEMPRE, con el estado que corresponda)
   const filaRadar: Record<string, unknown> = {
     mensaje_id: mensaje.id,
@@ -669,7 +688,10 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   if (confianza < umbral) motivos.push(`Confianza ${Math.round(confianza * 100)}% por debajo del umbral ${Math.round(umbral * 100)}%`);
 
   const severidad: SeveridadAlerta = anomalias.some(
-    (a) => a.codigo === "posible_duplicado" || a.codigo === "galones_exceden_tanque"
+    (a) =>
+      a.codigo === "posible_duplicado" ||
+      a.codigo === "galones_exceden_tanque" ||
+      a.codigo === "galones_coinciden_km"
   )
     ? "critico"
     : "atencion";
@@ -694,6 +716,124 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       anomalias,
       motivos,
     },
+  };
+}
+
+// ── Odómetro (solo lectura de kilometraje, sin datos de recarga) ────────────
+//
+// A diferencia de combustible, aquí NO hay monto/anomalías que calcular: lib/odometro.ts
+// (registrarLectura) ya trae su propia protección anti-retroceso/anti-salto — una lectura
+// rara queda "sospechosa" (nunca corrompe vehiculos.kilometraje_actual) y se revisa en
+// /mantenimiento > Odómetro, que ya tiene el flujo de aceptar/rechazar. Por eso esta acción
+// es más simple: matchea la placa contra la flota PROPIA (lecturas_odometro.vehiculo_id
+// solo admite `vehiculos`, no `vehiculos_tercero` — el odómetro no se lleva de terceros)
+// y delega toda la validación en registrarLectura().
+// Señales fuertes de que el mensaje describía una COMPRA de combustible (no solo el km).
+// Si un mensaje así termina clasificado como "odometro", probablemente la IA no pudo leer
+// el voucher (foto borrosa) y el gasto se perdería en silencio — mejor avisar.
+const SENALES_COMPRA = /voucher|v[au]cher|comprobante|factura|boleta|importe|\bmonto\b|soles|s\/\s*\d|\bgrifo\b|gal[oó]n|precio/i;
+
+async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAccion): Promise<ResultadoAccion> {
+  const d = datos as ExtraccionOdometro;
+  const veh = await matchVehiculo(sb, d.placa);
+  const km = numOpc(d.kilometraje);
+  const umbral = Number(config.umbral_confianza ?? 0.7);
+  const puedeAuto = config.acciones_automaticas?.odometro === true && !!veh && km != null && confianza >= umbral;
+
+  // Guardarraíl de la promesa "una lectura rara nunca corrompe el km vigente sin que nadie
+  // la vea": si el vehículo aún no tiene kilometraje vigente, esta lectura es la PRIMERA y
+  // registrarLectura la acepta sin comparación posible (no hay base contra qué validarla).
+  const esPrimeraLectura = !veh || !(Number(veh.kilometraje_actual ?? 0) > 0);
+  // ¿El mensaje sonaba a una compra de combustible? (posible voucher mal leído → clasificado odómetro)
+  const sospechaVoucher = SENALES_COMPRA.test(String(mensaje.texto ?? ""));
+
+  let errorRegistro: string | null = null;
+
+  if (puedeAuto) {
+    const res = await registrarLectura(sb, {
+      vehiculo_id: veh!.id,
+      km: km!,
+      fuente: mensaje.media_url ? "whatsapp_foto" : "whatsapp_manual",
+      fecha: d.fecha ?? fechaLima(),
+      foto_url: mensaje.media_url ?? null,
+      ref_origen: "radar_ia",
+    });
+    if (res.ok && res.estado === "aceptada") {
+      // Registrada, pero hay dos casos que igual conviene que un humano revise: la PRIMERA
+      // lectura de una unidad (se aceptó sin poder validarla) y un posible voucher mal
+      // clasificado. En esos casos se deja también una alerta (el km ya quedó grabado igual).
+      const avisos: string[] = [];
+      if (esPrimeraLectura) avisos.push("Es la PRIMERA lectura de esta unidad: se aceptó como base sin poder validarla — confirmar que el número es correcto");
+      if (sospechaVoucher) avisos.push("El mensaje menciona términos de compra (grifo/monto/voucher): revisar si en realidad era una recarga de combustible y no solo el odómetro");
+      let alertaId: string | null = null;
+      if (avisos.length) {
+        alertaId = await crearAlerta(sb, {
+          mensaje_id: mensaje.id,
+          tipo: "odometro",
+          severidad: "atencion",
+          titulo: `🛞 Odómetro de ${veh!.placa} registrado (${km!.toLocaleString("es-PE")} km) — conviene revisar`,
+          detalle: `${avisos.join(" · ")} · /mantenimiento (pestaña Odómetro)`,
+          href: "/mantenimiento?tab=odometro",
+        });
+      }
+      return {
+        accion: "odometro_registrado",
+        detalle: `Lectura de ${veh!.placa} registrada: ${km!.toLocaleString("es-PE")} km${avisos.length ? " (con aviso de revisión)" : ""}`,
+        datos: { vehiculo_id: veh!.id, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, primera_lectura: esPrimeraLectura, sospecha_voucher: sospechaVoucher },
+      };
+    }
+    if (res.ok) {
+      // "sospechosa"/"rechazada": registrarLectura YA la guardó sin tocar el vigente — solo falta avisar.
+      const titulo = `🛞 Lectura de odómetro por revisar: ${veh!.placa} — ${km!.toLocaleString("es-PE")} km`;
+      const alertaId = await crearAlerta(sb, {
+        mensaje_id: mensaje.id,
+        tipo: "odometro_anomalia",
+        severidad: "atencion",
+        titulo,
+        detalle: `${res.motivo ?? "Lectura fuera de rango"} · revisar y aceptar en /mantenimiento (pestaña Odómetro)`,
+        href: "/mantenimiento?tab=odometro",
+      });
+      return {
+        accion: "odometro_en_revision",
+        detalle: `Lectura capturada pero quedó "${res.estado}" — revisar en /mantenimiento`,
+        datos: { vehiculo_id: veh!.id, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, estado_lectura: res.estado },
+      };
+    }
+    errorRegistro = res.error ?? "error desconocido";
+  }
+
+  // Sin automatización, sin match de placa, o sin kilometraje: alerta para registro manual.
+  const motivos: string[] = [];
+  if (config.acciones_automaticas?.odometro !== true) motivos.push("Registro automático de odómetro desactivado en la configuración");
+  if (errorRegistro) motivos.push(`No se pudo grabar automáticamente: ${errorRegistro}`);
+  if (!veh) {
+    const tercero = d.placa ? await matchVehiculoTercero(sb, d.placa) : null;
+    motivos.push(
+      tercero
+        ? `${tercero.placa} es una unidad TERCERIZADA — el odómetro solo se lleva de la flota propia de AFA`
+        : d.placa
+          ? `Placa ${placaFormato(d.placa)} no está registrada en la flota propia`
+          : "Mensaje sin placa identificable"
+    );
+  }
+  if (km == null) motivos.push("Sin lectura de kilometraje");
+  if (confianza < umbral) motivos.push(`Confianza ${Math.round(confianza * 100)}% por debajo del umbral ${Math.round(umbral * 100)}%`);
+  if (sospechaVoucher) motivos.push("El mensaje menciona términos de compra (grifo/monto/voucher): revisar si era una recarga de combustible");
+
+  const titulo = `🛞 Kilometraje reportado: ${veh?.placa ?? placaFormato(d.placa) ?? d.unidad ?? "unidad sin identificar"}${km != null ? ` — ${km.toLocaleString("es-PE")} km` : ""}`;
+  const alertaId = await crearAlerta(sb, {
+    mensaje_id: mensaje.id,
+    tipo: "odometro",
+    severidad: "info",
+    titulo,
+    detalle: motivos.join(" · ") || "Requiere registro manual",
+    href: "/mantenimiento?tab=odometro",
+  });
+
+  return {
+    accion: "odometro_pendiente",
+    detalle: motivos[0] ?? "Requiere registro manual en /mantenimiento",
+    datos: { alerta_id: alertaId, motivos, kilometraje: km },
   };
 }
 
