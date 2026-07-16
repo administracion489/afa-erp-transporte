@@ -92,6 +92,9 @@ export async function enviarEmail({
 //   {{5}} dirección del paradero (fallback "No especificada" si falta)
 //   {{6}} conductor (fallback "Por asignar")
 //   {{7}} vehículo: "PLACA (Color)" (fallback "Por asignar")
+// Botones (URL): #0 "Descargar App" es ESTÁTICO (fijo en la plantilla, sin variable).
+// #1 "Ver ubicación" es DINÁMICO — su {{1}} se rellena con lat,lng del paradero
+// (o la dirección/nombre como respaldo si no hay coordenadas).
 const PLANTILLA_RECORDATORIO = "recordatorio_servicio";
 const PLANTILLA_IDIOMA       = "es";
 
@@ -343,7 +346,7 @@ export async function notificarReserva(
   // 3. Paradas de esta reserva
   const { data: paradas } = await supabaseAdmin
     .from("paradas")
-    .select("id, nombre, direccion, hora_estimada")
+    .select("id, nombre, direccion, hora_estimada, lat, lng")
     .eq("reserva_id", reservaId);
 
   const paradasMap = Object.fromEntries((paradas || []).map(p => [p.id, p]));
@@ -436,6 +439,11 @@ export async function notificarReserva(
         const vehiculoTexto = datosN.vehiculoPlaca
           ? `${datosN.vehiculoPlaca}${datosN.vehiculoColor ? ` (${datosN.vehiculoColor})` : ""}`
           : "Por asignar";
+        // Botón "Ver ubicación": coordenadas del paradero si existen, si no cae a la
+        // dirección/nombre como texto de búsqueda (el botón sigue siendo útil).
+        const ubicacionQuery = (parada?.lat != null && parada?.lng != null)
+          ? `${parada.lat},${parada.lng}`
+          : (parada?.direccion || parada?.nombre || datosN.paradaNombre);
         await enviarWhatsAppPlantilla(
           tel,
           PLANTILLA_RECORDATORIO,
@@ -450,6 +458,7 @@ export async function notificarReserva(
             vehiculoTexto,
           ],
           phoneAvisos(),
+          [{ index: 1, texto: encodeURIComponent(ubicacionQuery) }],
         );
         resultado.canales.push({ tipo: "whatsapp", estado: "enviado" });
         enviados++;

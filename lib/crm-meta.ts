@@ -44,15 +44,31 @@ export async function enviarWhatsApp(to: string, texto: string, phoneId?: string
 // Mensaje con PLANTILLA aprobada (HSM). Obligatorio para mensajes iniciados por
 // la empresa fuera de la ventana de 24h (recordatorios, avisos a pasajeros).
 // `parametros` rellena las variables {{1}}, {{2}}, … del cuerpo, en orden.
+// `botones` rellena la variable {{1}} de botones URL DINÁMICOS (index = posición
+// del botón en la plantilla, 0-based). Los botones URL estáticos (sin variable,
+// p.ej. "Descargar App") NO necesitan entrada aquí — ya están fijos en la plantilla.
 export async function enviarWhatsAppPlantilla(
   to: string,
   plantilla: string,
   idioma: string,
   parametros: string[] = [],
-  phoneId?: string
+  phoneId?: string,
+  botones?: { index: number; texto: string }[]
 ): Promise<string | null> {
   const phone = phoneId ?? process.env.META_PHONE_NUMBER_ID;
   if (!phone) throw new Error("META_PHONE_NUMBER_ID no configurado");
+
+  const components = [
+    ...(parametros.length
+      ? [{ type: "body", parameters: parametros.map((text) => ({ type: "text", text })) }]
+      : []),
+    ...(botones ?? []).map((b) => ({
+      type: "button",
+      sub_type: "url",
+      index: String(b.index),
+      parameters: [{ type: "text", text: b.texto }],
+    })),
+  ];
 
   const res = await fetch(`${GRAPH}/${phone}/messages`, {
     method: "POST",
@@ -64,9 +80,7 @@ export async function enviarWhatsAppPlantilla(
       template: {
         name: plantilla,
         language: { code: idioma },
-        ...(parametros.length
-          ? { components: [{ type: "body", parameters: parametros.map((text) => ({ type: "text", text })) }] }
-          : {}),
+        ...(components.length ? { components } : {}),
       },
     }),
   });
