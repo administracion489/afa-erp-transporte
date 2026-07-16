@@ -109,8 +109,9 @@ const PLANTILLA_CONDUCTOR = "recordatorio_conductor";
 // Plantilla de LLEGADA (utility). Se dispara desde el motor de proximidad
 // (lib/proximidad.ts) cuando el bus llega a un paradero — reutiliza esa misma
 // detección (radio adaptativo + velocidad + dedupe), NO tiene lógica propia de
-// GPS. Variable del cuerpo:
-//   {{1}} nombre del paradero
+// GPS. Variables del cuerpo, EN ESTE ORDEN:
+//   {{1}} primer nombre del pasajero (mensaje corto, se lee de un vistazo)
+//   {{2}} nombre del paradero
 const PLANTILLA_LLEGADA = "bus_llego_paradero";
 
 /**
@@ -603,18 +604,19 @@ export async function avisarLlegadaWhatsApp(
 
   const { data: pasajeros } = await supabaseAdmin
     .from("pasajeros")
-    .select("id, telefono")
+    .select("id, nombre, telefono")
     .in("id", pasajeroIds);
 
   for (const pas of pasajeros || []) {
     if (!pas.telefono) continue;
     const tel = normalizarTelefono(pas.telefono);
+    const primerNombre = (pas.nombre || "").trim().split(/\s+/)[0] || "Hola";
     try {
       await enviarWhatsAppPlantilla(
         tel,
         PLANTILLA_LLEGADA,
         PLANTILLA_IDIOMA,
-        [paradaNombre],
+        [primerNombre, paradaNombre],
         phoneAvisos(),
       );
       await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "whatsapp", estado: "enviado", destinatario: tel, trigger: "proximidad_llego" });
