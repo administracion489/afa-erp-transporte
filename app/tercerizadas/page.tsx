@@ -804,7 +804,7 @@ export default function EmpresasTercerizadasPage() {
                         </Campo>
                         <Campo label="Categoría">
                           <select className={inputCls()} value={formCond.categoria_licencia} onChange={e => setFormCond(p => ({ ...p, categoria_licencia: e.target.value }))}>
-                            {["A-I","A-IIa","A-IIb","A-IIIb","A-IIIc"].map(c => <option key={c}>{c}</option>)}
+                            {["A-I","A-IIa","A-IIb","A-IIIa","A-IIIb","A-IIIc"].map(c => <option key={c}>{c}</option>)}
                           </select>
                         </Campo>
                         <Campo label="Venc. licencia">
