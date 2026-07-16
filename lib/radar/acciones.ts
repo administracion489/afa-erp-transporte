@@ -13,7 +13,7 @@
 // demás queda como alerta + registro para revisión humana. NUNCA se cancela un servicio
 // automáticamente.
 
-import { registrarLectura } from "@/lib/odometro";
+import { registrarLectura, type Flota } from "@/lib/odometro";
 import type {
   AnomaliaCombustible,
   CategoriaRadar,
@@ -146,20 +146,29 @@ export async function matchVehiculo(sb: any, placa: string | null | undefined): 
 }
 
 /**
- * Empareja una placa contra la flota TERCERIZADA (`vehiculos_tercero`) — solo para dar un
- * motivo claro en el mensaje de revisión ("es una unidad tercerizada" en vez de "sin
- * match", que suena a placa desconocida). El combustible de terceros NUNCA se
- * auto-registra en `combustible` (esa tabla es el gasto propio de AFA); `vehiculo_id` en
- * `radar_combustible` sigue reservado para `vehiculos` — este match es solo informativo.
+ * Empareja una placa contra la flota TERCERIZADA (`vehiculos_tercero`). Devuelve `id` y
+ * `kilometraje_actual` porque el ODÓMETRO sí se lleva de terceros (lecturas_odometro.
+ * vehiculo_tercero_id, ver lib/odometro.ts flota:"tercero"). El COMBUSTIBLE de terceros en
+ * cambio NUNCA se auto-registra en `combustible` (esa tabla es el gasto propio de AFA);
+ * ahí este match es solo informativo (dar el motivo "es una unidad tercerizada").
  */
-async function matchVehiculoTercero(sb: any, placa: string | null | undefined): Promise<{ placa: string; marca: string | null; modelo: string | null } | null> {
+async function matchVehiculoTercero(
+  sb: any,
+  placa: string | null | undefined,
+): Promise<{ id: number; placa: string; marca: string | null; modelo: string | null; kilometraje_actual: number | null } | null> {
   const objetivo = placaNorm(placa);
   if (!objetivo) return null;
   try {
-    const { data } = await sb.from("vehiculos_tercero").select("placa, marca, modelo");
+    const { data } = await sb.from("vehiculos_tercero").select("id, placa, marca, modelo, kilometraje_actual");
     const hit = ((data as any[]) ?? []).find((v) => placaNorm(v.placa) === objetivo);
     if (!hit) return null;
-    return { placa: hit.placa, marca: hit.marca ?? null, modelo: hit.modelo ?? null };
+    return {
+      id: hit.id,
+      placa: hit.placa,
+      marca: hit.marca ?? null,
+      modelo: hit.modelo ?? null,
+      kilometraje_actual: hit.kilometraje_actual != null ? Number(hit.kilometraje_actual) : null,
+    };
   } catch {
     return null;
   }
@@ -723,11 +732,25 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
 //
 // A diferencia de combustible, aquí NO hay monto/anomalías que calcular: lib/odometro.ts
 // (registrarLectura) ya trae su propia protección anti-retroceso/anti-salto — una lectura
-// rara queda "sospechosa" (nunca corrompe vehiculos.kilometraje_actual) y se revisa en
-// /mantenimiento > Odómetro, que ya tiene el flujo de aceptar/rechazar. Por eso esta acción
-// es más simple: matchea la placa contra la flota PROPIA (lecturas_odometro.vehiculo_id
-// solo admite `vehiculos`, no `vehiculos_tercero` — el odómetro no se lleva de terceros)
-// y delega toda la validación en registrarLectura().
+// rara queda "sospechosa" (nunca corrompe el km vigente) y se revisa en el panel de
+// odómetro, que ya tiene el flujo de aceptar/rechazar.
+//
+// El odómetro SÍ se lleva de ambas flotas: matchea la placa contra la propia (`vehiculos`,
+// FK vehiculo_id, panel /mantenimiento) y, si no está, contra la tercerizada
+// (`vehiculos_tercero`, FK vehiculo_tercero_id, panel /tercerizadas). registrarLectura()
+// enruta a la tabla/FK correcta con `flota` — ver targetFlota() en lib/odometro.ts.
+
+/** Unidad resuelta para una lectura de odómetro, independientemente de su flota. */
+type UnidadOdometro = { id: number; placa: string; kilometraje_actual: number | null; flota: Flota };
+
+/** Resuelve la placa a una unidad de la flota PROPIA o, si no está, de la TERCERIZADA. */
+async function resolverUnidadOdometro(sb: any, placa: string | null | undefined): Promise<UnidadOdometro | null> {
+  const propia = await matchVehiculo(sb, placa);
+  if (propia) return { id: propia.id, placa: propia.placa, kilometraje_actual: propia.kilometraje_actual, flota: "propia" };
+  const tercero = await matchVehiculoTercero(sb, placa);
+  if (tercero) return { id: tercero.id, placa: tercero.placa, kilometraje_actual: tercero.kilometraje_actual, flota: "tercero" };
+  return null;
+}
 // Señales fuertes de que el mensaje describía una COMPRA de combustible (no solo el km).
 // Si un mensaje así termina clasificado como "odometro", probablemente la IA no pudo leer
 // el voucher (foto borrosa) y el gasto se perdería en silencio — mejor avisar.
@@ -735,28 +758,34 @@ const SENALES_COMPRA = /voucher|v[au]cher|comprobante|factura|boleta|importe|\bm
 
 async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAccion): Promise<ResultadoAccion> {
   const d = datos as ExtraccionOdometro;
-  const veh = await matchVehiculo(sb, d.placa);
+  const unidad = await resolverUnidadOdometro(sb, d.placa);
   const km = numOpc(d.kilometraje);
   const umbral = Number(config.umbral_confianza ?? 0.7);
-  const puedeAuto = config.acciones_automaticas?.odometro === true && !!veh && km != null && confianza >= umbral;
+  const puedeAuto = config.acciones_automaticas?.odometro === true && !!unidad && km != null && confianza >= umbral;
 
   // Guardarraíl de la promesa "una lectura rara nunca corrompe el km vigente sin que nadie
-  // la vea": si el vehículo aún no tiene kilometraje vigente, esta lectura es la PRIMERA y
+  // la vea": si la unidad aún no tiene kilometraje vigente, esta lectura es la PRIMERA y
   // registrarLectura la acepta sin comparación posible (no hay base contra qué validarla).
-  const esPrimeraLectura = !veh || !(Number(veh.kilometraje_actual ?? 0) > 0);
+  const esPrimeraLectura = !unidad || !(Number(unidad.kilometraje_actual ?? 0) > 0);
   // ¿El mensaje sonaba a una compra de combustible? (posible voucher mal leído → clasificado odómetro)
   const sospechaVoucher = SENALES_COMPRA.test(String(mensaje.texto ?? ""));
+  // Dónde revisa el humano según la flota: propia en /mantenimiento, tercero en /tercerizadas.
+  const esTercero = unidad?.flota === "tercero";
+  const dondeRevisar = esTercero ? "/tercerizadas (ficha de la unidad → Odómetro)" : "/mantenimiento (pestaña Odómetro)";
+  const hrefOdometro = esTercero ? "/tercerizadas" : "/mantenimiento?tab=odometro";
+  const etiquetaFlota = esTercero ? " (tercerizada)" : "";
 
   let errorRegistro: string | null = null;
 
   if (puedeAuto) {
     const res = await registrarLectura(sb, {
-      vehiculo_id: veh!.id,
+      vehiculo_id: unidad!.id,
       km: km!,
       fuente: mensaje.media_url ? "whatsapp_foto" : "whatsapp_manual",
       fecha: d.fecha ?? fechaLima(),
       foto_url: mensaje.media_url ?? null,
       ref_origen: "radar_ia",
+      flota: unidad!.flota,
     });
     if (res.ok && res.estado === "aceptada") {
       // Registrada, pero hay dos casos que igual conviene que un humano revise: la PRIMERA
@@ -771,32 +800,32 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
           mensaje_id: mensaje.id,
           tipo: "odometro",
           severidad: "atencion",
-          titulo: `🛞 Odómetro de ${veh!.placa} registrado (${km!.toLocaleString("es-PE")} km) — conviene revisar`,
-          detalle: `${avisos.join(" · ")} · /mantenimiento (pestaña Odómetro)`,
-          href: "/mantenimiento?tab=odometro",
+          titulo: `🛞 Odómetro de ${unidad!.placa}${etiquetaFlota} registrado (${km!.toLocaleString("es-PE")} km) — conviene revisar`,
+          detalle: `${avisos.join(" · ")} · ${dondeRevisar}`,
+          href: hrefOdometro,
         });
       }
       return {
         accion: "odometro_registrado",
-        detalle: `Lectura de ${veh!.placa} registrada: ${km!.toLocaleString("es-PE")} km${avisos.length ? " (con aviso de revisión)" : ""}`,
-        datos: { vehiculo_id: veh!.id, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, primera_lectura: esPrimeraLectura, sospecha_voucher: sospechaVoucher },
+        detalle: `Lectura de ${unidad!.placa}${etiquetaFlota} registrada: ${km!.toLocaleString("es-PE")} km${avisos.length ? " (con aviso de revisión)" : ""}`,
+        datos: { vehiculo_id: unidad!.id, flota: unidad!.flota, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, primera_lectura: esPrimeraLectura, sospecha_voucher: sospechaVoucher },
       };
     }
     if (res.ok) {
       // "sospechosa"/"rechazada": registrarLectura YA la guardó sin tocar el vigente — solo falta avisar.
-      const titulo = `🛞 Lectura de odómetro por revisar: ${veh!.placa} — ${km!.toLocaleString("es-PE")} km`;
+      const titulo = `🛞 Lectura de odómetro por revisar: ${unidad!.placa}${etiquetaFlota} — ${km!.toLocaleString("es-PE")} km`;
       const alertaId = await crearAlerta(sb, {
         mensaje_id: mensaje.id,
         tipo: "odometro_anomalia",
         severidad: "atencion",
         titulo,
-        detalle: `${res.motivo ?? "Lectura fuera de rango"} · revisar y aceptar en /mantenimiento (pestaña Odómetro)`,
-        href: "/mantenimiento?tab=odometro",
+        detalle: `${res.motivo ?? "Lectura fuera de rango"} · revisar y aceptar en ${dondeRevisar}`,
+        href: hrefOdometro,
       });
       return {
         accion: "odometro_en_revision",
-        detalle: `Lectura capturada pero quedó "${res.estado}" — revisar en /mantenimiento`,
-        datos: { vehiculo_id: veh!.id, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, estado_lectura: res.estado },
+        detalle: `Lectura capturada pero quedó "${res.estado}" — revisar en ${dondeRevisar}`,
+        datos: { vehiculo_id: unidad!.id, flota: unidad!.flota, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, estado_lectura: res.estado },
       };
     }
     errorRegistro = res.error ?? "error desconocido";
@@ -806,34 +835,31 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   const motivos: string[] = [];
   if (config.acciones_automaticas?.odometro !== true) motivos.push("Registro automático de odómetro desactivado en la configuración");
   if (errorRegistro) motivos.push(`No se pudo grabar automáticamente: ${errorRegistro}`);
-  if (!veh) {
-    const tercero = d.placa ? await matchVehiculoTercero(sb, d.placa) : null;
+  if (!unidad) {
     motivos.push(
-      tercero
-        ? `${tercero.placa} es una unidad TERCERIZADA — el odómetro solo se lleva de la flota propia de AFA`
-        : d.placa
-          ? `Placa ${placaFormato(d.placa)} no está registrada en la flota propia`
-          : "Mensaje sin placa identificable"
+      d.placa
+        ? `Placa ${placaFormato(d.placa)} no está registrada ni en la flota propia ni en la tercerizada`
+        : "Mensaje sin placa identificable"
     );
   }
   if (km == null) motivos.push("Sin lectura de kilometraje");
   if (confianza < umbral) motivos.push(`Confianza ${Math.round(confianza * 100)}% por debajo del umbral ${Math.round(umbral * 100)}%`);
   if (sospechaVoucher) motivos.push("El mensaje menciona términos de compra (grifo/monto/voucher): revisar si era una recarga de combustible");
 
-  const titulo = `🛞 Kilometraje reportado: ${veh?.placa ?? placaFormato(d.placa) ?? d.unidad ?? "unidad sin identificar"}${km != null ? ` — ${km.toLocaleString("es-PE")} km` : ""}`;
+  const titulo = `🛞 Kilometraje reportado: ${unidad?.placa ?? placaFormato(d.placa) ?? d.unidad ?? "unidad sin identificar"}${etiquetaFlota}${km != null ? ` — ${km.toLocaleString("es-PE")} km` : ""}`;
   const alertaId = await crearAlerta(sb, {
     mensaje_id: mensaje.id,
     tipo: "odometro",
     severidad: "info",
     titulo,
     detalle: motivos.join(" · ") || "Requiere registro manual",
-    href: "/mantenimiento?tab=odometro",
+    href: hrefOdometro,
   });
 
   return {
     accion: "odometro_pendiente",
-    detalle: motivos[0] ?? "Requiere registro manual en /mantenimiento",
-    datos: { alerta_id: alertaId, motivos, kilometraje: km },
+    detalle: motivos[0] ?? `Requiere registro manual en ${dondeRevisar}`,
+    datos: { alerta_id: alertaId, motivos, kilometraje: km, flota: unidad?.flota ?? null },
   };
 }
 
