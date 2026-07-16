@@ -39,6 +39,11 @@ export type ResultadoPasajero = {
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
+/** Nombre + primer apellido (nunca el nombre completo), p.ej. "Carlos Alberto Ramírez Gonzáles" → "Carlos Ramírez". */
+function nombreCorto(nombre: string): string {
+  return nombre.trim().split(/\s+/).slice(0, 2).join(" ");
+}
+
 /** Normaliza teléfono peruano a E.164: 987654321 → +51987654321 */
 function normalizarTelefono(tel: string): string {
   const limpio = tel.replace(/\D/g, "");
@@ -322,7 +327,7 @@ export async function notificarReserva(
   if (reserva.tipo_asignacion === "propio") {
     if (reserva.conductor_id) {
       const { data: c } = await supabaseAdmin.from("conductores").select("nombre").eq("id", reserva.conductor_id).single();
-      conductorNombre = c?.nombre;
+      conductorNombre = c?.nombre ? nombreCorto(c.nombre) : undefined;
     }
     if (reserva.vehiculo_id) {
       const { data: v } = await supabaseAdmin.from("vehiculos").select("placa, color").eq("id", reserva.vehiculo_id).single();
