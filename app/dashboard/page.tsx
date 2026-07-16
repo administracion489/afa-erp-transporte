@@ -29,7 +29,7 @@ type EmpresaTer    = { id:number; razon_social:string; estado:string; };
 type DocTercero    = { id:number; empresa_id:number; tipo:string; fecha_vencimiento:string|null; };
 type Factura       = { id:number; total:number; estado:string; fecha_emision:string|null; };
 type Gasto         = { id:number; monto:number; categoria:string|null; fecha:string|null; };
-type ServicioHoy   = { id:number; origen:string; destino:string; hora_servicio:string|null; estado:string; cliente:string; placa:string|null; conductor:string|null; };
+type ServicioHoy   = { id:number; origen:string; destino:string; hora_servicio:string|null; estado:string; cliente:string; placa:string|null; conductor:string|null; esTercero?:boolean; };
 type AlertaSOS     = { id:number; reserva_id:number|null; lat:number|null; lng:number|null; motivo:string|null; estado:string; atendida_por:number|null; atendida_at:string|null; created_at:string; };
 
 // ─── ICONOS LOCALES ───────────────────────────────────────────────────────────
@@ -526,7 +526,7 @@ export default function DashboardPage() {
           return r;
         };
         const hoy = new Date().toISOString().split("T")[0];
-        const [rRes,vRes,cRes,sRes,mRes,cbRes,dvRes,nRes,etRes,dtRes,fRes,gRes,shRes,sosRes] = await Promise.all([
+        const [rRes,vRes,cRes,sRes,mRes,cbRes,dvRes,nRes,etRes,dtRes,fRes,gRes,shRes,sosRes,vtRes,ctRes] = await Promise.all([
           safe(supabase.from("reservas").select("id,origen,destino,fecha_servicio,hora_servicio,tipo,estado,precio_cliente,costo_proveedor,margen,cliente_id,vehiculo_id,conductor_id,tipo_asignacion,empresa_tercerizada_id").order("id", { ascending: false })),
           safe(supabase.from("vehiculos").select("id,placa,categoria,estado,estado_operativo,kilometraje_actual,proximo_mantenimiento_km")),
           safe(supabase.from("conductores").select("id,nombre,estado,vencimiento_licencia")),
@@ -539,8 +539,10 @@ export default function DashboardPage() {
           safe(supabase.from("documentos_tercero").select("id,empresa_id,tipo,fecha_vencimiento")),
           safe(supabase.from("facturas").select("id,total,estado,fecha_emision")),
           safe(supabase.from("gastos").select("id,monto,categoria,fecha")),
-          safe(supabase.from("reservas").select("id,origen,destino,hora_servicio,estado,cliente:clientes(nombre,empresa),vehiculo:vehiculos(placa),conductor:conductores(nombre)").eq("fecha_servicio", hoy).order("hora_servicio")),
+          safe(supabase.from("reservas").select("id,origen,destino,hora_servicio,estado,tipo,empresa_tercerizada_id,vehiculo_tercero_id,conductor_tercero_id,cliente:clientes(nombre,empresa),vehiculo:vehiculos(placa),conductor:conductores(nombre)").eq("fecha_servicio", hoy).order("hora_servicio")),
           safe(supabase.from("alertas_sos").select("*").eq("estado", "pendiente").order("created_at", { ascending: false })),
+          safe(supabase.from("vehiculos_tercero").select("id,placa")),
+          safe(supabase.from("conductores_tercero").select("id,nombre")),
         ]);
         setReservas(rRes.data      || []);
         setVehiculos(vRes.data     || []);
@@ -555,13 +557,27 @@ export default function DashboardPage() {
         setFacturas(fRes.data      || []);
         setGastos(gRes.data        || []);
         setAlertasSOS((sosRes.data || []) as AlertaSOS[]);
-        setServiciosHoy(((shRes.data || []) as any[]).map(r => ({
-          id: r.id, origen: r.origen, destino: r.destino,
-          hora_servicio: r.hora_servicio, estado: r.estado,
-          cliente: r.cliente?.empresa || r.cliente?.nombre || "Sin cliente",
-          placa: r.vehiculo?.placa || null,
-          conductor: r.conductor?.nombre || null,
-        })));
+        // Recurso de servicios tercerizados: vive en tablas aparte (empresa/vehiculo/conductor
+        // del tercero), no en vehiculos/conductores de flota propia. Se resuelven aquí para
+        // que el dashboard muestre lo mismo que /programacion en vez de "Sin asignar".
+        const empTerMap  = new Map(((etRes.data || []) as any[]).map(e => [e.id, e.razon_social]));
+        const vehTerMap  = new Map(((vtRes.data || []) as any[]).map(v => [v.id, v.placa]));
+        const condTerMap = new Map(((ctRes.data || []) as any[]).map(c => [c.id, c.nombre]));
+        setServiciosHoy(((shRes.data || []) as any[]).map(r => {
+          const esTer = r.tipo === "tercerizada" || !!r.empresa_tercerizada_id;
+          return {
+            id: r.id, origen: r.origen, destino: r.destino,
+            hora_servicio: r.hora_servicio, estado: r.estado,
+            cliente: r.cliente?.empresa || r.cliente?.nombre || "Sin cliente",
+            placa: esTer
+              ? (vehTerMap.get(r.vehiculo_tercero_id) || null)
+              : (r.vehiculo?.placa || null),
+            conductor: esTer
+              ? (condTerMap.get(r.conductor_tercero_id) || empTerMap.get(r.empresa_tercerizada_id) || null)
+              : (r.conductor?.nombre || null),
+            esTercero: esTer,
+          };
+        }));
       } catch (e) { console.error("Dashboard error:", e); }
       finally { setLoading(false); }
     })();
@@ -1216,10 +1232,17 @@ export default function DashboardPage() {
                   </p>
                 </div>
                 <div style={{ flex:1.5, minWidth:0 }}>
-                  <p style={{ margin:0, fontSize:12, fontWeight:600, color:C.ink2 }}>
-                    {s.conductor?.split(" ").slice(0,2).join(" ") || <span style={{ color:C.mute2 }}>Sin asignar</span>}
+                  <p style={{ margin:0, fontSize:12, fontWeight:600, color:C.ink2,
+                    overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                    {s.conductor
+                      ? (s.esTercero ? s.conductor : s.conductor.split(" ").slice(0,2).join(" "))
+                      : <span style={{ color:C.mute2 }}>Sin asignar</span>}
                   </p>
-                  {s.placa && <p style={{ margin:"2px 0 0", fontFamily:"var(--font-mono)", fontSize:10.5, color:C.mute2 }}>{s.placa}</p>}
+                  <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:2 }}>
+                    {s.placa && <span style={{ fontFamily:"var(--font-mono)", fontSize:10.5, color:C.mute2 }}>{s.placa}</span>}
+                    {s.esTercero && <span style={{ fontSize:9, fontWeight:700, color:C.warn, background:C.warnTint,
+                      padding:"1px 6px", borderRadius:999, letterSpacing:0.3 }}>Tercerizado</span>}
+                  </div>
                 </div>
                 <div style={{ flex:0.7 }}>
                   <p style={{ margin:0, fontFamily:"var(--font-mono)", fontSize:12, fontWeight:700, color:C.ink }}>
