@@ -1803,6 +1803,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
             sb
               .from("lecturas_odometro")
               .select("vehiculo_id, km, fecha")
+              .not("vehiculo_id", "is", null)   // solo flota propia (terceros tienen vehiculo_id NULL)
               .gte("fecha", inicio)
               .eq("estado", "aceptada")
               .range(d, h)

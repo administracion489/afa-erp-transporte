@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import OdometroTerceroModal from "./_components/OdometroTerceroModal";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -21,6 +22,7 @@ type VehiculoTercero = {
   foto_externa_url: string | null; foto_interna_url: string | null;
   descripcion_unidad: string | null;
   tipo_vehiculo_costeo: string | null;
+  kilometraje_actual: number | null;
 };
 
 type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null };
@@ -143,6 +145,12 @@ export default function EmpresasTercerizadasPage() {
   const [formCond, setFormCond] = useState(FORM_COND);
   const [formDoc,  setFormDoc]  = useState(FORM_DOC);
   const [subiendoFoto, setSubiendoFoto] = useState<"externa"|"interna"|null>(null);
+  // Odómetro (para el km/badge de cada tarjeta): se consultan por métrica y acotadas para no
+  // caer en el tope de 1000 filas de PostgREST. "Últimas" ordenadas desc (sobreviven las más
+  // recientes bajo el cap); "sospechosas" es un conjunto naturalmente chico.
+  const [odoUltimas, setOdoUltimas] = useState<{ vehiculo_tercero_id: number; fecha: string | null }[]>([]);
+  const [odoSosp,    setOdoSosp]    = useState<{ vehiculo_tercero_id: number }[]>([]);
+  const [modalOdoVeh, setModalOdoVeh] = useState<VehiculoTercero | null>(null);
 
   const fe = (k: keyof typeof FORM_EMP) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -152,18 +160,22 @@ export default function EmpresasTercerizadasPage() {
 
   const cargarTodo = async () => {
     setLoading(true);
-    const [eRes, vRes, cRes, dRes, pRes] = await Promise.all([
+    const [eRes, vRes, cRes, dRes, pRes, oUltRes, oSospRes] = await Promise.all([
       supabase.from("empresas_tercerizadas").select("*").order("razon_social"),
       supabase.from("vehiculos_tercero").select("*").order("placa"),
       supabase.from("conductores_tercero").select("*").order("nombre"),
       supabase.from("documentos_tercero").select("*").order("fecha_vencimiento"),
       supabase.from("parametros_costos").select("tipo_vehiculo,nombre,grupo_vehiculo").eq("activo", true).order("grupo_vehiculo").order("capacidad"),
+      supabase.from("lecturas_odometro").select("vehiculo_tercero_id,fecha").not("vehiculo_tercero_id", "is", null).order("fecha", { ascending: false }).limit(1000),
+      supabase.from("lecturas_odometro").select("vehiculo_tercero_id").not("vehiculo_tercero_id", "is", null).eq("estado", "sospechosa").limit(1000),
     ]);
     setEmpresas(eRes.data   || []);
     setVehiculos(vRes.data  || []);
     setConductores(cRes.data|| []);
     setDocumentos(dRes.data || []);
     setParamsVeh(pRes.data  || []);
+    setOdoUltimas(oUltRes.data || []);
+    setOdoSosp(oSospRes.data || []);
     if (!empresaSel && (eRes.data || []).length > 0) setEmpresaSel((eRes.data || [])[0].id);
     setLoading(false);
   };
@@ -174,6 +186,22 @@ export default function EmpresasTercerizadasPage() {
   const vehEmpresa  = vehiculos.filter(v => v.empresa_id === empresaSel);
   const condEmpresa = conductores.filter(c => c.empresa_id === empresaSel);
   const docEmpresa  = documentos.filter(d => d.empresa_id === empresaSel);
+
+  // Resumen de odómetro por vehículo tercero: última fecha de lectura + cuántas por revisar.
+  const odoPorVeh = useMemo(() => {
+    const m: Record<number, { ultima: string | null; porRevisar: number }> = {};
+    for (const l of odoUltimas) {   // ya vienen ordenadas por fecha desc
+      const id = l.vehiculo_tercero_id;
+      if (!m[id]) m[id] = { ultima: null, porRevisar: 0 };
+      if (l.fecha && (!m[id].ultima || l.fecha > m[id].ultima)) m[id].ultima = l.fecha;
+    }
+    for (const l of odoSosp) {
+      const id = l.vehiculo_tercero_id;
+      if (!m[id]) m[id] = { ultima: null, porRevisar: 0 };
+      m[id].porRevisar++;
+    }
+    return m;
+  }, [odoUltimas, odoSosp]);
 
   // ── KPIs globales ─────────────────────────────────────────────────────────
 
@@ -720,6 +748,19 @@ export default function EmpresasTercerizadasPage() {
                                   📸 {[v.foto_externa_url && "ext.", v.foto_interna_url && "int."].filter(Boolean).join(" · ")}
                                 </p>
                               )}
+                              <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                                <span className="text-[11px] font-mono font-bold text-gray-700">
+                                  {v.kilometraje_actual != null ? `${Number(v.kilometraje_actual).toLocaleString("es-PE")} km` : "Sin km"}
+                                </span>
+                                {odoPorVeh[v.id]?.ultima && (
+                                  <span className="text-[10px] text-gray-400">últ. {fmtFecha(odoPorVeh[v.id].ultima)}</span>
+                                )}
+                                {(odoPorVeh[v.id]?.porRevisar ?? 0) > 0 && (
+                                  <span className="text-[10px] font-bold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">⚠ {odoPorVeh[v.id].porRevisar} por revisar</span>
+                                )}
+                                <button onClick={() => setModalOdoVeh(v)}
+                                  className="text-[11px] font-bold text-[#0b315f] hover:underline">📷 Odómetro</button>
+                              </div>
                             </div>
                             <div className="flex items-center gap-1.5">
                               <span className="text-xs font-bold px-2 py-0.5 rounded-lg"
@@ -951,6 +992,14 @@ export default function EmpresasTercerizadasPage() {
           )}
         </div>
       </div>
+
+      {modalOdoVeh && (
+        <OdometroTerceroModal
+          vehiculo={modalOdoVeh}
+          onClose={() => setModalOdoVeh(null)}
+          onSaved={cargarTodo}
+        />
+      )}
     </main>
   );
 }

@@ -92,7 +92,7 @@ export default function ProgramaTab() {
       supabase.from("vehiculos_tercero").select("id,placa,categoria,marca,modelo").order("placa"),
       supabase.from("vehiculos_plan").select("vehiculo_id,km_base,fecha_base,plan:planes_mantenimiento(id,marca,modelo,motor,intervalo_base_km,intervalo_base_meses)").eq("activo", true),
       supabase.from("mantenimiento").select("vehiculo_id,fecha,kilometraje,tipo").eq("tipo", "preventivo").order("fecha", { ascending: false }),
-      supabase.from("lecturas_odometro").select("vehiculo_id,km,fecha").eq("estado", "aceptada").gte("fecha", desde),
+      supabase.from("lecturas_odometro").select("vehiculo_id,km,fecha").not("vehiculo_id", "is", null).eq("estado", "aceptada").gte("fecha", desde),
       supabase.from("config_mantenimiento").select("*").eq("id", 1).maybeSingle(),
     ]);
     setVehiculos(vRes.data || []);

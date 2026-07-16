@@ -18,6 +18,20 @@ export type FuenteLectura =
 
 export type EvalLectura = { estado: EstadoLectura; motivo: string | null };
 
+/** Flota a la que pertenece la lectura. Default "propia" (retrocompatible). */
+export type Flota = "propia" | "tercero";
+
+/**
+ * Resuelve la tabla del vehículo y la columna FK de lecturas_odometro según la flota.
+ * Ambas tablas exponen `id` y `kilometraje_actual`, así que el resto de la lógica
+ * (anti-retroceso, vigente derivado) es idéntica para propia y tercero.
+ */
+function targetFlota(flota: Flota | undefined): { tabla: "vehiculos" | "vehiculos_tercero"; fk: "vehiculo_id" | "vehiculo_tercero_id" } {
+  return flota === "tercero"
+    ? { tabla: "vehiculos_tercero", fk: "vehiculo_tercero_id" }
+    : { tabla: "vehiculos", fk: "vehiculo_id" };
+}
+
 /** Decide el estado de una lectura nueva frente al km vigente. Función pura. */
 export function evaluarLectura(opts: {
   kmVigente: number | null | undefined;
@@ -74,7 +88,7 @@ function hoyISO(): string {
 export async function registrarLectura(
   client: any,
   l: {
-    vehiculo_id: number;
+    vehiculo_id: number;       // id de `vehiculos` (propia) o `vehiculos_tercero` (tercero, según `flota`)
     km: number;
     fuente: FuenteLectura;
     fecha?: string;            // YYYY-MM-DD
@@ -82,6 +96,7 @@ export async function registrarLectura(
     ref_origen?: string | null;
     kmDiaMax?: number;
     forzar?: boolean;          // saltar validación (aceptar desde panel de revisión)
+    flota?: Flota;             // "propia" (default) | "tercero"
   }
 ): Promise<{ ok: boolean; estado: EstadoLectura; motivo: string | null; lecturaId?: string; error?: string }> {
   const km = Number(l.km);
@@ -89,14 +104,16 @@ export async function registrarLectura(
     return { ok: false, estado: "rechazada", motivo: "Datos incompletos", error: "Datos incompletos" };
   }
 
+  const { tabla, fk } = targetFlota(l.flota);
+
   const { data: veh } = await client
-    .from("vehiculos").select("kilometraje_actual").eq("id", l.vehiculo_id).maybeSingle();
+    .from(tabla).select("kilometraje_actual").eq("id", l.vehiculo_id).maybeSingle();
   if (!veh) {
     return { ok: false, estado: "rechazada", motivo: "Vehículo no encontrado", error: "Vehículo no encontrado" };
   }
   const { data: ult } = await client
     .from("lecturas_odometro").select("fecha")
-    .eq("vehiculo_id", l.vehiculo_id).eq("estado", "aceptada")
+    .eq(fk, l.vehiculo_id).eq("estado", "aceptada")
     .order("fecha", { ascending: false }).limit(1).maybeSingle();
 
   const kmVigente = Number(veh?.kilometraje_actual || 0);
@@ -109,7 +126,7 @@ export async function registrarLectura(
   const fecha = l.fecha || hoyISO();
 
   const { data: ins, error } = await client.from("lecturas_odometro").insert({
-    vehiculo_id: l.vehiculo_id,
+    [fk]: l.vehiculo_id,
     km,
     fuente: l.fuente,
     fecha,
@@ -122,7 +139,7 @@ export async function registrarLectura(
   if (error) return { ok: false, estado: evalr.estado, motivo: evalr.motivo, error: error.message };
 
   if (evalr.estado === "aceptada" && km > kmVigente) {
-    await client.from("vehiculos").update({ kilometraje_actual: km }).eq("id", l.vehiculo_id);
+    await client.from(tabla).update({ kilometraje_actual: km }).eq("id", l.vehiculo_id);
   }
 
   return { ok: true, estado: evalr.estado, motivo: evalr.motivo, lecturaId: ins?.id };
@@ -133,15 +150,23 @@ export async function aceptarLectura(
   client: any,
   lecturaId: string
 ): Promise<{ ok: boolean; error?: string }> {
+  // select("*") en vez de nombrar vehiculo_tercero_id: migration-safe (si el código se
+  // despliega antes de correr odometro-terceros.sql, nombrar la columna nueva haría fallar
+  // el SELECT y rompería el "Aceptar" de flota propia en silencio). Pre-migración la columna
+  // simplemente no viene → esTercero = (undefined != null) = false → se trata como propia.
   const { data: l } = await client
-    .from("lecturas_odometro").select("vehiculo_id, km").eq("id", lecturaId).single();
+    .from("lecturas_odometro").select("*").eq("id", lecturaId).single();
   if (!l) return { ok: false, error: "Lectura no encontrada" };
+  // La flota se deriva de qué columna FK está poblada (propia XOR tercero por CHECK).
+  const esTercero = l.vehiculo_tercero_id != null;
+  const tabla = esTercero ? "vehiculos_tercero" : "vehiculos";
+  const vid = esTercero ? l.vehiculo_tercero_id : l.vehiculo_id;
   await client.from("lecturas_odometro")
     .update({ estado: "aceptada", motivo: "Aceptada manualmente" }).eq("id", lecturaId);
   const { data: veh } = await client
-    .from("vehiculos").select("kilometraje_actual").eq("id", l.vehiculo_id).single();
+    .from(tabla).select("kilometraje_actual").eq("id", vid).single();
   if (Number(l.km) > Number(veh?.kilometraje_actual || 0)) {
-    await client.from("vehiculos").update({ kilometraje_actual: Number(l.km) }).eq("id", l.vehiculo_id);
+    await client.from(tabla).update({ kilometraje_actual: Number(l.km) }).eq("id", vid);
   }
   return { ok: true };
 }
@@ -152,19 +177,20 @@ export async function aceptarLectura(
  */
 export async function marcarReinicio(
   client: any,
-  opts: { vehiculo_id: number; km: number; fecha?: string }
+  opts: { vehiculo_id: number; km: number; fecha?: string; flota?: Flota }
 ): Promise<{ ok: boolean; error?: string }> {
   const km = Number(opts.km);
   if (!opts.vehiculo_id || !Number.isFinite(km) || km < 0) return { ok: false, error: "Datos incompletos" };
   const fecha = opts.fecha || hoyISO();
-  const { data: veh } = await client.from("vehiculos").select("id").eq("id", opts.vehiculo_id).maybeSingle();
+  const { tabla, fk } = targetFlota(opts.flota);
+  const { data: veh } = await client.from(tabla).select("id").eq("id", opts.vehiculo_id).maybeSingle();
   if (!veh) return { ok: false, error: "Vehículo no encontrado" };
   const { error } = await client.from("lecturas_odometro").insert({
-    vehiculo_id: opts.vehiculo_id, km, fuente: "manual", fecha,
+    [fk]: opts.vehiculo_id, km, fuente: "manual", fecha,
     estado: "reinicio", motivo: "Reinicio / cambio de tablero",
   });
   if (error) return { ok: false, error: error.message };
-  await client.from("vehiculos").update({ kilometraje_actual: km }).eq("id", opts.vehiculo_id);
+  await client.from(tabla).update({ kilometraje_actual: km }).eq("id", opts.vehiculo_id);
   return { ok: true };
 }
 

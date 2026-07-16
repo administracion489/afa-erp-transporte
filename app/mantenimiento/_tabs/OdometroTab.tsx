@@ -67,7 +67,10 @@ export default function OdometroTab() {
     setLoading(true);
     const [vRes, lRes, cRes] = await Promise.all([
       supabase.from("vehiculos").select("id,placa,marca,modelo,kilometraje_actual").order("placa"),
-      supabase.from("lecturas_odometro").select("*").order("created_at", { ascending: false }).limit(200),
+      // Solo flota propia: las lecturas de terceros tienen vehiculo_id NULL (viven en
+      // vehiculo_tercero_id). Filtrar por vehiculo_id NOT NULL es migration-safe (no nombra
+      // la columna nueva) y evita que filas de terceros aparezcan como "#null" en esta vista.
+      supabase.from("lecturas_odometro").select("*").not("vehiculo_id", "is", null).order("created_at", { ascending: false }).limit(200),
       supabase.from("config_mantenimiento").select("km_dia_max").eq("id", 1).maybeSingle(),
     ]);
     setVehiculos(vRes.data || []);

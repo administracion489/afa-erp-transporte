@@ -507,21 +507,22 @@ export async function POST(req: NextRequest) {
       case "checklist": {
         const { checklist } = body;
         if (!checklist?.conductor_id) return NextResponse.json({ error: "checklist inválido" }, { status: 400 });
-        const { error } = await admin.from("checklist_conductor").insert(checklist);
-        if (error) {
-          // FK violation: el conductor es de conductores_tercero y su ID no existe
-          // en conductores. El conductor ya completó el pre-viaje visualmente — no
-          // bloquearlo. TODO: agregar columna conductor_tercero_id a checklist_conductor.
-          if (error.message.includes("foreign key") || error.message.includes("violates")) {
-            console.warn("[checklist] FK tercero — no guardado en BD:", error.message);
-            return NextResponse.json({ ok: true });
-          }
-          return NextResponse.json({ error: error.message }, { status: 500 });
-        }
-        // Alimentar el odómetro consolidado con el km de inicio (solo flota propia)
+        // `es_tercero` viaja en el payload pero NO es columna de checklist_conductor:
+        // se usa solo para rutear el odómetro y se quita antes de insertar la fila.
+        const esTercero = checklist.es_tercero === true;
+        const checklistRow = { ...checklist };
+        delete checklistRow.es_tercero;
+
+        // 1) Alimentar el odómetro consolidado con el km de inicio. Se hace ANTES y con
+        //    independencia de que la fila de checklist_conductor persista (para terceros
+        //    esa fila falla por FK — ver más abajo), porque el km es el dato valioso.
+        //    Se consulta la tabla de la flota correcta (vehiculos vs vehiculos_tercero):
+        //    los ids se solapan, así que usar la tabla equivocada asociaría el km al bus
+        //    equivocado.
         try {
           if (checklist.vehiculo_id && checklist.km_inicio) {
-            const { data: veh } = await admin.from("vehiculos").select("id").eq("id", checklist.vehiculo_id).maybeSingle();
+            const tablaVeh = esTercero ? "vehiculos_tercero" : "vehiculos";
+            const { data: veh } = await admin.from(tablaVeh).select("id").eq("id", checklist.vehiculo_id).maybeSingle();
             if (veh) {
               await registrarLectura(admin, {
                 vehiculo_id: Number(checklist.vehiculo_id),
@@ -529,10 +530,25 @@ export async function POST(req: NextRequest) {
                 fuente: "checklist",
                 fecha: checklist.fecha,
                 ref_origen: "checklist_conductor",
+                flota: esTercero ? "tercero" : "propia",
               });
             }
           }
         } catch (e) { console.warn("[checklist] lectura odómetro:", e); }
+
+        // 2) Persistir la fila del checklist (best-effort).
+        const { error } = await admin.from("checklist_conductor").insert(checklistRow);
+        if (error) {
+          // FK violation: el conductor es de conductores_tercero y su ID no existe
+          // en conductores. El conductor ya completó el pre-viaje visualmente y el
+          // odómetro ya quedó registrado arriba — no bloquearlo. TODO: agregar
+          // columnas conductor_tercero_id / vehiculo_tercero_id a checklist_conductor.
+          if (error.message.includes("foreign key") || error.message.includes("violates")) {
+            console.warn("[checklist] FK tercero — fila no guardada en BD:", error.message);
+            return NextResponse.json({ ok: true });
+          }
+          return NextResponse.json({ error: error.message }, { status: 500 });
+        }
         return NextResponse.json({ ok: true });
       }
 

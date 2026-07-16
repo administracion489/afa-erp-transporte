@@ -1858,9 +1858,14 @@ export default function ConductorApp() {
     if (checks.some(c => c.ok === null)) {
       alert(`Faltan ${checks.filter(c => c.ok === null).length} ítems por completar`); return;
     }
+    // `es_tercero` enruta el odómetro en el backend hacia vehiculos_tercero (el id de
+    // `vehiculoId` es de esa tabla cuando el conductor es tercerizado). El server lo
+    // usa y lo descarta antes de insertar checklist_conductor (no es columna de esa tabla).
+    const esTercero = conductor._tabla === "conductores_tercero";
     const payload = { checklist: {
       conductor_id: conductor.id,
       vehiculo_id:  vehiculoId,
+      es_tercero:   esTercero,
       fecha:        getFechaLocal(),
       items_json:   checks,
       km_inicio:    kmInicio ? Number(kmInicio) : null,
