@@ -119,12 +119,15 @@ const PLANTILLA_IDIOMA       = "es";
 
 // Plantilla del CONDUCTOR (utility). Variables del cuerpo, EN ESTE ORDEN:
 //   {{1}} nombre del conductor
-//   {{2}} fecha del servicio
-//   {{3}} hora de salida
-//   {{4}} punto de ORIGEN
-//   {{5}} punto de DESTINO
-//   {{6}} placa del vehículo (fallback "Por asignar")
-//   {{7}} teléfono de contingencia (del directorio, es_contingencia=true)
+//   {{2}} SENTIDO en línea propia y destacada: "SERVICIO DE IDA ➡️" / "SERVICIO DE
+//         RETORNO 🔙" / "SERVICIO PROGRAMADO" (el conductor debe distinguir ida/retorno
+//         de un vistazo — pedido explícito del usuario)
+//   {{3}} fecha del servicio
+//   {{4}} hora de salida
+//   {{5}} punto de ORIGEN
+//   {{6}} punto de DESTINO
+//   {{7}} placa del vehículo (fallback "Por asignar")
+//   {{8}} teléfono de contingencia (del directorio, es_contingencia=true)
 // DOS botones URL DINÁMICOS: #0 "Ver origen" ({{1}} = lat,lng del primer paradero) y
 // #1 "Ver destino" ({{1}} = lat,lng del último paradero; fallback texto destino).
 // Misma estructura para la plantilla `conductor_cambio_servicio` (solo cambia el texto fijo).
@@ -644,9 +647,11 @@ export async function notificarConductor(
     ? `${ultima.lat},${ultima.lng}`
     : (reserva.destino || ultima?.direccion || destino);
 
-  const sentido    = sentidoDe(reserva);
-  const fechaTexto = (reserva.fecha_servicio ? formatFecha(reserva.fecha_servicio) : "-")
-    + (sentido ? ` · ${sentido}` : "");
+  const sentido = sentidoDe(reserva);
+  const sentidoTexto = sentido === "IDA" ? "SERVICIO DE IDA ➡️"
+    : sentido === "RETORNO" ? "SERVICIO DE RETORNO 🔙"
+    : "SERVICIO PROGRAMADO";
+  const fechaTexto = reserva.fecha_servicio ? formatFecha(reserva.fecha_servicio) : "-";
   const horaTexto  = reserva.hora_servicio?.slice(0, 5) ?? "-";
   const tel        = normalizarTelefono(cond.telefono);
   const telConting = await telefonoContingencia();
@@ -658,6 +663,7 @@ export async function notificarConductor(
       PLANTILLA_IDIOMA,
       [
         nombreCorto(cond.nombre),
+        sentidoTexto,
         fechaTexto,
         horaTexto,
         origen,
