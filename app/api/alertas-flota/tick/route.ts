@@ -232,6 +232,32 @@ async function handler(req: NextRequest) {
     res.proximo_inicio  = await avisoPreInicio("proximo_inicio");
     res.recuerda_iniciar = await avisoPreInicio("recuerda_iniciar");
 
+    // ── BLOQUE 3c: alerta PREVIA al Coordinador (antes de la hora) — el conductor ya
+    //    recibió 2 recordatorios (90/30 min) y sigue sin iniciar el recorrido en la
+    //    app (sin GPS, sin confirmar salida). A diferencia de "no_inicio" (que dispara
+    //    DESPUÉS de la hora), esta es la escalada PREVENTIVA para que Operaciones
+    //    pueda llamarlo antes de que el servicio arranque tarde. Reusa la plantilla
+    //    genérica `coordinador_alerta` — no requiere aprobar una plantilla nueva.
+    {
+      const cfg = activa("alerta_no_inicio_previa");
+      if (cfg) {
+        let n = 0;
+        for (const r of todas) {
+          if (r.tipo_asignacion !== "propio" || !r.conductor_id) continue;
+          if (!["programada", "confirmada"].includes(r.estado)) continue; // sin GPS ni salida confirmada
+          if (!enViaRecordatorio(cfg, r, hoy, manana, ahora, force)) continue;
+          if (!(await reclamarEnvio("alerta_no_inicio_previa", r.id))) continue;
+          const nombre = nombreCorto(condMap.get(r.conductor_id)?.nombre);
+          const hora = horaCorta(r.hora_servicio);
+          const ruta = rutaDe(r);
+          const rd = await aDirectorio(cfg, ["Falta iniciar recorrido", nombre, `${ruta} ${hora}`, "Faltan ~25 min y el conductor aún no confirma salida (sin GPS) en la app."]);
+          if (rd.enviados > 0) n++;
+          else if (rd.fallos > 0) await liberarEnvio("alerta_no_inicio_previa", r.id); // transitorio → reintentar
+        }
+        res.alerta_no_inicio_previa = n;
+      }
+    }
+
     // ── BLOQUE 4: no inició a tiempo ────────────────────────────────────────────
     {
       const cfg = activa("no_inicio");

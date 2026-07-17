@@ -59,6 +59,8 @@ values
      true,false,'conductor_proximo_inicio'),
   ('recuerda_iniciar','Recuerda iniciar recorrido','Solo si aún no inició en la app; a 30 min del servicio','anticipacion',30,null,null,
      true,false,'conductor_recuerda_iniciar'),
+  ('alerta_no_inicio_previa','Alerta previa al coordinador','A 25 min del servicio si aún no inició el GPS/recorrido en la app','anticipacion',25,null,null,
+     false,false,'coordinador_alerta'),
   ('asignacion','Servicio asignado','Cuando se le asigna un servicio al conductor','evento',null,null,null,
      true,false,'recordatorio_conductor'),
   ('cambio','Cambio de servicio','Cuando cambia la hora o el vehículo','evento',null,null,null,
