@@ -14,7 +14,7 @@ const supabaseAdmin = createClient(
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
 export type TipoCanal   = "email" | "whatsapp" | "sms" | "push";
-export type TipoTrigger = "manual" | "cron_recordatorio" | "proximidad_llego";
+export type TipoTrigger = "manual" | "cron_recordatorio" | "proximidad_llego" | "asignacion" | "cambio";
 
 export type DatosNotificacion = {
   pasajeroNombre:   string;
@@ -102,8 +102,13 @@ const PLANTILLA_IDIOMA       = "es";
 //   {{1}} nombre del conductor
 //   {{2}} fecha del servicio
 //   {{3}} hora de salida
-//   {{4}} ruta (origen → destino)
-//   {{5}} placa del vehículo
+//   {{4}} punto de ORIGEN
+//   {{5}} punto de DESTINO
+//   {{6}} dirección del punto de partida (fallback "No especificada")
+//   {{7}} placa del vehículo (fallback "Por asignar")
+// Botón URL DINÁMICO #0 "Ver punto de partida": {{1}} = lat,lng del primer paradero
+// (fallback: dirección/origen como texto de búsqueda). Misma estructura para la
+// plantilla `conductor_cambio_servicio` (solo cambia el texto fijo).
 const PLANTILLA_CONDUCTOR = "recordatorio_conductor";
 
 // Plantilla de LLEGADA (utility). Se dispara desde el motor de proximidad
@@ -553,14 +558,16 @@ export async function notificarReserva(
 // ─── AVISO AL CONDUCTOR ────────────────────────────────────────────────────────
 
 /**
- * Notifica al CONDUCTOR asignado a una reserva por WhatsApp (2do número, plantilla
- * utility `recordatorio_conductor`). Reutiliza el mismo pipeline/logging que los
- * pasajeros. Solo aplica a asignación "propio" (los terceros gestionan su flota).
- * No hace nada si falta el 2do número o si el conductor no tiene teléfono.
+ * Notifica al CONDUCTOR asignado a una reserva por WhatsApp (2do número). Por defecto
+ * usa la plantilla `recordatorio_conductor`; el motor de alertas puede pasar otra con
+ * la MISMA estructura (7 variables + botón de mapa), p.ej. `conductor_cambio_servicio`.
+ * Solo aplica a asignación "propio" (los terceros gestionan su flota). No hace nada si
+ * falta el 2do número o si el conductor no tiene teléfono.
  */
 export async function notificarConductor(
   reservaId: number,
   trigger: TipoTrigger = "manual",
+  plantilla?: string,
 ): Promise<{ ok: boolean; estado: "enviado" | "error" | "sin_canal"; detalle?: string }> {
   if (!phoneAvisos()) return { ok: true, estado: "sin_canal", detalle: "sin 2do número" };
 
@@ -590,15 +597,28 @@ export async function notificarConductor(
     return { ok: true, estado: "sin_canal", detalle: "conductor sin teléfono" };
   }
 
-  let placa: string | undefined;
-  if (reserva.vehiculo_id) {
-    const { data: v } = await supabaseAdmin.from("vehiculos").select("placa").eq("id", reserva.vehiculo_id).single();
-    placa = v?.placa;
-  }
+  // Vehículo + paraderos (primer paradero = punto de partida del conductor).
+  const [vR, pR] = await Promise.all([
+    reserva.vehiculo_id
+      ? supabaseAdmin.from("vehiculos").select("placa").eq("id", reserva.vehiculo_id).single()
+      : Promise.resolve({ data: null } as any),
+    supabaseAdmin.from("paradas").select("nombre, direccion, lat, lng, orden").eq("reserva_id", reservaId).order("orden"),
+  ]);
+  const placa = vR.data?.placa as string | undefined;
+  const paradas = (pR.data ?? []) as any[];
+  const primera = paradas[0];
+  const ultima  = paradas[paradas.length - 1];
 
   const clienteJoin: any = Array.isArray(reserva.cliente) ? reserva.cliente[0] : reserva.cliente;
-  const ruta = [reserva.origen, reserva.destino].filter(Boolean).join(" → ")
-    || clienteJoin?.empresa || clienteJoin?.nombre || "Servicio";
+  const origen  = reserva.origen  || primera?.nombre || clienteJoin?.empresa || clienteJoin?.nombre || "Por confirmar";
+  const destino = reserva.destino || (ultima && ultima !== primera ? ultima.nombre : null) || "Por confirmar";
+  const direccion = primera?.direccion || "No especificada";
+  // Botón "Ver punto de partida": coordenadas reales del primer paradero; si no hay,
+  // la dirección/origen como búsqueda de texto en Google Maps.
+  const ubicacionQuery = (primera?.lat != null && primera?.lng != null)
+    ? `${primera.lat},${primera.lng}`
+    : (primera?.direccion || reserva.origen || origen);
+
   const fechaTexto = reserva.fecha_servicio ? formatFecha(reserva.fecha_servicio) : "-";
   const horaTexto  = reserva.hora_servicio?.slice(0, 5) ?? "-";
   const tel        = normalizarTelefono(cond.telefono);
@@ -606,10 +626,19 @@ export async function notificarConductor(
   try {
     await enviarWhatsAppPlantilla(
       tel,
-      PLANTILLA_CONDUCTOR,
+      plantilla || PLANTILLA_CONDUCTOR,
       PLANTILLA_IDIOMA,
-      [cond.nombre, fechaTexto, horaTexto, ruta, placa ?? "Por asignar"],
+      [
+        nombreCorto(cond.nombre),
+        fechaTexto,
+        horaTexto,
+        origen,
+        destino,
+        direccion,
+        placa ?? "Por asignar",
+      ],
       phoneAvisos(),
+      [{ index: 0, texto: encodeURIComponent(ubicacionQuery) }],
     );
     await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "enviado", destinatario: tel, trigger });
     return { ok: true, estado: "enviado" };

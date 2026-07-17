@@ -88,13 +88,6 @@ async function handler(req: NextRequest) {
       const { data } = await admin.from("conductores").select("id, nombre, telefono").in("id", [...condIds]);
       for (const c of data ?? []) condMap.set(c.id, { nombre: c.nombre, telefono: c.telefono });
     }
-    const vehIds = [...new Set(todas.map((r) => r.vehiculo_id).filter(Boolean))] as number[];
-    const vehMap = new Map<number, string>();
-    if (vehIds.length) {
-      const { data } = await admin.from("vehiculos").select("id, placa").in("id", vehIds);
-      for (const v of data ?? []) vehMap.set(v.id, v.placa);
-    }
-
     // ── Helpers de envío (tri-estado: distingue "sin canal" de "fallo transitorio") ──
     async function aConductor(cfg: AlertaConfig, conductorId: number, params: string[]): Promise<ResultadoEnvio> {
       const c = condMap.get(conductorId);
@@ -121,7 +114,6 @@ async function handler(req: NextRequest) {
           const est = estados.get(r.id);
           const fecha = r.fecha_servicio; const hora = horaCorta(r.hora_servicio);
           const ruta = rutaDe(r);
-          const placa = r.vehiculo_id ? (vehMap.get(r.vehiculo_id) ?? "Por asignar") : "Por asignar";
 
           // Cancelación: avisar al conductor asignado. Solo marcar si el envío salió.
           if (r.estado === "cancelada") {
@@ -135,10 +127,10 @@ async function handler(req: NextRequest) {
             continue;
           }
           if (!r.conductor_id) continue;
-          const nombre = nombreCorto(condMap.get(r.conductor_id)?.nombre);
 
           let avanzar = true; // por defecto graba baseline (config off o sin cambio) para no
                               // disparar un "cambio" espurio después.
+          const tieneTel = !!condMap.get(r.conductor_id)?.telefono;
           if (!est || est.conductor_avisado !== r.conductor_id) {
             // Reasignación: avisar al conductor SALIENTE que ya no cubre el servicio.
             if (cDes && est?.conductor_avisado && est.conductor_avisado !== r.conductor_id) {
@@ -146,13 +138,23 @@ async function handler(req: NextRequest) {
               await aConductor(cDes, est.conductor_avisado, [ant, fecha, ruta]);
             }
             if (cAsig) {
-              avanzar = (await aConductor(cAsig, r.conductor_id, [nombre, fecha, hora, ruta, placa])) === "enviado";
-              if (avanzar) n++;
+              // notificarConductor arma los datos ricos (origen/destino/dirección + botón de mapa).
+              // Sin teléfono aún → no llamar (evita log-spam); avanzar=false reintenta cuando lo tenga.
+              if (!tieneTel) { avanzar = false; }
+              else {
+                const rc = await notificarConductor(r.id, "asignacion", cAsig.plantilla ?? undefined);
+                avanzar = rc.estado === "enviado";
+                if (avanzar) n++;
+              }
             }
           } else if (est.hora_avisada !== hora || est.vehiculo_avisado !== (r.vehiculo_id ?? null)) {
             if (cCamb) {
-              avanzar = (await aConductor(cCamb, r.conductor_id, [nombre, fecha, hora, ruta, placa])) === "enviado";
-              if (avanzar) n++;
+              if (!tieneTel) { avanzar = false; }
+              else {
+                const rc = await notificarConductor(r.id, "cambio", cCamb.plantilla ?? undefined);
+                avanzar = rc.estado === "enviado";
+                if (avanzar) n++;
+              }
             }
           }
           if (avanzar) {
