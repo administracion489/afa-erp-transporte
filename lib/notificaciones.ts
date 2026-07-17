@@ -45,6 +45,24 @@ function nombreCorto(nombre: string): string {
   return nombre.trim().split(/\s+/).slice(0, 2).join(" ");
 }
 
+// Sentido IDA/RETORNO del servicio — misma lógica canónica que sentidoServicio() en
+// /programacion: prioriza `direccion_servicio`; heurística conservadora solo para fijos.
+// Se anexa al valor de la FECHA en los mensajes ("… · IDA"), así no cambia ninguna
+// plantilla de Meta y aplica a WhatsApp + email + push a la vez.
+const TIPOS_SERVICIO_FIJO = new Set(["transporte_personal", "fijo_solo_ida", "fijo_multiparada", "fijo_reten"]);
+function sentidoDe(r: {
+  direccion_servicio?: string | null;
+  tipo_servicio_detalle?: string | null;
+  reserva_vinculada_id?: number | null;
+}): "IDA" | "RETORNO" | null {
+  if (r.direccion_servicio === "ida") return "IDA";
+  if (r.direccion_servicio === "retorno") return "RETORNO";
+  if (!TIPOS_SERVICIO_FIJO.has(r.tipo_servicio_detalle || "")) return null; // eventual: sin chip
+  if (r.tipo_servicio_detalle === "fijo_solo_ida") return "IDA";
+  if (r.reserva_vinculada_id != null) return "RETORNO";
+  return null;
+}
+
 /** Normaliza teléfono peruano a E.164: 987654321 → +51987654321 */
 function normalizarTelefono(tel: string): string {
   const limpio = tel.replace(/\D/g, "");
@@ -350,6 +368,7 @@ export async function notificarReserva(
       id, fecha_servicio, hora_servicio,
       conductor_id, vehiculo_id, empresa_tercerizada_id,
       vehiculo_tercero_id, tipo_asignacion,
+      direccion_servicio, tipo_servicio_detalle, reserva_vinculada_id,
       cliente_id, cliente:clientes(nombre,empresa)
     `)
     .eq("id", reservaId)
@@ -428,7 +447,9 @@ export async function notificarReserva(
   const empresa        = process.env.EMPRESA_NOMBRE ?? "AFA Transporte";
   const clienteJoin: any = Array.isArray(reserva.cliente) ? reserva.cliente[0] : reserva.cliente;
   const empresaCliente = clienteJoin?.empresa || clienteJoin?.nombre || undefined;
-  const fechaTexto     = reserva.fecha_servicio ? formatFecha(reserva.fecha_servicio) : "-";
+  const sentido        = sentidoDe(reserva);
+  const fechaTexto     = (reserva.fecha_servicio ? formatFecha(reserva.fecha_servicio) : "-")
+    + (sentido ? ` · ${sentido}` : "");
   const horaTexto  = reserva.hora_servicio?.slice(0, 5) ?? "-";
   const esRecordatorio = trigger === "cron_recordatorio";
 
@@ -577,6 +598,7 @@ export async function notificarConductor(
     .select(`
       id, fecha_servicio, hora_servicio, tipo_asignacion,
       conductor_id, vehiculo_id, origen, destino,
+      direccion_servicio, tipo_servicio_detalle, reserva_vinculada_id,
       cliente:clientes(nombre,empresa)
     `)
     .eq("id", reservaId)
@@ -622,7 +644,9 @@ export async function notificarConductor(
     ? `${ultima.lat},${ultima.lng}`
     : (reserva.destino || ultima?.direccion || destino);
 
-  const fechaTexto = reserva.fecha_servicio ? formatFecha(reserva.fecha_servicio) : "-";
+  const sentido    = sentidoDe(reserva);
+  const fechaTexto = (reserva.fecha_servicio ? formatFecha(reserva.fecha_servicio) : "-")
+    + (sentido ? ` · ${sentido}` : "");
   const horaTexto  = reserva.hora_servicio?.slice(0, 5) ?? "-";
   const tel        = normalizarTelefono(cond.telefono);
   const telConting = await telefonoContingencia();
