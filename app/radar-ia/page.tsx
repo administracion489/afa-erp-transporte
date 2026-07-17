@@ -113,6 +113,7 @@ const TABS = [
   { id: "feed",          label: "Feed" },
   { id: "oportunidades", label: "Oportunidades" },
   { id: "combustible",   label: "Combustible" },
+  { id: "odometro",      label: "Odómetro" },
   { id: "alertas",       label: "Alertas" },
   { id: "grupos",        label: "Grupos" },
   { id: "configuracion", label: "Configuración" },
@@ -122,6 +123,27 @@ type TabId = (typeof TABS)[number]["id"];
 type VehiculoLite = { id: number; placa: string; categoria: string | null; estado: string | null };
 
 type VehiculoGuiaOdometro = { tipo: "propio" | "tercero"; id: number; placa: string; categoria: string | null; guia_odometro: string | null };
+
+// Lectura de odómetro que el Radar registró en lecturas_odometro (ref_origen='radar_ia').
+type RadarLecturaOdometro = {
+  id: string;
+  vehiculo_id: number | null;
+  vehiculo_tercero_id: number | null;
+  km: number;
+  fuente: string;
+  fecha: string | null;
+  foto_url: string | null;
+  estado: "aceptada" | "sospechosa" | "rechazada" | "reinicio";
+  motivo: string | null;
+  created_at: string;
+};
+
+const ESTADO_ODO_CFG: Record<RadarLecturaOdometro["estado"], { label: string; color: string; bg: string }> = {
+  aceptada:   { label: "Registrada",  color: "#27AE60", bg: "#E8F5EC" },
+  sospechosa: { label: "Por revisar", color: "#B07A0F", bg: "#FBF1D8" },
+  rechazada:  { label: "Rechazada",   color: "#EB5757", bg: "#FDECEC" },
+  reinicio:   { label: "Reinicio",    color: "#1d4ed8", bg: "#dbeafe" },
+};
 
 // ── Iconos SVG inline ────────────────────────────────────────────────────────
 
@@ -705,6 +727,94 @@ function TabCombustible({ registros, vehiculos, registrando, onRegistrar, onDesc
 // Wrapper mínimo para agrupar fila + fila expandida sin romper el <tbody>
 function FragmentoFilaCombustible({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
+}
+
+// ── Tab: Odómetro ────────────────────────────────────────────────────────────
+// Muestra las lecturas de odómetro que el Radar registró (lecturas_odometro con
+// ref_origen='radar_ia'), de ambas flotas. La fuente de verdad y el flujo de
+// aceptar/rechazar viven en /mantenimiento > Odómetro; aquí es solo la vista del Radar.
+
+function TabOdometro({ registros, vehiculosGuia }: {
+  registros: RadarLecturaOdometro[];
+  vehiculosGuia: VehiculoGuiaOdometro[];
+}) {
+  const [foto, setFoto] = useState<string | null>(null);
+
+  if (registros.length === 0) {
+    return <CardVacia emoji="🛞" titulo="Sin lecturas de odómetro" detalle="Las fotos de tablero que lleguen a los grupos y el Radar logre registrar aparecen aquí." />;
+  }
+
+  const unidadDe = (r: RadarLecturaOdometro): { placa: string | null; flota: "propio" | "tercero" | null } => {
+    if (r.vehiculo_id != null) {
+      const v = vehiculosGuia.find((x) => x.tipo === "propio" && x.id === r.vehiculo_id);
+      return { placa: v?.placa ?? null, flota: "propio" };
+    }
+    if (r.vehiculo_tercero_id != null) {
+      const v = vehiculosGuia.find((x) => x.tipo === "tercero" && x.id === r.vehiculo_tercero_id);
+      return { placa: v?.placa ?? null, flota: "tercero" };
+    }
+    return { placa: null, flota: null };
+  };
+
+  return (
+    <>
+      <section className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                {["Fecha", "Unidad", "Kilometraje", "Foto", "Estado", ""].map((h, i) => (
+                  <th key={i} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {registros.map((r) => {
+                const est = ESTADO_ODO_CFG[r.estado] ?? ESTADO_ODO_CFG.sospechosa;
+                const { placa, flota } = unidadDe(r);
+                return (
+                  <tr key={r.id} className="border-t hover:bg-gray-50 transition-colors" style={{ borderColor: "#f1f5f9" }}>
+                    <td className="p-3 whitespace-nowrap text-gray-600">{r.fecha ? fmtFecha(r.fecha) : "—"}</td>
+                    <td className="p-3 whitespace-nowrap">
+                      <span className="font-mono font-black text-[#0b315f]">{placa ?? "—"}</span>
+                      {flota === "tercero" && <span className="ml-1.5 text-[10px] font-black px-1.5 py-0.5 rounded-full" style={{ color: "#B07A0F", background: "#FBF1D8" }}>Tercero</span>}
+                    </td>
+                    <td className="p-3 whitespace-nowrap font-black text-[#0b315f]">{r.km.toLocaleString("es-PE")} km</td>
+                    <td className="p-3">
+                      {r.foto_url ? (
+                        <button onClick={() => setFoto(r.foto_url)} className="text-[#1262bd] hover:underline text-xs font-bold inline-flex items-center gap-1">
+                          <Ic.Externo size={12} /> Ver foto
+                        </button>
+                      ) : <span className="text-xs text-gray-300">—</span>}
+                    </td>
+                    <td className="p-3 whitespace-nowrap">
+                      <div className="flex items-center gap-1.5">
+                        <ChipEstado {...est} />
+                        {r.motivo && <span className="text-[11px] text-gray-400" title={r.motivo}>ⓘ</span>}
+                      </div>
+                    </td>
+                    <td className="p-3 whitespace-nowrap">
+                      <Link href="/mantenimiento?tab=odometro" className="text-[#1262bd] hover:underline text-xs font-bold inline-flex items-center gap-1">
+                        <Ic.Externo size={12} /> Odómetro
+                      </Link>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* Visor de foto */}
+      {foto && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={() => setFoto(null)}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={foto} alt="Foto del odómetro" className="max-h-[90vh] max-w-[90vw] rounded-xl" onClick={(e) => e.stopPropagation()} />
+        </div>
+      )}
+    </>
+  );
 }
 
 // ── Tab: Alertas ─────────────────────────────────────────────────────────────
@@ -1313,6 +1423,7 @@ export default function RadarIAPage() {
   const [mensajes, setMensajes] = useState<RadarMensaje[]>([]);
   const [oportunidades, setOportunidades] = useState<RadarOportunidad[]>([]);
   const [combustibles, setCombustibles] = useState<RadarCombustible[]>([]);
+  const [odometros, setOdometros] = useState<RadarLecturaOdometro[]>([]);
   const [alertas, setAlertas] = useState<RadarAlerta[]>([]);
   const [vehiculos, setVehiculos] = useState<VehiculoLite[]>([]);
   const [vehiculosGuia, setVehiculosGuia] = useState<VehiculoGuiaOdometro[]>([]);
@@ -1333,13 +1444,14 @@ export default function RadarIAPage() {
   // ── Carga de datos ──
   const cargar = useCallback(async () => {
     try {
-      const [rEstado, rConfig, rGrupos, rMensajes, rOpps, rComb, rAlertas, rVehiculos, rVehTercero] = await Promise.all([
+      const [rEstado, rConfig, rGrupos, rMensajes, rOpps, rComb, rOdo, rAlertas, rVehiculos, rVehTercero] = await Promise.all([
         supabase.from("radar_estado").select("*").eq("id", 1).maybeSingle(),
         supabase.from("radar_config").select("*").eq("id", 1).maybeSingle(),
         supabase.from("radar_grupos").select("*").order("nombre"),
         supabase.from("radar_mensajes").select("*").order("recibido_en", { ascending: false }).limit(150),
         supabase.from("radar_oportunidades").select("*").order("created_at", { ascending: false }).limit(60),
         supabase.from("radar_combustible").select("*").order("created_at", { ascending: false }).limit(60),
+        supabase.from("lecturas_odometro").select("*").eq("ref_origen", "radar_ia").order("created_at", { ascending: false }).limit(60),
         supabase.from("radar_alertas").select("*").order("created_at", { ascending: false }).limit(100),
         supabase.from("vehiculos").select("id, placa, categoria, estado, guia_odometro"),
         supabase.from("vehiculos_tercero").select("id, placa, categoria, guia_odometro"),
@@ -1356,6 +1468,7 @@ export default function RadarIAPage() {
       setMensajes(((rMensajes.data ?? []) as RadarMensaje[]));
       setOportunidades(((rOpps.data ?? []) as RadarOportunidad[]));
       setCombustibles(((rComb.data ?? []) as RadarCombustible[]));
+      setOdometros(((rOdo.data ?? []) as RadarLecturaOdometro[]));
       setAlertas(((rAlertas.data ?? []) as RadarAlerta[]));
       setVehiculos(((rVehiculos.data ?? []) as VehiculoLite[]));
       const guiaPropios: VehiculoGuiaOdometro[] = ((rVehiculos.data ?? []) as any[]).map((v) => ({
@@ -1447,6 +1560,7 @@ export default function RadarIAPage() {
 
   const oppNuevas = oportunidades.filter((o) => o.estado === "nueva").length;
   const combPendientes = combustibles.filter((c) => c.estado === "pendiente_revision").length;
+  const odoPorRevisar = odometros.filter((o) => o.estado === "sospechosa" || o.estado === "rechazada").length;
 
   const grupoPorMensaje = useMemo(() => {
     const map: Record<string, string> = {};
@@ -1779,6 +1893,7 @@ export default function RadarIAPage() {
   const contadorTab: Partial<Record<TabId, { n: number; color: string }>> = {
     oportunidades: { n: oppNuevas, color: "#1d4ed8" },
     combustible: { n: combPendientes, color: "#B07A0F" },
+    odometro: { n: odoPorRevisar, color: "#B07A0F" },
     alertas: { n: alertasSinLeer, color: "#EB5757" },
   };
 
@@ -1915,6 +2030,9 @@ export default function RadarIAPage() {
                 onRegistrar={registrarCombustible}
                 onDescartar={descartarCombustible}
               />
+            )}
+            {tab === "odometro" && (
+              <TabOdometro registros={odometros} vehiculosGuia={vehiculosGuia} />
             )}
             {tab === "alertas" && (
               <TabAlertas alertas={alertas} onMarcarLeida={marcarAlertaLeida} onMarcarTodas={marcarTodasLeidas} />
