@@ -12,7 +12,7 @@
 
 import { NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { distM, limpiarHuella, filasAPuntos, velocidadPorVentana, type FixVel } from "@/lib/huella";
+import { distM, limpiarHuella, filasAPuntos, velocidadPorVentana, paginarFilas, type FixVel } from "@/lib/huella";
 
 const admin = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
@@ -39,17 +39,21 @@ export async function GET(req: NextRequest) {
   let err: string | null = null;
   try {
     const sb = admin();
+    // PAGINADO (paginarFilas): PostgREST recorta al max-rows del servidor (1000) aunque se
+    // pida .limit(5000) → el replay perdía todo lo posterior al punto 1000 en viajes largos.
     if (reservaId) {
-      const { data } = await sb.from("ubicaciones_gps").select(HCOLS)
-        .eq("reserva_id", Number(reservaId)).order("created_at", { ascending: true }).limit(5000);
-      arr = data || [];
+      arr = await paginarFilas(() =>
+        sb.from("ubicaciones_gps").select(HCOLS)
+          .eq("reserva_id", Number(reservaId))
+          .order("created_at", { ascending: true }).order("id", { ascending: true }));
     } else if (vehiculoId || terceroId) {
       const desde = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
-      let q = sb.from("ubicaciones_gps").select(HCOLS)
-        .gte("created_at", desde).order("created_at", { ascending: true }).limit(5000);
-      q = terceroId ? q.eq("vehiculo_tercero_id", Number(terceroId)) : q.eq("vehiculo_id", Number(vehiculoId));
-      const { data } = await q;
-      arr = data || [];
+      arr = await paginarFilas(() => {
+        const q = sb.from("ubicaciones_gps").select(HCOLS)
+          .gte("created_at", desde)
+          .order("created_at", { ascending: true }).order("id", { ascending: true });
+        return terceroId ? q.eq("vehiculo_tercero_id", Number(terceroId)) : q.eq("vehiculo_id", Number(vehiculoId));
+      });
       // Cortar al último tramo contiguo (la ventana de 12 h puede traer 2 servicios).
       if (arr.length > 1) {
         let ini = 0;

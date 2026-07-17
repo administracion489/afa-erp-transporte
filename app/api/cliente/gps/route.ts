@@ -13,6 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { paginarFilas } from "@/lib/huella";
 
 const adminClient = () =>
   createClient(
@@ -72,20 +73,24 @@ export async function POST(req: NextRequest) {
       const HCOLS = "lat,lng,velocidad,created_at,timestamp,reserva_id,vehiculo_id,vehiculo_tercero_id,precision_m,fix_ts";
       let filas: any[] = [];
       let viaVehiculo = false; // ¿se usó la rama por-vehículo (sin reserva_id)?
+      // PAGINADO (paginarFilas): PostgREST recorta toda respuesta al max-rows del servidor
+      // (1000) aunque se pida .limit(5000) → la huella se congelaba en el punto 1000 y el
+      // resto del viaje salía como "tramo estimado". Orden created_at+id = páginas estables.
       if (reservaId != null) {
-        const { data } = await supabase.from("ubicaciones_gps").select(HCOLS)
-          .eq("reserva_id", reservaId).order("created_at", { ascending: true }).limit(5000);
-        filas = data || [];
+        filas = await paginarFilas(() =>
+          supabase.from("ubicaciones_gps").select(HCOLS)
+            .eq("reserva_id", reservaId)
+            .order("created_at", { ascending: true }).order("id", { ascending: true }));
       }
       if (filas.length === 0 && (vehiculoTerceroId != null || vehiculoId != null)) {
         // Tercero: los puntos no llevan reserva_id. Acotar a las últimas 12 h (viaje de hoy).
         const desde = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
-        let q = supabase.from("ubicaciones_gps").select(HCOLS)
-          .gte("created_at", desde).order("created_at", { ascending: true }).limit(5000);
-        if (vehiculoTerceroId != null) q = q.eq("vehiculo_tercero_id", vehiculoTerceroId);
-        else                            q = q.eq("vehiculo_id", vehiculoId);
-        const { data } = await q;
-        filas = data || [];
+        filas = await paginarFilas(() => {
+          const q = supabase.from("ubicaciones_gps").select(HCOLS)
+            .gte("created_at", desde)
+            .order("created_at", { ascending: true }).order("id", { ascending: true });
+          return vehiculoTerceroId != null ? q.eq("vehiculo_tercero_id", vehiculoTerceroId) : q.eq("vehiculo_id", vehiculoId);
+        });
         viaVehiculo = true;
       }
       // Rama por-vehículo: la ventana de 12 h puede traer 2 servicios del mismo bus → quedarnos

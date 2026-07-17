@@ -68,6 +68,28 @@ export function suavizarPorDistancia<T extends { lat: number; lng: number }>(pts
   });
 }
 
+// Trae TODAS las filas de una consulta paginando con .range() en ventanas de 1000.
+// PostgREST recorta CUALQUIER respuesta al tope max-rows del servidor (Supabase: 1000):
+// .limit(5000) NO lo salta — la huella quedaba CONGELADA en el punto 1000 (~1h20 de viaje,
+// verificado con la reserva #801: 1245 filas en BD, 1000 devueltas) mientras el bus seguía
+// en vivo, y todo lo posterior se pintaba como "tramo estimado". Mismo tope que ya truncó
+// reservas en /programacion. `armarQuery` debe devolver una consulta NUEVA en cada llamada,
+// con orden ESTABLE (created_at + id) para que las páginas no se solapen ni salten filas.
+export async function paginarFilas(
+  armarQuery: () => { range: (desde: number, hasta: number) => PromiseLike<{ data: any[] | null; error: any }> },
+  maxFilas = 15000, // techo de sanidad: ~12 h de viaje a 3 s/fix
+): Promise<any[]> {
+  const PAG = 1000; // = max-rows de Supabase: cada página llega completa
+  const todas: any[] = [];
+  for (let desde = 0; desde < maxFilas; desde += PAG) {
+    const { data, error } = await armarQuery().range(desde, desde + PAG - 1);
+    if (error) break;                      // conservar lo acumulado: huella parcial > vacía
+    todas.push(...(data || []));
+    if (!data || data.length < PAG) break; // página corta = no hay más filas
+  }
+  return todas;
+}
+
 // Normaliza filas crudas de ubicaciones_gps a HuellaPt (acc por defecto 25 m si falta).
 // `ts` (ms) del fix real (created_at, fallback timestamp) → lo usan el gate de velocidad y el
 // puenteo de huecos. 0 si no hay fecha (entonces esas etapas se omiten, ver guardas).

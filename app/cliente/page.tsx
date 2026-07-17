@@ -10,7 +10,7 @@ import { animarMarcador } from "@/lib/anim-marker";
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
-  calcularPuentes, decidirPuente, anclarImprecisos, puentePorRuta, distM,
+  calcularPuentes, decidirPuente, anclarImprecisos, puentePorRuta, distM, paginarFilas,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
 import { estadoCliente, normalizaEstado } from "@/lib/estados";
@@ -1177,11 +1177,13 @@ export default function ClientePortal() {
     let cancel = false;
     const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
     const cargarHuella = async (rid: number) => {
-      const { data } = await supabase.from("ubicaciones_gps")
-        .select("lat,lng,velocidad,rumbo,precision_m,created_at,timestamp")
-        .eq("reserva_id", rid)
-        .order("created_at", { ascending: true })
-        .limit(5000);
+      // PAGINADO (paginarFilas): PostgREST recorta al max-rows del servidor (1000) aunque se
+      // pida .limit(5000) → la huella se congelaba en el punto 1000 en viajes largos.
+      const data = await paginarFilas(() =>
+        supabase.from("ubicaciones_gps")
+          .select("lat,lng,velocidad,rumbo,precision_m,created_at,timestamp")
+          .eq("reserva_id", rid)
+          .order("created_at", { ascending: true }).order("id", { ascending: true }));
       if (cancel) return;
       const filas = (data || []).filter((p: any) => p.lat && p.lng);
       // Anclar imprecisos al corredor confiable (mata el zigzag off-road) + limpieza de jitter
