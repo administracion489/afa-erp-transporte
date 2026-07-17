@@ -202,9 +202,35 @@ function TabFeed({ mensajes, reprocesando, onFeedback, onReprocesar }: {
   const [filtroCat, setFiltroCat] = useState<CategoriaRadar | "todas">("todas");
   const [busqueda, setBusqueda] = useState("");
   const [expandido, setExpandido] = useState<string | null>(null);
+  const [msgsCategoria, setMsgsCategoria] = useState<RadarMensaje[] | null>(null);
+  const [cargandoCat, setCargandoCat] = useState(false);
 
-  const filtrados = mensajes.filter((m) => {
-    if (filtroCat !== "todas" && m.categoria !== filtroCat) return false;
+  // El feed general solo trae los 150 mensajes más recientes; con el volumen de los grupos,
+  // los mensajes de categorías poco frecuentes (odómetro, combustible…) quedan fuera de esa
+  // ventana en horas. Cuando se filtra por una categoría específica, se traen ESOS mensajes
+  // del servidor para que siempre aparezcan, sin importar cuánto tráfico nuevo haya después.
+  // Se refresca al cambiar de filtro y cuando llega un mensaje nuevo (id más reciente del feed).
+  const idMasReciente = mensajes[0]?.id;
+  useEffect(() => {
+    if (filtroCat === "todas") { setMsgsCategoria(null); return; }
+    let cancelado = false;
+    setCargandoCat(true);
+    supabase
+      .from("radar_mensajes")
+      .select("*")
+      .eq("categoria", filtroCat)
+      .order("recibido_en", { ascending: false })
+      .limit(150)
+      .then(({ data }: { data: RadarMensaje[] | null }) => {
+        if (cancelado) return;
+        setMsgsCategoria((data ?? []) as RadarMensaje[]);
+        setCargandoCat(false);
+      });
+    return () => { cancelado = true; };
+  }, [filtroCat, idMasReciente]);
+
+  const base = filtroCat === "todas" ? mensajes : (msgsCategoria ?? []);
+  const filtrados = base.filter((m) => {
     if (busqueda.trim()) {
       const b = norm(busqueda);
       const blob = norm(`${m.texto ?? ""} ${m.resumen_ia ?? ""} ${m.grupo_nombre ?? ""} ${m.remitente_nombre ?? ""}`);
@@ -246,8 +272,19 @@ function TabFeed({ mensajes, reprocesando, onFeedback, onReprocesar }: {
       </div>
 
       {/* Lista */}
-      {filtrados.length === 0 ? (
-        <CardVacia emoji="📭" titulo="Sin mensajes con ese filtro" detalle="Los mensajes de los grupos activos aparecen aquí en tiempo real." />
+      {cargandoCat && filtroCat !== "todas" && !msgsCategoria ? (
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-10 text-center">
+          <div className="w-6 h-6 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin mx-auto mb-3" />
+          <p className="font-bold text-gray-500 text-sm">Buscando mensajes de {CATEGORIAS_RADAR[filtroCat].label}…</p>
+        </div>
+      ) : filtrados.length === 0 ? (
+        <CardVacia
+          emoji="📭"
+          titulo="Sin mensajes con ese filtro"
+          detalle={filtroCat === "todas"
+            ? "Los mensajes de los grupos activos aparecen aquí en tiempo real."
+            : `No hay mensajes de ${CATEGORIAS_RADAR[filtroCat].label}${busqueda.trim() ? " que coincidan con la búsqueda" : " todavía"}.`}
+        />
       ) : (
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden divide-y divide-gray-100">
           {filtrados.map((m) => {
