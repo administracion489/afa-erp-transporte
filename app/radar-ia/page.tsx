@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import { normalizarConfigRadar } from "@/lib/radar/config";
 import {
   CATEGORIAS_RADAR,
   LISTA_CATEGORIAS,
@@ -1309,7 +1310,11 @@ export default function RadarIAPage() {
       if (rEstado.error) console.warn("radar-ia: error leyendo radar_estado", rEstado.error);
       if (rConfig.error) console.warn("radar-ia: error leyendo radar_config", rConfig.error);
       setEstado((rEstado.data as RadarEstado | null) ?? null);
-      setConfig((rConfig.data as RadarConfig | null) ?? null);
+      // Normaliza con los MISMOS defaults que el motor (lib/radar/config): así el toggle
+      // "Odómetro automático" muestra el estado real que ejecuta el pipeline, en vez de
+      // leerse apagado por una clave ausente en una config vieja mientras el backend la
+      // trataba como encendida.
+      setConfig(rConfig.data ? normalizarConfigRadar(rConfig.data) : null);
       setGrupos(((rGrupos.data ?? []) as RadarGrupo[]));
       setMensajes(((rMensajes.data ?? []) as RadarMensaje[]));
       setOportunidades(((rOpps.data ?? []) as RadarOportunidad[]));

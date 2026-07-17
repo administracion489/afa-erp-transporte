@@ -20,6 +20,7 @@ import { enviarEmail } from "@/lib/notificaciones";
 import { ejecutarAccion, crearAlerta, fechaLima, horaLima } from "./acciones";
 import { promptTriage, promptExtraccion, promptExtraccionMedia, type ContextoPrompt } from "./prompts";
 import { transcribirAudio } from "./transcripcion";
+import { CONFIG_DEFECTO, normalizarConfigRadar } from "./config";
 import { LISTA_CATEGORIAS, type CategoriaRadar, type RadarConfig, type ResumenProcesamiento } from "./tipos";
 
 // ── Cliente admin (patrón de la casa) ────────────────────────────────────────
@@ -69,60 +70,15 @@ function extraerJSON(texto: string): any {
 }
 
 // ── Config con defaults seguros (si la tabla aún no existe o está vacía) ─────
-
-const CONFIG_DEFECTO: RadarConfig = {
-  id: 1,
-  activo: true,
-  horario_activo: false,
-  hora_inicio: "06:00",
-  hora_fin: "22:00",
-  categorias_activas: LISTA_CATEGORIAS.filter((c) => c !== "otros"),
-  acciones_automaticas: { combustible: true, odometro: true, mantenimiento: false, operaciones: false },
-  palabras_clave: [],
-  umbral_confianza: 0.7,
-  modelo_triage: "claude-haiku-4-5",
-  modelo_extraccion: "claude-sonnet-5",
-  notificar_email: false,
-  correos_alerta: null,
-  limite_diario_usd: 5,
-  guia_voucher: null,
-  updated_at: "",
-};
+// La normalización vive en lib/radar/config.ts (normalizarConfigRadar) y la comparte
+// la UI del dashboard, para que lo que ve el operador == lo que ejecuta este motor.
 
 async function cargarConfig(sb: any): Promise<RadarConfig> {
   try {
     const { data } = await sb.from("radar_config").select("*").eq("id", 1).maybeSingle();
-    if (!data) return CONFIG_DEFECTO;
-
-    // Auto-migración de configs guardadas ANTES de que existiera la categoría "odometro".
-    // Sin esto, la fila de config ya persistida en prod (sin "odometro" en categorias_activas
-    // ni en acciones_automaticas) haría que todo mensaje de odómetro se descarte en silencio
-    // como "categoria_inactiva" — la feature quedaría inerte hasta que alguien la active a mano.
-    // Marcador de versión: la PRESENCIA de la clave "odometro" en acciones_automaticas indica
-    // que esta config ya "conoce" la categoría. Si falta, es una config vieja → activamos
-    // odometro por defecto (paridad con una instalación nueva), UNA sola vez: apenas el operador
-    // guarde desde la UI, la clave queda fijada y a partir de ahí manda su preferencia explícita
-    // (puede apagarla y se respeta). No requiere correr ningún SQL.
-    const accionesGuardadas =
-      data.acciones_automaticas && typeof data.acciones_automaticas === "object" ? data.acciones_automaticas : {};
-    const configConoceOdometro = "odometro" in accionesGuardadas;
-
-    let categorias = Array.isArray(data.categorias_activas) ? data.categorias_activas : CONFIG_DEFECTO.categorias_activas;
-    if (!configConoceOdometro && !categorias.includes("odometro")) {
-      categorias = [...categorias, "odometro"];
-    }
-
-    return {
-      ...CONFIG_DEFECTO,
-      ...data,
-      categorias_activas: categorias,
-      // Fusión por clave (no reemplazo del objeto entero): una config vieja hereda el default
-      // odometro:true; una nueva con el operador habiendo apagado algo conserva su elección.
-      acciones_automaticas: { ...CONFIG_DEFECTO.acciones_automaticas, ...accionesGuardadas },
-      palabras_clave: Array.isArray(data.palabras_clave) ? data.palabras_clave : [],
-    };
+    return normalizarConfigRadar(data);
   } catch {
-    return CONFIG_DEFECTO;
+    return { ...CONFIG_DEFECTO };
   }
 }
 
