@@ -74,6 +74,60 @@ export default function ConfigOperacionesPage() {
     showToast(error ? "Error al guardar" : "Canales guardados", !error);
   };
 
+  // ── Editor de plantillas Meta (textos de los mensajes WhatsApp) ──
+  type PlantillaMeta = { id: string; name: string; status: string; language: string; category: string; body: string; vars: number; botones: number };
+  const [plantillas, setPlantillas] = useState<PlantillaMeta[] | null>(null);
+  const [cargandoTpl, setCargandoTpl] = useState(false);
+  const [guardandoTpl, setGuardandoTpl] = useState<string | null>(null);
+
+  const authHeaders = async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    return { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token ?? ""}` };
+  };
+
+  const cargarPlantillas = async () => {
+    setCargandoTpl(true);
+    try {
+      const res = await fetch("/api/plantillas-meta?numero=avisos", { headers: await authHeaders() });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error ?? "Error");
+      setPlantillas(j.plantillas ?? []);
+    } catch (e: any) {
+      showToast("Error al cargar plantillas: " + e.message, false);
+    } finally {
+      setCargandoTpl(false);
+    }
+  };
+
+  const setBodyTpl = (id: string, body: string) =>
+    setPlantillas((prev) => (prev ?? []).map((t) => (t.id === id ? { ...t, body } : t)));
+
+  const guardarPlantilla = async (t: PlantillaMeta) => {
+    if (!confirm(`¿Enviar el nuevo texto de "${t.name}" a revisión de Meta?\nMientras esté en revisión, ese aviso no se enviará; al aprobarse vuelve a funcionar solo.`)) return;
+    setGuardandoTpl(t.id);
+    try {
+      const res = await fetch("/api/plantillas-meta", {
+        method: "POST",
+        headers: await authHeaders(),
+        body: JSON.stringify({ id: t.id, body: t.body }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error ?? "Error");
+      showToast(j.mensaje ?? "Enviado a revisión");
+      cargarPlantillas();
+    } catch (e: any) {
+      showToast(e.message, false);
+    } finally {
+      setGuardandoTpl(null);
+    }
+  };
+
+  const TPL_STATUS: Record<string, string> = {
+    APPROVED: "bg-green-100 text-green-700", PENDING: "bg-amber-100 text-amber-700",
+    IN_APPEAL: "bg-amber-100 text-amber-700", REJECTED: "bg-red-100 text-red-700",
+    PAUSED: "bg-gray-200 text-gray-600",
+  };
+
   const toggleDest = (c: AlertaCfg, id: number) => {
     const set = new Set(c.destinatarios);
     set.has(id) ? set.delete(id) : set.add(id);
@@ -238,6 +292,48 @@ export default function ConfigOperacionesPage() {
             </div>
           </div>
         ))}
+      </div>
+
+      {/* Editor de textos de mensajes (plantillas Meta) */}
+      <div className="bg-white border border-gray-200 rounded-2xl p-5 mt-6">
+        <h2 className="text-sm font-bold text-gray-700 mb-1">Textos de los mensajes (WhatsApp)</h2>
+        <p className="text-xs text-gray-500 mb-3">
+          Edita aquí el texto de cada mensaje sin salir del ERP. <strong>Ojo:</strong> cada cambio pasa por la
+          revisión de Meta (minutos a horas) y ese aviso <strong>no se envía mientras esté “PENDING”</strong>;
+          al aprobarse vuelve a funcionar solo. Las variables <code className="font-mono">{"{{1}}"}, {"{{2}}"}…</code>{" "}
+          no se pueden cambiar (el sistema pone los datos ahí): edita el texto alrededor de ellas.
+        </p>
+        {!plantillas ? (
+          <button onClick={cargarPlantillas} disabled={cargandoTpl}
+            className="text-sm font-semibold text-white bg-[#0b315f] px-4 py-2 rounded-lg disabled:opacity-50">
+            {cargandoTpl ? "Consultando Meta…" : "Cargar plantillas desde Meta"}
+          </button>
+        ) : plantillas.length === 0 ? (
+          <div className="text-xs text-gray-400">No hay plantillas en la cuenta de avisos todavía.</div>
+        ) : (
+          <div className="space-y-4">
+            {plantillas.map((t) => (
+              <div key={t.id} className="border border-gray-100 rounded-xl p-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="font-mono text-xs font-bold text-[#0b315f]">{t.name}</span>
+                  <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${TPL_STATUS[t.status] ?? "bg-gray-100 text-gray-600"}`}>{t.status}</span>
+                  <span className="text-[10px] text-gray-400">{t.vars} variable(s){t.botones ? ` · ${t.botones} botón(es)` : ""}</span>
+                </div>
+                <textarea
+                  className={input + " min-h-[110px] font-mono text-[13px]"}
+                  value={t.body}
+                  onChange={(e) => setBodyTpl(t.id, e.target.value)}
+                />
+                <div className="mt-2 flex justify-end">
+                  <button onClick={() => guardarPlantilla(t)} disabled={guardandoTpl === t.id}
+                    className="text-xs font-semibold text-white bg-[#0b315f] px-4 py-2 rounded-lg hover:bg-[#0a2a52] disabled:opacity-50">
+                    {guardandoTpl === t.id ? "Enviando a Meta…" : "Guardar y enviar a revisión"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {toast && (

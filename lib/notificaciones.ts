@@ -104,8 +104,7 @@ const PLANTILLA_IDIOMA       = "es";
 //   {{3}} hora de salida
 //   {{4}} punto de ORIGEN
 //   {{5}} punto de DESTINO
-//   {{6}} dirección del punto de partida (fallback "No especificada")
-//   {{7}} placa del vehículo (fallback "Por asignar")
+//   {{6}} placa del vehículo (fallback "Por asignar")
 // Botón URL DINÁMICO #0 "Ver punto de partida": {{1}} = lat,lng del primer paradero
 // (fallback: dirección/origen como texto de búsqueda). Misma estructura para la
 // plantilla `conductor_cambio_servicio` (solo cambia el texto fijo).
@@ -612,7 +611,6 @@ export async function notificarConductor(
   const clienteJoin: any = Array.isArray(reserva.cliente) ? reserva.cliente[0] : reserva.cliente;
   const origen  = reserva.origen  || primera?.nombre || clienteJoin?.empresa || clienteJoin?.nombre || "Por confirmar";
   const destino = reserva.destino || (ultima && ultima !== primera ? ultima.nombre : null) || "Por confirmar";
-  const direccion = primera?.direccion || "No especificada";
   // Botón "Ver punto de partida": coordenadas reales del primer paradero; si no hay,
   // la dirección/origen como búsqueda de texto en Google Maps.
   const ubicacionQuery = (primera?.lat != null && primera?.lng != null)
@@ -634,7 +632,6 @@ export async function notificarConductor(
         horaTexto,
         origen,
         destino,
-        direccion,
         placa ?? "Por asignar",
       ],
       phoneAvisos(),
