@@ -357,6 +357,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       { href: "/configuracion/costos",   label: "Costos",         sub: "Flota y combustible",  icon: Ic.Settings, modulo: "ajustes"       },
       { href: "/configuracion/usuarios", label: "Usuarios",       sub: "Permisos de acceso",   icon: Ic.Lock,     modulo: "usuarios"      },
       { href: "/configuracion/elia",     label: "ELIA",           sub: "Asistente IA · gasto", icon: Ic.Bot,      modulo: "configuracion" },
+      { href: "/configuracion/operaciones", label: "Alertas y Mensajes", sub: "Avisos WhatsApp · contactos", icon: Ic.Bell, modulo: "configuracion" },
       { href: "/configuracion/sistema",  label: "Sistema",        sub: "Parámetros generales", icon: Ic.Wrench,    modulo: "configuracion" },
       { href: "/configuracion/legal",   label: "Páginas Legales",sub: "Privacidad · Términos",icon: Ic.FileText, modulo: "configuracion" },
     ],

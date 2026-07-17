@@ -4,6 +4,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { notificarReserva, notificarConductor } from "@/lib/notificaciones";
+import { reclamarEnvio, liberarEnvio } from "@/lib/alertas";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -104,21 +105,30 @@ export async function GET(req: NextRequest) {
     }
 
     const resultados: any[] = [];
-    // Pasajeros
+    // Pasajeros. reclamarEnvio = candado insert-once COMPARTIDO con el motor de alertas
+    // (/api/alertas-flota/tick): si ese motor ya reclamó la reserva, aquí se salta y no
+    // hay doble envío aunque ambos corran a la misma hora (TOCTOU resuelto atómicamente).
     for (const reserva of pendientesPasajero) {
+      if (!(await reclamarEnvio("recordatorio_pasajero", reserva.id))) continue;
       try {
         const res = await notificarReserva(reserva.id, "cron_recordatorio");
+        // Nada entregado y todo falló (transitorio) → liberar para que un tick reintente.
+        if (res.resumen.enviados === 0 && res.resumen.errores > 0) await liberarEnvio("recordatorio_pasajero", reserva.id);
         resultados.push({ reservaId: reserva.id, tipo: "pasajeros", ...res.resumen });
       } catch (e: any) {
+        await liberarEnvio("recordatorio_pasajero", reserva.id);
         resultados.push({ reservaId: reserva.id, tipo: "pasajeros", error: e.message });
       }
     }
-    // Conductor (dedupe propio)
+    // Conductor
     for (const reserva of pendientesConductor) {
+      if (!(await reclamarEnvio("recordatorio_conductor", reserva.id))) continue;
       try {
         const rc = await notificarConductor(reserva.id, "cron_recordatorio");
+        if (rc.estado === "error") await liberarEnvio("recordatorio_conductor", reserva.id); // transitorio → reintentar
         resultados.push({ reservaId: reserva.id, tipo: "conductor", conductor: rc.estado });
       } catch (e: any) {
+        await liberarEnvio("recordatorio_conductor", reserva.id);
         resultados.push({ reservaId: reserva.id, tipo: "conductor", error: e.message });
       }
     }

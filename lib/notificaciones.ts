@@ -123,6 +123,27 @@ export function phoneAvisos(): string | undefined {
   return process.env.META_PHONE_NUMBER_ID_AVISOS ?? process.env.META_PHONE_NUMBER_ID_PASAJEROS;
 }
 
+/**
+ * Envío de bajo nivel para el motor de alertas operativas: manda una plantilla al
+ * teléfono dado desde el 2do número (avisos). Normaliza el teléfono, no lanza.
+ * El dedupe/logging lo maneja el motor (lib/alertas.ts); esto solo envía.
+ */
+export async function enviarAvisoWhatsApp(
+  telefonoRaw: string,
+  plantilla: string,
+  parametros: string[],
+): Promise<{ ok: boolean; error?: string }> {
+  const phone = phoneAvisos();
+  if (!phone) return { ok: false, error: "META_PHONE_NUMBER_ID_AVISOS no configurado" };
+  if (!telefonoRaw?.trim()) return { ok: false, error: "sin teléfono" };
+  try {
+    await enviarWhatsAppPlantilla(normalizarTelefono(telefonoRaw), plantilla, PLANTILLA_IDIOMA, parametros, phone);
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
+  }
+}
+
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://www.transportesafa.com";
 
 // ─── TEMPLATES ────────────────────────────────────────────────────────────────
@@ -380,6 +401,18 @@ export async function notificarReserva(
     .select("id, nombre, email, telefono")
     .in("id", pasajeroIds);
 
+  // Config de canales (anti-spam) + quiénes YA tienen la app (suscripción push activa).
+  // Si la tabla aún no existe (migración sin correr), los defaults dejan el comportamiento
+  // previo (los 3 canales a todos, sin filtrar por app).
+  const { data: cfgCanalRow } = await supabaseAdmin.from("config_canales").select("*").eq("id", 1).maybeSingle();
+  const canal = {
+    push_activo:            cfgCanalRow?.push_activo            ?? true,
+    email_activo:           cfgCanalRow?.email_activo           ?? true,
+    email_solo_sin_app:     cfgCanalRow?.email_solo_sin_app     ?? false,
+    whatsapp_activo:        cfgCanalRow?.whatsapp_activo        ?? true,
+    whatsapp_solo_sin_app:  cfgCanalRow?.whatsapp_solo_sin_app  ?? false,
+  };
+
   // Mapa pasajero_id → parada
   const pasajeroParada: Record<number, number> = {};
   for (const a of asignaciones) {
@@ -421,8 +454,31 @@ export async function notificarReserva(
       empresaCliente,
     };
 
-    // Canal 1: Email
-    if (pas.email && process.env.RESEND_API_KEY) {
+    // Canal 1: Push nativo PRIMERO — así "solo si no tiene app" se decide por la ENTREGA
+    // real del push, no por la mera existencia de una suscripción (que puede estar muerta
+    // sin podar). Si el push NO se entrega, email/WhatsApp SÍ salen como respaldo.
+    let pushEntregado = false;
+    if (canal.push_activo) try {
+      const payloadPush = esRecordatorio
+        ? payloadsViaje.recordatorio(reservaId, datosN.fecha, datosN.hora, datosN.paradaNombre)
+        : payloadsViaje.confirmacion(reservaId, datosN.fecha, datosN.hora, datosN.paradaNombre);
+      const rPush = await enviarPushAPasajeros([pas.id], payloadPush, { ttl: 43200 });
+      if (rPush.enviados > 0) {
+        pushEntregado = true;
+        resultado.canales.push({ tipo: "push", estado: "enviado" });
+        enviados++;
+        await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "push", estado: "enviado", destinatario: "push", trigger });
+      } else if (rPush.fallidos > 0) {
+        resultado.canales.push({ tipo: "push", estado: "error", detalle: "entrega push falló" });
+        errores++;
+        await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "push", estado: "error", destinatario: "push", trigger, error: "entrega push falló" });
+      }
+    } catch (e: any) {
+      console.warn("[notificaciones] canal push:", e?.message);
+    }
+
+    // Canal 2: Email (respeta config; "solo si no tiene app" = solo si NO recibió push)
+    if (pas.email && process.env.RESEND_API_KEY && canal.email_activo && (!canal.email_solo_sin_app || !pushEntregado)) {
       try {
         const html    = esRecordatorio ? htmlEmailRecordatorio(datosN) : htmlEmailSincronizacion(datosN);
         const prefijo = datosN.empresaCliente ? `${datosN.empresaCliente} · ` : "";
@@ -440,8 +496,8 @@ export async function notificarReserva(
       }
     }
 
-    // Canal 2: WhatsApp por plantilla Meta (2do número de avisos)
-    if (pas.telefono && phoneAvisos()) {
+    // Canal 3: WhatsApp por plantilla Meta (config; "solo si no tiene app" = solo si NO recibió push)
+    if (pas.telefono && phoneAvisos() && canal.whatsapp_activo && (!canal.whatsapp_solo_sin_app || !pushEntregado)) {
       const tel = normalizarTelefono(pas.telefono);
       try {
         const vehiculoTexto = datosN.vehiculoPlaca
@@ -476,28 +532,6 @@ export async function notificarReserva(
         errores++;
         await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "whatsapp", estado: "error", destinatario: tel, trigger, error: e.message });
       }
-    }
-
-    // Canal 3: Push nativo (ADITIVO — no reemplaza email/WhatsApp). Solo cuenta
-    // como canal si el pasajero tiene alguna suscripción registrada; si el envío
-    // a esa suscripción falla, se loguea como error.
-    try {
-      const payloadPush = esRecordatorio
-        ? payloadsViaje.recordatorio(reservaId, datosN.fecha, datosN.hora, datosN.paradaNombre)
-        : payloadsViaje.confirmacion(reservaId, datosN.fecha, datosN.hora, datosN.paradaNombre);
-      const rPush = await enviarPushAPasajeros([pas.id], payloadPush, { ttl: 43200 });
-      if (rPush.enviados > 0) {
-        resultado.canales.push({ tipo: "push", estado: "enviado" });
-        enviados++;
-        await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "push", estado: "enviado", destinatario: "push", trigger });
-      } else if (rPush.fallidos > 0) {
-        resultado.canales.push({ tipo: "push", estado: "error", detalle: "entrega push falló" });
-        errores++;
-        await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "push", estado: "error", destinatario: "push", trigger, error: "entrega push falló" });
-      }
-      // sin suscripción → no es un canal del pasajero: no se loguea ni bloquea sin_canal
-    } catch (e: any) {
-      console.warn("[notificaciones] canal push:", e?.message);
     }
 
     // Sin canal disponible
@@ -602,6 +636,17 @@ export async function avisarLlegadaWhatsApp(
 ): Promise<void> {
   if (!phoneAvisos() || pasajeroIds.length === 0) return;
 
+  // Respeta la config de canales: si WhatsApp está apagado, no avisa; y con "solo sin app"
+  // el aviso de llegada por WhatsApp solo va a quien NO tiene push (evita duplicar el push
+  // de llegada que proximidad.ts ya envió).
+  const { data: cfgCanalRow } = await supabaseAdmin.from("config_canales").select("whatsapp_activo, whatsapp_solo_sin_app").eq("id", 1).maybeSingle();
+  const waActivo   = cfgCanalRow?.whatsapp_activo ?? true;
+  const waSoloSin  = cfgCanalRow?.whatsapp_solo_sin_app ?? false;
+  if (!waActivo) return;
+  const { data: susc } = await supabaseAdmin
+    .from("push_suscripciones").select("pasajero_id").in("pasajero_id", pasajeroIds).eq("activo", true);
+  const tienePush = new Set<number>((susc || []).map((s: any) => Number(s.pasajero_id)));
+
   const { data: pasajeros } = await supabaseAdmin
     .from("pasajeros")
     .select("id, nombre, telefono")
@@ -609,6 +654,7 @@ export async function avisarLlegadaWhatsApp(
 
   for (const pas of pasajeros || []) {
     if (!pas.telefono) continue;
+    if (waSoloSin && tienePush.has(pas.id)) continue; // tiene app → ya recibió el push de llegada
     const tel = normalizarTelefono(pas.telefono);
     const primerNombre = (pas.nombre || "").trim().split(/\s+/)[0] || "Hola";
     try {
