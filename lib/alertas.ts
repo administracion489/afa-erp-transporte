@@ -82,6 +82,26 @@ export function directorioDe(cfg: AlertaConfig, destMap: Map<number, Destinatari
     .filter((d): d is Destinatario => !!d && d.activo && !!d.telefono);
 }
 
+/**
+ * Teléfono de CONTINGENCIA que se muestra en los mensajes al conductor ("si tienes un
+ * problema, llama al Coordinador: …"). Sale del directorio (es_contingencia=true) para
+ * poder cambiarlo desde el ERP sin re-aprobar plantillas en Meta. Fallback: número fijo.
+ */
+export async function telefonoContingencia(): Promise<string> {
+  try {
+    const { data } = await admin
+      .from("alerta_destinatarios")
+      .select("telefono")
+      .eq("activo", true)
+      .eq("es_contingencia", true)
+      .limit(1)
+      .maybeSingle();
+    const t = (data?.telefono || "").trim();
+    if (t) return t.startsWith("+") ? t : (t.replace(/\D/g, "").length === 9 ? `+51 ${t}` : t);
+  } catch { /* tabla/columna aún sin migrar → fallback */ }
+  return "+51 912 569 005";
+}
+
 // ─── DEDUPE INSERT-ONCE (alerta_enviada) ───────────────────────────────────────
 
 /**

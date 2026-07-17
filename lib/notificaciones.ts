@@ -4,6 +4,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { enviarWhatsAppPlantilla } from "@/lib/crm-meta";
 import { enviarPushAPasajeros, payloadsViaje } from "@/lib/push";
+import { telefonoContingencia } from "@/lib/alertas";
 
 // Admin client para escribir logs sin RLS
 const supabaseAdmin = createClient(
@@ -105,6 +106,7 @@ const PLANTILLA_IDIOMA       = "es";
 //   {{4}} punto de ORIGEN
 //   {{5}} punto de DESTINO
 //   {{6}} placa del vehículo (fallback "Por asignar")
+//   {{7}} teléfono de contingencia (del directorio, es_contingencia=true)
 // Botón URL DINÁMICO #0 "Ver punto de partida": {{1}} = lat,lng del primer paradero
 // (fallback: dirección/origen como texto de búsqueda). Misma estructura para la
 // plantilla `conductor_cambio_servicio` (solo cambia el texto fijo).
@@ -620,6 +622,7 @@ export async function notificarConductor(
   const fechaTexto = reserva.fecha_servicio ? formatFecha(reserva.fecha_servicio) : "-";
   const horaTexto  = reserva.hora_servicio?.slice(0, 5) ?? "-";
   const tel        = normalizarTelefono(cond.telefono);
+  const telConting = await telefonoContingencia();
 
   try {
     await enviarWhatsAppPlantilla(
@@ -633,6 +636,7 @@ export async function notificarConductor(
         origen,
         destino,
         placa ?? "Por asignar",
+        telConting,
       ],
       phoneAvisos(),
       [{ index: 0, texto: encodeURIComponent(ubicacionQuery) }],

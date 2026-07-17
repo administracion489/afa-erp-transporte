@@ -2,7 +2,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
-type Destinatario = { id: number; nombre: string; funcion: string | null; telefono: string; activo: boolean };
+type Destinatario = { id: number; nombre: string; funcion: string | null; telefono: string; activo: boolean; es_contingencia?: boolean };
 type ModoTiempo = "evento" | "anticipacion" | "hora_fija";
 type AlertaCfg = {
   clave: string; nombre: string; descripcion: string | null; activo: boolean;
@@ -141,7 +141,7 @@ export default function ConfigOperacionesPage() {
     setNNombre(""); setNFuncion(""); setNTel(""); showToast("Contacto agregado"); cargar();
   };
   const guardarDest = async (d: Destinatario) => {
-    const { error } = await supabase.from("alerta_destinatarios").update({ nombre: d.nombre, funcion: d.funcion, telefono: d.telefono, activo: d.activo }).eq("id", d.id);
+    const { error } = await supabase.from("alerta_destinatarios").update({ nombre: d.nombre, funcion: d.funcion, telefono: d.telefono, activo: d.activo, es_contingencia: d.es_contingencia ?? false }).eq("id", d.id);
     showToast(error ? "Error al guardar" : "Contacto actualizado", !error);
   };
   const borrarDest = async (id: number) => {
@@ -219,6 +219,9 @@ export default function ConfigOperacionesPage() {
               <input className={input + " flex-1 min-w-[140px]"} value={d.funcion ?? ""} onChange={(e) => setDest(d.id, { funcion: e.target.value })} placeholder="Función (ej: Coord. Operaciones)" />
               <input className={input + " w-32"} value={d.telefono} onChange={(e) => setDest(d.id, { telefono: e.target.value })} placeholder="987654321" />
               <label className="flex items-center gap-1 text-xs text-gray-600"><input type="checkbox" checked={d.activo} onChange={(e) => setDest(d.id, { activo: e.target.checked })} /> Activo</label>
+              <label className="flex items-center gap-1 text-xs text-gray-600" title="Su número aparece en los mensajes al conductor como contacto de contingencia">
+                <input type="checkbox" checked={d.es_contingencia ?? false} onChange={(e) => setDest(d.id, { es_contingencia: e.target.checked })} /> 🆘 Contingencia
+              </label>
               <button onClick={() => guardarDest(d)} className="text-xs font-semibold text-white bg-[#0b315f] px-3 py-1.5 rounded-lg">Guardar</button>
               <button onClick={() => borrarDest(d.id)} className="text-xs text-red-500 px-2">✕</button>
             </div>

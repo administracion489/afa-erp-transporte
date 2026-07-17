@@ -15,7 +15,7 @@ import { createClient } from "@supabase/supabase-js";
 import { enviarAvisoWhatsApp, notificarReserva, notificarConductor } from "@/lib/notificaciones";
 import {
   cargarMotor, directorioDe, reclamarEnvio, liberarEnvio, cargarEstados, upsertEstado,
-  hoyLima, ahoraLimaMin, hhmmAMin, type AlertaConfig,
+  hoyLima, ahoraLimaMin, hhmmAMin, telefonoContingencia, type AlertaConfig,
 } from "@/lib/alertas";
 import { detectarSolapesJornada, type ReservaFlota } from "@/lib/alertas-flota";
 
@@ -67,6 +67,7 @@ async function handler(req: NextRequest) {
     const hoy = hoyLima();
     const manana = fechaManana();
     const ahora = ahoraLimaMin();
+    const telConting = await telefonoContingencia();
     const res: Record<string, number> = {};
 
     const { data: reservas } = await admin
@@ -220,7 +221,7 @@ async function handler(req: NextRequest) {
           const nombre = r.conductor_id ? nombreCorto(condMap.get(r.conductor_id)?.nombre) : "Conductor";
           let exitos = 0, fallos = 0;
           if (cfg.notifica_conductor && r.conductor_id) {
-            const rc = await aConductor(cfg, r.conductor_id, [nombre, hora, ruta]);
+            const rc = await aConductor(cfg, r.conductor_id, [nombre, hora, ruta, telConting]);
             if (rc === "enviado") exitos++; else if (rc === "fallo") fallos++;
           }
           const rd = await aDirectorio(cfg, ["No inició a tiempo", nombre, `${ruta} ${hora}`, `Pasaron ${gracia}+ min de la hora y no marcó inicio.`]);
@@ -258,7 +259,7 @@ async function handler(req: NextRequest) {
               const nombre = r.conductor_id ? nombreCorto(condMap.get(r.conductor_id)?.nombre) : "Conductor";
               let exitos = 0;
               if (cfg.notifica_conductor && r.conductor_id) {
-                if ((await aConductor(cfg, r.conductor_id, [nombre, ruta])) === "enviado") exitos++;
+                if ((await aConductor(cfg, r.conductor_id, [nombre, ruta, telConting])) === "enviado") exitos++;
               }
               exitos += (await aDirectorio(cfg, ["GPS sin señal", nombre, ruta, `Sin ubicación hace ${Math.round(minsSin)} min.`])).enviados;
               if (exitos > 0) { await upsertEstado(r.id, { gps_silencio_at: new Date().toISOString() }); n++; }
