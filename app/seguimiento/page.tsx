@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo, useCallback } from "react";
 import Link from "next/link";
 import ModalGps from "@/components/seguimiento/ModalGps";
 import PanelMensajesPasajeros from "@/components/seguimiento/PanelMensajesPasajeros";
+import DescargaMasivaModal from "@/components/seguimiento/DescargaMasivaModal";
 import { supabase } from "@/lib/supabase";
 import { ESTADOS_RESERVA, ESTADO_ADMIN_INICIAL } from "@/lib/estados";
 import { idAfa } from "@/lib/folio";
@@ -1203,6 +1204,7 @@ export default function SeguimientoPage() {
   const [busqueda,    setBusqueda]    = useState("");
   const [gpsModal,    setGpsModal]    = useState<ServicioView | null>(null);
   const [drawer,      setDrawer]      = useState<ServicioView | null>(null);
+  const [descargaMasiva, setDescargaMasiva] = useState(false);
   const [empresaPerfil, setEmpresaPerfil] = useState<EmpresaPerfil | null>(null);
 
   // Cabecera de los documentos (logo/nombre/contacto AFA). Una sola vez por página.
@@ -1361,6 +1363,12 @@ export default function SeguimientoPage() {
             </button>
             {/* ── MENSAJES PASAJEROS ── */}
             <PanelMensajesPasajeros />
+            {/* ── DESCARGA MASIVA DE DOCUMENTOS ── */}
+            <button onClick={()=>setDescargaMasiva(true)}
+              className="flex items-center gap-2 bg-white border border-gray-200 hover:border-[#0b315f] text-[#0b315f] px-4 py-2.5 rounded-xl text-sm font-bold transition-colors shadow-sm"
+              title="Descargar Manifiestos MTC y Reportes en bloque, agrupados por ruta">
+              <Ic.FileText size={15} color="#0b315f"/> Descarga masiva
+            </button>
             {/* ── MAPA GLOBAL ── */}
             <Link href="/monitoreo" className="flex items-center gap-2 bg-[#0b315f] text-white px-4 py-2.5 rounded-xl text-sm font-bold hover:bg-[#1262bd] transition-colors shadow-sm">
               <Ic.Map size={15} color="white"/> Ver Mapa Global <Ic.ExternalLink size={13} color="white"/>
@@ -1506,6 +1514,11 @@ export default function SeguimientoPage() {
       {/* ── DRAWER: FICHA DEL SERVICIO ── */}
       {drawer && (
         <FichaServicio s={drawer} onClose={() => setDrawer(null)} onRefresh={cargar} onGps={setGpsModal} empresaPerfil={empresaPerfil} />
+      )}
+
+      {/* ── MODAL: DESCARGA MASIVA POR RUTA ── */}
+      {descargaMasiva && (
+        <DescargaMasivaModal fechaInicial={fechaFiltro} onClose={() => setDescargaMasiva(false)} />
       )}
     </div>
   );

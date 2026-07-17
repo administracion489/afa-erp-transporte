@@ -94,8 +94,153 @@ export type DatosServicioDoc = {
   generadoEn?: Date;
 };
 
-// ─── Reporte de Servicio (detalle de embarques + % cumplimiento + firma) ─────
+// ══════════════════════════════════════════════════════════════════════════════
+// SHELL + CSS COMPARTIDOS  (para poder combinar N documentos en UN solo imprimible)
+// Los dos templates de abajo devuelven SOLO el <body> (funciones *Body). `shellHTML`
+// arma el documento completo. El CSS de cada tipo vive acá una sola vez → en modo lote
+// se emite UNA vez y cada servicio va en su propia página (page-break-before). La salida
+// de un documento SUELTO queda idéntica a la versión previa (mismo <head>, mismo CSS,
+// mismo auto-print) para no alterar el portal cliente ni el manifiesto legal.
+// ══════════════════════════════════════════════════════════════════════════════
+function shellHTML(title: string, css: string, body: string, autoprint: boolean): string {
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>${title}</title>
+<style>
+${css}
+</style></head><body>${body}${autoprint ? `<script>window.onload=()=>window.print()</script>` : ""}</body></html>`;
+}
+
+const REPORTE_CSS = `@page{size:A4;margin:16mm 14mm}
+*{box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#1e293b;margin:0;background:#fff}
+.hd{display:flex;justify-content:space-between;align-items:center;border:1.5px solid #cbd5e1;border-left:5px solid #0b315f;padding:10px 16px;gap:12px;background:#f8faff;margin-bottom:0;border-radius:4px 4px 0 0}
+.hd-center{text-align:center;flex:1}
+.hd-right{text-align:right;min-width:120px}
+.hd-title{background:linear-gradient(135deg,#0b315f 0%,#1e4d8c 100%);padding:9px 18px;margin-bottom:18px;border-radius:0 0 4px 4px}
+.hd-title h1{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin:0;color:#fff}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+.box{border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;background:#fff}
+.box-accent{border-left:4px solid #0b315f}
+.box-green{border-left:4px solid #1e4d8c}
+.box-red{border-left:4px solid #334155}
+.bt{font-weight:800;font-size:9px;color:#0b315f;text-transform:uppercase;letter-spacing:1px;padding-bottom:8px;margin-bottom:10px;border-bottom:1.5px solid #e2e8f0}
+table{width:100%;border-collapse:collapse;font-size:10.5px;margin-bottom:0}
+thead tr{background:#f1f5f9}
+thead th{padding:8px 14px;text-align:left;font-size:9px;color:#475569;font-weight:700;letter-spacing:.5px;border-bottom:2px solid #cbd5e1;text-transform:uppercase}
+tbody tr:nth-child(even){background:#f8fafc}
+tbody td{vertical-align:middle}
+.kv{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:10.5px}
+.kv:last-child{border-bottom:none}
+.kv .lbl{color:#64748b}
+.kv .val{font-weight:700;color:#1e293b}
+.ft{border-top:1.5px solid #e2e8f0;padding-top:10px;text-align:center;font-size:8.5px;color:#94a3b8;margin-top:20px}
+@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}`;
+
+const MANIFIESTO_CSS = `@page{size:A4;margin:14mm 12mm}*{box-sizing:border-box}
+body{font-family:Arial,sans-serif;font-size:9.5px;color:#111827;margin:0}
+.hd-top{display:flex;justify-content:space-between;align-items:center;border:2px solid #111827;padding:10px 14px;gap:12px}
+.hd-empresa{text-align:center;flex:1}
+.hd-right{text-align:right;min-width:110px}
+.hd-title{text-align:center;border:2px solid #111827;border-top:none;padding:7px;background:#f9fafb}
+.hd-title h1{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin:0;color:#111827}
+.hd-title p{font-size:8px;color:#6b7280;margin:3px 0 0}
+.data-grid{display:grid;grid-template-columns:1fr 1fr;border:2px solid #111827;border-top:none}
+.dc{padding:5px 10px;border-right:1px solid #9ca3af;border-bottom:1px solid #9ca3af}
+.dc:nth-child(even){border-right:none}
+.dc:nth-last-child(1):nth-child(odd){grid-column:1/-1;border-right:none}
+.dc .lbl{font-size:7px;font-weight:700;text-transform:uppercase;color:#6b7280;letter-spacing:.5px}
+.dc .val{font-size:10px;font-weight:700;color:#111827;margin-top:2px}
+table{width:100%;border-collapse:collapse;font-size:9px;margin-top:0}
+thead tr{background:#111827;color:white}
+thead th{padding:6px 8px;text-align:left;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;border:1px solid #374151}
+tbody tr:nth-child(even){background:#f9fafb}
+.ft{margin-top:14px;border-top:2px solid #111827;padding-top:10px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+.ft-box{text-align:center}
+.ft-line{border-top:1px solid #374151;margin-top:28px;padding-top:4px;font-size:7.5px;color:#6b7280}
+.rd-ref{font-size:7px;color:#9ca3af;text-align:center;margin-top:8px}
+@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}`;
+
+// Wrappers públicos: documento suelto = shell + body (salida byte-idéntica a la previa).
 export function reporteServicioHTML(d: DatosServicioDoc): string {
+  return shellHTML(`Reporte · ${fmtFecha(d.servicio.fecha)}`, REPORTE_CSS, reporteServicioBody(d), true);
+}
+export function manifiestoMtcHTML(d: DatosServicioDoc): string {
+  return shellHTML(`Manifiesto MTC · ${fmtFecha(d.servicio.fecha)}`, MANIFIESTO_CSS, manifiestoMtcBody(d), true);
+}
+
+// ─── Descarga MASIVA por ruta: carátula + N documentos, uno por página ────────
+export type LoteDocItem = { fecha: string | null; cliente: string; placa: string | null; pax: number; estado: string };
+export type LoteMeta = {
+  tituloDoc: string;            // "Manifiestos de Pasajeros (MTC)" / "Reportes de Servicio"
+  ruta: string;                 // "ORIGEN → DESTINO · N paraderos · HH:MM"
+  rango: string;                // "12/07/2026" o "12/07/2026 – 18/07/2026"
+  empresaNombre?: string | null;
+  logoUrl?: string | null;
+  items: LoteDocItem[];         // índice (una fila por servicio del paquete)
+  generadoEn?: Date;
+};
+
+// Evita cortar una fila de pasajero entre dos páginas dentro de un documento largo.
+const LOTE_EXTRA_CSS = `tr{page-break-inside:avoid}`;
+
+// Carátula del paquete: SOLO estilos inline + grid de <div> (no usa <table> ni las clases
+// del documento) para que el CSS global del manifiesto/reporte no la pinte por accidente.
+function coverLoteHTML(meta: LoteMeta): string {
+  const now  = meta.generadoEn || new Date();
+  const logo = meta.logoUrl || "/logoafacotizacion.jpg";
+  const emp  = meta.empresaNombre || "AFA Tours Peru SAC";
+  const cel  = "padding:6px 8px;border-bottom:1px solid #e5e7eb;font-size:11px";
+  const filas = meta.items.map((it, i) => `
+    <div style="${cel};text-align:center;color:#6b7280">${i + 1}</div>
+    <div style="${cel};font-weight:700">${esc(it.fecha ? fmtFecha(it.fecha) : "–")}</div>
+    <div style="${cel}">${esc(it.cliente || "–")}</div>
+    <div style="${cel};text-align:center;font-family:monospace">${esc(it.placa || "–")}</div>
+    <div style="${cel};text-align:center">${it.pax}</div>
+    <div style="${cel};text-align:center;color:#6b7280">${esc(it.estado)}</div>`).join("");
+  const th = "padding:7px 8px;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.4px;color:#fff;background:#0b315f";
+  return `<div style="font-family:Arial,sans-serif;color:#111827">
+  <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #0b315f;padding-bottom:12px;margin-bottom:8px">
+    <img src="${logo}" alt="AFA" style="height:52px;object-fit:contain;max-width:170px"/>
+    <div style="text-align:right">
+      <div style="font-size:13px;font-weight:900;color:#0b315f">${esc(emp)}</div>
+      <div style="font-size:9px;color:#6b7280;margin-top:2px">Generado: ${now.toLocaleDateString("es-PE")} ${now.toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</div>
+    </div>
+  </div>
+  <div style="text-align:center;margin:22px 0 6px">
+    <div style="font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#6b7280">Paquete de documentos</div>
+    <div style="font-size:20px;font-weight:900;margin:6px 0;color:#0b315f">${esc(meta.tituloDoc)}</div>
+  </div>
+  <div style="background:#f8faff;border:1.5px solid #cbd5e1;border-left:5px solid #0b315f;border-radius:6px;padding:14px 18px;margin:14px 0 18px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;font-size:12px">
+      <div><span style="color:#6b7280">Ruta:</span> <b>${esc(meta.ruta)}</b></div>
+      <div><span style="color:#6b7280">Periodo:</span> <b>${esc(meta.rango)}</b></div>
+      <div><span style="color:#6b7280">Total de servicios:</span> <b>${meta.items.length}</b></div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:34px 1fr 1.5fr 92px 46px 96px;border:1px solid #e5e7eb;border-radius:6px;overflow:hidden">
+    <div style="${th};text-align:center">#</div>
+    <div style="${th}">Fecha</div>
+    <div style="${th}">Cliente</div>
+    <div style="${th};text-align:center">Placa</div>
+    <div style="${th};text-align:center">Pax</div>
+    <div style="${th};text-align:center">Estado</div>
+    ${filas}
+  </div>
+  <p style="font-size:8px;color:#9ca3af;text-align:center;margin-top:14px">Cada servicio se imprime en su propia página a continuación · Documento generado por el sistema AFA</p>
+</div>`;
+}
+
+export function manifiestosMtcLoteHTML(docs: DatosServicioDoc[], meta: LoteMeta): string {
+  const pages = docs.map(d => `<div style="page-break-before:always">${manifiestoMtcBody(d)}</div>`).join("");
+  return shellHTML(`${meta.tituloDoc} · ${meta.rango}`, `${MANIFIESTO_CSS}\n${LOTE_EXTRA_CSS}`, `${coverLoteHTML(meta)}${pages}`, true);
+}
+
+export function reportesLoteHTML(docs: DatosServicioDoc[], meta: LoteMeta): string {
+  const pages = docs.map(d => `<div style="page-break-before:always">${reporteServicioBody(d)}</div>`).join("");
+  return shellHTML(`${meta.tituloDoc} · ${meta.rango}`, `${REPORTE_CSS}\n${LOTE_EXTRA_CSS}`, `${coverLoteHTML(meta)}${pages}`, true);
+}
+
+// ─── Reporte de Servicio (detalle de embarques + % cumplimiento + firma) ─────
+function reporteServicioBody(d: DatosServicioDoc): string {
   const ps = d.paradas || [];
   const bl = d.boarding || [];   // boarding_log: solo para método/hora si existe
   const pp = d.pasajeros || [];
@@ -161,34 +306,7 @@ export function reporteServicioHTML(d: DatosServicioDoc): string {
 </div>
 `;
 
-  return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Reporte · ${fmtFecha(d.servicio.fecha)}</title>
-<style>
-@page{size:A4;margin:16mm 14mm}
-*{box-sizing:border-box}
-body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#1e293b;margin:0;background:#fff}
-.hd{display:flex;justify-content:space-between;align-items:center;border:1.5px solid #cbd5e1;border-left:5px solid #0b315f;padding:10px 16px;gap:12px;background:#f8faff;margin-bottom:0;border-radius:4px 4px 0 0}
-.hd-center{text-align:center;flex:1}
-.hd-right{text-align:right;min-width:120px}
-.hd-title{background:linear-gradient(135deg,#0b315f 0%,#1e4d8c 100%);padding:9px 18px;margin-bottom:18px;border-radius:0 0 4px 4px}
-.hd-title h1{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin:0;color:#fff}
-.g2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
-.box{border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;background:#fff}
-.box-accent{border-left:4px solid #0b315f}
-.box-green{border-left:4px solid #1e4d8c}
-.box-red{border-left:4px solid #334155}
-.bt{font-weight:800;font-size:9px;color:#0b315f;text-transform:uppercase;letter-spacing:1px;padding-bottom:8px;margin-bottom:10px;border-bottom:1.5px solid #e2e8f0}
-table{width:100%;border-collapse:collapse;font-size:10.5px;margin-bottom:0}
-thead tr{background:#f1f5f9}
-thead th{padding:8px 14px;text-align:left;font-size:9px;color:#475569;font-weight:700;letter-spacing:.5px;border-bottom:2px solid #cbd5e1;text-transform:uppercase}
-tbody tr:nth-child(even){background:#f8fafc}
-tbody td{vertical-align:middle}
-.kv{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:10.5px}
-.kv:last-child{border-bottom:none}
-.kv .lbl{color:#64748b}
-.kv .val{font-weight:700;color:#1e293b}
-.ft{border-top:1.5px solid #e2e8f0;padding-top:10px;text-align:center;font-size:8.5px;color:#94a3b8;margin-top:20px}
-@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
-</style></head><body>
+  return `
 <div class="hd">
   <div><img src="${pdfLogo}" alt="AFA" style="height:52px;object-fit:contain;max-width:150px"/></div>
   <div class="hd-center">
@@ -240,11 +358,11 @@ ${noEmb.length > 0 ? `<div class="box box-red" style="margin-bottom:14px"><div c
   </div>
 </div>
 <div class="ft">${esc(empNombre)} &nbsp;·&nbsp; ${esc(empTel)} &nbsp;·&nbsp; ${esc(empEmail)}</div>
-<script>window.onload=()=>window.print()</script></body></html>`;
+`;
 }
 
 // ─── Manifiesto oficial R.D. 1946-2009-MTC-15 ─────────────────────────────
-export function manifiestoMtcHTML(d: DatosServicioDoc): string {
+function manifiestoMtcBody(d: DatosServicioDoc): string {
   const bl  = d.boarding || [];
   const pp  = d.pasajeros || [];
   const cond = d.conductor;
@@ -290,32 +408,7 @@ export function manifiestoMtcHTML(d: DatosServicioDoc): string {
     filas = `<tr><td colspan="5" style="padding:16px;text-align:center;border:1px solid #374151;color:#6b7280;font-style:italic">Sin pasajeros registrados en este servicio</td></tr>`;
   }
 
-  return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Manifiesto MTC · ${fmtFecha(d.servicio.fecha)}</title>
-<style>
-@page{size:A4;margin:14mm 12mm}*{box-sizing:border-box}
-body{font-family:Arial,sans-serif;font-size:9.5px;color:#111827;margin:0}
-.hd-top{display:flex;justify-content:space-between;align-items:center;border:2px solid #111827;padding:10px 14px;gap:12px}
-.hd-empresa{text-align:center;flex:1}
-.hd-right{text-align:right;min-width:110px}
-.hd-title{text-align:center;border:2px solid #111827;border-top:none;padding:7px;background:#f9fafb}
-.hd-title h1{font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin:0;color:#111827}
-.hd-title p{font-size:8px;color:#6b7280;margin:3px 0 0}
-.data-grid{display:grid;grid-template-columns:1fr 1fr;border:2px solid #111827;border-top:none}
-.dc{padding:5px 10px;border-right:1px solid #9ca3af;border-bottom:1px solid #9ca3af}
-.dc:nth-child(even){border-right:none}
-.dc:nth-last-child(1):nth-child(odd){grid-column:1/-1;border-right:none}
-.dc .lbl{font-size:7px;font-weight:700;text-transform:uppercase;color:#6b7280;letter-spacing:.5px}
-.dc .val{font-size:10px;font-weight:700;color:#111827;margin-top:2px}
-table{width:100%;border-collapse:collapse;font-size:9px;margin-top:0}
-thead tr{background:#111827;color:white}
-thead th{padding:6px 8px;text-align:left;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;border:1px solid #374151}
-tbody tr:nth-child(even){background:#f9fafb}
-.ft{margin-top:14px;border-top:2px solid #111827;padding-top:10px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
-.ft-box{text-align:center}
-.ft-line{border-top:1px solid #374151;margin-top:28px;padding-top:4px;font-size:7.5px;color:#6b7280}
-.rd-ref{font-size:7px;color:#9ca3af;text-align:center;margin-top:8px}
-@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
-</style></head><body>
+  return `
 
 <div class="hd-top">
   <div>
@@ -367,7 +460,7 @@ tbody tr:nth-child(even){background:#f9fafb}
   <div class="ft-box"><div class="ft-line"><b>${esc(clienteNom || "EMPRESA")}</b><br/>Responsable de Servicio<br/>Firma y Sello</div></div>
 </div>
 <p class="rd-ref">R.D. N° 1946-2009-MTC-15 &nbsp;·&nbsp; AFA Tours Peru SAC &nbsp;·&nbsp; Tel: 966707225 / 01-3453707 &nbsp;·&nbsp; transporte@afatoursperu.com</p>
-<script>window.onload=()=>window.print()</script></body></html>`;
+`;
 }
 
 // ─── Único helper impuro: abre el HTML en una pestaña y dispara la impresión ──
