@@ -53,8 +53,10 @@ insert into public.alerta_config
 values
   ('recordatorio_pasajero','Recordatorio al pasajero','Aviso del servicio al pasajero','hora_fija',null,'08:00',null,
      false,true,'recordatorio_servicio'),
-  ('recordatorio_conductor','Recordatorio al conductor','Aviso del servicio asignado','hora_fija',null,'08:00',null,
+  ('recordatorio_conductor','Recordatorio al conductor','Aviso del servicio asignado (mismo contenido que "Servicio asignado")','anticipacion',720,null,null,
      true,false,'recordatorio_conductor'),
+  ('proximo_inicio','Próximo a iniciar','Aviso corto y urgente justo antes del servicio','anticipacion',90,null,null,
+     true,false,'conductor_proximo_inicio'),
   ('asignacion','Servicio asignado','Cuando se le asigna un servicio al conductor','evento',null,null,null,
      true,false,'recordatorio_conductor'),
   ('cambio','Cambio de servicio','Cuando cambia la hora o el vehículo','evento',null,null,null,

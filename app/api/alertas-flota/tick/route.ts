@@ -205,6 +205,29 @@ async function handler(req: NextRequest) {
       res.recordatorio_pasajero = n;
     }
 
+    // ── BLOQUE 3b: "próximo a iniciar" — aviso CORTO y urgente, por tramo (NUNCA
+    //    combinado ida+retorno: a esta hora cada tramo merece su propio empujón). ───
+    {
+      const cfg = activa("proximo_inicio");
+      if (cfg) {
+        let n = 0;
+        for (const r of todas) {
+          if (r.tipo_asignacion !== "propio" || !r.conductor_id) continue;
+          if (!["programada", "confirmada"].includes(r.estado)) continue;
+          if (!enViaRecordatorio(cfg, r, hoy, manana, ahora, force)) continue;
+          if (!(await reclamarEnvio("proximo_inicio", r.id))) continue;
+          const nombre = nombreCorto(condMap.get(r.conductor_id)?.nombre);
+          const hora = horaCorta(r.hora_servicio);
+          const origenTexto = r.origen || rutaDe(r);
+          const rc = await aConductor(cfg, r.conductor_id, [nombre, hora, origenTexto]);
+          if (rc === "enviado") n++;
+          else if (rc === "fallo") await liberarEnvio("proximo_inicio", r.id); // transitorio → reintentar
+          // "sin_canal" (sin teléfono/plantilla) queda reclamado: evita reintentar en bucle.
+        }
+        res.proximo_inicio = n;
+      }
+    }
+
     // ── BLOQUE 4: no inició a tiempo ────────────────────────────────────────────
     {
       const cfg = activa("no_inicio");
@@ -344,6 +367,15 @@ async function handler(req: NextRequest) {
   }
 }
 
+/** "YYYY-MM-DD" + "HH:MM" en hora Lima (UTC-5 fijo, sin horario de verano) → ms UTC absolutos. */
+function limaAUtcMs(fecha?: string | null, horaHHMM?: string | null): number | null {
+  if (!fecha) return null;
+  const [y, m, d] = fecha.split("-").map(Number);
+  const [hh, mm] = (horaHHMM || "00:00").split(":").map(Number);
+  if (!y || !m || !d || !Number.isFinite(hh)) return null;
+  return Date.UTC(y, m - 1, d, hh + 5, mm || 0);
+}
+
 /** ¿Estamos en la ventana de disparo del recordatorio? Piso amplio + dedupe = "una vez, sin perder". */
 function enViaRecordatorio(
   cfg: AlertaConfig, r: any, hoy: string, manana: string, ahora: number, force: boolean,
@@ -355,10 +387,15 @@ function enViaRecordatorio(
     return ahora >= hf && ahora < hf + VENTANA_HORA_FIJA;
   }
   if (cfg.modo_tiempo === "anticipacion") {
-    if (r.fecha_servicio !== hoy) return false; // anticipación → los de HOY, X min antes
-    const ini = hhmmAMin(r.hora_servicio); if (ini == null) return false;
-    const disparo = ini - (cfg.min_anticipacion ?? 90);
-    return ahora >= disparo && ahora < ini; // desde X min antes hasta la hora de inicio
+    // Fecha absoluta (no solo "minutos del día de hoy"): una anticipación de varias
+    // horas sobre un servicio de MAÑANA temprano dispara HOY en la noche — cruza la
+    // medianoche, y comparar solo r.fecha_servicio===hoy lo perdía por completo.
+    if (r.fecha_servicio !== hoy && r.fecha_servicio !== manana) return false;
+    const inicioMs = limaAUtcMs(r.fecha_servicio, r.hora_servicio);
+    if (inicioMs == null) return false;
+    const disparoMs = inicioMs - (cfg.min_anticipacion ?? 90) * 60_000;
+    const nowMs = Date.now();
+    return nowMs >= disparoMs && nowMs < inicioMs; // desde X min antes hasta la hora de inicio
   }
   return false;
 }
