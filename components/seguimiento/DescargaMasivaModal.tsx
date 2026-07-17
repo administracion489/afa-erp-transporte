@@ -42,6 +42,7 @@ export default function DescargaMasivaModal({ fechaInicial, onClose }: { fechaIn
   const [desde, setDesde] = useState(fechaInicial);
   const [hasta, setHasta] = useState(fechaInicial);
   const [busqueda, setBusqueda] = useState("");
+  const [placaFiltro, setPlacaFiltro] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [servicios, setServicios] = useState<ServicioLote[]>([]);
@@ -62,7 +63,7 @@ export default function DescargaMasivaModal({ fechaInicial, onClose }: { fechaIn
     try {
       const { servicios, empresa } = await cargarServiciosRango(desde, hasta);
       setServicios(servicios); setEmpresa(empresa);
-      setSel(new Set());
+      setSel(new Set()); setPlacaFiltro("");
       // Abrir por defecto la ruta con más servicios (la primera del agrupado).
       const g = agruparPorRuta(servicios);
       setAbiertos(g.length ? new Set([g[0].firma]) : new Set());
@@ -74,16 +75,23 @@ export default function DescargaMasivaModal({ fechaInicial, onClose }: { fechaIn
 
   useEffect(() => { cargar(); }, [cargar]);
 
+  // Placas presentes en el rango cargado (para el selector dedicado de placa).
+  const placas = useMemo(
+    () => [...new Set(servicios.map(s => s.vehiculo_placa).filter((p): p is string => !!p && p !== "—"))].sort(),
+    [servicios],
+  );
+
   const grupos: GrupoRuta[] = useMemo(() => {
     const q = busqueda.trim().toLowerCase();
-    const base = q
-      ? servicios.filter(s =>
-          s.cliente_nombre.toLowerCase().includes(q) ||
-          (s.vehiculo_placa || "").toLowerCase().includes(q) ||
-          s.origen.toLowerCase().includes(q) || s.destino.toLowerCase().includes(q))
-      : servicios;
+    const base = servicios.filter(s => {
+      if (placaFiltro && s.vehiculo_placa !== placaFiltro) return false;
+      if (!q) return true;
+      return s.cliente_nombre.toLowerCase().includes(q) ||
+        (s.vehiculo_placa || "").toLowerCase().includes(q) ||
+        s.origen.toLowerCase().includes(q) || s.destino.toLowerCase().includes(q);
+    });
     return agruparPorRuta(base);
-  }, [servicios, busqueda]);
+  }, [servicios, busqueda, placaFiltro]);
 
   const idsVisibles = useMemo(() => new Set(grupos.flatMap(g => g.servicios.map(s => s.id))), [grupos]);
   const nManifiesto = useMemo(() => servicios.filter(s => sel.has(s.id) && idsVisibles.has(s.id) && s.puede_manifiesto).length, [servicios, sel, idsVisibles]);
@@ -150,6 +158,11 @@ export default function DescargaMasivaModal({ fechaInicial, onClose }: { fechaIn
             <input className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-xl text-sm outline-none focus:border-[#0b315f]"
               placeholder="Filtrar por cliente, placa o paradero…" value={busqueda} onChange={e => setBusqueda(e.target.value)} />
           </div>
+          <select value={placaFiltro} onChange={e => setPlacaFiltro(e.target.value)} title="Filtrar por placa"
+            className="border border-gray-200 rounded-xl px-2.5 py-2 text-sm font-bold text-[#0b315f] bg-white outline-none focus:border-[#0b315f] max-w-[170px]">
+            <option value="">Todas las placas{placas.length ? ` (${placas.length})` : ""}</option>
+            {placas.map(p => <option key={p} value={p}>{p}</option>)}
+          </select>
         </div>
 
         {/* Cuerpo */}
