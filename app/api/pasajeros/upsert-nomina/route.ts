@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { normalizarEmpresa } from "@/lib/empresa";
 
 const supaAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -16,11 +17,13 @@ export async function POST(req: NextRequest) {
   if (!clienteId || !Array.isArray(pasajeros) || pasajeros.length === 0)
     return NextResponse.json({ error: "Datos inválidos" }, { status: 400 });
 
+  // Sin filtrar por reserva_id: uq_pasajero_cliente_dni es único por (dni, cliente_id)
+  // sin importar si la fila está ligada a una reserva puntual, así que hay que detectarla
+  // igual para actualizar en vez de chocar contra la constraint al insertar.
   const { data: existing, error: selErr } = await supaAdmin
     .from("pasajeros")
     .select("id, dni")
-    .eq("cliente_id", clienteId)
-    .is("reserva_id", null);
+    .eq("cliente_id", clienteId);
 
   if (selErr)
     return NextResponse.json({ error: selErr.message }, { status: 500 });
@@ -33,19 +36,20 @@ export async function POST(req: NextRequest) {
   const mensajesError: string[] = [];
 
   for (const p of pasajeros) {
+    const empresaNorm = normalizarEmpresa(p.empresa);
     const id = existingMap.get(String(p.dni));
     if (id) {
       const campos: Record<string, any> = { nombre: p.nombre };
       if (p.email)         campos.email    = p.email;
       if (p.telefono)      campos.telefono = p.telefono;
-      if (p.empresa)       campos.empresa  = p.empresa;
+      if (empresaNorm)     campos.empresa  = empresaNorm;
       if (p.edad != null)  campos.edad     = p.edad;
       const { error } = await supaAdmin.from("pasajeros").update(campos).eq("id", id);
       if (error) { errores++; mensajesError.push(error.message); } else actualizados++;
     } else {
       const { error } = await supaAdmin.from("pasajeros").insert({
         nombre: p.nombre, dni: p.dni, telefono: p.telefono,
-        empresa: p.empresa, email: p.email, edad: p.edad ?? null,
+        empresa: empresaNorm, email: p.email, edad: p.edad ?? null,
         cliente_id: clienteId, reserva_id: null,
       });
       if (error) { errores++; mensajesError.push(error.message); } else insertados++;

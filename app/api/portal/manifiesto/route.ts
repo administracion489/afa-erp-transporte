@@ -5,6 +5,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { normalizarEmpresa } from "@/lib/empresa";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -110,7 +111,7 @@ export async function POST(req: NextRequest) {
         cliente_id,
         nombre: nombre.trim(),
         dni: dni.trim(),
-        empresa: empresa?.trim() || null,
+        empresa: normalizarEmpresa(empresa),
         telefono: telefono?.trim() || null,
         edad: edadSane,
         activo: true,
@@ -216,7 +217,7 @@ export async function POST(req: NextRequest) {
           cliente_id,
           nombre: p.nombre.trim(),
           dni: p.dni.trim(),
-          empresa: p.empresa?.trim() || null,
+          empresa: normalizarEmpresa(p.empresa),
           telefono: p.telefono?.trim() || null,
           edad: sanitizarEdad(p.edad),
           activo: true,

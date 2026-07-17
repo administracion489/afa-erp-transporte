@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { normalizarEmpresa } from "@/lib/empresa";
 import { parsearManifiesto, descargarPlantilla } from "@/lib/manifiesto-csv";
 import SelectorGrupos from "./SelectorGrupos";
 import TimelineParadasEditable, { ParadaEditable } from "./TimelineParadasEditable";
@@ -484,7 +485,7 @@ export default function ModalManifiesto(props: Props) {
           nombre: p.nombre,
           dni: p.dni,
           telefono: p.telefono,
-          empresa: p.empresa,
+          empresa: normalizarEmpresa(p.empresa),
         })))
         .select();
 
@@ -510,7 +511,7 @@ export default function ModalManifiesto(props: Props) {
             paraNomina.map((p: any) => ({
               cliente_id: clienteId, reserva_id: null,
               nombre: p.nombre, dni: p.dni,
-              empresa: p.empresa || null, telefono: p.telefono || null, activo: true,
+              empresa: normalizarEmpresa(p.empresa), telefono: p.telefono || null, activo: true,
             }))
           );
           registradosNomina = paraNomina.length;
@@ -719,7 +720,7 @@ export default function ModalManifiesto(props: Props) {
           cliente_id: clienteId,
           nombre:     formAdd.nombre.trim(),
           dni:        formAdd.dni.trim(),
-          empresa:    formAdd.empresa.trim() || null,
+          empresa:    normalizarEmpresa(formAdd.empresa),
           telefono:   formAdd.telefono.trim() || null,
           activo:     true,
         })
@@ -750,7 +751,7 @@ export default function ModalManifiesto(props: Props) {
           await supabase.from("pasajeros").insert({
             cliente_id: clienteId, reserva_id: null,
             nombre: formAdd.nombre.trim(), dni: formAdd.dni.trim(),
-            empresa: formAdd.empresa.trim() || null,
+            empresa: normalizarEmpresa(formAdd.empresa),
             telefono: formAdd.telefono.trim() || null, activo: true,
           });
           registradoEnNomina = true;

@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
+import { normalizarEmpresa, claveEmpresa, agruparEmpresas } from "@/lib/empresa";
 import GruposPasajeros from "@/components/pasajeros/GruposPasajeros";
 
 type Pasajero = {
@@ -222,7 +223,7 @@ export default function PasajerosPage() {
     const payload: any = {
       nombre: form.nombre.trim(),
       dni: doc || null,
-      empresa: form.empresa.trim() || null,
+      empresa: normalizarEmpresa(form.empresa),
       telefono: form.telefono.trim() || null,
       email: form.email.trim() || null,
       foto_url: form.foto_url.trim() || null,
@@ -288,7 +289,7 @@ export default function PasajerosPage() {
           nombre,
           dni,
           email,
-          empresa: importEmpresa || null,
+          empresa: normalizarEmpresa(importEmpresa),
           cliente_id: importClienteId ? Number(importClienteId) : null,
           activo: true,
         });
@@ -320,27 +321,28 @@ export default function PasajerosPage() {
     setAsignaciones(resp.data || []);
   };
 
-  const empresas = Array.from(new Set(pasajeros.map((p) => p.empresa).filter(Boolean))).sort() as string[];
+  // Agrupamos por clave canónica (insensible a mayúsculas/espacios/punto final),
+  // así "…S.R.L" y "…S.R.L." salen como UNA sola empresa con el conteo sumado y
+  // la grafía más frecuente como etiqueta. `filtroEmpresa` guarda la clave.
+  const gruposEmpresa = agruparEmpresas(pasajeros.map((p) => p.empresa));
 
   const filtrados = pasajeros.filter((p) => {
     const q = busqueda.toLowerCase();
     const ok = p.nombre.toLowerCase().includes(q) || (p.dni || "").includes(q) || (p.empresa || "").toLowerCase().includes(q) || (p.email || "").toLowerCase().includes(q);
-    return ok && (filtroEmpresa === "todas" || p.empresa === filtroEmpresa);
+    return ok && (filtroEmpresa === "todas" || claveEmpresa(p.empresa) === filtroEmpresa);
   });
 
   const total = pasajeros.length;
   const activos = pasajeros.filter((p) => p.activo).length;
   const conQR = pasajeros.filter((p) => p.qr_code).length;
   const conEmail = pasajeros.filter((p) => p.email).length;
-  const porEmpresa: Record<string, number> = {};
-  pasajeros.forEach((p) => { if (p.empresa) porEmpresa[p.empresa] = (porEmpresa[p.empresa] || 0) + 1; });
 
   const kpis = [
     { label: "Total pasajeros", valor: total, color: "#0b315f", bg: "#eef3f8" },
     { label: "Activos", valor: activos, color: "#166534", bg: "#dcfce7" },
     { label: "Con QR", valor: conQR, color: "#1d4ed8", bg: "#dbeafe" },
     { label: "Con email", valor: conEmail, color: "#0891b2", bg: "#cffafe" },
-    { label: "Empresas", valor: empresas.length, color: "#854d0e", bg: "#fef9c3" },
+    { label: "Empresas", valor: gruposEmpresa.length, color: "#854d0e", bg: "#fef9c3" },
   ];
 
   const tabs: Array<{ id: Vista; label: string }> = [
@@ -386,6 +388,9 @@ export default function PasajerosPage() {
 
       {vista === "pasajeros" ? (
         <>
+          {/* Sugerencias de empresas existentes (grafía canónica) — compartido por el
+              formulario de registro y el de importar, para que se elija una grafía ya usada. */}
+          <datalist id="empresas-list">{gruposEmpresa.map((g) => (<option key={g.clave} value={g.label} />))}</datalist>
           {mostrarImport ? (
             <section className="bg-white rounded-2xl border shadow-sm p-6 space-y-4">
               <div>
@@ -395,7 +400,6 @@ export default function PasajerosPage() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <Campo label="Empresa / Cliente (texto)">
                   <input className={inputCls()} placeholder="Ej: Compania Minera ABC" value={importEmpresa} onChange={(e) => setImportEmpresa(e.target.value)} list="empresas-list" />
-                  <datalist id="empresas-list">{empresas.map((e) => (<option key={e} value={e} />))}</datalist>
                 </Campo>
                 <Campo label="Cliente registrado" hint="Vincula al cliente del ERP (opcional)">
                   <select className={inputCls()} value={importClienteId} onChange={(e) => setImportClienteId(e.target.value)}>
@@ -456,7 +460,7 @@ export default function PasajerosPage() {
                   </select>
                 </Campo>
                 <Campo label="Empresa / Area (texto libre)" hint="Se auto-rellena con el cliente elegido">
-                  <input className={inputCls()} placeholder="Ej: Planta Industrial Norte" value={form.empresa} onChange={f("empresa")} />
+                  <input className={inputCls()} placeholder="Ej: Planta Industrial Norte" value={form.empresa} onChange={f("empresa")} list="empresas-list" />
                 </Campo>
                 <Campo label="Telefono">
                   <input className={inputCls()} placeholder="987654321" value={form.telefono} onChange={f("telefono")} />
@@ -482,7 +486,7 @@ export default function PasajerosPage() {
             </div>
             <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroEmpresa} onChange={(e) => setFiltroEmpresa(e.target.value)}>
               <option value="todas">Todas las empresas</option>
-              {empresas.map((e) => (<option key={e} value={e}>{e} ({porEmpresa[e]})</option>))}
+              {gruposEmpresa.map((g) => (<option key={g.clave} value={g.clave}>{g.label} ({g.count})</option>))}
             </select>
             <div className="flex items-center px-4 py-2.5 border rounded-xl text-sm text-gray-400 bg-gray-50">{filtrados.length} pasajeros</div>
           </div>

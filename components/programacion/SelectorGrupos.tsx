@@ -11,6 +11,7 @@
 
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { normalizarEmpresa } from "@/lib/empresa";
 
 type Grupo = {
   id: number; cliente_id: number | null; nombre: string;
@@ -97,7 +98,7 @@ export default function SelectorGrupos({ reservaId, clienteId, paradas, dnisExis
         dni:        m.pasajeros.dni,
         telefono:   m.pasajeros.telefono,
         email:      m.pasajeros.email,
-        empresa:    m.pasajeros.empresa,
+        empresa:    normalizarEmpresa(m.pasajeros.empresa),
         cliente_id: clienteId,
         reserva_id: reservaId,
         activo:     true,

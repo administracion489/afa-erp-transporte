@@ -2,6 +2,7 @@
 
 import React, { useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { normalizarEmpresa } from "@/lib/empresa";
 import {
   parsearManifiestoUnificado,
   descargarPlantillaUnificada,
@@ -160,16 +161,20 @@ export default function CargadorUnificado(props: Props) {
           if (buscaPax.data) {
             pasajeroId = buscaPax.data.id;
             pasajerosReutilizados++;
-            // Actualizar datos básicos por si cambiaron
+            // Actualizar datos básicos por si cambiaron. `empresa` solo se pisa si
+            // el Excel trae un valor: no borramos una empresa ya cargada cuando la
+            // columna viene vacía.
+            const empresaNorm = normalizarEmpresa(pax.empresa);
+            const camposPax: Record<string, any> = {
+              nombre: pax.nombre,
+              telefono: pax.telefono,
+              email: pax.email,
+              cliente_id: clienteId,
+            };
+            if (empresaNorm) camposPax.empresa = empresaNorm;
             await supabase
               .from("pasajeros")
-              .update({
-                nombre: pax.nombre,
-                telefono: pax.telefono,
-                email: pax.email,
-                empresa: pax.empresa,
-                cliente_id: clienteId,
-              })
+              .update(camposPax)
               .eq("id", pasajeroId);
           } else {
             // Crear pasajero nuevo
@@ -180,7 +185,7 @@ export default function CargadorUnificado(props: Props) {
                 nombre: pax.nombre,
                 telefono: pax.telefono,
                 email: pax.email,
-                empresa: pax.empresa,
+                empresa: normalizarEmpresa(pax.empresa),
                 cliente_id: clienteId,
                 reserva_id: reservaId,
                 activo: true,
