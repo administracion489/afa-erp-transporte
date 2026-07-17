@@ -49,6 +49,7 @@ export type ServicioLote = {
   vehiculo_placa: string | null;
   conductor: { nombre: string | null; licencia: string | null } | null;
   es_ter: boolean;
+  sentido: "ida" | "retorno" | null;   // IDA / RETORNO (canónico o heurística de fijos)
   pax_total: number;
   gastos_total: number;
   firma_ruta: string;
@@ -68,6 +69,19 @@ export type GrupoRuta = {
   fechaMin: string | null;
   fechaMax: string | null;
 };
+
+// ─── Sentido IDA / RETORNO ──────────────────────────────────────────────────────
+// Réplica EXACTA de sentidoServicio() en app/programacion: prioriza el campo canónico
+// `direccion_servicio`; si falta, heurística conservadora SOLO para fijos (eventuales → null).
+const TIPOS_SERVICIO_FIJO = new Set(["transporte_personal", "fijo_solo_ida", "fijo_multiparada", "fijo_reten"]);
+function sentidoServicio(r: any): "ida" | "retorno" | null {
+  if (r.direccion_servicio === "ida") return "ida";
+  if (r.direccion_servicio === "retorno") return "retorno";
+  if (!TIPOS_SERVICIO_FIJO.has(r.tipo_servicio_detalle || "")) return null; // eventual → no se afirma
+  if (r.tipo_servicio_detalle === "fijo_solo_ida") return "ida";
+  if (r.reserva_vinculada_id != null) return "retorno";
+  return null;
+}
 
 // ─── Firma de ruta (paraderos + hora por parada + hora de salida) ───────────────
 const normNombre = (s?: string | null): string => String(s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
@@ -123,7 +137,7 @@ export async function cargarServiciosRango(
   // Reservas del rango (paginado, orden estable con id de desempate).
   const reservas = await paginarFilas(() =>
     supabase.from("reservas")
-      .select("id,tipo,estado,fecha_servicio,hora_servicio,hora_real_inicio,hora_real_fin,origen,destino,cliente_id,vehiculo_id,conductor_id,conductor_tercero_id,empresa_tercerizada_id,vehiculo_tercero_id")
+      .select("id,tipo,estado,fecha_servicio,hora_servicio,hora_real_inicio,hora_real_fin,origen,destino,cliente_id,vehiculo_id,conductor_id,conductor_tercero_id,empresa_tercerizada_id,vehiculo_tercero_id,direccion_servicio,tipo_servicio_detalle,reserva_vinculada_id")
       .gte("fecha_servicio", desde).lte("fecha_servicio", hasta)
       .in("estado", ["programada", "confirmada", "en_curso", "finalizada", "cancelada"])
       .order("fecha_servicio").order("hora_servicio").order("id"),
@@ -207,7 +221,7 @@ export async function cargarServiciosRango(
       },
       paradas: paradasR,
       cliente_nombre, cliente_ruc: cli?.ruc ?? null,
-      vehiculo_placa: placa, conductor, es_ter: esTer,
+      vehiculo_placa: placa, conductor, es_ter: esTer, sentido: sentidoServicio(r),
       pax_total, gastos_total: gastoPorReserva.get(r.id) || 0,
       firma_ruta: firmaRuta(r.hora_servicio, paradasR),
       origen, destino,
@@ -310,7 +324,7 @@ function buildMeta(tituloDoc: string, sel: ServicioLote[], empresa: EmpresaPerfi
     logoUrl: empresa.logo_url ?? null,
     items: sel.map(s => ({
       fecha: s.reserva.fecha_servicio, cliente: s.cliente_nombre,
-      placa: s.vehiculo_placa, pax: s.pax_total, estado: estadoLabel(s.reserva.estado),
+      placa: s.vehiculo_placa, pax: s.pax_total, estado: estadoLabel(s.reserva.estado), sentido: s.sentido,
     })),
   };
 }

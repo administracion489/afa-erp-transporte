@@ -43,6 +43,7 @@ export default function DescargaMasivaModal({ fechaInicial, onClose }: { fechaIn
   const [hasta, setHasta] = useState(fechaInicial);
   const [busqueda, setBusqueda] = useState("");
   const [placaFiltro, setPlacaFiltro] = useState("");
+  const [sentidoFiltro, setSentidoFiltro] = useState<"todos" | "ida" | "retorno">("todos");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [servicios, setServicios] = useState<ServicioLote[]>([]);
@@ -63,7 +64,7 @@ export default function DescargaMasivaModal({ fechaInicial, onClose }: { fechaIn
     try {
       const { servicios, empresa } = await cargarServiciosRango(desde, hasta);
       setServicios(servicios); setEmpresa(empresa);
-      setSel(new Set()); setPlacaFiltro("");
+      setSel(new Set()); setPlacaFiltro(""); setSentidoFiltro("todos");
       // Abrir por defecto la ruta con más servicios (la primera del agrupado).
       const g = agruparPorRuta(servicios);
       setAbiertos(g.length ? new Set([g[0].firma]) : new Set());
@@ -85,13 +86,14 @@ export default function DescargaMasivaModal({ fechaInicial, onClose }: { fechaIn
     const q = busqueda.trim().toLowerCase();
     const base = servicios.filter(s => {
       if (placaFiltro && s.vehiculo_placa !== placaFiltro) return false;
+      if (sentidoFiltro !== "todos" && s.sentido !== sentidoFiltro) return false;
       if (!q) return true;
       return s.cliente_nombre.toLowerCase().includes(q) ||
         (s.vehiculo_placa || "").toLowerCase().includes(q) ||
         s.origen.toLowerCase().includes(q) || s.destino.toLowerCase().includes(q);
     });
     return agruparPorRuta(base);
-  }, [servicios, busqueda, placaFiltro]);
+  }, [servicios, busqueda, placaFiltro, sentidoFiltro]);
 
   const idsVisibles = useMemo(() => new Set(grupos.flatMap(g => g.servicios.map(s => s.id))), [grupos]);
   const nManifiesto = useMemo(() => servicios.filter(s => sel.has(s.id) && idsVisibles.has(s.id) && s.puede_manifiesto).length, [servicios, sel, idsVisibles]);
@@ -144,7 +146,7 @@ export default function DescargaMasivaModal({ fechaInicial, onClose }: { fechaIn
         </div>
 
         {/* Filtros */}
-        <div className="px-5 py-3 bg-white border-b border-gray-100 flex-shrink-0 flex flex-col sm:flex-row gap-2.5">
+        <div className="px-5 py-3 bg-white border-b border-gray-100 flex-shrink-0 flex flex-col sm:flex-row sm:flex-wrap gap-2.5">
           <div className="flex items-center gap-2">
             <label className="text-[11px] font-bold text-gray-500">Desde</label>
             <input type="date" value={desde} max={hasta} onChange={e => setDesde(e.target.value)}
@@ -163,6 +165,14 @@ export default function DescargaMasivaModal({ fechaInicial, onClose }: { fechaIn
             <option value="">Todas las placas{placas.length ? ` (${placas.length})` : ""}</option>
             {placas.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
+          <div className="flex gap-1 bg-gray-50 rounded-xl p-1" title="Filtrar por sentido (ida / retorno)">
+            {(["todos", "ida", "retorno"] as const).map(t => (
+              <button key={t} onClick={() => setSentidoFiltro(t)}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap ${sentidoFiltro === t ? "bg-white shadow-sm text-[#0b315f]" : "text-gray-400 hover:text-gray-600"}`}>
+                {t === "todos" ? "Todos" : t === "ida" ? "Ida" : "Retorno"}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Cuerpo */}
@@ -237,6 +247,7 @@ export default function DescargaMasivaModal({ fechaInicial, onClose }: { fechaIn
                                 <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                                   <span className="text-[10px] text-gray-400 font-mono">{s.vehiculo_placa || "sin placa"}</span>
                                   <span className="text-[10px] text-gray-400">· {s.pax_total} pax</span>
+                                  {s.sentido && <span className={`text-[9px] font-bold rounded px-1 py-0.5 ${s.sentido === "ida" ? "text-blue-700 bg-blue-50" : "text-orange-700 bg-orange-50"}`}>{s.sentido === "ida" ? "IDA" : "RETORNO"}</span>}
                                   {s.es_ter && <span className="text-[9px] font-bold text-amber-700 bg-amber-50 rounded px-1 py-0.5">Tercerizado</span>}
                                   {/* Elegibilidad por documento */}
                                   <span className={`text-[9px] font-bold rounded px-1 py-0.5 ${s.puede_manifiesto ? "text-green-700 bg-green-50" : "text-gray-400 bg-gray-100"}`}

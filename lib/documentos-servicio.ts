@@ -168,7 +168,7 @@ export function manifiestoMtcHTML(d: DatosServicioDoc): string {
 }
 
 // ─── Descarga MASIVA por ruta: carátula + N documentos, uno por página ────────
-export type LoteDocItem = { fecha: string | null; cliente: string; placa: string | null; pax: number; estado: string };
+export type LoteDocItem = { fecha: string | null; cliente: string; placa: string | null; pax: number; estado: string; sentido?: "ida" | "retorno" | null };
 export type LoteMeta = {
   tituloDoc: string;            // "Manifiestos de Pasajeros (MTC)" / "Reportes de Servicio"
   ruta: string;                 // "ORIGEN → DESTINO · N paraderos · HH:MM"
@@ -189,9 +189,17 @@ function coverLoteHTML(meta: LoteMeta): string {
   const logo = meta.logoUrl || "/logoafacotizacion.jpg";
   const emp  = meta.empresaNombre || "AFA Tours Peru SAC";
   const cel  = "padding:6px 8px;border-bottom:1px solid #e5e7eb;font-size:11px";
+  const sentChip = (s?: "ida" | "retorno" | null) =>
+    s === "ida"     ? `<span style="font-size:8.5px;font-weight:800;color:#1e40af;background:#dbeafe;border-radius:4px;padding:1px 6px">IDA</span>`
+    : s === "retorno" ? `<span style="font-size:8.5px;font-weight:800;color:#9a3412;background:#ffedd5;border-radius:4px;padding:1px 6px">RETORNO</span>`
+    : `<span style="color:#cbd5e1">–</span>`;
+  const nIda = meta.items.filter(x => x.sentido === "ida").length;
+  const nRet = meta.items.filter(x => x.sentido === "retorno").length;
+  const resumenSentido = (nIda || nRet) ? `<div><span style="color:#6b7280">Ida / Retorno:</span> <b>${nIda} / ${nRet}</b></div>` : "";
   const filas = meta.items.map((it, i) => `
     <div style="${cel};text-align:center;color:#6b7280">${i + 1}</div>
     <div style="${cel};font-weight:700">${esc(it.fecha ? fmtFecha(it.fecha) : "–")}</div>
+    <div style="${cel};text-align:center">${sentChip(it.sentido)}</div>
     <div style="${cel}">${esc(it.cliente || "–")}</div>
     <div style="${cel};text-align:center;font-family:monospace">${esc(it.placa || "–")}</div>
     <div style="${cel};text-align:center">${it.pax}</div>
@@ -214,11 +222,13 @@ function coverLoteHTML(meta: LoteMeta): string {
       <div><span style="color:#6b7280">Ruta:</span> <b>${esc(meta.ruta)}</b></div>
       <div><span style="color:#6b7280">Periodo:</span> <b>${esc(meta.rango)}</b></div>
       <div><span style="color:#6b7280">Total de servicios:</span> <b>${meta.items.length}</b></div>
+      ${resumenSentido}
     </div>
   </div>
-  <div style="display:grid;grid-template-columns:34px 1fr 1.5fr 92px 46px 96px;border:1px solid #e5e7eb;border-radius:6px;overflow:hidden">
+  <div style="display:grid;grid-template-columns:30px 82px 78px 1fr 84px 40px 84px;border:1px solid #e5e7eb;border-radius:6px;overflow:hidden">
     <div style="${th};text-align:center">#</div>
     <div style="${th}">Fecha</div>
+    <div style="${th};text-align:center">Sentido</div>
     <div style="${th}">Cliente</div>
     <div style="${th};text-align:center">Placa</div>
     <div style="${th};text-align:center">Pax</div>
