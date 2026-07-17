@@ -47,38 +47,43 @@ create table if not exists public.alerta_config (
 );
 
 -- Semilla de todos los tipos con defaults razonables (no re-piso lo que el usuario edite).
+-- `plantilla` = para conductor/pasajero; `plantilla_directorio` = para el personal del
+-- directorio (default de tabla 'coordinador_alerta' — se sobreescribe cuando el tipo
+-- usa una plantilla PERSONALIZADA distinta, como "llamar_conductor").
 insert into public.alerta_config
   (clave, nombre, descripcion, modo_tiempo, min_anticipacion, hora_fija, umbral,
-   notifica_conductor, notifica_pasajero, plantilla)
+   notifica_conductor, notifica_pasajero, plantilla, plantilla_directorio)
 values
   ('recordatorio_pasajero','Recordatorio al pasajero','Aviso del servicio al pasajero','hora_fija',null,'08:00',null,
-     false,true,'recordatorio_servicio'),
+     false,true,'recordatorio_servicio',default),
   ('recordatorio_conductor','Recordatorio al conductor','Aviso del servicio asignado (mismo contenido que "Servicio asignado")','anticipacion',720,null,null,
-     true,false,'recordatorio_conductor'),
+     true,false,'recordatorio_conductor',default),
   ('proximo_inicio','Próximo a iniciar','Aviso corto y urgente justo antes del servicio','anticipacion',90,null,null,
-     true,false,'conductor_proximo_inicio'),
+     true,false,'conductor_proximo_inicio',default),
   ('recuerda_iniciar','Recuerda iniciar recorrido','Solo si aún no inició en la app; a 30 min del servicio','anticipacion',30,null,null,
-     true,false,'conductor_recuerda_iniciar'),
+     true,false,'conductor_recuerda_iniciar',default),
   ('alerta_no_inicio_previa','Alerta previa al coordinador','A 25 min del servicio si aún no inició el GPS/recorrido en la app','anticipacion',25,null,null,
-     false,false,'coordinador_alerta'),
+     false,false,null,'coordinador_alerta'),
+  ('llamar_conductor','Recordar llamar al conductor','Aviso personal 1h antes para que el coordinador llame y reporte','anticipacion',60,null,null,
+     false,false,null,'coordinador_llamar_conductor'),
   ('asignacion','Servicio asignado','Cuando se le asigna un servicio al conductor','evento',null,null,null,
-     true,false,'recordatorio_conductor'),
+     true,false,'recordatorio_conductor',default),
   ('cambio','Cambio de servicio','Cuando cambia la hora o el vehículo','evento',null,null,null,
-     true,false,'conductor_cambio_servicio'),
+     true,false,'conductor_cambio_servicio',default),
   ('cancelacion','Servicio cancelado','Cuando se cancela un servicio asignado','evento',null,null,null,
-     true,false,'conductor_servicio_cancelado'),
+     true,false,'conductor_servicio_cancelado',default),
   ('desasignacion','Servicio reasignado (aviso al saliente)','Avisa al conductor anterior que ya no cubre el servicio','evento',null,null,null,
-     true,false,'conductor_desasignado'),
+     true,false,'conductor_desasignado',default),
   ('no_inicio','No inició a tiempo','El conductor no marcó inicio pasada la hora','evento',null,null,10,
-     true,false,'conductor_no_inicio'),
+     true,false,'conductor_no_inicio',default),
   ('gps_silencio','GPS sin señal','Una unidad en curso dejó de enviar ubicación','evento',null,null,8,
-     true,false,'conductor_gps_silencio'),
+     true,false,'conductor_gps_silencio',default),
   ('doc_vence','Documento por vencer','Documentos del conductor próximos a vencer','hora_fija',null,'08:00',15,
-     true,false,'conductor_doc_vence'),
+     true,false,'conductor_doc_vence',default),
   ('solape','Solape de conductor','Un conductor con servicios que se cruzan','hora_fija',null,'07:00',null,
-     false,false,'coordinador_alerta'),
+     false,false,null,'coordinador_alerta'),
   ('jornada','Jornada extensa','Conductor con jornada larga o muchos servicios','hora_fija',null,'07:00',13,
-     false,false,'coordinador_alerta')
+     false,false,null,'coordinador_alerta')
 on conflict (clave) do nothing;
 
 -- ── 3) Dedupe de alertas de ciclo de vida (una fila por reserva) ──────────────

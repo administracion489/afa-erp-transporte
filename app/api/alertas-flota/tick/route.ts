@@ -104,6 +104,16 @@ async function handler(req: NextRequest) {
       }
       return { enviados, fallos };
     }
+    // Variante PERSONALIZADA: antepone el nombre propio de CADA destinatario (p.ej.
+    // "Hola Moisés..." en vez de un texto genérico) — un envío distinto por persona.
+    async function aDirectorioPersonalizado(cfg: AlertaConfig, paramsSinNombre: string[]): Promise<{ enviados: number; fallos: number }> {
+      let enviados = 0, fallos = 0;
+      for (const d of directorioDe(cfg, destinatarios)) {
+        const r = await enviarAvisoWhatsApp(d.telefono, cfg.plantilla_directorio || "coordinador_alerta", [nombreCorto(d.nombre), ...paramsSinNombre]);
+        if (r.ok) enviados++; else fallos++;
+      }
+      return { enviados, fallos };
+    }
 
     // ── BLOQUE 1: asignación / cambio / cancelación / desasignación (diff por reserva) ──
     {
@@ -231,6 +241,29 @@ async function handler(req: NextRequest) {
     }
     res.proximo_inicio  = await avisoPreInicio("proximo_inicio");
     res.recuerda_iniciar = await avisoPreInicio("recuerda_iniciar");
+
+    // ── BLOQUE 3b-2: recordatorio PERSONAL al Coordinador para que llame al conductor
+    //    ("Hola Moisés, debes llamar a…") — rutina de control 1h antes, no depende de
+    //    si el conductor ya inició o no (a diferencia de la alerta previa de abajo).
+    {
+      const cfg = activa("llamar_conductor");
+      if (cfg) {
+        let n = 0;
+        for (const r of todas) {
+          if (r.tipo_asignacion !== "propio" || !r.conductor_id) continue;
+          if (!["programada", "confirmada"].includes(r.estado)) continue;
+          if (!enViaRecordatorio(cfg, r, hoy, manana, ahora, force)) continue;
+          if (!(await reclamarEnvio("llamar_conductor", r.id))) continue;
+          const nombreCond = nombreCorto(condMap.get(r.conductor_id)?.nombre);
+          const hora = horaCorta(r.hora_servicio);
+          const ruta = rutaDe(r);
+          const rd = await aDirectorioPersonalizado(cfg, [nombreCond, ruta, hora]);
+          if (rd.enviados > 0) n++;
+          else if (rd.fallos > 0) await liberarEnvio("llamar_conductor", r.id); // transitorio → reintentar
+        }
+        res.llamar_conductor = n;
+      }
+    }
 
     // ── BLOQUE 3c: alerta PREVIA al Coordinador (antes de la hora) — el conductor ya
     //    recibió 2 recordatorios (90/30 min) y sigue sin iniciar el recorrido en la
