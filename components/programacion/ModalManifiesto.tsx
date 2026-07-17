@@ -782,17 +782,20 @@ export default function ModalManifiesto(props: Props) {
   };
 
   const agregarDesdeNomina = async (pax: PasajeroManifiesto) => {
+    if (paradas.length === 0) {
+      setMensaje({ tipo: "warn", texto: "Agrega primero una parada al itinerario para poder asignar pasajeros." });
+      return;
+    }
     setAgregandoPaxId(pax.id);
     setMensaje(null);
     try {
-      const { error } = await supabase.from("pasajeros").insert({
-        reserva_id: reservaId,
-        cliente_id: clienteId,
-        nombre:     pax.nombre,
-        dni:        pax.dni,
-        empresa:    pax.empresa || null,
-        telefono:   pax.telefono || null,
-        activo:     true,
+      // Enlaza el pasajero de nómina existente a la primera parada (no duplica su fila
+      // en `pasajeros`: eso choca con uq_pasajero_cliente_dni, único por dni+cliente).
+      const { error } = await supabase.from("pasajeros_parada").insert({
+        pasajero_id: pax.id,
+        parada_id: paradas[0].id,
+        estado: "esperando",
+        estado_abordaje: "Pendiente",
       });
       if (error) { setMensaje({ tipo: "err", texto: error.message }); return; }
       setNomina(prev => prev.filter(p => p.id !== pax.id));
