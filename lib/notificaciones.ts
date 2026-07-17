@@ -133,6 +133,16 @@ const PLANTILLA_IDIOMA       = "es";
 // Misma estructura para la plantilla `conductor_cambio_servicio` (solo cambia el texto fijo).
 const PLANTILLA_CONDUCTOR = "recordatorio_conductor";
 
+// Recordatorio COMBINADO ida+retorno (un solo mensaje con AMBOS tramos — pedido del
+// usuario: "hora de ida y hora de retorno"). Se usa cuando la reserva tiene su par
+// vinculado el mismo día con el mismo conductor. Variables, EN ESTE ORDEN:
+//   {{1}} nombre  {{2}} fecha  {{3}} placa
+//   {{4}} hora IDA     {{5}} origen IDA     {{6}} destino IDA
+//   {{7}} hora RETORNO {{8}} origen RETORNO {{9}} destino RETORNO
+//   {{10}} teléfono de contingencia
+// Botones: los mismos 2 dinámicos (origen/destino de la IDA).
+const PLANTILLA_CONDUCTOR_COMPLETO = "recordatorio_conductor_completo";
+
 // Plantilla de LLEGADA (utility). Se dispara desde el motor de proximidad
 // (lib/proximidad.ts) cuando el bus llega a un paradero — reutiliza esa misma
 // detección (radio adaptativo + velocidad + dedupe), NO tiene lógica propia de
@@ -655,6 +665,67 @@ export async function notificarConductor(
   const horaTexto  = reserva.hora_servicio?.slice(0, 5) ?? "-";
   const tel        = normalizarTelefono(cond.telefono);
   const telConting = await telefonoContingencia();
+
+  // ── Recordatorio COMBINADO ida+retorno (un solo mensaje con AMBOS tramos) ─────
+  // Solo aplica al RECORDATORIO (no a asignación/cambio) y cuando el par vinculado es
+  // del mismo día, sigue vigente y tiene el MISMO conductor. Determinista: la IDA (la
+  // reserva SIN reserva_vinculada_id) envía el combinado; el RETORNO se salta porque
+  // la ida lo cubre — sin carreras ni dedupe extra.
+  if (trigger === "cron_recordatorio" && !plantilla) {
+    if (reserva.reserva_vinculada_id != null) {
+      // Soy el RETORNO: si mi IDA también se recuerda hoy, ella manda el combinado.
+      const { data: ida } = await supabaseAdmin
+        .from("reservas").select("id, fecha_servicio, estado, conductor_id")
+        .eq("id", reserva.reserva_vinculada_id).maybeSingle();
+      if (ida && ida.fecha_servicio === reserva.fecha_servicio
+          && ["programada", "confirmada"].includes(ida.estado)
+          && ida.conductor_id === reserva.conductor_id) {
+        return { ok: true, estado: "sin_canal", detalle: "cubierto por el combinado de la ida" };
+      }
+    } else {
+      // Soy la IDA: si tengo retorno vinculado válido, mando UN mensaje con ambos tramos.
+      const { data: ret } = await supabaseAdmin
+        .from("reservas")
+        .select("id, fecha_servicio, hora_servicio, estado, conductor_id, origen, destino")
+        .eq("reserva_vinculada_id", reservaId)
+        .maybeSingle();
+      if (ret && ret.fecha_servicio === reserva.fecha_servicio
+          && ["programada", "confirmada"].includes(ret.estado)
+          && ret.conductor_id === reserva.conductor_id) {
+        const origenRet  = ret.origen  || destino;   // el retorno suele invertir la ida
+        const destinoRet = ret.destino || origen;
+        try {
+          await enviarWhatsAppPlantilla(
+            tel,
+            PLANTILLA_CONDUCTOR_COMPLETO,
+            PLANTILLA_IDIOMA,
+            [
+              nombreCorto(cond.nombre),
+              fechaTexto,
+              placa ?? "Por asignar",
+              horaTexto,
+              origen,
+              destino,
+              ret.hora_servicio?.slice(0, 5) ?? "-",
+              origenRet,
+              destinoRet,
+              telConting,
+            ],
+            phoneAvisos(),
+            [
+              { index: 0, texto: encodeURIComponent(origenQuery) },
+              { index: 1, texto: encodeURIComponent(destinoQuery) },
+            ],
+          );
+          await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "enviado", destinatario: tel, trigger });
+          return { ok: true, estado: "enviado", detalle: "combinado ida+retorno" };
+        } catch (e: any) {
+          await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "error", destinatario: tel, trigger, error: e.message });
+          return { ok: false, estado: "error", detalle: e.message };
+        }
+      }
+    }
+  }
 
   try {
     await enviarWhatsAppPlantilla(
