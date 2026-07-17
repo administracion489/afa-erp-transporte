@@ -205,28 +205,32 @@ async function handler(req: NextRequest) {
       res.recordatorio_pasajero = n;
     }
 
-    // ── BLOQUE 3b: "próximo a iniciar" — aviso CORTO y urgente, por tramo (NUNCA
-    //    combinado ida+retorno: a esta hora cada tramo merece su propio empujón). ───
-    {
-      const cfg = activa("proximo_inicio");
-      if (cfg) {
-        let n = 0;
-        for (const r of todas) {
-          if (r.tipo_asignacion !== "propio" || !r.conductor_id) continue;
-          if (!["programada", "confirmada"].includes(r.estado)) continue;
-          if (!enViaRecordatorio(cfg, r, hoy, manana, ahora, force)) continue;
-          if (!(await reclamarEnvio("proximo_inicio", r.id))) continue;
-          const nombre = nombreCorto(condMap.get(r.conductor_id)?.nombre);
-          const hora = horaCorta(r.hora_servicio);
-          const origenTexto = r.origen || rutaDe(r);
-          const rc = await aConductor(cfg, r.conductor_id, [nombre, hora, origenTexto]);
-          if (rc === "enviado") n++;
-          else if (rc === "fallo") await liberarEnvio("proximo_inicio", r.id); // transitorio → reintentar
-          // "sin_canal" (sin teléfono/plantilla) queda reclamado: evita reintentar en bucle.
-        }
-        res.proximo_inicio = n;
+    // ── BLOQUE 3b: avisos CORTOS pre-inicio (por tramo, NUNCA combinado ida+retorno:
+    //    a esta hora cada tramo merece su propio empujón). Solo mientras el conductor
+    //    NO haya iniciado el servicio en la app (estado sigue programada/confirmada) —
+    //    varios tipos posibles a distintos minutos de anticipación (90min, 30min, …),
+    //    cada uno su propia tarjeta/clave en el panel, misma lógica compartida aquí.
+    async function avisoPreInicio(clave: string): Promise<number> {
+      const cfg = activa(clave);
+      if (!cfg) return 0;
+      let n = 0;
+      for (const r of todas) {
+        if (r.tipo_asignacion !== "propio" || !r.conductor_id) continue;
+        if (!["programada", "confirmada"].includes(r.estado)) continue; // aún no inició
+        if (!enViaRecordatorio(cfg, r, hoy, manana, ahora, force)) continue;
+        if (!(await reclamarEnvio(clave, r.id))) continue;
+        const nombre = nombreCorto(condMap.get(r.conductor_id)?.nombre);
+        const hora = horaCorta(r.hora_servicio);
+        const origenTexto = r.origen || rutaDe(r);
+        const rc = await aConductor(cfg, r.conductor_id, [nombre, hora, origenTexto]);
+        if (rc === "enviado") n++;
+        else if (rc === "fallo") await liberarEnvio(clave, r.id); // transitorio → reintentar
+        // "sin_canal" (sin teléfono/plantilla) queda reclamado: evita reintentar en bucle.
       }
+      return n;
     }
+    res.proximo_inicio  = await avisoPreInicio("proximo_inicio");
+    res.recuerda_iniciar = await avisoPreInicio("recuerda_iniciar");
 
     // ── BLOQUE 4: no inició a tiempo ────────────────────────────────────────────
     {
