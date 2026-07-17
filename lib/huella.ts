@@ -77,7 +77,10 @@ export function suavizarPorDistancia<T extends { lat: number; lng: number }>(pts
 // con orden ESTABLE (created_at + id) para que las páginas no se solapen ni salten filas.
 export async function paginarFilas(
   armarQuery: () => { range: (desde: number, hasta: number) => PromiseLike<{ data: any[] | null; error: any }> },
-  maxFilas = 15000, // techo de sanidad: ~12 h de viaje a 3 s/fix
+  // Techo de sanidad, NO un límite operativo: 35 000 ≈ 29 h continuas a 3 s/fix (la cadencia
+  // más densa). Los full day tours de 24 h generan ~25-29 k puntos en el peor caso (carretera
+  // + paradas largas pegadas a un paradero, que también envían a 3 s) → entran completos.
+  maxFilas = 35000,
 ): Promise<any[]> {
   const PAG = 1000; // = max-rows de Supabase: cada página llega completa
   const todas: any[] = [];
