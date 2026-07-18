@@ -212,6 +212,15 @@ export default function ClientePortal() {
   const [colabErr,          setColabErr]           = useState("");
   const [colabLoad,         setColabLoad]          = useState(false);
 
+  // Cambiar contraseña (usuario logueado)
+  const [pwdActual, setPwdActual] = useState("");
+  const [pwdNueva,  setPwdNueva]  = useState("");
+  const [pwdNueva2, setPwdNueva2] = useState("");
+  const [pwdShow,   setPwdShow]   = useState(false);
+  const [pwdErr,    setPwdErr]    = useState("");
+  const [pwdOk,     setPwdOk]     = useState(false);
+  const [pwdLoad,   setPwdLoad]   = useState(false);
+
   // Cuenta / Configuración
   const [cuentaSeccion,     setCuentaSeccion]     = useState<CuentaSeccion>("empresa");
   const [busqueda,          setBusqueda]          = useState("");
@@ -384,6 +393,37 @@ export default function ClientePortal() {
   function cerrarModalReset() {
     setModalReset(false);
     setTimeout(() => { setResetStep(1); setResetRuc(""); setResetEmail(""); setResetToken(""); setResetPass(""); setResetPass2(""); setResetErr(""); setResetOk(false); }, 300);
+  }
+
+  // ─── Cambiar contraseña del usuario logueado ─────────────────────────────
+  async function cambiarPassword() {
+    if (pwdLoad) return;                    // guard anti doble envío (Enter/click repetido en vuelo)
+    if (!portalUsuario || !cliente) return;
+    setPwdErr(""); setPwdOk(false);         // limpia estados previos ANTES de validar (evita verde+rojo a la vez)
+    if (!pwdActual.trim())                     { setPwdErr("Ingresa tu contraseña actual"); return; }
+    if (pwdNueva.trim().length < 6)            { setPwdErr("La nueva contraseña debe tener al menos 6 caracteres"); return; }
+    if (pwdNueva.trim() !== pwdNueva2.trim())  { setPwdErr("Las contraseñas nuevas no coinciden"); return; }
+    if (pwdNueva.trim() === pwdActual.trim())  { setPwdErr("La nueva contraseña debe ser distinta de la actual"); return; }
+    setPwdLoad(true);
+    try {
+      const res = await fetch("/api/portal/cambiar-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          usuario_id: portalUsuario.id,
+          actual:     pwdActual.trim(),
+          nueva:      pwdNueva.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setPwdErr(data.error || "No se pudo cambiar la contraseña"); setPwdLoad(false); return; }
+      // Refleja la nueva clave en la sesión local para mantener coherencia.
+      const actualizado = { ...portalUsuario, codigo_acceso: pwdNueva.trim() };
+      setPortalUsuario(actualizado);
+      saveSession(cliente, actualizado);
+      setPwdOk(true); setPwdActual(""); setPwdNueva(""); setPwdNueva2("");
+    } catch { setPwdErr("Error de conexión. Intenta de nuevo."); }
+    setPwdLoad(false);
   }
 
   // ─── Cargar datos ─────────────────────────────────────────────────────────
@@ -4510,23 +4550,102 @@ export default function ClientePortal() {
 
                 {/* SEGURIDAD */}
                 {cuentaSeccion === "seguridad" && (
-                  <div style={{ background: C.white, borderRadius: 16, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
-                    <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.gray100}` }}>
-                      <p style={{ fontWeight: 800, color: C.gray800, fontSize: 14, margin: 0 }}>Seguridad de la cuenta</p>
-                    </div>
-                    {[
-                      { titulo: "Autenticación en 2 pasos (2FA)", desc: "Capa extra de seguridad para el acceso", activo: false },
-                      { titulo: "Sesiones activas",               desc: "1 sesión activa · Lima, Perú",          activo: true  },
-                      { titulo: "Registro de auditoría",          desc: "Historial de accesos e inicios de sesión",activo: true  },
-                    ].map(s => (
-                      <div key={s.titulo} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: `1px solid ${C.gray100}` }}>
-                        <div>
-                          <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0 }}>{s.titulo}</p>
-                          <p style={{ color: C.gray400, fontSize: 11, margin: "2px 0 0" }}>{s.desc}</p>
+                  <div style={{ display: "flex", flexDirection: "column" as const, gap: 16 }}>
+
+                    {/* ── Cambiar contraseña — solo usuarios individuales del portal (id>0) ── */}
+                    {portalUsuario && portalUsuario.id > 0 ? (
+                      <div style={{ background: C.white, borderRadius: 16, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
+                        <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                          <p style={{ fontWeight: 800, color: C.gray800, fontSize: 14, margin: 0 }}>Cambiar contraseña</p>
+                          <p style={{ color: C.gray400, fontSize: 11.5, margin: "2px 0 0" }}>
+                            Actualiza la contraseña con la que {portalUsuario.nombre || "tu usuario"} accede al portal
+                          </p>
                         </div>
-                        <span style={{ fontSize: 11, fontWeight: 800, padding: "4px 14px", borderRadius: 20, background: s.activo ? "#dcfce7" : "#fee2e2", color: s.activo ? C.green : C.red }}>{s.activo ? "Activo" : "Inactivo"}</span>
+                        <form onSubmit={e => { e.preventDefault(); cambiarPassword(); }}
+                          style={{ padding: "18px 20px", display: "flex", flexDirection: "column" as const, gap: 14, maxWidth: 460 }}>
+
+                          {/* Contraseña actual */}
+                          <div>
+                            <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: C.ink2, marginBottom: 6 }}>Contraseña actual</label>
+                            <input type={pwdShow ? "text" : "password"} value={pwdActual} onChange={e => { setPwdActual(e.target.value); setPwdOk(false); setPwdErr(""); }}
+                              autoComplete="current-password" placeholder="Tu contraseña actual"
+                              style={{ width: "100%", padding: "11px 14px", borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 14, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const, background: C.bg }} />
+                          </div>
+
+                          {/* Nueva contraseña */}
+                          <div>
+                            <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: C.ink2, marginBottom: 6 }}>Nueva contraseña</label>
+                            <div style={{ position: "relative" as const }}>
+                              <input type={pwdShow ? "text" : "password"} value={pwdNueva} onChange={e => { setPwdNueva(e.target.value); setPwdOk(false); setPwdErr(""); }}
+                                autoComplete="new-password" placeholder="Mínimo 6 caracteres"
+                                style={{ width: "100%", padding: "11px 40px 11px 14px", borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 14, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const, background: C.bg }} />
+                              <button onClick={() => setPwdShow(p => !p)} type="button" aria-label={pwdShow ? "Ocultar contraseña" : "Mostrar contraseña"} aria-pressed={pwdShow}
+                                style={{ position: "absolute" as const, right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: C.mute, padding: 4 }}>
+                                {pwdShow
+                                  ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                                  : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>}
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Confirmar nueva contraseña */}
+                          <div>
+                            <label style={{ display: "block", fontSize: 11.5, fontWeight: 700, color: C.ink2, marginBottom: 6 }}>Confirmar nueva contraseña</label>
+                            <input type={pwdShow ? "text" : "password"} value={pwdNueva2} onChange={e => { setPwdNueva2(e.target.value); setPwdOk(false); setPwdErr(""); }}
+                              autoComplete="new-password" placeholder="Repite la nueva contraseña"
+                              style={{ width: "100%", padding: "11px 14px", borderRadius: 10, border: `1.5px solid ${pwdNueva2 && pwdNueva !== pwdNueva2 ? C.danger : C.line}`, fontSize: 14, outline: "none", fontFamily: "inherit", boxSizing: "border-box" as const, background: C.bg }} />
+                          </div>
+
+                          {pwdErr && (
+                            <p style={{ margin: 0, fontSize: 12.5, color: C.danger, fontWeight: 600, background: C.dangerTint, padding: "8px 12px", borderRadius: 8 }}>{pwdErr}</p>
+                          )}
+                          {pwdOk && (
+                            <p style={{ margin: 0, fontSize: 12.5, color: C.success, fontWeight: 600, background: C.successTint, padding: "8px 12px", borderRadius: 8 }}>✓ Contraseña actualizada. Úsala la próxima vez que inicies sesión.</p>
+                          )}
+
+                          <div>
+                            <button type="submit" disabled={pwdLoad}
+                              style={{ padding: "11px 22px", borderRadius: 12, border: "none", background: pwdLoad ? C.mute2 : C.navy, color: "white", fontWeight: 800, fontSize: 13.5, cursor: pwdLoad ? "not-allowed" : "pointer", fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 8 }}>
+                              {pwdLoad ? "Guardando..." : "Actualizar contraseña"}
+                            </button>
+                          </div>
+                        </form>
                       </div>
-                    ))}
+                    ) : (
+                      <div style={{ background: C.white, borderRadius: 16, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
+                        <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                          <p style={{ fontWeight: 800, color: C.gray800, fontSize: 14, margin: 0 }}>Cambiar contraseña</p>
+                        </div>
+                        <div style={{ padding: "18px 20px" }}>
+                          <div style={{ background: C.warnTint, border: `1px solid ${C.warn}33`, borderRadius: 10, padding: "11px 14px" }}>
+                            <p style={{ margin: 0, fontSize: 12.5, color: C.warn, fontWeight: 600, lineHeight: 1.55 }}>
+                              Estás accediendo con el código compartido de la empresa, no con un usuario individual. Para tener tu propia contraseña, pide a AFA Transportes (o a un administrador de tu empresa) que te cree un usuario en <strong>Usuarios y accesos</strong>.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* ── Seguridad de la cuenta (informativo) ── */}
+                    <div style={{ background: C.white, borderRadius: 16, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,0.05)", border: `1px solid ${C.gray100}` }}>
+                      <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                        <p style={{ fontWeight: 800, color: C.gray800, fontSize: 14, margin: 0 }}>Seguridad de la cuenta</p>
+                      </div>
+                      {[
+                        { titulo: "Autenticación en 2 pasos (2FA)", desc: "Capa extra de seguridad para el acceso", activo: false },
+                        { titulo: "Sesiones activas",               desc: "1 sesión activa · Lima, Perú",          activo: true  },
+                        { titulo: "Registro de auditoría",          desc: "Historial de accesos e inicios de sesión",activo: true  },
+                      ].map(s => (
+                        <div key={s.titulo} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: `1px solid ${C.gray100}` }}>
+                          <div>
+                            <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0 }}>{s.titulo}</p>
+                            <p style={{ color: C.gray400, fontSize: 11, margin: "2px 0 0" }}>{s.desc}</p>
+                          </div>
+                          <span style={{ fontSize: 11, fontWeight: 800, padding: "4px 14px", borderRadius: 20, background: s.activo ? "#dcfce7" : "#fee2e2", color: s.activo ? C.green : C.red }}>{s.activo ? "Activo" : "Inactivo"}</span>
+                        </div>
+                      ))}
+                    </div>
+
                   </div>
                 )}
 
