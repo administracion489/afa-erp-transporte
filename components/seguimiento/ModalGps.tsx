@@ -11,6 +11,7 @@ import {
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, anclarImprecisos, puentePorRuta, puentesCrudos,
   FILTRO_APROX, FILTRO_NO_APROX, PINTURA_APROX,
+  pegarIconoAVia, viasCercanasTilequery, esAccCruda,
 } from "@/lib/huella";
 import { animarMarcador } from "@/lib/anim-marker";
 
@@ -116,6 +117,18 @@ export default function ModalGps({
   const [colaSnapped,       setColaSnapped]       = useState(true);                     // ¿la punta viva pegó a la vía? (false → colaViva sigue la ruta prevista, no el zigzag)
   const [colaClean,         setColaClean]         = useState(-1);                        // último índice de VÍA limpia en matched (frontera de colaViva; corta el crudo de la punta)
   const matchedRef                                = useRef<[number, number][] | null>(null); // última geometría ajustada (para puentesCrudos aunque el ciclo devuelva null por throttle)
+  const esCrudoRef = useRef<boolean[]>([]);       // espejo de esCrudoArr para leerlo en efectos SIN re-dispararlos
+  // Snap del ícono a la vía: continuidad + caché de vías cercanas (Tilequery, fallback del GPS crudo).
+  const snapIconoRef = useRef<{ lat: number; lng: number; s: number | null } | null>(null);
+  const viasCercaRef = useRef<{ lat: number; lng: number; puntos: { lat: number; lng: number }[] } | null>(null);
+  const tilequeryPendRef = useRef(false);
+  const tilequeryLastMsRef = useRef(0);           // throttle TEMPORAL (≥15 s): el jitter de red >80 m de un bus quieto no debe re-consultar en cada fix
+  const [snapTick, setSnapTick] = useState(0);    // bump al llegar vías de Tilequery → re-snap del ícono/cola
+  // Posición del ícono PEGADA a la vía — FUENTE ÚNICA para el marcador y la punta de la cola
+  // (calculada en un solo efecto; si cada consumidor la recalculara, la continuidad avanzaría en
+  // cadena y cola e ícono podían elegir vías distintas en el mismo frame).
+  const [snapPos, setSnapPos] = useState<{ lat: number; lng: number; snapped: boolean } | null>(null);
+  const prevSnapPosRef = useRef<{ lat: number; lng: number } | null>(null);   // para derivar el rumbo del movimiento PEGADO (no del jitter crudo)
   // Caché por hueco. `expira`: los fallos TRANSITORIOS (red caída, HTTP 429/5xx, OVER_QUERY_LIMIT)
   // se cachean con vencimiento — sin esto, o se reintentaban hasta 30 fetch cada 15 s (tormenta
   // contra Google) o quedaban "ocultar" para siempre (rango sin puente de por vida del modal).
@@ -468,7 +481,7 @@ export default function ModalGps({
 
         // Map Matching por ventanas (lib/huella.ts): throttle 60 s + congelado interno.
         const matched = await ajustador.ajustar(limpio, token, () => cancel);
-        if (matched && !cancel) { setMatchedCoords(matched); matchedRef.current = matched; setEsCrudoArr(ajustador.leerEsCrudo()); }
+        if (matched && !cancel) { setMatchedCoords(matched); matchedRef.current = matched; const ec = ajustador.leerEsCrudo(); esCrudoRef.current = ec; setEsCrudoArr(ec); }
         if (!cancel) setColaSnapped(ajustador.leerColaSnapped());   // ¿pegó la punta viva? (si no, colaViva sigue la ruta)
         const colaClean = ajustador.leerColaClean();                // último vértice de VÍA limpia (frontera de colaViva)
 
@@ -566,6 +579,46 @@ export default function ModalGps({
     return () => { cancel = true; clearInterval(iv); };
   }, [reservaId, vehiculoId, vehiculoTerceroId]); // eslint-disable-line
 
+  // Snap del ÍCONO del bus a la vía (regla: el bus SIEMPRE sobre una pista, jamás sobre techos).
+  // UN SOLO efecto calcula la posición pegada por fix y la publica en snapPos; el marcador y la
+  // punta de la cola la CONSUMEN — así jamás divergen ni la continuidad avanza en cadena. La
+  // corrección está acotada por la imprecisión del fix (ver pegarIconoAVia) → no fabrica posición.
+  useEffect(() => {
+    if (!ubic) { setSnapPos(null); snapIconoRef.current = null; return; }
+    const accFix = Number(ubic.precision_m) || 25;
+    const cerca = viasCercaRef.current;
+    const r = pegarIconoAVia(ubic.lat, ubic.lng, accFix, {
+      ruta: rutaRef.current?.coordenadas,
+      trail: matchedRef.current || undefined,
+      trailEsCrudo: esCrudoRef.current,
+      puntosVia: cerca && distM(cerca.lat, cerca.lng, ubic.lat, ubic.lng) <= 250 ? cerca.puntos : undefined,
+      prev: snapIconoRef.current,
+      prevS: snapIconoRef.current?.s ?? null,
+    });
+    snapIconoRef.current = { lat: r.lat, lng: r.lng, s: r.s };
+    // Publicar solo si cambió de verdad (>0.5 m) — evita re-renders/redraws idénticos.
+    setSnapPos((prev) => (prev && distM(prev.lat, prev.lng, r.lat, r.lng) < 0.5 && prev.snapped === r.snapped) ? prev : { lat: r.lat, lng: r.lng, snapped: r.snapped });
+    // Fix CRUDO sin vía conocida cerca → pedir a Tilequery los puntos de calle del entorno.
+    // Throttle DOBLE: espacial (>80 m del centro de la caché) y temporal (≥15 s) — el jitter de
+    // red de un bus quieto no re-consulta en cada fix. Error (null) → NO se cachea (se reintenta
+    // al vencer el throttle); [] genuino → SÍ se cachea (ahí no hay vía vehicular, es la verdad).
+    // Con chip preciso jamás se llama: el fix ya está sobre la vía.
+    if (!r.snapped && esAccCruda(accFix) && !tilequeryPendRef.current && Date.now() - tilequeryLastMsRef.current >= 15000) {
+      if (!cerca || distM(cerca.lat, cerca.lng, ubic.lat, ubic.lng) > 80) {
+        tilequeryPendRef.current = true;
+        tilequeryLastMsRef.current = Date.now();
+        const la = ubic.lat, ln = ubic.lng;
+        viasCercanasTilequery(la, ln, 200, process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "")
+          .then((puntos) => {
+            if (puntos == null) return;   // error de red/HTTP → conservar caché previa, reintentar al vencer el throttle
+            viasCercaRef.current = { lat: la, lng: ln, puntos };
+            if (puntos.length) setSnapTick((t) => t + 1);
+          })
+          .finally(() => { tilequeryPendRef.current = false; });
+      }
+    }
+  }, [ubic, snapTick, matchedCoords, ruta]); // eslint-disable-line
+
   // ── CAPA 2: Dibujar huella GPS (ajustada a carretera si hay Map Matching) ───
 
   useEffect(() => {
@@ -576,7 +629,12 @@ export default function ModalGps({
       // Con Map Matching: geometría pegada a la vía + COLA VIVA (puntos crudos posteriores y
       // posición en vivo) para que el trazo alcance al bus pese al throttle de 60 s del matching.
       // Sin matching aún (GPS de torre / cargando): huella cruda suavizada por tramos.
-      const live = ubic ? { lat: ubic.lat, lng: ubic.lng, velocidad: velCalc, acc: Number(ubic.precision_m) || 25 } : null;
+      // El punto vivo de la cola usa la posición PEGADA a la vía (snapPos — la MISMA del ícono,
+      // calculada una sola vez) → el trazo termina exactamente donde está el marcador, sin colita
+      // cruda hacia un techo. El `acc` se conserva CRUDO: si la cuerda hasta el bus es larga e
+      // imprecisa, sigue saliendo `aprox` (el camino intermedio sigue sin medirse).
+      const accLive = ubic ? (Number(ubic.precision_m) || 25) : 25;
+      const live = ubic ? { lat: snapPos?.lat ?? ubic.lat, lng: snapPos?.lng ?? ubic.lng, velocidad: velCalc, acc: accLive } : null;
       const cut = matchedCoords ? ((colaClean >= 1 && colaClean < matchedCoords.length - 1) ? colaClean : matchedCoords.length - 1) : 0;
       const features = (matchedCoords && matchedCoords.length >= 2)
         ? [...colorearMatched(matchedCoords, huella, suprimirCrudo, esCrudoArr), ...colaViva(matchedCoords.slice(0, cut + 1), huella, live, rutaRef.current?.coordenadas, !colaSnapped || cut < matchedCoords.length - 1)]
@@ -613,7 +671,7 @@ export default function ModalGps({
         }, "huella-gps-line");
       }
     } catch (e) { console.error("[ModalGps] Error dibujando huella GPS:", e); }
-  }, [huella, matchedCoords, mapListo, ubic, velCalc, suprimirCrudo, colaSnapped, colaClean, esCrudoArr]);
+  }, [huella, matchedCoords, mapListo, ubic, velCalc, suprimirCrudo, colaSnapped, colaClean, esCrudoArr, snapPos]); // eslint-disable-line
 
   // ── CAPA 3: Puntitos de telemetría real (velocidad/rumbo/dirección al clic) ──
   useEffect(() => {
@@ -890,15 +948,22 @@ export default function ModalGps({
 
   useEffect(() => {
     if (!ubic || !mapListo || !mapInst.current) return;
-    const lngLat: [number, number] = [ubic.lng, ubic.lat];
-    // Heading: usar rumbo del GPS si es válido (>0). Si no (detenido o sensor sin dato),
-    // calcular desde el desplazamiento respecto al punto anterior.
+    // Posición PEGADA a la vía (snapPos, calculada en el efecto de snap — misma que la cola).
+    // Fallback al fix crudo solo mientras snapPos aún no se publica en este ciclo.
+    const pos = snapPos ?? { lat: ubic.lat, lng: ubic.lng };
+    const lngLat: [number, number] = [pos.lng, pos.lat];
+    // Heading: usar rumbo del GPS si es válido (>0). Si no (detenido o sensor sin dato), derivarlo
+    // del desplazamiento PEGADO (snap previo → snap actual): con posición snapeada, el bearing del
+    // jitter crudo apuntaba de costado respecto de la pista. Con <5 m de avance se conserva el
+    // rumbo previo del marcador (no girar por ruido).
     const rawRumbo = Number(ubic.rumbo);
+    const prevSnap = prevSnapPosRef.current;
     const rot = rawRumbo > 0
       ? rawRumbo
-      : (prevUbicRef.current && (ubic.lat !== prevUbicRef.current.lat || ubic.lng !== prevUbicRef.current.lng))
-          ? calcBearing(prevUbicRef.current.lat, prevUbicRef.current.lng, ubic.lat, ubic.lng)
-          : rawRumbo;
+      : (prevSnap && distM(prevSnap.lat, prevSnap.lng, pos.lat, pos.lng) > 5)
+          ? calcBearing(prevSnap.lat, prevSnap.lng, pos.lat, pos.lng)
+          : (markerRef.current?.getRotation?.() ?? rawRumbo);
+    prevSnapPosRef.current = { lat: pos.lat, lng: pos.lng };
     const ts = ubic.created_at ? new Date(ubic.created_at).getTime()
              : ubic.timestamp  ? new Date(ubic.timestamp).getTime()
              : Date.now();
@@ -956,7 +1021,7 @@ export default function ModalGps({
       // Primera vez: salto directo al vehículo (como /seguimiento), no animación lenta desde Lima.
       mapInst.current.flyTo({ center: lngLat, zoom: 15, duration: 900 });
     }
-  }, [ubic, mapListo, vehiculoPlaca, conductorNombre]);
+  }, [ubic, mapListo, vehiculoPlaca, conductorNombre, snapPos]); // eslint-disable-line
 
   // Mantener la velocidad del popup del bus en sync (se arma una vez; sin esto se quedaba en 0).
   useEffect(() => {
@@ -1187,7 +1252,9 @@ export default function ModalGps({
                   if (mapInst.current && ubic) {
                     mapDescentradoRef.current = false;
                     setMapDescentrado(false);
-                    mapInst.current.easeTo({ center: [ubic.lng, ubic.lat], zoom: 15, duration: 800 });
+                    // Centrar en la posición PEGADA a la vía (donde se dibuja el ícono), no el fix crudo.
+                    const c = snapIconoRef.current ?? { lat: ubic.lat, lng: ubic.lng };
+                    mapInst.current.easeTo({ center: [c.lng, c.lat], zoom: 15, duration: 800 });
                   }
                 }}
                 className="absolute bottom-5 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 px-4 py-2 rounded-full text-white text-sm font-semibold shadow-lg"

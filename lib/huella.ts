@@ -653,6 +653,140 @@ export function puentePorRuta(
   return [[A.lng, A.lat], ...seg, [B.lng, B.lat]];
 }
 
+// ── ÍCONO DEL BUS PEGADO A LA VÍA ────────────────────────────────────────────
+// El marcador en vivo se dibujaba en el fix CRUDO: con GPS de red (±35-100 m) el bus "caminaba"
+// sobre techos y saltaba entre pistas sin conexión (regla del usuario: el ícono SIEMPRE sobre
+// una vía). Aquí la posición se PROYECTA sobre la geometría de vía disponible, con dos candados
+// de honestidad:
+//   1. La corrección NUNCA excede la imprecisión del propio fix (tol = 1.5·acc, acotada
+//      35–100 m): no se fabrica posición — solo se elige el punto de vía más plausible DENTRO
+//      del círculo de error del GPS. Un bus legítimamente fuera de pista (cochera, patio de
+//      maniobras, con chip preciso) se queda en su posición cruda.
+//   2. CONTINUIDAD: se prefiere el candidato a ≤80 m del snap anterior y, sobre la ruta, la
+//      ventana de progreso hacia adelante — el ícono no brinca entre vías paralelas ni se pega
+//      al pase opuesto de una ruta ida-vuelta.
+// Candidatos (un solo ranking por distancia): RUTA PLANIFICADA (con progreso), TRAZO MATCHEADO
+// (solo vértices de vía; se rechaza el clamp exacto en la PUNTA para no congelar el ícono cuando
+// el bus avanza más allá de lo matcheado) y PUNTOS DE VÍA de Tilequery (`puntosVia` — el punto
+// más cercano de cada calle del entorno; fallback cuando el bus va lejos de la ruta y el matching
+// no pegó, ver viasCercanasTilequery). Pura: el consumidor guarda prev/prevS entre ciclos.
+// Polilíneas en [lng, lat] (convención Mapbox).
+export type SnapIcono = { lat: number; lng: number; snapped: boolean; s: number | null; dist: number };
+export function pegarIconoAVia(
+  lat: number, lng: number, acc: number,
+  opts: {
+    ruta?: [number, number][];          // ruta planificada
+    trail?: [number, number][];         // geometría ajustada a la vía (Map Matching)
+    trailEsCrudo?: boolean[];           // por vértice del trail (leerEsCrudo) — los crudos NO son vía
+    puntosVia?: { lat: number; lng: number }[];   // puntos de calle cercanos (Tilequery)
+    prev?: { lat: number; lng: number } | null;   // snap anterior (continuidad)
+    prevS?: number | null;              // progreso anterior sobre la ruta (metros acumulados)
+  } = {},
+): SnapIcono {
+  // Tolerancia por FIABILIDAD: con chip (acc ≤ 20) el fix ya es la verdad — solo se admite el
+  // retoque fino a la vía (≤1.5·acc, piso 12 m); un chip a 25-30 m de la calle es un bus REALMENTE
+  // fuera de pista (cochera/patio) y se queda crudo. Con red (acc > 20 o desconocida) el círculo
+  // de error es grande y se admite hasta 1.5·acc (35–100 m).
+  const a = acc > 0 ? acc : 25;
+  const tol = a <= ACC_CONFIABLE_M ? Math.max(12, a * 1.5) : Math.min(100, Math.max(35, a * 1.5));
+  type Cand = { lat: number; lng: number; dist: number; s: number | null };
+  const cands: Cand[] = [];
+
+  const ruta = opts.ruta;
+  if (ruta && ruta.length >= 2) {
+    const cum = [0];
+    for (let i = 1; i < ruta.length; i++) cum[i] = cum[i - 1] + distM(ruta[i - 1][1], ruta[i - 1][0], ruta[i][1], ruta[i][0]);
+    let bestVent: Cand | null = null, bestGlob: Cand | null = null;
+    for (let i = 0; i < ruta.length - 1; i++) {
+      const A = { lat: ruta[i][1], lng: ruta[i][0] }, B = { lat: ruta[i + 1][1], lng: ruta[i + 1][0] };
+      const q = proyectarEnSegmento(lat, lng, A, B);
+      const s = cum[i] + distM(A.lat, A.lng, q.lat, q.lng);
+      const c: Cand = { lat: q.lat, lng: q.lng, dist: q.dist, s };
+      if (!bestGlob || c.dist < bestGlob.dist) bestGlob = c;
+      if (opts.prevS != null && s >= opts.prevS - 300 && s <= opts.prevS + 2500 && (!bestVent || c.dist < bestVent.dist)) bestVent = c;
+    }
+    // La ventana de progreso manda (evita el pase opuesto de la ida-vuelta); si el bus ya no
+    // está cerca de ese tramo (desvío / re-arranque) cae al mejor global.
+    const el = bestVent && bestVent.dist <= tol ? bestVent : bestGlob;
+    if (el && el.dist <= tol) cands.push(el);
+  }
+
+  const trail = opts.trail;
+  if (trail && trail.length >= 2) {
+    const desde = Math.max(0, trail.length - 40);   // solo la región de la punta (donde está el bus)
+    // Último vértice DE VÍA de la región (con cola cruda, el "fin de lo matcheado" no es el último
+    // vértice del array): un candidato que clampea EXACTO ahí significa que el bus avanzó más allá
+    // de lo matcheado → se rechaza para no congelar el ícono en esa esquina (ruta/Tilequery cubren).
+    let ultimoVia = -1;
+    for (let i = trail.length - 1; i >= desde; i--) { if (!opts.trailEsCrudo || !opts.trailEsCrudo[i]) { ultimoVia = i; break; } }
+    let best: Cand | null = null;
+    for (let i = desde; i < trail.length - 1; i++) {
+      if (opts.trailEsCrudo && (opts.trailEsCrudo[i] || opts.trailEsCrudo[i + 1])) continue;   // crudo ≠ vía
+      const A = { lat: trail[i][1], lng: trail[i][0] }, B = { lat: trail[i + 1][1], lng: trail[i + 1][0] };
+      const q = proyectarEnSegmento(lat, lng, A, B);
+      if (ultimoVia >= 0 && distM(q.lat, q.lng, trail[ultimoVia][1], trail[ultimoVia][0]) < 2) continue;   // clamp en la punta de vía → fuera
+      if (q.dist <= tol && (!best || q.dist < best.dist)) best = { lat: q.lat, lng: q.lng, dist: q.dist, s: null };
+    }
+    if (best) cands.push(best);
+  }
+
+  for (const p of opts.puntosVia || []) {
+    const d = distM(lat, lng, p.lat, p.lng);
+    if (d <= tol) cands.push({ lat: p.lat, lng: p.lng, dist: d, s: null });
+  }
+
+  if (!cands.length) return { lat, lng, snapped: false, s: opts.prevS ?? null, dist: 0 };
+  // Continuidad ACOTADA: con snap previo se prefiere el candidato que NO brinca (≤80 m del
+  // anterior), pero SOLO si no es claramente peor que el mejor global (≤25 m de diferencia).
+  // Sin ese tope, un snap que cayó una vez en la vía paralela equivocada se quedaba "pegado" a
+  // ella ciclo tras ciclo aunque la calle correcta estuviera mucho más cerca del fix.
+  let glob = cands[0];
+  for (const c of cands) if (c.dist < glob.dist) glob = c;
+  let win = glob;
+  if (opts.prev) {
+    const cerca = cands.filter((c) => distM(c.lat, c.lng, opts.prev!.lat, opts.prev!.lng) <= 80);
+    if (cerca.length) {
+      let nb = cerca[0];
+      for (const c of cerca) if (c.dist < nb.dist) nb = c;
+      if (nb.dist <= glob.dist + 25) win = nb;
+    }
+  }
+  return { lat: win.lat, lng: win.lng, snapped: true, s: win.s ?? opts.prevS ?? null, dist: win.dist };
+}
+
+// PUNTOS de vía VEHICULAR cercanos a una posición (Mapbox Tilequery, tileset mapbox-streets-v8,
+// capa `road`). La API devuelve, por cada feature del entorno, un Point = el punto de ESA vía más
+// cercano al consultado (verificado con datos reales — no devuelve la polilínea). Es el fallback
+// del snap del ícono cuando el bus circula LEJOS de la ruta planificada y el Map Matching no pegó
+// (GPS de red, el caso #962). Se excluyen las clases donde un bus NO puede estar: peatonales,
+// ferrovías (la capa road también trae rieles — pegar el bus al tren sería el mismo bug), vías en
+// obra, teleféricos y ferry. `limit=50` (el máximo, mismo costo): el filtro corre DESPUÉS en el
+// cliente y con limit chico una zona peatonal densa dejaba fuera la calzada real.
+// Devuelve null en ERROR (red/HTTP — el consumidor puede reintentar con throttle) y [] cuando
+// GENUINAMENTE no hay vía vehicular cerca (cacheable). Esta función no guarda estado.
+const CLASES_NO_VEHICULARES = new Set([
+  "path", "steps", "pedestrian", "sidewalk", "crossing", "footway", "corridor", "golf",
+  "ferry", "major_rail", "minor_rail", "service_rail", "aerialway", "construction",
+]);
+export async function viasCercanasTilequery(lat: number, lng: number, radioM: number, token: string): Promise<{ lat: number; lng: number }[] | null> {
+  if (!token) return null;
+  try {
+    const res = await fetch(
+      `https://api.mapbox.com/v4/mapbox.mapbox-streets-v8/tilequery/${lng},${lat}.json` +
+      `?radius=${Math.round(radioM)}&limit=50&layers=road&geometry=linestring&access_token=${token}`
+    );
+    if (!res.ok) return null;
+    const json = await res.json();
+    const out: { lat: number; lng: number }[] = [];
+    for (const f of json?.features || []) {
+      if (CLASES_NO_VEHICULARES.has(String(f?.properties?.class || ""))) continue;
+      const c = f?.geometry?.type === "Point" ? f.geometry.coordinates : null;
+      if (Array.isArray(c) && Number.isFinite(c[0]) && Number.isFinite(c[1])) out.push({ lat: c[1], lng: c[0] });
+    }
+    return out;
+  } catch { return null; }
+}
+
 // Prepara una ventana para Map Matching: deduplica y limita a 100 (máximo de la API),
 // conservando primero y último. Se llama por ventana, que ya viene ≤100.
 export function prepararPuntos(pts: MatchPt[]): MatchPt[] {
@@ -798,7 +932,9 @@ export const MAX_SEG_CRUDO_M = 60;
 //    precision_m: 0, app/api/conductor-tercero/*) — desconocida ≠ confiable.
 //  • acc > ACC_CONFIABLE_M (20) → crudo: red/torre. filasAPuntos ya convierte NULL de BD en 25 →
 //    las filas sin precision_m también cuentan como crudas (desconocida ≠ confiable).
-const esAccCruda = (acc: number | undefined) => acc != null && (acc <= 0 || acc > ACC_CONFIABLE_M);
+// Exportada: los consumidores la usan también para decidir si el ícono necesita el fallback de
+// Tilequery (solo con fix crudo — un chip preciso ya está sobre la pista).
+export const esAccCruda = (acc: number | undefined) => acc != null && (acc <= 0 || acc > ACC_CONFIABLE_M);
 
 // Filtros/pintura COMPARTIDOS de la capa "aprox" (señal imprecisa, gris punteada). Viven aquí —la
 // fuente única del contrato aprox— para que el modal del ERP y el portal cliente no diverjan: un

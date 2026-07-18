@@ -5,13 +5,14 @@ import { supabase } from "@/lib/supabase";
 import { idAfa } from "@/lib/folio";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador } from "@/lib/anim-marker";
+import { pegarIconoAVia } from "@/lib/huella";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 type Parada = {
   id: number; orden: number; nombre: string; direccion: string | null;
   lat: number | null; lng: number | null; hora_estimada: string | null; estado: string;
 };
-type UbicacionGPS = { lat: number; lng: number; velocidad: number; rumbo: number; estado: string; created_at: string };
+type UbicacionGPS = { lat: number; lng: number; velocidad: number; rumbo: number; estado: string; created_at: string; precision_m?: number | null };
 type ReservaInfo = {
   id: number; codigo?: string | null; estado: string; fecha_servicio: string; hora_servicio: string;
   vehiculo_id: number | null; vehiculo_tercero_id: number | null;
@@ -94,6 +95,7 @@ export default function SeguimientoPage() {
   const mapInstanceRef = useRef<any>(null);
   const mapboxglRef = useRef<any>(null);
   const busMarkerRef = useRef<any>(null);
+  const snapTokenRef = useRef<{ lat: number; lng: number; s: number | null } | null>(null); // continuidad del ícono pegado a la ruta
   const paradaMarkersRef = useRef<any[]>([]);
   const ubicacionRef = useRef<UbicacionGPS | null>(null);
   const mapDescentradoRef = useRef(false);
@@ -245,7 +247,14 @@ export default function SeguimientoPage() {
 
     const lat = Number(ubicacion.lat); const lng = Number(ubicacion.lng);
     if (isNaN(lat) || isNaN(lng)) return;
-    const lngLat: [number, number] = [lng, lat];
+    // Ícono PEGADO a la ruta planificada, acotado por la imprecisión del fix (pegarIconoAVia):
+    // con GPS de red el bus ya no se dibuja sobre techos. Lejos de la ruta → posición cruda.
+    const prevSnap = snapTokenRef.current;
+    const rs = pegarIconoAVia(lat, lng, Number((ubicacion as any).precision_m) || 25, {
+      ruta: ruta?.coordenadas, prev: prevSnap, prevS: prevSnap?.s ?? null,
+    });
+    snapTokenRef.current = { lat: rs.lat, lng: rs.lng, s: rs.s };
+    const lngLat: [number, number] = [rs.lng, rs.lat];
 
     if (busMarkerRef.current) {
       animarMarcador(busMarkerRef.current, lngLat); // deslizar suave entre puntos
@@ -299,7 +308,7 @@ export default function SeguimientoPage() {
         .addTo(map);
       map.flyTo({ center: lngLat, zoom: 15 });
     }
-  }, [mapListo, ubicacion]);
+  }, [mapListo, ubicacion, ruta]); // eslint-disable-line
 
   // ────────── 6. Cargar ruta inicial ──────────
   const cargarRuta = useCallback(async () => {
@@ -376,6 +385,7 @@ export default function SeguimientoPage() {
           lat: Number(d.lat), lng: Number(d.lng),
           velocidad: Number(d.velocidad) || 0, rumbo: Number(d.rumbo) || 0,
           estado: d.estado, created_at: d.created_at,
+          precision_m: d.precision_m != null ? Number(d.precision_m) : null,   // el snap del ícono acota la corrección con la imprecisión REAL
         };
         ubicacionRef.current = nueva;
         setUbicacion(nueva);

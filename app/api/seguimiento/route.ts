@@ -94,7 +94,7 @@ export async function GET(req: NextRequest) {
 
   const { data: ubPorReserva } = await supabase
     .from("ubicaciones_gps")
-    .select("lat, lng, velocidad, rumbo, estado, created_at")
+    .select("lat, lng, velocidad, rumbo, estado, created_at, precision_m")
     .eq("reserva_id", reserva.id)
     .order("created_at", { ascending: false })
     .limit(1)
@@ -115,7 +115,7 @@ export async function GET(req: NextRequest) {
     const hace15min = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     let query = supabase
       .from("ubicaciones_gps")
-      .select("lat, lng, velocidad, rumbo, estado, created_at")
+      .select("lat, lng, velocidad, rumbo, estado, created_at, precision_m")
       .neq("estado", "disponible")
       .gte("created_at", hace15min)
       .order("created_at", { ascending: false })

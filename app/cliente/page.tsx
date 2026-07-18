@@ -11,7 +11,7 @@ import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, anclarImprecisos, puentePorRuta, distM, paginarFilas,
-  FILTRO_APROX, FILTRO_NO_APROX, PINTURA_APROX,
+  FILTRO_APROX, FILTRO_NO_APROX, PINTURA_APROX, pegarIconoAVia,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
 import { estadoCliente, normalizaEstado } from "@/lib/estados";
@@ -284,6 +284,8 @@ export default function ClientePortal() {
   const [etaDestinoMap, setEtaDestinoMap] = useState<Record<number, string | null>>({});
   const ajustadoresRef   = useRef<Record<number, ReturnType<typeof crearAjustadorHuella>>>({}); // 1 ajustador de Map Matching por servicio
   const matchedEnVivoRefMap = useRef<Record<number, [number, number][]>>({}); // última geometría ajustada por servicio (para puentesCrudos aunque el ciclo devuelva null)
+  const esCrudoEnVivoRefMap = useRef<Record<number, boolean[]>>({}); // espejo del estado esCrudoEnVivoMap para el efecto de MARCADORES (par ref+ref con matchedEnVivoRefMap → siempre alineados)
+  const snapIconoCliRef = useRef<{ rid: number; lat: number; lng: number; s: number | null } | null>(null); // continuidad del snap del ícono (servicio seleccionado)
   const dibujoLayersRef  = useRef<string[]>([]);
   const dibujoSourcesRef = useRef<string[]>([]);
   const stopMarkersRef   = useRef<mapboxgl.Marker[]>([]);
@@ -876,6 +878,14 @@ export default function ClientePortal() {
   useEffect(() => {
     if (!mapListoEnVivo || !mapRef.current) return;
     const vistos = new Set<string>();
+    // UNA sola fila representa al servicio seleccionado (la misma que elige el draw effect con
+    // .find): el merge sticky puede retener varias filas del mismo vehículo con llaves distintas,
+    // y si todas snapearan compartirían snapIconoCliRef (continuidad envenenada entre filas).
+    const saSel: any = rutaSelId != null ? (serviciosHoyRef.current || []).find((r: any) => r.id === rutaSelId) : null;
+    const uSel = saSel ? ubicacionesEnVivo.find(u =>
+      (u.reserva_id != null && Number(u.reserva_id) === saSel.id) ||
+      (saSel.vehiculo_id != null && u.vehiculo_id === saSel.vehiculo_id) ||
+      (saSel.vehiculo_tercero_id != null && u.vehiculo_tercero_id === saSel.vehiculo_tercero_id)) : null;
     ubicacionesEnVivo.forEach(u => {
       // Key compuesta: prioriza conductor/vehículo de tercero sobre los propios.
       // Evita colisiones cuando vehiculo_id es null (puntos de tercero) o cuando
@@ -900,10 +910,26 @@ export default function ClientePortal() {
       vistos.add(key);
       const popupHtml = `<div style="font-family:system-ui,sans-serif;padding:2px 0"><b style="font-size:13px;color:#0a0e1a">${placa}</b><br><span style="font-size:12px;color:${color};font-weight:600">${label}</span><br><span style="font-size:11px;color:#6b6f7c">${u.velocidad} km/h</span></div>`;
 
+      // Ícono PEGADO a la vía para el servicio SELECCIONADO (tiene ruta+trazo cargados): con GPS
+      // de red el bus no camina sobre techos. Corrección acotada por la imprecisión del fix
+      // (pegarIconoAVia); los demás buses (sin contexto de ruta) quedan en su fix crudo.
+      let pos: [number, number] = [u.lng, u.lat];
+      if (uSel != null && u === uSel && saSel) {
+        const prev = snapIconoCliRef.current?.rid === saSel.id ? snapIconoCliRef.current : null;
+        const r = pegarIconoAVia(Number(u.lat), Number(u.lng), Number((u as any).precision_m) || 25, {
+          ruta: rutasEnVivoRef.current[saSel.id],
+          trail: matchedEnVivoRefMap.current[saSel.id] || undefined,
+          trailEsCrudo: esCrudoEnVivoRefMap.current[saSel.id],
+          prev, prevS: prev?.s ?? null,
+        });
+        snapIconoCliRef.current = { rid: saSel.id, lat: r.lat, lng: r.lng, s: r.s };
+        pos = [r.lng, r.lat];
+      }
+
       // Si el marcador ya existe: deslizarlo suave (tween) y refrescar rumbo, color y popup.
       const existente = markersEnVivo.current[key];
       if (existente) {
-        animarMarcador(existente, [u.lng, u.lat]);
+        animarMarcador(existente, pos);
         existente.setRotation(Number(u.rumbo) || 0);
         existente.getElement().querySelectorAll<HTMLElement>(".afa-pulse1, .afa-pulse2").forEach(d => { d.style.background = color; });
         existente.getPopup()?.setHTML(popupHtml);
@@ -953,7 +979,7 @@ export default function ClientePortal() {
         rotationAlignment: "map",
         anchor: "center",
       })
-        .setLngLat([u.lng, u.lat])
+        .setLngLat(pos)
         .setPopup(popup)
         .addTo(mapRef.current!);
     });
@@ -974,7 +1000,7 @@ export default function ClientePortal() {
         try { mapRef.current.fitBounds(b, { padding: 80, maxZoom: 15, duration: 900 }); } catch {}
       }
     }
-  }, [ubicacionesEnVivo, vehiculosCliente, vehiculosTerceroCliente, mapListoEnVivo]);
+  }, [ubicacionesEnVivo, vehiculosCliente, vehiculosTerceroCliente, mapListoEnVivo, rutaSelId]); // rutaSelId: al (de)seleccionar, el snap del ícono aplica/se quita al instante
 
   // ─── En vivo: centrar en el bus del chip seleccionado ────────────────────
   useEffect(() => {
@@ -986,7 +1012,9 @@ export default function ClientePortal() {
       ((sel as any).vehiculo_tercero_id != null && u.vehiculo_tercero_id === (sel as any).vehiculo_tercero_id)
     );
     if (!gps) return;
-    mapRef.current.flyTo({ center: [gps.lng, gps.lat], zoom: 14, duration: 900 });
+    // Centrar en la posición PEGADA a la vía si ya existe para este servicio (donde se dibuja el ícono).
+    const c = snapIconoCliRef.current?.rid === rutaSelId ? snapIconoCliRef.current : { lat: gps.lat, lng: gps.lng };
+    mapRef.current.flyTo({ center: [c.lng, c.lat], zoom: 14, duration: 900 });
   }, [rutaSelId, mapListoEnVivo]);
 
   // ─── En vivo: limpiar selección si el servicio elegido ya no existe ───────
@@ -1207,7 +1235,7 @@ export default function ClientePortal() {
       // Map Matching por ventanas (pegado a la pista) — throttle/congelado interno del ajustador.
       if (!ajustadoresRef.current[rid]) ajustadoresRef.current[rid] = crearAjustadorHuella();
       const matched = await ajustadoresRef.current[rid].ajustar(limpio, token, () => cancel);
-      if (matched && !cancel) { setMatchedEnVivoMap(prev => ({ ...prev, [rid]: matched })); setEsCrudoEnVivoMap(prev => ({ ...prev, [rid]: ajustadoresRef.current[rid].leerEsCrudo() })); matchedEnVivoRefMap.current[rid] = matched; }
+      if (matched && !cancel) { const ec = ajustadoresRef.current[rid].leerEsCrudo(); esCrudoEnVivoRefMap.current[rid] = ec; setMatchedEnVivoMap(prev => ({ ...prev, [rid]: matched })); setEsCrudoEnVivoMap(prev => ({ ...prev, [rid]: ec })); matchedEnVivoRefMap.current[rid] = matched; }
       if (!cancel) setColaSnappedMap(prev => ({ ...prev, [rid]: ajustadoresRef.current[rid].leerColaSnapped() }));   // ¿pegó la punta viva?
       const colaClean = ajustadoresRef.current[rid].leerColaClean();   // último vértice de VÍA limpia (frontera de colaViva)
 
@@ -1342,7 +1370,18 @@ export default function ClientePortal() {
       (sa.vehiculo_id != null && u.vehiculo_id === sa.vehiculo_id) ||
       (sa.vehiculo_tercero_id != null && u.vehiculo_tercero_id === sa.vehiculo_tercero_id)
     );
-    const live = liveU ? { lat: Number(liveU.lat), lng: Number(liveU.lng), velocidad: Number(liveU.velocidad) || 0, acc: Number((liveU as any).precision_m) || 25 } : null;
+    // Punto vivo PEGADO a la vía (misma posición que el ícono) → la cola termina en el marcador,
+    // sin colita cruda hacia un techo. `acc` se conserva crudo (una cuerda larga sigue saliendo aprox).
+    const liveRaw = liveU ? { lat: Number(liveU.lat), lng: Number(liveU.lng), velocidad: Number(liveU.velocidad) || 0, acc: Number((liveU as any).precision_m) || 25 } : null;
+    let live = liveRaw;
+    if (liveRaw) {
+      const prevSnap = snapIconoCliRef.current?.rid === sel.id ? snapIconoCliRef.current : null;
+      const rs = pegarIconoAVia(liveRaw.lat, liveRaw.lng, liveRaw.acc, {
+        ruta: rutasEnVivoMap[sel.id], trail: matchedEV || undefined, trailEsCrudo: esCrudoEnVivoMap[sel.id],
+        prev: prevSnap, prevS: prevSnap?.s ?? null,
+      });
+      live = { ...liveRaw, lat: rs.lat, lng: rs.lng };
+    }
     const cutC = matchedEV ? ((colaCleanMap[sel.id] >= 1 && colaCleanMap[sel.id] < matchedEV.length - 1) ? colaCleanMap[sel.id] : matchedEV.length - 1) : 0;
     const feats: any[] = (matchedEV && matchedEV.length >= 2)
       ? [...colorearMatched(matchedEV, huellaPts, suprimirCrudoMap[sel.id], esCrudoEnVivoMap[sel.id]), ...colaViva(matchedEV.slice(0, cutC + 1), huellaPts, live, rutasEnVivoMap[sel.id], colaSnappedMap[sel.id] === false || cutC < matchedEV.length - 1)]
