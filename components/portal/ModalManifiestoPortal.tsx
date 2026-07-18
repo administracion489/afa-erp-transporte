@@ -9,7 +9,7 @@
 //   - Llama a /api/portal/manifiesto (verifica cliente_id)
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { portalApi } from "@/lib/portal-sesion";
 import { parsearManifiesto, descargarPlantillaPortal } from "@/lib/manifiesto-csv";
 
 // ─── Paleta (misma que page.tsx) ─────────────────────────────────────────────
@@ -112,75 +112,30 @@ export default function ModalManifiestoPortal({ reservaId, clienteId, readonly, 
   const [form, setForm] = useState<AddForm>(emptyForm);
 
   // ── Carga inicial ─────────────────────────────────────────────────────────
+  // Todo en una acción de /api/cliente (service role + token del portal): RLS
+  // bloquea reservas/paradas/pasajeros/pasajeros_parada al rol anónimo. El armado
+  // (config + paradas + ad-hoc ∪ globales + asignaciones) es el mismo de antes.
   const cargar = useCallback(async () => {
     setLoading(true);
     try {
-      // 0. Config de la reserva (ruta_nombre + toggles)
-      const { data: resData } = await supabase
-        .from("reservas")
-        .select("ruta_nombre,permite_autoseleccion,permite_cambio_paradero")
-        .eq("id", reservaId)
-        .maybeSingle();
-      if (resData) {
-        setRutaNombre(resData.ruta_nombre || "");
-        setPermiteAutoseleccion(!!resData.permite_autoseleccion);
-        setPermiteCambioParadero(!!resData.permite_cambio_paradero);
+      const { ok, data } = await portalApi("manifiesto_editor", { reserva_id: reservaId });
+      if (!ok) return;
+      if (data.config) {
+        setRutaNombre(data.config.ruta_nombre || "");
+        setPermiteAutoseleccion(!!data.config.permite_autoseleccion);
+        setPermiteCambioParadero(!!data.config.permite_cambio_paradero);
       }
-
-      // 1. Paradas del servicio
-      const { data: parData } = await supabase
-        .from("paradas")
-        .select("id,orden,nombre,hora_estimada")
-        .eq("reserva_id", reservaId)
-        .order("orden");
-      const pars = (parData || []) as Parada[];
-      setParadas(pars);
-      const paradaIds = pars.map(p => p.id);
-
-      // 2. Pasajeros ad-hoc de esta reserva (reserva_id = X)
-      const { data: paxAdhoc } = await supabase
-        .from("pasajeros")
-        .select("id,nombre,dni,empresa,telefono")
-        .eq("reserva_id", reservaId);
-      const adhocList = (paxAdhoc || []) as Pasajero[];
-      const adhocIds  = new Set(adhocList.map(p => p.id));
-
-      // 3. Asignaciones de pasajeros_parada para las paradas de esta reserva
+      setParadas((data.paradas || []) as Parada[]);
       const map: Record<number, AsignacionParada> = {};
-      let extraPaxIds: number[] = [];
-
-      if (paradaIds.length > 0) {
-        const { data: ppData } = await supabase
-          .from("pasajeros_parada")
-          .select("pasajero_id,parada_id,estado_abordaje")
-          .in("parada_id", paradaIds);
-        (ppData || []).forEach((row: any) => {
-          map[row.pasajero_id] = {
-            pasajero_id:     row.pasajero_id,
-            parada_id:       row.parada_id,
-            estado_abordaje: row.estado_abordaje || "Pendiente",
-          };
-          // Pasajeros del registro global (no son ad-hoc de esta reserva)
-          if (!adhocIds.has(row.pasajero_id)) {
-            extraPaxIds.push(row.pasajero_id);
-          }
-        });
-      }
+      (data.asignaciones || []).forEach((row: any) => {
+        map[row.pasajero_id] = {
+          pasajero_id:     row.pasajero_id,
+          parada_id:       row.parada_id,
+          estado_abordaje: row.estado_abordaje || "Pendiente",
+        };
+      });
       setAsig(map);
-
-      // 4. Cargar datos de pasajeros del registro global que están asignados aquí
-      let globalList: Pasajero[] = [];
-      const uniqueExtraIds = [...new Set(extraPaxIds)];
-      if (uniqueExtraIds.length > 0) {
-        const { data: paxGlobal } = await supabase
-          .from("pasajeros")
-          .select("id,nombre,dni,empresa,telefono")
-          .in("id", uniqueExtraIds);
-        globalList = (paxGlobal || []) as Pasajero[];
-      }
-
-      // 5. Merge: ad-hoc primero, luego globales (ya deduplicados)
-      setPasajeros([...adhocList, ...globalList]);
+      setPasajeros((data.pasajeros || []) as Pasajero[]);
     } finally {
       setLoading(false);
     }

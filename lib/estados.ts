@@ -135,6 +135,106 @@ export function siguienteAdmin(e: EstadoAdmin | string | null | undefined): Esta
   return ESTADOS_ADMIN_LISTA[i + 1];
 }
 
+// ── Dimensión B refinada · derivar el estado admin de HECHOS, no de un clic ──────
+//
+// El problema que resuelve: hoy facturas.estado y reservas.estado_admin son "dos
+// verdades" que divergen porque se avanzan a mano. La regla nueva: el estado admin
+// del CLIENTE se DERIVA de si existe factura emitida y del saldo por cobrar
+// (total − Σ pagos_aplicacion). Un único servicio de cobro/facturación llama a esto
+// y actualiza reservas.estado_admin de forma consistente. Ver lib/finanzas/pagos.ts.
+//
+//   sin factura                 → por_liquidar (o liquidada, si ya se concilió)
+//   factura emitida, saldo>0     → facturada
+//   factura emitida, saldo=0     → cobrada
+//
+// `liquidada` es un paso previo explícito (la liquidación al cliente fue aprobada
+// pero aún no se emite comprobante). No se puede DERIVAR de factura/saldo, así que
+// se pasa como pista `conciliada`.
+export function estadoAdminDerivado(args: {
+  tieneFactura: boolean;
+  total?: number | null;
+  pagado?: number | null;
+  conciliada?: boolean; // liquidación al cliente aprobada (aún sin factura)
+}): EstadoAdmin {
+  const total = Number(args.total ?? 0);
+  const pagado = Number(args.pagado ?? 0);
+  if (args.tieneFactura) {
+    // Saldo cero (con tolerancia de céntimo) ⇒ cobrada.
+    if (total > 0 && pagado + 0.005 >= total) return "cobrada";
+    return "facturada";
+  }
+  return args.conciliada ? "liquidada" : "por_liquidar";
+}
+
+// ── Dimensión C · estado del PROVEEDOR / tercero (columna reservas.estado_proveedor) ──
+//
+// B modela el lado CLIENTE (cobro). C modela el lado PROVEEDOR (pago), que B nunca
+// tocó. SOLO aplica cuando el servicio fue tercerizado (tipo_asignacion='tercerizado').
+//
+//   por_conciliar → conciliada → por_pagar → pagada
+//   Responde: "¿concilié lo que me cobra el tercero y ya le pagué?"
+//
+// Familia de color ÁMBAR/TEAL — distinta a propósito del ciclo operativo (azules) y
+// de la dimensión B (violeta), para que las tres se lean como grupos separados.
+
+export type EstadoProveedor = "por_conciliar" | "conciliada" | "por_pagar" | "pagada";
+
+export type ConfigProveedor = {
+  label: string;
+  descripcion: string;
+  color: string;
+  orden: number;
+};
+
+export const ESTADOS_PROVEEDOR: Record<EstadoProveedor, ConfigProveedor> = {
+  por_conciliar: { label: "Por conciliar", descripcion: "Servicio tercerizado hecho, falta conciliar costo", color: "#b45309", orden: 0 },
+  conciliada:    { label: "Conciliada",    descripcion: "Liquidación al proveedor aprobada",                 color: "#0f766e", orden: 1 },
+  por_pagar:     { label: "Por pagar",     descripcion: "Cuenta por pagar generada",                         color: "#a16207", orden: 2 },
+  pagada:        { label: "Pagada",        descripcion: "Pago emitido y aplicado",                           color: "#065f46", orden: 3 },
+};
+
+export const ESTADOS_PROVEEDOR_LISTA = Object.keys(ESTADOS_PROVEEDOR) as EstadoProveedor[];
+
+// La dimensión C solo aplica a servicios tercerizados ya realizados.
+export function aplicaProveedor(args: {
+  estado: EstadoReserva | string | null | undefined;
+  tipoAsignacion?: string | null;
+}): boolean {
+  return normalizaEstado(args.estado) === "finalizada"
+    && (args.tipoAsignacion ?? "") === "tercerizado";
+}
+
+// Al finalizar un servicio tercerizado, la dimensión C arranca en "por_conciliar".
+export const ESTADO_PROVEEDOR_INICIAL: EstadoProveedor = "por_conciliar";
+
+export function etiquetaProveedor(e: EstadoProveedor | string | null | undefined): string {
+  if (!e) return "—";
+  return (ESTADOS_PROVEEDOR as Record<string, ConfigProveedor>)[e]?.label ?? String(e);
+}
+
+export function configProveedor(e: EstadoProveedor | string | null | undefined): ConfigProveedor {
+  return (e && (ESTADOS_PROVEEDOR as Record<string, ConfigProveedor>)[e]) || ESTADOS_PROVEEDOR.por_conciliar;
+}
+
+export function siguienteProveedor(e: EstadoProveedor | string | null | undefined): EstadoProveedor | null {
+  const i = e ? ESTADOS_PROVEEDOR_LISTA.indexOf(e as EstadoProveedor) : -1;
+  if (i < 0 || i >= ESTADOS_PROVEEDOR_LISTA.length - 1) return null;
+  return ESTADOS_PROVEEDOR_LISTA[i + 1];
+}
+
+// Derivar el estado del proveedor de hechos (liquidación aprobada, saldo por pagar).
+export function estadoProveedorDerivado(args: {
+  liquidacionAprobada: boolean;
+  total?: number | null;
+  pagado?: number | null;
+}): EstadoProveedor {
+  if (!args.liquidacionAprobada) return "por_conciliar";
+  const total = Number(args.total ?? 0);
+  const pagado = Number(args.pagado ?? 0);
+  if (total > 0 && pagado + 0.005 >= total) return "pagada";
+  return "por_pagar";
+}
+
 // ── Capa CLIENTE · proyección de cara al cliente final ──────────────────────────
 //
 // El cliente NO ve el detalle operativo interno. En particular "pendiente" (servicio

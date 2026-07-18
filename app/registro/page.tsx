@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { supabase } from "@/lib/supabase";
 
 /* ══════════════════════════════════════════════
    TYPES & CONSTANTS
@@ -294,9 +293,14 @@ export default function RegistroClientePage() {
       estado: "pendiente",
     };
 
-    const { error } = await supabase.from("solicitudes_cliente").insert(payload);
+    // Vía /api/registro (service role): RLS bloquea el INSERT anónimo directo.
+    const res = await fetch("/api/registro", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ solicitud: payload }),
+    }).catch(() => null);
 
-    if (error) {
+    if (!res || !res.ok) {
       setErrors({ submit: "Hubo un error al enviar. Por favor intente nuevamente." });
       setSending(false);
       return;

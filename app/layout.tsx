@@ -250,6 +250,22 @@ const Ic = {
       <rect width="18" height="10" x="3" y="11" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" x2="8" y1="16" y2="16"/><line x1="16" x2="16" y1="16" y2="16"/>
     </svg>
   ),
+  // ── Liquidaciones (balanza) y Contabilidad (libro) ──────────────────────
+  Scale: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M12 3v18"/><path d="M5 7h14"/><path d="m5 7-3 6a3 3 0 0 0 6 0z"/><path d="m19 7-3 6a3 3 0 0 0 6 0z"/><path d="M7 21h10"/>
+    </svg>
+  ),
+  BookOpen: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+    </svg>
+  ),
+  Wallet: ({ size = 16, strokeWidth = 2, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h16a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5"/><path d="M18 12a1 1 0 0 0 0 2h2v-2z"/>
+    </svg>
+  ),
 };
 
 // ─── Tipos ─────────────────────────────────────────────────────────────────
@@ -333,8 +349,16 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
   {
     grupo: "Finanzas",
     items: [
-      { href: "/facturacion", label: "Facturación", sub: "SUNAT / pagos", icon: Ic.Receipt,      modulo: "facturacion" },
-      { href: "/gastos",      label: "Gastos",      sub: "Egresos",       icon: Ic.TrendingDown, modulo: "gastos"      },
+      { href: "/liquidaciones", label: "Liquidaciones", sub: "Cierre cliente / proveedor", icon: Ic.Scale,        modulo: "liquidaciones" },
+      { href: "/finanzas",      label: "Finanzas",      sub: "Ingresos · Egresos · Tesorería", icon: Ic.Wallet,   modulo: "finanzas"      },
+      { href: "/facturacion",   label: "Facturación",   sub: "SUNAT / comprobantes",  icon: Ic.Receipt,      modulo: "facturacion" },
+      { href: "/gastos",        label: "Gastos",        sub: "Egresos",               icon: Ic.TrendingDown, modulo: "gastos"      },
+    ],
+  },
+  {
+    grupo: "Contabilidad",
+    items: [
+      { href: "/contabilidad", label: "Contabilidad", sub: "Compras · IGV · Asientos", icon: Ic.BookOpen, modulo: "contabilidad" },
     ],
   },
   {

@@ -16,6 +16,7 @@ import {
 import { idAfa } from "@/lib/folio";
 import { estadoCliente, normalizaEstado } from "@/lib/estados";
 import { manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado } from "@/lib/documentos-servicio";
+import { saveSession, loadSession, clearSession, getPortalToken, portalApi } from "@/lib/portal-sesion";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 
@@ -101,10 +102,10 @@ const C = {
 // Vocabulario de estados de cara al cliente → única fuente en lib/estados.ts (estadoCliente()).
 
 // ─── SESSION ──────────────────────────────────────────────────────────────
-const SK = "afa_cliente_portal_v2";
-function saveSession(c: Cliente, u: PortalUsuario | null) { localStorage.setItem(SK, JSON.stringify({ c, u, exp: Date.now() + 8 * 3600000 })); }
-function loadSession(): { c: Cliente; u: PortalUsuario | null } | null { try { const r = localStorage.getItem(SK); if (!r) return null; const { c, u, exp } = JSON.parse(r); if (Date.now() > exp) { localStorage.removeItem(SK); return null; } return { c, u: u || null }; } catch { return null; } }
-function clearSession() { localStorage.removeItem(SK); }
+// saveSession/loadSession/clearSession + portalApi viven en lib/portal-sesion.ts
+// (compartidas con los modales del portal). La sesión ahora incluye el token de
+// /api/cliente: las consultas del portal van por ese endpoint (service role)
+// porque RLS bloquea el rol anónimo en las tablas del ERP.
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────
 const fmtFecha    = (f: string | null) => f ? new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" }) : "–";
@@ -306,7 +307,7 @@ export default function ClientePortal() {
   // ─── Init ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     supabase.from("empresa_perfil").select("nombre,logo_url,color_primario,telefono,email,slogan").eq("id", 1).maybeSingle()
-      .then(({ data }) => { if (data) setEmpresa(data as EmpresaPerfil); });
+      .then(({ data }: any) => { if (data) setEmpresa(data as EmpresaPerfil); });
     const saved = loadSession();
     if (saved) {
       setCliente(saved.c); setPortalUsuario(saved.u);
@@ -319,38 +320,23 @@ export default function ClientePortal() {
   }, []);
 
   // ─── Login ────────────────────────────────────────────────────────────────
+  // Credenciales verificadas en el SERVIDOR (/api/cliente, service role): el rol
+  // anónimo no puede leer clientes/portal_usuarios (RLS) ni debe ver claves.
   async function login() {
     if (!rucInput.trim())      { setLoginErr("Ingresa el RUC de tu empresa"); return; }
     if (!dniInput.trim())      { setLoginErr(`Ingresa tu ${tipoIdInput === "Celular" ? "número de celular" : tipoIdInput}`); return; }
     if (!passwordInput.trim()) { setLoginErr("Ingresa tu contraseña"); return; }
     setLoginErr(""); setLoginLoad(true);
-    const q = rucInput.trim();
-    const { data: clienteData } = await supabase.from("clientes").select("*")
-      .or(`ruc.eq.${q},empresa.ilike.%${q}%`).limit(1).single();
-    if (!clienteData) { setLoginErr("No se encontró ningún cliente con ese RUC."); setLoginLoad(false); return; }
-    // Buscar usuario en portal_usuarios
-    const { data: usuariosData } = await supabase.from("portal_usuarios")
-      .select("*").eq("cliente_id", (clienteData as any).id).eq("activo", true);
-    const usuarios = (usuariosData || []) as PortalUsuario[];
-    if (usuarios.length === 0) {
-      // Sin usuarios configurados: fallback al código de acceso de la empresa (legacy)
-      const codigoEmpresa = (clienteData as any).codigo_acceso;
-      if (codigoEmpresa && codigoEmpresa !== passwordInput.trim()) {
-        setLoginErr("Sin usuarios configurados. Contacta a AFA Transportes."); setLoginLoad(false); return;
-      }
-      const tempUser: PortalUsuario = { id: 0, cliente_id: (clienteData as any).id, nombre: (clienteData as any).nombre, dni: dniInput.trim(), cargo: null, rol: "admin", email: (clienteData as any).email, codigo_acceso: "", activo: true, created_at: "" };
-      saveSession(clienteData as Cliente, tempUser);
-      setCliente(clienteData as Cliente); setPortalUsuario(tempUser);
-      await cargarDatos((clienteData as any).id); cargarVehiculosCliente((clienteData as any).id); setLoginLoad(false); return;
+    const { ok, data } = await portalApi("login", {
+      ruc: rucInput.trim(), doc: dniInput.trim(), password: passwordInput.trim(), tipoId: tipoIdInput,
+    });
+    if (!ok || !data?.cliente || !data?.token) {
+      setLoginErr(data?.error || "No se pudo iniciar sesión. Intenta de nuevo.");
+      setLoginLoad(false); return;
     }
-    const usuario = usuarios.find(u => u.dni === dniInput.trim());
-    if (!usuario) { setLoginErr(`${tipoIdInput === "Celular" ? "Celular" : tipoIdInput} no registrado para este cliente.`); setLoginLoad(false); return; }
-    if (usuario.codigo_acceso !== passwordInput.trim()) {
-      setLoginErr("Contraseña incorrecta."); setLoginLoad(false); return;
-    }
-    saveSession(clienteData as Cliente, usuario);
-    setCliente(clienteData as Cliente); setPortalUsuario(usuario);
-    await cargarDatos((clienteData as any).id); cargarVehiculosCliente((clienteData as any).id); setLoginLoad(false);
+    saveSession(data.cliente, data.usuario, data.token);
+    setCliente(data.cliente as Cliente); setPortalUsuario(data.usuario as PortalUsuario);
+    await cargarDatos(data.cliente.id); cargarVehiculosCliente(data.cliente.id); setLoginLoad(false);
   }
 
   // ─── Reset de contraseña — paso 1: solicitar código ──────────────────────
@@ -420,17 +406,22 @@ export default function ClientePortal() {
       // Refleja la nueva clave en la sesión local para mantener coherencia.
       const actualizado = { ...portalUsuario, codigo_acceso: pwdNueva.trim() };
       setPortalUsuario(actualizado);
-      saveSession(cliente, actualizado);
+      const tok = getPortalToken();
+      if (tok) saveSession(cliente, actualizado, tok);
       setPwdOk(true); setPwdActual(""); setPwdNueva(""); setPwdNueva2("");
     } catch { setPwdErr("Error de conexión. Intenta de nuevo."); }
     setPwdLoad(false);
   }
 
   // ─── Cargar datos ─────────────────────────────────────────────────────────
+  // Reservas + facturas + documentos llegan juntas desde /api/cliente (service
+  // role): el rol anónimo no puede leerlas por RLS.
   const cargarDatos = useCallback(async (cid: number) => {
     setLoading(true);
-    const { data: res } = await supabase.from("reservas").select("*").eq("cliente_id", cid).order("fecha_servicio", { ascending: false });
-    const rList = (res || []) as Reserva[];
+    setLoadingFact(true);
+    const { ok, data } = await portalApi("datos");
+    if (!ok) { setLoading(false); setLoadingFact(false); return; } // falla transitoria: conservar estado
+    const rList = (data.reservas || []) as Reserva[];
     // No borrar reservas existentes si la consulta devuelve vacío (falla transitoria).
     setReservas(prev => rList.length > 0 ? rList : prev.length > 0 ? prev : rList);
     const hoy = getHoyPeru();
@@ -449,24 +440,20 @@ export default function ClientePortal() {
     }
     if (activo?.conductor_id) {
       supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", activo.conductor_id).maybeSingle()
-        .then(({ data }) => { if (data) setConductorInfo(data as ConductorInfo); });
+        .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); });
     }
     if (activo?.vehiculo_id) {
-      supabase.from("vehiculos").select("placa").eq("id", activo.vehiculo_id).maybeSingle()
-        .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); });
+      portalApi("placas_vehiculos", { vehiculo_ids: [activo.vehiculo_id] })
+        .then(({ ok, data }) => { const placa = ok ? data?.vehiculos?.[0]?.placa : null; if (placa) setVehiculoInfo({ placa }); });
     }
     setLoading(false);
     if (activo) {
-      supabase.from("paradas").select("*").eq("reserva_id", activo.id).order("orden")
-        .then(({ data }) => { if (data?.length) setParadas(prev => ({ ...prev, [activo.id]: data })); });
+      portalApi("paradas_reserva", { reserva_id: activo.id })
+        .then(({ ok, data }) => { if (ok && data?.paradas?.length) setParadas(prev => ({ ...prev, [activo.id]: data.paradas })); });
     }
-    setLoadingFact(true);
-    supabase.from("facturas").select("id,reserva_id,tipo_comprobante,serie,numero,fecha_emision,fecha_vencimiento,total,estado,pdf_url")
-      .eq("cliente_id", cid).order("fecha_emision", { ascending: false })
-      .then(({ data }) => { setFacturas((data || []) as Factura[]); setLoadingFact(false); });
-
-    supabase.from("documentos_cliente").select("*").eq("cliente_id", cid).order("created_at", { ascending: false })
-      .then(({ data }) => { setDocs((data || []) as DocPortal[]); });
+    setFacturas((data.facturas || []) as Factura[]);
+    setLoadingFact(false);
+    setDocs((data.documentos || []) as DocPortal[]);
   }, []);
 
   // ─── Cargar detalles (paradas + boarding + pasajeros + conductor + vehiculo)
@@ -483,45 +470,15 @@ export default function ClientePortal() {
     // paradas[r.id] sin tocar ppList[r.id]. Si el guard fuera por paradas, abrir GPS y
     // luego "Ver" cortocircuitaría esta carga y el detalle quedaría sin roster ("Esperados: 0").
     if (force || !ppList[r.id]) {
+      // El armado del roster (paradas + boarding + pasajeros ∪ sin-paradero + edad
+      // aislada) vive ahora en /api/cliente acción manifiesto_reserva (service role):
+      // el rol anónimo no puede leer esas tablas por RLS. Misma semántica que antes.
       tasks.push(
-        Promise.all([
-          supabase.from("paradas").select("*").eq("reserva_id", r.id).order("orden"),
-          supabase.from("boarding_log").select("*, pasajero:pasajeros(nombre,dni,empresa)").eq("reserva_id", r.id).order("timestamp"),
-          // NO pedir "edad" aquí ni en el join de pasajeros_parada: si la columna faltara,
-          // PostgREST devuelve error y el cliente retorna data:null → roster vacío (Esperados 0
-          // / PDFs sin pasajeros). La edad se lee en una consulta APARTE más abajo, cuyo fallo
-          // jamás vacía el roster (el manifiesto MTC mostraría "–" en Edad).
-          supabase.from("pasajeros").select("id,nombre,dni").eq("reserva_id", r.id),
-        ]).then(async ([pRes, bRes, paxRes]) => {
-          setParadas(prev => ({ ...prev, [r.id]: pRes.data || [] }));
-          setBoarding(prev => ({ ...prev, [r.id]: bRes.data || [] }));
-          const ps = pRes.data || [];
-          let pp: any[] = [];
-          if (ps.length > 0) {
-            const { data } = await supabase.from("pasajeros_parada").select("*, pasajero:pasajeros(nombre,dni)").in("parada_id", ps.map((p: any) => p.id));
-            pp = data || [];
-          }
-          // Pasajeros del manifiesto sin paradero asignado: existen en pasajeros.reserva_id
-          // pero no tienen fila en pasajeros_parada. Se agregan como entradas sintéticas
-          // (parada_id: null, id negativo para no colisionar con ids reales) para que
-          // cuenten en "Esperados", aparezcan en el PDF y se listen en su propia sección.
-          const asignados = new Set(pp.map((x: any) => x.pasajero_id));
-          const sinParada = (paxRes.data || [])
-            .filter((p: any) => !asignados.has(p.id))
-            .map((p: any) => ({ id: -p.id, parada_id: null, pasajero_id: p.id, estado: "Pendiente", pasajero: { nombre: p.nombre, dni: p.dni } }));
-          const roster = [...pp, ...sinParada];
-          // Edad para el Manifiesto MTC. Consulta AISLADA a propósito: si la columna `edad`
-          // no existiera en la BD, esta query falla sola (data:null) sin afectar el roster ya
-          // construido arriba. Así nunca se repite el bug de "Esperados 0".
-          const idsPax = [...new Set(roster.map((x: any) => x.pasajero_id).filter(Boolean))];
-          if (idsPax.length > 0) {
-            const { data: edades } = await supabase.from("pasajeros").select("id,edad").in("id", idsPax);
-            if (edades) {
-              const em = new Map((edades as any[]).map(e => [e.id, e.edad]));
-              roster.forEach((x: any) => { if (x.pasajero) x.pasajero.edad = em.get(x.pasajero_id) ?? null; });
-            }
-          }
-          setPPList(prev => ({ ...prev, [r.id]: roster }));
+        portalApi("manifiesto_reserva", { reserva_id: r.id }).then(({ ok, data }) => {
+          if (!ok) return; // falla transitoria: conservar estado previo
+          setParadas(prev => ({ ...prev, [r.id]: data.paradas || [] }));
+          setBoarding(prev => ({ ...prev, [r.id]: data.boarding || [] }));
+          setPPList(prev => ({ ...prev, [r.id]: data.roster || [] }));
         })
       );
     }
@@ -532,27 +489,28 @@ export default function ClientePortal() {
     if (r.conductor_id) {
       tasks.push(
         supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", r.conductor_id).maybeSingle()
-          .then(({ data }) => { if (data) setConductorInfo(data as ConductorInfo); })
+          .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); })
       );
     } else if (ra.conductor_tercero_id) {
       tasks.push(
         supabase.from("conductores_tercero").select("nombre,licencia,telefono").eq("id", ra.conductor_tercero_id).maybeSingle()
-          .then(({ data }) => { if (data) setConductorInfo({ nombre: (data as any).nombre, numero_licencia: (data as any).licencia ?? null, telefono: (data as any).telefono || "" } as ConductorInfo); })
+          .then(({ data }: any) => { if (data) setConductorInfo({ nombre: (data as any).nombre, numero_licencia: (data as any).licencia ?? null, telefono: (data as any).telefono || "" } as ConductorInfo); })
       );
     } else if (ra.empresa_tercerizada_id) {
       setConductorInfo({ nombre: "Conductor asignado", numero_licencia: null, telefono: "" } as ConductorInfo);
     }
 
-    // Vehículo: propio (vehiculo_id → tabla vehiculos) o tercerizado (vehiculo_tercero_id → vehiculos_tercero).
+    // Vehículo: propio (vehiculo_id → /api/cliente, RLS bloquea vehiculos al rol
+    // anónimo) o tercerizado (vehiculo_tercero_id → vehiculos_tercero, lectura abierta).
     if (r.vehiculo_id) {
       tasks.push(
-        supabase.from("vehiculos").select("placa").eq("id", r.vehiculo_id).maybeSingle()
-          .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
+        portalApi("placas_vehiculos", { vehiculo_ids: [r.vehiculo_id] })
+          .then(({ ok, data }) => { const placa = ok ? data?.vehiculos?.[0]?.placa : null; if (placa) setVehiculoInfo({ placa }); })
       );
     } else if (ra.vehiculo_tercero_id) {
       tasks.push(
         supabase.from("vehiculos_tercero").select("placa").eq("id", ra.vehiculo_tercero_id).maybeSingle()
-          .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
+          .then(({ data }: any) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
       );
     }
 
@@ -569,8 +527,8 @@ export default function ClientePortal() {
 
     if (!paradas[r.id]) {
       tasks.push(
-        supabase.from("paradas").select("*").eq("reserva_id", r.id).order("orden")
-          .then(({ data }) => { setParadas(prev => ({ ...prev, [r.id]: data || [] })); })
+        portalApi("paradas_reserva", { reserva_id: r.id })
+          .then(({ ok, data }) => { if (ok) setParadas(prev => ({ ...prev, [r.id]: data.paradas || [] })); })
       );
     }
 
@@ -579,13 +537,13 @@ export default function ClientePortal() {
       // Propio: conductor desde tabla conductores
       tasks.push(
         supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", r.conductor_id).maybeSingle()
-          .then(({ data }) => { if (data) setConductorInfo(data as ConductorInfo); })
+          .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); })
       );
     } else if (ra.conductor_tercero_id) {
       // Tercerizado con conductor asignado (no revelar empresa al cliente)
       tasks.push(
         supabase.from("conductores_tercero").select("nombre,telefono").eq("id", ra.conductor_tercero_id).maybeSingle()
-          .then(({ data }) => { if (data) setConductorInfo({ nombre: (data as any).nombre, telefono: (data as any).telefono || "" } as ConductorInfo); })
+          .then(({ data }: any) => { if (data) setConductorInfo({ nombre: (data as any).nombre, telefono: (data as any).telefono || "" } as ConductorInfo); })
       );
     } else if (ra.empresa_tercerizada_id) {
       // Tercerizado sin conductor específico aún asignado
@@ -594,13 +552,13 @@ export default function ClientePortal() {
 
     if (r.vehiculo_id) {
       tasks.push(
-        supabase.from("vehiculos").select("placa").eq("id", r.vehiculo_id).maybeSingle()
-          .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
+        portalApi("placas_vehiculos", { vehiculo_ids: [r.vehiculo_id] })
+          .then(({ ok, data }) => { const placa = ok ? data?.vehiculos?.[0]?.placa : null; if (placa) setVehiculoInfo({ placa }); })
       );
     } else if (ra.vehiculo_tercero_id) {
       tasks.push(
         supabase.from("vehiculos_tercero").select("placa").eq("id", ra.vehiculo_tercero_id).maybeSingle()
-          .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
+          .then(({ data }: any) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
       );
     }
 
@@ -609,10 +567,12 @@ export default function ClientePortal() {
   }, [paradas]);
 
   // ─── Portal Usuarios CRUD ─────────────────────────────────────────────────
-  const cargarColabs = useCallback(async (clienteId: number) => {
+  // Todo el CRUD va por /api/cliente (service role + token): así las claves de los
+  // colaboradores no dependen de que portal_usuarios sea legible/escribible por anon.
+  const cargarColabs = useCallback(async (_clienteId: number) => {
     setLoadingColabs(true);
-    const { data } = await supabase.from("portal_usuarios").select("*").eq("cliente_id", clienteId).order("created_at");
-    setColabs((data || []) as PortalUsuario[]);
+    const { ok, data } = await portalApi("colaboradores_listar");
+    if (ok) setColabs((data.colaboradores || []) as PortalUsuario[]);
     setLoadingColabs(false);
   }, []);
 
@@ -635,27 +595,27 @@ export default function ClientePortal() {
     setColabErr(""); setColabLoad(true);
     const todosPermisos = MODULOS_CTRL.every(m => newColabPermisos.includes(m.id));
     const modulosGuardar = (newColabRol === "admin" && todosPermisos) ? null : newColabPermisos;
-    if (editColab) {
-      const updates: any = { nombre: newColabNombre.trim(), dni: newColabDni.trim(), cargo: newColabCargo.trim() || null, rol: newColabRol, email: newColabEmail.trim() || null, modulos_permitidos: modulosGuardar };
-      if (newColabPass.trim()) updates.codigo_acceso = newColabPass.trim();
-      const { error } = await supabase.from("portal_usuarios").update(updates).eq("id", editColab.id);
-      if (error) { setColabErr("Error al actualizar: " + error.message); setColabLoad(false); return; }
-    } else {
-      const { error } = await supabase.from("portal_usuarios").insert({ cliente_id: clienteId, nombre: newColabNombre.trim(), dni: newColabDni.trim(), cargo: newColabCargo.trim() || null, rol: newColabRol, email: newColabEmail.trim() || null, codigo_acceso: newColabPass.trim(), activo: true, modulos_permitidos: modulosGuardar });
-      if (error) { setColabErr("Error: " + (error.message.includes("unique") ? "Ya existe un usuario con ese DNI" : error.message)); setColabLoad(false); return; }
-    }
+    const { ok, data } = await portalApi("colaboradores_guardar", {
+      id: editColab?.id ?? 0,
+      datos: {
+        nombre: newColabNombre.trim(), dni: newColabDni.trim(), cargo: newColabCargo.trim() || null,
+        rol: newColabRol, email: newColabEmail.trim() || null, modulos_permitidos: modulosGuardar,
+        codigo_acceso: newColabPass.trim(),
+      },
+    });
+    if (!ok) { setColabErr(data?.error || "No se pudo guardar. Intenta de nuevo."); setColabLoad(false); return; }
     await cargarColabs(clienteId);
     setModalColab(false); resetColabForm(); setColabLoad(false);
   }
 
   async function toggleColabActivo(id: number, activo: boolean) {
-    await supabase.from("portal_usuarios").update({ activo: !activo }).eq("id", id);
-    setColabs(prev => prev.map(c => c.id === id ? { ...c, activo: !activo } : c));
+    const { ok } = await portalApi("colaboradores_toggle", { id });
+    if (ok) setColabs(prev => prev.map(c => c.id === id ? { ...c, activo: !activo } : c));
   }
 
   async function eliminarColab(id: number, nombre: string, clienteId: number) {
     if (!window.confirm(`¿Eliminar definitivamente al usuario "${nombre}"? Esta acción no se puede deshacer.`)) return;
-    await supabase.from("portal_usuarios").delete().eq("id", id);
+    await portalApi("colaboradores_eliminar", { id });
     await cargarColabs(clienteId);
   }
 
@@ -672,80 +632,37 @@ export default function ClientePortal() {
   // carga → muchos servicios mostraban manifiesto/pasajeros = 0 de forma intermitente.
   // Solución: (1) leer pasajeros_parada con join a paradas(reserva_id) para no traer las
   // paradas, y (2) paginar con orden estable para superar el tope de 1000.
+  // El cómputo (unión A ∪ B paginada + esAbordado) vive ahora en /api/cliente
+  // acción historial_stats (service role): RLS bloquea estas tablas al rol anónimo.
   const cargarHistorialStats = useCallback(async (reservaIds: number[]) => {
     if (reservaIds.length === 0) return;
     setLoadingStats(true);
-
-    const fetchAll = async (build: (from: number, to: number) => any): Promise<any[]> => {
-      const PAGE = 1000;
-      let from = 0;
-      const all: any[] = [];
-      for (;;) {
-        const { data, error } = await build(from, from + PAGE - 1);
-        if (error || !data) break;
-        all.push(...data);
-        if (data.length < PAGE) break;
-        from += PAGE;
-      }
-      return all;
-    };
-
-    const [ppData, paxAdhocData] = await Promise.all([
-      // (B) por paradero: join a paradas para obtener reserva_id sin traer todas las paradas.
-      // Se trae estado/estado_abordaje porque el abordaje vive aquí (boarding_log está vacía).
-      fetchAll((f, t) => supabase.from("pasajeros_parada").select("pasajero_id, estado, estado_abordaje, paradas!inner(reserva_id)").in("paradas.reserva_id", reservaIds).order("id").range(f, t)),
-      // (A) ad-hoc de la reserva
-      fetchAll((f, t) => supabase.from("pasajeros").select("id, reserva_id").in("reserva_id", reservaIds).order("id").range(f, t)),
-    ]);
-
-    // Por reserva: pasajeros distintos (esperados = unión A ∪ B) y abordados distintos.
-    const paxPorReserva: Record<number, Set<number>> = {};
-    const abordadosPorReserva: Record<number, Set<number>> = {};
-    reservaIds.forEach(id => { paxPorReserva[id] = new Set(); abordadosPorReserva[id] = new Set(); });
-    paxAdhocData.forEach((p: any) => { paxPorReserva[p.reserva_id]?.add(p.id); });
-    ppData.forEach((pp: any) => {
-      const rid = pp.paradas?.reserva_id;
-      if (!rid) return;
-      paxPorReserva[rid]?.add(pp.pasajero_id);
-      if (esAbordado(pp)) abordadosPorReserva[rid]?.add(pp.pasajero_id);
-    });
-
-    const stats: Record<number, { embarcados: number; esperados: number }> = {};
-    reservaIds.forEach(id => { stats[id] = { embarcados: abordadosPorReserva[id]?.size || 0, esperados: paxPorReserva[id]?.size || 0 }; });
-    setReservaStats(stats);
+    const { ok, data } = await portalApi("historial_stats", { reserva_ids: reservaIds });
+    if (ok) setReservaStats((data.stats || {}) as Record<number, { embarcados: number; esperados: number }>);
     setLoadingStats(false);
   }, []);
 
   // ─── Vehículos del cliente para mapa En vivo ──────────────────────────────
-  const cargarVehiculosCliente = useCallback(async (cid: number) => {
-    // Reservas del cliente: vehículos propios (vehiculo_id) y de tercero (vehiculo_tercero_id).
-    // Los ids se solapan entre tablas, por eso se consultan/dedupean por separado.
-    const { data: resData, error: resErr } = await supabase.from("reservas")
-      .select("vehiculo_id,vehiculo_tercero_id").eq("cliente_id", cid);
+  const cargarVehiculosCliente = useCallback(async (_cid: number) => {
+    // La resolución reservas → placas (propios y de tercero, dedupe por separado)
+    // vive en /api/cliente acción vehiculos_en_vivo (service role): RLS bloquea
+    // reservas/vehiculos al rol anónimo.
+    const { ok, data } = await portalApi("vehiculos_en_vivo");
     // Si la consulta falla o devuelve vacío, conserva el estado actual (falla transitoria).
-    if (resErr || !resData || resData.length === 0) return;
-    const vIds  = [...new Set(resData.map((r: any) => r.vehiculo_id).filter(Boolean))] as number[];
-    const vtIds = [...new Set(resData.map((r: any) => r.vehiculo_tercero_id).filter(Boolean))] as number[];
-    if (vIds.length === 0 && vtIds.length === 0) return;
+    if (!ok) return;
+    const vList  = (data.vehiculos || []) as {id:number;placa:string}[];
+    const vtList = (data.vehiculos_tercero || []) as {id:number;placa:string}[];
+    if (vList.length === 0 && vtList.length === 0) return;
 
-    // Vehículos y GPS en paralelo: así todos los setState se ejecutan en el mismo
-    // render de React 18 y el efecto de marcadores nunca ve un estado intermedio
-    // donde los vehículos ya llegaron pero el GPS aún no (flash "0 buses").
-    const [{ data: vData }, { data: vtData }, gpsJson] = await Promise.all([
-      vIds.length
-        ? supabase.from("vehiculos").select("id,placa").in("id", vIds)
-        : Promise.resolve({ data: [] }),
-      vtIds.length
-        ? supabase.from("vehiculos_tercero").select("id,placa").in("id", vtIds)
-        : Promise.resolve({ data: [] }),
-      fetch("/api/cliente/gps", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ vehiculoIds: vIds, vehiculoTerceroIds: vtIds }),
-      }).then(r => r.json()).catch(() => ({})),
-    ]);
-    setVehiculosCliente((vData || []) as {id:number;placa:string}[]);
-    setVehiculosTerceroCliente((vtData || []) as {id:number;placa:string}[]);
+    // GPS después de conocer la flota; los setState van juntos tras el fetch para
+    // que el efecto de marcadores nunca vea un estado intermedio (flash "0 buses").
+    const gpsJson = await fetch("/api/cliente/gps", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vehiculoIds: vList.map(v => v.id), vehiculoTerceroIds: vtList.map(v => v.id) }),
+    }).then(r => r.json()).catch(() => ({}));
+    setVehiculosCliente(vList);
+    setVehiculosTerceroCliente(vtList);
 
     const gpsLista = Array.isArray((gpsJson as any)?.ubicaciones) ? (gpsJson as any).ubicaciones : [];
     const keyDe = (g: any) =>
@@ -857,12 +774,12 @@ export default function ClientePortal() {
             setReservaActivaId(updated.id);
             if (updated.conductor_id) {
               supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", updated.conductor_id).maybeSingle()
-                .then(({ data }) => { if (data) setConductorInfo(data as ConductorInfo); });
+                .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); });
             }
             if (updated.vehiculo_id) {
               setVehiculoActivo(updated.vehiculo_id);
-              supabase.from("vehiculos").select("placa").eq("id", updated.vehiculo_id).maybeSingle()
-                .then(({ data }) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); });
+              portalApi("placas_vehiculos", { vehiculo_ids: [updated.vehiculo_id] })
+                .then(({ ok, data }) => { const placa = ok ? data?.vehiculos?.[0]?.placa : null; if (placa) setVehiculoInfo({ placa }); });
             }
           }
         })
@@ -1068,9 +985,10 @@ export default function ClientePortal() {
     if (tab !== "activos" && tab !== "dashboard") return;
     serviciosHoyRef.current.forEach(async r => {
       if (paradas[r.id] !== undefined) return;
-      const { data } = await supabase.from("paradas").select("*").eq("reserva_id", r.id).order("orden");
+      const { ok, data } = await portalApi("paradas_reserva", { reserva_id: r.id });
+      if (!ok) return; // falla transitoria: reintentará el próximo ciclo
       // Siempre registrar (aunque sea []) para distinguir "sin paradas" de "no cargado"
-      setParadas(prev => ({ ...prev, [r.id]: (data || []) as Parada[] }));
+      setParadas(prev => ({ ...prev, [r.id]: (data.paradas || []) as Parada[] }));
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, reservas.length]);
@@ -1098,8 +1016,9 @@ export default function ClientePortal() {
       // Vehículo: vehiculo_id → tabla vehiculos; vehiculo_tercero_id → tabla vehiculos_tercero
       if (!(r.id in vehPlacaMap)) {
         if (r.vehiculo_id) {
-          const { data } = await supabase.from("vehiculos").select("placa").eq("id", r.vehiculo_id).maybeSingle();
-          if ((data as any)?.placa) setVehPlacaMap(prev => ({ ...prev, [r.id]: (data as any).placa }));
+          const { ok, data } = await portalApi("placas_vehiculos", { vehiculo_ids: [r.vehiculo_id] });
+          const placa = ok ? data?.vehiculos?.[0]?.placa : null;
+          if (placa) setVehPlacaMap(prev => ({ ...prev, [r.id]: placa }));
         } else if (ra.vehiculo_tercero_id) {
           const { data } = await supabase.from("vehiculos_tercero").select("placa").eq("id", ra.vehiculo_tercero_id).maybeSingle();
           if ((data as any)?.placa) setVehPlacaMap(prev => ({ ...prev, [r.id]: (data as any).placa }));
@@ -4155,8 +4074,8 @@ export default function ClientePortal() {
                             <p style={{ fontWeight: 700, color: C.gray800, fontSize: 13, margin: 0, wordBreak: "break-word" }}>{d.nombre}</p>
                             <p style={{ color: C.gray400, fontSize: 11, margin: "4px 0 8px" }}>{fmtBytesPortal(d.tamano_bytes)} · {fmtFecha(d.created_at.slice(0,10))}</p>
                             <button onClick={async () => {
-                              const { data } = await supabase.storage.from("documentos-clientes").createSignedUrl(d.storage_path, 3600);
-                              if (data?.signedUrl) window.open(data.signedUrl, "_blank");
+                              const { ok, data } = await portalApi("doc_url", { doc_id: d.id });
+                              if (ok && data?.url) window.open(data.url, "_blank");
                             }} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 10, background: "#eef3f8", color: C.navy, fontSize: 11, fontWeight: 800, border: "none", cursor: "pointer" }}>
                               ↓ Descargar
                             </button>
