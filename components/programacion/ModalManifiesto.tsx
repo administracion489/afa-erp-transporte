@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { paginarFilas } from "@/lib/huella";
 import { normalizarEmpresa } from "@/lib/empresa";
 import { parsearManifiesto, descargarPlantilla } from "@/lib/manifiesto-csv";
 import SelectorGrupos from "./SelectorGrupos";
@@ -156,9 +157,21 @@ export default function ModalManifiesto(props: Props) {
   const [incluirActual,    setIncluirActual]    = useState(true);
   const [aplicandoConfig,  setAplicandoConfig]  = useState(false);
   const [previewIds,       setPreviewIds]       = useState<number[]>([]);
-  // Candidatos totales en el rango (mismo vehículo) — para distinguir cuántos se
-  // descartaron por tener una ruta distinta a la del servicio actual.
+  // Candidatos totales en el rango (mismo vehículo + mismo tramo) — para distinguir
+  // cuántos se descartaron por tener una ruta distinta a la del servicio actual.
   const [previewTotal,     setPreviewTotal]     = useState(0);
+  // true mientras la corrida async (paginación + huellas) recalcula el preview.
+  // Deshabilita el botón Aplicar para que un clic no aplique sobre ids obsoletos.
+  const [previewCargando,  setPreviewCargando]  = useState(false);
+  // Resultado crudo de la coincidencia (sin aplicar el filtro de incluirActual):
+  // `ids` = servicios que coinciden con la ruta (incluye el actual si está en rango),
+  // `universo` = candidatos del MISMO tramo (denominador de "omitidos"). Se deriva
+  // previewIds/previewTotal desde aquí para que togglear "Incluir este servicio" NO
+  // vuelva a paginar ni a re-descargar los paradas_json (es un filtro puro).
+  const [matchRaw,         setMatchRaw]         = useState<{ ids: number[]; universo: number[] } | null>(null);
+  // true si la corrida async falló (red/consulta): para NO mostrar "no hay servicios"
+  // (un negativo rotundo) cuando en realidad no se pudo calcular.
+  const [previewError,     setPreviewError]     = useState(false);
 
   const autoCrearParadasIniciales = async (): Promise<number> => {
     // Prioridad 1: paradas_json de la cotización (ya trae coordenadas de Google Maps)
@@ -374,63 +387,136 @@ export default function ModalManifiesto(props: Props) {
       });
   }, [reservaId]);
 
-  // Preview: cuenta reservas afectadas al cambiar fechas o el checkbox.
-  // IMPORTANTE: solo se incluyen servicios con la MISMA ruta que el actual,
-  // es decir mismos paraderos (nombre + coordenadas) y en el MISMO orden
-  // (no en inversa). El mismo vehículo puede operar rutas distintas en días
-  // distintos, así que filtrar solo por vehículo + cotización replicaba el
-  // nombre de ruta sobre servicios que no corresponden.
+  // Preview (parte pesada): calcula, al cambiar el rango/servicio, qué reservas
+  // comparten la MISMA ruta que el actual (mismos paraderos + coordenadas, mismo
+  // orden y mismo SENTIDO ida/retorno). NO depende de `incluirActual` (ese es un
+  // filtro puro que se aplica abajo, sin re-paginar ni re-descargar).
+  //
+  // La huella se calcula desde el snapshot `paradas_json` de cada reserva (con
+  // fallback a la cotización por tramo ida/retorno), NO desde la tabla `paradas`.
+  // Motivo: la programación masiva (ModalGenerarPrograma) inserta cientos/miles
+  // de reservas con paradas_json + direccion_servicio pero SIN materializar filas
+  // en `paradas` hasta que cada servicio se abre. Comparar por `paradas` dejaba
+  // fuera a TODOS los servicios masivos aún sin abrir (huella vacía) y solo
+  // coincidía el servicio actual consigo mismo.
   useEffect(() => {
     const vidActivo = vehiculoId || vehiculoTerceroId;
     if (!modalConfigRango || !cotizacionId || !vidActivo || !configDesde || !configHasta) {
-      setPreviewIds([]); setPreviewTotal(0); return;
+      setMatchRaw(null); setPreviewCargando(false); setPreviewError(false); return;
     }
     let cancelado = false;
+    setPreviewCargando(true); setPreviewError(false); // botón Aplicar off hasta resolver
     const campo = vehiculoId ? "vehiculo_id" : "vehiculo_tercero_id";
 
     (async () => {
-      // 1. Candidatos: misma cotización + vehículo + rango de fechas + estado activo
-      const { data: cand } = await supabase.from("reservas").select("id")
-        .eq("cotizacion_id", cotizacionId).eq(campo, vidActivo)
-        .gte("fecha_servicio", configDesde).lte("fecha_servicio", configHasta)
-        .not("estado", "in", "(cancelada,finalizada)");
-      const candIds = ((cand || []) as any[]).map((r: any) => r.id as number);
+     try {
+      // 1. Candidatos: misma cotización + vehículo + rango + estado activo.
+      //    Se PAGINA: PostgREST corta CUALQUIER respuesta a 1000 filas y una
+      //    programación masiva puede tener miles de servicios idénticos; sin
+      //    paginar solo veíamos 1000 (de ahí el "999 omitidos").
+      const cand = await paginarFilas(() =>
+        supabase.from("reservas")
+          .select("id, direccion_servicio, paradas_json")
+          .eq("cotizacion_id", cotizacionId).eq(campo, vidActivo)
+          .gte("fecha_servicio", configDesde).lte("fecha_servicio", configHasta)
+          .not("estado", "in", "(cancelada,finalizada)")
+          .order("fecha_servicio").order("id")); // orden estable para paginar
+      const candIds = (cand as any[]).map((r: any) => r.id as number);
+      const rowById = new Map<number, any>((cand as any[]).map((r: any) => [r.id, r]));
 
-      // 2. Paradas de la referencia (servicio actual) + candidatos.
-      //    Se consulta por lotes: ~142 servicios × ~10 paradas supera el tope de
-      //    ~1000 filas de un solo .in(), lo que truncaría paradas y dejaría
-      //    servicios válidos sin huella (excluidos por error).
-      const idsParaParadas = Array.from(new Set([reservaId, ...candIds]));
-      const LOTE = 60; // ≤ ~600 paradas por consulta, bajo el tope de 1000
-      const porReserva = new Map<number, any[]>();
-      for (let i = 0; i < idsParaParadas.length; i += LOTE) {
-        const lote = idsParaParadas.slice(i, i + LOTE);
-        const { data: pars } = await supabase.from("paradas")
-          .select("reserva_id, orden, nombre, lat, lng")
-          .in("reserva_id", lote);
-        for (const p of ((pars || []) as any[])) {
-          const arr = porReserva.get(p.reserva_id);
-          if (arr) arr.push(p); else porReserva.set(p.reserva_id, [p]);
+      // 2. Fuente de la huella: paradas_json de la reserva → cotización por tramo.
+      const { data: cot } = await supabase.from("cotizaciones")
+        .select("paradas_json, paradas_retorno_json").eq("id", cotizacionId).maybeSingle();
+      // El servicio actual puede quedar fuera del rango → se trae aparte.
+      const { data: refRow } = await supabase.from("reservas")
+        .select("direccion_servicio, paradas_json").eq("id", reservaId).maybeSingle();
+
+      // Ordena un paradas_json igual que resolverParadasJSON (inicio→intermedia→destino).
+      const sortLeg = (arr: any[]) => [
+        ...arr.filter((p: any) => p.tipo === "inicio"),
+        ...arr.filter((p: any) => p.tipo === "intermedia"),
+        ...arr.filter((p: any) => p.tipo === "destino"),
+        ...arr.filter((p: any) => !["inicio", "intermedia", "destino"].includes(p.tipo)),
+      ];
+      // paradas_json propio de la reserva (por tramo) → fallback a la cotización.
+      const fuenteJson = (r: any): any[] => {
+        if (Array.isArray(r?.paradas_json) && r.paradas_json.length > 0) return sortLeg(r.paradas_json);
+        const c: any = cot;
+        if (r?.direccion_servicio === "retorno") {
+          const ret = Array.isArray(c?.paradas_retorno_json) && c.paradas_retorno_json.length > 0
+            ? c.paradas_retorno_json : c?.paradas_json;
+          return Array.isArray(ret) ? sortLeg(ret) : [];
         }
+        return Array.isArray(c?.paradas_json) ? sortLeg(c.paradas_json) : [];
+      };
+
+      // Sentido del servicio (ida/retorno). El RETORNO de una cotización SIN
+      // paradas_retorno_json propio se guarda con el MISMO paradas_json de la ida
+      // (mismos paraderos, sin invertir) → su huella coincidiría con la de la ida.
+      // Se exige mismo tramo para no mezclar sentidos ni aplicar la config/nombre de
+      // ruta de la ida sobre servicios de retorno (ni duplicar el conteo).
+      const tramoDe = (r: any): string => (r?.direccion_servicio === "retorno" ? "retorno" : "ida");
+      const refTramo = tramoDe(refRow);
+      // Universo = candidatos del MISMO tramo que la referencia (denominador de "omitidos").
+      const universo = candIds.filter((id) => id === reservaId || tramoDe(rowById.get(id)) === refTramo);
+
+      const huellaRefJson = huellaRuta(fuenteJson(refRow));
+
+      let ids: number[];
+      if (huellaRefJson !== "") {
+        // Ruta principal: comparar huellas del snapshot JSON. Funciona con los
+        // servicios masivos aún sin `paradas` materializadas.
+        ids = universo.filter((id) =>
+          id === reservaId || huellaRuta(fuenteJson(rowById.get(id))) === huellaRefJson
+        );
+      } else {
+        // Fallback legacy: cotización/reserva sin paradas_json → comparar las
+        // filas `paradas` ya materializadas (comportamiento anterior). Se consulta
+        // por lotes bajo el tope de 1000 filas de un solo .in(); LOTE conservador
+        // para no truncar rutas con muchos paraderos.
+        const idsParaParadas = Array.from(new Set([reservaId, ...universo]));
+        const LOTE = 25; // ≤ ~1000 paradas por consulta aun con ~40 paraderos/servicio
+        const porReserva = new Map<number, any[]>();
+        for (let i = 0; i < idsParaParadas.length; i += LOTE) {
+          const lote = idsParaParadas.slice(i, i + LOTE);
+          const { data: pars } = await supabase.from("paradas")
+            .select("reserva_id, orden, nombre, lat, lng")
+            .in("reserva_id", lote);
+          for (const p of ((pars || []) as any[])) {
+            const arr = porReserva.get(p.reserva_id);
+            if (arr) arr.push(p); else porReserva.set(p.reserva_id, [p]);
+          }
+        }
+        const huellaRef = huellaRuta(porReserva.get(reservaId));
+        ids = universo.filter((id) =>
+          id === reservaId || (huellaRef !== "" && huellaRuta(porReserva.get(id)) === huellaRef)
+        );
       }
 
-      // 4. Huella de ruta de cada reserva (ver helper a nivel de módulo).
-      const huellaRef = huellaRuta(porReserva.get(reservaId));
-
-      // 5. Conservar solo candidatos con la misma huella exacta.
-      //    El servicio actual siempre coincide consigo mismo (es la referencia).
-      let ids = candIds.filter((id) =>
-        id === reservaId || (huellaRef !== "" && huellaRuta(porReserva.get(id)) === huellaRef)
-      );
-      if (!incluirActual) ids = ids.filter((id: number) => id !== reservaId);
-
       if (cancelado) return;
-      setPreviewTotal(candIds.filter((id) => incluirActual || id !== reservaId).length);
-      setPreviewIds(ids);
+      setMatchRaw({ ids, universo });
+     } catch {
+      // Error inesperado de red/consulta: no dejamos el preview colgado ni con un
+      // conteo obsoleto del rango anterior. Solo la corrida vigente toca el estado.
+      if (!cancelado) { setMatchRaw(null); setPreviewError(true); }
+     } finally {
+      if (!cancelado) setPreviewCargando(false);
+     }
     })();
 
     return () => { cancelado = true; };
-  }, [modalConfigRango, cotizacionId, vehiculoId, vehiculoTerceroId, configDesde, configHasta, incluirActual, reservaId]);
+  }, [modalConfigRango, cotizacionId, vehiculoId, vehiculoTerceroId, configDesde, configHasta, reservaId]);
+
+  // Preview (parte barata): deriva previewIds/previewTotal desde el resultado crudo
+  // aplicando el filtro de "Incluir este servicio". Togglear el checkbox solo re-corre
+  // esto (un filtro en memoria), sin volver a paginar ni descargar paradas_json.
+  useEffect(() => {
+    if (!matchRaw) { setPreviewIds([]); setPreviewTotal(0); return; }
+    const ids = incluirActual ? matchRaw.ids : matchRaw.ids.filter((id) => id !== reservaId);
+    const universo = incluirActual ? matchRaw.universo : matchRaw.universo.filter((id) => id !== reservaId);
+    setPreviewIds(ids);
+    setPreviewTotal(universo.length);
+  }, [matchRaw, incluirActual, reservaId]);
 
   const total = pasajeros.length;
   const abordados = useMemo(() => Object.values(asignaciones).filter((a) => a.estado_abordaje === "Abordado").length, [asignaciones]);
@@ -990,18 +1076,23 @@ export default function ModalManifiesto(props: Props) {
         paradasOrigen.map((p: any) => [p.id, p.orden])
       );
 
-      // 3. Find target reservas: same cotizacion_id + vehiculo, in date range
+      // 3. Find target reservas: same cotizacion_id + vehiculo, in date range.
+      //    Se PAGINA (PostgREST corta a 1000): con programación masiva el rango
+      //    puede abarcar >1000 destinos y sin paginar se copiaba a solo 1000 en
+      //    silencio, sin reportarlo como omitido.
       const campoVehiculo = vehiculoId ? "vehiculo_id" : "vehiculo_tercero_id";
       const vidCopiar = (vehiculoId || vehiculoTerceroId)!;
-      const { data: reservasDestino } = await supabase
-        .from("reservas")
-        .select("id, fecha_servicio")
-        .eq("cotizacion_id", cotizacionId)
-        .eq(campoVehiculo, vidCopiar)
-        .neq("id", reservaId)
-        .gte("fecha_servicio", copiarDesde)
-        .lte("fecha_servicio", copiarHasta)
-        .not("estado", "in", "(cancelada,finalizada)");
+      const reservasDestino = await paginarFilas(() =>
+        supabase
+          .from("reservas")
+          .select("id, fecha_servicio")
+          .eq("cotizacion_id", cotizacionId)
+          .eq(campoVehiculo, vidCopiar)
+          .neq("id", reservaId)
+          .gte("fecha_servicio", copiarDesde)
+          .lte("fecha_servicio", copiarHasta)
+          .not("estado", "in", "(cancelada,finalizada)")
+          .order("fecha_servicio").order("id")); // orden estable para paginar
       if (!reservasDestino || reservasDestino.length === 0) {
         setMensaje({ tipo: "warn", texto: "No se encontraron servicios del mismo vehículo en ese rango de fechas." });
         return;
@@ -1009,7 +1100,8 @@ export default function ModalManifiesto(props: Props) {
 
       let totalInsertados = 0;
       let reservasFallidas = 0;
-      let reservasOmitidas = 0; // descartadas por tener una ruta distinta
+      let reservasOmitidas = 0;   // descartadas por tener una ruta distinta
+      let reservasSinParadas = 0; // aún sin `paradas` materializadas (no se abrieron)
       let reservasCopiadas = 0;
 
       for (const rd of reservasDestino) {
@@ -1019,7 +1111,10 @@ export default function ModalManifiesto(props: Props) {
           .select("id, orden, nombre, lat, lng")
           .eq("reserva_id", rd.id)
           .order("orden");
-        if (!paradasDest || paradasDest.length === 0) continue;
+        // Sin paradas materializadas: no hay parada_id destino donde enganchar las
+        // asignaciones (típico de servicios masivos aún sin abrir). Se cuenta aparte
+        // para no reportar un falso "Copiado a 0 ✓".
+        if (!paradasDest || paradasDest.length === 0) { reservasSinParadas++; continue; }
 
         // Solo copiar si la ruta de destino es idéntica a la de origen
         // (mismos paraderos y mismo orden, no en inversa).
@@ -1057,15 +1152,18 @@ export default function ModalManifiesto(props: Props) {
         }
       }
 
-      if (reservasCopiadas === 0 && reservasOmitidas > 0) {
-        setMensaje({
-          tipo: "warn",
-          texto: `Ningún servicio del rango tiene la misma ruta que este (${reservasOmitidas} con paraderos distintos o en otro orden). No se copió nada.`,
-        });
+      if (reservasCopiadas === 0 && (reservasOmitidas > 0 || reservasSinParadas > 0 || reservasFallidas > 0)) {
+        const motivos = [
+          reservasSinParadas ? `${reservasSinParadas} sin paraderos aún (ábrelos primero para generar sus paradas)` : "",
+          reservasOmitidas ? `${reservasOmitidas} con paraderos distintos o en otro orden` : "",
+          reservasFallidas ? `${reservasFallidas} con error de inserción` : "",
+        ].filter(Boolean).join(" · ");
+        setMensaje({ tipo: reservasFallidas > 0 ? "err" : "warn", texto: `No se copió a ningún servicio. ${motivos}.` });
       } else {
         const extras = [
           reservasFallidas ? `${reservasFallidas} con error` : "",
           reservasOmitidas ? `${reservasOmitidas} omitido(s) por ruta distinta` : "",
+          reservasSinParadas ? `${reservasSinParadas} sin paraderos aún` : "",
         ].filter(Boolean).join(" · ");
         const msg = `Copiado a ${reservasCopiadas} servicio(s) · ${totalInsertados} asignaciones${extras ? ` · ${extras}` : ""} ✓`;
         setMensaje({ tipo: "ok", texto: msg });
@@ -1659,14 +1757,21 @@ export default function ModalManifiesto(props: Props) {
                 {configDesde && configHasta && (
                   <div>
                     <p className="text-xs font-bold rounded-xl px-3 py-2 text-center"
-                      style={{ background: previewIds.length ? "#dcfce7" : "#fef9c3", color: previewIds.length ? "#166534" : "#854d0e" }}>
-                      {previewIds.length
-                        ? `Se actualizarán ${previewIds.length} servicio(s) con la misma ruta`
-                        : previewTotal > 0
-                          ? "Ningún servicio del rango tiene la misma ruta que este"
-                          : "No se encontraron servicios del mismo vehículo en ese rango"}
+                      style={{
+                        background: previewCargando ? "#e2e8f0" : previewError ? "#fee2e2" : previewIds.length ? "#dcfce7" : "#fef9c3",
+                        color: previewCargando ? "#475569" : previewError ? "#991b1b" : previewIds.length ? "#166534" : "#854d0e",
+                      }}>
+                      {previewCargando
+                        ? "Calculando servicios afectados…"
+                        : previewError
+                          ? "No se pudo calcular (error de conexión). Reintenta ajustando el rango."
+                          : previewIds.length
+                            ? `Se actualizarán ${previewIds.length} servicio(s) con la misma ruta`
+                            : previewTotal > 0
+                              ? "Ningún servicio del rango tiene la misma ruta que este"
+                              : "No se encontraron servicios del mismo vehículo en ese rango"}
                     </p>
-                    {previewTotal > previewIds.length && (
+                    {!previewCargando && !previewError && previewTotal > previewIds.length && (
                       <p className="text-[11px] text-gray-500 text-center mt-1.5 leading-snug">
                         Se omitieron {previewTotal - previewIds.length} servicio(s) con paraderos
                         distintos o en otro orden. Solo se aplica a rutas con los mismos paraderos
@@ -1687,11 +1792,11 @@ export default function ModalManifiesto(props: Props) {
                 </button>
                 <button
                   onClick={aplicarConfigRango}
-                  disabled={aplicandoConfig || !previewIds.length}
+                  disabled={aplicandoConfig || previewCargando || !previewIds.length}
                   className="px-5 py-2 rounded-xl font-bold text-xs text-white disabled:opacity-50"
-                  style={{ background: aplicandoConfig ? "#6b7280" : "#0b315f" }}
+                  style={{ background: aplicandoConfig || previewCargando ? "#6b7280" : "#0b315f" }}
                 >
-                  {aplicandoConfig ? "Aplicando..." : `Aplicar a ${previewIds.length || 0} servicio(s)`}
+                  {aplicandoConfig ? "Aplicando..." : previewCargando ? "Calculando…" : `Aplicar a ${previewIds.length || 0} servicio(s)`}
                 </button>
               </div>
             </div>
