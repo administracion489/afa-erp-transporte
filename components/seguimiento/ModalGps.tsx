@@ -10,6 +10,7 @@ import {
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, anclarImprecisos, puentePorRuta, puentesCrudos,
+  FILTRO_APROX, FILTRO_NO_APROX, PINTURA_APROX,
 } from "@/lib/huella";
 import { animarMarcador } from "@/lib/anim-marker";
 
@@ -104,8 +105,9 @@ export default function ModalGps({
   const [cargandoRuta,      setCargandoRuta]      = useState(false);
   const [errorRuta,         setErrorRuta]         = useState<string | null>(null);
   const [paradasResueltas,  setParadasResueltas]  = useState<Parada[]>([]);
-  const [huella,            setHuella]            = useState<{lat:number;lng:number;velocidad:number}[]>([]);
+  const [huella,            setHuella]            = useState<{lat:number;lng:number;velocidad:number;acc?:number}[]>([]);
   const [matchedCoords,     setMatchedCoords]     = useState<[number, number][] | null>(null);
+  const [esCrudoArr,        setEsCrudoArr]        = useState<boolean[]>([]);              // esCrudo por vértice de matchedCoords (cuerdas crudas largas → aprox, no "medido")
   const [velCalc,           setVelCalc]           = useState<number>(0);
   const [telemetria,        setTelemetria]        = useState<PuntoTelemetria[]>([]); // puntitos de telemetría real
   const [resumen,           setResumen]           = useState<ResumenViaje | null>(null); // resumen del viaje (datos reales)
@@ -114,7 +116,12 @@ export default function ModalGps({
   const [colaSnapped,       setColaSnapped]       = useState(true);                     // ¿la punta viva pegó a la vía? (false → colaViva sigue la ruta prevista, no el zigzag)
   const [colaClean,         setColaClean]         = useState(-1);                        // último índice de VÍA limpia en matched (frontera de colaViva; corta el crudo de la punta)
   const matchedRef                                = useRef<[number, number][] | null>(null); // última geometría ajustada (para puentesCrudos aunque el ciclo devuelva null por throttle)
-  const puentesCacheRef = useRef<Map<string, { nivel: string; coords: [number, number][]; km: number; dt: number }>>(new Map()); // caché por hueco
+  // Caché por hueco. `expira`: los fallos TRANSITORIOS (red caída, HTTP 429/5xx, OVER_QUERY_LIMIT)
+  // se cachean con vencimiento — sin esto, o se reintentaban hasta 30 fetch cada 15 s (tormenta
+  // contra Google) o quedaban "ocultar" para siempre (rango sin puente de por vida del modal).
+  // Los "ocultar" GEOMÉTRICOS (ZERO_RESULTS / rodeo absurdo) sí son permanentes: el mapa no cambia.
+  const puentesCacheRef = useRef<Map<string, { nivel: string; coords: [number, number][]; km: number; dt: number; expira?: number }>>(new Map());
+  const cargandoHuellaRef = useRef(false); // evita ciclos solapados de cargar() (30 fetch lentos > intervalo de 15 s)
   const [mostrarPuntos,     setMostrarPuntos]     = useState(true);                  // toggle de la leyenda
   const geocacheRef = useRef<Map<string, string>>(new Map());                        // caché reverse-geocode por coord redondeada
   const popupTelemRef = useRef<any>(null);                                           // popup activo de un puntito
@@ -354,6 +361,8 @@ export default function ModalGps({
     const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
     const ajustador = crearAjustadorHuella(); // estado de ventanas/congelado por apertura del modal
     const cargar = async () => {
+      if (cargandoHuellaRef.current) return;   // ciclo anterior aún en vuelo (p. ej. 30 puentes lentos) → saltar este tick
+      cargandoHuellaRef.current = true;
       try {
         const res = await fetch("/api/cliente/gps", {
           method: "POST",
@@ -449,7 +458,9 @@ export default function ModalGps({
         // ventanas → coherentes. crudos (ya anclado) alimenta telemetría/resumen/puentes.
         const crudos = anclarImprecisos(filasAPuntos(arr));
         const limpio = conVelocidadColor(limpiarHuella(crudos));
-        setHuella(limpio.map(p => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad })));
+        // `acc` viaja con cada punto: el dibujo marca `aprox` (gris punteado, no "medido") las
+        // cuerdas >60 m con extremo crudo de red — el primer render ya no pinta el zigzag sólido.
+        if (!cancel) setHuella(limpio.map(p => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad, acc: p.acc })));
         // Puntitos de telemetría real (~cada 100 m de recorrido, anclados a muestra real).
         if (!cancel) setTelemetria(puntosTelemetria(limpio, crudos));
         // Resumen del viaje: se calcula MÁS ABAJO (tras el loop de puentes) para que el badge de
@@ -457,7 +468,7 @@ export default function ModalGps({
 
         // Map Matching por ventanas (lib/huella.ts): throttle 60 s + congelado interno.
         const matched = await ajustador.ajustar(limpio, token, () => cancel);
-        if (matched && !cancel) { setMatchedCoords(matched); matchedRef.current = matched; }
+        if (matched && !cancel) { setMatchedCoords(matched); matchedRef.current = matched; setEsCrudoArr(ajustador.leerEsCrudo()); }
         if (!cancel) setColaSnapped(ajustador.leerColaSnapped());   // ¿pegó la punta viva? (si no, colaViva sigue la ruta)
         const colaClean = ajustador.leerColaClean();                // último vértice de VÍA limpia (frontera de colaViva)
 
@@ -469,7 +480,10 @@ export default function ModalGps({
         // que SÍ se rutean se añaden a `suprimir` para que colorearMatched no las dibuje también (crudas).
         const crudoRanges = ajustador.leerCrudoRanges();
         const cruditos = puentesCrudos(matchedRef.current || [], crudoRanges);
-        const candidatos = [...calcularPuentes(limpio), ...cruditos];
+        // Corridas crudas PRIMERO: si los candidatos superan MAX_PUENTES, que lo que quede sin
+        // rutear sean huecos de señal (quedan como hueco honesto), no rangos crudos (que sin
+        // puente dependen del corte/aprox para no dibujarse como zigzag medido).
+        const candidatos = [...cruditos, ...calcularPuentes(limpio)];
         const suprimir: Array<[number, number]> = [];
         const MAX_PUENTES = 30;
         if (candidatos.length > MAX_PUENTES) console.warn(`[ModalGps] ${candidatos.length} huecos, puenteando los primeros ${MAX_PUENTES}`);
@@ -489,6 +503,7 @@ export default function ModalGps({
           // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco).
           const key = `${c.aLat.toFixed(5)},${c.aLng.toFixed(5)}->${c.bLat.toFixed(5)},${c.bLng.toFixed(5)}`;
           let r = cache.get(key);
+          if (r?.expira && Date.now() > r.expira) r = undefined;   // fallo transitorio vencido → reintentar
           if (!r) {
             try {
               const resp = await fetch("/api/ruta-puente", {
@@ -498,6 +513,10 @@ export default function ModalGps({
               const j = await resp.json();
               if (j?.ocultar || j?.status !== "OK") {
                 r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt };
+                // "Sin camino" GEOMÉTRICO (ZERO_RESULTS/NOT_FOUND/SIN_GEOMETRIA) es permanente: se
+                // cachea sin vencimiento. Cualquier otro status (HTTP 429/5xx, OVER_QUERY_LIMIT,
+                // cuota) es transitorio → vence en 60 s para no envenenar el rango de por vida.
+                if (!["ZERO_RESULTS", "NOT_FOUND", "SIN_GEOMETRIA"].includes(j?.status)) r.expira = Date.now() + 60000;
               } else {
                 const nivel = decidirPuente(j.roadM, c.dRecta);   // unir todo por carretera (corte solo si sin ruta o rodeo absurdo >8×)
                 // Envolver con A/B → el tramo estimado comparte extremos EXACTOS con lo medido (costura sin corte).
@@ -505,7 +524,9 @@ export default function ModalGps({
                 r = { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt };
               }
               cache.set(key, r);
-            } catch { r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt }; cache.set(key, r); }
+            // Fallo de RED (fetch lanzó): cachear "ocultar" CON vencimiento de 60 s — reintenta al
+            // vencer (no queda sin puente para siempre) pero sin tormenta de 30 fetch cada 15 s.
+            } catch { r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt, expira: Date.now() + 60000 }; cache.set(key, r); }
           }
           if (r.nivel !== "ocultar" && r.coords.length >= 2) {
             feats.push({
@@ -527,12 +548,18 @@ export default function ModalGps({
         const largoCoords = (cs: any[]) => { let m = 0; for (let k = 1; k < (cs?.length || 0); k++) m += distM(cs[k - 1][1], cs[k - 1][0], cs[k][1], cs[k][0]); return m; };
         const largoFeats = (fs: any[]) => fs.reduce((a, f) => a + largoCoords(f.geometry?.coordinates || []), 0);
         const huellaColor = limpio.map((p) => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad }));
-        const medidoM = largoFeats(colorearMatched(matchedRef.current || [], huellaColor, suprimir));
+        // Las cuerdas `aprox` (crudas largas sin puente) NO son medido, pero SÍ cuentan en el
+        // denominador (como no-medido): si se filtraran de ambos lados, un viaje 70% gris punteado
+        // marcaría "Rastreo 100% medido" — la deshonestidad que este badge evita.
+        const featsColoreados = colorearMatched(matchedRef.current || [], huellaColor, suprimir, ajustador.leerEsCrudo());
+        const medidoM = largoFeats(featsColoreados.filter((f: any) => f.properties?.aprox !== 1));
+        const aproxM  = largoFeats(featsColoreados.filter((f: any) => f.properties?.aprox === 1));
         const estimadoM = largoFeats(feats);
         const rv = resumenViaje(limpio, crudos);
-        if (rv && medidoM + estimadoM > 0) rv.medidoPct = Math.round((medidoM / (medidoM + estimadoM)) * 100);
+        if (rv && medidoM + estimadoM + aproxM > 0) rv.medidoPct = Math.round((medidoM / (medidoM + estimadoM + aproxM)) * 100);
         if (!cancel) setResumen(rv);
       } catch { /* conservar estela previa */ }
+      finally { cargandoHuellaRef.current = false; }
     };
     cargar();
     const iv = setInterval(cargar, 15000);
@@ -549,10 +576,10 @@ export default function ModalGps({
       // Con Map Matching: geometría pegada a la vía + COLA VIVA (puntos crudos posteriores y
       // posición en vivo) para que el trazo alcance al bus pese al throttle de 60 s del matching.
       // Sin matching aún (GPS de torre / cargando): huella cruda suavizada por tramos.
-      const live = ubic ? { lat: ubic.lat, lng: ubic.lng, velocidad: velCalc } : null;
+      const live = ubic ? { lat: ubic.lat, lng: ubic.lng, velocidad: velCalc, acc: Number(ubic.precision_m) || 25 } : null;
       const cut = matchedCoords ? ((colaClean >= 1 && colaClean < matchedCoords.length - 1) ? colaClean : matchedCoords.length - 1) : 0;
       const features = (matchedCoords && matchedCoords.length >= 2)
-        ? [...colorearMatched(matchedCoords, huella, suprimirCrudo), ...colaViva(matchedCoords.slice(0, cut + 1), huella, live, rutaRef.current?.coordenadas, !colaSnapped || cut < matchedCoords.length - 1)]
+        ? [...colorearMatched(matchedCoords, huella, suprimirCrudo, esCrudoArr), ...colaViva(matchedCoords.slice(0, cut + 1), huella, live, rutaRef.current?.coordenadas, !colaSnapped || cut < matchedCoords.length - 1)]
         : huellaCrudaFeatures(huella);
       const data: any = { type: "FeatureCollection", features };
 
@@ -564,6 +591,11 @@ export default function ModalGps({
         map.addSource("huella-gps", { type: "geojson", data });
         map.addLayer({
           id: "huella-gps-line", type: "line", source: "huella-gps",
+          // Las cuerdas `aprox` (crudas de red >60 m, imposibles de pegar a la vía) NO se pintan
+          // como medido: van en su propia capa gris punteada (abajo). line-dasharray no es
+          // data-driven en Mapbox GL → dos capas sobre el mismo source (filtros/pintura
+          // compartidos con el portal cliente vía lib/huella.ts).
+          filter: FILTRO_NO_APROX,
           layout: { "line-join": "round", "line-cap": "round" },
           paint: {
             "line-width": 5, "line-opacity": 0.9,
@@ -571,9 +603,17 @@ export default function ModalGps({
             "line-color": ["case", ["==", ["get", "estimado"], 1], "#0f766e", ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"]],
           },
         });
+        map.addLayer({
+          id: "huella-gps-aprox", type: "line", source: "huella-gps",
+          // Señal imprecisa (GPS de red): trazo tenue punteado — honesto, distinguible del medido
+          // sólido y del estimado petróleo. Nunca finge que el bus cruzó por ahí.
+          filter: FILTRO_APROX,
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: PINTURA_APROX,
+        }, "huella-gps-line");
       }
     } catch (e) { console.error("[ModalGps] Error dibujando huella GPS:", e); }
-  }, [huella, matchedCoords, mapListo, ubic, velCalc, suprimirCrudo, colaSnapped, colaClean]);
+  }, [huella, matchedCoords, mapListo, ubic, velCalc, suprimirCrudo, colaSnapped, colaClean, esCrudoArr]);
 
   // ── CAPA 3: Puntitos de telemetría real (velocidad/rumbo/dirección al clic) ──
   useEffect(() => {

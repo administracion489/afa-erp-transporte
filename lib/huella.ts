@@ -783,6 +783,31 @@ export async function matchVentana(ventana: MatchPt[], token: string): Promise<{
 // (#1138, chip GPS a 4 s: máx ~138 m), solo lo superan los saltos imposibles del GPS pobre.
 export const MAX_SEG_M = 300;
 
+// Cuerda máxima que se dibuja SÓLIDA ("medido") cuando alguno de sus extremos es CRUDO de red
+// (acc > ACC_CONFIABLE_M, o vértice esCrudo del matching). 60 m ≈ media cuadra limeña: por debajo
+// la cuerda sigue la calle; por encima cruza techos/manzanas en diagonal — los segmentos imposibles
+// medidos en la #962 iban de 61 a 165 m y TODOS pasaban el corte de 300. Entre 60 y MAX_SEG_M la
+// cuerda cruda se emite con `aprox: 1` (el consumidor la pinta gris punteada: señal imprecisa, no
+// recorrido medido) para no dejar sin estela a los equipos legítimamente degradados; > MAX_SEG_M se
+// corta como siempre. Con chip (acc ≤ 20 / esCrudo=false) NO aplica → flota propia idéntica.
+export const MAX_SEG_CRUDO_M = 60;
+// ¿Este `acc` marca el punto como crudo de red para el DIBUJO? Tres casos deliberados:
+//  • acc == null (llamador legacy sin acc) → NO crudo: comportamiento idéntico al anterior, y en
+//    un par mixto el extremo sin dato no fuerza el aprox del vecino chip.
+//  • acc <= 0 → crudo: 0 significa "precisión NO medida" (el conductor tercero escribe
+//    precision_m: 0, app/api/conductor-tercero/*) — desconocida ≠ confiable.
+//  • acc > ACC_CONFIABLE_M (20) → crudo: red/torre. filasAPuntos ya convierte NULL de BD en 25 →
+//    las filas sin precision_m también cuentan como crudas (desconocida ≠ confiable).
+const esAccCruda = (acc: number | undefined) => acc != null && (acc <= 0 || acc > ACC_CONFIABLE_M);
+
+// Filtros/pintura COMPARTIDOS de la capa "aprox" (señal imprecisa, gris punteada). Viven aquí —la
+// fuente única del contrato aprox— para que el modal del ERP y el portal cliente no diverjan: un
+// consumidor que use colorearMatched/huellaCrudaFeatures DEBE separar sus features en dos capas
+// con estos filtros (una sola capa sin filtro volvería a pintar el crudo largo como sólido).
+export const FILTRO_APROX: any = ["==", ["get", "aprox"], 1];
+export const FILTRO_NO_APROX: any = ["!=", ["get", "aprox"], 1];
+export const PINTURA_APROX: any = { "line-width": 3, "line-opacity": 0.55, "line-color": "#64748b", "line-dasharray": [1.2, 1.6] };
+
 // ⚠️ SIN USO (revertido): el puente con línea recta INVENTABA recorridos por donde el bus no fue
 // (GPS pobre de terceros — la recta cruzaba calles que la unidad no tomó). El "se corta" honesto
 // (hueco) resultó preferible a una ruta inventada. Se conserva para una posible v2 más conservadora.
@@ -821,11 +846,17 @@ export function puentearHuecos(pts: HuellaPt[], maxSegM = MAX_SEG_M, vmaxKmh = 1
 
 // Reparte la velocidad de la huella cruda sobre la geometría ajustada a la vía: a cada
 // vértice ajustado le asigna la velocidad del punto GPS real más cercano (coloreado leyenda).
-// Corta el trazo en saltos > MAX_SEG_M (costuras de ventanas fallidas / huecos).
+// Corta el trazo en saltos > MAX_SEG_M (costuras de ventanas fallidas / huecos). Con `esCrudo`
+// (por vértice, alineado con coords — leerEsCrudo del ajustador): una cuerda con extremo crudo
+// que supere MAX_SEG_CRUDO_M ya NO se dibuja sólida — sale con `aprox: 1` (gris punteada). Es la
+// red de seguridad del "nunca cruzar techos" cuando la supresión/puentes fallan (puente con rodeo
+// absurdo, corrida corta sin rutear, tope de puentes, estado desfasado): antes esas cuerdas de
+// 61-300 m se pintaban como recorrido medido (#962).
 export function colorearMatched(
   coords: [number, number][],
   huella: { lat: number; lng: number; velocidad: number }[],
   suprimir?: Array<[number, number]>,   // rangos de índice [s,e] a NO dibujar (crudo que se rellena por ruta estimada)
+  esCrudo?: boolean[],                  // por vértice: true = fix crudo de red (no geometría de vía)
 ): any[] {
   const velCercana = (lng: number, lat: number): number => {
     let best = 0, bd = Infinity;
@@ -840,10 +871,13 @@ export function colorearMatched(
   for (let i = 0; i < coords.length - 1; i++) {
     if (supr(i) || supr(i + 1)) continue;   // tramo crudo: lo cubre la ruta estimada (petróleo), no se dibuja como medido
     const [aLng, aLat] = coords[i], [bLng, bLat] = coords[i + 1];
-    if (distM(aLat, aLng, bLat, bLng) > MAX_SEG_M) continue;   // hueco, no recta cruzando el mapa
+    const d = distM(aLat, aLng, bLat, bLng);
+    if (d > MAX_SEG_M) continue;   // hueco, no recta cruzando el mapa
+    const aprox = !!esCrudo && (esCrudo[i] || esCrudo[i + 1]) && d > MAX_SEG_CRUDO_M;
     feats.push({
       type: "Feature",
-      properties: { velocidad: velCercana(aLng, aLat) },
+      // La capa aprox no usa velocidad (gris fijo) → se ahorra el barrido O(n) de velCercana.
+      properties: aprox ? { velocidad: 0, aprox: 1 } : { velocidad: velCercana(aLng, aLat) },
       geometry: { type: "LineString", coordinates: [coords[i], coords[i + 1]] },
     });
   }
@@ -855,8 +889,13 @@ export function colorearMatched(
 // el suavizado NO promedia a través de un teleport y no se dibuja una recta sobre el hueco),
 // suaviza cada tramo por DISTANCIA (aplana el zigzag lento, conserva curvas rápidas) y emite un
 // segmento por par, coloreado por velocidad. Fuente ÚNICA del fallback crudo del modal/cliente/cola.
+// Si los puntos traen `acc`, una cuerda con extremo crudo de red (acc > 20) que supere
+// MAX_SEG_CRUDO_M sale con `aprox: 1` (gris punteada, no "medido"): es el PRIMER RENDER del modal
+// (mientras el ajustador hace sus llamadas a Mapbox) el que antes pintaba el zigzag de red entero
+// —192 cuerdas >60 m en la #962— como recorrido sólido cruzando manzanas. Sin `acc` (llamadores
+// legacy) el comportamiento es idéntico al anterior.
 export function huellaCrudaFeatures(
-  huellaPts: { lat: number; lng: number; velocidad: number }[],
+  huellaPts: { lat: number; lng: number; velocidad: number; acc?: number }[],
   maxSegM = MAX_SEG_M
 ): any[] {
   const tramos: typeof huellaPts[] = [];
@@ -875,9 +914,11 @@ export function huellaCrudaFeatures(
     const pts = suavizarPorDistancia(tramo);   // aplana jitter lento DENTRO del tramo (no cruza huecos)
     for (let i = 0; i < pts.length - 1; i++) {
       const a = pts[i], b = pts[i + 1];
+      const d = distM(a.lat, a.lng, b.lat, b.lng);
+      const cruda = esAccCruda(a.acc) || esAccCruda(b.acc);   // extremo sin acc NO fuerza aprox (legacy idéntico)
       feats.push({
         type: "Feature",
-        properties: { velocidad: ((a.velocidad ?? 0) + (b.velocidad ?? 0)) / 2 },
+        properties: { velocidad: ((a.velocidad ?? 0) + (b.velocidad ?? 0)) / 2, ...(cruda && d > MAX_SEG_CRUDO_M ? { aprox: 1 } : {}) },
         geometry: { type: "LineString", coordinates: [[a.lng, a.lat], [b.lng, b.lat]] },
       });
     }
@@ -892,8 +933,8 @@ export function huellaCrudaFeatures(
 // posición EN VIVO. Sin coste extra de Map Matching. Devuelve features coloreados por velocidad.
 export function colaViva(
   matched: [number, number][],
-  huella: { lat: number; lng: number; velocidad: number }[],
-  live?: { lat: number; lng: number; velocidad?: number } | null,
+  huella: { lat: number; lng: number; velocidad: number; acc?: number }[],
+  live?: { lat: number; lng: number; velocidad?: number; acc?: number } | null,
   ruta?: [number, number][],        // ruta planificada (para pegar la punta viva a la vía cuando el GPS está degradado)
   degradado?: boolean,              // el Map Matching NO logró pegar la cola (GPS de red/corte) → seguir la ruta, no el zigzag
 ): any[] {
@@ -906,15 +947,17 @@ export function colaViva(
     if (d < bd) { bd = d; bestI = i; }
   }
   const tail = bestI >= 0 ? huella.slice(bestI + 1) : [];   // puntos POSTERIORES (no matcheados)
-  // Anclar al final REAL del trazo ajustado para no dejar hueco en la unión.
-  const pts: { lat: number; lng: number; velocidad: number }[] = [
+  // Anclar al final REAL del trazo ajustado para no dejar hueco en la unión. SIN `acc`: el ancla es
+  // geometría ya ajustada (no un fix) → esAccCruda la ignora y la cuerda de unión solo se marca
+  // `aprox` si el OTRO extremo (el primer fix del tail) es crudo de red.
+  const pts: { lat: number; lng: number; velocidad: number; acc?: number }[] = [
     { lat: endLat, lng: endLng, velocidad: tail[0]?.velocidad ?? huella[bestI]?.velocidad ?? 0 },
     ...tail,
   ];
   if (live && Number.isFinite(live.lat) && Number.isFinite(live.lng)) {
     const lastP = pts[pts.length - 1];
     if (!lastP || distM(lastP.lat, lastP.lng, live.lat, live.lng) > 3) {  // evita duplicar el vivo
-      pts.push({ lat: live.lat, lng: live.lng, velocidad: live.velocidad ?? lastP?.velocidad ?? 0 });
+      pts.push({ lat: live.lat, lng: live.lng, velocidad: live.velocidad ?? lastP?.velocidad ?? 0, acc: live.acc });
     }
   }
   // PUNTA VIVA DEGRADADA: si el Map Matching no logró pegar la cola (corte / GPS de red), en vez de
@@ -1021,6 +1064,7 @@ export function crearAjustadorHuella() {
   let ultimoCrudoRanges: Array<[number, number]> = [];  // rangos [ini,fin] de crudo POR VÉRTICE (incl. mixtas) a rellenar por ruta; excluye la punta viva
   let ultimoColaClean = 0;                  // último índice de VÍA limpia en las coords devueltas (frontera de colaViva)
   let ultimaColaSnapped = true;             // ¿el ÚLTIMO match de la cola viva pegó a la vía? (false = punta degradada)
+  let ultimoEsCrudo: boolean[] = [];        // esCrudo POR VÉRTICE del último `ajustar` (alineado 1:1 con las coords devueltas)
 
   return {
     async ajustar(
@@ -1117,6 +1161,7 @@ export function crearAjustadorHuella() {
 
       const todo = [...congeladas, lastCola].flat() as [number, number][];
       const esCrudoTodo = [...congeladasEsCrudo, lastColaEsCrudo].flat();   // alineado 1:1 con `todo`
+      ultimoEsCrudo = esCrudoTodo;   // para colorearMatched: marcar `aprox` las cuerdas crudas largas que escapen a la supresión
 
       // Rangos de crudo POR VÉRTICE (esto SÍ incluye las ventanas MIXTAS: snapped=true con fixes crudos
       // de RED intercalados — el bug #875 de rectas naranjas sobre casas). Corridas contiguas de
@@ -1144,6 +1189,8 @@ export function crearAjustadorHuella() {
     },
     // Rangos [ini,fin] de crudo POR VÉRTICE en las coords del último `ajustar` (para rutear como estimado).
     leerCrudoRanges: () => ultimoCrudoRanges,
+    // esCrudo POR VÉRTICE (alineado con las coords del último `ajustar`) — para el corte/aprox de colorearMatched.
+    leerEsCrudo: () => ultimoEsCrudo,
     // ¿El último match de la cola VIVA pegó a la vía? (false = punta degradada → colaViva sigue la ruta).
     leerColaSnapped: () => ultimaColaSnapped,
     // Último índice de VÍA limpia en las coords devueltas (frontera de colaViva; corta el crudo de la punta).
