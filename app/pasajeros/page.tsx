@@ -4,6 +4,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { normalizarEmpresa, claveEmpresa, agruparEmpresas } from "@/lib/empresa";
 import GruposPasajeros from "@/components/pasajeros/GruposPasajeros";
+import { useCanalesInvitacion } from "@/lib/useCanalesInvitacion";
 
 type Pasajero = {
   id: number;
@@ -178,8 +179,20 @@ export default function PasajerosPage() {
   const [importEmpresa, setImportEmpresa] = useState("");
   const [importando, setImportando] = useState(false);
   const [importClienteId, setImportClienteId] = useState("");
+  const { canalEmail, setCanalEmail, canalWhatsapp, setCanalWhatsapp } = useCanalesInvitacion();
 
   const f = (k: keyof typeof FORM_VACIO) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm((p) => ({ ...p, [k]: e.target.value }));
+
+  /** Correo + WhatsApp de invitación (automático) a pasajeros recién creados, según canales habilitados. */
+  const enviarInvitaciones = async (pasajeroIds: number[]) => {
+    if (!pasajeroIds.length || (!canalEmail && !canalWhatsapp)) return;
+    try {
+      await fetch("/api/pasajeros/invitacion", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pasajeroIds, canales: { email: canalEmail, whatsapp: canalWhatsapp } }),
+      });
+    } catch {}
+  };
 
   const cargarTodo = useCallback(async () => {
     setLoading(true);
@@ -234,13 +247,14 @@ export default function PasajerosPage() {
     const conTipo = { ...payload, tipo_documento: form.tipo_documento || "DNI" };
     let resp = editandoId
       ? await supabase.from("pasajeros").update(conTipo).eq("id", editandoId)
-      : await supabase.from("pasajeros").insert({ ...conTipo, activo: true });
+      : await supabase.from("pasajeros").insert({ ...conTipo, activo: true }).select("id").single();
     if (resp.error && /tipo_documento/i.test(resp.error.message || "")) {
       resp = editandoId
         ? await supabase.from("pasajeros").update(payload).eq("id", editandoId)
-        : await supabase.from("pasajeros").insert({ ...payload, activo: true });
+        : await supabase.from("pasajeros").insert({ ...payload, activo: true }).select("id").single();
     }
     if (resp.error) { alert(resp.error.message); setGuardando(false); return; }
+    if (!editandoId && (resp.data as any)?.id) await enviarInvitaciones([(resp.data as any).id]);
     setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false);
     cargarTodo(); setGuardando(false);
   };
@@ -277,27 +291,32 @@ export default function PasajerosPage() {
     if (lineas.length === 0) return;
     setImportando(true);
     let ok = 0;
+    const nuevosIds: number[] = [];
     for (const linea of lineas) {
       const partes = linea.split(",").map((s) => s.trim());
       const nombre = partes[0];
       const dni = partes[1] || null;
       const email = partes[2] && esEmailValido(partes[2]) ? partes[2] : null;
+      const telefono = partes[3] || null;
       if (!nombre) continue;
       const exResp = await supabase.from("pasajeros").select("id").eq("nombre", nombre).maybeSingle();
       if (!exResp.data) {
-        await supabase.from("pasajeros").insert({
+        const { data } = await supabase.from("pasajeros").insert({
           nombre,
           dni,
           email,
+          telefono,
           empresa: normalizarEmpresa(importEmpresa),
           cliente_id: importClienteId ? Number(importClienteId) : null,
           activo: true,
-        });
+        }).select("id").single();
+        if (data) nuevosIds.push(data.id);
         ok++;
       }
     }
     alert("Se importaron " + ok + " pasajeros nuevos de " + lineas.length + " lineas");
     setImportTexto(""); setMostrarImport(false); setImportando(false);
+    await enviarInvitaciones(nuevosIds);
     cargarTodo();
   };
 
@@ -395,7 +414,7 @@ export default function PasajerosPage() {
             <section className="bg-white rounded-2xl border shadow-sm p-6 space-y-4">
               <div>
                 <h2 className="text-base font-bold text-gray-900">Importar lista de pasajeros</h2>
-                <p className="text-xs text-gray-400">Una persona por linea. Formato: Nombre, DNI, Email (DNI y email opcionales)</p>
+                <p className="text-xs text-gray-400">Una persona por linea. Formato: Nombre, DNI, Email, Telefono (DNI, email y telefono opcionales)</p>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <Campo label="Empresa / Cliente (texto)">
@@ -410,8 +429,17 @@ export default function PasajerosPage() {
               </div>
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Lista de nombres</label>
-                <textarea className={inputCls("resize-none")} rows={8} placeholder={"Juan Perez Garcia, 12345678, juan@empresa.pe\nMaria Lopez Torres, 87654321\nCarlos Ramirez"} value={importTexto} onChange={(e) => setImportTexto(e.target.value)} />
+                <textarea className={inputCls("resize-none")} rows={8} placeholder={"Juan Perez Garcia, 12345678, juan@empresa.pe, 987654321\nMaria Lopez Torres, 87654321\nCarlos Ramirez"} value={importTexto} onChange={(e) => setImportTexto(e.target.value)} />
                 <p className="text-[10px] text-gray-400 mt-1">{importTexto.trim().split("\n").filter((l) => l.trim()).length} personas en la lista</p>
+              </div>
+              <div className="flex items-center gap-4">
+                <span className="text-[11px] text-gray-400 font-semibold">Enviar invitación automática a los nuevos por:</span>
+                <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-700 cursor-pointer">
+                  <input type="checkbox" checked={canalEmail} onChange={(e) => setCanalEmail(e.target.checked)} /> ✉ Correo
+                </label>
+                <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-700 cursor-pointer">
+                  <input type="checkbox" checked={canalWhatsapp} onChange={(e) => setCanalWhatsapp(e.target.checked)} /> 💬 WhatsApp
+                </label>
               </div>
               <div className="flex gap-3">
                 <button onClick={importarLista} disabled={importando || !importTexto.trim()} className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-50" style={{ background: "#0b315f" }}>{importando ? "Importando..." : "Importar lista"}</button>
@@ -473,6 +501,17 @@ export default function PasajerosPage() {
                   <input className={inputCls()} placeholder="https://drive.google.com/..." value={form.foto_url} onChange={f("foto_url")} />
                 </Campo>
               </div>
+              {!editandoId && (
+                <div className="flex items-center gap-4">
+                  <span className="text-[11px] text-gray-400 font-semibold">Al guardar, enviar invitación automática por:</span>
+                  <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-700 cursor-pointer">
+                    <input type="checkbox" checked={canalEmail} onChange={(e) => setCanalEmail(e.target.checked)} /> ✉ Correo
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-700 cursor-pointer">
+                    <input type="checkbox" checked={canalWhatsapp} onChange={(e) => setCanalWhatsapp(e.target.checked)} /> 💬 WhatsApp
+                  </label>
+                </div>
+              )}
               <div className="flex gap-3">
                 <button onClick={guardarPasajero} disabled={guardando} className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60" style={{ background: "#0b315f" }}>{guardando ? "Guardando..." : editandoId ? "Actualizar" : "Guardar pasajero"}</button>
                 <button onClick={() => { setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); }} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">Cancelar</button>

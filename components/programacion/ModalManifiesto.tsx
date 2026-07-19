@@ -9,6 +9,7 @@ import SelectorGrupos from "./SelectorGrupos";
 import TimelineParadasEditable, { ParadaEditable } from "./TimelineParadasEditable";
 import GestorParadas from "./GestorParadas";
 import CargadorUnificado from "./CargadorUnificado";
+import { useCanalesInvitacion } from "@/lib/useCanalesInvitacion";
 
 export type ParadaItin = {
   id: number;
@@ -120,8 +121,20 @@ export default function ModalManifiesto(props: Props) {
 
   // ── Agregar pasajero individual ──────────────────────────────────────────
   const [mostrarFormAdd, setMostrarFormAdd] = useState(false);
-  const [formAdd, setFormAdd] = useState({ nombre: "", dni: "", empresa: "", telefono: "", parada_id: "" });
+  const [formAdd, setFormAdd] = useState({ nombre: "", dni: "", empresa: "", telefono: "", email: "", parada_id: "" });
   const [savingAdd, setSavingAdd] = useState(false);
+  const { canalEmail, setCanalEmail, canalWhatsapp, setCanalWhatsapp } = useCanalesInvitacion();
+
+  /** Correo + WhatsApp de invitación (automático) a pasajeros recién creados, según canales habilitados. */
+  const enviarInvitaciones = async (pasajeroIds: number[]) => {
+    if (!pasajeroIds.length || (!canalEmail && !canalWhatsapp)) return;
+    try {
+      await fetch("/api/pasajeros/invitacion", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pasajeroIds, canales: { email: canalEmail, whatsapp: canalWhatsapp } }),
+      });
+    } catch {}
+  };
 
   // ── Panel "Agregar desde nómina" ─────────────────────────────────────────
   const [mostrarNomina,  setMostrarNomina]  = useState(false);
@@ -571,6 +584,7 @@ export default function ModalManifiesto(props: Props) {
           nombre: p.nombre,
           dni: p.dni,
           telefono: p.telefono,
+          email: p.email,
           empresa: normalizarEmpresa(p.empresa),
         })))
         .select();
@@ -596,7 +610,7 @@ export default function ModalManifiesto(props: Props) {
           await supabase.from("pasajeros").insert(
             paraNomina.map((p: any) => ({
               cliente_id: clienteId, reserva_id: null,
-              nombre: p.nombre, dni: p.dni,
+              nombre: p.nombre, dni: p.dni, email: p.email || null,
               empresa: normalizarEmpresa(p.empresa), telefono: p.telefono || null, activo: true,
             }))
           );
@@ -612,6 +626,7 @@ export default function ModalManifiesto(props: Props) {
       ].filter(Boolean);
       setMensaje({ tipo: "ok", texto: partes.join(" · ") });
 
+      if (insResp.data?.length) await enviarInvitaciones(insResp.data.map((p: any) => p.id));
       await cargar();
       if (onChange) onChange();
     } catch (err: any) {
@@ -808,6 +823,7 @@ export default function ModalManifiesto(props: Props) {
           dni:        formAdd.dni.trim(),
           empresa:    normalizarEmpresa(formAdd.empresa),
           telefono:   formAdd.telefono.trim() || null,
+          email:      formAdd.email.trim() || null,
           activo:     true,
         })
         .select("id")
@@ -838,15 +854,17 @@ export default function ModalManifiesto(props: Props) {
             cliente_id: clienteId, reserva_id: null,
             nombre: formAdd.nombre.trim(), dni: formAdd.dni.trim(),
             empresa: normalizarEmpresa(formAdd.empresa),
-            telefono: formAdd.telefono.trim() || null, activo: true,
+            telefono: formAdd.telefono.trim() || null,
+            email: formAdd.email.trim() || null, activo: true,
           });
           registradoEnNomina = true;
         }
       }
 
       setMensaje({ tipo: "ok", texto: `${formAdd.nombre.trim()} agregado al manifiesto${registradoEnNomina ? " y a la nómina" : ""} ✓` });
-      setFormAdd({ nombre: "", dni: "", empresa: "", telefono: "", parada_id: "" });
+      setFormAdd({ nombre: "", dni: "", empresa: "", telefono: "", email: "", parada_id: "" });
       setMostrarFormAdd(false);
+      await enviarInvitaciones([nuevo.id]);
       await cargar();
       if (onChange) onChange();
     } finally {
@@ -1339,6 +1357,17 @@ export default function ModalManifiesto(props: Props) {
               </button>
             </div>
 
+            {/* Invitación automática al crear pasajero (individual o desde Excel) */}
+            <div className="flex items-center gap-3 mx-6 mt-2">
+              <span className="text-[10px] text-gray-400 font-semibold">Invitación automática a pasajeros nuevos:</span>
+              <label className="flex items-center gap-1 text-[11px] font-semibold text-gray-600 cursor-pointer">
+                <input type="checkbox" checked={canalEmail} onChange={e => setCanalEmail(e.target.checked)} /> ✉ Correo
+              </label>
+              <label className="flex items-center gap-1 text-[11px] font-semibold text-gray-600 cursor-pointer">
+                <input type="checkbox" checked={canalWhatsapp} onChange={e => setCanalWhatsapp(e.target.checked)} /> 💬 WhatsApp
+              </label>
+            </div>
+
             {/* Panel config de ruta */}
             {mostrarConfigRuta && (
               <div className="mx-6 mt-3 rounded-xl border p-4" style={{ borderColor: "#bfdbfe", background: "#eaeff6" }}>
@@ -1462,6 +1491,17 @@ export default function ModalManifiesto(props: Props) {
                       onChange={e => setFormAdd(f => ({ ...f, telefono: e.target.value }))}
                       placeholder="999111222"
                       className="w-full border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
+                    />
+                  </div>
+                  {/* Email */}
+                  <div className="flex-[1_1_170px]">
+                    <p className="text-[10px] font-bold text-gray-400 uppercase mb-1">Email</p>
+                    <input
+                      type="email"
+                      value={formAdd.email}
+                      onChange={e => setFormAdd(f => ({ ...f, email: e.target.value }))}
+                      placeholder="Opcional — para invitación"
+                      className="w-full border rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
                     />
                   </div>
                   {/* Parada */}

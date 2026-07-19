@@ -34,6 +34,7 @@ export async function POST(req: NextRequest) {
 
   let insertados = 0, actualizados = 0, errores = 0;
   const mensajesError: string[] = [];
+  const nuevosIds: number[] = [];
 
   for (const p of pasajeros) {
     const empresaNorm = normalizarEmpresa(p.empresa);
@@ -47,16 +48,16 @@ export async function POST(req: NextRequest) {
       const { error } = await supaAdmin.from("pasajeros").update(campos).eq("id", id);
       if (error) { errores++; mensajesError.push(error.message); } else actualizados++;
     } else {
-      const { error } = await supaAdmin.from("pasajeros").insert({
+      const { data, error } = await supaAdmin.from("pasajeros").insert({
         nombre: p.nombre, dni: p.dni, telefono: p.telefono,
         empresa: empresaNorm, email: p.email, edad: p.edad ?? null,
         cliente_id: clienteId, reserva_id: null,
-      });
-      if (error) { errores++; mensajesError.push(error.message); } else insertados++;
+      }).select("id").single();
+      if (error) { errores++; mensajesError.push(error.message); } else { insertados++; if (data) nuevosIds.push(data.id); }
     }
   }
 
-  return NextResponse.json({ insertados, actualizados, errores, mensajesError });
+  return NextResponse.json({ insertados, actualizados, errores, mensajesError, nuevosIds });
 }
 
 /** PATCH /api/pasajeros/upsert-nomina
