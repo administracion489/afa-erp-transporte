@@ -87,6 +87,26 @@ function esViolacionUnica(err: any): boolean {
   return /duplicate key value violates unique constraint/i.test(err.message || "");
 }
 
+// Sube la foto del odómetro (base64 que manda el conductor) al bucket vehiculos-fotos vía
+// service-role (el conductor es anónimo → no puede escribir el bucket directo por RLS). La flota
+// va en el path porque los ids de vehiculos y vehiculos_tercero se solapan. Devuelve la publicUrl
+// o null si no vino foto. Lanza si la subida falla → el cliente lo trata como fallo de red y
+// re-encola (nunca se persiste un registro dando "ok" sin haber guardado su evidencia).
+async function subirFotoOdometro(
+  adj: { media_type?: string; data?: string } | undefined | null,
+  o: { flota: "propia" | "tercero"; vehiculo_id: number; momento: "checkin" | "checkout"; fecha: string }
+): Promise<string | null> {
+  if (!adj?.data) return null;
+  const path = `odometro/${o.flota}/${o.vehiculo_id}/${o.momento}/${o.fecha}-${crypto.randomUUID()}.jpg`;
+  const buf = Buffer.from(adj.data, "base64");
+  const { error } = await admin.storage.from("vehiculos-fotos").upload(path, buf, {
+    contentType: adj.media_type || "image/jpeg",
+    upsert: true,
+  });
+  if (error) throw new Error("upload_foto: " + error.message);
+  return admin.storage.from("vehiculos-fotos").getPublicUrl(path).data.publicUrl;
+}
+
 export async function POST(req: NextRequest) {
   try {
     // Gate de acceso: si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está configurada, exigir el header
@@ -512,18 +532,33 @@ export async function POST(req: NextRequest) {
       case "checklist": {
         const { checklist } = body;
         if (!checklist?.conductor_id) return NextResponse.json({ error: "checklist inválido" }, { status: 400 });
-        // `es_tercero` viaja en el payload pero NO es columna de checklist_conductor:
-        // se usa solo para rutear el odómetro y se quita antes de insertar la fila.
+        // `es_tercero` y `foto_adjunto` viajan en el payload pero NO son columnas de
+        // checklist_conductor: se usan aquí y se quitan antes de insertar la fila.
         const esTercero = checklist.es_tercero === true;
+        const fotoAdjunto = checklist.foto_adjunto as { media_type?: string; data?: string } | undefined;
         const checklistRow = { ...checklist };
         delete checklistRow.es_tercero;
+        delete checklistRow.foto_adjunto;
 
-        // 1) Alimentar el odómetro consolidado con el km de inicio. Se hace ANTES y con
-        //    independencia de que la fila de checklist_conductor persista (para terceros
-        //    esa fila falla por FK — ver más abajo), porque el km es el dato valioso.
-        //    Se consulta la tabla de la flota correcta (vehiculos vs vehiculos_tercero):
-        //    los ids se solapan, así que usar la tabla equivocada asociaría el km al bus
-        //    equivocado.
+        // 0) Subir la foto del odómetro (evidencia). Si falla la subida se lanza → el cliente lo
+        //    trata como fallo de red y re-encola: nunca se responde "ok" sin guardar la evidencia.
+        let fotoUrl: string | null = null;
+        try {
+          fotoUrl = await subirFotoOdometro(fotoAdjunto, {
+            flota: esTercero ? "tercero" : "propia",
+            vehiculo_id: Number(checklist.vehiculo_id),
+            momento: "checkin",
+            fecha: checklist.fecha,
+          });
+        } catch (e: any) {
+          return NextResponse.json({ error: e?.message || "No se pudo subir la foto" }, { status: 502 });
+        }
+        checklistRow.foto_url = fotoUrl;
+
+        // 1) Alimentar el odómetro consolidado con el km de inicio (con su foto). Se hace ANTES y
+        //    con independencia de que la fila de checklist_conductor persista (para terceros esa
+        //    fila falla por FK — ver abajo), porque el km + la foto son el dato valioso. La tabla
+        //    de la flota importa: los ids de vehiculos/vehiculos_tercero se solapan.
         try {
           if (checklist.vehiculo_id && checklist.km_inicio) {
             const tablaVeh = esTercero ? "vehiculos_tercero" : "vehiculos";
@@ -534,6 +569,7 @@ export async function POST(req: NextRequest) {
                 km: Number(checklist.km_inicio),
                 fuente: "checklist",
                 fecha: checklist.fecha,
+                foto_url: fotoUrl,
                 ref_origen: "checklist_conductor",
                 flota: esTercero ? "tercero" : "propia",
               });
@@ -541,13 +577,17 @@ export async function POST(req: NextRequest) {
           }
         } catch (e) { console.warn("[checklist] lectura odómetro:", e); }
 
-        // 2) Persistir la fila del checklist (best-effort).
-        const { error } = await admin.from("checklist_conductor").insert(checklistRow);
+        // 2) Persistir la fila del checklist (best-effort). Si la migración de las columnas nuevas
+        //    (foto_url/km_ocr/gps/capturado_en) aún no corrió, reintenta sin ellas.
+        const insertarChecklist = () => admin.from("checklist_conductor").insert(checklistRow);
+        let { error } = await insertarChecklist();
+        if (error && esColumnaInexistente(error)) {
+          for (const c of ["foto_url", "km_ocr", "gps_lat", "gps_lng", "capturado_en"]) delete (checklistRow as any)[c];
+          ({ error } = await insertarChecklist());
+        }
         if (error) {
-          // FK violation: el conductor es de conductores_tercero y su ID no existe
-          // en conductores. El conductor ya completó el pre-viaje visualmente y el
-          // odómetro ya quedó registrado arriba — no bloquearlo. TODO: agregar
-          // columnas conductor_tercero_id / vehiculo_tercero_id a checklist_conductor.
+          // FK violation: el conductor es de conductores_tercero y su ID no existe en conductores.
+          // El check-in ya quedó visualmente completo y el odómetro+foto ya se registraron arriba.
           if (error.message.includes("foreign key") || error.message.includes("violates")) {
             console.warn("[checklist] FK tercero — fila no guardada en BD:", error.message);
             return NextResponse.json({ ok: true });
@@ -564,11 +604,27 @@ export async function POST(req: NextRequest) {
         const { checkout } = body;
         if (!checkout?.conductor_id) return NextResponse.json({ error: "checkout inválido" }, { status: 400 });
         const esTercero = checkout.es_tercero === true;
+        const fotoAdjunto = checkout.foto_adjunto as { media_type?: string; data?: string } | undefined;
         const checkoutRow = { ...checkout };
-        delete checkoutRow.reserva_id; // solo se usa para la lectura; no es columna de checkout_conductor
+        delete checkoutRow.reserva_id;    // solo para la lectura; no es columna
+        delete checkoutRow.foto_adjunto;  // se sube aparte; no es columna
 
-        // 1) Odómetro final → consolidado. El km es el dato valioso: se registra con independencia
-        //    de que la fila persista (para terceros la FK puede fallar, igual que en checklist).
+        // 0) Subir la foto (si vino — el check-out permite cerrar SIN foto con motivo, p.ej. unidad
+        //    en taller / tablero apagado). Falla de subida → 502 y el cliente reintenta.
+        let fotoUrl: string | null = null;
+        try {
+          fotoUrl = await subirFotoOdometro(fotoAdjunto, {
+            flota: esTercero ? "tercero" : "propia",
+            vehiculo_id: Number(checkout.vehiculo_id),
+            momento: "checkout",
+            fecha: checkout.fecha,
+          });
+        } catch (e: any) {
+          return NextResponse.json({ error: e?.message || "No se pudo subir la foto" }, { status: 502 });
+        }
+        checkoutRow.foto_url = fotoUrl;
+
+        // 1) Odómetro final → consolidado (con su foto). Independiente de que la fila persista.
         try {
           if (checkout.vehiculo_id && checkout.km_fin) {
             const tablaVeh = esTercero ? "vehiculos_tercero" : "vehiculos";
@@ -579,7 +635,7 @@ export async function POST(req: NextRequest) {
                 km: Number(checkout.km_fin),
                 fuente: "servicio",
                 fecha: checkout.fecha,
-                foto_url: checkout.foto_url ?? null,
+                foto_url: fotoUrl,
                 ref_origen: "checkout_conductor",
                 flota: esTercero ? "tercero" : "propia",
               });
@@ -587,8 +643,13 @@ export async function POST(req: NextRequest) {
           }
         } catch (e) { console.warn("[checkout] lectura odómetro:", e); }
 
-        // 2) Persistir la fila del check-out (best-effort).
-        const { error } = await admin.from("checkout_conductor").insert(checkoutRow);
+        // 2) Persistir la fila del check-out (best-effort + migration-safe con las columnas nuevas).
+        const insertarCheckout = () => admin.from("checkout_conductor").insert(checkoutRow);
+        let { error } = await insertarCheckout();
+        if (error && esColumnaInexistente(error)) {
+          for (const c of ["foto_url", "km_ocr", "gps_lat", "gps_lng", "capturado_en", "sin_foto_motivo"]) delete (checkoutRow as any)[c];
+          ({ error } = await insertarCheckout());
+        }
         if (error) {
           if (error.message.includes("foreign key") || error.message.includes("violates")) {
             console.warn("[checkout] FK tercero — fila no guardada en BD:", error.message);

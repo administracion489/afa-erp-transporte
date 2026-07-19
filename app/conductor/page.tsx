@@ -650,6 +650,13 @@ export default function ConductorApp() {
   const [nivelComb,       setNivelComb]       = useState("");
   const [checkoutObs,     setCheckoutObs]     = useState("");
   const [checkoutSaving,  setCheckoutSaving]  = useState(false);
+  const [sinFotoMotivo,   setSinFotoMotivo]   = useState("");   // check-out sin foto (taller/avería/tablero apagado/unidad entregada)
+  const [expandirSinFoto, setExpandirSinFoto] = useState(false);
+
+  // Foto de odómetro capturada (comprimida, base64 para subir + miniatura + km leído por IA + GPS/hora).
+  type FotoCapturada = { base64: string; previewUrl: string; kmOcr: number | null; capturadoEn: string; lat: number | null; lng: number | null };
+  const [fotoCheckin,  setFotoCheckin]  = useState<FotoCapturada | null>(null);
+  const [fotoCheckout, setFotoCheckout] = useState<FotoCapturada | null>(null);
 
   // ── Docs ───────────────────────────────────────────────────────────────────
   const [docTipo,      setDocTipo]      = useState(TIPOS_DOC[0]);
@@ -1866,53 +1873,132 @@ export default function ConductorApp() {
   // ─── Checklist ──────────────────────────────────────────────────────────────
 
   // File → base64 SIN prefijo (forma que espera lib/vision-ia.ts vía el route de OCR).
-  function fileToAdjunto(file: File): Promise<{ tipo: "image"; media_type: string; data: string }> {
-    return new Promise((resolve, reject) => {
-      if (file.size > 20 * 1024 * 1024) return reject(new Error("La foto supera 20 MB"));
+  // Comprime la foto en el celular a ~1568px / JPEG 0.8 (calibrado para el OCR de visión y para que
+  // suba con señal débil sin gastar los datos del conductor). Devuelve base64 (sin prefijo) + blobUrl
+  // para la miniatura. Hoy fileToAdjunto mandaba hasta 20 MB sin comprimir — esto lo arregla.
+  async function comprimirFoto(file: File): Promise<{ base64: string; blobUrl: string }> {
+    const bitmap = await createImageBitmap(file);
+    const MAX = 1568, ratio = Math.min(MAX / bitmap.width, MAX / bitmap.height, 1);
+    const w = Math.round(bitmap.width * ratio), h = Math.round(bitmap.height * ratio);
+    const canvas = document.createElement("canvas"); canvas.width = w; canvas.height = h;
+    canvas.getContext("2d")!.drawImage(bitmap, 0, 0, w, h);
+    const blob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), "image/jpeg", 0.8));
+    const base64: string = await new Promise((resolve, reject) => {
       const r = new FileReader();
-      r.onload = () => {
-        const res = String(r.result || "");
-        resolve({ tipo: "image", media_type: file.type || "image/jpeg", data: res.includes(",") ? res.split(",")[1] : res });
-      };
-      r.onerror = () => reject(new Error("No se pudo leer el archivo"));
-      r.readAsDataURL(file);
+      r.onload = () => { const s = String(r.result || ""); resolve(s.includes(",") ? s.split(",")[1] : s); };
+      r.onerror = () => reject(new Error("No se pudo procesar la foto"));
+      r.readAsDataURL(blob);
     });
+    return { base64, blobUrl: URL.createObjectURL(blob) };
   }
 
-  // Lee la foto del odómetro con IA (reúsa /api/mantenimiento/leer-odometro) y PRELLENA el km.
-  // El conductor SIEMPRE confirma/corrige — nunca se auto-guarda. Si la foto está mala, pide otra.
-  // `setKm` se pasa para reusar el mismo flujo en check-in (setKmInicio) y check-out (setKmFin).
-  async function leerFotoOdometro(file: File | undefined, setKm: (v: string) => void) {
+  // Captura la foto del tablero (check-in o check-out): comprime → miniatura + evidencia al instante
+  // (la obligatoriedad se cumple con esto, offline-safe: no depende de red) → OCR best-effort con tope
+  // de 8s que PRELLENA el km (siempre editable). Si el OCR falla/tarda/foto mala: la foto igual queda,
+  // el km se escribe a mano. Guarda km_ocr (lo que leyó la IA) para cruzarlo luego con lo tecleado.
+  async function capturarFoto(file: File | undefined, kind: "checkin" | "checkout") {
     if (!file) return;
+    const setFoto = kind === "checkin" ? setFotoCheckin : setFotoCheckout;
+    const setKm   = kind === "checkin" ? setKmInicio    : setKmFin;
     try {
       setOcrLeyendo(true);
-      const adj = await fileToAdjunto(file);
-      const res = await fetch("/api/mantenimiento/leer-odometro", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ adjunto: adj }),
-      });
-      // text()+parse: si Vercel devuelve un 504/timeout sin JSON, no revienta con "Unexpected token".
-      const data = JSON.parse(await res.text());
-      if (!res.ok || !data.ok) throw new Error(data?.error || "No se pudo leer la foto");
-      const km = Number(data.kilometraje ?? data.km ?? 0);
-      if (data.calidad_imagen === "mala" || !km) {
-        alert(`Foto poco legible${data.motivo ? ` (${data.motivo})` : ""}.\nToma otra sin reflejo y con el tablero enfocado, o escribe el km a mano.`);
-        return;
-      }
-      setKm(String(km));
-      if (data.confianza !== "alta") {
-        alert(`Km leído: ${km.toLocaleString("es-PE")}${data.motivo ? ` (${data.motivo})` : ""}.\nRevísalo y corrige si hace falta antes de continuar.`);
+      const { base64, blobUrl } = await comprimirFoto(file);
+      const lat = posActual?.coords.latitude ?? null;
+      const lng = posActual?.coords.longitude ?? null;
+      setFoto({ base64, previewUrl: blobUrl, kmOcr: null, capturadoEn: new Date().toISOString(), lat, lng });
+      let data: any = null;
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 8000);
+        const res = await fetch("/api/mantenimiento/leer-odometro", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ adjunto: { tipo: "image", media_type: "image/jpeg", data: base64 } }),
+          signal: ctrl.signal,
+        });
+        clearTimeout(t);
+        data = JSON.parse(await res.text());
+        if (!res.ok || !data.ok) data = null;
+      } catch { data = null; }
+      const km = data ? Number(data.kilometraje ?? data.km ?? 0) : 0;
+      if (data && km && data.calidad_imagen !== "mala") {
+        setKm(String(km));
+        setFoto((prev) => (prev ? { ...prev, kmOcr: km } : prev));
+        if (data.confianza !== "alta") {
+          alert(`Km leído: ${km.toLocaleString("es-PE")}${data.motivo ? ` (${data.motivo})` : ""}.\nRevísalo y corrige si hace falta.`);
+        }
+      } else {
+        alert("No se pudo leer el km automáticamente. Escribe el kilometraje a mano — la foto ya quedó registrada.");
       }
     } catch (e: any) {
-      alert(`No se pudo leer la foto: ${e?.message || e}.\nEscribe el km a mano.`);
+      alert(`No se pudo procesar la foto: ${e?.message || e}`);
     } finally {
       setOcrLeyendo(false);
     }
   }
 
+  // Render reutilizable: FOTO arriba (obligatoria) + KM abajo (deshabilitado hasta tener foto).
+  const renderCapturaOdometro = (kind: "checkin" | "checkout") => {
+    const foto    = kind === "checkin" ? fotoCheckin : fotoCheckout;
+    const km      = kind === "checkin" ? kmInicio    : kmFin;
+    const setKm   = kind === "checkin" ? setKmInicio : setKmFin;
+    const setFoto = kind === "checkin" ? setFotoCheckin : setFotoCheckout;
+    const placeholder = kind === "checkin" ? "Km de inicio (ej: 152430)" : "Km final (ej: 152980)";
+    return (
+      <>
+        {!foto ? (
+          <label style={{
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 5,
+            padding: "22px 14px", borderRadius: 14, border: "2px dashed var(--c-navy)",
+            cursor: ocrLeyendo ? "default" : "pointer", background: "var(--c-navy-tint)", color: "var(--c-navy)",
+            fontFamily: FONT_SANS, fontSize: 14, fontWeight: 800, textAlign: "center",
+          }}>
+            <span style={{ fontSize: 26 }}>📷</span>
+            {ocrLeyendo ? "Procesando la foto…" : "Toma la foto del tablero"}
+            <span style={{ fontSize: 11, fontWeight: 600, color: "var(--c-mute)" }}>Obligatorio para continuar</span>
+            <input type="file" accept="image/*" capture="environment" hidden disabled={ocrLeyendo}
+              onChange={(e) => { capturarFoto(e.target.files?.[0], kind); e.currentTarget.value = ""; }} />
+          </label>
+        ) : (
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <img src={foto.previewUrl} alt="odómetro" style={{ width: 92, height: 68, objectFit: "cover", borderRadius: 10, border: "1px solid var(--c-line)" }} />
+            <div style={{ flex: 1 }}>
+              <p style={{ margin: 0, fontSize: 12.5, fontWeight: 800, color: "var(--c-success)" }}>✓ Foto del tablero lista</p>
+              <button onClick={() => { URL.revokeObjectURL(foto.previewUrl); setFoto(null); setKm(""); }}
+                style={{ marginTop: 4, background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--c-navy)", fontFamily: FONT_SANS, fontSize: 12, fontWeight: 700 }}>
+                Tomar otra
+              </button>
+            </div>
+          </div>
+        )}
+        <input
+          type="number" placeholder={placeholder} value={km} disabled={!foto || ocrLeyendo}
+          onChange={(e) => setKm(e.target.value)}
+          style={{
+            width: "100%", marginTop: 8, padding: "12px 14px",
+            borderRadius: 12, border: "1.5px solid var(--c-line)",
+            fontFamily: FONT_MONO, fontSize: 14, fontWeight: 700, letterSpacing: 0.3,
+            color: "var(--c-ink)", outline: "none", boxSizing: "border-box",
+            background: foto ? "var(--c-surface)" : "var(--c-soft)", opacity: foto ? 1 : 0.6,
+          }}
+        />
+        {!foto ? (
+          <p style={{ margin: "6px 2px 0", fontSize: 11, color: "var(--c-mute)" }}>Toma la foto del tablero primero; luego revisa el kilometraje.</p>
+        ) : foto.kmOcr == null ? (
+          <p style={{ margin: "6px 2px 0", fontSize: 11, color: "var(--c-warn)", fontWeight: 700 }}>No se leyó el km automáticamente — escríbelo a mano.</p>
+        ) : (
+          <p style={{ margin: "6px 2px 0", fontSize: 11, color: "var(--c-mute)" }}>Km leído por IA: {foto.kmOcr.toLocaleString("es-PE")}. Corrígelo si no coincide.</p>
+        )}
+      </>
+    );
+  };
+
   async function guardarChecklist() {
     if (!conductor) return;
     if (!vehiculoId) { alert("Selecciona el vehículo antes de iniciar el viaje"); return; }
+    // Foto del tablero OBLIGATORIA (la obligatoriedad es haberla capturado — offline-safe; la subida
+    // pasa después). El km solo se pudo escribir tras la foto (input deshabilitado hasta capturarla).
+    if (!fotoCheckin) { alert("Toma la foto del tablero antes de iniciar (el kilometraje se registra con la foto)"); return; }
+    if (!kmInicio || Number(kmInicio) <= 0) { alert("Ingresa el kilometraje de inicio (revisa el número que leyó la foto)"); return; }
     if (checks.some(c => c.ok === null)) {
       alert(`Faltan ${checks.filter(c => c.ok === null).length} ítems por completar`); return;
     }
@@ -1927,8 +2013,15 @@ export default function ConductorApp() {
       fecha:        getFechaLocal(),
       items_json:   checks,
       km_inicio:    kmInicio ? Number(kmInicio) : null,
+      km_ocr:       fotoCheckin.kmOcr,
+      gps_lat:      fotoCheckin.lat,
+      gps_lng:      fotoCheckin.lng,
+      capturado_en: fotoCheckin.capturadoEn,
       observaciones: checkObs,
       estado:       checks.some(c => c.ok === false) ? "con_fallas" : "ok",
+      // La foto (base64 comprimido) viaja DENTRO del payload → si no hay red, cae en la cola offline
+      // y se sube sola al reconectar (sin cola de subidas aparte). El server la sube con service-role.
+      foto_adjunto: { media_type: "image/jpeg", data: fotoCheckin.base64 },
     } };
     setCheckSaving(true);
     // Reintenta ante fallos de red transitorios ("Failed to fetch"): la tablet a veces pierde
@@ -1964,16 +2057,29 @@ export default function ConductorApp() {
   async function guardarCheckout() {
     if (!conductor) return;
     if (!vehiculoId) { alert("Selecciona el vehículo antes de cerrar la jornada"); return; }
-    if (!kmFin) { alert("Ingresa el kilometraje final (puedes leerlo con una foto del tablero)"); return; }
+    // Foto obligatoria CON salida de emergencia: si la unidad quedó en taller / el tablero no
+    // enciende, se cierra la jornada eligiendo un motivo (no dejar la jornada abierta sin liquidar).
+    if (!fotoCheckout && !sinFotoMotivo) {
+      alert("Toma la foto del tablero, o elige un motivo para cerrar sin foto (unidad en taller, tablero apagado, etc.)"); return;
+    }
+    if (fotoCheckout && (!kmFin || Number(kmFin) <= 0)) {
+      alert("Ingresa el kilometraje final (revisa el número que leyó la foto)"); return;
+    }
     const esTercero = conductor._tabla === "conductores_tercero";
     const payload = { checkout: {
       conductor_id: conductor.id,
       vehiculo_id:  vehiculoId,
       es_tercero:   esTercero,
       fecha:        getFechaLocal(),
-      km_fin:       Number(kmFin),
+      km_fin:       kmFin ? Number(kmFin) : null,
       nivel_combustible: nivelComb || null,
       observaciones: checkoutObs.trim() || null,
+      km_ocr:       fotoCheckout?.kmOcr ?? null,
+      gps_lat:      fotoCheckout?.lat ?? null,
+      gps_lng:      fotoCheckout?.lng ?? null,
+      capturado_en: fotoCheckout?.capturadoEn ?? null,
+      sin_foto_motivo: fotoCheckout ? null : (sinFotoMotivo || null),
+      ...(fotoCheckout ? { foto_adjunto: { media_type: "image/jpeg", data: fotoCheckout.base64 } } : {}),
     } };
     setCheckoutSaving(true);
     try {
@@ -2980,28 +3086,38 @@ export default function ConductorApp() {
                       <Eyebrow>Check-out · cierre de jornada</Eyebrow>
                       <h3 style={{ margin: "4px 0 12px", fontSize: 20, fontWeight: 800, letterSpacing: -0.5 }}>Kilometraje final</h3>
 
-                      <input
-                        type="number" placeholder="Km final (ej: 152980)" value={kmFin}
-                        onChange={e => setKmFin(e.target.value)}
-                        style={{
-                          width: "100%", padding: "12px 14px", borderRadius: 12, border: "1.5px solid var(--c-line)",
-                          fontFamily: FONT_MONO, fontSize: 14, fontWeight: 700, letterSpacing: 0.3,
-                          color: "var(--c-ink)", outline: "none", boxSizing: "border-box",
-                        }}
-                      />
-                      <label style={{
-                        display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                        marginTop: 8, padding: "11px 14px", borderRadius: 12,
-                        border: "1.5px dashed var(--c-navy)", cursor: ocrLeyendo ? "default" : "pointer",
-                        background: "var(--c-navy-tint)", color: "var(--c-navy)",
-                        fontFamily: FONT_SANS, fontSize: 13, fontWeight: 700,
-                      }}>
-                        {ocrLeyendo ? "Leyendo la foto…" : "📷 Leer km con foto del tablero"}
-                        <input
-                          type="file" accept="image/*" capture="environment" hidden disabled={ocrLeyendo}
-                          onChange={e => { leerFotoOdometro(e.target.files?.[0], setKmFin); e.currentTarget.value = ""; }}
-                        />
-                      </label>
+                      {renderCapturaOdometro("checkout")}
+
+                      {/* Salida de emergencia: cerrar sin foto (unidad en taller / tablero apagado / etc.) */}
+                      <div style={{ marginTop: 12 }}>
+                        {!expandirSinFoto && !sinFotoMotivo ? (
+                          <button onClick={() => setExpandirSinFoto(true)}
+                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--c-mute)", fontFamily: FONT_SANS, fontSize: 12, fontWeight: 700, textDecoration: "underline" }}>
+                            No puedo tomar la foto (unidad en taller, tablero apagado…)
+                          </button>
+                        ) : (
+                          <div style={{ background: "var(--c-soft)", borderRadius: 12, padding: 12 }}>
+                            <p style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700, color: "var(--c-ink-2)" }}>Cerrar sin foto — elige el motivo:</p>
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              {([["taller", "En taller"], ["averia", "Avería en ruta"], ["tablero_apagado", "Tablero apagado"], ["unidad_entregada", "Unidad entregada"]] as [string, string][]).map(([val, lbl]) => (
+                                <button key={val} onClick={() => setSinFotoMotivo(val)}
+                                  style={{
+                                    padding: "8px 10px", borderRadius: 10, cursor: "pointer", fontFamily: FONT_SANS, fontSize: 12, fontWeight: 700,
+                                    border: `1.5px solid ${sinFotoMotivo === val ? "var(--c-navy)" : "var(--c-line)"}`,
+                                    background: sinFotoMotivo === val ? "var(--c-navy-tint)" : "var(--c-surface)",
+                                    color: sinFotoMotivo === val ? "var(--c-navy)" : "var(--c-mute)",
+                                  }}>
+                                  {lbl}
+                                </button>
+                              ))}
+                            </div>
+                            <button onClick={() => { setSinFotoMotivo(""); setExpandirSinFoto(false); }}
+                              style={{ marginTop: 8, background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--c-navy)", fontFamily: FONT_SANS, fontSize: 12, fontWeight: 700 }}>
+                              ← Mejor tomo la foto
+                            </button>
+                          </div>
+                        )}
+                      </div>
 
                       <Eyebrow style={{ marginTop: 14, marginBottom: 8 }}>Nivel de combustible</Eyebrow>
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -3466,7 +3582,7 @@ export default function ConductorApp() {
                   La unidad fue inspeccionada y reportada al ERP.
                 </p>
                 <SecondaryBtn
-                  onClick={() => { setCheckDone(false); setChecks(CHECKLIST_ITEMS.map(i => ({ ...i }))); }}
+                  onClick={() => { setCheckDone(false); setChecks(CHECKLIST_ITEMS.map(i => ({ ...i }))); setFotoCheckin(null); setKmInicio(""); }}
                   icon={<IconRefresh size={15} color="var(--c-ink)" />}
                   full={false}
                 >
@@ -3494,33 +3610,9 @@ export default function ConductorApp() {
                     <option value="">Seleccionar vehículo…</option>
                     {vehiculos.map(v => <option key={v.id} value={v.id}>{v.placa} — {v.categoria}</option>)}
                   </select>
-                  <input
-                    type="number" placeholder="Km de inicio (ej: 152430)" value={kmInicio}
-                    onChange={e => setKmInicio(e.target.value)}
-                    style={{
-                      width: "100%", marginTop: 8, padding: "12px 14px",
-                      borderRadius: 12, border: "1.5px solid var(--c-line)",
-                      fontFamily: FONT_MONO, fontSize: 14, fontWeight: 700, letterSpacing: 0.3,
-                      color: "var(--c-ink)", outline: "none", boxSizing: "border-box",
-                    }}
-                  />
-                  {/* Leer el km con una foto del tablero (OCR). Siempre se confirma/corrige. */}
-                  <label style={{
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                    marginTop: 8, padding: "11px 14px", borderRadius: 12,
-                    border: "1.5px dashed var(--c-navy)", cursor: ocrLeyendo ? "default" : "pointer",
-                    background: "var(--c-navy-tint)", color: "var(--c-navy)",
-                    fontFamily: FONT_SANS, fontSize: 13, fontWeight: 700,
-                  }}>
-                    {ocrLeyendo ? "Leyendo la foto…" : "📷 Leer km con foto del tablero"}
-                    <input
-                      type="file" accept="image/*" capture="environment" hidden disabled={ocrLeyendo}
-                      onChange={e => { leerFotoOdometro(e.target.files?.[0], setKmInicio); e.currentTarget.value = ""; }}
-                    />
-                  </label>
-                  <p style={{ margin: "6px 2px 0", fontSize: 11, color: "var(--c-mute)", lineHeight: 1.4 }}>
-                    Toma la foto del tablero y la IA lee el kilometraje. Revísalo siempre antes de continuar.
-                  </p>
+                  <div style={{ marginTop: 10 }}>
+                    {renderCapturaOdometro("checkin")}
+                  </div>
                 </div>
 
                 {/* Barra progreso */}
