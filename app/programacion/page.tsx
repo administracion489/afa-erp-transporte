@@ -139,6 +139,48 @@ const FORM_VACIO = {
   costo_proveedor: "", observaciones: "",
 };
 
+// ─── CARGA ACOTADA (rendimiento) ────────────────────────────────────────────
+// La tabla `reservas` crece sin tope (los "Programa fijo" generan meses adelante).
+// Traer TODO con select("*") en cada carga descargaba megabytes y trababa la página.
+// Ahora la LISTA trae solo una ventana de fechas y solo las columnas que se pintan
+// (sin `paradas_json`, la columna más pesada — se hidrata bajo demanda al expandir/abrir
+// el manifiesto). Los TOTALES del tablero salen de un resumen aparte para seguir exactos.
+//
+// COLS_LISTA se validó contra el esquema real de la tabla: `punto_retorno` NO existe
+// como columna en `reservas` (enumerarla rompería el query entero) — el modal siempre
+// recibía null en ese prop. Si agregas una columna nueva que la lista deba mostrar,
+// añádela aquí o no llegará al cliente.
+const COLS_LISTA =
+  "id,codigo,cliente_id,cotizacion_id,vehiculo_id,conductor_id,tipo,estado,estado_admin," +
+  "fecha_servicio,hora_servicio,precio_cliente,costo_proveedor,margen,observaciones,created_at," +
+  "tipo_asignacion,empresa_tercerizada_id,vehiculo_tercero_id,conductor_tercero_id," +
+  "tipo_servicio_detalle,sincronizado_app,fecha_sincronizacion,token_seguimiento," +
+  "token_conductor_tercero,token_expira_at,reserva_vinculada_id,direccion_servicio," +
+  "lote_generacion,origen,destino";
+
+// Proyección ultraligera para los agregados globales (KPIs, flujo de estados, sumas).
+const COLS_RESUMEN = "id,estado,estado_admin,fecha_servicio,precio_cliente,costo_proveedor,margen,sincronizado_app";
+
+// Ventana por defecto al abrir (días relativos a hoy Lima). Cubre la operación diaria;
+// para ver fuera de ella el usuario usa los filtros de fecha o el botón "Ver todo".
+const VENTANA_DIAS_ATRAS    = 30;
+const VENTANA_DIAS_ADELANTE = 90;
+const PAGE_SUPABASE = 1000; // tope de filas por respuesta de PostgREST
+
+// Agregados globales del tablero (independientes de la ventana visible).
+type Resumen = {
+  total: number;
+  porEstado: Record<string, number>;
+  porAdmin: Record<string, number>;
+  hoy: number;
+  prox7d: number;
+  sincronizadas: number;
+  ventas: number;
+  costos: number;
+  margen: number;
+  sobrecupo: number;
+};
+
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 const TIPOS_SERVICIO_FIJO = new Set([
@@ -263,9 +305,13 @@ export default function ReservasPage() {
   const [condTercero,  setCondTercero]  = useState<ConductorTercero[]>([]);
   const [docsTercero,  setDocsTercero]  = useState<DocumentoTercero[]>([]);
   const [reservas,     setReservas]     = useState<Reserva[]>([]);
+  const [resumen,      setResumen]      = useState<Resumen | null>(null); // agregados globales del tablero
+  const [verTodo,      setVerTodo]      = useState(false);                // true = histórico completo (fuera de la ventana)
+  const [limiteVista,  setLimiteVista]  = useState(100);                  // filas renderizadas ("Cargar más")
   const [cotMapNum,    setCotMapNum]    = useState<Record<number, string>>({}); // cotizacion_id → numero_cotizacion
+  const [cotMapAsunto, setCotMapAsunto] = useState<Record<number, string>>({}); // cotizacion_id → asunto
   const [ocupacionMap, setOcupacionMap] = useState<Record<number, Ocupacion>>({});
-  const [loading,      setLoading]      = useState(false);
+  const [loading,      setLoading]      = useState(true); // arranca cargando (evita parpadeo "No hay reservas")
   const [guardando,    setGuardando]    = useState(false);
   const [paradasMap,   setParadasMap]   = useState<Record<number, any[]>>({});
   const [cargandoPar,  setCargandoPar]  = useState<Record<number, boolean>>({});
@@ -336,10 +382,19 @@ export default function ReservasPage() {
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
       setForm(p => ({ ...p, [k]: e.target.value }));
 
-  const cargarOcupaciones = async () => {
-    const { data } = await supabase.from("reservas_ocupacion").select("*");
+  // Ocupaciones solo de las reservas indicadas (o de las que hay en memoria). Antes traía
+  // TODA la vista con select("*"), que además se truncaba en silencio a 1000 filas. Se
+  // trocea el .in() para no reventar el largo de la URL. El KPI global de sobrecupo NO sale
+  // de aquí (sería parcial) sino de resumen.sobrecupo (count server-side).
+  const cargarOcupaciones = async (ids?: number[]) => {
+    const objetivo = ids ?? reservas.map(r => r.id);
     const map: Record<number, Ocupacion> = {};
-    (data || []).forEach((o: any) => { map[o.reserva_id] = o; });
+    for (let i = 0; i < objetivo.length; i += 300) {
+      const chunk = objetivo.slice(i, i + 300);
+      if (chunk.length === 0) continue;
+      const { data } = await supabase.from("reservas_ocupacion").select("*").in("reserva_id", chunk);
+      (data || []).forEach((o: any) => { map[o.reserva_id] = o; });
+    }
     setOcupacionMap(map);
   };
 
@@ -348,14 +403,19 @@ export default function ReservasPage() {
   // y se trocea la consulta `.in()` para no reventar el largo de la URL.
   const cargarNumerosCotizacion = async (rows: Reserva[]) => {
     const cotIds = [...new Set(rows.map(r => r.cotizacion_id).filter((v): v is number => v != null))];
-    if (cotIds.length === 0) { setCotMapNum({}); return; }
+    if (cotIds.length === 0) { setCotMapNum({}); setCotMapAsunto({}); return; }
     const m: Record<number, string> = {};
+    const ma: Record<number, string> = {};
     for (let i = 0; i < cotIds.length; i += 300) {
       const chunk = cotIds.slice(i, i + 300);
-      const { data } = await supabase.from("cotizaciones").select("id,numero_cotizacion").in("id", chunk);
-      (data || []).forEach((c: any) => { if (c.numero_cotizacion != null) m[c.id] = String(c.numero_cotizacion); });
+      const { data } = await supabase.from("cotizaciones").select("id,numero_cotizacion,asunto").in("id", chunk);
+      (data || []).forEach((c: any) => {
+        if (c.numero_cotizacion != null) m[c.id] = String(c.numero_cotizacion);
+        if (c.asunto) ma[c.id] = String(c.asunto);
+      });
     }
     setCotMapNum(m);
+    setCotMapAsunto(ma);
   };
 
   const cargarPasajerosAsignados = async (reservaId: number, paradaId?: number) => {
@@ -836,29 +896,70 @@ export default function ReservasPage() {
     setAsignando(false);
   };
 
-  // Supabase/PostgREST corta cada respuesta a 1000 filas por defecto. Con >1000
-  // reservas en la tabla (los "Programa fijo" generan meses hacia adelante), un
-  // .select("*") simple se queda solo con las 1000 más futuras (orden desc) y
-  // pierde silenciosamente las de hoy y todo el historial. Se pagina con .range().
-  const fetchAllReservas = async () => {
-    const PAGE = 1000;
-    let from = 0;
-    const all: any[] = [];
-    for (;;) {
-      const { data, error } = await supabase.from("reservas").select("*")
-        .order("fecha_servicio", { ascending: false }).order("id", { ascending: false })
-        .range(from, from + PAGE - 1);
-      if (error || !data) break;
-      all.push(...data);
-      if (data.length < PAGE) break;
-      from += PAGE;
+  // Trae reservas paginando en PARALELO: la 1ª página pide el count exacto y con él se
+  // lanzan el resto de páginas a la vez (antes eran 6 viajes en serie). `aplica` añade los
+  // filtros (rango de fechas, cotización…). El orden fecha desc + id desc es determinista,
+  // así el paginado no repite ni se salta filas.
+  const fetchReservasCols = async (cols: string, aplica: (q: any) => any): Promise<any[]> => {
+    const base = (withCount: boolean) => aplica(
+      supabase.from("reservas")
+        .select(cols, withCount ? { count: "exact" } : undefined)
+        .order("fecha_servicio", { ascending: false })
+        .order("id", { ascending: false })
+    );
+    const first = await base(true).range(0, PAGE_SUPABASE - 1);
+    if (first.error || !first.data) return [];
+    const all: any[] = [...first.data];
+    if (first.count != null) {
+      // Con el total conocido, el resto de páginas se piden A LA VEZ.
+      const promesas: Promise<any>[] = [];
+      for (let from = PAGE_SUPABASE; from < first.count; from += PAGE_SUPABASE) {
+        promesas.push(base(false).range(from, from + PAGE_SUPABASE - 1));
+      }
+      if (promesas.length) {
+        const res = await Promise.all(promesas);
+        for (const r of res) if (r.data) all.push(...r.data);
+      }
+    } else {
+      // Sin count (RLS raro): paginar en serie hasta una página corta. NUNCA quedarse en 1000
+      // silenciosamente (ese fue un bug real de esta tabla).
+      let from = PAGE_SUPABASE;
+      while (all.length % PAGE_SUPABASE === 0) {
+        const { data } = await base(false).range(from, from + PAGE_SUPABASE - 1);
+        if (!data || data.length === 0) break;
+        all.push(...data);
+        if (data.length < PAGE_SUPABASE) break;
+        from += PAGE_SUPABASE;
+      }
     }
-    return { data: all };
+    return all;
   };
 
-  const cargarDatos = async () => {
-    setLoading(true);
-    const [clRes, vRes, cRes, etRes, vtRes, ctRes, dtRes, rRes] = await Promise.all([
+  // Trae reservas puntuales por id (para acciones sobre servicios que pueden estar fuera de
+  // la ventana visible). Trocea el .in() por longitud de URL.
+  const fetchReservasPorIds = async (ids: number[]): Promise<Reserva[]> => {
+    if (ids.length === 0) return [];
+    const out: any[] = [];
+    for (let i = 0; i < ids.length; i += 300) {
+      const { data } = await supabase.from("reservas").select(COLS_LISTA).in("id", ids.slice(i, i + 300));
+      if (data) out.push(...data);
+    }
+    return out as Reserva[];
+  };
+
+  // Rango de fechas que pide la LISTA al servidor. verTodo → sin límite (histórico completo).
+  const rangoVentana = (): { desde: string | null; hasta: string | null } => {
+    if (verTodo) return { desde: null, hasta: null };
+    return {
+      desde: filtroDesde || fechaLima(-VENTANA_DIAS_ATRAS),
+      hasta: filtroHasta || fechaLima(VENTANA_DIAS_ADELANTE),
+    };
+  };
+
+  // Catálogos (clientes, vehículos, conductores, terceros): no cambian al operar reservas,
+  // se cargan una sola vez al montar.
+  const cargarCatalogos = async () => {
+    const [clRes, vRes, cRes, etRes, vtRes, ctRes, dtRes] = await Promise.all([
       supabase.from("clientes").select("id,nombre,empresa,tipo").order("nombre"),
       supabase.from("vehiculos").select("id,placa,categoria,estado,estado_operativo,capacidad_pasajeros").order("placa"),
       supabase.from("conductores").select("id,nombre,licencia,vencimiento_licencia,estado,telefono").order("nombre"),
@@ -866,7 +967,6 @@ export default function ReservasPage() {
       supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,capacidad,estado,marca").order("placa"),
       supabase.from("conductores_tercero").select("id,empresa_id,nombre,licencia,vencimiento_licencia,telefono,estado").order("nombre"),
       supabase.from("documentos_tercero").select("id,empresa_id,tipo,fecha_vencimiento"),
-      fetchAllReservas(),
     ]);
     setClientes(clRes.data     || []);
     setVehiculos(vRes.data     || []);
@@ -875,13 +975,87 @@ export default function ReservasPage() {
     setVehTercero(vtRes.data   || []);
     setCondTercero(ctRes.data  || []);
     setDocsTercero(dtRes.data  || []);
-    setReservas(rRes.data      || []);
-    await cargarNumerosCotizacion(rRes.data || []);
-    await cargarOcupaciones();
+  };
+
+  // Totales del tablero (KPIs, flujo de estados, sumas): SIEMPRE globales, no dependen de la
+  // ventana visible. Proyección ultraligera (sin paradas_json) sobre toda la tabla + el
+  // conteo de sobrecupo por count server-side.
+  const cargarResumen = async () => {
+    const filas = await fetchReservasCols(COLS_RESUMEN, (q: any) => q);
+    const hoyP = fechaLima();
+    const e7   = fechaLima(7);
+    const porEstado: Record<string, number> = {};
+    const porAdmin:  Record<string, number> = {};
+    let ventas = 0, costos = 0, margen = 0, hoy = 0, prox7d = 0, sincronizadas = 0;
+    for (const r of filas) {
+      porEstado[r.estado] = (porEstado[r.estado] || 0) + 1;
+      if (r.estado_admin) porAdmin[r.estado_admin] = (porAdmin[r.estado_admin] || 0) + 1;
+      ventas += Number(r.precio_cliente || 0);
+      costos += Number(r.costo_proveedor || 0);
+      margen += Number(r.margen || 0);
+      if (r.fecha_servicio === hoyP) hoy++;
+      if (r.fecha_servicio && r.fecha_servicio >= hoyP && r.fecha_servicio <= e7 && r.estado !== "cancelada" && r.estado !== "finalizada") prox7d++;
+      if (r.sincronizado_app) sincronizadas++;
+    }
+    const { count } = await supabase.from("reservas_ocupacion")
+      .select("reserva_id", { count: "exact", head: true }).eq("sobrecupo", true);
+    setResumen({ total: filas.length, porEstado, porAdmin, hoy, prox7d, sincronizadas, ventas, costos, margen, sobrecupo: count || 0 });
+  };
+
+  // La lista visible: solo la ventana de fechas y solo columnas de lista (sin paradas_json).
+  const cargarLista = async () => {
+    setLoading(true);
+    const { desde, hasta } = rangoVentana();
+    const filas = await fetchReservasCols(COLS_LISTA, (q: any) => {
+      let qq = q;
+      if (desde) qq = qq.gte("fecha_servicio", desde);
+      if (hasta) qq = qq.lte("fecha_servicio", hasta);
+      return qq;
+    });
+    setReservas(filas);
+    setLimiteVista(100);
+    await cargarNumerosCotizacion(filas);
+    await cargarOcupaciones(filas.map((r: any) => r.id));
     setLoading(false);
   };
 
-  useEffect(() => { cargarDatos(); }, []);
+  // Refresco tras una mutación (guardar, eliminar, aplicar masivo…): lista + totales.
+  const cargarDatos = async () => {
+    await Promise.all([cargarLista(), cargarResumen()]);
+  };
+
+  useEffect(() => { cargarCatalogos(); cargarResumen(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Recarga la lista cuando cambia la ventana (rango de fechas o "Ver todo"). Debounce corto
+  // para no disparar dos veces al elegir Desde y Hasta seguidos.
+  useEffect(() => {
+    const t = setTimeout(() => { cargarLista(); }, 300);
+    return () => clearTimeout(t);
+  }, [filtroDesde, filtroHasta, verTodo]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // paradas_json NO viaja en la lista (es la columna más pesada). Se trae puntualmente al
+  // abrir el manifiesto o expandir la fila y se fusiona en memoria. El check evita recargas:
+  // una fila de la ventana llega sin la propiedad (undefined); tras hidratar queda array/null.
+  const hidratarParadasJson = async (id: number) => {
+    const actual = reservas.find(r => r.id === id);
+    if (actual && (actual as any).paradas_json !== undefined) return;
+    const { data } = await supabase.from("reservas").select("paradas_json").eq("id", id).maybeSingle();
+    const pj = ((data as any)?.paradas_json ?? null) as any[] | null;
+    setReservas(prev => prev.map(r => r.id === id ? { ...r, paradas_json: pj } : r));
+  };
+
+  // Abre el modal de manifiesto asegurando que paradas_json esté hidratado primero.
+  const abrirManifiesto = async (id: number) => {
+    await hidratarParadasJson(id);
+    setModalReservaId(id);
+  };
+
+  // Al expandir una fila, hidrata su paradas_json para que el aviso "tiene N paradas en la
+  // cotización" y el botón "Desde cotización" reaccionen igual que antes.
+  useEffect(() => { if (expandidoId != null) hidratarParadasJson(expandidoId); }, [expandidoId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Al cambiar cualquier filtro de cliente (búsqueda, estado, tipo…) se vuelve a mostrar
+  // desde las primeras 100 filas, para que "Cargar más" no arrastre el conteo anterior.
+  useEffect(() => { setLimiteVista(100); }, [busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroPorAsignar]);
 
   const nombreCliente    = (id: number | null) => { const c = clientes.find(c => c.id === id); return c ? (c.empresa || c.nombre) : "Sin cliente"; };
   const nombreVehiculo   = (id: number | null) => vehiculos.find(v => v.id === id)?.placa || "-";
@@ -1021,8 +1195,11 @@ export default function ReservasPage() {
       // marcado "finalizada") ni el que está en ruta ahora mismo: cambiarles la unidad
       // reescribiría el historial o le cambiaría el bus al conductor a media carretera.
       const hoyPeru = fechaLima();
-      const otrasReservas = reservas.filter(r =>
-        r.cotizacion_id === reservaActual.cotizacion_id &&
+      // Todos los servicios del contrato desde el servidor: los "Programa fijo" se extienden
+      // meses adelante, fuera de la ventana visible. Sin esto, "aplicar a rango" solo
+      // alcanzaría lo que estuviera cargado en pantalla.
+      const delContrato = await fetchReservasCols(COLS_LISTA, (q: any) => q.eq("cotizacion_id", reservaActual.cotizacion_id!));
+      const otrasReservas = (delContrato as Reserva[]).filter(r =>
         r.id !== editandoId &&
         r.estado !== "cancelada" && r.estado !== "finalizada" && r.estado !== "en_curso" &&
         (r.fecha_servicio || "") >= hoyPeru
@@ -1224,15 +1401,22 @@ export default function ReservasPage() {
   const prepararEliminacionLote = async (idsBase: number[]) => {
     if (idsBase.length === 0) return;
 
-    const idsSet = new Set(idsBase);
+    // Las reservas involucradas pueden estar FUERA de la ventana visible (p. ej. "Deshacer"
+    // un Programa fijo generado a futuro). Se traen del servidor para no saltarlas.
+    const filasBase = await fetchReservasPorIds(idsBase);
+    const baseSet = new Set(idsBase);
+    const idsSet  = new Set(idsBase);
     let incluidosVinculados = 0;
-    reservas.forEach(r => {
-      if (idsSet.has(r.id) && r.reserva_vinculada_id && !idsSet.has(r.reserva_vinculada_id)) {
+    filasBase.forEach(r => {
+      if (r.reserva_vinculada_id && !idsSet.has(r.reserva_vinculada_id)) {
         idsSet.add(r.reserva_vinculada_id);
         incluidosVinculados++;
       }
     });
     const idsFinal = Array.from(idsSet);
+    // Trae las vinculadas nuevas (las de idsBase ya están en filasBase) y arma el índice.
+    const filasVinc = await fetchReservasPorIds(idsFinal.filter(id => !baseSet.has(id)));
+    const mapFinal  = new Map<number, Reserva>([...filasBase, ...filasVinc].map(r => [r.id, r]));
 
     const idsConFactura = new Set<number>();
     const CHUNK = 150;
@@ -1244,7 +1428,7 @@ export default function ReservasPage() {
     const bloqueados: Reserva[] = [];
     const aEliminar: Reserva[] = [];
     idsFinal.forEach(id => {
-      const r = reservas.find(x => x.id === id);
+      const r = mapFinal.get(id);
       if (!r) return;
       const bloqueado = r.estado_admin === "facturada" || r.estado_admin === "cobrada" || idsConFactura.has(id);
       (bloqueado ? bloqueados : aEliminar).push(r);
@@ -1270,6 +1454,7 @@ export default function ReservasPage() {
     }
     await supabase.from("reservas").update({ estado }).eq("id", id);
     setReservas(prev => prev.map(r => r.id === id ? { ...r, estado } : r));
+    cargarResumen(); // los KPIs/flujo de estados salen del resumen global: refrescarlo
   };
 
   const confirmarFinalizar = async () => {
@@ -1289,6 +1474,7 @@ export default function ReservasPage() {
     }).eq("id", modalFinalizar.id);
     setReservas(prev => prev.map(r => r.id === modalFinalizar.id ? { ...r, estado: "finalizada", estado_admin: adminCierre } : r));
     setModalFinalizar(null);
+    cargarResumen();
   };
 
   // Avanza el estado administrativo (dimensión B): por_liquidar → liquidada → facturada → cobrada
@@ -1299,6 +1485,7 @@ export default function ReservasPage() {
     if (!confirm(`Avanzar estado administrativo de "${ESTADOS_ADMIN[actual].label}" a "${ESTADOS_ADMIN[sig].label}"?`)) return;
     await supabase.from("reservas").update({ estado_admin: sig }).eq("id", r.id);
     setReservas(prev => prev.map(x => x.id === r.id ? { ...x, estado_admin: sig } : x));
+    cargarResumen();
   };
 
   const capacidadDe = (r: Reserva): number | null => {
@@ -1307,24 +1494,29 @@ export default function ReservasPage() {
   };
 
   const hoy          = fechaLima();
-  const totalRes     = reservas.length;
-  const pendientes   = reservas.filter(r => r.estado === "pendiente").length;
-  const programadas  = reservas.filter(r => r.estado === "programada").length;
-  const confirmadas  = reservas.filter(r => r.estado === "confirmada").length;
-  const enCurso      = reservas.filter(r => r.estado === "en_curso").length;
+  const en7d         = fechaLima(7);
+  // KPIs y flujo de estados: SIEMPRE globales (del resumen server-side), no de la ventana
+  // visible. Si `resumen` existe se usa su valor (0 cuando el estado no aparece, NO el
+  // fallback); mientras carga se cae a lo que haya en memoria para no mostrar vacíos.
+  const gEstado = (e: EstadoReserva) => resumen ? (resumen.porEstado[e] || 0) : reservas.filter(r => r.estado === e).length;
+  const gAdmin  = (e: EstadoAdmin)   => resumen ? (resumen.porAdmin[e]  || 0) : reservas.filter(r => r.estado_admin === e).length;
+  const totalRes     = resumen ? resumen.total : reservas.length;
+  const pendientes   = gEstado("pendiente");
+  const programadas  = gEstado("programada");
+  const confirmadas  = gEstado("confirmada");
+  const enCurso      = gEstado("en_curso");
   // Dimensión B · cierre administrativo (solo servicios finalizados tienen estado_admin)
-  const porLiquidar  = reservas.filter(r => r.estado_admin === "por_liquidar").length;
-  const liquidadas   = reservas.filter(r => r.estado_admin === "liquidada").length;
-  const facturadas   = reservas.filter(r => r.estado_admin === "facturada").length;
-  const cobradas     = reservas.filter(r => r.estado_admin === "cobrada").length;
-  const hoyCount     = reservas.filter(r => r.fecha_servicio === hoy).length;
-  const ventas       = reservas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
-  const costos       = reservas.reduce((s, r) => s + Number(r.costo_proveedor || 0), 0);
-  const margenTotal  = reservas.reduce((s, r) => s + Number(r.margen || 0), 0);
-  const conSobrecupo = Object.values(ocupacionMap).filter(o => o.sobrecupo).length;
-  const sincronizadas = reservas.filter(r => r.sincronizado_app).length;
-  const en7d          = fechaLima(7);
-  const proximos7d    = reservas.filter(r => r.fecha_servicio && r.fecha_servicio >= hoy && r.fecha_servicio <= en7d && r.estado !== "cancelada" && r.estado !== "finalizada").length;
+  const porLiquidar  = gAdmin("por_liquidar");
+  const liquidadas   = gAdmin("liquidada");
+  const facturadas   = gAdmin("facturada");
+  const cobradas     = gAdmin("cobrada");
+  const hoyCount     = resumen ? resumen.hoy    : reservas.filter(r => r.fecha_servicio === hoy).length;
+  const ventas       = resumen ? resumen.ventas : reservas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
+  const costos       = resumen ? resumen.costos : reservas.reduce((s, r) => s + Number(r.costo_proveedor || 0), 0);
+  const margenTotal  = resumen ? resumen.margen : reservas.reduce((s, r) => s + Number(r.margen || 0), 0);
+  const conSobrecupo = resumen ? resumen.sobrecupo : Object.values(ocupacionMap).filter(o => o.sobrecupo).length;
+  const sincronizadas = resumen ? resumen.sincronizadas : reservas.filter(r => r.sincronizado_app).length;
+  const proximos7d    = resumen ? resumen.prox7d : reservas.filter(r => r.fecha_servicio && r.fecha_servicio >= hoy && r.fecha_servicio <= en7d && r.estado !== "cancelada" && r.estado !== "finalizada").length;
 
   const filtradas = useMemo(() => {
     const base = reservas.filter(r => {
@@ -2084,7 +2276,7 @@ export default function ReservasPage() {
           {ESTADOS_RESERVA_LISTA.map((est, i, arr) => {
             const cfg   = ESTADO_CFG[est];
             const desc  = cfg.descripcion;
-            const count = reservas.filter(r => r.estado === est).length;
+            const count = gEstado(est);
             return (
               <React.Fragment key={est}>
                 <div className="flex flex-col items-center">
@@ -2435,8 +2627,20 @@ export default function ReservasPage() {
             >
               📍 {sincCoords.activo ? "Sincronizando…" : "Sincronizar coordenadas"}
             </button>
+            <button
+              onClick={() => setVerTodo(v => !v)}
+              title={verTodo ? "Volver a la vista rápida (ventana de fechas por defecto)" : "Cargar TODO el historial de servicios — más lento, úsalo para buscar servicios de otras fechas"}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all"
+              style={{
+                background: verTodo ? "#fef3c7" : "white",
+                borderColor: verTodo ? "#f59e0b" : "#e2e8f0",
+                color:       verTodo ? "#92400e" : "#6b7280",
+              }}
+            >
+              🕘 {verTodo ? "Viendo todo el historial" : "Ver todo"}
+            </button>
             <div className="flex items-center px-4 py-1.5 bg-gray-50 border rounded-xl text-sm text-gray-400">
-              {filtradas.length} resultado{filtradas.length !== 1 ? "s" : ""}
+              {loading ? "Cargando…" : <>{filtradas.length} resultado{filtradas.length !== 1 ? "s" : ""}{verTodo ? "" : " · ventana"}</>}
             </div>
           </div>
         </div>
@@ -2627,7 +2831,7 @@ export default function ReservasPage() {
                                   <td className="px-4 py-2.5">
                                     <div className="flex gap-1.5">
                                       <button
-                                        onClick={() => setModalReservaId(r.id)}
+                                        onClick={() => abrirManifiesto(r.id)}
                                         className="flex items-center gap-1 bg-purple-50 hover:bg-purple-100 text-purple-700 text-[10px] font-bold px-2 py-1 rounded-lg transition-colors"
                                       >
                                         <FileText size={11} /> Pax
@@ -2733,7 +2937,7 @@ export default function ReservasPage() {
                         </div>
                       </div>
                       <div className="flex gap-1.5 shrink-0">
-                        <button onClick={() => setModalReservaId(r.id)} className="flex items-center gap-1 bg-purple-50 hover:bg-purple-100 text-purple-700 text-[10px] font-bold px-2 py-1.5 rounded-lg transition-colors"><FileText size={11} /></button>
+                        <button onClick={() => abrirManifiesto(r.id)} className="flex items-center gap-1 bg-purple-50 hover:bg-purple-100 text-purple-700 text-[10px] font-bold px-2 py-1.5 rounded-lg transition-colors"><FileText size={11} /></button>
                         <button onClick={() => setModalLinksId(r.id)} className="flex items-center gap-1 bg-amber-50 hover:bg-amber-100 text-amber-700 text-[10px] font-bold px-2 py-1.5 rounded-lg transition-colors">
                           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                         </button>
@@ -2804,7 +3008,7 @@ export default function ReservasPage() {
                   <p className="text-3xl mb-2">🎫</p>
                   <p className="font-medium">No hay reservas</p>
                 </td></tr>
-              ) : filtradas.map((r, idx) => {
+              ) : filtradas.slice(0, limiteVista).map((r, idx) => {
                 const estCfg    = ESTADO_CFG[r.estado] || ESTADO_CFG.pendiente;
                 const expandido = expandidoId === r.id;
                 const margen    = Number(r.margen || 0);
@@ -2823,6 +3027,7 @@ export default function ReservasPage() {
                 // Muestra el numero_cotizacion real; si está vacío, cae al correlativo
                 // #NNNNN derivado del id (mismo fallback que usa toda la app).
                 const numCot    = r.cotizacion_id != null ? (cotMapNum[r.cotizacion_id] || String(r.cotizacion_id).padStart(5, "0")) : null;
+                const asuntoCot = r.cotizacion_id != null ? cotMapAsunto[r.cotizacion_id] : null;
 
                 let ocupBg = "#f8fafc", ocupColor = "#475569";
                 if (sobrecupo) { ocupBg = "#fee2e2"; ocupColor = "#991b1b"; }
@@ -2877,7 +3082,7 @@ export default function ReservasPage() {
                       </td>
 
                       {/* N° de cotización que originó el servicio (clic → abre la cotización) */}
-                      <td className="p-3" onClick={e => e.stopPropagation()}>
+                      <td className="p-3 max-w-[120px]" onClick={e => e.stopPropagation()}>
                         {numCot ? (
                           <button
                             onClick={() => router.push(`/cotizaciones?buscar=${encodeURIComponent(numCot)}`)}
@@ -2888,6 +3093,15 @@ export default function ReservasPage() {
                           </button>
                         ) : (
                           <span className="text-gray-300 text-xs">—</span>
+                        )}
+                        {asuntoCot && (
+                          <div
+                            title={asuntoCot}
+                            className="mt-0.5 truncate text-[9px] font-black px-1.5 py-0.5 rounded-full"
+                            style={{ background: "#f1f5f9", color: "#475569" }}
+                          >
+                            {asuntoCot}
+                          </div>
                         )}
                       </td>
 
@@ -2925,7 +3139,7 @@ export default function ReservasPage() {
 
                       <td className="p-3" onClick={e => e.stopPropagation()}>
                         <button
-                          onClick={() => setModalReservaId(r.id)}
+                          onClick={() => abrirManifiesto(r.id)}
                           className="group flex flex-col items-start gap-0.5 px-2.5 py-1.5 rounded-lg cursor-pointer transition-transform hover:scale-105"
                           style={{ background: ocupBg }}
                         >
@@ -2972,7 +3186,7 @@ export default function ReservasPage() {
 
                       <td className="p-3" onClick={e => e.stopPropagation()}>
                         <div className="flex gap-1.5 flex-wrap">
-                          <button onClick={() => setModalReservaId(r.id)} className="flex items-center gap-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
+                          <button onClick={() => abrirManifiesto(r.id)} className="flex items-center gap-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
                             <FileText size={13} /> Manifiesto
                           </button>
                           <button onClick={() => setModalLinksId(r.id)} className="flex items-center gap-1.5 bg-amber-50 hover:bg-amber-100 text-amber-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
@@ -3014,7 +3228,7 @@ export default function ReservasPage() {
                                         {paradasR.length === 0 ? "Desde cotización" : "Rehacer desde cotización"}
                                       </button>
                                     )}
-                                    <button onClick={() => setModalReservaId(r.id)} className="text-xs font-bold px-3 py-1.5 rounded-lg border hover:bg-blue-50" style={{ borderColor: "#0b315f", color: "#0b315f" }}>
+                                    <button onClick={() => abrirManifiesto(r.id)} className="text-xs font-bold px-3 py-1.5 rounded-lg border hover:bg-blue-50" style={{ borderColor: "#0b315f", color: "#0b315f" }}>
                                       Manifiesto
                                     </button>
                                   </div>
@@ -3131,7 +3345,7 @@ export default function ReservasPage() {
                               <p><span className="text-gray-400">Abordados:</span> <b className="text-green-700">{ocup?.abordados || 0}</b></p>
                               <p><span className="text-gray-400">Pendientes:</span> <b className="text-yellow-700">{ocup?.pendientes || 0}</b></p>
                               {sobrecupo && <p className="text-red-600 font-bold">Excede capacidad</p>}
-                              <button onClick={() => setModalReservaId(r.id)} className="mt-1 text-[10px] font-bold px-2 py-1 rounded-lg text-white" style={{ background: "#0b315f" }}>
+                              <button onClick={() => abrirManifiesto(r.id)} className="mt-1 text-[10px] font-bold px-2 py-1 rounded-lg text-white" style={{ background: "#0b315f" }}>
                                 Abrir manifiesto
                               </button>
                             </div>
@@ -3163,9 +3377,20 @@ export default function ReservasPage() {
             </tbody>
           </table>
         </div>
+        {filtradas.length > limiteVista && (
+          <div className="px-4 py-3 flex justify-center border-t" style={{ borderColor: "#f1f5f9" }}>
+            <button
+              onClick={() => setLimiteVista(v => v + 100)}
+              className="px-4 py-2 rounded-xl text-xs font-bold border transition-colors hover:bg-gray-50"
+              style={{ borderColor: "#0b315f", color: "#0b315f" }}
+            >
+              Cargar más ({filtradas.length - limiteVista} restantes)
+            </button>
+          </div>
+        )}
         {filtradas.length > 0 && (
           <div className="px-4 py-3 text-xs text-gray-400 border-t flex justify-between" style={{ borderColor: "#f1f5f9" }}>
-            <span>{filtradas.length} de {totalRes} reservas</span>
+            <span>Mostrando {Math.min(limiteVista, filtradas.length)} de {filtradas.length}{verTodo ? "" : " · ventana actual"} · {totalRes} en total</span>
             <span>AFA ERP · Operaciones</span>
           </div>
         )}
