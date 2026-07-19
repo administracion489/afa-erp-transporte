@@ -39,3 +39,17 @@ create table if not exists jornada_config (
   constraint jornada_config_una_fila check (id = 1)
 );
 insert into jornada_config (id) values (1) on conflict (id) do nothing;
+
+-- 4) Config del recordatorio de CHECK-OUT (motor de alertas operativas, editable desde
+--    /configuracion/operaciones). umbral = minutos de gracia tras terminar el último servicio
+--    antes de empezar a recordar; el motor lo repite cada hora hasta que el conductor registre
+--    su check-out. REQUIERE crear la plantilla Meta `conductor_recuerda_checkout` (2do número de
+--    avisos) y que el "pinger" del tick esté agendado (hoy no lo está). Depende de que ya se haya
+--    corrido supabase/alertas-operativas.sql (crea public.alerta_config).
+insert into public.alerta_config
+  (clave, nombre, descripcion, modo_tiempo, umbral, notifica_conductor, plantilla)
+values
+  ('recordar_checkout', 'Recordar check-out',
+   'Recuerda al conductor cerrar la jornada (check-out) tras terminar su último servicio del día',
+   'evento', 60, true, 'conductor_recuerda_checkout')
+on conflict (clave) do nothing;

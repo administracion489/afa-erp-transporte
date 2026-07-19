@@ -359,6 +359,45 @@ async function handler(req: NextRequest) {
       }
     }
 
+    // ── BLOQUE 5b: recordar CHECK-OUT de jornada ────────────────────────────────
+    // Cuando un conductor TERMINÓ todos sus servicios de hoy (todas finalizada) pero aún NO
+    // registró su check-out (no hay fila en checkout_conductor del día). Se repite cada HORA
+    // (dedupe por bucket horario) hasta que lo complete; al registrar el check-out deja de
+    // matchear y el recordatorio para solo.
+    {
+      const cfg = activa("recordar_checkout");
+      if (cfg && cfg.notifica_conductor) {
+        const graciaMin = cfg.umbral ?? 60; // min tras el último servicio antes de empezar a recordar
+        const hoyRes = todas.filter((r) => r.fecha_servicio === hoy && r.conductor_id);
+        const porConductor = new Map<number, any[]>();
+        for (const r of hoyRes) {
+          if (!porConductor.has(r.conductor_id)) porConductor.set(r.conductor_id, []);
+          porConductor.get(r.conductor_id)!.push(r);
+        }
+        // ¿Quién ya hizo check-out hoy? (query aparte → si la tabla nueva no existe, set vacío)
+        const { data: cos } = await admin.from("checkout_conductor").select("conductor_id").eq("fecha", hoy);
+        const yaCheckout = new Set<number>((cos ?? []).map((c: any) => Number(c.conductor_id)));
+        const horaBucket = `${hoy.replace(/-/g, "")}-${String(Math.floor(ahora / 60)).padStart(2, "0")}`; // YYYYMMDD-HH (Lima)
+        let n = 0;
+        for (const [cid, servicios] of porConductor) {
+          if (yaCheckout.has(cid)) continue;                       // ya cerró la jornada
+          if (!servicios.every((s) => s.estado === "finalizada")) continue; // aún tiene servicios abiertos
+          const tiempos = servicios
+            .map((s) => limaAUtcMs(s.fecha_servicio, horaCorta(s.hora_real_fin ?? s.hora_servicio)))
+            .filter((t): t is number => Number.isFinite(t as any) && (t as number) > 0);
+          const finMs = tiempos.length ? Math.max(...tiempos) : 0;
+          if (finMs > 0 && (Date.now() - finMs) / 60000 < graciaMin) continue; // aún dentro de la gracia
+          // Cadencia HORARIA: el bucket en el ref hace que cada hora sea un envío nuevo.
+          if (!(await reclamarEnvio("recordar_checkout", `${cid}:${horaBucket}`))) continue;
+          const rc = await aConductor(cfg, cid, [nombreCorto(condMap.get(cid)?.nombre), hoy]);
+          if (rc === "fallo") { await liberarEnvio("recordar_checkout", `${cid}:${horaBucket}`); continue; } // transitorio → reintentar
+          if (rc === "enviado") n++;
+          // sin_canal (sin teléfono/plantilla): se deja reclamado para no reintentar en bucle.
+        }
+        res.recordar_checkout = n;
+      }
+    }
+
     // ── BLOQUE 6: documentos del conductor por vencer (respeta hora fija) ───────
     {
       const cfg = activa("doc_vence");
