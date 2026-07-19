@@ -1067,7 +1067,23 @@ export default function CotizacionesPage(){
       const{data:afect}=await supabase.from("reservas").select("id,direccion_servicio").eq("cotizacion_id",cotIdGuardado).gte("fecha_servicio",todayPeru).neq("estado","en_curso").neq("estado","finalizada").neq("estado","cancelada");
       reservasParaPropagar=afect||[];
     }
+    // ── Sincronizar el CLIENTE a los servicios ya generados desde esta cotización ──────────
+    // cliente_id en una reserva es identidad HEREDADA de la cotización (se fija al generar el
+    // servicio y jamás se re-sincroniza sola). Si aquí se cambió el cliente y no lo propagamos,
+    // Programación seguiría mostrando el cliente viejo (bug reportado con la cotización #00238).
+    // Se corrigen los servicios vinculados MENOS cancelados y ya facturados/cobrados (cambiarles
+    // el cliente rompería la traza con el comprobante SUNAT ya emitido).
+    let clientesResinc=0;
+    if(cotIdGuardado){
+      const nuevoCliente=payload.cliente_id;
+      const vinc:{id:number;cliente_id:number|null;estado:string|null;estado_admin:string|null}[]=[];
+      for(let d=0;d<40000;d+=1000){const{data,error:eLee}=await supabase.from("reservas").select("id,cliente_id,estado,estado_admin").eq("cotizacion_id",cotIdGuardado).range(d,d+999);if(eLee)break;vinc.push(...(data||[]));if(!data||data.length<1000)break;}
+      const idsResinc=vinc.filter(r=>r.cliente_id!==nuevoCliente&&r.estado!=="cancelada"&&!["facturada","cobrada"].includes(r.estado_admin||"")).map(r=>r.id);
+      for(let i=0;i<idsResinc.length;i+=100)await supabase.from("reservas").update({cliente_id:nuevoCliente}).in("id",idsResinc.slice(i,i+100));
+      clientesResinc=idsResinc.length;
+    }
     limpiar();cargar();setGuardando(false);
+    if(clientesResinc>0)alert(`✅ Cliente actualizado en ${clientesResinc} servicio${clientesResinc!==1?"s":""} de Programación vinculado${clientesResinc!==1?"s":""} a esta cotización.`);
     if(reservasParaPropagar.length>0){
       setModalPropagar({cotId:cotIdGuardado!,reservas:reservasParaPropagar,paradasIda:paradasGuardadas,paradasRet:paradasRetornoGuardadas});
     }

@@ -11,6 +11,7 @@ type Vehiculo = {
   color: string | null; capacidad_pasajeros: number | null;
   carga_maxima: string | null; estado: string | null; nro_serie: string | null;
   kilometraje_actual: number | null; proximo_mantenimiento_km: number | null;
+  capacidad_tanque: Record<string, number> | null;
   estado_operativo: string | null; observaciones: string | null;
   equipamiento: string | null;
   foto_externa_url: string | null; foto_interna_url: string | null;
@@ -89,6 +90,29 @@ const FORM_V = {
   km: "", proximo_km: "", observaciones: "",
   tipo_vehiculo_costeo: "",
 };
+
+// Tipos de combustible con su unidad, para editar la capacidad del tanque por vehículo.
+const TIPOS_TANQUE: { tipo: string; label: string; unidad: string }[] = [
+  { tipo: "diesel",   label: "Diésel",   unidad: "gal" },
+  { tipo: "gasolina", label: "Gasolina", unidad: "gal" },
+  { tipo: "glp",      label: "GLP",      unidad: "gal" },
+  { tipo: "gnv",      label: "GNV",      unidad: "m³"  },
+  { tipo: "urea",     label: "Urea",     unidad: "lt"  },
+];
+// {diesel:"100", glp:"25"} → {diesel:100, glp:25}; todo vacío → null.
+function parseCapTanque(cap: Record<string, string>): Record<string, number> | null {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(cap || {})) {
+    const n = Number(v);
+    if (v !== "" && Number.isFinite(n) && n > 0) out[k] = n;
+  }
+  return Object.keys(out).length ? out : null;
+}
+function capTanqueAForm(cap: Record<string, number> | null | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(cap || {})) out[k] = String(v);
+  return out;
+}
 
 const FORM_D = {
   vehiculo_id: "", tipo: "SOAT", numero: "", fecha_emision: "",
@@ -226,6 +250,7 @@ export default function VehiculosPage() {
   const [filtroEst,    setFiltroEst]    = useState("todos");
   const [filtroEquip,  setFiltroEquip]  = useState("todos");
   const [formV,        setFormV]        = useState(FORM_V);
+  const [capTanque,    setCapTanque]    = useState<Record<string, string>>({});
   const [formD,        setFormD]        = useState(FORM_D);
   const [guardando,    setGuardando]    = useState(false);
   const [modoFotoExt,  setModoFotoExt]  = useState<"url"|"upload">("url");
@@ -308,6 +333,7 @@ export default function VehiculosPage() {
   const guardarVehiculo = async () => {
     if (!formV.placa.trim()) { alert("La placa es obligatoria"); return; }
     setGuardando(true);
+    const capT = parseCapTanque(capTanque);
     const payload = {
       placa: formV.placa.trim().toUpperCase(), categoria: formV.categoria,
       marca: formV.marca.trim() || null, modelo: formV.modelo.trim() || null,
@@ -323,12 +349,15 @@ export default function VehiculosPage() {
       proximo_mantenimiento_km: formV.proximo_km ? Number(formV.proximo_km) : null,
       observaciones: formV.observaciones.trim() || null,
       tipo_vehiculo_costeo: formV.tipo_vehiculo_costeo || null,
+      // Solo se incluye si hay algún valor: así, si la migración de capacidad_tanque aún no
+      // corrió, guardar un vehículo SIN capacidad configurada no rompe (no envía la columna nueva).
+      ...(capT ? { capacidad_tanque: capT } : {}),
     };
     const { error } = editandoId
       ? await supabase.from("vehiculos").update(payload).eq("id", editandoId)
       : await supabase.from("vehiculos").insert(payload);
     if (error) { alert(error.message); setGuardando(false); return; }
-    setFormV(FORM_V); setEditandoId(null); setMostrarFormV(false);
+    setFormV(FORM_V); setCapTanque({}); setEditandoId(null); setMostrarFormV(false);
     cargarTodo(); setGuardando(false);
   };
 
@@ -349,6 +378,7 @@ export default function VehiculosPage() {
       observaciones: v.observaciones || "",
       tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "",
     });
+    setCapTanque(capTanqueAForm(v.capacidad_tanque));
     setModoFotoExt("url"); setModoFotoInt("url");
     setEditandoId(v.id); setMostrarFormV(true);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
@@ -435,7 +465,7 @@ export default function VehiculosPage() {
           <p className="text-gray-400 mt-1 text-sm">Vehículos · características · equipamiento · fotos · documentos</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={() => { setFormV(FORM_V); setEditandoId(null); setModoFotoExt("url"); setModoFotoInt("url"); setMostrarFormD(false); setMostrarFormV(v => !v); }}
+          <button onClick={() => { setFormV(FORM_V); setCapTanque({}); setEditandoId(null); setModoFotoExt("url"); setModoFotoInt("url"); setMostrarFormD(false); setMostrarFormV(v => !v); }}
             className="px-4 py-2.5 rounded-xl font-bold text-sm text-white hover:opacity-90"
             style={{ background: mostrarFormV ? "#6b7280" : "#0b315f" }}>
             {mostrarFormV ? "✕ Cancelar" : "+ Vehículo"}
@@ -605,12 +635,27 @@ export default function VehiculosPage() {
             </div>
           </div>
 
+          {/* Capacidad de tanque — editable por tipo de combustible */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Capacidad de tanque</p>
+            <p className="text-xs text-gray-500 mb-3">Capacidad máxima por tipo de combustible. Sirve para detectar cargas que exceden el tanque (Radar IA y registro manual). Déjalo vacío para usar el estimado por categoría. Para GLP a gas, usa la capacidad real del kit (no la del tanque original).</p>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+              {TIPOS_TANQUE.map((t) => (
+                <Campo key={t.tipo} label={`${t.label} (${t.unidad})`}>
+                  <input type="number" min="0" step="0.1" className={inputCls()} placeholder="—"
+                    value={capTanque[t.tipo] ?? ""}
+                    onChange={(e) => setCapTanque((p) => ({ ...p, [t.tipo]: e.target.value }))} />
+                </Campo>
+              ))}
+            </div>
+          </div>
+
           <div className="flex gap-3">
             <button onClick={guardarVehiculo} disabled={guardando}
               className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60" style={{ background: "#0b315f" }}>
               {guardando ? "Guardando..." : editandoId ? "Actualizar" : "Guardar vehículo"}
             </button>
-            <button onClick={() => { setFormV(FORM_V); setEditandoId(null); setMostrarFormV(false); }}
+            <button onClick={() => { setFormV(FORM_V); setCapTanque({}); setEditandoId(null); setMostrarFormV(false); }}
               className="px-6 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">Cancelar</button>
           </div>
         </section>

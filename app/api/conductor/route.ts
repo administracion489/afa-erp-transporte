@@ -166,8 +166,8 @@ export async function POST(req: NextRequest) {
         const condField = tabla === "conductores_tercero" ? "conductor_tercero_id" : "conductor_id";
 
         const [vR, vTR, rR, dR, ckR] = await Promise.all([
-          admin.from("vehiculos").select("id,placa,categoria,marca").order("placa"),
-          admin.from("vehiculos_tercero").select("id,placa,categoria,marca").order("placa"),
+          admin.from("vehiculos").select("id,placa,categoria,marca,kilometraje_actual").order("placa"),
+          admin.from("vehiculos_tercero").select("id,placa,categoria,marca,kilometraje_actual").order("placa"),
           admin.from("reservas")
             .select("id,origen,destino,fecha_servicio,hora_servicio,vehiculo_id,vehiculo_tercero_id,estado")
             .eq("fecha_servicio", hoy).eq(condField, cid).order("hora_servicio"),
@@ -178,12 +178,17 @@ export async function POST(req: NextRequest) {
         const err = vR.error || vTR.error || rR.error || dR.error || ckR.error;
         if (err) return NextResponse.json({ error: err.message }, { status: 500 });
 
+        // ¿Ya hizo el CHECK-OUT de hoy? Query aparte (fuera del err-gate) → si la tabla nueva aún
+        // no existe (pre-migración), devuelve error sin data y checkoutHecho=false, sin romper `inicio`.
+        const coR = await admin.from("checkout_conductor").select("id").eq("conductor_id", cid).eq("fecha", hoy).limit(1);
+
         return NextResponse.json({
           vehiculos:        vR.data  || [],
           vehiculosTercero: vTR.data || [],
           reservas:         rR.data  || [],
           docs:             dR.data  || [],
           checklistHecho:   !!(ckR.data && ckR.data.length > 0),
+          checkoutHecho:    !!(coR.data && coR.data.length > 0),
         });
       }
 
@@ -545,6 +550,48 @@ export async function POST(req: NextRequest) {
           // columnas conductor_tercero_id / vehiculo_tercero_id a checklist_conductor.
           if (error.message.includes("foreign key") || error.message.includes("violates")) {
             console.warn("[checklist] FK tercero — fila no guardada en BD:", error.message);
+            return NextResponse.json({ ok: true });
+          }
+          return NextResponse.json({ error: error.message }, { status: 500 });
+        }
+        return NextResponse.json({ ok: true });
+      }
+
+      // ── Guardar CHECK-OUT de jornada (km final + nivel de combustible + obs) ──
+      // Espejo de "checklist". El km final alimenta el odómetro consolidado (anti-retroceso)
+      // con fuente="servicio"; y se guarda la fila en checkout_conductor (best-effort).
+      case "checkout": {
+        const { checkout } = body;
+        if (!checkout?.conductor_id) return NextResponse.json({ error: "checkout inválido" }, { status: 400 });
+        const esTercero = checkout.es_tercero === true;
+        const checkoutRow = { ...checkout };
+        delete checkoutRow.reserva_id; // solo se usa para la lectura; no es columna de checkout_conductor
+
+        // 1) Odómetro final → consolidado. El km es el dato valioso: se registra con independencia
+        //    de que la fila persista (para terceros la FK puede fallar, igual que en checklist).
+        try {
+          if (checkout.vehiculo_id && checkout.km_fin) {
+            const tablaVeh = esTercero ? "vehiculos_tercero" : "vehiculos";
+            const { data: veh } = await admin.from(tablaVeh).select("id").eq("id", checkout.vehiculo_id).maybeSingle();
+            if (veh) {
+              await registrarLectura(admin, {
+                vehiculo_id: Number(checkout.vehiculo_id),
+                km: Number(checkout.km_fin),
+                fuente: "servicio",
+                fecha: checkout.fecha,
+                foto_url: checkout.foto_url ?? null,
+                ref_origen: "checkout_conductor",
+                flota: esTercero ? "tercero" : "propia",
+              });
+            }
+          }
+        } catch (e) { console.warn("[checkout] lectura odómetro:", e); }
+
+        // 2) Persistir la fila del check-out (best-effort).
+        const { error } = await admin.from("checkout_conductor").insert(checkoutRow);
+        if (error) {
+          if (error.message.includes("foreign key") || error.message.includes("violates")) {
+            console.warn("[checkout] FK tercero — fila no guardada en BD:", error.message);
             return NextResponse.json({ ok: true });
           }
           return NextResponse.json({ error: error.message }, { status: 500 });

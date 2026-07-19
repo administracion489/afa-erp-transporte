@@ -250,10 +250,13 @@ function distanciaMetros(a: GeoPos, b: GeoPos): number {
 function intervaloEnvioMs(kmh: number, cercaParadero: boolean, emergencia: boolean): number {
   if (emergencia)    return 2000;   // SOS: lo más rápido que permita la captura
   if (cercaParadero) return 3000;   // arribo/embarque: precisar la maniobra
-  if (kmh < 3)       return 25000;  // detenido: solo heartbeat (el jitter lo colapsa lib/huella)
-  if (kmh < 20)      return 5000;   // lento / maniobras / tráfico denso → más puntos para la huella
-  if (kmh < 60)      return 4000;   // urbano
-  return 3000;                      // carretera: más seguido para no saltar la huella
+  // Cadencia MÁS DENSA (jul-2026, pedido del usuario: "en tramos lentos solo veo 2 puntos y la huella
+  // falla"). Más fixes en lento/urbano = más fuente para el Map Matching (menos zigzag/estimado). El
+  // salto-gate de >40 m (abajo) además dispara envíos aunque la velocidad se clasifique mal como parada.
+  if (kmh < 3)       return 15000;  // detenido: heartbeat (antes 25 s; baja para el lento-mal-clasificado)
+  if (kmh < 20)      return 3000;   // lento / maniobras / tráfico denso → antes 5 s: la queja del usuario
+  if (kmh < 60)      return 3000;   // urbano (antes 4 s)
+  return 3000;                      // carretera
 }
 
 // true si la posición está a < UMBRAL_PARADERO_M de alguna parada con coordenadas.
@@ -638,6 +641,15 @@ export default function ConductorApp() {
   const [checkObs,     setCheckObs]     = useState("");
   const [checkDone,    setCheckDone]    = useState(false);
   const [checkSaving,  setCheckSaving]  = useState(false);
+  const [ocrLeyendo,   setOcrLeyendo]   = useState(false);
+
+  // ── Check-out de jornada ─────────────────────────────────────────────────────
+  const [checkoutHecho,   setCheckoutHecho]   = useState(false);
+  const [mostrarCheckout, setMostrarCheckout] = useState(false);
+  const [kmFin,           setKmFin]           = useState("");
+  const [nivelComb,       setNivelComb]       = useState("");
+  const [checkoutObs,     setCheckoutObs]     = useState("");
+  const [checkoutSaving,  setCheckoutSaving]  = useState(false);
 
   // ── Docs ───────────────────────────────────────────────────────────────────
   const [docTipo,      setDocTipo]      = useState(TIPOS_DOC[0]);
@@ -782,6 +794,7 @@ export default function ConductorApp() {
       if (unicos.length === 1) setVehiculoId(unicos[0] as number);
       setDocs(d.docs || []);
       if (d.checklistHecho) setCheckDone(true);
+      if (d.checkoutHecho) setCheckoutHecho(true);
       return r;
     };
 
@@ -1013,7 +1026,7 @@ export default function ConductorApp() {
       const dt = ahora - lastSentRef.current;
       const distMov = lastSentPosRef.current ? distanciaMetros(pos, lastSentPosRef.current) : Infinity;
       if (dt < 2500) return;                      // nunca más de ~1 envío cada 2.5 s
-      if (dt < objetivo && distMov < 60) return;  // ni antes del objetivo salvo salto > 60 m
+      if (dt < objetivo && distMov < 40) return;  // ni antes del objetivo salvo salto > 40 m (antes 60 → más puntos en marcha lenta)
     }
     lastSentRef.current = ahora;
     lastSentPosRef.current = pos;
@@ -1405,7 +1418,7 @@ export default function ConductorApp() {
 
   async function iniciarRecorrido(reserva: Reserva, forzar = false) {
     if (reservaActiva) { alert("Hay un servicio en curso. Finalízalo antes de iniciar otro."); return; }
-    if (!checkDone) { alert("Debes completar el pre-viaje antes de iniciar el recorrido"); setTab("checklist"); return; }
+    if (!checkDone) { alert("Debes completar el check-in antes de iniciar el recorrido"); setTab("checklist"); return; }
     if (!vehiculoId) { alert("Selecciona el vehículo primero"); return; }
     // Gate FUERTE-SUAVE de precisión: si el permiso quedó en APROXIMADO, el rastreo saldría a ±150 m
     // TODA la ruta. Usamos el estado `precUbic` (refrescado al montar y en cada visibilitychange),
@@ -1852,6 +1865,51 @@ export default function ConductorApp() {
 
   // ─── Checklist ──────────────────────────────────────────────────────────────
 
+  // File → base64 SIN prefijo (forma que espera lib/vision-ia.ts vía el route de OCR).
+  function fileToAdjunto(file: File): Promise<{ tipo: "image"; media_type: string; data: string }> {
+    return new Promise((resolve, reject) => {
+      if (file.size > 20 * 1024 * 1024) return reject(new Error("La foto supera 20 MB"));
+      const r = new FileReader();
+      r.onload = () => {
+        const res = String(r.result || "");
+        resolve({ tipo: "image", media_type: file.type || "image/jpeg", data: res.includes(",") ? res.split(",")[1] : res });
+      };
+      r.onerror = () => reject(new Error("No se pudo leer el archivo"));
+      r.readAsDataURL(file);
+    });
+  }
+
+  // Lee la foto del odómetro con IA (reúsa /api/mantenimiento/leer-odometro) y PRELLENA el km.
+  // El conductor SIEMPRE confirma/corrige — nunca se auto-guarda. Si la foto está mala, pide otra.
+  // `setKm` se pasa para reusar el mismo flujo en check-in (setKmInicio) y check-out (setKmFin).
+  async function leerFotoOdometro(file: File | undefined, setKm: (v: string) => void) {
+    if (!file) return;
+    try {
+      setOcrLeyendo(true);
+      const adj = await fileToAdjunto(file);
+      const res = await fetch("/api/mantenimiento/leer-odometro", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ adjunto: adj }),
+      });
+      // text()+parse: si Vercel devuelve un 504/timeout sin JSON, no revienta con "Unexpected token".
+      const data = JSON.parse(await res.text());
+      if (!res.ok || !data.ok) throw new Error(data?.error || "No se pudo leer la foto");
+      const km = Number(data.kilometraje ?? data.km ?? 0);
+      if (data.calidad_imagen === "mala" || !km) {
+        alert(`Foto poco legible${data.motivo ? ` (${data.motivo})` : ""}.\nToma otra sin reflejo y con el tablero enfocado, o escribe el km a mano.`);
+        return;
+      }
+      setKm(String(km));
+      if (data.confianza !== "alta") {
+        alert(`Km leído: ${km.toLocaleString("es-PE")}${data.motivo ? ` (${data.motivo})` : ""}.\nRevísalo y corrige si hace falta antes de continuar.`);
+      }
+    } catch (e: any) {
+      alert(`No se pudo leer la foto: ${e?.message || e}.\nEscribe el km a mano.`);
+    } finally {
+      setOcrLeyendo(false);
+    }
+  }
+
   async function guardarChecklist() {
     if (!conductor) return;
     if (!vehiculoId) { alert("Selecciona el vehículo antes de iniciar el viaje"); return; }
@@ -1893,12 +1951,39 @@ export default function ConductorApp() {
     // ni siquiera bloquea a terceros). Ofrecer continuar y dejarlo en cola para sincronizar al
     // volver la conexión — un microcorte de red NO debe impedir arrancar el servicio.
     const proceder = confirm(
-      `No se pudo guardar el pre-viaje por la conexión (${ultimoError?.message || "sin red"}).\n\n` +
+      `No se pudo guardar el check-in por la conexión (${ultimoError?.message || "sin red"}).\n\n` +
       `El checklist está completo. ¿Continuar igual? Se guardará automáticamente cuando vuelva la conexión.`
     );
     if (proceder) {
       try { localStorage.setItem("afa_checklist_pendiente", JSON.stringify(payload)); } catch {}
       setCheckDone(true);
+    }
+  }
+
+  // ─── Check-out de jornada (km final + nivel de combustible + observaciones) ───
+  async function guardarCheckout() {
+    if (!conductor) return;
+    if (!vehiculoId) { alert("Selecciona el vehículo antes de cerrar la jornada"); return; }
+    if (!kmFin) { alert("Ingresa el kilometraje final (puedes leerlo con una foto del tablero)"); return; }
+    const esTercero = conductor._tabla === "conductores_tercero";
+    const payload = { checkout: {
+      conductor_id: conductor.id,
+      vehiculo_id:  vehiculoId,
+      es_tercero:   esTercero,
+      fecha:        getFechaLocal(),
+      km_fin:       Number(kmFin),
+      nivel_combustible: nivelComb || null,
+      observaciones: checkoutObs.trim() || null,
+    } };
+    setCheckoutSaving(true);
+    try {
+      await condApi("checkout", payload);
+      setCheckoutHecho(true);
+      setMostrarCheckout(false);
+    } catch (e: any) {
+      alert(`No se pudo guardar el check-out: ${e?.message || "sin red"}. Reintenta al llegar a cochera.`);
+    } finally {
+      setCheckoutSaving(false);
     }
   }
 
@@ -2186,8 +2271,8 @@ export default function ConductorApp() {
               },
               {
                 icon: <IconShield size={22} color="var(--c-navy)" />,
-                titulo: "Pre-viaje",
-                sub: "Checklist seguro",
+                titulo: "Check-in",
+                sub: "Inspección inicial",
               },
             ].map(b => (
               <div key={b.titulo} style={{
@@ -2235,7 +2320,7 @@ export default function ConductorApp() {
   const TABS: TabItem<Tab>[] = [
     { id: "ruta",       label: "Hoy",       icon: <IconCalendar size={20} /> },
     { id: "paradas",    label: "Ruta",      icon: <IconRoute size={20} />, badge: enRuta && paradaActual ? true : false },
-    { id: "checklist",  label: "Pre-viaje", icon: <IconShield size={20} />, badge: !checkDone },
+    { id: "checklist",  label: "Check-in",  icon: <IconShield size={20} />, badge: !checkDone },
     { id: "documentos", label: "Docs",      icon: <IconReceipt size={20} />, badge: docsBadge > 0 },
     { id: "perfil",     label: "Perfil",    icon: <IconUser size={20} /> },
   ];
@@ -2361,7 +2446,7 @@ export default function ConductorApp() {
                 >
                   <IconShield size={17} color={checkDone ? "var(--c-success)" : "var(--c-warn)"} />
                   <span style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.2, textAlign: "left", color: checkDone ? "var(--c-success)" : "var(--c-warn)" }}>
-                    Pre-viaje<br />{checkDone ? "Listo" : "Pendiente"}
+                    Check-in<br />{checkDone ? "Listo" : "Pendiente"}
                   </span>
                 </button>
               </div>
@@ -2685,7 +2770,7 @@ export default function ConductorApp() {
                     {iniciando
                       ? <>Iniciando…</>
                       : !checkDone
-                        ? <><IconShield size={17} color="var(--c-navy)" /> Iniciar pre-viaje</>
+                        ? <><IconShield size={17} color="var(--c-navy)" /> Iniciar check-in</>
                         : <><IconPlay size={16} color="var(--c-navy)" /> Iniciar recorrido</>}
                   </button>
                 )}
@@ -2829,7 +2914,7 @@ export default function ConductorApp() {
                             disabled={iniciando}
                             icon={!checkDone ? <IconShield size={15} color="#fff" /> : <IconPlay size={15} color="#fff" />}
                           >
-                            {iniciando ? "Iniciando…" : !checkDone ? "Completar pre-viaje primero" : "Iniciar recorrido"}
+                            {iniciando ? "Iniciando…" : !checkDone ? "Completar check-in primero" : "Iniciar recorrido"}
                           </PrimaryBtn>
                         )}
                       </div>
@@ -2860,11 +2945,97 @@ export default function ConductorApp() {
                   </div>
                 ))}
 
-                {/* Todos los servicios del día ya finalizados */}
+                {/* Fin de jornada: todos los servicios finalizados → CHECK-OUT */}
                 {reservasPendientesSection.length === 0 && !esModoOtraFecha && !reservaActiva && reservasFinalizadasSection.length > 0 && (
-                  <p style={{ textAlign: "center", color: "var(--c-mute)", fontSize: 13, margin: "4px 0 0" }}>
-                    Todos los servicios del día finalizados
-                  </p>
+                  checkoutHecho ? (
+                    <div style={{
+                      background: "var(--c-success-tint)", border: "1px solid var(--c-success)",
+                      borderRadius: 16, padding: "14px 16px", display: "flex", alignItems: "center", gap: 10,
+                    }}>
+                      <IconCheck size={20} color="var(--c-success)" sw={2.5} />
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "var(--c-success)" }}>
+                        Jornada cerrada · Check-out completado
+                      </span>
+                    </div>
+                  ) : !mostrarCheckout ? (
+                    <div style={{
+                      background: "var(--c-navy-tint)", border: "1px solid var(--c-navy)",
+                      borderRadius: 16, padding: 16,
+                    }}>
+                      <p style={{ margin: "0 0 4px", fontWeight: 800, fontSize: 15, color: "var(--c-navy)" }}>
+                        Terminaste tu último servicio del día
+                      </p>
+                      <p style={{ margin: "0 0 12px", fontSize: 12.5, color: "var(--c-ink-2)", lineHeight: 1.45 }}>
+                        Al llegar a cochera, cierra la jornada con el <b>Check-out</b> (kilometraje final y nivel de combustible).
+                      </p>
+                      <PrimaryBtn onClick={() => setMostrarCheckout(true)} icon={<IconShield size={16} color="#fff" />} size="lg">
+                        Hacer Check-out
+                      </PrimaryBtn>
+                    </div>
+                  ) : (
+                    <div style={{
+                      background: "var(--c-surface)", border: "1px solid var(--c-line)",
+                      borderRadius: 16, padding: 16,
+                    }}>
+                      <Eyebrow>Check-out · cierre de jornada</Eyebrow>
+                      <h3 style={{ margin: "4px 0 12px", fontSize: 20, fontWeight: 800, letterSpacing: -0.5 }}>Kilometraje final</h3>
+
+                      <input
+                        type="number" placeholder="Km final (ej: 152980)" value={kmFin}
+                        onChange={e => setKmFin(e.target.value)}
+                        style={{
+                          width: "100%", padding: "12px 14px", borderRadius: 12, border: "1.5px solid var(--c-line)",
+                          fontFamily: FONT_MONO, fontSize: 14, fontWeight: 700, letterSpacing: 0.3,
+                          color: "var(--c-ink)", outline: "none", boxSizing: "border-box",
+                        }}
+                      />
+                      <label style={{
+                        display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                        marginTop: 8, padding: "11px 14px", borderRadius: 12,
+                        border: "1.5px dashed var(--c-navy)", cursor: ocrLeyendo ? "default" : "pointer",
+                        background: "var(--c-navy-tint)", color: "var(--c-navy)",
+                        fontFamily: FONT_SANS, fontSize: 13, fontWeight: 700,
+                      }}>
+                        {ocrLeyendo ? "Leyendo la foto…" : "📷 Leer km con foto del tablero"}
+                        <input
+                          type="file" accept="image/*" capture="environment" hidden disabled={ocrLeyendo}
+                          onChange={e => { leerFotoOdometro(e.target.files?.[0], setKmFin); e.currentTarget.value = ""; }}
+                        />
+                      </label>
+
+                      <Eyebrow style={{ marginTop: 14, marginBottom: 8 }}>Nivel de combustible</Eyebrow>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {["Lleno", "3/4", "1/2", "1/4", "Reserva"].map(n => (
+                          <button key={n} onClick={() => setNivelComb(n)}
+                            style={{
+                              flex: "1 0 auto", padding: "9px 10px", borderRadius: 10, cursor: "pointer",
+                              fontFamily: FONT_SANS, fontSize: 12.5, fontWeight: 700,
+                              border: `1.5px solid ${nivelComb === n ? "var(--c-navy)" : "var(--c-line)"}`,
+                              background: nivelComb === n ? "var(--c-navy-tint)" : "var(--c-surface)",
+                              color: nivelComb === n ? "var(--c-navy)" : "var(--c-mute)",
+                            }}>
+                            {n}
+                          </button>
+                        ))}
+                      </div>
+
+                      <textarea rows={2} value={checkoutObs} placeholder="Observaciones (opcional)…"
+                        onChange={e => setCheckoutObs(e.target.value)}
+                        style={{
+                          width: "100%", marginTop: 12, padding: 12, borderRadius: 12, border: "1.5px solid var(--c-line)",
+                          fontFamily: FONT_SANS, fontSize: 13, color: "var(--c-ink)", background: "var(--c-surface)",
+                          resize: "none", outline: "none", boxSizing: "border-box",
+                        }} />
+
+                      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                        <PrimaryBtn onClick={guardarCheckout} disabled={checkoutSaving}
+                          icon={<IconCheck size={16} color="#fff" sw={2.5} />} size="lg">
+                          {checkoutSaving ? "Guardando…" : "Cerrar jornada"}
+                        </PrimaryBtn>
+                        <SecondaryBtn onClick={() => setMostrarCheckout(false)} full={false}>Cancelar</SecondaryBtn>
+                      </div>
+                    </div>
+                  )
                 )}
 
               </div>
@@ -3261,10 +3432,10 @@ export default function ConductorApp() {
               <IconArrowLeft size={14} color="var(--c-mute)" />
               Hoy
             </button>
-            <Eyebrow>Antes de salir</Eyebrow>
+            <Eyebrow>Inspección inicial · inicio de jornada</Eyebrow>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, marginBottom: 16 }}>
               <h2 style={{ margin: 0, fontSize: 28, fontWeight: 800, letterSpacing: -1 }}>
-                Pre-viaje
+                Check-in
               </h2>
               <Chip
                 color={checkPct === 100 ? "var(--c-success)" : "var(--c-navy)"}
@@ -3289,7 +3460,7 @@ export default function ConductorApp() {
                   <IconCheck size={36} color="var(--c-success)" sw={2.5} />
                 </div>
                 <p style={{ margin: 0, fontWeight: 800, fontSize: 18, letterSpacing: -0.4 }}>
-                  Pre-viaje completado
+                  Check-in completado
                 </p>
                 <p style={{ margin: "6px 0 18px", color: "var(--c-mute)", fontSize: 13 }}>
                   La unidad fue inspeccionada y reportada al ERP.
@@ -3333,6 +3504,23 @@ export default function ConductorApp() {
                       color: "var(--c-ink)", outline: "none", boxSizing: "border-box",
                     }}
                   />
+                  {/* Leer el km con una foto del tablero (OCR). Siempre se confirma/corrige. */}
+                  <label style={{
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                    marginTop: 8, padding: "11px 14px", borderRadius: 12,
+                    border: "1.5px dashed var(--c-navy)", cursor: ocrLeyendo ? "default" : "pointer",
+                    background: "var(--c-navy-tint)", color: "var(--c-navy)",
+                    fontFamily: FONT_SANS, fontSize: 13, fontWeight: 700,
+                  }}>
+                    {ocrLeyendo ? "Leyendo la foto…" : "📷 Leer km con foto del tablero"}
+                    <input
+                      type="file" accept="image/*" capture="environment" hidden disabled={ocrLeyendo}
+                      onChange={e => { leerFotoOdometro(e.target.files?.[0], setKmInicio); e.currentTarget.value = ""; }}
+                    />
+                  </label>
+                  <p style={{ margin: "6px 2px 0", fontSize: 11, color: "var(--c-mute)", lineHeight: 1.4 }}>
+                    Toma la foto del tablero y la IA lee el kilometraje. Revísalo siempre antes de continuar.
+                  </p>
                 </div>
 
                 {/* Barra progreso */}

@@ -93,6 +93,30 @@ function getCapacidad(categoria: string | null | undefined, tipo: string): numbe
   return CAPACIDAD_TANQUE.DEFAULT[tipo] || 80;
 }
 
+// Marcas de KIT DE CONVERSIÓN A GLP (se ven en el tablero) — NUNCA son el grifo/estación.
+// Si la IA las devuelve como grifo/proveedor, se descartan (trampa "LANDI RENZO" del caso CWQ-400).
+const MARCAS_KIT_GLP = [
+  "landi renzo", "landirenzo", "brc", "lovato", "tomasetto", "zavoli", "omvl", "ac stag",
+  "stag", "prins", "vialle", "gasitaly", "cavagna", "bigas", "snit", "longas", "elpigaz", "aeb",
+];
+function esMarcaKitGLP(s?: string | null): boolean {
+  const t = norm(String(s ?? ""));
+  if (!t) return false;
+  return MARCAS_KIT_GLP.some((m) => t === m || t.includes(m));
+}
+
+/**
+ * Capacidad del tanque para (vehículo, tipo). Usa la capacidad EDITABLE por vehículo si el
+ * operador la configuró (vehiculos.capacidad_tanque jsonb { diesel, glp, gnv, ... }); si no,
+ * cae a la heurística por categoría. Editable resuelve el caso GLP: un kit convertido tiene
+ * ~20-30 gal, no los 80 que asumía la heurística de un bus.
+ */
+function capacidadTanque(veh: VehiculoMatch | null, tipo: string): number {
+  const editable = veh?.capacidad_tanque?.[tipo];
+  if (editable != null && Number(editable) > 0) return Number(editable);
+  return getCapacidad(veh?.categoria, tipo);
+}
+
 // ── Helpers compartidos contra la BD ─────────────────────────────────────────
 
 /** Inserta una alerta del Radar y devuelve su id. Lanza si el insert falla. */
@@ -128,13 +152,17 @@ export type VehiculoMatch = {
   placa: string;
   categoria: string | null;
   kilometraje_actual: number | null;
+  /** Capacidad de tanque editable por tipo de combustible (jsonb en `vehiculos`). null si no configurada. */
+  capacidad_tanque?: Record<string, number> | null;
 };
 
 /** Empareja una placa (en cualquier formato) contra la flota propia. */
 export async function matchVehiculo(sb: any, placa: string | null | undefined): Promise<VehiculoMatch | null> {
   const objetivo = placaNorm(placa);
   if (!objetivo) return null;
-  const { data } = await sb.from("vehiculos").select("id, placa, categoria, kilometraje_actual");
+  // select("*") en vez de nombrar capacidad_tanque: migration-safe (si el código se despliega
+  // antes de correr la migración, la columna simplemente no viene y capacidad_tanque = null).
+  const { data } = await sb.from("vehiculos").select("*");
   const hit = ((data as any[]) ?? []).find((v) => placaNorm(v.placa) === objetivo);
   if (!hit) return null;
   return {
@@ -142,6 +170,7 @@ export async function matchVehiculo(sb: any, placa: string | null | undefined): 
     placa: hit.placa,
     categoria: hit.categoria ?? null,
     kilometraje_actual: hit.kilometraje_actual != null ? Number(hit.kilometraje_actual) : null,
+    capacidad_tanque: hit.capacidad_tanque ?? null,
   };
 }
 
@@ -454,9 +483,53 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
 
   const anomalias: AnomaliaCombustible[] = [];
 
-  // 1) Cantidad vs capacidad estimada del tanque (misma heurística que /combustible)
+  // ── Campos del camino de VISIÓN multi-foto (opcionales; el de texto no los llena) ──
+  const consumoTasa = numOpc(d.consumo_l_100km);
+  const tripKm = numOpc(d.trip_km);
+  const vioNota = d.vio_nota === true;
+  const vioSurtidor = d.vio_surtidor === true;
+  const discrepancias = Array.isArray(d.discrepancias) ? d.discrepancias.filter(Boolean) : [];
+
+  // Identidad: el grifo/proveedor JAMÁS es una marca de kit GLP del tablero (trampa "LANDI RENZO").
+  let grifo = d.grifo ?? null;
+  let proveedor = d.proveedor ?? null;
+  if (esMarcaKitGLP(grifo) || esMarcaKitGLP(proveedor)) {
+    anomalias.push({
+      codigo: "marca_kit_como_grifo",
+      detalle: `"${grifo ?? proveedor}" es la marca del kit de conversión a GLP del tablero, no un grifo — se ignoró como estación`,
+      bloquea: true,
+    });
+    if (esMarcaKitGLP(grifo)) grifo = null;
+    if (esMarcaKitGLP(proveedor)) proveedor = null;
+  }
+
+  // Guard determinista (no confiar solo en el prompt): "16.3 L/100km" es una TASA de consumo,
+  // no una cantidad cargada. 16.3 es un galonaje plausible → sin este freno pasaría todos los
+  // controles y registraría una carga fantasma.
+  if (cantidad != null && consumoTasa != null && Math.abs(cantidad - consumoTasa) < 0.1) {
+    anomalias.push({
+      codigo: "tasa_como_cantidad",
+      detalle: `La cantidad (${cantidad}) coincide con la tasa de consumo (${consumoTasa} L/100km) — probable confusión: una tasa se registró como galones`,
+      bloquea: true,
+    });
+  }
+  // Guard: el "Trip"/viaje parcial del tablero no es el odómetro total.
+  if (km != null && tripKm != null && km === tripKm) {
+    anomalias.push({
+      codigo: "trip_como_odometro",
+      detalle: `El kilometraje (${km.toLocaleString("es-PE")}) coincide con el "Trip"/viaje parcial — probable confusión con el odómetro total`,
+      bloquea: true,
+    });
+  }
+  // Discrepancias surtidor/display vs nota que reportó la IA: la NOTA manda (decisión del
+  // operador); el valor del surtidor queda solo como alerta informativa (no bloquea).
+  for (const disc of discrepancias) {
+    anomalias.push({ codigo: "discrepancia_maquina_vs_nota", detalle: String(disc).slice(0, 240), bloquea: false });
+  }
+
+  // 1) Cantidad vs capacidad del tanque (editable por vehículo si el operador la configuró)
   if (veh && cantidad != null) {
-    const cap = getCapacidad(veh.categoria, tipoComb);
+    const cap = capacidadTanque(veh, tipoComb);
     if (cantidad > cap * 1.1) {
       anomalias.push({
         codigo: "galones_exceden_tanque",
@@ -591,6 +664,18 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     }
   }
 
+  // ¿"Faltan datos" DE VERDAD o el voucher estaba pero no se leyó? Si vino foto de nota/surtidor
+  // pero no se pudo sacar la cantidad o el importe, es lectura fallida (no dato ausente) → bloquea
+  // el auto-registro y le dice al revisor "revisa la foto del voucher" en vez de "faltan datos".
+  const faltaCantidadOMonto = cantidad == null || (monto == null && precioUnit == null);
+  if (faltaCantidadOMonto && (vioNota || vioSurtidor)) {
+    anomalias.push({
+      codigo: "voucher_no_leido",
+      detalle: "Hay una foto de la nota/surtidor pero no se pudo leer la cantidad o el importe — revisar la foto del voucher",
+      bloquea: true,
+    });
+  }
+
   // Fila base para radar_combustible (se inserta SIEMPRE, con el estado que corresponda)
   const filaRadar: Record<string, unknown> = {
     mensaje_id: mensaje.id,
@@ -598,7 +683,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     vehiculo_id: veh?.id ?? null,
     fecha,
     hora: d.hora ?? null,
-    grifo: d.grifo ?? null,
+    grifo,
     direccion_grifo: d.direccion_grifo ?? null,
     tipo_combustible: d.tipo_combustible ?? null,
     galones: numOpc(d.galones),
@@ -609,18 +694,22 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     comprobante: d.comprobante ?? null,
     kilometraje: km,
     conductor: d.conductor ?? null,
-    proveedor: d.proveedor ?? null,
+    proveedor,
     anomalias,
   };
 
   // ¿Se puede registrar automáticamente en la tabla real `combustible`?
+  // El gate distingue anomalías BLOQUEANTES de observaciones (bloquea:false), así una discrepancia
+  // informativa surtidor↔nota no frena una carga por lo demás correcta. La boleta única y clara
+  // (una sola foto legible, sin observaciones) sigue auto-registrándose como antes.
+  const sinBloqueantes = !anomalias.some((a) => a.bloquea !== false);
   const puedeAuto =
     config.acciones_automaticas?.combustible === true &&
     !!veh &&
     cantidad != null &&
     (monto != null || precioUnit != null) &&
     confianza >= umbral &&
-    anomalias.length === 0;
+    sinBloqueantes;
 
   if (puedeAuto) {
     // Payload espejo del guardado de app/combustible/page.tsx (NUNCA escribir `total`: columna generada)
@@ -639,7 +728,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
         kilometraje: km ?? 0,
         galones: cantidad,
         precio_galon: precioFinal,
-        grifo: d.grifo ?? null,
+        grifo,
         conductor: d.conductor ?? null,
         observaciones,
         tipo_combustible: d.tipo_combustible ?? "diesel",
@@ -650,12 +739,13 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     if (errComb) throw new Error(`combustible: ${errComb.message}`);
     const combustibleId = Number((comb as any)?.id);
 
-    // Alimentar el odómetro consolidado (anti-retroceso) igual que la página
+    // Alimentar el odómetro consolidado (anti-retroceso). fuente="combustible" deja marcado que
+    // esta lectura se tomó EN LA RECARGA (base para el rendimiento km/galón y la auditoría de km).
     if (km != null && km > 0) {
       await registrarLectura(sb, {
         vehiculo_id: veh!.id,
         km,
-        fuente: mensaje.media_url ? "whatsapp_foto" : "whatsapp_manual",
+        fuente: "combustible",
         fecha,
         foto_url: mensaje.media_url ?? null,
         ref_origen: "radar_ia",
@@ -692,15 +782,25 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       motivos.push(placa ? `Placa ${placa} no está registrada en la flota propia ni en tercerizadas` : "Mensaje sin placa identificable");
     }
   }
-  if (cantidad == null) motivos.push("Sin cantidad (galones/litros)");
-  if (monto == null && precioUnit == null) motivos.push("Sin monto total ni precio unitario");
+  if (cantidad == null)
+    motivos.push(vioSurtidor || vioNota
+      ? "No se pudo leer la cantidad de la foto del surtidor/voucher — revisar la foto"
+      : "Sin cantidad (galones/litros): falta la foto del surtidor o del voucher");
+  if (monto == null && precioUnit == null)
+    motivos.push(vioNota
+      ? "No se pudo leer el importe de la nota — revisar la foto"
+      : "Sin monto total ni precio unitario: falta la foto del voucher");
   if (confianza < umbral) motivos.push(`Confianza ${Math.round(confianza * 100)}% por debajo del umbral ${Math.round(umbral * 100)}%`);
 
   const severidad: SeveridadAlerta = anomalias.some(
     (a) =>
       a.codigo === "posible_duplicado" ||
       a.codigo === "galones_exceden_tanque" ||
-      a.codigo === "galones_coinciden_km"
+      a.codigo === "galones_coinciden_km" ||
+      a.codigo === "marca_kit_como_grifo" ||
+      a.codigo === "tasa_como_cantidad" ||
+      a.codigo === "trip_como_odometro" ||
+      a.codigo === "voucher_no_leido"
   )
     ? "critico"
     : "atencion";

@@ -113,12 +113,16 @@ export async function extraerPlanFabricante(adjuntos: Adjunto[]): Promise<any> {
 // ─── ODÓMETRO ─────────────────────────────────────────────────────────────────
 
 const PROMPT_ODO = `Te paso la foto del ODÓMETRO (cuentakilómetros) del tablero de un vehículo.
-Devuelve SOLO un JSON: {"km": number, "confianza": "alta"|"media"|"baja", "texto_leido": string}.
-"km" es el kilometraje TOTAL del vehículo (entero, ignora el cuentakilómetros parcial/trip y los decimales). Si no puedes leerlo con seguridad, devuelve km=0 y confianza="baja". Responde únicamente el JSON.`;
+Devuelve SOLO un JSON:
+{"km": number, "confianza": "alta"|"media"|"baja", "calidad_imagen": "buena"|"regular"|"mala", "motivo": string, "texto_leido": string}.
+"km" es el kilometraje TOTAL del vehículo (entero, ignora el cuentakilómetros parcial/trip y los decimales).
+"calidad_imagen"="mala" si la foto está borrosa, con reflejo/brillo que tape dígitos, muy oscura, o el odómetro no es legible; "regular" si se lee con algo de esfuerzo; "buena" si es nítida.
+"motivo" = por qué esa confianza/calidad, en pocas palabras (ej "lectura nítida", "reflejo sobre el último dígito", "foto borrosa").
+Si no puedes leerlo con seguridad, devuelve km=0 y confianza="baja". Responde únicamente el JSON.`;
 
 export async function extraerOdometro(
   adjunto: Adjunto
-): Promise<{ km: number; confianza: string; texto_leido: string }> {
+): Promise<{ km: number; kilometraje: number; confianza: string; calidad_imagen: string; motivo: string; texto_leido: string }> {
   const reqOdo: any = {
     model: MODELO_VISION,
     max_tokens: 300,
@@ -126,9 +130,13 @@ export async function extraerOdometro(
   };
   const resp: any = await getAnthropic().messages.create(reqOdo);
   const r = extraerJSON(textoDe(resp));
+  const km = Math.round(Number(r.km || 0));
   return {
-    km: Math.round(Number(r.km || 0)),
+    km,                              // alias retrocompatible (OdometroTab lee data.km)
+    kilometraje: km,
     confianza: r.confianza || "baja",
+    calidad_imagen: r.calidad_imagen || "regular",
+    motivo: r.motivo || "",
     texto_leido: r.texto_leido || "",
   };
 }

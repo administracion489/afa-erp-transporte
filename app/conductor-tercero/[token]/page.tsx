@@ -68,9 +68,11 @@ function distanciaMetros(la1: number, ln1: number, la2: number, ln2: number): nu
 const UMBRAL_PARADERO_M = 150;
 function intervaloEnvioMs(kmh: number, cercaParadero: boolean): number {
   if (cercaParadero) return 3000;   // arribo/embarque: precisar la maniobra
-  if (kmh < 3)  return 25000;       // detenido: solo heartbeat (el jitter lo colapsa lib/huella)
-  if (kmh < 20) return 5000;        // lento / maniobras / tráfico denso
-  if (kmh < 60) return 4000;        // urbano
+  // Cadencia MÁS DENSA (jul-2026, pedido del usuario): más fixes en lento/urbano = más fuente para el
+  // Map Matching (menos zigzag/estimado en la huella). El salto-gate de >40 m (abajo) también dispara.
+  if (kmh < 3)  return 15000;       // detenido: heartbeat (antes 25 s)
+  if (kmh < 20) return 3000;        // lento / tráfico denso (antes 5 s): "en lento solo veo 2 puntos"
+  if (kmh < 60) return 3000;        // urbano (antes 4 s)
   return 3000;                      // carretera: más seguido para no saltar la huella
 }
 function cercaDeParadero(lat: number, lng: number, lista: Parada[]): boolean {
@@ -245,7 +247,7 @@ export default function ConductorTerceroPage() {
       ? distanciaMetros(pos.lat, pos.lng, lastSentPosRef.current.lat, lastSentPosRef.current.lng)
       : Infinity;
     if (dt < 2500) return;
-    if (dt < objetivo && distMov < 60) return;
+    if (dt < objetivo && distMov < 40) return;   // antes 60 m → más puntos en marcha lenta
     lastSentRef.current = ahora;
     lastSentPosRef.current = { lat: pos.lat, lng: pos.lng };
     try {

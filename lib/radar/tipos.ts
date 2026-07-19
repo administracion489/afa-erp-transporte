@@ -174,8 +174,17 @@ export type AnomaliaCombustible = {
     | "consumo_excesivo"
     | "recarga_madrugada"
     | "monto_inconsistente"
-    | "galones_coinciden_km";
+    | "galones_coinciden_km"
+    // Multi-foto / reconciliación (camino de visión):
+    | "marca_kit_como_grifo"          // grifo/proveedor era una marca de kit GLP del tablero (LANDI RENZO…)
+    | "tasa_como_cantidad"            // "16.3 L/100km" (tasa) registrado como galones
+    | "trip_como_odometro"           // el "Trip"/viaje parcial registrado como odómetro total
+    | "discrepancia_maquina_vs_nota" // surtidor/display difiere de la nota (informativo: manda la nota)
+    | "voucher_no_leido"             // había foto de nota/surtidor pero no se pudo leer la cantidad/importe
+    | "multiples_recargas_en_cluster"; // la ráfaga trae 2 recargas/comprobantes distintos
   detalle: string;
+  /** false = observación informativa (NO bloquea el auto-registro). Ausente o true = bloqueante. */
+  bloquea?: boolean;
 };
 
 export type SeveridadAlerta = "critico" | "atencion" | "info";
@@ -255,6 +264,17 @@ export type ExtraccionCombustible = {
   kilometraje: number | null;
   conductor: string | null;
   proveedor: string | null;
+  // ── Campos adicionales del camino de VISIÓN multi-foto (opcionales; el camino de texto no los llena) ──
+  ruc?: string | null;                 // RUC impreso en la nota de despacho
+  consumo_l_100km?: number | null;     // TASA de consumo del viaje (p.ej. 16.3) — informativo, NUNCA cantidad cargada
+  trip_km?: number | null;             // cuentakm PARCIAL del tablero — informativo, NO es el odómetro total
+  vio_nota?: boolean | null;           // se vio una foto de nota/comprobante de grifo
+  vio_surtidor?: boolean | null;       // se vio una foto del surtidor
+  vio_tablero?: boolean | null;        // se vio una foto del tablero/odómetro
+  fuentes?: Record<string, string | null> | null;          // de qué foto salió cada campo clave (galones→surtidor, etc.)
+  confianza_campos?: Record<string, number | null> | null; // 0..1 por campo clave
+  discrepancias?: string[] | null;     // p.ej. "surtidor 8.548 gal vs nota 8.55 gal"
+  notas_extraccion?: string | null;    // dudas de 7 segmentos, fotos ilegibles, etc.
 };
 
 /**

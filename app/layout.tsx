@@ -328,6 +328,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       { href: "/mantenimiento/planes",   label: "Planes Fabricante",  sub: "Plan IA por modelo",       icon: Ic.FileText,  modulo: "mantenimiento"},
       { href: "/neumaticos",             label: "Neumáticos",         sub: "Vida útil",           icon: Ic.Circle,    modulo: "neumaticos"   },
       { href: "/combustible",            label: "Combustible",        sub: "Consumo",             icon: Ic.Fuel,      modulo: "combustible"  },
+      { href: "/auditoria-jornada",      label: "Auditoría km",       sub: "Jornada vs servicio", icon: Ic.Scale,     modulo: "combustible"  },
       { href: "/seguros",                label: "Seguros",            sub: "Pólizas",             icon: Ic.Shield,    modulo: "seguros"      },
     ],
   },

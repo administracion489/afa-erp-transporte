@@ -302,6 +302,32 @@ async function resolverCluster(sb: any, mensaje: any): Promise<ResolucionCluster
 }
 
 /**
+ * Elige hasta `cap` archivos del cluster para la ÚNICA llamada de visión, SIN sesgar contra
+ * los que llegan al final del álbum. La NOTA DE DESPACHO (la foto con galones/precio/total y
+ * la identidad del grifo) suele enviarse al final; el viejo `.slice(0, 4)` la recortaba justo
+ * a ella. Aquí se prioriza: (1) los documentos/PDF (nota cuando llega como PDF) y (2) un abanico
+ * de imágenes que EMPIEZA por las más recientes (donde suele estar la nota-foto) y va llenando
+ * hacia atrás. Al final se reordenan por hora de envío para que el modelo las vea en secuencia.
+ */
+function seleccionarMediaCluster(candidatos: any[], cap: number): any[] {
+  if (candidatos.length <= cap) return candidatos;
+  const ts = (m: any) => new Date(m.recibido_en).getTime();
+  const docs = candidatos.filter((m) => m.tipo === "documento");
+  const imgs = candidatos.filter((m) => m.tipo !== "documento").sort((a, b) => ts(a) - ts(b));
+  const elegidos: any[] = [];
+  const push = (m: any) => { if (m && elegidos.length < cap && !elegidos.includes(m)) elegidos.push(m); };
+  docs.forEach(push); // 1) la nota, cuando es PDF
+  // 2) abanico de imágenes: primero la más reciente (nota-foto suele ir al final), luego la más
+  //    antigua (el tablero/caption suele ir al inicio), alternando hacia el centro.
+  let i = 0, j = imgs.length - 1;
+  while (elegidos.length < cap && i <= j) {
+    push(imgs[j--]);
+    if (elegidos.length < cap && i <= j) push(imgs[i++]);
+  }
+  return elegidos.sort((a, b) => ts(a) - ts(b));
+}
+
+/**
  * Guías de lectura del odómetro por vehículo (propio + tercerizado, vehiculos.guia_odometro /
  * vehiculos_tercero.guia_odometro). Se cargan una sola vez por lote, solo si hay algún
  * candidato con pinta de combustible (para no gastar la consulta en lotes sin eso).
@@ -452,14 +478,13 @@ async function procesarMensaje(
     .map((m) => (m.id === mensaje.id ? texto : String(m.texto ?? m.transcripcion ?? "").trim()))
     .filter(Boolean)
     .join("\n");
-  const MAX_MEDIA_CLUSTER = 4;
-  const miembrosConMedia = clusterMiembros
-    .filter(
-      (m) =>
-        !!m.media_url &&
-        (m.tipo === "imagen" || (m.tipo === "documento" && (m.media_mime ?? "").toLowerCase().includes("pdf")))
-    )
-    .slice(0, MAX_MEDIA_CLUSTER);
+  const MAX_MEDIA_CLUSTER = 8;
+  const mediaCandidatos = clusterMiembros.filter(
+    (m) =>
+      !!m.media_url &&
+      (m.tipo === "imagen" || (m.tipo === "documento" && (m.media_mime ?? "").toLowerCase().includes("pdf")))
+  );
+  const miembrosConMedia = seleccionarMediaCluster(mediaCandidatos, MAX_MEDIA_CLUSTER);
   const conVisionCluster = miembrosConMedia.length > 0;
 
   // Documento no-PDF sin caption y sin nada más útil en el cluster: nada que analizar
@@ -498,13 +523,56 @@ async function procesarMensaje(
     );
     const notaMultiple =
       bloquesMedia.length > 1
-        ? `\n\nSe adjuntan ${bloquesMedia.length} archivos que el remitente envió juntos como parte del MISMO reporte (p.ej. foto del voucher + foto del odómetro) — combínalos en una sola extracción, no los trates por separado.`
+        ? `\n\nSe adjuntan ${bloquesMedia.length} archivos que el remitente envió JUNTOS como parte del MISMO reporte. Si es una recarga de combustible suelen tener ROLES distintos (foto del tablero/odómetro, del nivel de combustible, del surtidor del grifo y de la NOTA DE DESPACHO): combínalos en UNA sola extracción cruzando sus datos — no los trates por separado, y no ignores ninguno (la nota con los importes suele ir al final del álbum).`
         : "";
     const prompt =
       promptExtraccionMedia(ctx) +
       (textoClusterCombinado ? `\n\nTexto/caption que acompaña al/los archivo(s):\n"""${textoClusterCombinado}"""` : "") +
       notaMultiple;
-    const r = await llamarIA(modeloExtraccion, [...bloquesMedia, { type: "text", text: prompt }]);
+    // Robustez: si una URL de media venció o falló su descarga, la llamada ENTERA revienta y el
+    // reporte se perdería (estado 'error'). Se reintenta una vez y, si sigue fallando, se degrada
+    // (clasificar por el texto si lo hay, o dejar alerta de revisión) en vez de tumbar el reporte.
+    let r: RespuestaIA;
+    try {
+      r = await llamarIA(modeloExtraccion, [...bloquesMedia, { type: "text", text: prompt }]);
+    } catch (e1) {
+      try {
+        r = await llamarIA(modeloExtraccion, [...bloquesMedia, { type: "text", text: prompt }]);
+      } catch (e2: any) {
+        const detalle = String(e2?.message ?? e2).slice(0, 200);
+        console.warn("[radar/motor] visión con media falló tras reintento:", detalle);
+        if (textoClusterCombinado) {
+          const t = await llamarIA(modeloTriage, [
+            { type: "text", text: `${promptTriage(ctx)}\n\n(No se pudieron leer las fotos adjuntas; clasifica solo por el texto)\nMensaje:\n"""${textoClusterCombinado}"""` },
+          ]);
+          sumar(modeloTriage, t);
+          const tj = extraerJSON(t.texto);
+          await crearAlerta(sb, {
+            mensaje_id: mensaje.id, tipo: "sistema", severidad: "atencion",
+            titulo: "🛰️ Radar IA: no se pudieron leer las fotos de un reporte",
+            detalle: "Las imágenes adjuntas no se pudieron descargar/analizar; se clasificó solo por el texto. Revisar el mensaje en WhatsApp.",
+            href: "/radar-ia",
+          }).catch(() => {});
+          return finalizar("procesado", {
+            categoria: normalizarCategoria(tj?.categoria),
+            confianza: normalizarConfianza(tj?.confianza),
+            resumen_ia: String(tj?.resumen ?? "Fotos no legibles").slice(0, 300),
+            accion: "media_no_disponible",
+            resultado: { nota: "Fotos no descargables; clasificado por texto.", error_media: detalle },
+          });
+        }
+        await crearAlerta(sb, {
+          mensaje_id: mensaje.id, tipo: "sistema", severidad: "atencion",
+          titulo: "🛰️ Radar IA: fotos de un reporte no se pudieron leer",
+          detalle: "Un mensaje con fotos (posible recarga de combustible) no se pudo analizar porque las imágenes no se descargaron. Revisar el mensaje en WhatsApp.",
+          href: "/radar-ia",
+        }).catch(() => {});
+        return finalizar("descartado", {
+          categoria: "otros", accion: "media_no_disponible",
+          resumen_ia: "Fotos no disponibles/no legibles — se dejó alerta para revisión manual",
+        });
+      }
+    }
     sumar(modeloExtraccion, r);
     const json = extraerJSON(r.texto);
     categoria = normalizarCategoria(json?.categoria);

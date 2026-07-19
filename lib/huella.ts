@@ -580,7 +580,7 @@ export function calcularPuentes(limpia: HuellaPt[]): PuenteHueco[] {
 // RELLENARSE con la ruta (planificada→Google), igual que los huecos de señal. Cada rango [s,e] viene
 // del ajustador en el espacio de las coords devueltas y EXCLUYE la cola viva → el tramo estimado nunca
 // parpadea en la punta. Ancla A = último vértice PEGADO antes del crudo, B = primer pegado después; el
-// consumidor los pasa a puentePorRuta (candado de desvío 200 m + rodeo>8× vía decidirPuente). Se rutea
+// consumidor los pasa a puentePorRuta (candado de desvío 70 m + rodeo>8× vía decidirPuente). Se rutea
 // solo si la recta A→B ≥ minRectaM (una corrida corta ya hugea la pista → no vale la pena, evita confeti).
 export function puentesCrudos(
   coords: [number, number][],
@@ -615,42 +615,66 @@ export function decidirPuente(roadM: number, dRecta: number): NivelPuente {
   return "puente";
 }
 
-// Rellena un hueco (A→B) SIGUIENDO LA RUTA PLANIFICADA (la línea discontinua azul) en vez de una ruta
-// fresca de Google (decisión del usuario, jul-2026): el tramo estimado queda EXACTAMENTE sobre la vía
-// prevista (misma pista, nunca cruza el río, sin rodeos raros), reutilizando la ruta que ya tenemos.
-// Proyecta A y B al vértice más cercano de la polilínea de la ruta y devuelve el sub-tramo entre ambas
-// proyecciones, con A y B como extremos (para cerrar la unión con la huella medida). Devuelve null si
-// no hay ruta o si A/B caen demasiado lejos de ella (el bus se DESVIÓ de lo planificado → el consumidor
-// cae al puente por Google). `ruta` viene en [lng, lat] (convención Mapbox).
+// Conector recto máximo que se permite dibujar entre un fix crudo (A/B) y la geometría de VÍA del
+// tramo estimado. Un fix impreciso de red puede caer a 50-190 m de la vía; unirlo con una recta a la
+// calzada era EXACTAMENTE lo que hacía que el verde petróleo "cruzara casas/ríos" (reclamo del usuario,
+// jul-2026: la huella estimada saltaba por techos). Regla: el tramo estimado va SIEMPRE por la vía; el
+// único trazo recto tolerado es un empalme ≤ este valor (≈ ancho de calle) para cerrar la costura sin
+// hueco visible. Si el fix está más lejos, NO se dibuja recta — el estimado arranca sobre la vía y la
+// unión con lo medido queda con un micro-hueco honesto (preferible a una recta sobre manzanas).
+const CONECTOR_MAX_M = 25;
+
+// Rellena un hueco (A→B) SIGUIENDO LA RUTA PLANIFICADA en vez de una ruta fresca de Google (decisión del
+// usuario, jul-2026): el tramo estimado queda EXACTAMENTE sobre la vía prevista (misma pista, nunca cruza
+// el río, sin rodeos raros), reutilizando la ruta que ya tenemos. Devuelve geometría 100% DE VÍA:
+//   • Proyecta A y B PERPENDICULARMENTE sobre los segmentos de la ruta (no al vértice más cercano) → el
+//     "pie" cae SOBRE la calzada, no en el vértice más próximo que puede quedar cruzando en diagonal.
+//   • El tramo devuelto va del pie de A al pie de B por la ruta: pieA → vértices intermedios → pieB.
+//   • Los extremos crudos A/B se PREPENDEN/APPENDEN solo si su desvío perpendicular es ≤ CONECTOR_MAX_M
+//     (empalme corto para la costura). Si A/B están más lejos, NO se añade la recta cruda → el estimado
+//     arranca sobre la vía (la recta A→vía de hasta 190 m que cruzaba casas YA NO se dibuja).
+// Devuelve null si no hay ruta o si A/B caen a más de maxDesvioM de ella (el bus se DESVIÓ de lo
+// planificado → el consumidor cae al puente por Google, que rutea el A→B REAL). `ruta` en [lng, lat].
 export function puentePorRuta(
   A: { lat: number; lng: number }, B: { lat: number; lng: number },
-  ruta: [number, number][], maxDesvioM = 200,   // 200 m: los conectores rectos A→ruta y ruta→B quedan cortos (el resto cae a Google)
+  ruta: [number, number][], maxDesvioM = 70,   // 70 m: bus dentro de ~2·error-GPS de la ruta = va por ella; más lejos → Google
 ): [number, number][] | null {
   if (!ruta || ruta.length < 2) return null;
-  // Distancia acumulada a lo largo de la ruta (para medir "hacia adelante" y longitud del tramo).
+  // Distancia acumulada a lo largo de la ruta (para medir "hacia adelante" y acotar el tramo).
   const cum = [0];
   for (let i = 1; i < ruta.length; i++) cum[i] = cum[i - 1] + distM(ruta[i - 1][1], ruta[i - 1][0], ruta[i][1], ruta[i][0]);
-  // A: vértice más cercano en TODA la ruta.
-  let ia = -1, da = Infinity;
-  for (let i = 0; i < ruta.length; i++) { const d = distM(A.lat, A.lng, ruta[i][1], ruta[i][0]); if (d < da) { da = d; ia = i; } }
-  if (ia < 0 || da > maxDesvioM) return null;
-  // B: vértice más cercano pero SOLO hacia ADELANTE de A y dentro de una longitud PLAUSIBLE del tramo.
-  // Esto evita el pase equivocado cuando la ruta se cruza consigo misma (que tomaría un lazo gigante).
-  // El tramo de ruta entre A y B no debe exceder ~3× la recta del hueco (+1 km de holgura para huecos
-  // cortos): la ruta planificada entre dos puntos consecutivos del bus nunca da una vuelta enorme.
+  // Proyecta un punto sobre TODOS los segmentos de la ruta (desde `desde`, sin pasar `maxAlong`):
+  // devuelve el pie SOBRE la calzada, el índice de segmento, el avance acumulado y el desvío perpendicular.
+  const proyectar = (p: { lat: number; lng: number }, desde = 0, maxAlong = Infinity) => {
+    let best: { foot: { lat: number; lng: number }; seg: number; along: number; perp: number } | null = null;
+    for (let i = desde; i < ruta.length - 1; i++) {
+      const Aa = { lat: ruta[i][1], lng: ruta[i][0] }, Bb = { lat: ruta[i + 1][1], lng: ruta[i + 1][0] };
+      const q = proyectarEnSegmento(p.lat, p.lng, Aa, Bb);
+      const along = cum[i] + distM(Aa.lat, Aa.lng, q.lat, q.lng);
+      if (along > maxAlong) break;
+      if (!best || q.dist < best.perp) best = { foot: { lat: q.lat, lng: q.lng }, seg: i, along, perp: q.dist };
+    }
+    return best;
+  };
+  const pa = proyectar(A);
+  if (!pa || pa.perp > maxDesvioM) return null;
+  // B: proyectar SOLO hacia ADELANTE del pie de A (evita el pase de VUELTA en rutas ida-y-vuelta que
+  // tomaría un lazo gigante) y dentro de una longitud PLAUSIBLE (~3× la recta del hueco + 1 km).
   const dRecta = distM(A.lat, A.lng, B.lat, B.lng);
-  const maxSegM = Math.max(dRecta * 3, dRecta + 1000);
-  let ib = -1, db = Infinity;
-  for (let i = ia; i < ruta.length; i++) {
-    const along = cum[i] - cum[ia];
-    if (along > maxSegM) break;                                   // pasado el rango plausible → parar
-    const d = distM(B.lat, B.lng, ruta[i][1], ruta[i][0]);
-    if (d < db) { db = d; ib = i; }
-  }
-  if (ib < 0 || db > maxDesvioM) return null;                     // B no cae cerca hacia adelante → fallback a Google
-  const seg = ruta.slice(ia, ib + 1);
-  if (seg.length < 2) return null;
-  return [[A.lng, A.lat], ...seg, [B.lng, B.lat]];
+  const pb = proyectar(B, pa.seg, pa.along + Math.max(dRecta * 3, dRecta + 1000));
+  if (!pb || pb.perp > maxDesvioM || pb.along < pa.along) return null;   // B no cae adelante/cerca → Google
+  // Sub-tramo de VÍA: pie de A → vértices intermedios de la ruta → pie de B (todo sobre la calzada).
+  const mid = ruta.slice(pa.seg + 1, pb.seg + 1);
+  const via: [number, number][] = [[pa.foot.lng, pa.foot.lat], ...mid, [pb.foot.lng, pb.foot.lat]];
+  // Empalme corto a los extremos crudos SOLO si están pegados a la vía (≤ CONECTOR_MAX_M); si no, se omite
+  // la recta (el estimado arranca/termina sobre la vía). Este es el candado del "nunca cruzar casas".
+  const conA = pa.perp <= CONECTOR_MAX_M ? [[A.lng, A.lat] as [number, number]] : [];
+  const conB = pb.perp <= CONECTOR_MAX_M ? [[B.lng, B.lat] as [number, number]] : [];
+  const seg = [...conA, ...via, ...conB];
+  // Dedup de vértices consecutivos idénticos (pie que coincide con un vértice / empalme nulo).
+  const out: [number, number][] = [];
+  for (const c of seg) { const l = out[out.length - 1]; if (!l || l[0] !== c[0] || l[1] !== c[1]) out.push(c); }
+  return out.length >= 2 ? out : null;
 }
 
 // ── ÍCONO DEL BUS PEGADO A LA VÍA ────────────────────────────────────────────
@@ -917,13 +941,12 @@ export async function matchVentana(ventana: MatchPt[], token: string): Promise<{
 // (#1138, chip GPS a 4 s: máx ~138 m), solo lo superan los saltos imposibles del GPS pobre.
 export const MAX_SEG_M = 300;
 
-// Cuerda máxima que se dibuja SÓLIDA ("medido") cuando alguno de sus extremos es CRUDO de red
-// (acc > ACC_CONFIABLE_M, o vértice esCrudo del matching). 60 m ≈ media cuadra limeña: por debajo
-// la cuerda sigue la calle; por encima cruza techos/manzanas en diagonal — los segmentos imposibles
-// medidos en la #962 iban de 61 a 165 m y TODOS pasaban el corte de 300. Entre 60 y MAX_SEG_M la
-// cuerda cruda se emite con `aprox: 1` (el consumidor la pinta gris punteada: señal imprecisa, no
-// recorrido medido) para no dejar sin estela a los equipos legítimamente degradados; > MAX_SEG_M se
-// corta como siempre. Con chip (acc ≤ 20 / esCrudo=false) NO aplica → flota propia idéntica.
+// Cuerda máxima que se dibuja como VELOCIDAD ("medido") cuando alguno de sus extremos es CRUDO de red
+// (acc > ACC_CONFIABLE_M, o vértice esCrudo del matching). 60 m ≈ media cuadra limeña: por debajo la
+// cuerda sigue la calle; por encima cruza techos/manzanas en diagonal. Antes esas cuerdas >60 m con
+// extremo crudo salían GRIS PUNTEADAS ("aprox"); el usuario pidió eliminar ese gris (jul-2026) — ahora
+// se OMITEN del trazo medido (no se dibujan) y la vía de ese tramo la cubre el estimado por ruta (verde
+// petróleo) donde se pudo rutear. Con chip (acc ≤ 20 / esCrudo=false) NO aplica → flota propia idéntica.
 export const MAX_SEG_CRUDO_M = 60;
 // ¿Este `acc` marca el punto como crudo de red para el DIBUJO? Tres casos deliberados:
 //  • acc == null (llamador legacy sin acc) → NO crudo: comportamiento idéntico al anterior, y en
@@ -936,13 +959,10 @@ export const MAX_SEG_CRUDO_M = 60;
 // Tilequery (solo con fix crudo — un chip preciso ya está sobre la pista).
 export const esAccCruda = (acc: number | undefined) => acc != null && (acc <= 0 || acc > ACC_CONFIABLE_M);
 
-// Filtros/pintura COMPARTIDOS de la capa "aprox" (señal imprecisa, gris punteada). Viven aquí —la
-// fuente única del contrato aprox— para que el modal del ERP y el portal cliente no diverjan: un
-// consumidor que use colorearMatched/huellaCrudaFeatures DEBE separar sus features en dos capas
-// con estos filtros (una sola capa sin filtro volvería a pintar el crudo largo como sólido).
-export const FILTRO_APROX: any = ["==", ["get", "aprox"], 1];
-export const FILTRO_NO_APROX: any = ["!=", ["get", "aprox"], 1];
-export const PINTURA_APROX: any = { "line-width": 3, "line-opacity": 0.55, "line-color": "#64748b", "line-dasharray": [1.2, 1.6] };
+// (La capa gris punteada "aprox" fue ELIMINADA jul-2026 a pedido del usuario: la cuerda cruda larga
+// ya no se pinta gris, se omite del medido y la cubre el estimado por ruta —verde petróleo—, que
+// SIEMPRE va sobre la vía. colorearMatched/huellaCrudaFeatures ya no emiten `aprox:1`, así que los
+// consumidores dibujan una sola capa de velocidad sin filtro.)
 
 // ⚠️ SIN USO (revertido): el puente con línea recta INVENTABA recorridos por donde el bus no fue
 // (GPS pobre de terceros — la recta cruzaba calles que la unidad no tomó). El "se corta" honesto
@@ -1009,11 +1029,14 @@ export function colorearMatched(
     const [aLng, aLat] = coords[i], [bLng, bLat] = coords[i + 1];
     const d = distM(aLat, aLng, bLat, bLng);
     if (d > MAX_SEG_M) continue;   // hueco, no recta cruzando el mapa
-    const aprox = !!esCrudo && (esCrudo[i] || esCrudo[i + 1]) && d > MAX_SEG_CRUDO_M;
+    // Cuerda con extremo CRUDO de red que cruza más de MAX_SEG_CRUDO_M: NO se dibuja como velocidad
+    // (cruzaría casas) ni gris punteada — se OMITE. La vía de ese tramo la cubre el estimado por ruta
+    // (verde petróleo). El usuario pidió eliminar el gris "aprox" (jul-2026); en régimen las corridas
+    // crudas ya se rutean y esto es la red de seguridad (corrida sin rutear / tope de puentes / 1er render).
+    if (!!esCrudo && (esCrudo[i] || esCrudo[i + 1]) && d > MAX_SEG_CRUDO_M) continue;
     feats.push({
       type: "Feature",
-      // La capa aprox no usa velocidad (gris fijo) → se ahorra el barrido O(n) de velCercana.
-      properties: aprox ? { velocidad: 0, aprox: 1 } : { velocidad: velCercana(aLng, aLat) },
+      properties: { velocidad: velCercana(aLng, aLat) },
       geometry: { type: "LineString", coordinates: [coords[i], coords[i + 1]] },
     });
   }
@@ -1026,10 +1049,11 @@ export function colorearMatched(
 // suaviza cada tramo por DISTANCIA (aplana el zigzag lento, conserva curvas rápidas) y emite un
 // segmento por par, coloreado por velocidad. Fuente ÚNICA del fallback crudo del modal/cliente/cola.
 // Si los puntos traen `acc`, una cuerda con extremo crudo de red (acc > 20) que supere
-// MAX_SEG_CRUDO_M sale con `aprox: 1` (gris punteada, no "medido"): es el PRIMER RENDER del modal
-// (mientras el ajustador hace sus llamadas a Mapbox) el que antes pintaba el zigzag de red entero
-// —192 cuerdas >60 m en la #962— como recorrido sólido cruzando manzanas. Sin `acc` (llamadores
-// legacy) el comportamiento es idéntico al anterior.
+// MAX_SEG_CRUDO_M se OMITE (antes salía gris punteada "aprox"; el usuario pidió eliminar ese gris,
+// jul-2026): es el PRIMER RENDER del modal (mientras el ajustador hace sus llamadas a Mapbox) el que
+// pintaba el zigzag de red entero —192 cuerdas >60 m en la #962— cruzando manzanas. Ahora esa cuerda
+// no se dibuja; el estimado por ruta (verde petróleo) la cubre al terminar el Map Matching. Sin `acc`
+// (llamadores legacy) se conserva TODO (comportamiento idéntico al anterior).
 export function huellaCrudaFeatures(
   huellaPts: { lat: number; lng: number; velocidad: number; acc?: number }[],
   maxSegM = MAX_SEG_M
@@ -1051,10 +1075,12 @@ export function huellaCrudaFeatures(
     for (let i = 0; i < pts.length - 1; i++) {
       const a = pts[i], b = pts[i + 1];
       const d = distM(a.lat, a.lng, b.lat, b.lng);
-      const cruda = esAccCruda(a.acc) || esAccCruda(b.acc);   // extremo sin acc NO fuerza aprox (legacy idéntico)
+      // Cuerda cruda larga (extremo de red, cruza casas): se OMITE (antes gris "aprox"). Extremo sin
+      // acc (legacy) NO se omite → idéntico al comportamiento previo. La cubre el estimado por ruta.
+      if ((esAccCruda(a.acc) || esAccCruda(b.acc)) && d > MAX_SEG_CRUDO_M) continue;
       feats.push({
         type: "Feature",
-        properties: { velocidad: ((a.velocidad ?? 0) + (b.velocidad ?? 0)) / 2, ...(cruda && d > MAX_SEG_CRUDO_M ? { aprox: 1 } : {}) },
+        properties: { velocidad: ((a.velocidad ?? 0) + (b.velocidad ?? 0)) / 2 },
         geometry: { type: "LineString", coordinates: [[a.lng, a.lat], [b.lng, b.lat]] },
       });
     }
@@ -1100,7 +1126,7 @@ export function colaViva(
   // dibujar el zigzag crudo hasta el bus se SIGUE LA RUTA PREVISTA desde la frontera del trazo hasta la
   // posición en vivo (verde petróleo, `estimado:1`). Es determinista → sin parpadeo, y así la huella no
   // se rompe ni se corta. Si el bus se desvió de la ruta (o no hay ruta), cae al crudo → nunca inventa
-  // camino fuera de la vía (puentePorRuta devuelve null con desvío >200 m).
+  // camino fuera de la vía (puentePorRuta devuelve null con desvío >70 m).
   if (degradado && ruta && ruta.length >= 2 && live && Number.isFinite(live.lat) && Number.isFinite(live.lng)) {
     const bridge = puentePorRuta({ lat: endLat, lng: endLng }, { lat: live.lat, lng: live.lng }, ruta);
     if (bridge && bridge.length >= 2) {

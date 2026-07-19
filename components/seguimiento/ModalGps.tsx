@@ -10,7 +10,6 @@ import {
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, anclarImprecisos, puentePorRuta, puentesCrudos,
-  FILTRO_APROX, FILTRO_NO_APROX, PINTURA_APROX,
   pegarIconoAVia, viasCercanasTilequery, esAccCruda,
 } from "@/lib/huella";
 import { animarMarcador } from "@/lib/anim-marker";
@@ -532,8 +531,16 @@ export default function ModalGps({
                 if (!["ZERO_RESULTS", "NOT_FOUND", "SIN_GEOMETRIA"].includes(j?.status)) r.expira = Date.now() + 60000;
               } else {
                 const nivel = decidirPuente(j.roadM, c.dRecta);   // unir todo por carretera (corte solo si sin ruta o rodeo absurdo >8×)
-                // Envolver con A/B → el tramo estimado comparte extremos EXACTOS con lo medido (costura sin corte).
-                const coords = nivel === "puente" ? [[c.aLng, c.aLat], ...(j.coords || []), [c.bLng, c.bLat]] : [];
+                // El estimado usa la geometría de VÍA de Google TAL CUAL (nunca cruza casas). Los extremos
+                // crudos A/B se añaden solo si están pegados a la vía (≤25 m) para cerrar la costura; si el
+                // fix está más lejos, se OMITE la recta (antes esa recta A→vía de hasta 190 m cruzaba
+                // manzanas/ríos = el reclamo del usuario, jul-2026). El estimado arranca sobre la calzada.
+                const gc: [number, number][] = (j.coords || []) as [number, number][];
+                const headOk = gc.length > 0 && distM(c.aLat, c.aLng, gc[0][1], gc[0][0]) <= 25;
+                const tailOk = gc.length > 0 && distM(c.bLat, c.bLng, gc[gc.length - 1][1], gc[gc.length - 1][0]) <= 25;
+                const coords: [number, number][] = nivel === "puente"
+                  ? [...(headOk ? [[c.aLng, c.aLat] as [number, number]] : []), ...gc, ...(tailOk ? [[c.bLng, c.bLat] as [number, number]] : [])]
+                  : [];
                 r = { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt };
               }
               cache.set(key, r);
@@ -561,15 +568,13 @@ export default function ModalGps({
         const largoCoords = (cs: any[]) => { let m = 0; for (let k = 1; k < (cs?.length || 0); k++) m += distM(cs[k - 1][1], cs[k - 1][0], cs[k][1], cs[k][0]); return m; };
         const largoFeats = (fs: any[]) => fs.reduce((a, f) => a + largoCoords(f.geometry?.coordinates || []), 0);
         const huellaColor = limpio.map((p) => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad }));
-        // Las cuerdas `aprox` (crudas largas sin puente) NO son medido, pero SÍ cuentan en el
-        // denominador (como no-medido): si se filtraran de ambos lados, un viaje 70% gris punteado
-        // marcaría "Rastreo 100% medido" — la deshonestidad que este badge evita.
+        // Badge HONESTO desde la geometría dibujada: medido = línea de velocidad; estimado = tramos
+        // petróleo por ruta. El crudo largo ya no se dibuja (ni gris ni medido) — lo cubre el estimado.
         const featsColoreados = colorearMatched(matchedRef.current || [], huellaColor, suprimir, ajustador.leerEsCrudo());
-        const medidoM = largoFeats(featsColoreados.filter((f: any) => f.properties?.aprox !== 1));
-        const aproxM  = largoFeats(featsColoreados.filter((f: any) => f.properties?.aprox === 1));
+        const medidoM = largoFeats(featsColoreados);
         const estimadoM = largoFeats(feats);
         const rv = resumenViaje(limpio, crudos);
-        if (rv && medidoM + estimadoM + aproxM > 0) rv.medidoPct = Math.round((medidoM / (medidoM + estimadoM + aproxM)) * 100);
+        if (rv && medidoM + estimadoM > 0) rv.medidoPct = Math.round((medidoM / (medidoM + estimadoM)) * 100);
         if (!cancel) setResumen(rv);
       } catch { /* conservar estela previa */ }
       finally { cargandoHuellaRef.current = false; }
@@ -649,11 +654,9 @@ export default function ModalGps({
         map.addSource("huella-gps", { type: "geojson", data });
         map.addLayer({
           id: "huella-gps-line", type: "line", source: "huella-gps",
-          // Las cuerdas `aprox` (crudas de red >60 m, imposibles de pegar a la vía) NO se pintan
-          // como medido: van en su propia capa gris punteada (abajo). line-dasharray no es
-          // data-driven en Mapbox GL → dos capas sobre el mismo source (filtros/pintura
-          // compartidos con el portal cliente vía lib/huella.ts).
-          filter: FILTRO_NO_APROX,
+          // Una sola capa: velocidad + punta viva estimada. La cuerda cruda larga ya no se dibuja
+          // (se eliminó la capa gris punteada "aprox", jul-2026); la vía de esos tramos la da el
+          // estimado por ruta (verde petróleo), que SIEMPRE va sobre la calzada.
           layout: { "line-join": "round", "line-cap": "round" },
           paint: {
             "line-width": 5, "line-opacity": 0.9,
@@ -661,14 +664,6 @@ export default function ModalGps({
             "line-color": ["case", ["==", ["get", "estimado"], 1], "#0f766e", ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"]],
           },
         });
-        map.addLayer({
-          id: "huella-gps-aprox", type: "line", source: "huella-gps",
-          // Señal imprecisa (GPS de red): trazo tenue punteado — honesto, distinguible del medido
-          // sólido y del estimado petróleo. Nunca finge que el bus cruzó por ahí.
-          filter: FILTRO_APROX,
-          layout: { "line-join": "round", "line-cap": "round" },
-          paint: PINTURA_APROX,
-        }, "huella-gps-line");
       }
     } catch (e) { console.error("[ModalGps] Error dibujando huella GPS:", e); }
   }, [huella, matchedCoords, mapListo, ubic, velCalc, suprimirCrudo, colaSnapped, colaClean, esCrudoArr, snapPos]); // eslint-disable-line

@@ -19,7 +19,8 @@ type Combustible = {
   unidad: string | null;
 };
 
-type VistaActiva = "historial" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo";
+type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo";
+type GranPeriodo = "dia" | "semana" | "mes";
 
 // ─── CONFIGURACIÓN DE COMBUSTIBLES ───────────────────────────────────────────
 
@@ -48,7 +49,16 @@ const CAPACIDAD_TANQUE: Record<string, Record<string, number>> = {
   DEFAULT: { diesel: 80,  gnv: 100, glp: 60,  gasolina: 60,  urea: 20 },
 };
 
-function getCapacidad(categoria: string | undefined, tipo: string): number {
+function getCapacidad(
+  vehOCat: string | { categoria?: string | null; capacidad_tanque?: Record<string, number> | null } | null | undefined,
+  tipo: string
+): number {
+  // La capacidad EDITABLE por vehículo (vehiculos.capacidad_tanque) tiene prioridad sobre la heurística.
+  if (vehOCat && typeof vehOCat === "object") {
+    const edit = vehOCat.capacidad_tanque?.[tipo];
+    if (edit != null && Number(edit) > 0) return Number(edit);
+  }
+  const categoria = typeof vehOCat === "string" ? vehOCat : vehOCat?.categoria ?? undefined;
   if (!categoria) return CAPACIDAD_TANQUE.DEFAULT[tipo] || 80;
   const cat = categoria.toUpperCase();
   for (const [k, v] of Object.entries(CAPACIDAD_TANQUE)) {
@@ -88,6 +98,22 @@ function calcRendimiento(curr: Combustible, prev: Combustible | null): number | 
   return km / Number(curr.galones);
 }
 
+// Clave + etiqueta del período (día/semana/mes) para el análisis de gasto y rendimiento.
+function clavePeriodo(fecha: string, gran: GranPeriodo): { key: string; label: string } {
+  const d = new Date(fecha + "T00:00:00");
+  if (gran === "mes") {
+    return { key: fecha.slice(0, 7), label: d.toLocaleDateString("es-PE", { month: "long", year: "numeric" }) };
+  }
+  if (gran === "semana") {
+    const diaLun = (d.getDay() + 6) % 7;            // 0 = lunes
+    const lunes = new Date(d);
+    lunes.setDate(d.getDate() - diaLun);
+    const key = lunes.toISOString().slice(0, 10);
+    return { key, label: `Semana del ${lunes.toLocaleDateString("es-PE", { day: "2-digit", month: "short" })}` };
+  }
+  return { key: fecha, label: d.toLocaleDateString("es-PE", { weekday: "short", day: "2-digit", month: "short" }) };
+}
+
 const FORM_VACIO = {
   vehiculo_id: "", fecha: new Date().toISOString().split("T")[0],
   kilometraje: "", galones: "", precio_galon: "",
@@ -107,6 +133,7 @@ export default function CombustiblePage() {
   const [mostrarForm, setMostrarForm] = useState(false);
   const [expandidoId, setExpandidoId] = useState<number | null>(null);
   const [vista,       setVista]       = useState<VistaActiva>("historial");
+  const [granularidad,setGranularidad]= useState<GranPeriodo>("mes");
   const [busqueda,    setBusqueda]    = useState("");
   const [filtroVeh,   setFiltroVeh]   = useState("todos");
   const [filtroTipo,  setFiltroTipo]  = useState("todos");
@@ -125,7 +152,7 @@ export default function CombustiblePage() {
   const cargarDatos = async () => {
     setLoading(true);
     const [vRes, cRes, condRes] = await Promise.all([
-      supabase.from("vehiculos").select("id,placa,categoria,kilometraje_actual").order("placa"),
+      supabase.from("vehiculos").select("*").order("placa"),
       supabase.from("combustible").select("*").order("fecha", { ascending: false }).order("id", { ascending: false }),
       supabase.from("conductores").select("id,nombre").order("nombre"),
     ]);
@@ -187,7 +214,7 @@ export default function CombustiblePage() {
 
     // Alerta capacidad
     const veh = vehiculos.find(v => v.id === Number(form.vehiculo_id));
-    const cap = getCapacidad(veh?.categoria, form.tipo_combustible);
+    const cap = getCapacidad(veh,form.tipo_combustible);
     if (Number(form.galones) > cap * 1.1) {
       const ok = confirm(`⚠️ ALERTA: La cantidad (${form.galones} ${fuelCfg.unidadLabel}) supera la capacidad estimada del tanque de ${form.tipo_combustible} (${cap} ${fuelCfg.unidadLabel}).\n¿Continuar?`);
       if (!ok) return;
@@ -280,7 +307,7 @@ export default function CombustiblePage() {
     const key  = `${r.vehiculo_id}-${tipo}`;
     const promedio = rendimientoPromedio[key];
     const veh  = vehiculos.find(v => v.id === r.vehiculo_id);
-    const cap  = getCapacidad(veh?.categoria, tipo);
+    const cap  = getCapacidad(veh,tipo);
     if (Number(r.galones) > cap * 1.1) return true;
     if (rend !== null && promedio && promedio > 0 && ((promedio - rend) / promedio) > 0.3) return true;
     return false;
@@ -324,6 +351,34 @@ export default function CombustiblePage() {
     const precProm = regs.reduce((s, r) => s + Number(r.precio_galon || 0), 0) / regs.length;
     return { grifo: g, cargas: regs.length, costo: regs.reduce((s, r) => s + Number(r.total || 0), 0), precProm };
   }).sort((a, b) => b.costo - a.costo);
+
+  // ── Análisis por período (gasto + rendimiento km/gal por día/semana/mes) ──────
+  // Respeta los filtros de arriba (vehículo/tipo/mes/búsqueda). El km recorrido de cada
+  // carga sale del tramo entre esa carga y la anterior de la MISMA unidad+tipo (prevRegistro);
+  // el rendimiento del período = Σ km / Σ galones (exacto si filtras una unidad+tipo, aproximado
+  // si es la flota combinada). Los aditivos (urea) no cuentan para galones ni km.
+  const rendLabelAnalisis = filtroTipo !== "todos" ? (COMBUSTIBLES[filtroTipo]?.rendimientoLabel || "km/gal") : "km/gal";
+  const analisisPeriodos = useMemo(() => {
+    const buckets: Record<string, { key: string; label: string; gasto: number; galones: number; km: number; cargas: number }> = {};
+    for (const r of filtrados) {
+      const tipo = r.tipo_combustible || "diesel";
+      const { key, label } = clavePeriodo(r.fecha, granularidad);
+      const b = buckets[key] ?? (buckets[key] = { key, label, gasto: 0, galones: 0, km: 0, cargas: 0 });
+      b.gasto += Number(r.total || 0);
+      b.cargas += 1;
+      if (!COMBUSTIBLES[tipo]?.esAditivo) {
+        b.galones += Number(r.galones || 0);
+        const prev = prevRegistro[r.id];
+        if (prev) {
+          const dkm = Number(r.kilometraje) - Number(prev.kilometraje);
+          if (dkm > 0) b.km += dkm;
+        }
+      }
+    }
+    return Object.values(buckets)
+      .map(b => ({ ...b, rendimiento: b.km > 0 && b.galones > 0 ? b.km / b.galones : null }))
+      .sort((a, b) => b.key.localeCompare(a.key));
+  }, [filtrados, prevRegistro, granularidad]);
 
   // ─── RENDER ───────────────────────────────────────────────────────────────
 
@@ -450,13 +505,13 @@ export default function CombustiblePage() {
               Cantidad y precio — <span style={{ color: fuelCfg.color }}>{fuelCfg.label} ({fuelCfg.unidadLabel})</span>
             </p>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <Campo label={`Cantidad * (${fuelCfg.unidadLabel}) · Cap. ~${form.vehiculo_id ? getCapacidad(vehiculos.find(v => v.id === Number(form.vehiculo_id))?.categoria, form.tipo_combustible) : "—"} ${fuelCfg.unidadLabel}`}>
+              <Campo label={`Cantidad * (${fuelCfg.unidadLabel}) · Cap. ~${form.vehiculo_id ? getCapacidad(vehiculos.find(v => v.id === Number(form.vehiculo_id)),form.tipo_combustible) : "—"} ${fuelCfg.unidadLabel}`}>
                 <input type="number" min="0" className={inputCls(
-                  form.vehiculo_id && Number(form.galones) > getCapacidad(vehiculos.find(v => v.id === Number(form.vehiculo_id))?.categoria, form.tipo_combustible) * 1.1
+                  form.vehiculo_id && Number(form.galones) > getCapacidad(vehiculos.find(v => v.id === Number(form.vehiculo_id)),form.tipo_combustible) * 1.1
                     ? "border-red-400 bg-red-50" : ""
                 )} placeholder={`${fuelCfg.unidadLabel}`} value={form.galones}
                   onChange={e => setForm(p => ({ ...p, galones: e.target.value }))} />
-                {form.vehiculo_id && Number(form.galones) > getCapacidad(vehiculos.find(v => v.id === Number(form.vehiculo_id))?.categoria, form.tipo_combustible) * 1.1 && (
+                {form.vehiculo_id && Number(form.galones) > getCapacidad(vehiculos.find(v => v.id === Number(form.vehiculo_id)),form.tipo_combustible) * 1.1 && (
                   <p className="text-xs text-red-600 mt-1 font-bold">⚠ Supera capacidad del tanque</p>
                 )}
               </Campo>
@@ -522,6 +577,7 @@ export default function CombustiblePage() {
       <div className="flex gap-1 border-b overflow-x-auto">
         {([
           ["historial",     "📋 Historial"],
+          ["analisis",      "📈 Análisis"],
           ["por_tipo",      "⛽ Por tipo"],
           ["por_vehiculo",  "🚌 Por vehículo"],
           ["por_conductor", "👤 Por conductor"],
@@ -589,7 +645,7 @@ export default function CombustiblePage() {
                     const key     = `${r.vehiculo_id}-${tipo}`;
                     const promedio= rendimientoPromedio[key];
                     const veh     = vehiculos.find(v => v.id === r.vehiculo_id);
-                    const cap     = getCapacidad(veh?.categoria, tipo);
+                    const cap     = getCapacidad(veh,tipo);
                     const expandido = expandidoId === r.id;
 
                     const anomaliaExceso = Number(r.galones) > cap * 1.1;
@@ -791,6 +847,92 @@ export default function CombustiblePage() {
               ))}
             </tbody>
           </table>
+        </section>
+      )}
+
+      {/* ── ANÁLISIS (gasto y rendimiento por período) ── */}
+      {vista === "analisis" && (
+        <section className="space-y-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="inline-flex rounded-xl border overflow-hidden">
+              {([["dia", "Día"], ["semana", "Semana"], ["mes", "Mes"]] as [GranPeriodo, string][]).map(([g, l]) => (
+                <button key={g} onClick={() => setGranularidad(g)}
+                  className="px-4 py-2 text-sm font-bold transition-all"
+                  style={{ background: granularidad === g ? "#0b315f" : "#fff", color: granularidad === g ? "#fff" : "#6b7280" }}>
+                  {l}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-gray-500 flex-1 min-w-[200px]">
+              Gasto y rendimiento por período (respeta los filtros de vehículo/tipo).{" "}
+              {filtroVeh === "todos" || filtroTipo === "todos"
+                ? "Filtra por una unidad y un tipo para un rendimiento exacto; combinado es aproximado."
+                : "Rendimiento exacto para el filtro seleccionado."}
+            </p>
+          </div>
+
+          {/* Resumen del rango */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {(() => {
+              const totGasto = analisisPeriodos.reduce((s, b) => s + b.gasto, 0);
+              const totKm = analisisPeriodos.reduce((s, b) => s + b.km, 0);
+              const totGal = analisisPeriodos.reduce((s, b) => s + b.galones, 0);
+              const rend = totKm > 0 && totGal > 0 ? totKm / totGal : null;
+              const tarjetas = [
+                { label: "Gasto en el rango", valor: fmtSoles(totGasto), color: "#991b1b", bg: "#fee2e2" },
+                { label: "Km recorridos", valor: totKm > 0 ? `${fmtNum(totKm, 0)} km` : "—", color: "#0b315f", bg: "#eef3f8" },
+                { label: "Cantidad total", valor: totGal > 0 ? `${fmtNum(totGal, 1)}` : "—", color: "#6d28d9", bg: "#ede9fe" },
+                { label: "Rendimiento prom.", valor: rend != null ? `${fmtNum(rend, 1)} ${rendLabelAnalisis}` : "—", color: "#166534", bg: "#dcfce7" },
+              ];
+              return tarjetas.map(k => (
+                <div key={k.label} className="rounded-2xl p-4" style={{ background: k.bg }}>
+                  <p className="text-[11px] font-bold uppercase tracking-wide" style={{ color: k.color, opacity: 0.75 }}>{k.label}</p>
+                  <p className="text-xl font-black mt-1" style={{ color: k.color }}>{k.valor}</p>
+                </div>
+              ));
+            })()}
+          </div>
+
+          {/* Tabla por período */}
+          <div className="bg-white rounded-2xl border shadow-sm overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                  {["Período", "Cargas", "Cantidad", "Km recorridos", "Gasto", `Rendimiento (${rendLabelAnalisis})`].map(h => (
+                    <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {analisisPeriodos.length === 0 ? (
+                  <tr><td colSpan={6} className="p-10 text-center text-gray-400">Sin datos en el rango seleccionado</td></tr>
+                ) : (() => {
+                  const maxGasto = Math.max(...analisisPeriodos.map(x => x.gasto), 1);
+                  return analisisPeriodos.map(b => (
+                    <tr key={b.key} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
+                      <td className="p-3 font-bold text-gray-800 capitalize whitespace-nowrap">{b.label}</td>
+                      <td className="p-3 text-gray-600">{b.cargas}</td>
+                      <td className="p-3 text-gray-600">{b.galones > 0 ? fmtNum(b.galones, 1) : "—"}</td>
+                      <td className="p-3 text-gray-600 whitespace-nowrap">{b.km > 0 ? `${fmtNum(b.km, 0)} km` : "—"}</td>
+                      <td className="p-3">
+                        <div className="flex items-center gap-2">
+                          <div className="h-2 rounded-full flex-shrink-0" style={{ width: `${Math.round((b.gasto / maxGasto) * 70)}px`, background: "#991b1b", opacity: 0.25 }} />
+                          <span className="font-bold text-red-700 whitespace-nowrap">{fmtSoles(b.gasto)}</span>
+                        </div>
+                      </td>
+                      <td className="p-3 font-bold whitespace-nowrap" style={{ color: b.rendimiento != null ? "#166534" : "#9ca3af" }}>
+                        {b.rendimiento != null ? fmtNum(b.rendimiento, 1) : "—"}
+                      </td>
+                    </tr>
+                  ));
+                })()}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-gray-400">
+            Los km recorridos y el rendimiento se calculan con el odómetro registrado en cada carga (Radar IA, check-in o registro manual).
+            En la Fase 3 (Check-in/Check-out) se separará el <b>km de servicio</b> del <b>km fantasma</b> para el costeo por servicio.
+          </p>
         </section>
       )}
 

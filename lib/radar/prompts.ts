@@ -133,6 +133,66 @@ const FORMA_COMBUSTIBLE = `{
   "proveedor": string|null              // razón social de la empresa proveedora del voucher
 }`;
 
+// Esquema EXTENDIDO para el camino de VISIÓN multi-foto: mantiene los campos planos que ya
+// consume acciones.ts y agrega trazabilidad por foto (roles, fuentes, confianza por campo,
+// discrepancias) y los diagnósticos que no deben confundirse con la cantidad/odómetro.
+const FORMA_COMBUSTIBLE_MEDIA = `{
+  "placa": string|null,                 // normalizada AAA-123 en MAYÚSCULAS
+  "unidad": string|null,                // referencia informal ("bus 45") si no hay placa
+  "fecha": "YYYY-MM-DD"|null,
+  "hora": "HH:MM"|null,
+  "grifo": string|null,                 // SOLO de la NOTA de despacho. NUNCA una marca del tablero (LANDI RENZO, BRC…)
+  "direccion_grifo": string|null,       // SOLO de la nota
+  "ruc": string|null,                   // RUC del grifo — SOLO de la nota
+  "proveedor": string|null,             // razón social — SOLO de la nota
+  "comprobante": string|null,           // serie-correlativo — SOLO de la nota
+  "tipo_combustible": "diesel"|"gasolina"|"glp"|"gnv"|"urea"|"biodiesel"|null,
+  "galones": number|null,               // cantidad DESPACHADA (surtidor manda; si no, la nota). GLP en galones. NUNCA el km ni una tasa L/100km
+  "litros": number|null,                // solo si el despacho fue realmente en litros
+  "precio_galon": number|null,
+  "precio_litro": number|null,
+  "monto_total": number|null,           // importe pagado — usa el de la NOTA (comprobante) como valor oficial
+  "kilometraje": number|null,           // odómetro TOTAL del tablero (ignora "Trip"/viaje). El tablero manda sobre la nota
+  "conductor": string|null,
+  "consumo_l_100km": number|null,       // TASA de consumo del viaje (p.ej. 16.3). Informativo. JAMÁS en galones/litros/monto
+  "trip_km": number|null,               // cuentakm PARCIAL del tablero. Informativo, NO es el odómetro
+  "vio_nota": boolean,                  // ¿viste una foto de la nota/comprobante de grifo?
+  "vio_surtidor": boolean,              // ¿viste una foto del surtidor?
+  "vio_tablero": boolean,               // ¿viste una foto del tablero/odómetro?
+  "fuentes": {                          // de qué foto salió cada campo (para poder cruzar y auditar)
+    "galones": "surtidor"|"nota"|"tablero"|"texto"|"calculado"|null,
+    "monto_total": "surtidor"|"nota"|"texto"|"calculado"|null,
+    "precio_galon": "surtidor"|"nota"|"texto"|"calculado"|null,
+    "kilometraje": "tablero"|"nota"|"texto"|null,
+    "grifo": "nota"|"texto"|null,
+    "comprobante": "nota"|"texto"|null
+  },
+  "confianza_campos": { "galones": number|null, "monto_total": number|null, "kilometraje": number|null, "grifo": number|null },
+  "discrepancias": [ string ],          // si el surtidor y la nota difieren en galones/soles/km, descríbelo aquí
+  "notas_extraccion": string|null       // dígitos ambiguos de 7 segmentos, fotos borrosas, etc.
+}`;
+
+// Reglas de lectura de un reporte de combustible que llega como VARIAS fotos con roles distintos.
+const GUIA_COMBUSTIBLE_MEDIA = `REGLAS ESPECIALES SI EL CONTENIDO ES DE COMBUSTIBLE (recarga de una unidad de AFA):
+Un reporte de recarga suele venir como VARIAS fotos con ROLES distintos; combina los datos de TODAS, no de una sola:
+- TABLERO / ODÓMETRO: lee el kilometraje TOTAL. El "Trip"/viaje es PARCIAL (va en "trip_km", NO en "kilometraje"). Cifras como "16.3 L/100km" o "km/gal" son la TASA DE CONSUMO del viaje (va en "consumo_l_100km"): NUNCA la pongas en galones/litros/monto.
+- NIVEL DE COMBUSTIBLE (aguja del tablero, a veces antes y después): solo evidencia visual; no aporta números duros.
+- SURTIDOR del grifo (pantalla digital de 7 segmentos): galones/litros despachados, soles y a veces el precio. Transcríbelo dígito a dígito; cuida las confusiones 8↔0↔6↔9 y la posición del punto decimal (8.548 gal ≠ 8548). Verifica que galones × precio ≈ total.
+- NOTA DE DESPACHO / voucher (papel impreso por el grifo): grifo, dirección, RUC, razón social, N° de comprobante (serie-correlativo), placa, kilometraje, galones, precio, total, fecha y hora.
+
+JERARQUÍA DE FUENTES (rellena "fuentes" con la que usaste en cada campo):
+- Cantidad y precio: manda el SURTIDOR; si no se ve, la NOTA.
+- Kilometraje: manda el TABLERO; contrástalo con el km impreso en la nota (si difieren, ponlo en "discrepancias").
+- IDENTIDAD (grifo, dirección, RUC, razón social, comprobante): SIEMPRE de la NOTA DE DESPACHO, JAMÁS del tablero. Si no ves una nota, deja grifo/RUC/comprobante en null.
+- Importe oficial ("monto_total"): usa el de la NOTA (es el comprobante deducible). Si el surtidor muestra un total distinto, NO lo pongas en "monto_total": descríbelo en "discrepancias".
+
+NO CONFUNDIR MARCA DE KIT GLP CON EL GRIFO: "LANDI RENZO", "BRC", "LOVATO", "TOMASETTO", "ZAVOLI", "OMVL", "AC STAG", "PRINS", "GASITALY" y similares son marcas del KIT DE CONVERSIÓN A GLP del vehículo (se ven en el tablero), NO son el grifo ni el proveedor. Nunca las uses como "grifo"/"proveedor".
+
+GLP: en Perú el GLP se despacha en GALONES. Unidades como "UGL", "U.GAL", "GLN" o etiquetas "GLP-G" significan GLP en galones → pon la cantidad en "galones" (no en "litros") y tipo_combustible="glp".
+
+Si NO se pudo leer la cantidad/importe pero SÍ había una foto de la nota o del surtidor, igual marca vio_nota/vio_surtidor en true y deja los números en null (para distinguir "foto ilegible" de "dato ausente").
+Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.`;
+
 const FORMA_ODOMETRO = `{
   "placa": string|null,                 // normalizada AAA-123 en MAYÚSCULAS
   "unidad": string|null,                // referencia informal ("bus 45") si no hay placa
@@ -310,7 +370,7 @@ ${DESCRIPCION_CATEGORIAS}
 
 2) EXTRAE los datos según la categoría elegida. La forma de "datos" depende de la categoría:
 - "oportunidad_comercial" → ${FORMA_OPORTUNIDAD}
-- "combustible" → ${FORMA_COMBUSTIBLE}
+- "combustible" → ${FORMA_COMBUSTIBLE_MEDIA}
 - "odometro" → ${FORMA_ODOMETRO}
 - "mantenimiento" → ${FORMA_MANTENIMIENTO}
 - "operaciones" → ${FORMA_OPERACION}
@@ -319,9 +379,9 @@ ${DESCRIPCION_CATEGORIAS}
 - "cobranza" → ${FORMA_COBRANZA}
 - "otros" → {}
 
-Caso especial: si la imagen es la FOTO DE UN VOUCHER O COMPROBANTE DE GRIFO (categoría "combustible"), lee TODOS los campos impresos: nombre del grifo, dirección de la estación, razón social del proveedor, número de comprobante (serie-correlativo, ej "B001-004521"), galones o litros despachados, precio unitario, importe total, fecha y hora de la venta, y la placa si aparece.
+${GUIA_COMBUSTIBLE_MEDIA}
 
-Caso especial: si la imagen es SOLO una FOTO DEL TABLERO/ODÓMETRO (categoría "odometro"), sin ningún dato de una recarga (sin monto, sin grifo, sin galones/litros), lee la lectura total del odómetro (ignora el "trip"/viaje parcial si el tablero muestra varios contadores) y la placa/unidad si aparece en la foto o en el texto que la acompaña.
+Caso "odometro": si SOLO ves una foto del tablero/odómetro sin ningún dato de recarga (sin monto, sin grifo, sin galones/litros), clasifícalo "odometro": lee la lectura TOTAL del odómetro (ignora el "trip"/viaje parcial si el tablero muestra varios contadores) y la placa/unidad si aparece. Aplica igual la regla de que "16.3 L/100km" o el "Trip" NO son el kilometraje total.
 
 ${REGLAS_EXTRACCION}
 

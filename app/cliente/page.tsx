@@ -11,7 +11,7 @@ import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, anclarImprecisos, puentePorRuta, distM, paginarFilas,
-  FILTRO_APROX, FILTRO_NO_APROX, PINTURA_APROX, pegarIconoAVia,
+  pegarIconoAVia,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
 import { estadoCliente, normalizaEstado } from "@/lib/estados";
@@ -1240,8 +1240,15 @@ export default function ClientePortal() {
               if (!["ZERO_RESULTS", "NOT_FOUND", "SIN_GEOMETRIA"].includes(j?.status)) r.expira = Date.now() + 60000;
             } else {
               const nivel = decidirPuente(j.roadM, c.dRecta);   // unir todo por carretera (corte solo si sin ruta o rodeo absurdo >8×)
-              // Envolver con A/B → el tramo estimado comparte extremos EXACTOS con lo medido (costura sin corte).
-              const coords = nivel === "puente" ? [[c.aLng, c.aLat], ...(j.coords || []), [c.bLng, c.bLat]] : [];
+              // Geometría de VÍA de Google TAL CUAL (nunca cruza casas); los extremos crudos A/B se añaden
+              // solo si están pegados a la vía (≤25 m) para cerrar la costura, si no se OMITE la recta
+              // (antes esa recta A→vía cruzaba manzanas/ríos = reclamo del usuario, jul-2026).
+              const gc: [number, number][] = (j.coords || []) as [number, number][];
+              const headOk = gc.length > 0 && distM(c.aLat, c.aLng, gc[0][1], gc[0][0]) <= 25;
+              const tailOk = gc.length > 0 && distM(c.bLat, c.bLng, gc[gc.length - 1][1], gc[gc.length - 1][0]) <= 25;
+              const coords: [number, number][] = nivel === "puente"
+                ? [...(headOk ? [[c.aLng, c.aLat] as [number, number]] : []), ...gc, ...(tailOk ? [[c.bLng, c.bLat] as [number, number]] : [])]
+                : [];
               r = { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt };
             }
             cache.set(key, r);
@@ -1261,14 +1268,13 @@ export default function ClientePortal() {
       const largoCoordsC = (cs: any[]) => { let m = 0; for (let k = 1; k < (cs?.length || 0); k++) m += distM(cs[k - 1][1], cs[k - 1][0], cs[k][1], cs[k][0]); return m; };
       const largoFeatsC = (fs: any[]) => fs.reduce((a, f) => a + largoCoordsC(f.geometry?.coordinates || []), 0);
       const huellaColorC = limpio.map((p) => ({ lat: p.lat, lng: p.lng, velocidad: p.velocidad }));
-      // Las cuerdas `aprox` no son medido pero SÍ van al denominador (si no, un viaje mayormente
-      // gris punteado marcaría "100% medido").
+      // Badge honesto: medido = línea de velocidad; estimado = petróleo por ruta. El crudo largo ya no
+      // se dibuja (ni gris ni medido) — lo cubre el estimado. medidoPct = medido/(medido+estimado).
       const featsColorC = colorearMatched(matchedEnVivoRefMap.current[rid] || [], huellaColorC, suprimir, ajustadoresRef.current[rid].leerEsCrudo());
-      const medidoMC = largoFeatsC(featsColorC.filter((f: any) => f.properties?.aprox !== 1));
-      const aproxMC  = largoFeatsC(featsColorC.filter((f: any) => f.properties?.aprox === 1));
+      const medidoMC = largoFeatsC(featsColorC);
       const estimadoMC = largoFeatsC(feats);
       const rvC = resumenViaje(limpio, crudos);
-      if (rvC && medidoMC + estimadoMC + aproxMC > 0) rvC.medidoPct = Math.round((medidoMC / (medidoMC + estimadoMC + aproxMC)) * 100);
+      if (rvC && medidoMC + estimadoMC > 0) rvC.medidoPct = Math.round((medidoMC / (medidoMC + estimadoMC)) * 100);
       if (!cancel) setResumenMap(prev => ({ ...prev, [rid]: rvC }));
       } finally { cargandoHuellaCliRef.current = false; }
     };
@@ -1344,21 +1350,19 @@ export default function ClientePortal() {
     const cutC = matchedEV ? ((colaCleanMap[sel.id] >= 1 && colaCleanMap[sel.id] < matchedEV.length - 1) ? colaCleanMap[sel.id] : matchedEV.length - 1) : 0;
     const feats: any[] = (matchedEV && matchedEV.length >= 2)
       ? [...colorearMatched(matchedEV, huellaPts, suprimirCrudoMap[sel.id], esCrudoEnVivoMap[sel.id]), ...colaViva(matchedEV.slice(0, cutC + 1), huellaPts, live, rutasEnVivoMap[sel.id], colaSnappedMap[sel.id] === false || cutC < matchedEV.length - 1)]
-      : huellaCrudaFeatures(huellaPts);   // cruda por tramos (corta teleports/huecos; cuerdas crudas >60 m salen `aprox`). lib/huella.ts
+      : huellaCrudaFeatures(huellaPts);   // cruda por tramos (corta teleports/huecos; la cuerda cruda larga se OMITE, no gris). lib/huella.ts
     if (feats.length > 0) {
-      const sid = `gps-s-${sel.id}`, lid = `gps-l-${sel.id}`, lidAprox = `gps-la-${sel.id}`;
+      const sid = `gps-s-${sel.id}`, lid = `gps-l-${sel.id}`;
       try {
         map.addSource(sid, { type: "geojson", data: { type: "FeatureCollection", features: feats } as any });
-        // Señal imprecisa (cuerdas crudas de red >60 m): capa tenue punteada, debajo del medido.
-        // line-dasharray no es data-driven en Mapbox GL → dos capas sobre el mismo source
-        // (filtros/pintura compartidos con ModalGps vía lib/huella.ts).
-        map.addLayer({ id: lidAprox, type: "line", source: sid, filter: FILTRO_APROX, layout: { "line-join": "round", "line-cap": "round" }, paint: PINTURA_APROX });
-        map.addLayer({ id: lid, type: "line", source: sid, filter: FILTRO_NO_APROX, layout: { "line-join": "round", "line-cap": "round" }, paint: {
+        // Una sola capa: velocidad + punta viva estimada. Se eliminó la capa gris punteada "aprox"
+        // (jul-2026); la vía de los tramos crudos la da el estimado por ruta (verde petróleo, siempre sobre calzada).
+        map.addLayer({ id: lid, type: "line", source: sid, layout: { "line-join": "round", "line-cap": "round" }, paint: {
           "line-width": 5, "line-opacity": 0.95,
           // Punta viva estimada (sigue la ruta prevista) en verde petróleo; el resto por velocidad.
           "line-color": ["case", ["==", ["get", "estimado"], 1], "#0f766e", ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"]] as any,
         } });
-        dibujoSourcesRef.current.push(sid); dibujoLayersRef.current.push(lidAprox); dibujoLayersRef.current.push(lid);
+        dibujoSourcesRef.current.push(sid); dibujoLayersRef.current.push(lid);
         huellaPts.forEach(p => { bounds.extend([p.lng, p.lat]); hasBounds = true; });
       } catch {}
     }
