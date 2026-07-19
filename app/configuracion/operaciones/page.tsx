@@ -123,12 +123,17 @@ export default function ConfigOperacionesPage() {
   };
 
   // ── Crear plantilla NUEVA (p.ej. el recordatorio de Check-out que aún no existe en Meta) ──
-  type NuevaPlantilla = { name: string; category: "UTILITY" | "MARKETING"; body: string; ejemplos: string[] };
+  type NuevaPlantilla = {
+    name: string; category: "UTILITY" | "MARKETING"; body: string; ejemplos: string[];
+    botonTexto: string; botonUrl: string; // botón de enlace ESTÁTICO (opcional; misma URL siempre)
+  };
   const PLANTILLA_CHECKOUT: NuevaPlantilla = {
     name: "conductor_recuerda_checkout",
     category: "UTILITY",
     body: "Hola {{1}} 👋, ya terminaste tus servicios de hoy {{2}}. No olvides registrar tu *Check-out* en la app (kilometraje final y nivel de combustible) para cerrar tu jornada. Gracias por tu trabajo.",
     ejemplos: ["Carlos", "20/07"],
+    botonTexto: "Abrir app conductor",
+    botonUrl: "https://transportesafa.com/conductor",
   };
   const [nuevaTpl, setNuevaTpl] = useState<NuevaPlantilla | null>(null);
   const [creandoTpl, setCreandoTpl] = useState(false);
@@ -140,12 +145,18 @@ export default function ConfigOperacionesPage() {
     const ejemplosOk = nuevaTpl.ejemplos.filter((e) => e.trim()).length;
     if (!nuevaTpl.name.trim()) { showToast("Falta el nombre de la plantilla", false); return; }
     if (vars.length !== ejemplosOk) { showToast(`Faltan ejemplos: la plantilla usa ${vars.length} variable(s)`, false); return; }
+    if (nuevaTpl.botonUrl.trim() && !/^https?:\/\//i.test(nuevaTpl.botonUrl.trim())) {
+      showToast("La URL del botón debe empezar con http:// o https://", false); return;
+    }
     if (!confirm(`¿Crear la plantilla "${nuevaTpl.name}" en Meta?\nQuedará en revisión (minutos a horas) antes de poder enviarse.`)) return;
     setCreandoTpl(true);
     try {
       const res = await fetch("/api/plantillas-meta", {
         method: "POST", headers: await authHeaders(),
-        body: JSON.stringify({ accion: "crear", numero: "avisos", name: nuevaTpl.name, category: nuevaTpl.category, body: nuevaTpl.body, ejemplos: nuevaTpl.ejemplos }),
+        body: JSON.stringify({
+          accion: "crear", numero: "avisos", name: nuevaTpl.name, category: nuevaTpl.category, body: nuevaTpl.body, ejemplos: nuevaTpl.ejemplos,
+          boton: nuevaTpl.botonTexto.trim() && nuevaTpl.botonUrl.trim() ? { texto: nuevaTpl.botonTexto.trim(), url: nuevaTpl.botonUrl.trim() } : null,
+        }),
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error ?? "Error");
@@ -390,7 +401,7 @@ export default function ConfigOperacionesPage() {
           Crea una plantilla directamente en Meta sin salir del ERP. Queda en revisión (minutos a horas) antes de poder usarse.
         </p>
         {!nuevaTpl ? (
-          <button onClick={() => setNuevaTpl({ name: "", category: "UTILITY", body: "", ejemplos: [] })}
+          <button onClick={() => setNuevaTpl({ name: "", category: "UTILITY", body: "", ejemplos: [], botonTexto: "", botonUrl: "" })}
             className="text-sm font-semibold text-white bg-[#0b315f] px-4 py-2 rounded-lg">
             + Nueva plantilla en blanco
           </button>
@@ -431,6 +442,18 @@ export default function ConfigOperacionesPage() {
                 </div>
               </div>
             )}
+            <div>
+              <label className={label}>Botón de enlace (opcional — mismo link para todos los envíos)</label>
+              <div className="flex gap-2 flex-wrap">
+                <input className={input + " w-auto flex-1 min-w-[160px]"} placeholder="Texto del botón (ej. Abrir app conductor)"
+                  maxLength={25} value={nuevaTpl.botonTexto}
+                  onChange={(e) => setNuevaTpl((p) => p && { ...p, botonTexto: e.target.value })} />
+                <input className={input + " w-auto flex-1 min-w-[220px]"} placeholder="https://transportesafa.com/conductor"
+                  value={nuevaTpl.botonUrl}
+                  onChange={(e) => setNuevaTpl((p) => p && { ...p, botonUrl: e.target.value })} />
+              </div>
+              <p className="text-[11px] text-gray-400 mt-1">Deja ambos vacíos si no quieres botón. Máx. 25 caracteres en el texto (límite de Meta).</p>
+            </div>
             <div className="flex gap-2 justify-end">
               <button onClick={() => setNuevaTpl(null)} className="text-xs font-semibold text-gray-500 px-4 py-2 rounded-lg hover:bg-gray-50">Cancelar</button>
               <button onClick={crearPlantilla} disabled={creandoTpl}

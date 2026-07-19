@@ -64,20 +64,29 @@ export async function POST(req: NextRequest) {
   const payload = await req.json();
 
   // ── Crear una plantilla NUEVA (p.ej. conductor_recuerda_checkout) ───────────
-  // POST { accion:"crear", numero, name, category, body, ejemplos: string[] }
+  // POST { accion:"crear", numero, name, category, body, ejemplos: string[], boton?: {texto,url} }
   // `ejemplos` trae un valor de muestra por cada {{n}} del cuerpo, en el mismo orden
-  // (Meta los exige para poder mandar la plantilla a revisión).
+  // (Meta los exige para poder mandar la plantilla a revisión). `boton` es un botón de
+  // enlace ESTÁTICO (misma URL para todos los envíos, sin variable): no requiere pasar
+  // parámetros extra al enviar el aviso (a diferencia de los botones dinámicos que ya usa
+  // recordatorio_conductor, esos sí llevan {{1}} y se arman en lib/notificaciones.ts).
   if (payload.accion === "crear") {
     const numero = payload.numero === "crm" ? "crm" : "avisos";
     const name = String(payload.name ?? "").trim().toLowerCase();
     const category = payload.category === "MARKETING" ? "MARKETING" : "UTILITY";
     const bodyTexto = String(payload.body ?? "").trim();
     const ejemplos = Array.isArray(payload.ejemplos) ? payload.ejemplos.map((e: any) => String(e)) : [];
+    const boton = payload.boton && String(payload.boton.texto ?? "").trim() && String(payload.boton.url ?? "").trim()
+      ? { texto: String(payload.boton.texto).trim().slice(0, 25), url: String(payload.boton.url).trim() }
+      : null;
 
     if (!/^[a-z0-9_]{1,512}$/.test(name)) {
       return NextResponse.json({ error: "El nombre solo puede tener minúsculas, números y guion bajo (_), sin espacios" }, { status: 400 });
     }
     if (!bodyTexto) return NextResponse.json({ error: "El cuerpo del mensaje es obligatorio" }, { status: 400 });
+    if (boton && !/^https?:\/\//i.test(boton.url)) {
+      return NextResponse.json({ error: "La URL del botón debe empezar con http:// o https://" }, { status: 400 });
+    }
 
     const vars = extraerVars(bodyTexto);
     if (vars.length !== ejemplos.filter((e: string) => e.trim()).length) {
@@ -88,6 +97,7 @@ export async function POST(req: NextRequest) {
 
     const components: any[] = [
       { type: "BODY", text: bodyTexto, ...(vars.length ? { example: { body_text: [ejemplos] } } : {}) },
+      ...(boton ? [{ type: "BUTTONS", buttons: [{ type: "URL", text: boton.texto, url: boton.url }] }] : []),
     ];
 
     try {
