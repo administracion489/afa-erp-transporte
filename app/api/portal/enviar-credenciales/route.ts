@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
     const tipoId       = tipo_doc || "Identificación";
     const portalUrl    = process.env.NEXT_PUBLIC_APP_URL
       ? `${process.env.NEXT_PUBLIC_APP_URL}/cliente`
-      : "https://app.afatoursperu.com/cliente";
+      : "https://www.transportesafa.com/cliente";
 
     const html = `
 <!DOCTYPE html>
@@ -150,7 +150,7 @@ export async function POST(req: NextRequest) {
           <td style="background:#F6F4EE;padding:18px 36px;border-top:1px solid #E6E2D6">
             <p style="margin:0;font-size:11px;color:#9AA0AC">
               ${empresa} &nbsp;·&nbsp; Portal Empresarial &nbsp;·&nbsp;
-              <a href="https://www.afatoursperu.com" style="color:#0b315f;text-decoration:none">afatoursperu.com</a>
+              <a href="https://www.transportesafa.com" style="color:#0b315f;text-decoration:none">transportesafa.com</a>
             </p>
           </td>
         </tr>
