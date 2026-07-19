@@ -378,6 +378,7 @@ async function handler(req: NextRequest) {
         const { data: cos } = await admin.from("checkout_conductor").select("conductor_id").eq("fecha", hoy);
         const yaCheckout = new Set<number>((cos ?? []).map((c: any) => Number(c.conductor_id)));
         const horaBucket = `${hoy.replace(/-/g, "")}-${String(Math.floor(ahora / 60)).padStart(2, "0")}`; // YYYYMMDD-HH (Lima)
+        const hoyBonito = `${hoy.slice(8, 10)}/${hoy.slice(5, 7)}`; // "20/07" — legible en el mensaje (hoy sigue en ISO para las queries de arriba)
         let n = 0;
         for (const [cid, servicios] of porConductor) {
           if (yaCheckout.has(cid)) continue;                       // ya cerró la jornada
@@ -389,7 +390,7 @@ async function handler(req: NextRequest) {
           if (finMs > 0 && (Date.now() - finMs) / 60000 < graciaMin) continue; // aún dentro de la gracia
           // Cadencia HORARIA: el bucket en el ref hace que cada hora sea un envío nuevo.
           if (!(await reclamarEnvio("recordar_checkout", `${cid}:${horaBucket}`))) continue;
-          const rc = await aConductor(cfg, cid, [nombreCorto(condMap.get(cid)?.nombre), hoy]);
+          const rc = await aConductor(cfg, cid, [nombreCorto(condMap.get(cid)?.nombre), hoyBonito]);
           if (rc === "fallo") { await liberarEnvio("recordar_checkout", `${cid}:${horaBucket}`); continue; } // transitorio → reintentar
           if (rc === "enviado") n++;
           // sin_canal (sin teléfono/plantilla): se deja reclamado para no reintentar en bucle.

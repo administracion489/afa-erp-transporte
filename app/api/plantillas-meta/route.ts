@@ -61,8 +61,58 @@ export async function POST(req: NextRequest) {
   const token = process.env.META_WA_TOKEN;
   if (!token) return NextResponse.json({ error: "META_WA_TOKEN no configurado" }, { status: 400 });
 
+  const payload = await req.json();
+
+  // ── Crear una plantilla NUEVA (p.ej. conductor_recuerda_checkout) ───────────
+  // POST { accion:"crear", numero, name, category, body, ejemplos: string[] }
+  // `ejemplos` trae un valor de muestra por cada {{n}} del cuerpo, en el mismo orden
+  // (Meta los exige para poder mandar la plantilla a revisión).
+  if (payload.accion === "crear") {
+    const numero = payload.numero === "crm" ? "crm" : "avisos";
+    const name = String(payload.name ?? "").trim().toLowerCase();
+    const category = payload.category === "MARKETING" ? "MARKETING" : "UTILITY";
+    const bodyTexto = String(payload.body ?? "").trim();
+    const ejemplos = Array.isArray(payload.ejemplos) ? payload.ejemplos.map((e: any) => String(e)) : [];
+
+    if (!/^[a-z0-9_]{1,512}$/.test(name)) {
+      return NextResponse.json({ error: "El nombre solo puede tener minúsculas, números y guion bajo (_), sin espacios" }, { status: 400 });
+    }
+    if (!bodyTexto) return NextResponse.json({ error: "El cuerpo del mensaje es obligatorio" }, { status: 400 });
+
+    const vars = extraerVars(bodyTexto);
+    if (vars.length !== ejemplos.filter((e: string) => e.trim()).length) {
+      return NextResponse.json({
+        error: `Faltan ejemplos: la plantilla usa ${vars.length} variable(s) (${vars.join(" ") || "ninguna"}) y llegaron ${ejemplos.length} ejemplo(s).`,
+      }, { status: 400 });
+    }
+
+    const components: any[] = [
+      { type: "BODY", text: bodyTexto, ...(vars.length ? { example: { body_text: [ejemplos] } } : {}) },
+    ];
+
+    try {
+      const rCrear = await fetch(`${GRAPH}/${WABA[numero]}/message_templates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ name, language: "es", category, components }),
+      });
+      const resCrear = await rCrear.json();
+      if (!rCrear.ok) {
+        return NextResponse.json({ error: resCrear.error?.error_user_msg || resCrear.error?.message || "Error al crear la plantilla" }, { status: 500 });
+      }
+      return NextResponse.json({
+        ok: true,
+        id: resCrear.id,
+        mensaje: `Plantilla "${name}" enviada a revisión de Meta (estado: ${resCrear.status || "PENDING"}). Mientras esté en revisión no se puede enviar; al aprobarse (minutos a horas) empieza a funcionar sola.`,
+      });
+    } catch (e: any) {
+      return NextResponse.json({ error: e.message }, { status: 500 });
+    }
+  }
+
+  // ── Editar el TEXTO de una plantilla EXISTENTE (comportamiento previo) ──────
   try {
-    const { id, body } = await req.json();
+    const { id, body } = payload;
     if (!id || !body?.trim()) return NextResponse.json({ error: "id y body requeridos" }, { status: 400 });
 
     // 1) Traer la plantilla actual (para conservar botones/ejemplos y validar variables).

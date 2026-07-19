@@ -122,6 +122,43 @@ export default function ConfigOperacionesPage() {
     }
   };
 
+  // ── Crear plantilla NUEVA (p.ej. el recordatorio de Check-out que aún no existe en Meta) ──
+  type NuevaPlantilla = { name: string; category: "UTILITY" | "MARKETING"; body: string; ejemplos: string[] };
+  const PLANTILLA_CHECKOUT: NuevaPlantilla = {
+    name: "conductor_recuerda_checkout",
+    category: "UTILITY",
+    body: "Hola {{1}} 👋, ya terminaste tus servicios de hoy {{2}}. No olvides registrar tu *Check-out* en la app (kilometraje final y nivel de combustible) para cerrar tu jornada. Gracias por tu trabajo.",
+    ejemplos: ["Carlos", "20/07"],
+  };
+  const [nuevaTpl, setNuevaTpl] = useState<NuevaPlantilla | null>(null);
+  const [creandoTpl, setCreandoTpl] = useState(false);
+  const varsDe = (texto: string) => [...new Set((texto.match(/\{\{\s*\d+\s*\}\}/g) ?? []).map((v) => v.replace(/\s/g, "")))].sort();
+
+  const crearPlantilla = async () => {
+    if (!nuevaTpl) return;
+    const vars = varsDe(nuevaTpl.body);
+    const ejemplosOk = nuevaTpl.ejemplos.filter((e) => e.trim()).length;
+    if (!nuevaTpl.name.trim()) { showToast("Falta el nombre de la plantilla", false); return; }
+    if (vars.length !== ejemplosOk) { showToast(`Faltan ejemplos: la plantilla usa ${vars.length} variable(s)`, false); return; }
+    if (!confirm(`¿Crear la plantilla "${nuevaTpl.name}" en Meta?\nQuedará en revisión (minutos a horas) antes de poder enviarse.`)) return;
+    setCreandoTpl(true);
+    try {
+      const res = await fetch("/api/plantillas-meta", {
+        method: "POST", headers: await authHeaders(),
+        body: JSON.stringify({ accion: "crear", numero: "avisos", name: nuevaTpl.name, category: nuevaTpl.category, body: nuevaTpl.body, ejemplos: nuevaTpl.ejemplos }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error ?? "Error");
+      showToast(j.mensaje ?? "Plantilla creada");
+      setNuevaTpl(null);
+      cargarPlantillas();
+    } catch (e: any) {
+      showToast(e.message, false);
+    } finally {
+      setCreandoTpl(false);
+    }
+  };
+
   const TPL_STATUS: Record<string, string> = {
     APPROVED: "bg-green-100 text-green-700", PENDING: "bg-amber-100 text-amber-700",
     IN_APPEAL: "bg-amber-100 text-amber-700", REJECTED: "bg-red-100 text-red-700",
@@ -335,6 +372,72 @@ export default function ConfigOperacionesPage() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* Crear plantilla NUEVA (no requiere entrar a Meta Business Manager) */}
+      <div className="bg-white border border-gray-200 rounded-2xl p-5 mt-4">
+        <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
+          <h2 className="text-sm font-bold text-gray-700">Crear plantilla nueva</h2>
+          {!nuevaTpl && (
+            <button onClick={() => setNuevaTpl({ ...PLANTILLA_CHECKOUT })} className="text-xs font-semibold text-[#0b315f] hover:underline">
+              Prellenar: recordatorio de Check-out
+            </button>
+          )}
+        </div>
+        <p className="text-xs text-gray-500 mb-3">
+          Crea una plantilla directamente en Meta sin salir del ERP. Queda en revisión (minutos a horas) antes de poder usarse.
+        </p>
+        {!nuevaTpl ? (
+          <button onClick={() => setNuevaTpl({ name: "", category: "UTILITY", body: "", ejemplos: [] })}
+            className="text-sm font-semibold text-white bg-[#0b315f] px-4 py-2 rounded-lg">
+            + Nueva plantilla en blanco
+          </button>
+        ) : (
+          <div className="space-y-3">
+            <div>
+              <label className={label}>Nombre (minúsculas y guion bajo, sin espacios)</label>
+              <input className={input + " font-mono"} value={nuevaTpl.name}
+                onChange={(e) => setNuevaTpl((p) => p && { ...p, name: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_") })} />
+            </div>
+            <div>
+              <label className={label}>Categoría</label>
+              <select className={input} value={nuevaTpl.category}
+                onChange={(e) => setNuevaTpl((p) => p && { ...p, category: e.target.value as "UTILITY" | "MARKETING" })}>
+                <option value="UTILITY">Utilidad (operativo, recomendado)</option>
+                <option value="MARKETING">Marketing</option>
+              </select>
+            </div>
+            <div>
+              <label className={label}>Cuerpo del mensaje</label>
+              <textarea className={input + " min-h-[110px] font-mono text-[13px]"} value={nuevaTpl.body}
+                onChange={(e) => setNuevaTpl((p) => p && { ...p, body: e.target.value })} />
+              <p className="text-[11px] text-gray-400 mt-1">Usa {"{{1}}"}, {"{{2}}"}… para los datos que pone el sistema (en el mismo orden en que los envía el código).</p>
+            </div>
+            {varsDe(nuevaTpl.body).length > 0 && (
+              <div>
+                <label className={label}>Ejemplos (uno por variable, en orden — Meta los pide para revisar)</label>
+                <div className="flex gap-2 flex-wrap">
+                  {varsDe(nuevaTpl.body).map((v, i) => (
+                    <input key={v} className={input + " w-auto flex-1 min-w-[120px]"} placeholder={v}
+                      value={nuevaTpl.ejemplos[i] ?? ""}
+                      onChange={(e) => setNuevaTpl((p) => {
+                        if (!p) return p;
+                        const ej = [...p.ejemplos]; ej[i] = e.target.value;
+                        return { ...p, ejemplos: ej };
+                      })} />
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setNuevaTpl(null)} className="text-xs font-semibold text-gray-500 px-4 py-2 rounded-lg hover:bg-gray-50">Cancelar</button>
+              <button onClick={crearPlantilla} disabled={creandoTpl}
+                className="text-xs font-semibold text-white bg-[#0b315f] px-4 py-2 rounded-lg hover:bg-[#0a2a52] disabled:opacity-50">
+                {creandoTpl ? "Creando…" : "Crear y enviar a revisión"}
+              </button>
+            </div>
           </div>
         )}
       </div>
