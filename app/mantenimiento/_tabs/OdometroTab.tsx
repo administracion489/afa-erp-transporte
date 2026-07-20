@@ -1,16 +1,20 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { paginarFilas } from "@/lib/huella";
 import { registrarLectura, aceptarLectura, marcarReinicio, type FuenteLectura } from "@/lib/odometro";
+import {
+  analizarVehiculo, resumenPeriodo, claveVehiculo, hoyLima, sumarDias,
+  type LecturaCruda, type DiaRecorrido, type Anomalia,
+} from "@/lib/odometro-analitica";
+import { BarrasHorizontal } from "./_charts";
+import AnaliticaVehiculo, { type VehiculoAnalitica } from "./_AnaliticaVehiculo";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
-type Vehiculo = { id: number; placa: string; marca?: string; modelo?: string; kilometraje_actual?: number };
-type Lectura = {
-  id: string; vehiculo_id: number; km: number; fuente: string; fecha: string;
-  foto_url: string | null; estado: string; motivo: string | null; created_at: string;
-};
+type Vehiculo = { id: number; placa: string; categoria?: string; marca?: string; modelo?: string; kilometraje_actual?: number };
+type Lectura = LecturaCruda;
 
 const FUENTE_LABEL: Record<string, string> = {
   combustible: "Combustible", checklist: "Inicio servicio", servicio: "Servicio",
@@ -32,7 +36,7 @@ function fmtFecha(f: string | null | undefined) {
   if (!f) return "—";
   return new Date(f + (f.length <= 10 ? "T00:00:00" : "")).toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
-function hoyISO() { return new Date().toISOString().split("T")[0]; }
+function fmtNum(n: number | null | undefined) { return n == null ? "—" : Number(n).toLocaleString("es-PE"); }
 
 function fileToAdjunto(file: File): Promise<{ tipo: "image"; media_type: string; data: string }> {
   return new Promise((resolve, reject) => {
@@ -50,40 +54,156 @@ function fileToAdjunto(file: File): Promise<{ tipo: "image"; media_type: string;
   });
 }
 
+// Peor severidad de una lista de anomalías (para pintar el badge de la jornada).
+function peorSeveridad(anoms: Anomalia[]): "critico" | "advertencia" | null {
+  if (anoms.some((a) => a.severidad === "critico" && a.tipo !== "sin_recorrido")) return "critico";
+  if (anoms.some((a) => a.severidad === "advertencia")) return "advertencia";
+  return null;
+}
+
+const VENTANA_DIAS = 180; // histórico cargado para la analítica/jornadas
+
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 export default function OdometroTab() {
+  const hoy = hoyLima();
+
   const [vehiculos, setVehiculos] = useState<Vehiculo[]>([]);
+  const [terceros, setTerceros]   = useState<Vehiculo[]>([]);
   const [lecturas, setLecturas]   = useState<Lectura[]>([]);
+  const [sospechosas, setSospechosas] = useState<Lectura[]>([]);
   const [kmDiaMax, setKmDiaMax]   = useState(1500);
   const [loading, setLoading]     = useState(true);
 
-  const [form, setForm] = useState({ vehiculo_id: "", km: "", fecha: hoyISO(), fuente: "manual" as FuenteLectura });
+  // Filtros / vista
+  const [vista, setVista]         = useState<"jornada" | "historial">("jornada");
+  const [buscar, setBuscar]       = useState("");
+  const [flota, setFlota]         = useState<"propia" | "tercero" | "todas">("propia");
+  const [fEstado, setFEstado]     = useState("todos");
+  const [fFuente, setFFuente]     = useState("todas");
+  const [desde, setDesde]         = useState(sumarDias(hoy, -29));
+  const [hasta, setHasta]         = useState(hoy);
+
+  // Drawer de analítica
+  const [vehSel, setVehSel]       = useState<VehiculoAnalitica | null>(null);
+
+  // Registro
+  const [form, setForm] = useState({ vehiculo_id: "", km: "", fecha: hoy, fuente: "manual" as FuenteLectura });
   const [foto, setFoto] = useState<File | null>(null);
   const [leyendo, setLeyendo]     = useState(false);
   const [guardando, setGuardando] = useState(false);
 
   const cargar = async () => {
     setLoading(true);
-    const [vRes, lRes, cRes] = await Promise.all([
-      supabase.from("vehiculos").select("id,placa,marca,modelo,kilometraje_actual").order("placa"),
-      // Solo flota propia: las lecturas de terceros tienen vehiculo_id NULL (viven en
-      // vehiculo_tercero_id). Filtrar por vehiculo_id NOT NULL es migration-safe (no nombra
-      // la columna nueva) y evita que filas de terceros aparezcan como "#null" en esta vista.
-      supabase.from("lecturas_odometro").select("*").not("vehiculo_id", "is", null).order("created_at", { ascending: false }).limit(200),
+    const desdeVentana = sumarDias(hoy, -VENTANA_DIAS);
+    const [vRes, tRes, cRes, lecAll, sospRes] = await Promise.all([
+      supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,kilometraje_actual").order("placa"),
+      supabase.from("vehiculos_tercero").select("id,placa,categoria,marca,modelo,kilometraje_actual").order("placa"),
       supabase.from("config_mantenimiento").select("km_dia_max").eq("id", 1).maybeSingle(),
+      // Ambas flotas, todos los estados, ventana de 180 días (paginado para no truncar a 1000).
+      paginarFilas(() =>
+        supabase.from("lecturas_odometro")
+          .select("id,vehiculo_id,vehiculo_tercero_id,km,fuente,fecha,estado,motivo,created_at,momento,foto_url")
+          .gte("fecha", desdeVentana)
+          .order("fecha", { ascending: false })
+      ),
+      // "Por revisar" completo (independiente de la ventana): pocas filas, siempre accionables.
+      supabase.from("lecturas_odometro")
+        .select("id,vehiculo_id,vehiculo_tercero_id,km,fuente,fecha,estado,motivo,created_at,momento,foto_url")
+        .eq("estado", "sospechosa").order("created_at", { ascending: false }).limit(300),
     ]);
     setVehiculos(vRes.data || []);
-    setLecturas(lRes.data || []);
+    setTerceros(tRes.data || []);
+    setLecturas((lecAll || []) as Lectura[]);
+    setSospechosas((sospRes.data || []) as Lectura[]);
     if (cRes.data?.km_dia_max) setKmDiaMax(cRes.data.km_dia_max);
     setLoading(false);
   };
   useEffect(() => { cargar(); }, []);
 
-  const vehName = (id: number) => {
-    const v = vehiculos.find(x => x.id === id);
-    return v ? v.placa : `#${id}`;
-  };
+  // Mapa clave → placa (ambas flotas).
+  const placaMap = useMemo(() => {
+    const m = new Map<string, string>();
+    vehiculos.forEach((v) => m.set(`p:${v.id}`, v.placa));
+    terceros.forEach((v) => m.set(`t:${v.id}`, v.placa));
+    return m;
+  }, [vehiculos, terceros]);
+  const placaDe = (l: { vehiculo_id: number | null; vehiculo_tercero_id?: number | null }) =>
+    placaMap.get(claveVehiculo(l)) || `#${l.vehiculo_tercero_id ?? l.vehiculo_id}`;
+  const placaDeKey = (k: string) => placaMap.get(k) || k;
+
+  const pasaFlota = (k: string) =>
+    flota === "todas" || (flota === "propia" ? k.startsWith("p:") : k.startsWith("t:"));
+  const pasaBuscar = (placa: string) => !buscar.trim() || placa.toLowerCase().includes(buscar.trim().toLowerCase());
+
+  // Análisis por vehículo (sanea + recorridos + anomalías) sobre la ventana cargada.
+  const analisisPorVeh = useMemo(() => {
+    const porVeh = new Map<string, Lectura[]>();
+    for (const l of lecturas) {
+      const k = claveVehiculo(l);
+      const arr = porVeh.get(k); if (arr) arr.push(l); else porVeh.set(k, [l]);
+    }
+    const res = new Map<string, ReturnType<typeof analizarVehiculo>>();
+    for (const [k, ls] of porVeh) res.set(k, analizarVehiculo(ls));
+    return res;
+  }, [lecturas]);
+
+  // Jornadas (recorrido diario) filtradas.
+  const jornadas = useMemo(() => {
+    const rows: (DiaRecorrido & { placa: string })[] = [];
+    for (const [k, a] of analisisPorVeh) {
+      if (!pasaFlota(k)) continue;
+      const placa = placaDeKey(k);
+      if (!pasaBuscar(placa)) continue;
+      for (const d of a.dias) {
+        if (d.fecha < desde || d.fecha > hasta) continue;
+        rows.push({ ...d, placa });
+      }
+    }
+    return rows.sort((a, b) => (a.fecha !== b.fecha ? (a.fecha < b.fecha ? 1 : -1) : a.placa.localeCompare(b.placa)));
+  }, [analisisPorVeh, flota, buscar, desde, hasta, placaMap]);
+
+  // Historial plano filtrado.
+  const historial = useMemo(() => {
+    return lecturas
+      .filter((l) => {
+        const k = claveVehiculo(l);
+        if (!pasaFlota(k)) return false;
+        if (!pasaBuscar(placaDeKey(k))) return false;
+        if (fEstado !== "todos" && l.estado !== fEstado) return false;
+        if (fFuente !== "todas" && l.fuente !== fFuente) return false;
+        if (l.fecha < desde || l.fecha > hasta) return false;
+        return true;
+      })
+      .sort((a, b) => (new Date(b.created_at).getTime() || 0) - (new Date(a.created_at).getTime() || 0));
+  }, [lecturas, flota, buscar, fEstado, fFuente, desde, hasta, placaMap]);
+
+  // Comparativo entre vehículos (km del mes en curso, por odómetro).
+  const comparativo = useMemo(() => {
+    const inicioMes = hoy.slice(0, 8) + "01";
+    const arr: { label: string; value: number; sub?: string }[] = [];
+    for (const [k, a] of analisisPorVeh) {
+      if (!pasaFlota(k)) continue;
+      const placa = placaDeKey(k);
+      if (!pasaBuscar(placa)) continue;
+      const r = resumenPeriodo(a.dias, inicioMes, hoy);
+      if (r.kmTotal > 0) arr.push({ label: placa, value: r.kmTotal, sub: `${r.diasConDato}d` });
+    }
+    return arr.sort((a, b) => b.value - a.value).slice(0, 15);
+  }, [analisisPorVeh, flota, buscar, placaMap, hoy]);
+
+  // Totales del período filtrado (para el encabezado de la vista jornada).
+  const totalPeriodo = useMemo(() => {
+    let km = 0, dias = 0, pend = 0, anom = 0;
+    for (const j of jornadas) {
+      if (j.pendiente) pend++;
+      else if (j.recorrido != null) { km += j.recorrido; dias++; }
+      if (peorSeveridad(j.anomalias)) anom++;
+    }
+    return { km: Math.round(km), dias, pend, anom };
+  }, [jornadas]);
+
+  const vehName = (l: { vehiculo_id: number | null; vehiculo_tercero_id?: number | null }) => placaDe(l);
 
   // ── Leer odómetro con IA ──────────────────────────────────────────────────────
 
@@ -138,12 +258,9 @@ export default function OdometroTab() {
         kmDiaMax,
       });
       if (!r.ok) throw new Error(r.error || "No se pudo registrar");
-      if (r.estado === "sospechosa") {
-        alert(`Registrada pero marcada para revisión: ${r.motivo}`);
-      } else {
-        alert("Lectura registrada ✓");
-      }
-      setForm({ vehiculo_id: "", km: "", fecha: hoyISO(), fuente: "manual" });
+      if (r.estado === "sospechosa") alert(`Registrada pero marcada para revisión: ${r.motivo}`);
+      else alert("Lectura registrada ✓");
+      setForm({ vehiculo_id: "", km: "", fecha: hoy, fuente: "manual" });
       setFoto(null);
       await cargar();
     } catch (e: any) {
@@ -155,22 +272,34 @@ export default function OdometroTab() {
 
   // ── Acciones del panel de revisión ──────────────────────────────────────────────
 
-  const aceptar = async (l: Lectura) => {
-    await aceptarLectura(supabase, l.id);
-    cargar();
-  };
+  const aceptar = async (l: Lectura) => { await aceptarLectura(supabase, l.id); cargar(); };
   const rechazar = async (l: Lectura) => {
     await supabase.from("lecturas_odometro").update({ estado: "rechazada", motivo: "Rechazada manualmente" }).eq("id", l.id);
     cargar();
   };
   const reiniciar = async (l: Lectura) => {
-    if (!confirm(`¿Marcar ${Number(l.km).toLocaleString("es-PE")} km como REINICIO de odómetro para ${vehName(l.vehiculo_id)}? El km vigente se re-anclará a este valor.`)) return;
-    await marcarReinicio(supabase, { vehiculo_id: l.vehiculo_id, km: l.km, fecha: l.fecha });
+    if (!confirm(`¿Marcar ${Number(l.km).toLocaleString("es-PE")} km como REINICIO de odómetro para ${vehName(l)}? El km vigente se re-anclará a este valor.`)) return;
+    const esTercero = l.vehiculo_tercero_id != null;
+    await marcarReinicio(supabase, {
+      vehiculo_id: esTercero ? (l.vehiculo_tercero_id as number) : (l.vehiculo_id as number),
+      km: l.km, fecha: l.fecha, flota: esTercero ? "tercero" : "propia",
+    });
     await supabase.from("lecturas_odometro").update({ estado: "reinicio", motivo: "Confirmado como reinicio" }).eq("id", l.id);
     cargar();
   };
 
-  const porRevisar = lecturas.filter(l => l.estado === "sospechosa");
+  const abrirAnalitica = (key: string) => {
+    const esTercero = key.startsWith("t:");
+    const id = Number(key.slice(2));
+    const src = (esTercero ? terceros : vehiculos).find((v) => v.id === id);
+    setVehSel({
+      key, id, flota: esTercero ? "tercero" : "propia",
+      placa: src?.placa || placaDeKey(key), categoria: src?.categoria, kilometraje_actual: src?.kilometraje_actual,
+    });
+  };
+
+  const porRevisar = sospechosas;
+  const fuentesDisponibles = useMemo(() => [...new Set(lecturas.map((l) => l.fuente))], [lecturas]);
 
   // ─── RENDER ───────────────────────────────────────────────────────────────────
 
@@ -179,7 +308,7 @@ export default function OdometroTab() {
       <div>
         <h1 className="text-3xl font-bold text-gray-900">Odómetro</h1>
         <p className="text-gray-400 text-sm mt-1">
-          Kilometraje consolidado de varias fuentes · registro manual o por foto (IA) · se conserva el mayor
+          Recorrido por jornada · validación anti-trampa · analítica operativa por vehículo · alertas de patrón
         </p>
       </div>
 
@@ -251,7 +380,7 @@ export default function OdometroTab() {
               <tbody>
                 {porRevisar.map(l => (
                   <tr key={l.id} className="border-t" style={{ borderColor: "#fde68a" }}>
-                    <td className="p-3 font-mono font-bold text-[#0b315f] text-xs">{vehName(l.vehiculo_id)}</td>
+                    <td className="p-3 font-mono font-bold text-[#0b315f] text-xs">{vehName(l)}</td>
                     <td className="p-3 font-mono text-xs">{Number(l.km).toLocaleString("es-PE")}</td>
                     <td className="p-3 text-xs text-gray-600">{fmtFecha(l.fecha)}</td>
                     <td className="p-3 text-xs text-gray-600">{FUENTE_LABEL[l.fuente] || l.fuente}</td>
@@ -271,43 +400,190 @@ export default function OdometroTab() {
         </section>
       )}
 
-      {/* HISTORIAL */}
-      <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
-        <div className="px-5 py-3 border-b"><h2 className="font-bold text-gray-800 text-sm">Historial de lecturas</h2></div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead><tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-              {["Vehículo", "Km", "Fecha", "Fuente", "Estado", "Foto"].map(h =>
-                <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>)}
-            </tr></thead>
-            <tbody>
-              {loading ? (
-                <tr><td colSpan={6} className="p-10 text-center text-gray-400">Cargando…</td></tr>
-              ) : lecturas.length === 0 ? (
-                <tr><td colSpan={6} className="p-10 text-center text-gray-400">
-                  <p className="text-3xl mb-2">📷</p><p className="font-medium">Sin lecturas registradas</p>
-                </td></tr>
-              ) : lecturas.map(l => {
-                const est = ESTADO_CFG[l.estado] || ESTADO_CFG.aceptada;
-                return (
-                  <tr key={l.id} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
-                    <td className="p-3 font-mono font-bold text-[#0b315f] text-xs">{vehName(l.vehiculo_id)}</td>
-                    <td className="p-3 font-mono text-xs text-gray-700">{Number(l.km).toLocaleString("es-PE")}</td>
-                    <td className="p-3 text-xs text-gray-600">{fmtFecha(l.fecha)}</td>
-                    <td className="p-3 text-xs text-gray-600">{FUENTE_LABEL[l.fuente] || l.fuente}</td>
-                    <td className="p-3">
-                      <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={{ background: est.bg, color: est.color }}>{est.label}</span>
-                    </td>
-                    <td className="p-3 text-xs">
-                      {l.foto_url ? <a href={l.foto_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">ver</a> : "—"}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+      {/* FILTROS */}
+      <section className="bg-white rounded-2xl border shadow-sm p-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex-1 min-w-[160px]">
+            <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Buscar placa</label>
+            <input className={inputCls()} placeholder="Ej: BUB-236" value={buscar} onChange={e => setBuscar(e.target.value)} list="placas-odo" />
+            <datalist id="placas-odo">
+              {[...vehiculos, ...terceros].map(v => <option key={v.placa} value={v.placa} />)}
+            </datalist>
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Flota</label>
+            <select className={inputCls()} value={flota} onChange={e => setFlota(e.target.value as any)}>
+              <option value="propia">Propia</option>
+              <option value="tercero">Terceros</option>
+              <option value="todas">Todas</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Desde</label>
+            <input type="date" className={inputCls()} value={desde} max={hasta} onChange={e => setDesde(e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Hasta</label>
+            <input type="date" className={inputCls()} value={hasta} min={desde} onChange={e => setHasta(e.target.value)} />
+          </div>
+          {vista === "historial" && (
+            <>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Estado</label>
+                <select className={inputCls()} value={fEstado} onChange={e => setFEstado(e.target.value)}>
+                  <option value="todos">Todos</option>
+                  {Object.entries(ESTADO_CFG).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Fuente</label>
+                <select className={inputCls()} value={fFuente} onChange={e => setFFuente(e.target.value)}>
+                  <option value="todas">Todas</option>
+                  {fuentesDisponibles.map(f => <option key={f} value={f}>{FUENTE_LABEL[f] || f}</option>)}
+                </select>
+              </div>
+            </>
+          )}
+        </div>
+        {/* Toggle vista */}
+        <div className="flex gap-1 mt-3 border-t pt-3">
+          {([["jornada", "🚌 Recorrido por jornada"], ["historial", "📋 Historial de lecturas"]] as const).map(([k, lbl]) => (
+            <button key={k} onClick={() => setVista(k)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${vista === k ? "bg-[#0b315f] text-white" : "text-gray-500 hover:bg-gray-100"}`}>
+              {lbl}
+            </button>
+          ))}
         </div>
       </section>
+
+      {loading ? (
+        <div className="p-10 text-center text-gray-400">Cargando…</div>
+      ) : vista === "jornada" ? (
+        <>
+          {/* RESUMEN DEL PERÍODO */}
+          <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {[
+              { label: "Km del período", valor: fmtNum(totalPeriodo.km), color: "#0b315f", bg: "#eff6ff" },
+              { label: "Jornadas con dato", valor: totalPeriodo.dias, color: "#166534", bg: "#dcfce7" },
+              { label: "Pendientes", valor: totalPeriodo.pend, color: "#854d0e", bg: "#fef9c3" },
+              { label: "Con anomalía", valor: totalPeriodo.anom, color: "#991b1b", bg: "#fee2e2" },
+            ].map(k => (
+              <div key={k.label} className="rounded-xl p-3 border" style={{ background: k.bg, borderColor: k.color + "22" }}>
+                <p className="text-[10px] font-bold uppercase tracking-wide" style={{ color: k.color + "99" }}>{k.label}</p>
+                <p className="text-2xl font-black mt-0.5 leading-tight" style={{ color: k.color }}>{k.valor}</p>
+              </div>
+            ))}
+          </section>
+
+          {/* TABLA JORNADAS */}
+          <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
+            <div className="px-5 py-3 border-b flex items-center justify-between">
+              <h2 className="font-bold text-gray-800 text-sm">Recorrido por jornada</h2>
+              <span className="text-xs text-gray-400">{jornadas.length} jornadas</span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead><tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                  {["Vehículo", "Fecha", "Primera", "Última", "Recorrido", "Lecturas", "Estado", ""].map(h =>
+                    <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>)}
+                </tr></thead>
+                <tbody>
+                  {jornadas.length === 0 ? (
+                    <tr><td colSpan={8} className="p-10 text-center text-gray-400">
+                      <p className="text-3xl mb-2">🚌</p><p className="font-medium">Sin jornadas en el filtro</p>
+                    </td></tr>
+                  ) : jornadas.map((j) => {
+                    const sev = peorSeveridad(j.anomalias);
+                    return (
+                      <tr key={`${j.key}-${j.fecha}`} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
+                        <td className="p-3 font-mono font-bold text-[#0b315f] text-xs">{j.placa}</td>
+                        <td className="p-3 text-xs text-gray-600">{fmtFecha(j.fecha)}</td>
+                        <td className="p-3 text-xs text-gray-600 font-mono">{fmtNum(j.primeraKm)}<span className="text-gray-300"> · {j.primeraHora || "—"}</span></td>
+                        <td className="p-3 text-xs text-gray-600 font-mono">{j.pendiente ? "—" : fmtNum(j.ultimaKm)}<span className="text-gray-300">{j.ultimaHora && !j.pendiente ? ` · ${j.ultimaHora}` : ""}</span></td>
+                        <td className="p-3 text-xs font-mono font-bold">
+                          {j.pendiente ? <span className="text-amber-600 font-sans font-normal">Pendiente</span>
+                            : j.reinicio ? <span className="text-blue-600 font-sans font-normal">Reinicio</span>
+                            : j.recorrido == null ? "—"
+                            : <span style={{ color: sev === "critico" ? "#991b1b" : sev === "advertencia" ? "#b45309" : "#0b315f" }}>{fmtNum(j.recorrido)} km</span>}
+                        </td>
+                        <td className="p-3 text-xs text-gray-500">{j.nLecturas}</td>
+                        <td className="p-3">
+                          {sev ? (
+                            <span className="text-[11px] font-bold px-2 py-0.5 rounded-lg" style={{ background: sev === "critico" ? "#fee2e2" : "#fef9c3", color: sev === "critico" ? "#991b1b" : "#854d0e" }}
+                              title={j.anomalias.map(a => a.mensaje).join(" · ")}>
+                              {sev === "critico" ? "❌ Revisar" : "⚠ Atención"}
+                            </span>
+                          ) : j.pendiente ? (
+                            <span className="text-[11px] text-amber-600">⏳</span>
+                          ) : (
+                            <span className="text-[11px] text-green-600">✓</span>
+                          )}
+                        </td>
+                        <td className="p-3 text-right">
+                          <button onClick={() => abrirAnalitica(j.key)} className="text-xs font-bold text-[#0b315f] hover:underline whitespace-nowrap">Analítica →</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {/* COMPARATIVO ENTRE VEHÍCULOS */}
+          {comparativo.length > 0 && (
+            <section className="bg-white rounded-2xl border shadow-sm p-5 space-y-3">
+              <h2 className="font-bold text-gray-800 text-sm">Comparativo entre vehículos — km del mes</h2>
+              <BarrasHorizontal data={comparativo} />
+            </section>
+          )}
+        </>
+      ) : (
+        /* HISTORIAL PLANO */
+        <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b flex items-center justify-between">
+            <h2 className="font-bold text-gray-800 text-sm">Historial de lecturas</h2>
+            <span className="text-xs text-gray-400">{historial.length} lecturas</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                {["Vehículo", "Km", "Fecha", "Fuente", "Estado", "Foto", ""].map(h =>
+                  <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>)}
+              </tr></thead>
+              <tbody>
+                {historial.length === 0 ? (
+                  <tr><td colSpan={7} className="p-10 text-center text-gray-400">
+                    <p className="text-3xl mb-2">📷</p><p className="font-medium">Sin lecturas en el filtro</p>
+                  </td></tr>
+                ) : historial.map(l => {
+                  const est = ESTADO_CFG[l.estado] || ESTADO_CFG.aceptada;
+                  return (
+                    <tr key={l.id} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
+                      <td className="p-3 font-mono font-bold text-[#0b315f] text-xs">{vehName(l)}</td>
+                      <td className="p-3 font-mono text-xs text-gray-700">{Number(l.km).toLocaleString("es-PE")}</td>
+                      <td className="p-3 text-xs text-gray-600">{fmtFecha(l.fecha)}</td>
+                      <td className="p-3 text-xs text-gray-600">{FUENTE_LABEL[l.fuente] || l.fuente}</td>
+                      <td className="p-3">
+                        <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={{ background: est.bg, color: est.color }}>{est.label}</span>
+                      </td>
+                      <td className="p-3 text-xs">
+                        {l.foto_url ? <a href={l.foto_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">ver</a> : "—"}
+                      </td>
+                      <td className="p-3 text-right">
+                        <button onClick={() => abrirAnalitica(claveVehiculo(l))} className="text-xs font-bold text-[#0b315f] hover:underline whitespace-nowrap">Analítica →</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {/* DRAWER ANALÍTICA */}
+      {vehSel && <AnaliticaVehiculo veh={vehSel} onClose={() => setVehSel(null)} />}
     </main>
   );
 }

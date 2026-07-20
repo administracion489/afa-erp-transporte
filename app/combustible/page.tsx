@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { registrarLectura } from "@/lib/odometro";
+import { sincronizarPrecioDesdeCarga } from "@/lib/precios-combustible";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -239,6 +240,16 @@ export default function CombustiblePage() {
       : await supabase.from("combustible").insert(payload);
 
     if (error) { alert(error.message); setGuardando(false); return; }
+
+    // La carga real es la fuente de precio más actual → actualiza el precio vigente
+    // que usa /configuracion/costos (Cotizador). No bloquea el guardado si falla.
+    const { data: authData } = await supabase.auth.getUser();
+    await sincronizarPrecioDesdeCarga(supabase, {
+      tipoCombustible: form.tipo_combustible,
+      precio:          Number(form.precio_galon),
+      fecha:           form.fecha,
+      actualizadoPor:  authData?.user?.email || undefined,
+    });
 
     if (form.kilometraje) {
       if (editandoId) {

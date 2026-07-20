@@ -229,6 +229,119 @@ export async function matchCliente(
   return null;
 }
 
+/** Trae un vehículo de la flota propia por id (mismo shape que matchVehiculo). */
+async function vehiculoPorId(sb: any, id: number): Promise<VehiculoMatch | null> {
+  try {
+    const { data } = await sb.from("vehiculos").select("*").eq("id", id).maybeSingle();
+    if (!data) return null;
+    const hit = data as any;
+    return {
+      id: hit.id,
+      placa: hit.placa,
+      categoria: hit.categoria ?? null,
+      kilometraje_actual: hit.kilometraje_actual != null ? Number(hit.kilometraje_actual) : null,
+      capacidad_tanque: hit.capacidad_tanque ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export type ConductorMatch = {
+  id: number;
+  nombre: string;
+  telefono: string | null;
+  /** Cómo se identificó: por su WhatsApp, por un nombre del voucher, o por la asignación del día. */
+  via: "telefono" | "nombre" | "asignacion";
+};
+
+/** Teléfono peruano (9 díg.) desde un JID de WhatsApp: recorta el device (:NN) y el dominio (@...). */
+function telDeJid(jid?: string | null): string {
+  const base = String(jid ?? "").split("@")[0].split(":")[0];
+  return base.replace(/\D/g, "").slice(-9);
+}
+
+/**
+ * Identifica al conductor por el WhatsApp del remitente (contra `conductores.telefono`) o, en
+ * su defecto, por un nombre leído del voucher. El chofer que envía la foto de la recarga casi
+ * siempre es el de la unidad: cruzar su número evita que el operador re-teclee un dato que el
+ * sistema ya tiene. Devuelve null (degradación limpia) si no hay match — la carga se registra igual.
+ */
+export async function matchConductor(
+  sb: any,
+  ref: { jid?: string | null; telefono?: string | null; nombre?: string | null }
+): Promise<ConductorMatch | null> {
+  try {
+    const { data } = await sb.from("conductores").select("id, nombre, telefono").neq("estado", "de_baja");
+    const filas = (data as any[]) ?? [];
+    // 1) Por teléfono del remitente (últimos 9 dígitos) — la señal más directa de "quién lo envió".
+    const tel = ref.jid ? telDeJid(ref.jid) : tel9(ref.telefono);
+    if (tel.length === 9) {
+      const hit = filas.find((c) => tel9(c.telefono) === tel);
+      if (hit) return { id: Number(hit.id), nombre: hit.nombre, telefono: hit.telefono ?? null, via: "telefono" };
+    }
+    // 2) Por nombre leído del voucher (raro, pero si coincide con un chofer es una buena señal).
+    const nom = ref.nombre ? norm(ref.nombre) : "";
+    if (nom.length >= 3) {
+      const exact = filas.find((c) => norm(String(c.nombre ?? "")) === nom);
+      const cand =
+        exact ??
+        filas.find((c) => {
+          const cn = norm(String(c.nombre ?? ""));
+          return cn.length >= 3 && (cn.includes(nom) || nom.includes(cn));
+        });
+      if (cand) return { id: Number(cand.id), nombre: cand.nombre, telefono: cand.telefono ?? null, via: "nombre" };
+    }
+  } catch {
+    // sin match: la carga se registra igual, solo sin conductor identificado
+  }
+  return null;
+}
+
+/** Trae un conductor por id (para el cruce inverso vehículo→chofer asignado del día). */
+async function conductorPorId(sb: any, id: number): Promise<ConductorMatch | null> {
+  try {
+    const { data } = await sb.from("conductores").select("id, nombre, telefono").eq("id", id).maybeSingle();
+    if (!data) return null;
+    const c = data as any;
+    return { id: Number(c.id), nombre: c.nombre, telefono: c.telefono ?? null, via: "asignacion" };
+  } catch {
+    return null;
+  }
+}
+
+/** Única unidad (id) asignada a un conductor en una fecha; null si ninguna o si hay ambigüedad. */
+async function vehiculoAsignadoAlConductor(sb: any, conductorId: number, fecha: string): Promise<number | null> {
+  try {
+    const { data } = await sb
+      .from("reservas")
+      .select("vehiculo_id")
+      .eq("conductor_id", conductorId)
+      .eq("fecha_servicio", fecha)
+      .neq("estado", "cancelada");
+    const ids = [...new Set(((data as any[]) ?? []).map((r) => r.vehiculo_id).filter(Boolean))];
+    return ids.length === 1 ? Number(ids[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Único conductor (id) asignado a una unidad en una fecha; null si ninguno o si hay ambigüedad. */
+async function conductorAsignadoAlVehiculo(sb: any, vehiculoId: number, fecha: string): Promise<number | null> {
+  try {
+    const { data } = await sb
+      .from("reservas")
+      .select("conductor_id")
+      .eq("vehiculo_id", vehiculoId)
+      .eq("fecha_servicio", fecha)
+      .neq("estado", "cancelada");
+    const ids = [...new Set(((data as any[]) ?? []).map((r) => r.conductor_id).filter(Boolean))];
+    return ids.length === 1 ? Number(ids[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
 type OportunidadDuplicada = { id: string; veces_detectada: number; grupos_json: unknown };
 
 /**
@@ -472,8 +585,35 @@ async function accionOportunidad({ sb, mensaje, datos }: ArgsAccion): Promise<Re
 async function accionCombustible({ sb, mensaje, datos, confianza, config }: ArgsAccion): Promise<ResultadoAccion> {
   const d = datos as ExtraccionCombustible;
   const fecha = d.fecha || fechaLima();
-  const placa = placaFormato(d.placa);
-  const veh = await matchVehiculo(sb, d.placa);
+  let veh = await matchVehiculo(sb, d.placa);
+
+  // ── Cruce de identidad: rellenar conductor y placa con lo que el sistema ya sabe ──
+  // Meta: que el operador no re-teclee datos deducibles. El chofer que envía la foto del
+  // voucher casi siempre es el de la unidad → se identifica por su WhatsApp (remitente_wa).
+  let condMatch = await matchConductor(sb, { jid: mensaje.remitente_wa, nombre: d.conductor });
+  // Si el voucher no trae placa pero sí sabemos quién es el chofer, se infiere el vehículo
+  // desde su única asignación del día (si es ambigua no se infiere, para no adivinar mal).
+  let placaInferida = false;
+  if (!veh && condMatch) {
+    const vid = await vehiculoAsignadoAlConductor(sb, condMatch.id, fecha);
+    if (vid) {
+      const inferido = await vehiculoPorId(sb, vid);
+      if (inferido) {
+        veh = inferido;
+        placaInferida = true;
+      }
+    }
+  }
+  // Cruce inverso: hay placa pero el remitente no está en `conductores` (p.ej. lo reenvió un
+  // coordinador) → se toma el único chofer asignado a esa unidad ese día.
+  if (!condMatch && veh) {
+    const cid = await conductorAsignadoAlVehiculo(sb, veh.id, fecha);
+    if (cid) condMatch = await conductorPorId(sb, cid);
+  }
+
+  // Placa resuelta (leída del voucher o inferida) y nombre canónico del conductor identificado.
+  const placa = placaFormato(d.placa) ?? veh?.placa ?? null;
+  const conductorNombre = condMatch?.nombre ?? d.conductor ?? null;
   const tipoComb = String(d.tipo_combustible || "diesel").toLowerCase();
   const cantidad = numOpc(d.galones) ?? numOpc(d.litros);
   const precioUnit = numOpc(d.precio_galon) ?? numOpc(d.precio_litro);
@@ -693,7 +833,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     monto_total: monto,
     comprobante: d.comprobante ?? null,
     kilometraje: km,
-    conductor: d.conductor ?? null,
+    conductor: conductorNombre,
     proveedor,
     anomalias,
   };
@@ -706,6 +846,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   const puedeAuto =
     config.acciones_automaticas?.combustible === true &&
     !!veh &&
+    !placaInferida && // placa inferida (no leída del voucher) → siempre a revisión: no se carga gasto a una unidad adivinada
     cantidad != null &&
     (monto != null || precioUnit != null) &&
     confianza >= umbral &&
@@ -729,7 +870,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
         galones: cantidad,
         precio_galon: precioFinal,
         grifo,
-        conductor: d.conductor ?? null,
+        conductor: conductorNombre,
         observaciones,
         tipo_combustible: d.tipo_combustible ?? "diesel",
         unidad: numOpc(d.galones) != null ? "galones" : "litros",
@@ -759,8 +900,8 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
 
     return {
       accion: "combustible_registrado",
-      detalle: `Carga de ${veh!.placa} registrada en /combustible: ${cantidad} ${numOpc(d.galones) != null ? "gal" : "lt"} de ${tipoComb}${monto != null ? ` por ${fmtSoles(monto)}` : ""}`,
-      datos: { combustible_id: combustibleId, vehiculo_id: veh!.id, anomalias },
+      detalle: `Carga de ${veh!.placa} registrada en /combustible: ${cantidad} ${numOpc(d.galones) != null ? "gal" : "lt"} de ${tipoComb}${monto != null ? ` por ${fmtSoles(monto)}` : ""}${conductorNombre ? ` · conductor ${conductorNombre}${condMatch?.via === "telefono" ? " (identificado por su WhatsApp)" : ""}` : ""}`,
+      datos: { combustible_id: combustibleId, vehiculo_id: veh!.id, conductor: conductorNombre, conductor_via: condMatch?.via ?? null, anomalias },
     };
   }
 
@@ -782,6 +923,8 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       motivos.push(placa ? `Placa ${placa} no está registrada en la flota propia ni en tercerizadas` : "Mensaje sin placa identificable");
     }
   }
+  if (placaInferida)
+    motivos.push(`Placa ${veh!.placa} inferida${condMatch ? ` del conductor ${condMatch.nombre}` : ""} (no venía en el voucher) — confirmar la unidad antes de registrar`);
   if (cantidad == null)
     motivos.push(vioSurtidor || vioNota
       ? "No se pudo leer la cantidad de la foto del surtidor/voucher — revisar la foto"
@@ -804,13 +947,21 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   )
     ? "critico"
     : "atencion";
+  // Datos que el sistema YA rellenó por cruce (se muestran primero para que el operador vea
+  // que solo debe confirmar, no re-teclear). "✅" los distingue de los motivos de revisión.
+  const enriquecido: string[] = [];
+  if (condMatch?.via === "telefono") enriquecido.push(`✅ Conductor identificado por su WhatsApp: ${condMatch.nombre}`);
+  else if (condMatch?.via === "nombre") enriquecido.push(`✅ Conductor reconocido del voucher: ${condMatch.nombre}`);
+  else if (condMatch?.via === "asignacion") enriquecido.push(`✅ Conductor tomado de la asignación del día: ${condMatch.nombre}`);
+  if (placaInferida) enriquecido.push(`✅ Placa ${veh!.placa} inferida de la asignación del conductor`);
+
   const titulo = `⛽ Combustible por revisar: ${veh?.placa ?? placa ?? d.unidad ?? "unidad sin identificar"}${monto != null ? ` · ${fmtSoles(monto)}` : ""}`;
   const alertaId = await crearAlerta(sb, {
     mensaje_id: mensaje.id,
     tipo: "combustible_anomalia",
     severidad,
     titulo,
-    detalle: motivos.join(" · ") || "Requiere revisión manual",
+    detalle: [...enriquecido, ...motivos].join(" · ") || "Requiere revisión manual",
     href: "/radar-ia?tab=combustible",
   });
 
@@ -822,6 +973,9 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       alerta_id: alertaId,
       severidad,
       titulo,
+      conductor: conductorNombre,
+      conductor_via: condMatch?.via ?? null,
+      placa_inferida: placaInferida,
       anomalias,
       motivos,
     },
