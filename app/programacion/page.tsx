@@ -314,6 +314,9 @@ export default function ReservasPage() {
   const [loading,      setLoading]      = useState(true); // arranca cargando (evita parpadeo "No hay reservas")
   const [guardando,    setGuardando]    = useState(false);
   const [paradasMap,   setParadasMap]   = useState<Record<number, any[]>>({});
+  // Solo para la columna Ruta: primera/última parada real por reserva. `reservas.origen/destino`
+  // es una copia denormalizada que se desfasa si se reeditan las paradas desde la cotización.
+  const [rutaMap,      setRutaMap]      = useState<Record<number, { o: string; d: string }>>({});
   const [cargandoPar,  setCargandoPar]  = useState<Record<number, boolean>>({});
   const [pasajerosCliente, setPasajerosCliente] = useState<Record<number, any[]>>({});
   const [pasajerosAsig,    setPasajerosAsig]    = useState<Record<number, number[]>>({});
@@ -935,6 +938,32 @@ export default function ReservasPage() {
     return all;
   };
 
+  // Ruta a mostrar: paradas cargadas al expandir > paradas de la lista > origen/destino guardados.
+  const rutaDe = (r: any): { o: string; d: string } => {
+    const ps = paradasMap[r.id];
+    if (ps && ps.length > 0) return { o: ps[0].nombre, d: ps.length > 1 ? ps[ps.length - 1].nombre : (r.destino || "-") };
+    const rm = rutaMap[r.id];
+    if (rm) return { o: rm.o, d: rm.o !== rm.d ? rm.d : (r.destino || "-") };
+    return { o: r.origen || "-", d: r.destino || "-" };
+  };
+
+  // Primera y última parada de cada reserva listada (columna Ruta). Solo nombre + orden:
+  // es la fuente de verdad frente a reservas.origen/destino, que puede estar desfasado.
+  const cargarRutas = async (ids: number[]) => {
+    if (ids.length === 0) { setRutaMap({}); return; }
+    const acc: Record<number, { o: string; d: string }> = {};
+    for (let i = 0; i < ids.length; i += 300) {
+      const { data } = await supabase.from("paradas")
+        .select("reserva_id,orden,nombre").in("reserva_id", ids.slice(i, i + 300)).order("orden");
+      for (const p of (data || []) as any[]) {
+        const cur = acc[p.reserva_id];
+        if (!cur) acc[p.reserva_id] = { o: p.nombre, d: p.nombre };
+        else cur.d = p.nombre; // llegan ordenadas por `orden`: la última pisa el destino
+      }
+    }
+    setRutaMap(acc);
+  };
+
   // Trae reservas puntuales por id (para acciones sobre servicios que pueden estar fuera de
   // la ventana visible). Trocea el .in() por longitud de URL.
   const fetchReservasPorIds = async (ids: number[]): Promise<Reserva[]> => {
@@ -1017,6 +1046,7 @@ export default function ReservasPage() {
     await cargarNumerosCotizacion(filas);
     await cargarOcupaciones(filas.map((r: any) => r.id));
     setLoading(false);
+    cargarRutas(filas.map((r: any) => r.id));
   };
 
   // Refresco tras una mutación (guardar, eliminar, aplicar masivo…): lista + totales.
@@ -2710,7 +2740,7 @@ export default function ReservasPage() {
                           )}
                           <span className="font-bold text-gray-800">{nombreCliente(r0.cliente_id)}</span>
                           <span className="text-xs text-gray-400 truncate max-w-[200px]">
-                            {(r0 as any).origen || "-"} → {(r0 as any).destino || "-"}
+                            {rutaDe(r0).o} → {rutaDe(r0).d}
                           </span>
                         </div>
                         <div className="flex items-center gap-3 mt-1.5 flex-wrap">
@@ -2930,7 +2960,7 @@ export default function ReservasPage() {
                           })()}
                           {sob && <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">SOBRECUPO</span>}
                         </div>
-                        <div className="text-xs text-gray-400 mt-0.5 truncate">{(r as any).origen || "-"} → {(r as any).destino || "-"}</div>
+                        <div className="text-xs text-gray-400 mt-0.5 truncate">{rutaDe(r).o} → {rutaDe(r).d}</div>
                         <div className="text-xs text-gray-400 mt-0.5">
                           {esTer ? nombreEmpTer(r.empresa_tercerizada_id) : (nombreVehiculo(r.vehiculo_id) !== "-" ? nombreVehiculo(r.vehiculo_id) + " · " + nombreConductor(r.conductor_id) : "Sin asignar")}
                           {cap !== null && <span className="ml-2 text-[10px] font-bold">{totalPax}/{cap} pax</span>}
@@ -3110,7 +3140,10 @@ export default function ReservasPage() {
                       </td>
 
                       <td className="p-3 text-gray-600 max-w-[160px]">
-                        <div className="truncate text-xs">{(r as any).origen || "-"} - {(r as any).destino || "-"}</div>
+                        {(() => {
+                          const { o, d } = rutaDe(r);
+                          return <div className="truncate text-xs" title={`${o} - ${d}`}>{o} - {d}</div>;
+                        })()}
                       </td>
 
                       <td className="p-3 text-xs">

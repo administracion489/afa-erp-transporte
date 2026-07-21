@@ -1142,6 +1142,15 @@ export default function CotizacionesPage(){
     const todasFilas=[...filasIda,...filasRet];
     for(let i=0;i<todasFilas.length;i+=200)await supabase.from("paradas").insert(todasFilas.slice(i,i+200));
 
+    // Sincronizar origen/destino (copia denormalizada que se muestra en programación/seguimiento)
+    const syncOD=async(ids:number[],tramo:typeof paradasIda)=>{
+      if(ids.length===0||tramo.length===0)return;
+      const od={origen:tramo[0].nombre,destino:tramo[tramo.length-1].nombre};
+      for(let i=0;i<ids.length;i+=BATCH)await supabase.from("reservas").update(od).in("id",ids.slice(i,i+BATCH));
+    };
+    await syncOD(idsIda,paradasIda);
+    await syncOD(idsRet,tramoRet);
+
     setModalPropagar(null);setPropagando(false);
     alert(`✅ Propagación completada\n• ${reservasAfectar.length} servicio${reservasAfectar.length!==1?"s":""} actualizado${reservasAfectar.length!==1?"s":""}${saltadas>0?`\n• ${saltadas} saltado${saltadas!==1?"s":""} (ya tienen actividad registrada)`:""}`);
   };

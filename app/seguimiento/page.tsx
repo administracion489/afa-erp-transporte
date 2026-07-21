@@ -1030,7 +1030,10 @@ function DocBar({ s, empresaPerfil, onGps }: { s: ServicioView; empresaPerfil: E
   const puedeReporte = r.estado === "en_curso" || r.estado === "finalizada";
 
   const servicioBase = {
-    fecha: r.fecha_servicio, hora: r.hora_servicio, origen: r.origen ?? "", destino: r.destino ?? "",
+    // Las paradas mandan sobre r.origen/r.destino (copia denormalizada que puede quedar desfasada).
+    fecha: r.fecha_servicio, hora: r.hora_servicio,
+    origen:  s.paradas[0]?.nombre ?? r.origen ?? "",
+    destino: (s.paradas.length > 1 ? s.paradas[s.paradas.length - 1].nombre : null) ?? r.destino ?? "",
   };
 
   function imprimirManifiesto() {
@@ -1499,8 +1502,8 @@ export default function SeguimientoPage() {
           conductorNombre={gpsModal.conductor_nombre}
           conductorTel={gpsModal.conductor_tel}
           clienteNombre={gpsModal.cliente_nombre}
-          origen={gpsModal.reserva.origen ?? null}
-          destino={gpsModal.reserva.destino ?? null}
+          origen={gpsModal.paradas[0]?.nombre ?? gpsModal.reserva.origen ?? null}
+          destino={(gpsModal.paradas.length > 1 ? gpsModal.paradas[gpsModal.paradas.length - 1].nombre : null) ?? gpsModal.reserva.destino ?? null}
           paradas={gpsModal.paradas.map(p => ({
             id: p.id, nombre: p.nombre,
             lat: p.lat ?? null, lng: p.lng ?? null,
