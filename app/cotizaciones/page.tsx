@@ -1142,10 +1142,15 @@ export default function CotizacionesPage(){
     const todasFilas=[...filasIda,...filasRet];
     for(let i=0;i<todasFilas.length;i+=200)await supabase.from("paradas").insert(todasFilas.slice(i,i+200));
 
-    // Sincronizar origen/destino (copia denormalizada que se muestra en programación/seguimiento)
+    // Sincronizar origen/destino y hora de salida (copias denormalizadas que se muestran en
+    // programación/seguimiento). La hora del servicio ES la del primer paradero de su tramo:
+    // al reeditar los horarios en la cotización, reservas.hora_servicio se quedaba con la hora
+    // vieja y Programación seguía mostrándola aunque los paraderos ya tuvieran la nueva.
     const syncOD=async(ids:number[],tramo:typeof paradasIda)=>{
       if(ids.length===0||tramo.length===0)return;
-      const od={origen:tramo[0].nombre,destino:tramo[tramo.length-1].nombre};
+      const od:Record<string,any>={origen:tramo[0].nombre,destino:tramo[tramo.length-1].nombre};
+      const horaSalida=(tramo[0].hora||"").trim();
+      if(horaSalida)od.hora_servicio=horaSalida;  // sin hora en el primer paradero no se pisa la actual
       for(let i=0;i<ids.length;i+=BATCH)await supabase.from("reservas").update(od).in("id",ids.slice(i,i+BATCH));
     };
     await syncOD(idsIda,paradasIda);
@@ -1254,6 +1259,7 @@ export default function CotizacionesPage(){
               <p>• Los servicios <strong>ya ejecutados o en curso</strong> NO serán modificados.</p>
               <p>• Los servicios con <strong>paradas ya escaneadas</strong> tampoco se tocarán.</p>
               <p>• Esta acción reemplaza las paradas de cada servicio futuro.</p>
+              <p>• La <strong>hora de salida</strong> de cada servicio se ajusta a la del primer paradero de su tramo.</p>
             </div>
             <div className="flex gap-2 pt-1">
               <button onClick={()=>setModalPropagar(null)} className="flex-1 py-2.5 px-4 rounded-xl border border-gray-200 text-sm font-semibold text-gray-600 hover:bg-gray-50">Solo esta cotización</button>

@@ -21,6 +21,7 @@ type CotizacionFija = {
   precio_dia: number | null;
   precio_cliente: number | null;
   paradas_json: any[] | null;
+  hora_ida: string | null;
   hora_retorno: string | null;
   paradas_retorno_json: any[] | null;
   items_json: ItemCot[] | null;
@@ -103,7 +104,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
     Promise.all([
       supabase
         .from("cotizaciones")
-        .select("id, cliente_id, tipo_servicio, precio_dia, precio_cliente, paradas_json, hora_retorno, paradas_retorno_json, items_json")
+        .select("id, cliente_id, tipo_servicio, precio_dia, precio_cliente, paradas_json, hora_ida, hora_retorno, paradas_retorno_json, items_json")
         .eq("modo_servicio", "fijo")
         .order("id", { ascending: false }),
       supabase.from("vehiculos_tercero").select("id, empresa_id, placa, categoria"),
@@ -423,7 +424,14 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
             ) : cotizaciones.length === 0 ? (
               <p className="text-sm text-amber-600 py-2">No hay cotizaciones fijas.</p>
             ) : (
-              <select className={inputCls()} value={cotizacionId} onChange={e => setCotizacionId(e.target.value)}>
+              <select className={inputCls()} value={cotizacionId} onChange={e => {
+                setCotizacionId(e.target.value);
+                // La hora arranca en la del contrato (primer paradero → hora_ida). Tipearla a mano
+                // es lo que deja reservas.hora_servicio desfasada de los paraderos reales.
+                const c = cotizaciones.find(c => c.id === Number(e.target.value));
+                const h = String(c?.paradas_json?.find(p => p.tipo === "inicio")?.hora || c?.hora_ida || "").slice(0, 5);
+                if (h) setHora(h);
+              }}>
                 <option value="">Seleccionar cotización...</option>
                 {cotizaciones.map(c => (
                   <option key={c.id} value={c.id}>
