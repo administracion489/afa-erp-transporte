@@ -10,6 +10,7 @@ import {
 } from "@/lib/odometro-analitica";
 import { BarrasHorizontal } from "./_charts";
 import AnaliticaVehiculo, { type VehiculoAnalitica } from "./_AnaliticaVehiculo";
+import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -25,6 +26,7 @@ const ESTADO_CFG: Record<string, { label: string; bg: string; color: string }> =
   sospechosa: { label: "Por revisar", bg: "#fef9c3", color: "#854d0e" },
   rechazada:  { label: "Rechazada",  bg: "#fee2e2", color: "#991b1b" },
   reinicio:   { label: "Reinicio",   bg: "#dbeafe", color: "#1d4ed8" },
+  anulada:    { label: "Anulada",    bg: "#f1f5f9", color: "#64748b" },
 };
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -89,6 +91,9 @@ export default function OdometroTab() {
 
   // Visor de la foto del tablero (evidencia de la lectura)
   const [fotoZoom, setFotoZoom]   = useState<{ url: string; titulo: string } | null>(null);
+
+  // Anulación de una lectura (con motivo → alimenta el aprendizaje de la IA)
+  const [anular, setAnular]       = useState<Lectura | null>(null);
 
   // Registro
   const [form, setForm] = useState({ vehiculo_id: "", km: "", fecha: hoy, fuente: "manual" as FuenteLectura });
@@ -588,8 +593,12 @@ export default function OdometroTab() {
                               onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${vehName(l)} · ${Number(l.km).toLocaleString("es-PE")} km · ${fmtFecha(l.fecha)}` })}>ver</button>
                           : "—"}
                       </td>
-                      <td className="p-3 text-right">
-                        <button onClick={() => abrirAnalitica(claveVehiculo(l))} className="text-xs font-bold text-[#0b315f] hover:underline whitespace-nowrap">Analítica →</button>
+                      <td className="p-3 text-right whitespace-nowrap">
+                        {l.estado !== "anulada" && (
+                          <button onClick={() => setAnular(l)} className="text-xs font-bold text-red-500 hover:underline mr-3"
+                            title="Anular esta lectura indicando el error">🗑 Anular</button>
+                        )}
+                        <button onClick={() => abrirAnalitica(claveVehiculo(l))} className="text-xs font-bold text-[#0b315f] hover:underline">Analítica →</button>
                       </td>
                     </tr>
                   );
@@ -602,6 +611,16 @@ export default function OdometroTab() {
 
       {/* DRAWER ANALÍTICA */}
       {vehSel && <AnaliticaVehiculo veh={vehSel} onClose={() => setVehSel(null)} />}
+
+      {/* ANULAR LECTURA (con motivo que se le enseña a la IA) */}
+      {anular && (
+        <AnularLecturaOdometro
+          lectura={{ id: String(anular.id), km: Number(anular.km), fecha: anular.fecha, fuente: anular.fuente, foto_url: anular.foto_url ?? null, estado: anular.estado }}
+          placa={vehName(anular)}
+          onClose={() => setAnular(null)}
+          onAnulada={() => { cargar(); }}
+        />
+      )}
 
       {/* VISOR FOTO TABLERO */}
       {fotoZoom && (

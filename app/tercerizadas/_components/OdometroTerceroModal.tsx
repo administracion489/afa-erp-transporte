@@ -9,6 +9,7 @@
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { registrarLectura, aceptarLectura, marcarReinicio, type FuenteLectura } from "@/lib/odometro";
+import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 
 type Lectura = {
   id: string; km: number; fuente: string; fecha: string;
@@ -24,6 +25,7 @@ const ESTADO_CFG: Record<string, { label: string; bg: string; color: string }> =
   sospechosa: { label: "Por revisar", bg: "#fef9c3", color: "#854d0e" },
   rechazada:  { label: "Rechazada",   bg: "#fee2e2", color: "#991b1b" },
   reinicio:   { label: "Reinicio",    bg: "#dbeafe", color: "#1d4ed8" },
+  anulada:    { label: "Anulada",     bg: "#f1f5f9", color: "#64748b" },
 };
 
 function inputCls(extra = "") {
@@ -67,6 +69,7 @@ export default function OdometroTerceroModal({
   const [foto, setFoto] = useState<File | null>(null);
   const [leyendo, setLeyendo] = useState(false);
   const [guardando, setGuardando] = useState(false);
+  const [anular, setAnular] = useState<Lectura | null>(null);
 
   const cargar = async () => {
     setLoading(true);
@@ -249,14 +252,14 @@ export default function OdometroTerceroModal({
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead><tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                  {["Km", "Fecha", "Fuente", "Estado", "Foto"].map(h =>
+                  {["Km", "Fecha", "Fuente", "Estado", "Foto", ""].map(h =>
                     <th key={h} className="p-2.5 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>)}
                 </tr></thead>
                 <tbody>
                   {loading ? (
-                    <tr><td colSpan={5} className="p-8 text-center text-gray-400">Cargando…</td></tr>
+                    <tr><td colSpan={6} className="p-8 text-center text-gray-400">Cargando…</td></tr>
                   ) : lecturas.length === 0 ? (
-                    <tr><td colSpan={5} className="p-8 text-center text-gray-400">
+                    <tr><td colSpan={6} className="p-8 text-center text-gray-400">
                       <p className="text-3xl mb-2">📷</p><p className="font-medium">Sin lecturas registradas</p>
                     </td></tr>
                   ) : lecturas.map(l => {
@@ -272,6 +275,13 @@ export default function OdometroTerceroModal({
                         <td className="p-2.5 text-xs">
                           {l.foto_url ? <a href={l.foto_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">ver</a> : "—"}
                         </td>
+                        <td className="p-2.5 text-right">
+                          {l.estado !== "anulada" && (
+                            <button onClick={() => setAnular(l)}
+                              className="text-xs font-bold text-red-500 hover:underline whitespace-nowrap"
+                              title="Anular esta lectura indicando el error">🗑 Anular</button>
+                          )}
+                        </td>
                       </tr>
                     );
                   })}
@@ -281,6 +291,18 @@ export default function OdometroTerceroModal({
           </section>
         </div>
       </div>
+
+      {/* stopPropagation: el overlay padre cierra al hacer click, y este modal vive dentro de él */}
+      {anular && (
+        <div onClick={e => e.stopPropagation()}>
+        <AnularLecturaOdometro
+          lectura={anular}
+          placa={vehiculo.placa}
+          onClose={() => setAnular(null)}
+          onAnulada={async () => { await cargar(); onSaved(); }}
+        />
+        </div>
+      )}
     </div>
   );
 }

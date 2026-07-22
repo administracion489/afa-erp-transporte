@@ -11,7 +11,7 @@
 //   - marcarReinicio() re-ancla el vigente cuando cambian el tablero (odómetro
 //     físico reemplazado), evitando que "el mayor gana" deje al bus ciego.
 
-export type EstadoLectura = "aceptada" | "sospechosa" | "rechazada" | "reinicio";
+export type EstadoLectura = "aceptada" | "sospechosa" | "rechazada" | "reinicio" | "anulada";
 export type FuenteLectura =
   | "combustible" | "checklist" | "servicio"
   | "whatsapp_foto" | "whatsapp_manual" | "manual";
@@ -192,6 +192,128 @@ export async function marcarReinicio(
   if (error) return { ok: false, error: error.message };
   await client.from(tabla).update({ kilometraje_actual: km }).eq("id", opts.vehiculo_id);
   return { ok: true };
+}
+
+// ─── ANULACIÓN + APRENDIZAJE ─────────────────────────────────────────────────
+
+/** Motivos tipificados de anulación. La clave viaja a odometro_correcciones.motivo_tipo. */
+export const MOTIVOS_ANULACION = [
+  { id: "ia_digito",   label: "La IA leyó mal un dígito",      ensena: true  },
+  { id: "ia_trip",     label: "La IA leyó el parcial (trip)",  ensena: true  },
+  { id: "otra_unidad", label: "Foto de otra unidad",           ensena: false },
+  { id: "duplicada",   label: "Lectura duplicada",             ensena: false },
+  { id: "tipeo",       label: "Error al tipear el km",         ensena: false },
+  { id: "reinicio",    label: "Era un reinicio de tablero",    ensena: false },
+  { id: "otro",        label: "Otro",                          ensena: false },
+] as const;
+export type MotivoAnulacion = (typeof MOTIVOS_ANULACION)[number]["id"];
+
+/**
+ * Recalcula `kilometraje_actual` a partir de las lecturas que siguen vivas.
+ * Necesario tras anular una lectura aceptada: el vigente es derivado, y si la
+ * lectura anulada era la que lo empujó, el vehículo quedaría con un km inventado.
+ *
+ * Regla: si hay un reinicio de tablero, solo cuentan las lecturas desde ese
+ * reinicio (antes de él el odómetro medía otra cosa). El vigente es el mayor km
+ * entre el reinicio y las lecturas aceptadas posteriores.
+ */
+export async function recalcularKmVigente(
+  client: any,
+  opts: { vehiculo_id: number; flota?: Flota }
+): Promise<{ ok: boolean; km: number | null; error?: string }> {
+  const { tabla, fk } = targetFlota(opts.flota);
+  const { data, error } = await client
+    .from("lecturas_odometro").select("km,fecha,estado,created_at")
+    .eq(fk, opts.vehiculo_id)
+    .in("estado", ["aceptada", "reinicio"])
+    .order("created_at", { ascending: true });
+  if (error) return { ok: false, km: null, error: error.message };
+
+  const filas = (data || []) as { km: number; estado: string; created_at: string }[];
+  const idxReinicio = filas.map(f => f.estado).lastIndexOf("reinicio");
+  const vivas = idxReinicio >= 0 ? filas.slice(idxReinicio) : filas;
+  const km = vivas.length ? Math.max(...vivas.map(f => Number(f.km) || 0)) : null;
+
+  const { error: eUp } = await client.from(tabla)
+    .update({ kilometraje_actual: km }).eq("id", opts.vehiculo_id);
+  if (eUp) return { ok: false, km, error: eUp.message };
+  return { ok: true, km };
+}
+
+/**
+ * Anula una lectura (no la borra) y registra POR QUÉ estuvo mal.
+ * La corrección alimenta `odometro_correcciones`, que /api/mantenimiento/leer-odometro
+ * usa como ejemplos para que la lectura por foto deje de repetir el mismo error.
+ * Al final recalcula el km vigente del vehículo.
+ */
+export async function anularLectura(
+  client: any,
+  opts: {
+    lecturaId: string;
+    motivo_tipo: MotivoAnulacion;
+    nota?: string | null;
+    km_correcto?: number | null;
+    usuario?: string | null;
+    placa?: string | null;
+  }
+): Promise<{ ok: boolean; kmVigente?: number | null; error?: string }> {
+  const { data: l } = await client.from("lecturas_odometro").select("*").eq("id", opts.lecturaId).single();
+  if (!l) return { ok: false, error: "Lectura no encontrada" };
+  if (l.estado === "anulada") return { ok: false, error: "La lectura ya está anulada" };
+
+  const esTercero = l.vehiculo_tercero_id != null;
+  const vid = esTercero ? l.vehiculo_tercero_id : l.vehiculo_id;
+  const flota: Flota = esTercero ? "tercero" : "propia";
+
+  // 1) Bitácora + dataset de aprendizaje. Se escribe ANTES de mutar la lectura:
+  //    si esto falla, no anulamos (no queremos anulaciones sin explicación).
+  const { error: eCorr } = await client.from("odometro_correcciones").insert({
+    lectura_id: l.id,
+    vehiculo_id: esTercero ? null : vid,
+    vehiculo_tercero_id: esTercero ? vid : null,
+    placa: opts.placa ?? null,
+    km_leido: Number(l.km),
+    km_correcto: opts.km_correcto != null && Number.isFinite(Number(opts.km_correcto)) ? Number(opts.km_correcto) : null,
+    fuente: l.fuente,
+    motivo_tipo: opts.motivo_tipo,
+    nota: opts.nota || null,
+    foto_url: l.foto_url || null,
+    usuario: opts.usuario || null,
+  });
+  if (eCorr) return { ok: false, error: "No se pudo guardar la corrección: " + eCorr.message };
+
+  // 2) Anular la lectura (se conserva la fila y la foto como evidencia).
+  const etiqueta = MOTIVOS_ANULACION.find(m => m.id === opts.motivo_tipo)?.label || opts.motivo_tipo;
+  const { error: eUpd } = await client.from("lecturas_odometro")
+    .update({ estado: "anulada", motivo: `Anulada: ${etiqueta}${opts.nota ? " — " + opts.nota : ""}` })
+    .eq("id", l.id);
+  if (eUpd) return { ok: false, error: eUpd.message };
+
+  // 3) El vigente es derivado → recalcular sin la lectura anulada.
+  const rec = await recalcularKmVigente(client, { vehiculo_id: vid, flota });
+  return { ok: true, kmVigente: rec.km };
+}
+
+/**
+ * Últimas correcciones de lecturas hechas por IA, en texto plano, para inyectar
+ * como ejemplos en el prompt de visión. Solo los motivos que enseñan algo sobre
+ * cómo mirar la foto (dígito mal leído, parcial confundido con total).
+ */
+export async function leccionesOdometro(client: any, limite = 12): Promise<string> {
+  const ensenables = MOTIVOS_ANULACION.filter(m => m.ensena).map(m => m.id);
+  const { data } = await client
+    .from("odometro_correcciones")
+    .select("km_leido,km_correcto,motivo_tipo,nota")
+    .in("motivo_tipo", ensenables)
+    .order("created_at", { ascending: false })
+    .limit(limite);
+  const filas = (data || []) as any[];
+  if (!filas.length) return "";
+  return filas.map(c => {
+    const corr = c.km_correcto ? `lo correcto era ${Number(c.km_correcto).toLocaleString("es-PE")}` : "el valor era incorrecto";
+    const tipo = c.motivo_tipo === "ia_trip" ? "leíste el parcial/trip en vez del total" : "leíste mal un dígito";
+    return `- Devolviste ${Number(c.km_leido).toLocaleString("es-PE")} y ${corr}: ${tipo}${c.nota ? ` (${c.nota})` : ""}.`;
+  }).join("\n");
 }
 
 /** Promedio km/día a partir de lecturas aceptadas ordenadas. Null si no es fiable. */

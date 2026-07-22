@@ -121,12 +121,18 @@ Devuelve SOLO un JSON:
 Si no puedes leerlo con seguridad, devuelve km=0 y confianza="baja". Responde únicamente el JSON.`;
 
 export async function extraerOdometro(
-  adjunto: Adjunto
+  adjunto: Adjunto,
+  // Correcciones que el equipo hizo sobre lecturas anteriores (lib/odometro.ts →
+  // leccionesOdometro). Se inyectan como ejemplos para no repetir el mismo error.
+  lecciones?: string | null
 ): Promise<{ km: number; kilometraje: number; confianza: string; calidad_imagen: string; motivo: string; texto_leido: string }> {
+  const prompt = lecciones
+    ? `${PROMPT_ODO}\n\nERRORES QUE YA COMETISTE en este mismo parque automotor (corregidos por el equipo). Revísalos y no los repitas:\n${lecciones}\nSi tu lectura se parece a alguno de esos casos, baja la confianza y explica por qué en "motivo".`
+    : PROMPT_ODO;
   const reqOdo: any = {
     model: MODELO_VISION,
     max_tokens: 300,
-    messages: [{ role: "user", content: [{ type: "text", text: PROMPT_ODO }, bloqueAdjunto(adjunto)] }],
+    messages: [{ role: "user", content: [{ type: "text", text: prompt }, bloqueAdjunto(adjunto)] }],
   };
   const resp: any = await getAnthropic().messages.create(reqOdo);
   const r = extraerJSON(textoDe(resp));

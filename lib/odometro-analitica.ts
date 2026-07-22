@@ -182,8 +182,8 @@ export function sanearLecturas(
     const km = Number(l.km);
     const key = claveVehiculo(l);
 
-    if (l.estado === "rechazada") {
-      descartadas.push({ lectura: l, motivo: "rechazada", detalle: "Lectura rechazada" });
+    if (l.estado === "rechazada" || l.estado === "anulada") {
+      descartadas.push({ lectura: l, motivo: "rechazada", detalle: l.estado === "anulada" ? "Lectura anulada" : "Lectura rechazada" });
       continue;
     }
     if (!Number.isFinite(km) || km <= 0) {
