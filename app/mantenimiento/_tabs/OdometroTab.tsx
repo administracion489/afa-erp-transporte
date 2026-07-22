@@ -87,6 +87,9 @@ export default function OdometroTab() {
   // Drawer de analítica
   const [vehSel, setVehSel]       = useState<VehiculoAnalitica | null>(null);
 
+  // Visor de la foto del tablero (evidencia de la lectura)
+  const [fotoZoom, setFotoZoom]   = useState<{ url: string; titulo: string } | null>(null);
+
   // Registro
   const [form, setForm] = useState({ vehiculo_id: "", km: "", fecha: hoy, fuente: "manual" as FuenteLectura });
   const [foto, setFoto] = useState<File | null>(null);
@@ -374,12 +377,24 @@ export default function OdometroTab() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr style={{ background: "#fffbeb" }}>
-                {["Vehículo", "Km", "Fecha", "Fuente", "Motivo", "Acciones"].map(h =>
+                {["Foto", "Vehículo", "Km", "Fecha", "Fuente", "Motivo", "Acciones"].map(h =>
                   <th key={h} className="p-3 text-left text-xs font-bold text-amber-700 uppercase tracking-wide">{h}</th>)}
               </tr></thead>
               <tbody>
                 {porRevisar.map(l => (
                   <tr key={l.id} className="border-t" style={{ borderColor: "#fde68a" }}>
+                    <td className="p-2">
+                      {l.foto_url ? (
+                        <button type="button"
+                          onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${vehName(l)} · ${Number(l.km).toLocaleString("es-PE")} km · ${fmtFecha(l.fecha)}` })}
+                          className="block rounded-lg overflow-hidden border border-amber-200 hover:ring-2 hover:ring-amber-400"
+                          title="Ver foto del tablero">
+                          <img src={l.foto_url} alt="Tablero" className="w-16 h-12 object-cover" />
+                        </button>
+                      ) : (
+                        <span className="text-[11px] text-gray-400">sin foto</span>
+                      )}
+                    </td>
                     <td className="p-3 font-mono font-bold text-[#0b315f] text-xs">{vehName(l)}</td>
                     <td className="p-3 font-mono text-xs">{Number(l.km).toLocaleString("es-PE")}</td>
                     <td className="p-3 text-xs text-gray-600">{fmtFecha(l.fecha)}</td>
@@ -568,7 +583,10 @@ export default function OdometroTab() {
                         <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={{ background: est.bg, color: est.color }}>{est.label}</span>
                       </td>
                       <td className="p-3 text-xs">
-                        {l.foto_url ? <a href={l.foto_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">ver</a> : "—"}
+                        {l.foto_url
+                          ? <button type="button" className="text-blue-600 hover:underline"
+                              onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${vehName(l)} · ${Number(l.km).toLocaleString("es-PE")} km · ${fmtFecha(l.fecha)}` })}>ver</button>
+                          : "—"}
                       </td>
                       <td className="p-3 text-right">
                         <button onClick={() => abrirAnalitica(claveVehiculo(l))} className="text-xs font-bold text-[#0b315f] hover:underline whitespace-nowrap">Analítica →</button>
@@ -584,6 +602,23 @@ export default function OdometroTab() {
 
       {/* DRAWER ANALÍTICA */}
       {vehSel && <AnaliticaVehiculo veh={vehSel} onClose={() => setVehSel(null)} />}
+
+      {/* VISOR FOTO TABLERO */}
+      {fotoZoom && (
+        <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center p-4 bg-black/80"
+          onClick={() => setFotoZoom(null)}>
+          <div className="flex items-center gap-3 mb-2 text-white text-sm font-bold">
+            <span>{fotoZoom.titulo}</span>
+            <a href={fotoZoom.url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+              className="text-xs font-normal underline opacity-80 hover:opacity-100">abrir original</a>
+          </div>
+          <img src={fotoZoom.url} alt="Foto del tablero"
+            className="max-h-[80vh] max-w-full rounded-xl shadow-2xl object-contain"
+            onClick={e => e.stopPropagation()} />
+          <button onClick={() => setFotoZoom(null)}
+            className="mt-3 px-4 py-2 rounded-xl bg-white text-sm font-bold">Cerrar</button>
+        </div>
+      )}
     </main>
   );
 }
