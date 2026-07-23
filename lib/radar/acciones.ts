@@ -42,6 +42,18 @@ export function horaLima(): string {
   return new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(11, 16);
 }
 
+/**
+ * Fecha Lima (YYYY-MM-DD) de un timestamp dado — p.ej. cuándo se ENVIÓ el mensaje al grupo.
+ * Al reprocesar una foto días después, la fecha de la lectura debe ser la del mensaje
+ * original (ts_mensaje), no la del reproceso. Devuelve null si el ts no es válido.
+ */
+export function fechaLimaDeTs(ts: string | null | undefined): string | null {
+  if (!ts) return null;
+  const t = new Date(ts).getTime();
+  if (!Number.isFinite(t)) return null;
+  return new Date(t - 5 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
 const diasPara = (f?: string | null): number | null =>
   f ? Math.ceil((new Date(f + "T00:00:00-05:00").getTime() - Date.now()) / 86400000) : null;
 
@@ -584,7 +596,7 @@ async function accionOportunidad({ sb, mensaje, datos }: ArgsAccion): Promise<Re
 
 async function accionCombustible({ sb, mensaje, datos, confianza, config }: ArgsAccion): Promise<ResultadoAccion> {
   const d = datos as ExtraccionCombustible;
-  const fecha = d.fecha || fechaLima();
+  const fecha = d.fecha || fechaLimaDeTs(mensaje.ts_mensaje) || fechaLima();
   let veh = await matchVehiculo(sb, d.placa);
 
   // ── Cruce de identidad: rellenar conductor y placa con lo que el sistema ya sabe ──
@@ -890,6 +902,9 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
         fecha,
         foto_url: mensaje.media_url ?? null,
         ref_origen: "radar_ia",
+        capturado_en: mensaje.ts_mensaje ?? null,
+        // el km de una recarga se ata al mensaje → reproceso no duplica la lectura
+        idemKey: `radar_odo_comb:${mensaje.id}`,
       });
     }
 
@@ -1015,7 +1030,52 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   const unidad = await resolverUnidadOdometro(sb, d.placa);
   const km = numOpc(d.kilometraje);
   const umbral = Number(config.umbral_confianza ?? 0.7);
-  const puedeAuto = config.acciones_automaticas?.odometro === true && !!unidad && km != null && confianza >= umbral;
+  // Fecha de la lectura: la que dictó la IA (si vio una en la foto/texto), o la del MENSAJE
+  // original (ts_mensaje) — así reprocesar días después conserva el día real, no el del proceso.
+  const fechaOdo = d.fecha ?? fechaLimaDeTs(mensaje.ts_mensaje) ?? fechaLima();
+
+  // ── Guards de auto-registro (Grupo D): el Radar es el ÚNICO camino que graba sin que un
+  //    humano lo vea, así que exige más que "confianza de categoría alta". Cada guard que
+  //    salta bloquea el auto y cae al flujo de alerta manual con su motivo.
+  const esFoto = !!mensaje.media_url;
+  const calidad = d.calidad_imagen ?? null;
+  const confLectura = d.confianza_lectura != null ? Number(d.confianza_lectura) : null;
+  const tripKm = numOpc(d.trip_km);
+  const kmDigitos = km != null ? String(Math.round(km)).replace(/[^0-9]/g, "").length : 0;
+
+  const calidadMala   = esFoto && calidad === "mala";                       // foto ilegible
+  // La confianza de lectura solo aplica a FOTOS (en texto claro el prompt devuelve null).
+  const lecturaDudosa = esFoto && confLectura != null && confLectura < umbral;
+  // Un odómetro real tiene 3–7 dígitos (una unidad nueva puede ir en cientos de km).
+  const kmImplausible = km != null && (kmDigitos < 3 || kmDigitos > 7);
+  const tripComoOdo   = tripKm != null && km != null && km === tripKm;      // leyó el parcial como total
+
+  // Identidad: ¿la unidad de la foto es la que el conductor remitente tenía asignada el día en
+  // que ENVIÓ el mensaje? Solo flota propia (la asignación por reserva usa vehiculo_id). Se usa
+  // el día del mensaje (no la fecha declarada de la lectura). Degrada limpio si no hay match.
+  const fechaAsignacion = fechaLimaDeTs(mensaje.ts_mensaje) ?? fechaLima();
+  let placaAsignadaOtra: string | null = null;
+  if (unidad && unidad.flota === "propia" && mensaje.remitente_wa) {
+    const cond = await matchConductor(sb, { jid: mensaje.remitente_wa, nombre: d.conductor });
+    if (cond) {
+      const vidAsignado = await vehiculoAsignadoAlConductor(sb, cond.id, fechaAsignacion);
+      if (vidAsignado != null && vidAsignado !== unidad.id) {
+        const { data: vAsig } = await sb.from("vehiculos").select("placa").eq("id", vidAsignado).maybeSingle();
+        placaAsignadaOtra = (vAsig as any)?.placa ?? `#${vidAsignado}`;
+      }
+    }
+  }
+  const identidadConflicto = placaAsignadaOtra != null;
+
+  const bloqueos: string[] = [];
+  if (calidadMala)   bloqueos.push("Foto del tablero ilegible (borrosa/reflejo/oscura) — pedir una nueva foto");
+  if (lecturaDudosa) bloqueos.push(`La IA no está segura del número (confianza de lectura ${Math.round((confLectura ?? 0) * 100)}%)`);
+  if (kmImplausible) bloqueos.push(`Kilometraje con ${kmDigitos} dígito(s): fuera del rango de un odómetro real`);
+  if (tripComoOdo)   bloqueos.push(`El km coincide con el "Trip"/parcial (${km!.toLocaleString("es-PE")}) — probable confusión con el odómetro total`);
+  if (identidadConflicto) bloqueos.push(`La foto es de ${unidad!.placa} pero quien la envió tiene asignada la ${placaAsignadaOtra} hoy — ¿foto de otra unidad?`);
+
+  const puedeAuto = config.acciones_automaticas?.odometro === true
+    && !!unidad && km != null && confianza >= umbral && bloqueos.length === 0;
 
   // Guardarraíl de la promesa "una lectura rara nunca corrompe el km vigente sin que nadie
   // la vea": si la unidad aún no tiene kilometraje vigente, esta lectura es la PRIMERA y
@@ -1036,10 +1096,12 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
       vehiculo_id: unidad!.id,
       km: km!,
       fuente: mensaje.media_url ? "whatsapp_foto" : "whatsapp_manual",
-      fecha: d.fecha ?? fechaLima(),
+      fecha: fechaOdo,
       foto_url: mensaje.media_url ?? null,
       ref_origen: "radar_ia",
       flota: unidad!.flota,
+      capturado_en: mensaje.ts_mensaje ?? null,
+      idemKey: `radar_odo:${mensaje.id}`,
     });
     if (res.ok && res.estado === "aceptada") {
       // Registrada, pero hay dos casos que igual conviene que un humano revise: la PRIMERA
@@ -1098,13 +1160,18 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   }
   if (km == null) motivos.push("Sin lectura de kilometraje");
   if (confianza < umbral) motivos.push(`Confianza ${Math.round(confianza * 100)}% por debajo del umbral ${Math.round(umbral * 100)}%`);
+  // Guards de lectura que bloquearon el auto-registro (calidad, trip, plausibilidad, identidad).
+  for (const b of bloqueos) motivos.push(b);
   if (sospechaVoucher) motivos.push("El mensaje menciona términos de compra (grifo/monto/voucher): revisar si era una recarga de combustible");
 
   const titulo = `🛞 Kilometraje reportado: ${unidad?.placa ?? placaFormato(d.placa) ?? d.unidad ?? "unidad sin identificar"}${etiquetaFlota}${km != null ? ` — ${km.toLocaleString("es-PE")} km` : ""}`;
+  // Si hubo señales de riesgo (foto ilegible, trip como total, otra unidad, posible voucher),
+  // la alerta merece "atención"; el simple "falta registrar a mano" queda como "info".
+  const severidadManual: SeveridadAlerta = bloqueos.length > 0 || sospechaVoucher ? "atencion" : "info";
   const alertaId = await crearAlerta(sb, {
     mensaje_id: mensaje.id,
     tipo: "odometro",
-    severidad: "info",
+    severidad: severidadManual,
     titulo,
     detalle: motivos.join(" · ") || "Requiere registro manual",
     href: hrefOdometro,

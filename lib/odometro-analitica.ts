@@ -34,10 +34,16 @@ export type LecturaCruda = {
   fecha: string;                 // YYYY-MM-DD (fecha Lima de la lectura)
   estado: string;                // aceptada | sospechosa | rechazada | reinicio
   motivo?: string | null;
-  created_at: string;            // timestamptz — orden dentro del día
+  created_at: string;            // timestamptz — hora de INSERCIÓN en el servidor
+  capturado_en?: string | null;  // timestamptz — hora en que se TOMÓ la lectura (manda sobre created_at)
   momento?: string | null;       // checkin | checkout | null
   foto_url?: string | null;
 };
+
+/** Hora efectiva de una lectura: cuándo se tomó (capturado_en) o, si no, cuándo se insertó. */
+function tsEfectivo(l: LecturaCruda): number {
+  return new Date(l.capturado_en || l.created_at).getTime() || 0;
+}
 
 /** Lectura ya saneada y anclada a su vehículo lógico (propia o tercero). */
 export type LecturaSana = LecturaCruda & { key: string; esReinicio: boolean };
@@ -178,6 +184,7 @@ export function sanearLecturas(
   const limpias: LecturaSana[] = [];
   const descartadas: Descartada[] = [];
   let base = 0; // km vigente de la secuencia saneada
+  const hoy = hoyLima();
 
   for (const l of ordenadas) {
     const km = Number(l.km);
@@ -193,6 +200,12 @@ export function sanearLecturas(
     }
     if (km > kmTope) {
       descartadas.push({ lectura: l, motivo: "absurda", detalle: `Valor absurdo: ${km.toLocaleString("es-PE")} km` });
+      continue;
+    }
+    // Lectura del futuro (reloj adelantado): no debe mover el vigente ni la jornada.
+    // (Solo se descartan las de fecha estrictamente posterior a hoy-Lima; el mismo día vale.)
+    if (l.fecha > hoy) {
+      descartadas.push({ lectura: l, motivo: "invalida", detalle: `Fecha futura (${l.fecha}) — revisar reloj del dispositivo` });
       continue;
     }
 
@@ -217,6 +230,9 @@ export function sanearLecturas(
       continue;
     }
 
+    // Los duplicados exactos (mismo km) se CONSERVAN: un bus parqueado con check-in y
+    // check-out iguales es una jornada legítima de 0 km. La jornada los marca como anomalía
+    // 'duplicada' en recorridosDiarios (no se descartan aquí para no romper ese caso).
     limpias.push({ ...l, key, esReinicio: false });
     if (km > base) base = km;
   }
@@ -224,12 +240,10 @@ export function sanearLecturas(
   return { limpias, descartadas };
 }
 
-/** Orden temporal estable: por fecha (día) y luego por created_at. */
+/** Orden temporal estable: por fecha (día) y luego por hora efectiva de captura. */
 function ordenTemporal(a: LecturaCruda, b: LecturaCruda): number {
   if (a.fecha !== b.fecha) return a.fecha < b.fecha ? -1 : 1;
-  const ta = new Date(a.created_at).getTime() || 0;
-  const tb = new Date(b.created_at).getTime() || 0;
-  return ta - tb;
+  return tsEfectivo(a) - tsEfectivo(b);
 }
 
 // ─── RECORRIDO POR JORNADA ───────────────────────────────────────────────────
@@ -249,18 +263,39 @@ export function recorridosDiarios(limpias: LecturaSana[]): DiaRecorrido[] {
   const dias: DiaRecorrido[] = [];
   for (const [fecha, lects] of porDia) {
     const orden = [...lects].sort(ordenTemporal);
+    const anomalias: Anomalia[] = [];
+
+    // La secuencia ya viene saneada y es monótona en km, así que la primera/última por HORA
+    // coinciden con el km menor/mayor del día: primera = orden[0], última = orden[último].
+    // (No se re-ancla por 'momento' para no colapsar la jornada cuando falta el check-out).
     const primera = orden[0];
     const ultima = orden[orden.length - 1];
     const hayReinicio = orden.some((l) => l.esReinicio);
-    const anomalias: Anomalia[] = [];
+    // Los roles solo se usan para etiquetar la hora y para detectar horas incoherentes.
+    const checkin = orden.find((l) => l.momento === "checkin");
+    const checkouts = orden.filter((l) => l.momento === "checkout");
+    const checkout = checkouts.length ? checkouts[checkouts.length - 1] : undefined;
+
+    // Check-out con hora de CAPTURA anterior al check-in → reloj o carga desordenada. Solo se
+    // avisa cuando AMBOS traen capturado_en (comparar created_at de inserción daría falsos).
+    if (checkin && checkout && checkin.capturado_en && checkout.capturado_en && tsEfectivo(checkout) < tsEfectivo(checkin)) {
+      anomalias.push({
+        tipo: "retroceso",
+        severidad: "critico",
+        mensaje: "El check-out quedó registrado antes que el check-in — revisar horas",
+      });
+    }
 
     // Duplicados exactos consecutivos (mismo km) → verificar (no se descarta).
     for (let i = 1; i < orden.length; i++) {
       if (Number(orden[i].km) === Number(orden[i - 1].km)) {
+        const mismaFoto = !!orden[i].foto_url && orden[i].foto_url === orden[i - 1].foto_url;
         anomalias.push({
           tipo: "duplicada",
-          severidad: "info",
-          mensaje: `Lecturas iguales (${Number(orden[i].km).toLocaleString("es-PE")} km) — ¿unidad detenida o duplicado?`,
+          severidad: mismaFoto ? "advertencia" : "info",
+          mensaje: mismaFoto
+            ? `Lecturas iguales con la MISMA foto (${Number(orden[i].km).toLocaleString("es-PE")} km) — probable duplicado/reenvío`
+            : `Lecturas iguales (${Number(orden[i].km).toLocaleString("es-PE")} km) — ¿unidad detenida o duplicado?`,
         });
         break;
       }
@@ -288,11 +323,14 @@ export function recorridosDiarios(limpias: LecturaSana[]): DiaRecorrido[] {
       }
     }
 
-    const primeraHora = horaLima(primera.created_at);
-    const ultimaHora = horaLima(ultima.created_at);
+    // Hora: se prefiere el rol (check-in/check-out) para etiquetar; si no, la primera/última.
+    const horaIni = checkin ?? primera;
+    const horaFin = checkout ?? ultima;
+    const primeraHora = horaLima(horaIni.capturado_en || horaIni.created_at);
+    const ultimaHora = horaLima(horaFin.capturado_en || horaFin.created_at);
     const minutosOperacion =
-      orden.length >= 2 && primera.created_at && ultima.created_at
-        ? Math.max(0, Math.round((new Date(ultima.created_at).getTime() - new Date(primera.created_at).getTime()) / 60000))
+      orden.length >= 2
+        ? Math.max(0, Math.round((tsEfectivo(ultima) - tsEfectivo(primera)) / 60000))
         : null;
 
     dias.push({

@@ -112,13 +112,13 @@ export default function OdometroTab() {
       // Ambas flotas, todos los estados, ventana de 180 días (paginado para no truncar a 1000).
       paginarFilas(() =>
         supabase.from("lecturas_odometro")
-          .select("id,vehiculo_id,vehiculo_tercero_id,km,fuente,fecha,estado,motivo,created_at,momento,foto_url")
+          .select("id,vehiculo_id,vehiculo_tercero_id,km,fuente,fecha,estado,motivo,created_at,capturado_en,momento,foto_url")
           .gte("fecha", desdeVentana)
           .order("fecha", { ascending: false })
       ),
       // "Por revisar" completo (independiente de la ventana): pocas filas, siempre accionables.
       supabase.from("lecturas_odometro")
-        .select("id,vehiculo_id,vehiculo_tercero_id,km,fuente,fecha,estado,motivo,created_at,momento,foto_url")
+        .select("id,vehiculo_id,vehiculo_tercero_id,km,fuente,fecha,estado,motivo,created_at,capturado_en,momento,foto_url")
         .eq("estado", "sospechosa").order("created_at", { ascending: false }).limit(300),
     ]);
     setVehiculos(vRes.data || []);

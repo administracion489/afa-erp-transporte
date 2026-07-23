@@ -572,6 +572,12 @@ export async function POST(req: NextRequest) {
                 foto_url: fotoUrl,
                 ref_origen: "checklist_conductor",
                 flota: esTercero ? "tercero" : "propia",
+                capturado_en: checklist.capturado_en ?? null,
+                momento: "checkin",
+                // idempotencia por CONDUCTOR (no solo unidad): dos conductores pueden usar la
+                // misma unidad el mismo día en servicios distintos y ambas lecturas son válidas.
+                // El gate anti-doble de la app es por conductor+fecha, así que esta clave calza.
+                idemKey: `checkin:${esTercero ? "t" : "p"}:${checklist.vehiculo_id}:${checklist.fecha}:${checklist.conductor_id}`,
               });
             }
           }
@@ -638,6 +644,9 @@ export async function POST(req: NextRequest) {
                 foto_url: fotoUrl,
                 ref_origen: "checkout_conductor",
                 flota: esTercero ? "tercero" : "propia",
+                capturado_en: checkout.capturado_en ?? null,
+                momento: "checkout",
+                idemKey: `checkout:${esTercero ? "t" : "p"}:${checkout.vehiculo_id}:${checkout.fecha}:${checkout.conductor_id}`,
               });
             }
           }

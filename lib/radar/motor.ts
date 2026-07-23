@@ -17,6 +17,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@supabase/supabase-js";
 import { enviarEmail } from "@/lib/notificaciones";
+import { leccionesOdometro } from "@/lib/odometro";
 import { ejecutarAccion, crearAlerta, fechaLima, horaLima } from "./acciones";
 import { promptTriage, promptExtraccion, promptExtraccionMedia, type ContextoPrompt } from "./prompts";
 import { transcribirAudio } from "./transcripcion";
@@ -138,6 +139,14 @@ export async function procesarPendientes(opts?: {
   const gruposInfo = await cargarGruposInfo(sb, lote);
   // Guías de odómetro por vehículo — solo si el lote trae algo con pinta de combustible.
   const guiasOdometro = lote.some(pareceCombustible) ? await cargarGuiasOdometro(sb) : [];
+  // Correcciones humanas de lectura de odómetro (dataset de aprendizaje). Se inyectan en el
+  // prompt de extracción para que el Radar —el único camino que auto-registra— no repita
+  // el dígito mal leído ni confunda el parcial con el total. Solo si el lote trae algo con
+  // pinta de combustible/odómetro (foto o texto de recarga) → evita el round-trip en lotes
+  // de puro texto irrelevante.
+  const leccionesOdo = lote.some((m) => pareceCombustible(m) || m.media_url)
+    ? await leccionesOdometro(sb).catch(() => "")
+    : "";
 
   // Gate 1: radar apagado → los mensajes quedan pendientes (se procesan al reactivar)
   if (!config.activo && !forzar) {
@@ -194,7 +203,7 @@ export async function procesarPendientes(opts?: {
 
     try {
       const grupoInfo = mensaje.grupo_id ? gruposInfo.get(mensaje.grupo_id) ?? null : null;
-      const r = await procesarMensaje(sb, mensaje, config, forzar, grupoInfo, guiasOdometro);
+      const r = await procesarMensaje(sb, mensaje, config, forzar, grupoInfo, guiasOdometro, leccionesOdo);
       resumen.costo_usd += r.costo;
       if (r.estado === "procesado") resumen.procesados++;
       else resumen.descartados++;
@@ -379,7 +388,8 @@ async function procesarMensaje(
   config: RadarConfig,
   forzar: boolean,
   grupoInfo: GrupoInfo | null,
-  guiasOdometro: { placa: string; guia: string }[]
+  guiasOdometro: { placa: string; guia: string }[],
+  leccionesOdo: string
 ): Promise<ResultadoMensaje> {
   const ctx: ContextoPrompt = {
     grupo: mensaje.grupo_nombre,
@@ -390,6 +400,7 @@ async function procesarMensaje(
     contextoGrupo: grupoInfo?.contexto ?? null,
     guiaVoucher: config.guia_voucher,
     guiasOdometro,
+    leccionesOdometro: leccionesOdo,
   };
 
   // Categorías efectivas para ESTE grupo: las globales, restringidas además por

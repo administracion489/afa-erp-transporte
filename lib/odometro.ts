@@ -33,51 +33,104 @@ function targetFlota(flota: Flota | undefined): { tabla: "vehiculos" | "vehiculo
 }
 
 /** Decide el estado de una lectura nueva frente al km vigente. Función pura. */
+/** Tolerancia de horas por delante para no marcar "futuro" por desfase de reloj. */
+const HORAS_FUTURO_TOLERANCIA = 6;
+/** Factor de salto de orden de magnitud: ×8 sobre el vigente = casi seguro un dígito de más. */
+const RATIO_DIGITO_DE_MAS = 8;
+
 export function evaluarLectura(opts: {
   kmVigente: number | null | undefined;
   kmNuevo: number;
   kmDiaMax?: number;                  // tope de plausibilidad km/día
-  diasDesdeUltima?: number | null;    // días desde la última lectura aceptada
+  horasDesdeUltima?: number | null;   // horas reales desde la última lectura aceptada
+  origenIA?: boolean;                 // la fuente es automática/IA (whatsapp_foto/manual, combustible)
+  duplicadoProbable?: boolean;        // misma foto/mismo evento/ventana corta → casi seguro repetido
+  fechaLectura?: string | null;       // fecha (o timestamp) de la lectura, para el guard de "futuro"
+  ahora?: Date;                       // inyectable (default: ahora)
 }): EvalLectura {
   const kmNuevo = Number(opts.kmNuevo);
   const kmVigente = Number(opts.kmVigente || 0);
   const kmDiaMax = opts.kmDiaMax && opts.kmDiaMax > 0 ? opts.kmDiaMax : 1500;
+  const ahora = opts.ahora ?? new Date();
 
   if (!Number.isFinite(kmNuevo) || kmNuevo < 0) {
     return { estado: "rechazada", motivo: "Lectura inválida" };
   }
-  if (kmVigente <= 0) return { estado: "aceptada", motivo: null }; // primera lectura
-  if (kmNuevo < kmVigente) {
-    return {
-      estado: "sospechosa",
-      motivo: `Retrocede: ${kmNuevo.toLocaleString("es-PE")} < vigente ${kmVigente.toLocaleString("es-PE")}`,
-    };
-  }
-  if (kmNuevo === kmVigente) return { estado: "aceptada", motivo: null };
 
-  // Mayor al vigente: validar que el salto sea físicamente posible
-  const dias = opts.diasDesdeUltima && opts.diasDesdeUltima > 0 ? opts.diasDesdeUltima : 30;
-  const saltoMax = kmDiaMax * dias;
+  // Guard de "lectura del futuro": un reloj adelantado (teléfono del conductor) mete una
+  // fecha posterior a ahora que ordenaría al final de la jornada e inflaría el vigente.
+  const tLectura = tsDe(opts.fechaLectura);
+  if (tLectura != null && tLectura > ahora.getTime() + HORAS_FUTURO_TOLERANCIA * 3600_000) {
+    return { estado: "sospechosa", motivo: "Fecha/hora futura: revisar reloj del dispositivo" };
+  }
+
+  if (kmVigente <= 0) return { estado: "aceptada", motivo: null }; // primera lectura
+
+  if (kmNuevo < kmVigente) {
+    // Retroceso graduado: un ruido de OCR de pocos km no es lo mismo que un rollback grande.
+    const retro = kmVigente - kmNuevo;
+    const tol = Math.max(5, Math.round(kmVigente * 0.001)); // ±0.1% del vigente, mínimo 5 km
+    return retro <= tol
+      ? { estado: "sospechosa", motivo: `Retroceso leve (−${retro.toLocaleString("es-PE")} km): posible ruido de lectura` }
+      : { estado: "sospechosa", motivo: `Retrocede: ${kmNuevo.toLocaleString("es-PE")} < vigente ${kmVigente.toLocaleString("es-PE")} (posible manipulación)` };
+  }
+
+  if (kmNuevo === kmVigente) {
+    // Sin avance. Del conductor (check-in/out manual de un bus parqueado) es legítimo; de una
+    // fuente automática/IA es casi siempre una foto reenviada o un doble registro → advertir.
+    if (!opts.origenIA) return { estado: "aceptada", motivo: null };
+    return opts.duplicadoProbable
+      ? { estado: "sospechosa", motivo: "Duplicada: mismo km y misma foto/origen (posible reenvío)" }
+      : { estado: "sospechosa", motivo: "Sin avance: km igual al vigente — ¿unidad detenida o lectura repetida?" };
+  }
+
+  // Mayor al vigente.
   const salto = kmNuevo - kmVigente;
+
+  // 1) Salto de ORDEN DE MAGNITUD (dígito de más, p.ej. 43,546 → 435,461 = ×10). Un umbral
+  //    de km/día no lo captura por diseño; el ratio sí. Solo con el vigente ya ALTO: en
+  //    odómetros bajos (unidad nueva) un ×8 legítimo es posible, así que el piso evita
+  //    falsos positivos sin perder el caso real (un dígito de más siempre deja el vigente alto).
+  if (kmVigente >= 5000 && kmNuevo >= kmVigente * RATIO_DIGITO_DE_MAS) {
+    const veces = Math.round(kmNuevo / kmVigente);
+    return { estado: "sospechosa", motivo: `Salto ×${veces} (${kmNuevo.toLocaleString("es-PE")}): posible dígito de más` };
+  }
+
+  // 2) Salto físicamente imposible. Se usa el tiempo real transcurrido pero con PISO de 1 día
+  //    completo: una segunda lectura del mismo día (check-out, combustible) conserva el
+  //    presupuesto de una jornada entera y no se marca por prorratear el tope a pocas horas
+  //    (un bus interprovincial recorre en 10–14 h más de lo que daría kmDiaMax×horas/24).
+  //    Sin tiempo conocido se cae a 30 días; el guard de ratio de arriba es el respaldo.
+  const dias = opts.horasDesdeUltima != null && opts.horasDesdeUltima > 0
+    ? Math.max(opts.horasDesdeUltima / 24, 1)  // piso de 1 día completo
+    : 30;
+  const saltoMax = kmDiaMax * dias;
   if (salto > saltoMax) {
-    return {
-      estado: "sospechosa",
-      motivo: `Salto improbable: +${salto.toLocaleString("es-PE")} km en ~${dias} día(s)`,
-    };
+    const cuando = opts.horasDesdeUltima != null
+      ? (opts.horasDesdeUltima < 36 ? "el día" : `~${Math.round(opts.horasDesdeUltima / 24)} día(s)`)
+      : "período largo";
+    return { estado: "sospechosa", motivo: `Salto improbable: +${salto.toLocaleString("es-PE")} km en ${cuando}` };
   }
   return { estado: "aceptada", motivo: null };
 }
 
-function diasEntre(fechaISO: string | null | undefined, hasta: Date): number | null {
+/** Parsea una fecha (YYYY-MM-DD) o timestamp a epoch ms, o null si no es válida. */
+function tsDe(fechaISO: string | null | undefined): number | null {
   if (!fechaISO) return null;
-  const base = fechaISO.length <= 10 ? fechaISO + "T00:00:00" : fechaISO;
+  const base = fechaISO.length <= 10 ? fechaISO + "T00:00:00-05:00" : fechaISO; // fecha suelta = medianoche Lima
   const t = new Date(base).getTime();
-  if (!Number.isFinite(t)) return null;
-  return Math.max(0, Math.round((hasta.getTime() - t) / 86400000));
+  return Number.isFinite(t) ? t : null;
 }
 
+/** Horas transcurridas entre un timestamp de referencia y ahora (o null si no se puede). */
+function horasEntre(tsRef: number | null, hasta: Date): number | null {
+  if (tsRef == null) return null;
+  return Math.max(0, (hasta.getTime() - tsRef) / 3600_000);
+}
+
+/** Fecha de HOY en hora Lima (UTC-5), YYYY-MM-DD. Antes usaba UTC y de noche saltaba a mañana. */
 function hoyISO(): string {
-  return new Date().toISOString().split("T")[0];
+  return new Date(Date.now() - 5 * 3600_000).toISOString().split("T")[0];
 }
 
 /**
@@ -97,6 +150,9 @@ export async function registrarLectura(
     kmDiaMax?: number;
     forzar?: boolean;          // saltar validación (aceptar desde panel de revisión)
     flota?: Flota;             // "propia" (default) | "tercero"
+    capturado_en?: string | null; // cuándo se TOMÓ la lectura (no cuándo se insertó)
+    momento?: "checkin" | "checkout" | null; // rol en la jornada
+    idemKey?: string | null;   // clave estable por evento de origen → dedupe idempotente
   }
 ): Promise<{ ok: boolean; estado: EstadoLectura; motivo: string | null; lecturaId?: string; error?: string }> {
   const km = Number(l.km);
@@ -106,24 +162,77 @@ export async function registrarLectura(
 
   const { tabla, fk } = targetFlota(l.flota);
 
+  // ── Idempotencia (Grupo C) ──────────────────────────────────────────────────
+  // (a) Por clave de evento: reproceso del Radar, doble-POST del conductor, cron+trigger.
+  if (l.idemKey) {
+    const { data: yaIdem } = await client
+      .from("lecturas_odometro").select("id,estado,motivo")
+      .eq("idem_key", l.idemKey).limit(1).maybeSingle();
+    if (yaIdem) return { ok: true, estado: yaIdem.estado, motivo: yaIdem.motivo, lecturaId: yaIdem.id };
+  }
+  // (b) Por foto: la MISMA foto reenviada a otro grupo o el mensaje reprocesado.
+  if (l.foto_url) {
+    const { data: yaFoto } = await client
+      .from("lecturas_odometro").select("id,estado,motivo")
+      .eq(fk, l.vehiculo_id).eq("foto_url", l.foto_url).neq("estado", "anulada").limit(1).maybeSingle();
+    if (yaFoto) return { ok: true, estado: yaFoto.estado, motivo: yaFoto.motivo, lecturaId: yaFoto.id };
+  }
+
   const { data: veh } = await client
     .from(tabla).select("kilometraje_actual").eq("id", l.vehiculo_id).maybeSingle();
   if (!veh) {
     return { ok: false, estado: "rechazada", motivo: "Vehículo no encontrado", error: "Vehículo no encontrado" };
   }
-  const { data: ult } = await client
-    .from("lecturas_odometro").select("fecha")
-    .eq(fk, l.vehiculo_id).eq("estado", "aceptada")
-    .order("fecha", { ascending: false }).limit(1).maybeSingle();
-
   const kmVigente = Number(veh?.kilometraje_actual || 0);
-  const diasDesdeUltima = diasEntre(ult?.fecha, new Date());
+
+  // Momento de CAPTURA de esta lectura (no el de inserción/proceso): al reprocesar una foto
+  // vieja el tiempo transcurrido y las validaciones deben medirse contra cuándo se tomó.
+  const fecha = l.fecha || hoyISO();
+  const tsNueva = tsDe(l.capturado_en) ?? tsDe(fecha) ?? Date.now();
+
+  // Historial reciente para (1) el tiempo real desde la última lectura y (2) el km/día
+  // adaptativo. Se incluye 'reinicio': tras un cambio de tablero, es el ancla temporal
+  // correcto (si solo miráramos 'aceptada' y no hay ninguna posterior, caeríamos al
+  // fallback de 30 días y el anti-salto quedaría casi desactivado).
+  const { data: histAcept } = await client
+    .from("lecturas_odometro").select("km,fecha,created_at,capturado_en,estado")
+    .eq(fk, l.vehiculo_id).in("estado", ["aceptada", "reinicio"])
+    .order("created_at", { ascending: false }).limit(30);
+  const vivas = (histAcept || []) as { km: number; fecha: string; created_at: string; capturado_en: string | null; estado: string }[];
+  const tsUltima = vivas.length ? tsDe(vivas[0].capturado_en) ?? tsDe(vivas[0].created_at) : null;
+  // Horas entre la captura de la última y la captura de ESTA lectura (no "ahora").
+  const horasDesdeUltima = tsUltima != null ? Math.max(0, (tsNueva - tsUltima) / 3600_000) : null;
+
+  // km/día adaptativo: si el caller no lo fija, se deriva del ritmo histórico (kmPorDia × 3)
+  // pero nunca por DEBAJO del default de 1500 — un promedio diluido por días ociosos no debe
+  // sub-topar a un interprovincial de ráfaga. Solo lecturas 'aceptada' para el ritmo.
+  const ritmo = kmPorDia(vivas.filter(v => v.estado === "aceptada").map(a => ({ km: a.km, fecha: a.fecha })));
+  const kmDiaMax = l.kmDiaMax && l.kmDiaMax > 0
+    ? l.kmDiaMax
+    : (ritmo != null ? Math.min(Math.max(Math.round(ritmo * 3), 1500), 8000) : 1500);
+
+  // Señal de duplicado: última lectura viva con el MISMO km en una ventana corta (≤ 12 h).
+  let duplicadoProbable = false;
+  if (kmVigente > 0 && km === kmVigente) {
+    const { data: ultViva } = await client
+      .from("lecturas_odometro").select("km,created_at,capturado_en,foto_url")
+      .eq(fk, l.vehiculo_id).neq("estado", "anulada")
+      .order("created_at", { ascending: false }).limit(1).maybeSingle();
+    if (ultViva && Number(ultViva.km) === km) {
+      const tPrev = tsDe(ultViva.capturado_en) ?? tsDe(ultViva.created_at);
+      const horas = tPrev != null ? Math.abs(tsNueva - tPrev) / 3600_000 : null;
+      duplicadoProbable = (horas != null && horas <= 12) || (!!l.foto_url && ultViva.foto_url === l.foto_url);
+    }
+  }
+
+  const origenIA = l.fuente === "whatsapp_foto" || l.fuente === "whatsapp_manual" || l.fuente === "combustible";
 
   const evalr: EvalLectura = l.forzar
     ? { estado: "aceptada", motivo: null }
-    : evaluarLectura({ kmVigente, kmNuevo: km, kmDiaMax: l.kmDiaMax, diasDesdeUltima });
-
-  const fecha = l.fecha || hoyISO();
+    : evaluarLectura({
+        kmVigente, kmNuevo: km, kmDiaMax, horasDesdeUltima, origenIA, duplicadoProbable,
+        fechaLectura: l.capturado_en ?? fecha,
+      });
 
   const { data: ins, error } = await client.from("lecturas_odometro").insert({
     [fk]: l.vehiculo_id,
@@ -132,17 +241,34 @@ export async function registrarLectura(
     fecha,
     foto_url: l.foto_url ?? null,
     ref_origen: l.ref_origen ?? null,
+    capturado_en: l.capturado_en ?? null,
+    momento: l.momento ?? null,
+    idem_key: l.idemKey ?? null,
     estado: evalr.estado,
     motivo: evalr.motivo,
   }).select("id").single();
 
-  if (error) return { ok: false, estado: evalr.estado, motivo: evalr.motivo, error: error.message };
+  if (error) {
+    // Carrera perdida contra el índice único parcial (otro proceso insertó el mismo idem_key):
+    // no es un fallo real, la lectura ya existe → devolverla como idempotente.
+    if (esViolacionUnica(error) && l.idemKey) {
+      const { data: yaIdem } = await client
+        .from("lecturas_odometro").select("id,estado,motivo").eq("idem_key", l.idemKey).limit(1).maybeSingle();
+      if (yaIdem) return { ok: true, estado: yaIdem.estado, motivo: yaIdem.motivo, lecturaId: yaIdem.id };
+    }
+    return { ok: false, estado: evalr.estado, motivo: evalr.motivo, error: error.message };
+  }
 
   if (evalr.estado === "aceptada" && km > kmVigente) {
     await client.from(tabla).update({ kilometraje_actual: km }).eq("id", l.vehiculo_id);
   }
 
   return { ok: true, estado: evalr.estado, motivo: evalr.motivo, lecturaId: ins?.id };
+}
+
+/** ¿El error de Postgres/PostgREST es una violación de índice único (23505)? */
+function esViolacionUnica(error: any): boolean {
+  return error?.code === "23505" || /duplicate key|unique constraint/i.test(String(error?.message ?? ""));
 }
 
 /** Acepta manualmente una lectura sospechosa (desde el panel de revisión). */

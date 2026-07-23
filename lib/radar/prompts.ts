@@ -21,7 +21,15 @@ export type ContextoPrompt = {
   contextoGrupo?: string | null; // nota del operador sobre qué es este grupo (radar_grupos.contexto)
   guiaVoucher?: string | null;   // cómo leer los vouchers de grifo (radar_config.guia_voucher)
   guiasOdometro?: { placa: string; guia: string }[]; // dónde está la lectura en el tablero de cada unidad
+  leccionesOdometro?: string | null; // correcciones humanas previas de lectura de odómetro (para no repetir errores)
 };
+
+/** Bloque de "errores que ya cometiste" para inyectar en la lectura de odómetro. */
+function lineaLeccionesOdometro(ctx: ContextoPrompt): string {
+  const lec = (ctx.leccionesOdometro ?? "").trim();
+  if (!lec) return "";
+  return `\n\nERRORES DE LECTURA DE ODÓMETRO que ya cometiste en esta flota (corregidos por el equipo). Revísalos y NO los repitas; si tu lectura se parece a alguno, baja "confianza_lectura" y explícalo en "observaciones":\n${lec}`;
+}
 
 // ── Helpers de fecha (solo formateo, la fecha Lima llega ya resuelta) ────────
 
@@ -196,10 +204,14 @@ Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.`;
 const FORMA_ODOMETRO = `{
   "placa": string|null,                 // normalizada AAA-123 en MAYÚSCULAS
   "unidad": string|null,                // referencia informal ("bus 45") si no hay placa
-  "kilometraje": number|null,           // lectura del odómetro (número puro, sin puntos ni comas)
+  "kilometraje": number|null,           // odómetro TOTAL (número puro, sin puntos ni comas). Ignora el "Trip"/parcial
+  "trip_km": number|null,               // cuentakm PARCIAL del tablero si se ve (NO es el odómetro total)
   "fecha": "YYYY-MM-DD"|null,
   "hora": "HH:MM"|null,
   "conductor": string|null,             // nombre del conductor si se menciona
+  "calidad_imagen": "buena"|"regular"|"mala"|null,  // SOLO si viste una foto del tablero: "mala" = borrosa/reflejo/oscura/ilegible; null si es texto
+  "confianza_lectura": number|null,     // 0..1 qué tan seguro estás del NÚMERO del odómetro (null si es texto claro)
+  "texto_leido": string|null,           // los dígitos crudos que leíste en el odómetro (para poder verificar)
   "observaciones": string|null          // cualquier detalle relevante adicional
 }`;
 
@@ -315,7 +327,7 @@ export function promptExtraccion(categoria: CategoriaRadar, ctx: ContextoPrompt)
   const extra =
     categoria === "combustible"
       ? `\n- Si el texto transcribe un voucher, captura TODOS los campos impresos que se mencionen (grifo, dirección, comprobante, cantidad, precio, total, fecha y hora).`
-      : "";
+      : (categoria === "odometro" ? lineaLeccionesOdometro(ctx) : "");
   return `Eres el analista del Radar IA de AFA Transportes (operador de transporte de personal y turismo en Perú).
 
 ${lineaContexto(ctx)}
@@ -361,7 +373,7 @@ export function promptExtraccionMedia(ctx: ContextoPrompt): string {
 
 ${lineaContexto(ctx)}${lineaPalabrasClave(ctx)}
 
-${GLOSARIO}${lineaGuiasCombustible(ctx)}
+${GLOSARIO}${lineaGuiasCombustible(ctx)}${lineaLeccionesOdometro(ctx)}
 
 Haz DOS cosas en una sola respuesta:
 

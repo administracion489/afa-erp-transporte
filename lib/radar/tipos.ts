@@ -286,9 +286,13 @@ export type ExtraccionOdometro = {
   placa: string | null;
   unidad: string | null;
   kilometraje: number | null;
+  trip_km: number | null;
   fecha: string | null;
   hora: string | null;
   conductor: string | null;
+  calidad_imagen: "buena" | "regular" | "mala" | null;
+  confianza_lectura: number | null;
+  texto_leido: string | null;
   observaciones: string | null;
 };
 

@@ -110,7 +110,7 @@ export default function AnaliticaVehiculo({ veh, onClose }: { veh: VehiculoAnali
 
       const lecturas = await paginarFilas(() =>
         supabase.from("lecturas_odometro")
-          .select("id,vehiculo_id,vehiculo_tercero_id,km,fuente,fecha,estado,motivo,created_at,momento,foto_url")
+          .select("id,vehiculo_id,vehiculo_tercero_id,km,fuente,fecha,estado,motivo,created_at,capturado_en,momento,foto_url")
           .eq(fkCol, veh.id)
           .gte("fecha", desde)
           .order("fecha", { ascending: false })
