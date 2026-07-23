@@ -560,6 +560,9 @@ export default function AppPasajero() {
   // ── AUTO-DETECCIÓN B2: el bus pasó mi paradero sin escanear (solo UI, sin DB) ──
   const [busPasoMiParada, setBusPasoMiParada] = useState(false);
   const [pasoDismiss,     setPasoDismiss]     = useState(false);
+  // Estado "blando": el bus se aleja de mi paradero (tendencia sostenida) pero aún sin
+  // confirmación fuerte de que "pasó". Basta para dejar de mostrar una cuenta regresiva engañosa.
+  const [busAlejando,    setBusAlejando]    = useState(false);
   const [agoMin,         setAgoMin]         = useState<number>(0); // minutos desde última señal del bus
   const [avisadoSinSenal, setAvisadoSinSenal] = useState(false);
   const [copiado,        setCopiado]        = useState(false);
@@ -622,8 +625,15 @@ export default function AppPasajero() {
   const [mostrarParadasModal, setMostrarParadasModal] = useState(false);
 
   const alertaRef    = useRef(false);
-  const minDistRef   = useRef<number>(Infinity);          // mín. distancia bus→miParada vista
-  const pasoDesdeRef = useRef<number | null>(null);       // ts en que empezó a alejarse
+  // Seguimiento direccional del bus respecto a MI paradero (ver efecto de busPosicion):
+  //   minDist  = distancia mínima (punto más cercano) alcanzada, en m
+  //   lastD    = última distancia procesada, en m
+  //   lastTs   = timestamp de la última muestra GPS procesada (dedupe del polling)
+  //   lastLat/lastLng = última posición del bus aceptada (para descartar saltos imposibles)
+  //   recStreak/apprStreak = muestras consecutivas alejándose / acercándose
+  const segRef = useRef<{ minDist: number; lastD: number | null; lastTs: number; lastLat: number | null; lastLng: number | null; recStreak: number; apprStreak: number }>(
+    { minDist: Infinity, lastD: null, lastTs: 0, lastLat: null, lastLng: null, recStreak: 0, apprStreak: 0 }
+  );
   const watchRef     = useRef<GeoWatch | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -857,7 +867,9 @@ export default function AppPasajero() {
       const d   = dist(Number(busPosicion.lat), Number(busPosicion.lng), Number(paradaDestino.lat), Number(paradaDestino.lng));
       const eta = calcETA(d, busPosicion.velocidad);
       setDistM(d); setEtaMin(eta);
-      if (eta <= 5 && !alertaRef.current && miEstado !== "embarcado") {
+      // No dispares "tu bus está llegando" si el bus cruza la banda de ≤5 min ALEJÁNDOSE
+      // (recStreak alto = tendencia sostenida de alejamiento del paradero).
+      if (eta <= 5 && !alertaRef.current && miEstado !== "embarcado" && segRef.current.recStreak < 3) {
         alertaRef.current = true; setAlerta5min(true); setAlertaDismiss(false);
         if ("vibrate" in navigator) navigator.vibrate([300, 100, 300]);
       }
@@ -876,22 +888,73 @@ export default function AppPasajero() {
       map.current?.fitBounds(b, { padding: 80, maxZoom: 15, duration: 1500 });
     }
 
-    // ── B2: auto-detección "el bus pasó mi paradero sin escanear" ──────────────
-    // Solo aplica si sigo esperando y mi paradero tiene coords. Es una señal local
-    // (no escribe DB): el "No Show" oficial sigue siendo del despachador.
+    // ── SEGUIMIENTO DIRECCIONAL: ¿el bus se acerca, se aleja o ya pasó? ─────────
+    // El ETA por distancia (d/v) no distingue dirección: si el bus se aleja sigue
+    // mostrando "llega en X min" como si pudiera regresar. Aquí rastreamos la TENDENCIA
+    // de la distancia bus→mi paradero para detectar cuándo dejó atrás su punto más
+    // cercano y confirmar que ya pasó. Es señal local (no escribe DB); el "No Show"
+    // oficial sigue siendo del despachador.
     if (miEstado === "esperando" && miParada?.lat && miParada?.lng) {
       const dMia = dist(Number(busPosicion.lat), Number(busPosicion.lng), Number(miParada.lat), Number(miParada.lng));
-      if (dMia < minDistRef.current) minDistRef.current = dMia;
-      // Se acercó DE VERDAD al paradero (<150 m, no solo de paso por una ruta vecina) y
-      // ahora se aleja (>500 m) yendo en movimiento.
-      const seAlejando = minDistRef.current < 150 && dMia > 500 && Number(busPosicion.velocidad) > 3;
-      const t = new Date(busPosicion.timestamp ?? busPosicion.created_at ?? 0).getTime();
-      if (seAlejando && t > 0) {
-        if (pasoDesdeRef.current == null) pasoDesdeRef.current = t;
-        // Sostenido ≥ 2 min → confirmar el aviso.
-        else if (t - pasoDesdeRef.current >= 120000) setBusPasoMiParada(true);
-      } else if (!seAlejando) {
-        pasoDesdeRef.current = null;   // el bus volvió a acercarse → resetear
+      const ts   = new Date(busPosicion.timestamp ?? busPosicion.created_at ?? 0).getTime();
+      const s    = segRef.current;
+
+      // El polling repite la misma fila GPS entre envíos del conductor (~10 s): solo
+      // procesamos muestras NUEVAS para no contar la misma posición varias veces.
+      if (ts > 0 && ts !== s.lastTs) {
+        const busLat = Number(busPosicion.lat), busLng = Number(busPosicion.lng);
+        const dt       = s.lastTs ? (ts - s.lastTs) / 1000 : 0;
+        const saltoBus = s.lastLat != null ? dist(s.lastLat, s.lastLng!, busLat, busLng) : 0;
+        // Descartar muestras físicamente imposibles (glitch de GPS): un bus urbano no supera
+        // ~120 km/h (34 m/s). Sin este filtro una lectura errónea que caiga cerca de mi paradero
+        // envenenaría minDist (mínimo monótono) y dispararía un falso "ya pasó" con el bus aún viniendo.
+        const glitch = s.lastLat != null && dt > 0 && saltoBus > 400 && saltoBus / dt > 34;
+        if (!glitch) {
+          if (dMia < s.minDist) s.minDist = dMia;   // punto más cercano alcanzado
+          const gap = dMia - s.minDist;             // cuánto se alejó de ese punto más cercano
+
+          // Tendencia medida contra el punto MÁS CERCANO (no contra la muestra previa): así un
+          // bus lento en tráfico que se aleja de a pocos (<40 m por muestra) igual acumula
+          // alejamiento — el bug original se daba justo con buses lentos que "se despegaban" poco a poco.
+          const bajando = s.lastD != null && dMia < s.lastD - 40;   // se acercó vs. la muestra previa
+          if      (gap > 60)            { s.recStreak++;  s.apprStreak = 0; }  // se aleja de su mínimo
+          else if (gap < 25 || bajando) { s.apprStreak++; s.recStreak  = 0; }  // en su mínimo o regresando
+          // zona intermedia (25–60 m sin acercarse): conservar las rachas
+          s.lastD = dMia; s.lastTs = ts; s.lastLat = busLat; s.lastLng = busLng;
+
+          // Paradero SIGUIENTE al mío en la ruta (rutaParadas llega ordenada por `orden`).
+          const idxMia = rutaParadas.findIndex((p) => p.id === miParada.id);
+          const paradaSiguiente = idxMia >= 0 && idxMia < rutaParadas.length - 1 ? rutaParadas[idxMia + 1] : null;
+
+          // Señales de que el bus quedó "aguas abajo" de mi paradero (para el aviso ROJO):
+          //  A) ahora está MÁS CERCA del paradero siguiente que del mío → avanzó por la ruta
+          //     (robusto a coords imprecisas; distingue "pasó de verdad" de "fue al retorno").
+          //  B) se acercó de verdad (<450 m) y ya quedó MUY atrás (+600 m, más que un retorno típico
+          //     de una avenida con separador, para no gritar "ya pasó" cuando el bus da la vuelta a recoger).
+          const masCercaDelSiguiente = paradaSiguiente?.lat != null && paradaSiguiente?.lng != null &&
+            dist(busLat, busLng, Number(paradaSiguiente.lat), Number(paradaSiguiente.lng)) < dMia;
+          const dejoAtrasClaro = s.minDist < 450 && gap > 600;
+          const sostenido = s.recStreak >= 3;   // ~3 muestras seguidas alejándose
+
+          if (sostenido && (masCercaDelSiguiente || dejoAtrasClaro)) {
+            // Confianza alta: el bus pasó mi paradero y sigue de largo → aviso rojo + cortar cuenta regresiva.
+            setBusPasoMiParada(true);
+            setBusAlejando(true);
+          } else if (sostenido) {
+            // Alejamiento sostenido sin confirmación locacional fuerte (p. ej. sobrepasa hacia un
+            // retorno): no mostramos cuenta regresiva engañosa, pero aún no el aviso rojo de "ya pasó".
+            setBusAlejando(true);
+          } else if (s.apprStreak >= 2 && dMia < 400) {
+            // El bus REGRESÓ y está cerca otra vez (fue al retorno / dio la vuelta a recoger):
+            // limpiar AMBOS avisos y re-sembrar el mínimo. Exigir cercanía (<400 m) distingue un
+            // retorno real (el bus vuelve al paradero) de una curva de la vía que solo acorta la
+            // distancia en línea recta mientras el bus se va de verdad → así no borramos un "ya pasó" legítimo.
+            setBusAlejando(false);
+            setBusPasoMiParada(false);
+            s.minDist = dMia;
+            s.recStreak = 0;
+          }
+        }
       }
     }
   }, [busPosicion, mapListo, miParada, vehiculo, conductor, miEstado, rutaParadas]);
@@ -1019,11 +1082,11 @@ export default function AppPasajero() {
   // Mantener ref sincronizada con el último GPS (para leerlo dentro de intervalos sin dep)
   useEffect(() => { busPosicionRef.current = busPosicion; }, [busPosicion]);
 
-  // Resetear la auto-detección B2 al cambiar de servicio/parada (o si ya abordó).
+  // Resetear el seguimiento direccional al cambiar de servicio/parada (o si ya abordó).
   useEffect(() => {
-    minDistRef.current = Infinity;
-    pasoDesdeRef.current = null;
+    segRef.current = { minDist: Infinity, lastD: null, lastTs: 0, lastLat: null, lastLng: null, recStreak: 0, apprStreak: 0 };
     setBusPasoMiParada(false);
+    setBusAlejando(false);
     setPasoDismiss(false);
   }, [miParada?.id, miEstado]);
 
@@ -1463,6 +1526,26 @@ export default function AppPasajero() {
   // Derivados
   const busActivo = busPosicion && estadoBus !== "finalizado" && estadoBus !== "sin_señal";
   const pct       = distM !== null ? Math.max(0, Math.min(100, 100 - (distM / 5000) * 100)) : 0;
+  // Flags de dirección para la UI. Solo aplican mientras ESPERO el recojo (no embarcado),
+  // y "se aleja" (estado blando, en presente) cede ante SIN SEÑAL/FINALIZADO para no
+  // congelarse afirmando movimiento cuando el GPS quedó obsoleto. "Ya pasó" es una
+  // conclusión durable y conserva su prioridad.
+  const esperando = miEstado === "esperando";
+  const yaPaso    = esperando && busPasoMiParada;
+  const seAleja   = esperando && busAlejando && estadoBus !== "sin_señal" && estadoBus !== "finalizado";
+  // El bus ya pasó o se aleja de mi paradero: NO mostrar cuenta regresiva ni hora de
+  // llegada "en vivo" (evita el bug de "recalcula como si aún viniera / pudiera regresar").
+  const busYaNoViene = yaPaso || seAleja;
+  const mostrarEta   = busActivo && etaMin !== null && !busYaNoViene;
+  const etaEnVivo    = busYaNoViene ? null : etaGoogle;
+  // Píldora de estado (arriba a la derecha del mapa).
+  const pillAlerta = yaPaso || seAleja || estadoBus === "sin_señal";
+  const pillTexto  = yaPaso ? "YA PASÓ"
+    : seAleja                    ? "SE ALEJA"
+    : estadoBus === "sin_señal"  ? "SIN SEÑAL"
+    : estadoBus === "finalizado" ? "FINALIZADO"
+    : !busPosicion               ? "ESPERANDO"
+    : "EN VIVO";
 
   // ── LOADING ─────────────────────────────────────────────────────────────────
   if (initing) return (
@@ -1720,11 +1803,19 @@ export default function AppPasajero() {
                                   <span className="afa-para-tag-m">
                                     <IconPin sz={10} c="var(--navy)" /> Tu paradero
                                   </span>
-                                  {etaMin !== null && etaMin > 0 && (
+                                  {yaPaso ? (
+                                    <span className="afa-para-tag-e">
+                                      <IconBus sz={10} c="var(--warn)" /> Ya pasó
+                                    </span>
+                                  ) : seAleja ? (
+                                    <span className="afa-para-tag-e">
+                                      <IconBus sz={10} c="var(--warn)" /> Se aleja
+                                    </span>
+                                  ) : etaMin !== null && etaMin > 0 ? (
                                     <span className="afa-para-tag-e">
                                       <IconClock sz={10} c="var(--warn)" /> En {fmtETA(etaMin)}
                                     </span>
-                                  )}
+                                  ) : null}
                                 </div>
                               )}
                             </div>
@@ -2117,16 +2208,16 @@ export default function AppPasajero() {
                 <span style={{ fontWeight: 700, fontSize: 13, color: "var(--ink)", letterSpacing: -0.1 }}>{pasajero.nombre.split(" ").slice(0, 2).join(" ")}</span>
                 <div style={{ width: 26, height: 26, borderRadius: "50%", background: "var(--navy)", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 11 }}>{ini(pasajero.nombre)}</div>
               </div>
-              <div style={{ background: estadoBus === "sin_señal" ? "var(--warn-tint)" : "white", borderRadius: 999, padding: "7px 12px", display: "flex", alignItems: "center", gap: 7, boxShadow: "0 4px 14px rgba(0,0,0,0.08)", border: `1px solid ${estadoBus === "sin_señal" ? "rgba(180,83,9,0.2)" : "var(--line2)"}` }}>
-                <StatusDot color={estadoBus === "en_camino" ? "var(--success)" : estadoBus === "retrasado" ? "var(--warn)" : estadoBus === "sin_señal" ? "var(--warn)" : "var(--mute2)"} size={7} />
-                <span style={{ fontWeight: 700, fontSize: 12, color: estadoBus === "sin_señal" ? "var(--warn)" : "var(--ink2)", letterSpacing: -0.1 }}>
-                  {estadoBus === "sin_señal" ? "SIN SEÑAL" : estadoBus === "finalizado" ? "FINALIZADO" : !busPosicion ? "ESPERANDO" : "EN VIVO"}
+              <div style={{ background: pillAlerta ? "var(--warn-tint)" : "white", borderRadius: 999, padding: "7px 12px", display: "flex", alignItems: "center", gap: 7, boxShadow: "0 4px 14px rgba(0,0,0,0.08)", border: `1px solid ${pillAlerta ? "rgba(180,83,9,0.2)" : "var(--line2)"}` }}>
+                <StatusDot color={pillAlerta ? "var(--warn)" : estadoBus === "en_camino" ? "var(--success)" : estadoBus === "retrasado" ? "var(--warn)" : "var(--mute2)"} size={7} pulse={!yaPaso} />
+                <span style={{ fontWeight: 700, fontSize: 12, color: pillAlerta ? "var(--warn)" : "var(--ink2)", letterSpacing: -0.1 }}>
+                  {pillTexto}
                 </span>
               </div>
             </div>
 
             {/* Arrival banner (≤5 min) */}
-            {alerta5min && !alertaDismiss && miEstado !== "embarcado" && !busPasoMiParada && (
+            {alerta5min && !alertaDismiss && miEstado !== "embarcado" && !busPasoMiParada && !busAlejando && (
               <div style={{ position: "absolute", top: 78, left: 14, right: 14, zIndex: 4, background: "var(--navy)", color: "white", borderRadius: 18, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, boxShadow: "0 10px 30px rgba(11,49,95,0.4)", animation: "sheetIn 0.4s cubic-bezier(.2,.7,.3,1)" }}>
                 <div style={{ width: 38, height: 38, borderRadius: 12, background: "rgba(255,255,255,0.14)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                   <IconBell sz={20} c="white" />
@@ -2148,8 +2239,8 @@ export default function AppPasajero() {
                   <IconBus sz={20} c="#b45309" />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <p style={{ margin: 0, fontWeight: 800, fontSize: 15, letterSpacing: -0.2 }}>El bus podría haber pasado tu paradero</p>
-                  <p style={{ margin: "2px 0 8px", fontSize: 12.5, color: "rgba(146,64,14,0.78)", letterSpacing: -0.1 }}>¿No te recogieron? Contáctanos para resolverlo.</p>
+                  <p style={{ margin: 0, fontWeight: 800, fontSize: 15, letterSpacing: -0.2 }}>El bus ya pasó tu paradero</p>
+                  <p style={{ margin: "2px 0 8px", fontSize: 12.5, color: "rgba(146,64,14,0.78)", letterSpacing: -0.1 }}>Se está alejando{distM !== null ? ` (a ${fmtDist(distM)})` : ""}. ¿No te recogieron? Contáctanos ahora.</p>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     {conductor?.telefono && (
                       <a href={telHref(conductor.telefono)} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 10, background: "#b45309", color: "white", textDecoration: "none", fontWeight: 700, fontSize: 12, fontFamily: "var(--f)" }}>
@@ -2169,7 +2260,7 @@ export default function AppPasajero() {
 
             {/* GPS denied banner */}
             {gpsPermiso === "denied" && !mostrarModalGPS && (
-              <div style={{ position: "absolute", top: (busPasoMiParada && !pasoDismiss && miEstado === "esperando") ? 188 : (alerta5min && !alertaDismiss && miEstado !== "embarcado" && !busPasoMiParada) ? 144 : 78, left: 14, right: 14, zIndex: 3, background: "var(--warn-tint)", borderRadius: 14, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, border: "1px solid rgba(180,83,9,0.2)" }}>
+              <div style={{ position: "absolute", top: (busPasoMiParada && !pasoDismiss && miEstado === "esperando") ? 188 : (alerta5min && !alertaDismiss && miEstado !== "embarcado" && !busPasoMiParada && !busAlejando) ? 144 : 78, left: 14, right: 14, zIndex: 3, background: "var(--warn-tint)", borderRadius: 14, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, border: "1px solid rgba(180,83,9,0.2)" }}>
                 <IconPin sz={16} c="var(--warn)" />
                 <p style={{ flex: 1, margin: 0, fontSize: 12, color: "var(--warn)", fontWeight: 600 }}>GPS desactivado — actívalo para ver tu posición</p>
                 <button onClick={() => void solicitarGPS(true)} style={{ background: "var(--warn)", border: "none", borderRadius: 8, padding: "4px 10px", color: "white", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--f)", flexShrink: 0 }}>Activar</button>
@@ -2413,40 +2504,73 @@ export default function AppPasajero() {
                 <div style={{ padding: "14px 20px 0" }}>
                   {/* Eyebrow status */}
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                    <StatusDot color={miEstado === "embarcado" ? "var(--success)" : "var(--navy)"} size={7} />
-                    <Eyebrow color={miEstado === "embarcado" ? "var(--success)" : "var(--navy)"}>
-                      {miEstado === "embarcado" ? "A bordo · viaje en curso" : estadoBus === "no_iniciado" || !busPosicion ? "Bus aún no inicia" : estadoBus === "retrasado" ? "Bus detenido · tráfico" : "En camino a tu paradero"}
+                    <StatusDot color={miEstado === "embarcado" ? "var(--success)" : busYaNoViene ? "var(--warn)" : "var(--navy)"} size={7} pulse={!yaPaso} />
+                    <Eyebrow color={miEstado === "embarcado" ? "var(--success)" : busYaNoViene ? "var(--warn)" : "var(--navy)"}>
+                      {miEstado === "embarcado" ? "A bordo · viaje en curso"
+                        : yaPaso ? "El bus ya pasó tu paradero"
+                        : seAleja ? "El bus se aleja de tu paradero"
+                        : estadoBus === "no_iniciado" || !busPosicion ? "Bus aún no inicia"
+                        : estadoBus === "retrasado" ? "Bus detenido · tráfico"
+                        : "En camino a tu paradero"}
                     </Eyebrow>
                   </div>
 
                   {/* ETA hero */}
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 14, marginBottom: 10 }}>
-                    {busActivo && etaMin !== null ? (
-                      <span key={etaMin} style={{ fontFamily: "var(--f)", fontWeight: 800, fontSize: 72, lineHeight: 0.95, color: "var(--ink)", letterSpacing: -3.5, animation: "numIn 0.5s ease", display: "inline-block" }}>{etaMin}</span>
+                  <div style={{ display: "flex", alignItems: busYaNoViene ? "center" : "baseline", gap: 14, marginBottom: 10 }}>
+                    {yaPaso ? (
+                      /* El bus ya pasó: sin cuenta regresiva — mensaje claro. */
+                      <>
+                        <div style={{ width: 54, height: 54, borderRadius: 16, background: "var(--warn-tint)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          <IconBus sz={26} c="var(--warn)" />
+                        </div>
+                        <div style={{ minWidth: 0 }}>
+                          <p style={{ margin: 0, fontWeight: 800, fontSize: 22, color: "var(--warn)", letterSpacing: -0.5, lineHeight: 1.05 }}>El bus ya pasó</p>
+                          <p style={{ margin: "3px 0 0", fontSize: 12.5, color: "var(--mute)" }}>{distM !== null ? `A ${fmtDist(distM)} y alejándose` : "Se aleja de tu paradero"}</p>
+                        </div>
+                      </>
+                    ) : seAleja ? (
+                      /* Se aleja (sin confirmar que pasó): tampoco mostramos cuenta regresiva. */
+                      <>
+                        <div style={{ width: 54, height: 54, borderRadius: 16, background: "var(--soft)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          <IconBus sz={26} c="var(--mute)" />
+                        </div>
+                        <div style={{ minWidth: 0 }}>
+                          <p style={{ margin: 0, fontWeight: 800, fontSize: 20, color: "var(--ink)", letterSpacing: -0.4, lineHeight: 1.05 }}>El bus se aleja</p>
+                          <p style={{ margin: "3px 0 0", fontSize: 12.5, color: "var(--mute)" }}>{distM !== null ? `A ${fmtDist(distM)} de tu paradero` : "Alejándose de tu paradero"}</p>
+                        </div>
+                      </>
                     ) : (
-                      <span style={{ fontFamily: "var(--f)", fontWeight: 800, fontSize: 48, lineHeight: 0.95, color: "var(--mute2)", letterSpacing: -2 }}>—</span>
+                      <>
+                        {mostrarEta ? (
+                          <span key={etaMin} style={{ fontFamily: "var(--f)", fontWeight: 800, fontSize: 72, lineHeight: 0.95, color: "var(--ink)", letterSpacing: -3.5, animation: "numIn 0.5s ease", display: "inline-block" }}>{etaMin}</span>
+                        ) : (
+                          <span style={{ fontFamily: "var(--f)", fontWeight: 800, fontSize: 48, lineHeight: 0.95, color: "var(--mute2)", letterSpacing: -2 }}>—</span>
+                        )}
+                        <div style={{ paddingBottom: 6 }}>
+                          <p style={{ margin: 0, fontWeight: 700, fontSize: 16, color: "var(--ink)", letterSpacing: -0.3 }}>{mostrarEta ? "min" : "Bus esperando"}</p>
+                          <p style={{ margin: "2px 0 0", fontSize: 12, color: "var(--mute)" }}>{distM !== null ? fmtDist(distM) : miParada.reserva?.hora_servicio ? `Primer paradero · ${fmtHora(miParada.reserva.hora_servicio)}` : ""}</p>
+                        </div>
+                      </>
                     )}
-                    <div style={{ paddingBottom: 6 }}>
-                      <p style={{ margin: 0, fontWeight: 700, fontSize: 16, color: "var(--ink)", letterSpacing: -0.3 }}>{busActivo && etaMin !== null ? "min" : "Bus esperando"}</p>
-                      <p style={{ margin: "2px 0 0", fontSize: 12, color: "var(--mute)" }}>{distM !== null ? fmtDist(distM) : miParada.reserva?.hora_servicio ? `Primer paradero · ${fmtHora(miParada.reserva.hora_servicio)}` : ""}</p>
-                    </div>
                     <div style={{ flex: 1 }} />
-                    {/* Arrival time chip — En vivo con Google cuando bus conectado */}
-                    <div style={{ background: etaGoogle !== null ? "var(--navy)" : "var(--surface)", border: `1px solid ${etaGoogle !== null ? "transparent" : "var(--line)"}`, borderRadius: 12, padding: "8px 12px", alignSelf: "flex-end", transition: "background 0.4s" }}>
-                      <p style={{ margin: 0, fontSize: 9, fontWeight: 700, color: etaGoogle !== null ? "rgba(255,255,255,0.7)" : "var(--mute)", letterSpacing: 0.6, textTransform: "uppercase" }}>
-                        {miEstado === "embarcado" ? "Llega destino" : etaGoogle !== null ? "En vivo · llega" : miParada.hora_estimada ? "Tu recojo" : "Salida"}
-                      </p>
-                      <p style={{ margin: "2px 0 0", fontFamily: "var(--m)", fontSize: 18, fontWeight: 700, color: etaGoogle !== null ? "white" : "var(--ink)", letterSpacing: -0.5 }}>
-                        {etaGoogle !== null ? fmtHoraLlegada(etaGoogle) : (miParada.hora_estimada || fmtHora(miParada.reserva?.hora_servicio) || "—")}
-                      </p>
-                    </div>
+                    {/* Arrival time chip — En vivo con Google solo cuando el bus AÚN viene */}
+                    {!busYaNoViene && (
+                      <div style={{ background: etaEnVivo !== null ? "var(--navy)" : "var(--surface)", border: `1px solid ${etaEnVivo !== null ? "transparent" : "var(--line)"}`, borderRadius: 12, padding: "8px 12px", alignSelf: "flex-end", transition: "background 0.4s" }}>
+                        <p style={{ margin: 0, fontSize: 9, fontWeight: 700, color: etaEnVivo !== null ? "rgba(255,255,255,0.7)" : "var(--mute)", letterSpacing: 0.6, textTransform: "uppercase" }}>
+                          {miEstado === "embarcado" ? "Llega destino" : etaEnVivo !== null ? "En vivo · llega" : miParada.hora_estimada ? "Tu recojo" : "Salida"}
+                        </p>
+                        <p style={{ margin: "2px 0 0", fontFamily: "var(--m)", fontSize: 18, fontWeight: 700, color: etaEnVivo !== null ? "white" : "var(--ink)", letterSpacing: -0.5 }}>
+                          {etaEnVivo !== null ? fmtHoraLlegada(etaEnVivo) : (miParada.hora_estimada || fmtHora(miParada.reserva?.hora_servicio) || "—")}
+                        </p>
+                      </div>
+                    )}
                   </div>
 
                   {/* Progress bar */}
                   {distM !== null && (
                     <div style={{ marginTop: 4, marginBottom: 14 }}>
                       <div style={{ height: 5, background: "var(--line2)", borderRadius: 999, overflow: "hidden" }}>
-                        <div style={{ height: "100%", width: `${pct}%`, background: `linear-gradient(90deg, var(--navy) 0%, ${alerta5min ? "var(--success)" : "var(--navy)"} 100%)`, borderRadius: 999, transition: "width 1.5s ease" }} />
+                        <div style={{ height: "100%", width: `${pct}%`, background: `linear-gradient(90deg, var(--navy) 0%, ${alerta5min && !busYaNoViene ? "var(--success)" : "var(--navy)"} 100%)`, borderRadius: 999, transition: "width 1.5s ease" }} />
                       </div>
                       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
                         <span style={{ fontSize: 10, color: "var(--mute2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>{(miParada.reserva as any)?.origen || "Origen"}</span>
@@ -2916,7 +3040,7 @@ export default function AppPasajero() {
         {/* ── BOTTOM NAV ── */}
         <nav className="afa-nav">
           {([
-            { id: "ruta" as Tab, lbl: "Mi ruta",  Icon: IconMap,  badge: alerta5min && !alertaDismiss && miEstado !== "embarcado" },
+            { id: "ruta" as Tab, lbl: "Mi ruta",  Icon: IconMap,  badge: alerta5min && !alertaDismiss && miEstado !== "embarcado" && !busPasoMiParada && !busAlejando },
             { id: "qr"   as Tab, lbl: "Pase",      Icon: IconQR,   badge: false },
             { id: "perfil" as Tab, lbl: "Perfil",  Icon: IconUser, badge: gpsPermiso === "denied" },
           ]).map(t => {
