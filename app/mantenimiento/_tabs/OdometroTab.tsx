@@ -89,8 +89,9 @@ export default function OdometroTab() {
   // Drawer de analítica
   const [vehSel, setVehSel]       = useState<VehiculoAnalitica | null>(null);
 
-  // Visor de la foto del tablero (evidencia de la lectura)
-  const [fotoZoom, setFotoZoom]   = useState<{ url: string; titulo: string } | null>(null);
+  // Visor de la foto del tablero (evidencia de la lectura). Puede llevar la lectura
+  // asociada para ofrecer "Anular / avisar a la IA" desde el propio visor.
+  const [fotoZoom, setFotoZoom]   = useState<{ url: string; titulo: string; lectura?: Lectura } | null>(null);
 
   // Anulación de una lectura (con motivo → alimenta el aprendizaje de la IA)
   const [anular, setAnular]       = useState<Lectura | null>(null);
@@ -391,7 +392,7 @@ export default function OdometroTab() {
                     <td className="p-2">
                       {l.foto_url ? (
                         <button type="button"
-                          onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${vehName(l)} · ${Number(l.km).toLocaleString("es-PE")} km · ${fmtFecha(l.fecha)}` })}
+                          onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${vehName(l)} · ${Number(l.km).toLocaleString("es-PE")} km · ${fmtFecha(l.fecha)}`, lectura: l })}
                           className="block rounded-lg overflow-hidden border border-amber-200 hover:ring-2 hover:ring-amber-400"
                           title="Ver foto del tablero">
                           <img src={l.foto_url} alt="Tablero" className="w-16 h-12 object-cover" />
@@ -504,12 +505,12 @@ export default function OdometroTab() {
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead><tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                  {["Vehículo", "Fecha", "Primera", "Última", "Recorrido", "Lecturas", "Estado", ""].map(h =>
+                  {["Vehículo", "Fecha", "Primera", "Última", "Recorrido", "Lecturas", "Foto", "Estado", ""].map(h =>
                     <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>)}
                 </tr></thead>
                 <tbody>
                   {jornadas.length === 0 ? (
-                    <tr><td colSpan={8} className="p-10 text-center text-gray-400">
+                    <tr><td colSpan={9} className="p-10 text-center text-gray-400">
                       <p className="text-3xl mb-2">🚌</p><p className="font-medium">Sin jornadas en el filtro</p>
                     </td></tr>
                   ) : jornadas.map((j) => {
@@ -527,6 +528,18 @@ export default function OdometroTab() {
                             : <span style={{ color: sev === "critico" ? "#991b1b" : sev === "advertencia" ? "#b45309" : "#0b315f" }}>{fmtNum(j.recorrido)} km</span>}
                         </td>
                         <td className="p-3 text-xs text-gray-500">{j.nLecturas}</td>
+                        <td className="p-3">
+                          <div className="flex gap-1">
+                            {j.lecturas.filter(l => l.foto_url).slice(0, 4).map(l => (
+                              <button key={l.id} type="button" title={`${fmtNum(Number(l.km))} km · ver / corregir`}
+                                onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${j.placa} · ${fmtNum(Number(l.km))} km · ${fmtFecha(j.fecha)}`, lectura: l as unknown as Lectura })}
+                                className={`block rounded-md overflow-hidden border hover:ring-2 hover:ring-[#0b315f]/40 ${l.esReinicio ? "border-blue-300" : "border-gray-200"}`}>
+                                <img src={l.foto_url!} alt="Tablero" className="w-10 h-8 object-cover" />
+                              </button>
+                            ))}
+                            {j.lecturas.every(l => !l.foto_url) && <span className="text-[11px] text-gray-300">—</span>}
+                          </div>
+                        </td>
                         <td className="p-3">
                           {sev ? (
                             <span className="text-[11px] font-bold px-2 py-0.5 rounded-lg" style={{ background: sev === "critico" ? "#fee2e2" : "#fef9c3", color: sev === "critico" ? "#991b1b" : "#854d0e" }}
@@ -590,7 +603,7 @@ export default function OdometroTab() {
                       <td className="p-3 text-xs">
                         {l.foto_url
                           ? <button type="button" className="text-blue-600 hover:underline"
-                              onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${vehName(l)} · ${Number(l.km).toLocaleString("es-PE")} km · ${fmtFecha(l.fecha)}` })}>ver</button>
+                              onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${vehName(l)} · ${Number(l.km).toLocaleString("es-PE")} km · ${fmtFecha(l.fecha)}`, lectura: l })}>ver</button>
                           : "—"}
                       </td>
                       <td className="p-3 text-right whitespace-nowrap">
@@ -632,10 +645,18 @@ export default function OdometroTab() {
               className="text-xs font-normal underline opacity-80 hover:opacity-100">abrir original</a>
           </div>
           <img src={fotoZoom.url} alt="Foto del tablero"
-            className="max-h-[80vh] max-w-full rounded-xl shadow-2xl object-contain"
+            className="max-h-[75vh] max-w-full rounded-xl shadow-2xl object-contain"
             onClick={e => e.stopPropagation()} />
-          <button onClick={() => setFotoZoom(null)}
-            className="mt-3 px-4 py-2 rounded-xl bg-white text-sm font-bold">Cerrar</button>
+          <div className="mt-3 flex items-center gap-2" onClick={e => e.stopPropagation()}>
+            <button onClick={() => setFotoZoom(null)}
+              className="px-4 py-2 rounded-xl bg-white text-sm font-bold">Cerrar</button>
+            {fotoZoom.lectura && fotoZoom.lectura.estado !== "anulada" && (
+              <button onClick={() => { const l = fotoZoom.lectura!; setFotoZoom(null); setAnular(l); }}
+                className="px-4 py-2 rounded-xl bg-red-600 text-white text-sm font-bold hover:opacity-90">
+                🗑 Anular / avisar a la IA
+              </button>
+            )}
+          </div>
         </div>
       )}
     </main>

@@ -66,6 +66,7 @@ export type DiaRecorrido = {
   pendiente: boolean;            // true = solo 1 lectura → no se puede calcular
   reinicio: boolean;             // hubo un cambio de tablero ese día
   anomalias: Anomalia[];
+  lecturas: LecturaSana[];       // lecturas saneadas de la jornada (para ver foto / corregir)
 };
 
 export type TipoAnomalia =
@@ -307,6 +308,7 @@ export function recorridosDiarios(limpias: LecturaSana[]): DiaRecorrido[] {
       pendiente,
       reinicio: hayReinicio,
       anomalias,
+      lecturas: orden,
     });
   }
 
