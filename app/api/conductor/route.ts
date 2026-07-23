@@ -11,7 +11,7 @@ import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { registrarLectura } from "@/lib/odometro";
 import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm, enviarPushAPasajeros, payloadRespuestaChat } from "@/lib/push";
-import { evaluarProximidad } from "@/lib/proximidad";
+import { evaluarProximidad, emitirLlego } from "@/lib/proximidad";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -326,18 +326,30 @@ export async function POST(req: NextRequest) {
 
       // ── Marcar parada completada ─────────────────────────────────────────────
       case "marcar_parada": {
-        const { paradaId } = body;
+        const { paradaId, horaLlegada } = body;
         if (!paradaId) return NextResponse.json({ error: "paradaId requerido" }, { status: 400 });
-        const { error } = await admin.from("paradas").update({ estado: "completada" }).eq("id", paradaId);
+        // `hora_llegada`: hora REAL de arribo. El nudge de auto-llegada manda la hora
+        // de ENTRADA al radio del paradero; el marcado manual manda null → now(). La
+        // columna es opcional (SQL paradas-hora-llegada.sql); si el build de la BD aún
+        // no la tiene, se reintenta sin ella para no romper el marcado.
+        const llegadaISO = typeof horaLlegada === "string" && horaLlegada ? horaLlegada : new Date().toISOString();
+        let { error } = await admin.from("paradas")
+          .update({ estado: "completada", hora_llegada: llegadaISO }).eq("id", paradaId);
+        if (error && esColumnaInexistente(error)) {
+          ({ error } = await admin.from("paradas").update({ estado: "completada" }).eq("id", paradaId));
+        }
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         // Push "quedan 2 paradas": tras completar una parada, avisar a la parada
         // pendiente que quedó con EXACTAMENTE 2 pendientes por delante. Solo N=2
         // (anti-spam) y dedupe por parada en push_eventos_viaje.
         after(async () => {
           try {
-            const { data: pMarcada } = await admin.from("paradas").select("reserva_id").eq("id", paradaId).maybeSingle();
+            const { data: pMarcada } = await admin.from("paradas").select("reserva_id, nombre").eq("id", paradaId).maybeSingle();
             const rid = Number(pMarcada?.reserva_id);
             if (!Number.isFinite(rid) || rid <= 0) return;
+            // Fallback "ya llegó" de ÚLTIMO recurso: cubre GPS muerto + 0 embarques (nadie
+            // escaneó ni se embarcó). El dedupe evita duplicar si ya se avisó por otra vía.
+            await emitirLlego({ reservaId: rid, paradaId, paradaNombre: pMarcada?.nombre });
             const { data: ps } = await admin.from("paradas")
               .select("id, nombre, orden, estado").eq("reserva_id", rid).order("orden");
             const pendientes = (ps || []).filter((p: any) => p.estado !== "completada");
@@ -351,6 +363,41 @@ export async function POST(req: NextRequest) {
               });
             }
           } catch (e: any) { console.warn("[push quedan_paradas]", e?.message); }
+        });
+        return NextResponse.json({ ok: true });
+      }
+
+      // ── Deshacer una parada marcada (undo del nudge de auto-llegada) ──────────
+      // Devuelve la parada a pendiente y borra la hora de llegada. Se usa desde el
+      // "Deshacer" que aparece tras marcar por el nudge, por si fue por error.
+      case "anular_parada": {
+        const { paradaId } = body;
+        if (!paradaId) return NextResponse.json({ error: "paradaId requerido" }, { status: 400 });
+        let { error } = await admin.from("paradas")
+          .update({ estado: "pendiente", hora_llegada: null }).eq("id", paradaId);
+        if (error && esColumnaInexistente(error)) {
+          ({ error } = await admin.from("paradas").update({ estado: "pendiente" }).eq("id", paradaId));
+        }
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ ok: true });
+      }
+
+      // ── Ping de llegada por geofence local del conductor ─────────────────────
+      // El app del conductor detecta la 1ª entrada al radio de la parada actual (hora real
+      // de llegada) y avisa aquí. Dispara el push "ya llegó" como fallback cuando el
+      // heartbeat GPS del servidor se cayó pero el geofence local sí tripó. Best-effort,
+      // post-respuesta; el dedupe insert-once evita duplicar con proximidad.
+      case "llegada_geofence": {
+        const { paradaId } = body;
+        if (!paradaId) return NextResponse.json({ error: "paradaId requerido" }, { status: 400 });
+        after(async () => {
+          try {
+            const { data: p } = await admin.from("paradas").select("reserva_id, nombre").eq("id", paradaId).maybeSingle();
+            const rid = Number(p?.reserva_id);
+            if (Number.isFinite(rid) && rid > 0) {
+              await emitirLlego({ reservaId: rid, paradaId: Number(paradaId), paradaNombre: p?.nombre });
+            }
+          } catch (e: any) { console.warn("[llegada_geofence]", e?.message); }
         });
         return NextResponse.json({ ok: true });
       }
@@ -370,6 +417,9 @@ export async function POST(req: NextRequest) {
         // Bitácora real de abordaje (la lee el reporte del portal cliente).
         await logBoarding(pasajeroId ?? null, paradaIdReal ?? null, reservaId ?? null);
         after(() => pushEmbarcado(pasajeroId, reservaId));
+        // Fallback "ya llegó" al resto que espera en este paradero: si alguien sube, el bus
+        // está aquí (a prueba de GPS malo). Dedupe insert-once → no duplica con proximidad.
+        if (paradaIdReal && reservaId) after(() => emitirLlego({ reservaId: Number(reservaId), paradaId: Number(paradaIdReal) }));
         return NextResponse.json({ ok: true });
       }
 
@@ -475,6 +525,8 @@ export async function POST(req: NextRequest) {
           if (eIns) return NextResponse.json({ error: eIns.message }, { status: 500 });
           await logBoarding(pasajeroId, paradaId, reservaId);
           after(() => pushEmbarcado(pasajeroId, reservaId));
+          // Fallback "ya llegó" al resto que espera en este paradero (dedupe evita duplicar).
+          after(() => emitirLlego({ reservaId: Number(reservaId), paradaId: Number(paradaId) }));
           return NextResponse.json({ ok: true, id: nuevo?.id, creado: true, empresaAjena, pasajero: pasajeroInfo });
         }
 
@@ -514,6 +566,8 @@ export async function POST(req: NextRequest) {
         if (!yaEmbarcado) {
           await logBoarding(pasajeroId, paradaId, reservaId);
           after(() => pushEmbarcado(pasajeroId, reservaId));
+          // Fallback "ya llegó" al resto que espera en este paradero (dedupe evita duplicar).
+          after(() => emitirLlego({ reservaId: Number(reservaId), paradaId: Number(paradaId) }));
         }
 
         return NextResponse.json({ ok: true, id: target.id, movido, otroBus, paradaOriginalId, eliminados, yaEmbarcado, empresaAjena, pasajero: pasajeroInfo });

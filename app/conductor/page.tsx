@@ -29,7 +29,7 @@ type Conductor = {
 };
 type Vehiculo  = { id: number; placa: string; categoria: string | null; marca?: string | null; };
 type Reserva   = { id: number; origen: string; destino: string; fecha_servicio: string | null; hora_servicio?: string | null; vehiculo_id?: number | null; estado?: string | null; };
-type Parada    = { id: number; reserva_id: number; orden: number; nombre: string; direccion: string | null; lat: number | null; lng: number | null; hora_estimada: string | null; estado: string; };
+type Parada    = { id: number; reserva_id: number; orden: number; nombre: string; direccion: string | null; lat: number | null; lng: number | null; hora_estimada: string | null; estado: string; hora_llegada?: string | null; };
 type Pasajero  = { id: number; nombre: string; dni: string | null; empresa: string | null; qr_code: string | null; foto_url: string | null; };
 type PasajeroParada = { id: number; parada_id: number; pasajero_id: number; estado: string; pasajero?: Pasajero; };
 type CheckItem = { id: string; label: string; categoria: string; ok: boolean | null; };
@@ -268,6 +268,67 @@ function cercaDeAlgunParadero(pos: GeoPos, paradas: { lat: number | null; lng: n
     if (d < UMBRAL_PARADERO_M) return true;
   }
   return false;
+}
+
+// ─── GEOFENCE DE AUTO-LLEGADA (nudge, no marca sola) ───────────────────────────
+// Detecta que el bus llegó al paradero para RECORDARLE al conductor que marque la
+// llegada — nunca marca en silencio (una marca falsa avisa a pasajeros y ensucia el
+// registro; ver /api/conductor "quedan_paradas"). Dos avisos: SUAVE al detenerse en
+// el paradero y FUERTE si se aleja sin marcar. La histéresis entrada/salida evita el
+// parpadeo por deriva del GPS. Distancias, no velocidad: los equipos sin Doppler
+// reportan speed=0 y confundirían "detenido" con "pasando lento" — la PRESENCIA
+// sostenida dentro del radio es una señal robusta en cualquier equipo.
+const GEO_ACC_MAX      = 80;     // m: fixes peores que esto no deciden geofence (basura de torre/red)
+const GEO_RADIO_ENTRADA = 120;   // m: entró al paradero (radio interno)
+const GEO_RADIO_SALIDA  = 250;   // m: se alejó del paradero (radio externo → dispara aviso fuerte)
+const GEO_DWELL_MS      = 20000;  // ms de presencia continua dentro del radio interno → "estás en el paradero"
+// Atribución de EMBARQUE por GPS: el paradero real donde está el bus al escanear,
+// no el puntero manual (que el nudge/marcado puede haber adelantado).
+const GEO_RADIO_EMBARQUE  = 200;  // m: tope para considerar que el bus está EN ese paradero
+const GEO_MARGEN_EMBARQUE = 40;   // m: el más cercano debe ganarle por esto al 2º (si no, empate → puntero)
+
+// Paradero (con coordenadas) más cercano a `pos` y su distancia. null si no hay ninguno
+// con coordenadas. Base de la atribución de embarque por realidad física.
+function paraderoCercano(
+  pos: GeoPos,
+  paradas: { id: number; lat: number | null; lng: number | null }[],
+): { id: number; dist: number; segundo: number } | null {
+  let mejorId = -1, mejor = Infinity, segundo = Infinity;
+  for (const p of paradas) {
+    if (p.lat == null || p.lng == null) continue;
+    const d = distanciaMetros(pos, { coords: { latitude: p.lat, longitude: p.lng, accuracy: 0 } });
+    if (d < mejor) { segundo = mejor; mejor = d; mejorId = p.id; }
+    else if (d < segundo) { segundo = d; }
+  }
+  return mejorId === -1 ? null : { id: mejorId, dist: mejor, segundo };
+}
+
+// Notificación NATIVA del SO (tipo Temu): se ve con el app cerrado/minimizado. Requiere
+// APK recompilado con `npx cap sync android` (el plugin @capacitor/local-notifications).
+// En web es no-op; el aviso DENTRO del app (banner) sí funciona en todos lados. El canal
+// se crea en el useEffect de arranque; aquí solo se agenda inmediata (id fijo por tipo →
+// una nueva reemplaza a la anterior, sin acumular).
+async function notificarLlegadaNativa(tipo: "suave" | "fuerte", titulo: string, cuerpo: string): Promise<void> {
+  if (!esAppNativa()) return;                 // web: el banner in-app cubre
+  try {
+    const { LocalNotifications } = await import("@capacitor/local-notifications");
+    try {
+      const perm = await LocalNotifications.checkPermissions();
+      if (perm.display !== "granted") {
+        const req = await LocalNotifications.requestPermissions();
+        if (req.display !== "granted") return;
+      }
+    } catch { /* checkPermissions ausente en APK viejo → intentar agendar igual */ }
+    await LocalNotifications.schedule({
+      notifications: [{
+        id: tipo === "fuerte" ? 88001 : 88002,
+        channelId: tipo === "fuerte" ? "afa_llegada_fuerte" : "afa_llegada_suave",
+        title: titulo,
+        body: cuerpo,
+        extra: { tipo, origen: "nudge_llegada" },
+      }],
+    });
+  } catch { /* plugin ausente (APK sin recompilar) o error → el banner in-app cubre */ }
 }
 
 // ─── GUÍA DE AJUSTES DEL EQUIPO (para que el fabricante no mate el rastreo) ──────
@@ -593,12 +654,56 @@ export default function ConductorApp() {
   const conductorRef     = useRef<Conductor | null>(null);
   const reservaActivaRef = useRef<Reserva | null>(null);
   const paradasRef       = useRef<Parada[]>([]); // para el gate "cerca de paradero" del envío
+  const paradaIdxRef     = useRef(0);            // puntero actual sin closures obsoletos (geofence)
+  // Máquina de estados del geofence de auto-llegada para la PARADA ACTUAL. Se reinicia
+  // sola cuando cambia `paradaId`. `entroTs` es la hora REAL de llegada (1ª entrada al
+  // radio). `avisoSuave/avisoFuerte` son one-shot. `marcada` silencia tras marcar.
+  const geoRef = useRef<{
+    paradaId: number | null; entroTs: number | null; presenteDesde: number | null;
+    avisoSuave: boolean; avisoFuerte: boolean; marcada: boolean;
+  }>({ paradaId: null, entroTs: null, presenteDesde: null, avisoSuave: false, avisoFuerte: false, marcada: false });
 
   // ── Sync refs (para GPS sin closures obsoletos) ────────────────────────────
   useEffect(() => { vehiculoIdRef.current    = vehiculoId;    }, [vehiculoId]);
   useEffect(() => { conductorRef.current     = conductor;     }, [conductor]);
   useEffect(() => { reservaActivaRef.current = reservaActiva; }, [reservaActiva]);
   useEffect(() => { paradasRef.current       = paradas;       }, [paradas]);
+  useEffect(() => { paradaIdxRef.current     = paradaIdx;     }, [paradaIdx]);
+
+  // ── Notificaciones NATIVAS del SO para el nudge de auto-llegada: crea los canales
+  //    (fuerte = heads-up con vibración · suave = discreto), pide permiso y escucha el
+  //    TOQUE para traer el app a la pestaña de Ruta. Solo app nativa; en web es no-op.
+  //    Requiere APK recompilado con `npx cap sync android`.
+  useEffect(() => {
+    if (!esAppNativa()) return;
+    let quitar: (() => void) | undefined;
+    (async () => {
+      try {
+        const { LocalNotifications } = await import("@capacitor/local-notifications");
+        try {
+          await LocalNotifications.createChannel({
+            id: "afa_llegada_fuerte", name: "Llegada a paradero (urgente)",
+            description: "Te alejaste de un paradero sin marcar la llegada",
+            importance: 5, visibility: 1, vibration: true,
+          });
+          await LocalNotifications.createChannel({
+            id: "afa_llegada_suave", name: "Llegada a paradero",
+            description: "Estás en un paradero: marca tu llegada",
+            importance: 3, visibility: 1, vibration: false,
+          });
+        } catch { /* iOS o canal ya existente */ }
+        try {
+          const perm = await LocalNotifications.checkPermissions();
+          if (perm.display !== "granted") await LocalNotifications.requestPermissions();
+        } catch { /* APK viejo sin la API */ }
+        const h = await LocalNotifications.addListener("localNotificationActionPerformed", () => {
+          setTab("paradas"); // el banner in-app ya está visible; solo traer el foco
+        });
+        quitar = () => { try { h.remove(); } catch { /* noop */ } };
+      } catch { /* plugin ausente (APK sin recompilar) → el banner in-app cubre */ }
+    })();
+    return () => { if (quitar) quitar(); };
+  }, []);
   // Sin deps: mantiene el ref apuntando a la versión más reciente (que cierra sobre estado fresco).
   useEffect(() => { procesarQRRef.current = procesarQR; });
 
@@ -619,9 +724,16 @@ export default function ConductorApp() {
   // ── QR Scanner ─────────────────────────────────────────────────────────────
   const [escanear,          setEscanear]          = useState(false);
   const [validando,         setValidando]         = useState<Pasajero | null>(null); // kept for TS compat, unused after redesign
-  const [resultadoEmbarque, setResultadoEmbarque] = useState<{ pasajero: Pasajero; fueraLista: boolean; otroBus?: boolean; cambioParada?: boolean; empresaAjena?: boolean; paradaOriginalNombre?: string | null } | null>(null);
+  const [resultadoEmbarque, setResultadoEmbarque] = useState<{ pasajero: Pasajero; fueraLista: boolean; otroBus?: boolean; cambioParada?: boolean; empresaAjena?: boolean; paradaOriginalNombre?: string | null; paradaEmbarqueNombre?: string | null } | null>(null);
   const [resultProgreso,    setResultProgreso]    = useState(0);
   const [boardingMsg,       setBoardingMsg]       = useState<{ok: boolean; msg: string} | null>(null);
+  // Nudge de auto-llegada: banner DENTRO del app (además de la notificación del SO).
+  // `tipo` = "suave" (estás en el paradero) | "fuerte" (te alejaste sin marcar).
+  const [nudgeLlegada,  setNudgeLlegada]  = useState<{ paradaId: number; nombre: string; tipo: "suave" | "fuerte"; horaLlegada: number | null } | null>(null);
+  // "Deshacer" tras marcar por el nudge (por si fue por error). Guarda el índice previo
+  // para poder devolver el puntero. Se auto-oculta a los ~30 s.
+  const [deshacerLlegada, setDeshacerLlegada] = useState<{ paradaId: number; nombre: string; idxPrevio: number } | null>(null);
+  const deshacerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Feedback OPTIMISTA: se enciende al instante al escanear (antes de la red) y se apaga al
   // llegar el resultado. Hace que el conductor sienta respuesta inmediata aunque el server tarde.
   const [leyendo,           setLeyendo]           = useState(false);
@@ -1103,6 +1215,73 @@ export default function ConductorApp() {
     }
   }, []);
 
+  // Enciende el banner in-app y la notificación NATIVA del SO para un nudge de llegada.
+  const dispararNudge = useCallback((pa: Parada, tipo: "suave" | "fuerte", horaLlegada: number | null) => {
+    setNudgeLlegada({ paradaId: pa.id, nombre: pa.nombre, tipo, horaLlegada });
+    const titulo = tipo === "fuerte" ? "¿Llegaste a tu paradero?" : `Estás en ${pa.nombre}`;
+    const cuerpo = tipo === "fuerte"
+      ? `Ya te alejaste de ${pa.nombre} sin marcar la llegada. Toca para registrarla.`
+      : `Marca tu llegada a ${pa.nombre} cuando termines de embarcar.`;
+    notificarLlegadaNativa(tipo, titulo, cuerpo).catch(() => {});
+  }, []);
+
+  // ─── GEOFENCE DE AUTO-LLEGADA (nudge) ──────────────────────────────────────────
+  // Corre por CADA fix (también en background). NO marca la parada: solo dispara los
+  // avisos SUAVE (presencia sostenida en el paradero) y FUERTE (se alejó sin marcar)
+  // para la PARADA ACTUAL. Por distancias, no velocidad → robusto en equipos sin Doppler.
+  const evaluarGeofence = useCallback((pos: GeoPos) => {
+    if (!reservaActivaRef.current) return;                       // solo en servicio activo
+    const paradas = paradasRef.current;
+    const pa = paradas[paradaIdxRef.current];
+    if (!pa || pa.lat == null || pa.lng == null) return;         // sin coords → no se evalúa
+    if (geoRef.current.paradaId !== pa.id) {                     // cambió la parada objetivo → reiniciar
+      geoRef.current = { paradaId: pa.id, entroTs: null, presenteDesde: null, avisoSuave: false, avisoFuerte: false, marcada: false };
+    }
+    const g = geoRef.current;
+    if (g.marcada) return;                                       // ya marcada → sin más avisos
+    const acc = pos.coords.accuracy;
+    if (!Number.isFinite(acc) || acc > GEO_ACC_MAX) return;      // GPS malo → no arriesgar un falso positivo
+    const dist = distanciaMetros(pos, { coords: { latitude: pa.lat, longitude: pa.lng, accuracy: 0 } });
+    const ahora = Date.now();
+    if (dist <= GEO_RADIO_ENTRADA) {
+      if (g.entroTs == null) {
+        g.entroTs = ahora;                                       // 1ª entrada = HORA REAL de llegada
+        // Fallback push "ya llegó" al pasajero: el geofence local tripó → avisa al server
+        // (cubre el hueco de heartbeat GPS caído). One-shot por parada (guardado por entroTs);
+        // el dedupe insert-once del server evita duplicar con la proximidad. Best-effort.
+        condApi("llegada_geofence", { paradaId: pa.id }).catch(() => {});
+      }
+      if (g.presenteDesde == null) g.presenteDesde = ahora;
+      if (!g.avisoSuave && ahora - g.presenteDesde >= GEO_DWELL_MS) {
+        g.avisoSuave = true;
+        dispararNudge(pa, "suave", g.entroTs);
+      }
+    } else {
+      g.presenteDesde = null;                                    // salió del radio interno → reinicia presencia
+      // Ya había entrado y ahora cruzó el radio de salida alejándose → aviso fuerte (one-shot).
+      if (g.entroTs != null && dist >= GEO_RADIO_SALIDA && !g.avisoFuerte) {
+        g.avisoFuerte = true;
+        dispararNudge(pa, "fuerte", g.entroTs);
+      }
+    }
+  }, [dispararNudge]);
+
+  // Paradero donde REGISTRAR el embarque: el más cercano por GPS (realidad física del
+  // bus), no el puntero manual (que el nudge/marcado pudo adelantar). Cae al puntero si
+  // el GPS no es confiable, el bus no está en ningún paradero, o hay empate entre dos.
+  function paraderoParaEmbarque(): Parada {
+    const puntero = paradas[paradaIdx];
+    const pos = posRef.current;
+    if (!pos) return puntero;
+    const acc = pos.coords.accuracy;
+    if (!Number.isFinite(acc) || acc > GEO_ACC_MAX) return puntero;
+    const cerca = paraderoCercano(pos, paradas);
+    if (!cerca) return puntero;
+    if (cerca.dist > GEO_RADIO_EMBARQUE) return puntero;                                   // no está en ningún paradero
+    if (Number.isFinite(cerca.segundo) && cerca.segundo - cerca.dist < GEO_MARGEN_EMBARQUE) return puntero; // empate → puntero
+    return paradas.find(p => p.id === cerca.id) ?? puntero;
+  }
+
   // ─── GPS: activo SÓLO mientras el conductor esté CONECTADO o EN SERVICIO ───────
   // (no por el login). Al desconectar/finalizar, el cleanup detiene el servicio nativo
   // (BackgroundGeolocation.stop() → quita notificación y deja de acceder a la ubicación).
@@ -1121,7 +1300,7 @@ export default function ConductorApp() {
       // App nativa: rastreo en SEGUNDO PLANO (sigue con Waze encima o pantalla
       // bloqueada). Si el plugin no está en este build, cae a primer plano solo.
       observarUbicacionBackground(
-        (pos) => { recibioPos = true; registrarFix(pos); posRef.current = pos; setPosActual(pos); setGpsError(null); enviarUbicacion(pos); },
+        (pos) => { recibioPos = true; registrarFix(pos); posRef.current = pos; setPosActual(pos); setGpsError(null); enviarUbicacion(pos); evaluarGeofence(pos); },
         (e) => { if (!recibioPos) setGpsError(e.message); },
       )
         .then((w) => { if (cancelado) w.clear(); else watchIdRef.current = w; })
@@ -1154,6 +1333,7 @@ export default function ConductorApp() {
               recibioPos = true; registrarFix(pos);
               posRef.current = pos; setPosActual(pos); setGpsError(null);
               enviarUbicacion(pos); // el throttle adaptativo decide el ritmo real
+              evaluarGeofence(pos);
             },
             (e) => { if (!recibioPos) setGpsError(e.message); },
             { enableHighAccuracy: alta, maximumAge: alta ? 5000 : 20000, timeout: alta ? 12000 : 25000 }
@@ -1525,12 +1705,20 @@ export default function ConductorApp() {
     setInicioViaje(null);
   }
 
-  async function marcarParadaCompletada(paradaId: number) {
+  async function marcarParadaCompletada(paradaId: number, opts?: { viaNudge?: boolean }) {
+    // Hora REAL de llegada: la de ENTRADA al radio que detectó el geofence para esta
+    // parada. Si no hay (sin GPS/coords), va null y el server usa now().
+    const g = geoRef.current;
+    const horaLlegadaMs = g.paradaId === paradaId ? g.entroTs : null;
+    const horaLlegada = horaLlegadaMs ? new Date(horaLlegadaMs).toISOString() : null;
     try {
-      await condApi("marcar_parada", { paradaId });
+      await condApi("marcar_parada", { paradaId, horaLlegada });
     } catch (e: any) { alert(`Error al marcar parada: ${e?.message}`); return; }
-    setParadas(prev => prev.map(p => p.id === paradaId ? { ...p, estado: "completada" } : p));
+    g.marcada = true;         // silenciar avisos del geofence para esta parada
+    setNudgeLlegada(prev => prev?.paradaId === paradaId ? null : prev); // cerrar el banner si era de esta parada
+    setParadas(prev => prev.map(p => p.id === paradaId ? { ...p, estado: "completada", hora_llegada: horaLlegada } : p));
     if (paradaIdx < paradas.length - 1) {
+      const idxPrevio = paradaIdx;
       const nuevaIdx = paradaIdx + 1;
       setParadaIdx(nuevaIdx);
       saveServicio({
@@ -1539,9 +1727,44 @@ export default function ConductorApp() {
         paradaIdx:   nuevaIdx,
         inicioViaje: inicioViaje?.toISOString() ?? new Date().toISOString(),
       });
+      // "Deshacer" SOLO cuando la marcó el nudge (el marcado manual es intencional). No en
+      // la última parada, porque implicaría des-finalizar el viaje.
+      if (opts?.viaNudge) {
+        const nombre = paradas.find(p => p.id === paradaId)?.nombre ?? "el paradero";
+        mostrarDeshacer(paradaId, nombre, idxPrevio);
+      }
     } else {
       // Último paradero → finalizar de una sola acción.
       await finalizarUltimaParada();
+    }
+  }
+
+  // ─── DESHACER una llegada marcada por el nudge (por si fue por error) ───────────
+  function mostrarDeshacer(paradaId: number, nombre: string, idxPrevio: number) {
+    if (deshacerTimerRef.current) clearTimeout(deshacerTimerRef.current);
+    setDeshacerLlegada({ paradaId, nombre, idxPrevio });
+    deshacerTimerRef.current = setTimeout(() => setDeshacerLlegada(null), 30000);
+  }
+
+  async function deshacerUltimaLlegada() {
+    const d = deshacerLlegada;
+    if (!d) return;
+    setDeshacerLlegada(null);
+    if (deshacerTimerRef.current) { clearTimeout(deshacerTimerRef.current); deshacerTimerRef.current = null; }
+    try {
+      await condApi("anular_parada", { paradaId: d.paradaId });
+    } catch (e: any) { alert(`No se pudo deshacer: ${e?.message}`); return; }
+    setParadas(prev => prev.map(p => p.id === d.paradaId ? { ...p, estado: "pendiente", hora_llegada: null } : p));
+    setParadaIdx(d.idxPrevio);
+    // Reabrir el geofence para esta parada (podrá volver a avisar/marcar).
+    geoRef.current = { paradaId: null, entroTs: null, presenteDesde: null, avisoSuave: false, avisoFuerte: false, marcada: false };
+    if (reservaActiva && vehiculoId != null) {
+      saveServicio({
+        reservaId:   reservaActiva.id,
+        vehiculoId:  vehiculoId,
+        paradaIdx:   d.idxPrevio,
+        inicioViaje: inicioViaje?.toISOString() ?? new Date().toISOString(),
+      });
     }
   }
 
@@ -1708,12 +1931,15 @@ export default function ConductorApp() {
         setTimeout(() => setBoardingMsg(null), 4000);
         return;
       }
+      // Atribuir el embarque al paradero REAL por GPS (no al puntero, que el nudge o el
+      // marcado de llegada pudo adelantar). Cae al puntero si el GPS no es confiable.
+      const paradaEmbarque = paraderoParaEmbarque();
 
       let resp: any;
       try {
         resp = await condApi("embarcar_qr", {
           qrCode,
-          paradaId:  paradaActual.id,
+          paradaId:  paradaEmbarque.id,
           reservaId: reservaActiva?.id ?? null,
         });
       } catch (e: any) {
@@ -1755,7 +1981,7 @@ export default function ConductorApp() {
         const sinPax = prev.filter(p => p.pasajero_id !== pasajero.id);
         return [...sinPax, {
           id:          resp?.id ?? 0,
-          parada_id:   paradaActual.id,
+          parada_id:   paradaEmbarque.id,
           pasajero_id: pasajero.id,
           estado:      "abordado",
           pasajero,
@@ -1766,7 +1992,7 @@ export default function ConductorApp() {
 
       // Mostrar tarjeta resultado con barra de progreso (3 s)
       if (resultIntervalRef.current) clearInterval(resultIntervalRef.current);
-      setResultadoEmbarque({ pasajero, fueraLista, otroBus, cambioParada, empresaAjena, paradaOriginalNombre });
+      setResultadoEmbarque({ pasajero, fueraLista, otroBus, cambioParada, empresaAjena, paradaOriginalNombre, paradaEmbarqueNombre: paradaEmbarque.nombre });
       setResultProgreso(0);
       let prog = 0;
       resultIntervalRef.current = setInterval(() => {
@@ -4133,6 +4359,70 @@ export default function ConductorApp() {
         </div>
       )}
 
+      {/* NUDGE DE AUTO-LLEGADA: recordatorio DENTRO del app (además de la notificación
+          del SO). "suave" = estás en el paradero · "fuerte" = te alejaste sin marcar.
+          Un toque marca la llegada (con la hora real de entrada). */}
+      {nudgeLlegada && enRuta && (() => {
+        const fuerte = nudgeLlegada.tipo === "fuerte";
+        const col  = fuerte ? "var(--c-warn)" : "var(--c-navy)";
+        const tint = fuerte ? "var(--c-warn-tint)" : "var(--c-navy-tint)";
+        return (
+          <div style={{
+            position: "fixed", left: 12, right: 12, bottom: 80, zIndex: 130,
+            background: tint, border: `1.5px solid ${col}`,
+            borderRadius: 16, padding: "14px 16px", boxShadow: "0 10px 30px rgba(0,0,0,0.28)",
+            fontFamily: FONT_SANS, animation: "sheetIn 0.22s ease-out",
+          }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+              <IconPin size={20} color={col} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 800, color: col }}>
+                  {fuerte ? "¿Llegaste a tu paradero?" : `Estás en ${nudgeLlegada.nombre}`}
+                </p>
+                <p style={{ margin: "3px 0 0", fontSize: 12.5, lineHeight: 1.45, color: "var(--c-ink)" }}>
+                  {fuerte
+                    ? <>Ya te alejaste de <strong>{nudgeLlegada.nombre}</strong> sin marcar. Regístralo para no perder la hora real de llegada.</>
+                    : <>Marca tu llegada a <strong>{nudgeLlegada.nombre}</strong> cuando termines de embarcar.</>}
+                </p>
+              </div>
+              <button onClick={() => setNudgeLlegada(null)} aria-label="Descartar"
+                style={{ background: "none", border: "none", color: "var(--c-mute)", cursor: "pointer", padding: 2, flexShrink: 0 }}>
+                <IconClose size={18} />
+              </button>
+            </div>
+            <button
+              onClick={() => marcarParadaCompletada(nudgeLlegada.paradaId, { viaNudge: true })}
+              style={{
+                width: "100%", marginTop: 10, padding: "11px 0", borderRadius: 11, border: "none",
+                background: col, color: "#fff", fontWeight: 800, fontSize: 13.5,
+                cursor: "pointer", fontFamily: FONT_SANS,
+              }}
+            >
+              Marcar llegada
+            </button>
+          </div>
+        );
+      })()}
+
+      {/* DESHACER: tras marcar por el nudge, por si fue por error (se auto-oculta ~30 s). */}
+      {deshacerLlegada && (
+        <div style={{
+          position: "fixed", left: 12, right: 12, bottom: 80, zIndex: 131,
+          background: "var(--c-ink)", color: "#fff", borderRadius: 14, padding: "12px 14px",
+          boxShadow: "0 10px 30px rgba(0,0,0,0.3)", fontFamily: FONT_SANS,
+          display: "flex", alignItems: "center", gap: 12, animation: "sheetIn 0.2s ease-out",
+        }}>
+          <IconCheck size={18} color="#fff" sw={2.5} />
+          <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600 }}>
+            Llegada a {deshacerLlegada.nombre} registrada
+          </span>
+          <button onClick={() => deshacerUltimaLlegada()}
+            style={{ background: "rgba(255,255,255,0.16)", border: "none", color: "#fff", fontWeight: 800, fontSize: 13, borderRadius: 9, padding: "7px 14px", cursor: "pointer", fontFamily: FONT_SANS }}>
+            Deshacer
+          </button>
+        </div>
+      )}
+
       {/* Gate FUERTE-SUAVE de precisión: interrumpe el inicio del servicio si el permiso quedó en
           APROXIMADO. Empuja a activar preciso, pero con válvula de escape ("Iniciar de todos modos")
           para no dejar varado a nadie (p.ej. ROM que reporta mal / conductor que no puede activarlo). */}
@@ -4702,7 +4992,7 @@ export default function ConductorApp() {
       {/* TARJETA RESULTADO EMBARQUE (auto-dismiss 3 s, toca para cerrar)    */}
       {/* ═══════════════════════════════════════════════════════════════════ */}
       {resultadoEmbarque && (() => {
-        const { pasajero: p, fueraLista, otroBus, cambioParada, empresaAjena, paradaOriginalNombre } = resultadoEmbarque;
+        const { pasajero: p, fueraLista, otroBus, cambioParada, empresaAjena, paradaOriginalNombre, paradaEmbarqueNombre } = resultadoEmbarque;
         const color  = empresaAjena ? "var(--c-danger)"
           : (fueraLista || otroBus) ? "var(--c-warn)" : "var(--c-success)";
         const tint   = empresaAjena ? "var(--c-danger-tint)"
@@ -4761,6 +5051,11 @@ export default function ConductorApp() {
                 <div>
                   <p style={{ margin: 0, fontSize: 14, fontWeight: 800, color, letterSpacing: 0.2 }}>{titulo}</p>
                   <p style={{ margin: "2px 0 0", fontSize: 12, color, opacity: 0.8 }}>{sub}</p>
+                  {paradaEmbarqueNombre && (
+                    <p style={{ margin: "3px 0 0", fontSize: 12, color, opacity: 0.9, fontWeight: 700 }}>
+                      📍 Abordó en {paradaEmbarqueNombre}
+                    </p>
+                  )}
                 </div>
               </div>
 

@@ -61,6 +61,56 @@ function tsDeFix(g: { fix_ts?: string | null; created_at?: string | null }): num
 }
 
 /**
+ * Emite el push 'llego' ("¡tu bus ya llegó!") de UNA parada, con dedupe insert-once.
+ * Es el ÚNICO camino para ese aviso: lo llaman TODOS los disparadores —proximidad GPS,
+ * 1er escaneo QR, embarque en lista, geofence del conductor y "Marcar llegada" manual—
+ * y el PRIMERO que ocurra gana; el resto quedan en no-op (sin prioridad ni orden).
+ * Hace SIEMPRE lo mismo, venga la señal de donde venga:
+ *   1) registra+envía 'llego' (dedupe por reserva+parada en push_eventos_viaje),
+ *   2) consume el 'aproximandose' de esa parada (nunca "está llegando" DESPUÉS de "ya llegó"),
+ *   3) manda el WhatsApp de respaldo (2º número, para quien no tenga push activo).
+ * Nunca lanza. Devuelve true SOLO si esta llamada fue la que envió (la primera).
+ */
+export async function emitirLlego(args: {
+  reservaId: number;
+  paradaId: number;
+  paradaNombre?: string | null;
+  destinatarios?: number[];
+}): Promise<boolean> {
+  try {
+    const reservaId = Number(args.reservaId);
+    const paradaId  = Number(args.paradaId);
+    if (!Number.isFinite(reservaId) || reservaId <= 0 || !Number.isFinite(paradaId) || paradaId <= 0) return false;
+
+    // Nombre de la parada para el texto del push; si no vino, se consulta.
+    let nombre = args.paradaNombre;
+    if (nombre == null) {
+      const { data } = await admin.from("paradas").select("nombre").eq("id", paradaId).maybeSingle();
+      nombre = data?.nombre ?? null;
+    }
+    const nom  = nombre || "tu paradero";
+    const dest = args.destinatarios ?? await pasajerosEsperandoDeParada(paradaId);
+
+    const emitido = await emitirEventoViaje({
+      reservaId, evento: "llego", paradaId, destinatarios: dest,
+      payload: payloadsViaje.llego(paradaId, nom), ttl: 300, urgencia: "high",
+    });
+    if (emitido) {
+      // Consumir 'aproximandose' de esta parada: que NUNCA llegue "está llegando" DESPUÉS de "ya llegó".
+      await emitirEventoViaje({
+        reservaId, evento: "aproximandose", paradaId, destinatarios: [], payload: null,
+      });
+      // WhatsApp de respaldo (2º número) para quien no tenga push. El dedupe del 'llego' evita repetir.
+      await avisarLlegadaWhatsApp(reservaId, nom, dest);
+    }
+    return emitido;
+  } catch (e: any) {
+    console.warn("[emitirLlego]", e?.message);
+    return false;
+  }
+}
+
+/**
  * Evalúa proximidad del bus de una reserva a sus paradas pendientes y emite los
  * push 'aproximandose' / 'llego'. Pensada para correr en after() del heartbeat:
  * nunca lanza, y si pierde el claim del throttle retorna de inmediato.
@@ -132,26 +182,12 @@ export async function evaluarProximidad(reservaId: number): Promise<void> {
     const radio = radioLlegadaM(acc);
 
     // 4) LLEGÓ — todas las pendientes (paradas fuera de orden: pudo saltarse varias).
+    //    El envío/dedupe/WhatsApp los centraliza emitirLlego (mismo camino que los
+    //    fallbacks del conductor: QR, embarque, geofence, "marcar llegada").
     for (const p of pendientes) {
       const d = distM(Number(ultimo.lat), Number(ultimo.lng), Number(p.lat), Number(p.lng));
       if (d <= radio && vKmh !== null && vKmh <= VEL_MAX_LLEGADA) {
-        const dest = await pasajerosEsperandoDeParada(p.id);
-        const emitido = await emitirEventoViaje({
-          reservaId, evento: "llego", paradaId: p.id, destinatarios: dest,
-          payload: payloadsViaje.llego(p.id, p.nombre || "tu paradero"),
-          ttl: 300, urgencia: "high",
-        });
-        if (emitido) {
-          // Consumir 'aproximandose' de esta parada: que NUNCA llegue "está
-          // llegando" DESPUÉS de "ya llegó" (registro sin envío).
-          await emitirEventoViaje({
-            reservaId, evento: "aproximandose", paradaId: p.id, destinatarios: [], payload: null,
-          });
-          // Aviso adicional por WhatsApp (2do número): llega a quien no tiene la
-          // app/push activo. El dedupe ya lo resolvió el `if (emitido)` de arriba —
-          // esta llamada nunca se repite para el mismo paradero/viaje.
-          await avisarLlegadaWhatsApp(reservaId, p.nombre || "tu paradero", dest);
-        }
+        await emitirLlego({ reservaId, paradaId: p.id, paradaNombre: p.nombre });
       }
     }
 
