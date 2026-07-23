@@ -196,15 +196,20 @@ export async function marcarReinicio(
 
 // ─── ANULACIÓN + APRENDIZAJE ─────────────────────────────────────────────────
 
-/** Motivos tipificados de anulación. La clave viaja a odometro_correcciones.motivo_tipo. */
+/**
+ * Motivos tipificados de anulación. La clave viaja a odometro_correcciones.motivo_tipo.
+ *   - ensena  → el caso se inyecta como ejemplo en el prompt de visión (errores de lectura IA).
+ *   - corrige → el motivo pide el km correcto y registra una lectura corregida en su lugar
+ *               (para "otro" es opcional; para el resto de correctivos es obligatorio).
+ */
 export const MOTIVOS_ANULACION = [
-  { id: "ia_digito",   label: "La IA leyó mal un dígito",      ensena: true  },
-  { id: "ia_trip",     label: "La IA leyó el parcial (trip)",  ensena: true  },
-  { id: "otra_unidad", label: "Foto de otra unidad",           ensena: false },
-  { id: "duplicada",   label: "Lectura duplicada",             ensena: false },
-  { id: "tipeo",       label: "Error al tipear el km",         ensena: false },
-  { id: "reinicio",    label: "Era un reinicio de tablero",    ensena: false },
-  { id: "otro",        label: "Otro",                          ensena: false },
+  { id: "ia_digito",   label: "La IA leyó mal un dígito",      ensena: true,  corrige: true  },
+  { id: "ia_trip",     label: "La IA leyó el parcial (trip)",  ensena: true,  corrige: true  },
+  { id: "tipeo",       label: "Error al tipear el km",         ensena: false, corrige: true  },
+  { id: "otra_unidad", label: "Foto de otra unidad",           ensena: false, corrige: false },
+  { id: "duplicada",   label: "Lectura duplicada",             ensena: false, corrige: false },
+  { id: "reinicio",    label: "Era un reinicio de tablero",    ensena: false, corrige: false },
+  { id: "otro",        label: "Otro",                          ensena: false, corrige: true  },
 ] as const;
 export type MotivoAnulacion = (typeof MOTIVOS_ANULACION)[number]["id"];
 
@@ -256,42 +261,115 @@ export async function anularLectura(
     usuario?: string | null;
     placa?: string | null;
   }
-): Promise<{ ok: boolean; kmVigente?: number | null; error?: string }> {
+): Promise<{ ok: boolean; kmVigente?: number | null; lecturaCorregidaId?: string | null; error?: string }> {
   const { data: l } = await client.from("lecturas_odometro").select("*").eq("id", opts.lecturaId).single();
   if (!l) return { ok: false, error: "Lectura no encontrada" };
-  if (l.estado === "anulada") return { ok: false, error: "La lectura ya está anulada" };
 
   const esTercero = l.vehiculo_tercero_id != null;
   const vid = esTercero ? l.vehiculo_tercero_id : l.vehiculo_id;
   const flota: Flota = esTercero ? "tercero" : "propia";
+  const fk = esTercero ? "vehiculo_tercero_id" : "vehiculo_id";
 
-  // 1) Bitácora + dataset de aprendizaje. Se escribe ANTES de mutar la lectura:
-  //    si esto falla, no anulamos (no queremos anulaciones sin explicación).
-  const { error: eCorr } = await client.from("odometro_correcciones").insert({
-    lectura_id: l.id,
-    vehiculo_id: esTercero ? null : vid,
-    vehiculo_tercero_id: esTercero ? vid : null,
-    placa: opts.placa ?? null,
-    km_leido: Number(l.km),
-    km_correcto: opts.km_correcto != null && Number.isFinite(Number(opts.km_correcto)) ? Number(opts.km_correcto) : null,
-    fuente: l.fuente,
-    motivo_tipo: opts.motivo_tipo,
-    nota: opts.nota || null,
-    foto_url: l.foto_url || null,
-    usuario: opts.usuario || null,
-  });
-  if (eCorr) return { ok: false, error: "No se pudo guardar la corrección: " + eCorr.message };
+  // km correcto normalizado: se registra una lectura corregida solo si es un entero
+  // positivo y DISTINTO al mal leído (si coincide, no hay nada que corregir).
+  const kmC = opts.km_correcto;
+  const kmCorrecto =
+    kmC != null && Number.isFinite(Number(kmC)) && Number(kmC) > 0 ? Math.round(Number(kmC)) : null;
+  const hayCorreccion = kmCorrecto != null && kmCorrecto !== Number(l.km);
 
-  // 2) Anular la lectura (se conserva la fila y la foto como evidencia).
+  // Registra (o recupera) la lectura CORREGIDA: clon del original con el número bueno,
+  // la MISMA foto y la MISMA marca temporal (created_at/momento) para no desordenar la
+  // jornada, forzada a "aceptada". Es IDEMPOTENTE: se identifica por ref_origen, así un
+  // reintento tras un fallo parcial no la duplica ni la pierde.
+  const refCorreccion = `correccion:${l.id}`;
+  const asegurarCorregida = async (): Promise<{ ok: boolean; id?: string | null; error?: string }> => {
+    if (!hayCorreccion) return { ok: true, id: null };
+    const { data: ya } = await client.from("lecturas_odometro").select("id").eq("ref_origen", refCorreccion).limit(1).maybeSingle();
+    if (ya) return { ok: true, id: ya.id };
+    const { data: nueva, error } = await client.from("lecturas_odometro").insert({
+      [fk]: vid,
+      km: kmCorrecto,
+      fuente: l.fuente,
+      fecha: l.fecha,
+      foto_url: l.foto_url ?? null,
+      momento: l.momento ?? null,
+      created_at: l.created_at,                 // conserva la posición temporal en la jornada
+      ref_origen: refCorreccion,                // trazabilidad + idempotencia
+      estado: "aceptada",
+      motivo: `Corregida desde ${Number(l.km).toLocaleString("es-PE")} km`,
+    }).select("id").single();
+    if (error) return { ok: false, error: error.message };
+    return { ok: true, id: nueva?.id ?? null };
+  };
+
+  // Ya anulada → reintento idempotente: NO se repiten la bitácora ni el flip (duplicaría),
+  // pero SÍ se asegura la lectura corregida (recupera el caso en que su INSERT falló antes)
+  // y se re-deriva el vigente. Así una anulación que quedó a medias se completa al reintentar.
+  if (l.estado === "anulada") {
+    const c = await asegurarCorregida();
+    const rec = await recalcularKmVigente(client, { vehiculo_id: vid, flota });
+    if (!c.ok) return { ok: false, error: "La lectura ya estaba anulada; no se pudo registrar la corrección: " + c.error };
+    if (!rec.ok) return { ok: false, error: "La lectura ya estaba anulada y no se pudo recalcular el km vigente: " + rec.error };
+    return { ok: true, kmVigente: rec.km, lecturaCorregidaId: c.id };
+  }
+
+  // 1) Bitácora + dataset de aprendizaje. Se escribe ANTES de mutar la lectura. Dedupe
+  //    por lectura_id para que un reintento tras un fallo posterior no la duplique.
+  const { data: yaCorr } = await client.from("odometro_correcciones").select("id").eq("lectura_id", l.id).limit(1).maybeSingle();
+  if (!yaCorr) {
+    const { error: eCorr } = await client.from("odometro_correcciones").insert({
+      lectura_id: l.id,
+      vehiculo_id: esTercero ? null : vid,
+      vehiculo_tercero_id: esTercero ? vid : null,
+      placa: opts.placa ?? null,
+      km_leido: Number(l.km),
+      km_correcto: kmCorrecto,
+      fuente: l.fuente,
+      motivo_tipo: opts.motivo_tipo,
+      nota: opts.nota || null,
+      foto_url: l.foto_url || null,
+      usuario: opts.usuario || null,
+    });
+    if (eCorr) return { ok: false, error: "No se pudo guardar la corrección: " + eCorr.message };
+  }
+
+  // Caso especial: "era un reinicio de tablero". La lectura no está mala, es el nuevo
+  // odómetro físico. En vez de anularla (que dejaría el vigente anclado en los km
+  // altos previos → bus "ciego"), se re-ancla el vigente a este valor marcándola como
+  // 'reinicio' — misma semántica que marcarReinicio() pero sobre la fila existente.
+  if (opts.motivo_tipo === "reinicio") {
+    const kmAncla = kmCorrecto ?? Number(l.km);
+    const { error: eR } = await client.from("lecturas_odometro")
+      .update({ estado: "reinicio", km: kmAncla, motivo: `Reinicio de tablero${opts.nota ? " — " + opts.nota : ""}` })
+      .eq("id", l.id);
+    if (eR) return { ok: false, error: eR.message };
+    const rec = await recalcularKmVigente(client, { vehiculo_id: vid, flota });
+    return rec.ok
+      ? { ok: true, kmVigente: rec.km }
+      : { ok: false, kmVigente: rec.km, error: "Se marcó el reinicio pero no se pudo recalcular el km vigente: " + rec.error };
+  }
+
+  // 2) Registrar la lectura corregida ANTES de anular la mala: si esto falla, el original
+  //    sigue intacto y el reintento es limpio (nada que recuperar). El clon es idempotente.
+  const c = await asegurarCorregida();
+  if (!c.ok) return { ok: false, error: "No se pudo registrar la lectura corregida: " + c.error };
+  const lecturaCorregidaId = c.id;
+
+  // 3) Anular la lectura mala (se conserva la fila y la foto como evidencia). Si falla, el
+  //    clon ya quedó guardado; el reintento entra por la rama "ya anulada"/limpia y converge.
   const etiqueta = MOTIVOS_ANULACION.find(m => m.id === opts.motivo_tipo)?.label || opts.motivo_tipo;
   const { error: eUpd } = await client.from("lecturas_odometro")
     .update({ estado: "anulada", motivo: `Anulada: ${etiqueta}${opts.nota ? " — " + opts.nota : ""}` })
     .eq("id", l.id);
-  if (eUpd) return { ok: false, error: eUpd.message };
+  if (eUpd) return { ok: false, lecturaCorregidaId, error: eUpd.message };
 
-  // 3) El vigente es derivado → recalcular sin la lectura anulada.
+  // 4) El vigente es derivado → recalcular con la lectura corregida (si la hubo) y sin la
+  //    anulada. Si el recálculo falla, se avisa (no se traga): reintentar lo completa.
   const rec = await recalcularKmVigente(client, { vehiculo_id: vid, flota });
-  return { ok: true, kmVigente: rec.km };
+  if (!rec.ok) {
+    return { ok: false, kmVigente: rec.km, lecturaCorregidaId, error: "Se anuló/corrigió la lectura, pero no se pudo recalcular el km vigente. Reintenta: " + rec.error };
+  }
+  return { ok: true, kmVigente: rec.km, lecturaCorregidaId };
 }
 
 /**

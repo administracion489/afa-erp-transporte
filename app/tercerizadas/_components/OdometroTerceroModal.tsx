@@ -150,11 +150,8 @@ export default function OdometroTerceroModal({
   };
 
   const aceptar = async (l: Lectura) => { await aceptarLectura(supabase, l.id); await cargar(); onSaved(); };
-  const rechazar = async (l: Lectura) => {
-    await supabase.from("lecturas_odometro").update({ estado: "rechazada", motivo: "Rechazada manualmente" }).eq("id", l.id);
-    await cargar();
-    onSaved();  // refresca el badge "por revisar" de la tarjeta en la página
-  };
+  // "Rechazar" abre el modal de corrección (setAnular): corregir el km + enseñar a la
+  // IA, o descartar con motivo. No se descarta la lectura en silencio.
   const reiniciar = async (l: Lectura) => {
     if (!confirm(`¿Marcar ${Number(l.km).toLocaleString("es-PE")} km como REINICIO de odómetro para ${vehiculo.placa}? El km vigente se re-anclará a este valor.`)) return;
     await marcarReinicio(supabase, { vehiculo_id: vehiculo.id, km: l.km, fecha: l.fecha, flota: "tercero" });
@@ -237,7 +234,7 @@ export default function OdometroTerceroModal({
                     <span className="text-[11px] text-amber-800 flex-1 min-w-[120px]">{l.motivo}</span>
                     <div className="flex gap-1.5">
                       <button onClick={() => aceptar(l)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-green-700 border border-green-200 hover:bg-green-50">✓ Aceptar</button>
-                      <button onClick={() => rechazar(l)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50">✕ Rechazar</button>
+                      <button onClick={() => setAnular(l)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50" title="Corregir el km o descartar con motivo (no se pierde la lectura)">✕ Rechazar</button>
                       <button onClick={() => reiniciar(l)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-blue-700 border border-blue-200 hover:bg-blue-50">↻ Reinicio</button>
                     </div>
                   </div>

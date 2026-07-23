@@ -7,6 +7,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import { aceptarLectura } from "@/lib/odometro";
+import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 import { normalizarConfigRadar } from "@/lib/radar/config";
 import {
   CATEGORIAS_RADAR,
@@ -133,7 +135,8 @@ type RadarLecturaOdometro = {
   fuente: string;
   fecha: string | null;
   foto_url: string | null;
-  estado: "aceptada" | "sospechosa" | "rechazada" | "reinicio";
+  estado: "aceptada" | "sospechosa" | "rechazada" | "reinicio" | "anulada";
+  momento: string | null;
   motivo: string | null;
   created_at: string;
 };
@@ -143,6 +146,7 @@ const ESTADO_ODO_CFG: Record<RadarLecturaOdometro["estado"], { label: string; co
   sospechosa: { label: "Por revisar", color: "#B07A0F", bg: "#FBF1D8" },
   rechazada:  { label: "Rechazada",   color: "#EB5757", bg: "#FDECEC" },
   reinicio:   { label: "Reinicio",    color: "#1d4ed8", bg: "#dbeafe" },
+  anulada:    { label: "Anulada",     color: "#64748b", bg: "#f1f5f9" },
 };
 
 // ── Iconos SVG inline ────────────────────────────────────────────────────────
@@ -734,11 +738,15 @@ function FragmentoFilaCombustible({ children }: { children: React.ReactNode }) {
 // ref_origen='radar_ia'), de ambas flotas. La fuente de verdad y el flujo de
 // aceptar/rechazar viven en /mantenimiento > Odómetro; aquí es solo la vista del Radar.
 
-function TabOdometro({ registros, vehiculosGuia }: {
+function TabOdometro({ registros, vehiculosGuia, onRefresh, showToast }: {
   registros: RadarLecturaOdometro[];
   vehiculosGuia: VehiculoGuiaOdometro[];
+  onRefresh: () => void | Promise<void>;
+  showToast: (msg: string, ok?: boolean) => void;
 }) {
   const [foto, setFoto] = useState<string | null>(null);
+  const [aceptando, setAceptando] = useState<string | null>(null);
+  const [corrigiendo, setCorrigiendo] = useState<RadarLecturaOdometro | null>(null);
 
   if (registros.length === 0) {
     return <CardVacia emoji="🛞" titulo="Sin lecturas de odómetro" detalle="Las fotos de tablero que lleguen a los grupos y el Radar logre registrar aparecen aquí." />;
@@ -754,6 +762,21 @@ function TabOdometro({ registros, vehiculosGuia }: {
       return { placa: v?.placa ?? null, flota: "tercero" };
     }
     return { placa: null, flota: null };
+  };
+
+  // Aceptar el proceso: valida la lectura "por revisar" y actualiza el km vigente.
+  const aceptar = async (r: RadarLecturaOdometro) => {
+    setAceptando(r.id);
+    try {
+      const res = await aceptarLectura(supabase, r.id);
+      if (!res.ok) throw new Error(res.error || "No se pudo aceptar");
+      showToast("Lectura aceptada ✓");
+      await onRefresh();
+    } catch (e: any) {
+      showToast("Error: " + e.message, false);
+    } finally {
+      setAceptando(null);
+    }
   };
 
   return (
@@ -794,9 +817,24 @@ function TabOdometro({ registros, vehiculosGuia }: {
                       </div>
                     </td>
                     <td className="p-3 whitespace-nowrap">
-                      <Link href="/mantenimiento?tab=odometro" className="text-[#1262bd] hover:underline text-xs font-bold inline-flex items-center gap-1">
-                        <Ic.Externo size={12} /> Odómetro
-                      </Link>
+                      <div className="flex items-center gap-1.5">
+                        {r.estado === "sospechosa" && (
+                          <button onClick={() => aceptar(r)} disabled={aceptando === r.id}
+                            className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-green-700 border border-green-200 hover:bg-green-50 disabled:opacity-50">
+                            {aceptando === r.id ? "…" : "✓ Aceptar"}
+                          </button>
+                        )}
+                        {r.estado !== "anulada" && (
+                          <button onClick={() => setCorrigiendo(r)}
+                            className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-[#1262bd] border border-[#1262bd]/20 hover:bg-[#1262bd]/5"
+                            title="Corregir el número y enseñarle a la IA su error">
+                            ✏ Corregir a la IA
+                          </button>
+                        )}
+                        <Link href="/mantenimiento?tab=odometro" className="text-[#1262bd] hover:underline text-xs font-bold inline-flex items-center gap-1">
+                          <Ic.Externo size={12} /> Odómetro
+                        </Link>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -812,6 +850,23 @@ function TabOdometro({ registros, vehiculosGuia }: {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={foto} alt="Foto del odómetro" className="max-h-[90vh] max-w-[90vw] rounded-xl" onClick={(e) => e.stopPropagation()} />
         </div>
+      )}
+
+      {/* Corregir + enseñar a la IA (anula la mala, registra el km correcto) */}
+      {corrigiendo && (
+        <AnularLecturaOdometro
+          lectura={{
+            id: corrigiendo.id,
+            km: corrigiendo.km,
+            fecha: corrigiendo.fecha ?? "",
+            fuente: corrigiendo.fuente,
+            foto_url: corrigiendo.foto_url,
+            estado: corrigiendo.estado,
+          }}
+          placa={unidadDe(corrigiendo).placa ?? "—"}
+          onClose={() => setCorrigiendo(null)}
+          onAnulada={async () => { showToast("Lectura corregida ✓"); await onRefresh(); }}
+        />
       )}
     </>
   );
@@ -2032,7 +2087,7 @@ export default function RadarIAPage() {
               />
             )}
             {tab === "odometro" && (
-              <TabOdometro registros={odometros} vehiculosGuia={vehiculosGuia} />
+              <TabOdometro registros={odometros} vehiculosGuia={vehiculosGuia} onRefresh={cargar} showToast={showToast} />
             )}
             {tab === "alertas" && (
               <TabAlertas alertas={alertas} onMarcarLeida={marcarAlertaLeida} onMarcarTodas={marcarTodasLeidas} />

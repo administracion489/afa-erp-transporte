@@ -137,6 +137,11 @@ export async function POST(req: NextRequest) {
 
       const lecUnidad = lecturas
         .filter((l) => (esT ? Number(l.vehiculo_tercero_id) === g.vid : Number(l.vehiculo_id) === g.vid))
+        // Solo lecturas vivas: 'anulada'/'rechazada'/'sospechosa' NO cuentan para el
+        // recorrido (mismo criterio que recalcularKmVigente y sanearLecturas). Sin esto,
+        // una lectura mal leída ya anulada seguiría inflando el max y disparando falsos
+        // "km no justificados".
+        .filter((l) => l.estado === "aceptada" || l.estado === "reinicio")
         .map((l) => Number(l.km))
         .filter((k) => Number.isFinite(k) && k > 0);
       if (kmInicio == null && lecUnidad.length) kmInicio = Math.min(...lecUnidad);
