@@ -18,6 +18,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@supabase/supabase-js";
 import { enviarEmail } from "@/lib/notificaciones";
 import { leccionesOdometro } from "@/lib/odometro";
+import { leccionesCombustible } from "./lecciones-combustible";
 import { ejecutarAccion, crearAlerta, fechaLima, horaLima } from "./acciones";
 import { promptTriage, promptExtraccion, promptExtraccionMedia, type ContextoPrompt } from "./prompts";
 import { transcribirAudio } from "./transcripcion";
@@ -144,9 +145,11 @@ export async function procesarPendientes(opts?: {
   // el dígito mal leído ni confunda el parcial con el total. Solo si el lote trae algo con
   // pinta de combustible/odómetro (foto o texto de recarga) → evita el round-trip en lotes
   // de puro texto irrelevante.
-  const leccionesOdo = lote.some((m) => pareceCombustible(m) || m.media_url)
-    ? await leccionesOdometro(sb).catch(() => "")
-    : "";
+  const traeCombustibleOFoto = lote.some((m) => pareceCombustible(m) || m.media_url);
+  const leccionesOdo = traeCombustibleOFoto ? await leccionesOdometro(sb).catch(() => "") : "";
+  // Correcciones humanas de lectura de vouchers (grifo/cantidad/precio/monto) → mismo
+  // gate que odómetro: solo si el lote trae algo con pinta de combustible o una foto.
+  const leccionesComb = traeCombustibleOFoto ? await leccionesCombustible(sb).catch(() => "") : "";
 
   // Gate 1: radar apagado → los mensajes quedan pendientes (se procesan al reactivar)
   if (!config.activo && !forzar) {
@@ -203,7 +206,7 @@ export async function procesarPendientes(opts?: {
 
     try {
       const grupoInfo = mensaje.grupo_id ? gruposInfo.get(mensaje.grupo_id) ?? null : null;
-      const r = await procesarMensaje(sb, mensaje, config, forzar, grupoInfo, guiasOdometro, leccionesOdo);
+      const r = await procesarMensaje(sb, mensaje, config, forzar, grupoInfo, guiasOdometro, leccionesOdo, leccionesComb);
       resumen.costo_usd += r.costo;
       if (r.estado === "procesado") resumen.procesados++;
       else resumen.descartados++;
@@ -389,7 +392,8 @@ async function procesarMensaje(
   forzar: boolean,
   grupoInfo: GrupoInfo | null,
   guiasOdometro: { placa: string; guia: string }[],
-  leccionesOdo: string
+  leccionesOdo: string,
+  leccionesComb: string
 ): Promise<ResultadoMensaje> {
   const ctx: ContextoPrompt = {
     grupo: mensaje.grupo_nombre,
@@ -401,6 +405,7 @@ async function procesarMensaje(
     guiaVoucher: config.guia_voucher,
     guiasOdometro,
     leccionesOdometro: leccionesOdo,
+    leccionesCombustible: leccionesComb,
   };
 
   // Categorías efectivas para ESTE grupo: las globales, restringidas además por
@@ -633,8 +638,17 @@ async function procesarMensaje(
 
   // 4) Acción de la categoría (si el cluster trajo fotos y esta fila no tiene una propia,
   //    se usa la primera del cluster como evidencia — p.ej. la foto del odómetro para /combustible)
-  const mensajeParaAccion =
-    mensaje.media_url || !miembrosConMedia.length ? mensaje : { ...mensaje, media_url: miembrosConMedia[0].media_url };
+  // Todas las fotos del cluster (voucher + surtidor + odómetro) para que el panel de
+  // revisión de combustible las muestre — no solo la primera. Deduplicado por URL.
+  const fotosCluster = miembrosConMedia
+    .filter((m: any) => !!m.media_url)
+    .map((m: any) => ({ url: m.media_url as string, mime: (m.media_mime as string) ?? null, nombre: (m.media_nombre as string) ?? null }))
+    .filter((f: any, i: number, arr: any[]) => arr.findIndex((x) => x.url === f.url) === i);
+  const mensajeParaAccion = {
+    ...mensaje,
+    media_url: mensaje.media_url || miembrosConMedia[0]?.media_url || mensaje.media_url,
+    fotos_cluster: fotosCluster,
+  };
   const resultado = await ejecutarAccion({ sb, mensaje: mensajeParaAccion, categoria, datos: datos ?? {}, confianza, config });
 
   // 4b) Fusionar el resto del cluster en esta fila (si los hubo) — ya no se procesan solos.

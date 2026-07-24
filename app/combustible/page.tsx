@@ -7,11 +7,14 @@ import { sincronizarPrecioDesdeCarga } from "@/lib/precios-combustible";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
-type Vehiculo  = { id: number; placa: string; categoria?: string; kilometraje_actual?: number; };
+type Vehiculo  = { id: number; placa: string; categoria?: string; kilometraje_actual?: number; capacidad_tanque?: Record<string, number> | null; };
 type Conductor = { id: number; nombre: string; };
+// Unidad unificada (flota propia + tercerizada) con clave sintética `uid` — los ids de
+// `vehiculos` y `vehiculos_tercero` se solapan, así que se distinguen por prefijo p/t.
+type Unidad = Vehiculo & { uid: string; tipo: "propio" | "tercero" };
 
 type Combustible = {
-  id: number; vehiculo_id: number | null;
+  id: number; vehiculo_id: number | null; vehiculo_tercero_id: number | null;
   fecha: string; kilometraje: number;
   galones: number; precio_galon: number; total: number;
   grifo: string | null; conductor: string | null;
@@ -126,6 +129,7 @@ const FORM_VACIO = {
 
 export default function CombustiblePage() {
   const [vehiculos,   setVehiculos]   = useState<Vehiculo[]>([]);
+  const [vehiculosTercero, setVehiculosTercero] = useState<Vehiculo[]>([]);
   const [conductores, setConductores] = useState<Conductor[]>([]);
   const [registros,   setRegistros]   = useState<Combustible[]>([]);
   const [loading,     setLoading]     = useState(false);
@@ -137,6 +141,7 @@ export default function CombustiblePage() {
   const [granularidad,setGranularidad]= useState<GranPeriodo>("mes");
   const [busqueda,    setBusqueda]    = useState("");
   const [filtroVeh,   setFiltroVeh]   = useState("todos");
+  const [filtroFlota, setFiltroFlota] = useState<"todos" | "propio" | "tercero">("todos");
   const [filtroTipo,  setFiltroTipo]  = useState("todos");
   const [filtroMes,   setFiltroMes]   = useState("todos");
   const [form, setForm] = useState(FORM_VACIO);
@@ -152,12 +157,14 @@ export default function CombustiblePage() {
 
   const cargarDatos = async () => {
     setLoading(true);
-    const [vRes, cRes, condRes] = await Promise.all([
+    const [vRes, vtRes, cRes, condRes] = await Promise.all([
       supabase.from("vehiculos").select("*").order("placa"),
+      supabase.from("vehiculos_tercero").select("*").order("placa"),
       supabase.from("combustible").select("*").order("fecha", { ascending: false }).order("id", { ascending: false }),
       supabase.from("conductores").select("id,nombre").order("nombre"),
     ]);
     setVehiculos(vRes.data || []);
+    setVehiculosTercero(vtRes.data || []);
     setRegistros(cRes.data || []);
     setConductores(condRes.data || []);
     setLoading(false);
@@ -165,29 +172,38 @@ export default function CombustiblePage() {
 
   useEffect(() => { cargarDatos(); }, []);
 
-  const nombreVehiculo = (id: number | null) => vehiculos.find(v => v.id === id)?.placa || "—";
+  // ── Unidades unificadas (flota propia + tercerizada) ───────────────────────
+  const unidades = useMemo<Unidad[]>(() => [
+    ...vehiculos.map(v => ({ ...v, uid: `p${v.id}`, tipo: "propio" as const })),
+    ...vehiculosTercero.map(v => ({ ...v, uid: `t${v.id}`, tipo: "tercero" as const })),
+  ], [vehiculos, vehiculosTercero]);
+  // Clave sintética de la unidad de un registro (según a qué flota apunta).
+  const uidReg = (r: Combustible) =>
+    r.vehiculo_tercero_id != null ? `t${r.vehiculo_tercero_id}` : r.vehiculo_id != null ? `p${r.vehiculo_id}` : "";
+  const unidadDe = (uid: string) => unidades.find(u => u.uid === uid);
+  const placaReg = (r: Combustible) => unidadDe(uidReg(r))?.placa || "—";
 
-  // ── Rendimiento promedio por vehículo+tipo ─────────────────────────────────
+  // ── Rendimiento promedio por unidad+tipo ───────────────────────────────────
 
   const rendimientoPromedio = useMemo(() => {
     const mapa: Record<string, number | null> = {};
-    vehiculos.forEach(v => {
+    unidades.forEach(u => {
       Object.keys(COMBUSTIBLES).forEach(tipo => {
         const regs = registros
-          .filter(r => r.vehiculo_id === v.id && (r.tipo_combustible || "diesel") === tipo && r.kilometraje > 0)
+          .filter(r => uidReg(r) === u.uid && (r.tipo_combustible || "diesel") === tipo && r.kilometraje > 0)
           .sort((a, b) => Number(a.kilometraje) - Number(b.kilometraje));
-        if (regs.length < 2) { mapa[`${v.id}-${tipo}`] = null; return; }
+        if (regs.length < 2) { mapa[`${u.uid}-${tipo}`] = null; return; }
         const rends: number[] = [];
         for (let i = 1; i < regs.length; i++) {
           const km  = Number(regs[i].kilometraje) - Number(regs[i - 1].kilometraje);
           const qty = Number(regs[i].galones);
           if (km > 0 && qty > 0) rends.push(km / qty);
         }
-        mapa[`${v.id}-${tipo}`] = rends.length > 0 ? rends.reduce((a, b) => a + b) / rends.length : null;
+        mapa[`${u.uid}-${tipo}`] = rends.length > 0 ? rends.reduce((a, b) => a + b) / rends.length : null;
       });
     });
     return mapa;
-  }, [vehiculos, registros]);
+  }, [unidades, registros]);
 
   // Mapa prev registro
   const prevRegistro = useMemo(() => {
@@ -196,7 +212,7 @@ export default function CombustiblePage() {
     ord.forEach((r, i) => {
       const tipo = r.tipo_combustible || "diesel";
       const prev = ord.slice(0, i).reverse().find(x =>
-        x.vehiculo_id === r.vehiculo_id &&
+        uidReg(x) === uidReg(r) &&
         (x.tipo_combustible || "diesel") === tipo &&
         x.kilometraje < r.kilometraje
       );
@@ -213,9 +229,13 @@ export default function CombustiblePage() {
     if (!form.vehiculo_id || !form.fecha) { alert("Selecciona vehículo y fecha"); return; }
     if (!form.galones || !form.precio_galon) { alert("Ingresa cantidad y precio"); return; }
 
+    // Unidad seleccionada (flota propia o tercerizada, según el prefijo del uid).
+    const uSel = unidadDe(form.vehiculo_id);
+    if (!uSel) { alert("Selecciona una unidad válida"); return; }
+    const esTercero = uSel.tipo === "tercero";
+
     // Alerta capacidad
-    const veh = vehiculos.find(v => v.id === Number(form.vehiculo_id));
-    const cap = getCapacidad(veh,form.tipo_combustible);
+    const cap = getCapacidad(uSel, form.tipo_combustible);
     if (Number(form.galones) > cap * 1.1) {
       const ok = confirm(`⚠️ ALERTA: La cantidad (${form.galones} ${fuelCfg.unidadLabel}) supera la capacidad estimada del tanque de ${form.tipo_combustible} (${cap} ${fuelCfg.unidadLabel}).\n¿Continuar?`);
       if (!ok) return;
@@ -223,7 +243,8 @@ export default function CombustiblePage() {
 
     setGuardando(true);
     const payload = {
-      vehiculo_id:      Number(form.vehiculo_id),
+      vehiculo_id:         esTercero ? null : uSel.id,
+      vehiculo_tercero_id: esTercero ? uSel.id : null,
       fecha:            form.fecha,
       kilometraje:      Number(form.kilometraje || 0),
       galones:          Number(form.galones),
@@ -254,14 +275,15 @@ export default function CombustiblePage() {
     if (form.kilometraje) {
       if (editandoId) {
         // Edición: ajustar el vigente sin duplicar lectura en el historial
-        const v = vehiculos.find(v => v.id === Number(form.vehiculo_id));
-        if (v && Number(form.kilometraje) > Number(v.kilometraje_actual || 0)) {
-          await supabase.from("vehiculos").update({ kilometraje_actual: Number(form.kilometraje) }).eq("id", Number(form.vehiculo_id));
+        if (Number(form.kilometraje) > Number(uSel.kilometraje_actual || 0)) {
+          await supabase.from(esTercero ? "vehiculos_tercero" : "vehiculos")
+            .update({ kilometraje_actual: Number(form.kilometraje) }).eq("id", uSel.id);
         }
       } else {
         // Registro nuevo: pasa por la consolidación de odómetro (anti-retroceso)
         await registrarLectura(supabase, {
-          vehiculo_id: Number(form.vehiculo_id),
+          vehiculo_id: uSel.id,
+          flota: esTercero ? "tercero" : "propia",
           km: Number(form.kilometraje),
           fuente: "combustible",
           fecha: form.fecha,
@@ -274,7 +296,7 @@ export default function CombustiblePage() {
 
   const editar = (r: Combustible) => {
     setForm({
-      vehiculo_id:      r.vehiculo_id ? String(r.vehiculo_id) : "",
+      vehiculo_id:      uidReg(r),
       fecha:            r.fecha        || "",
       kilometraje:      r.kilometraje  ? String(r.kilometraje)  : "",
       galones:          r.galones      ? String(r.galones)      : "",
@@ -315,10 +337,9 @@ export default function CombustiblePage() {
     if (COMBUSTIBLES[tipo]?.esAditivo) return false;
     const prev = prevRegistro[r.id];
     const rend = calcRendimiento(r, prev);
-    const key  = `${r.vehiculo_id}-${tipo}`;
+    const key  = `${uidReg(r)}-${tipo}`;
     const promedio = rendimientoPromedio[key];
-    const veh  = vehiculos.find(v => v.id === r.vehiculo_id);
-    const cap  = getCapacidad(veh,tipo);
+    const cap  = getCapacidad(unidadDe(uidReg(r)), tipo);
     if (Number(r.galones) > cap * 1.1) return true;
     if (rend !== null && promedio && promedio > 0 && ((promedio - rend) / promedio) > 0.3) return true;
     return false;
@@ -330,18 +351,19 @@ export default function CombustiblePage() {
   // ── Filtrado ──────────────────────────────────────────────────────────────
 
   const filtrados = useMemo(() => registros.filter(r => {
-    const v  = vehiculos.find(v => v.id === r.vehiculo_id);
+    const u  = unidadDe(uidReg(r));
     const q  = busqueda.toLowerCase();
-    const txt= `${v?.placa || ""} ${r.grifo || ""} ${r.conductor || ""} ${r.tipo_combustible || ""}`.toLowerCase();
+    const txt= `${u?.placa || ""} ${r.grifo || ""} ${r.conductor || ""} ${r.tipo_combustible || ""}`.toLowerCase();
     return txt.includes(q) &&
-      (filtroVeh  === "todos" || String(r.vehiculo_id) === filtroVeh) &&
+      (filtroFlota === "todos" || (u?.tipo ?? "propio") === filtroFlota) &&
+      (filtroVeh  === "todos" || uidReg(r) === filtroVeh) &&
       (filtroTipo === "todos" || (r.tipo_combustible || "diesel") === filtroTipo) &&
       (filtroMes  === "todos" || r.fecha?.slice(0, 7) === filtroMes);
-  }), [registros, busqueda, filtroVeh, filtroTipo, filtroMes, vehiculos]);
+  }), [registros, busqueda, filtroFlota, filtroVeh, filtroTipo, filtroMes, unidades]);
 
-  // Datos por vehículo
-  const datosVehiculo = vehiculos.map(v => {
-    const regs = registros.filter(r => r.vehiculo_id === v.id);
+  // Datos por vehículo (ambas flotas)
+  const datosVehiculo = unidades.map(v => {
+    const regs = registros.filter(r => uidReg(r) === v.uid);
     const costo = regs.reduce((s, r) => s + Number(r.total || 0), 0);
     const km    = Number(v.kilometraje_actual || 0);
     const tipos = [...new Set(regs.map(r => r.tipo_combustible || "diesel"))];
@@ -497,7 +519,12 @@ export default function CombustiblePage() {
               <Campo label="Vehículo *">
                 <select className={inputCls()} value={form.vehiculo_id} onChange={e => setForm(p => ({ ...p, vehiculo_id: e.target.value }))}>
                   <option value="">Seleccionar vehículo</option>
-                  {vehiculos.map(v => <option key={v.id} value={v.id}>{v.placa}{v.categoria ? ` · ${v.categoria}` : ""}</option>)}
+                  <optgroup label="Flota propia">
+                    {unidades.filter(u => u.tipo === "propio").map(u => <option key={u.uid} value={u.uid}>{u.placa}{u.categoria ? ` · ${u.categoria}` : ""}</option>)}
+                  </optgroup>
+                  <optgroup label="Tercerizadas">
+                    {unidades.filter(u => u.tipo === "tercero").map(u => <option key={u.uid} value={u.uid}>{u.placa}{u.categoria ? ` · ${u.categoria}` : ""}</option>)}
+                  </optgroup>
                 </select>
               </Campo>
               <Campo label="Fecha *">
@@ -516,13 +543,13 @@ export default function CombustiblePage() {
               Cantidad y precio — <span style={{ color: fuelCfg.color }}>{fuelCfg.label} ({fuelCfg.unidadLabel})</span>
             </p>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <Campo label={`Cantidad * (${fuelCfg.unidadLabel}) · Cap. ~${form.vehiculo_id ? getCapacidad(vehiculos.find(v => v.id === Number(form.vehiculo_id)),form.tipo_combustible) : "—"} ${fuelCfg.unidadLabel}`}>
+              <Campo label={`Cantidad * (${fuelCfg.unidadLabel}) · Cap. ~${form.vehiculo_id ? getCapacidad(unidadDe(form.vehiculo_id),form.tipo_combustible) : "—"} ${fuelCfg.unidadLabel}`}>
                 <input type="number" min="0" className={inputCls(
-                  form.vehiculo_id && Number(form.galones) > getCapacidad(vehiculos.find(v => v.id === Number(form.vehiculo_id)),form.tipo_combustible) * 1.1
+                  form.vehiculo_id && Number(form.galones) > getCapacidad(unidadDe(form.vehiculo_id),form.tipo_combustible) * 1.1
                     ? "border-red-400 bg-red-50" : ""
                 )} placeholder={`${fuelCfg.unidadLabel}`} value={form.galones}
                   onChange={e => setForm(p => ({ ...p, galones: e.target.value }))} />
-                {form.vehiculo_id && Number(form.galones) > getCapacidad(vehiculos.find(v => v.id === Number(form.vehiculo_id)),form.tipo_combustible) * 1.1 && (
+                {form.vehiculo_id && Number(form.galones) > getCapacidad(unidadDe(form.vehiculo_id),form.tipo_combustible) * 1.1 && (
                   <p className="text-xs text-red-600 mt-1 font-bold">⚠ Supera capacidad del tanque</p>
                 )}
               </Campo>
@@ -612,9 +639,19 @@ export default function CombustiblePage() {
                 placeholder="Buscar por placa, grifo, conductor o combustible..."
                 value={busqueda} onChange={e => setBusqueda(e.target.value)} />
             </div>
+            <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroFlota} onChange={e => setFiltroFlota(e.target.value as "todos" | "propio" | "tercero")}>
+              <option value="todos">Toda la flota</option>
+              <option value="propio">Propios</option>
+              <option value="tercero">Tercerizados</option>
+            </select>
             <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroVeh} onChange={e => setFiltroVeh(e.target.value)}>
               <option value="todos">Todos los vehículos</option>
-              {vehiculos.map(v => <option key={v.id} value={v.id}>{v.placa}</option>)}
+              <optgroup label="Flota propia">
+                {unidades.filter(u => u.tipo === "propio").map(u => <option key={u.uid} value={u.uid}>{u.placa}</option>)}
+              </optgroup>
+              <optgroup label="Tercerizadas">
+                {unidades.filter(u => u.tipo === "tercero").map(u => <option key={u.uid} value={u.uid}>{u.placa}</option>)}
+              </optgroup>
             </select>
             <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroTipo} onChange={e => setFiltroTipo(e.target.value)}>
               <option value="todos">Todos los tipos</option>
@@ -653,10 +690,10 @@ export default function CombustiblePage() {
                     const unidLbl = r.unidad === "m3" ? "m³" : r.unidad || "gal";
                     const prev    = prevRegistro[r.id];
                     const rend    = calcRendimiento(r, prev);
-                    const key     = `${r.vehiculo_id}-${tipo}`;
+                    const key     = `${uidReg(r)}-${tipo}`;
                     const promedio= rendimientoPromedio[key];
-                    const veh     = vehiculos.find(v => v.id === r.vehiculo_id);
-                    const cap     = getCapacidad(veh,tipo);
+                    const uni     = unidadDe(uidReg(r));
+                    const cap     = getCapacidad(uni,tipo);
                     const expandido = expandidoId === r.id;
 
                     const anomaliaExceso = Number(r.galones) > cap * 1.1;
@@ -670,7 +707,10 @@ export default function CombustiblePage() {
                           onClick={() => setExpandidoId(expandido ? null : r.id)}>
                           <td className="p-3 text-gray-300 text-xs">{expandido ? "▼" : "▶"}</td>
                           <td className="p-3 text-xs text-gray-600 font-medium">{fmtFecha(r.fecha)}</td>
-                          <td className="p-3 font-mono font-black text-xs text-[#0b315f]">{nombreVehiculo(r.vehiculo_id)}</td>
+                          <td className="p-3 font-mono font-black text-xs text-[#0b315f]">
+                            {placaReg(r)}
+                            {uni?.tipo === "tercero" && <span className="ml-1.5 text-[9px] font-black text-[#7c3aed] bg-[#f3e8ff] px-1.5 py-0.5 rounded-full align-middle">tercero</span>}
+                          </td>
                           <td className="p-3">
                             <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={{ background: cfg.bg, color: cfg.color }}>
                               {cfg.icon} {cfg.label}
@@ -708,7 +748,7 @@ export default function CombustiblePage() {
                                 <div className="space-y-1">
                                   <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Carga</p>
                                   <p><span className="text-gray-400">Fecha:</span> {fmtFecha(r.fecha)}</p>
-                                  <p><span className="text-gray-400">Vehículo:</span> <b>{nombreVehiculo(r.vehiculo_id)}</b></p>
+                                  <p><span className="text-gray-400">Vehículo:</span> <b>{placaReg(r)}</b></p>
                                   <p><span className="text-gray-400">KM:</span> <span className="font-mono">{r.kilometraje ? fmtNum(Number(r.kilometraje), 0) : "—"}</span></p>
                                   <p><span className="text-gray-400">Conductor:</span> {r.conductor || "—"}</p>
                                 </div>
@@ -809,8 +849,12 @@ export default function CombustiblePage() {
             </thead>
             <tbody>
               {datosVehiculo.map(d => (
-                <tr key={d.vehiculo.id} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
-                  <td className="p-3 font-mono font-black text-[#0b315f]">{d.vehiculo.placa}<div className="text-xs text-gray-400 font-normal">{d.vehiculo.categoria}</div></td>
+                <tr key={d.vehiculo.uid} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
+                  <td className="p-3 font-mono font-black text-[#0b315f]">
+                    {d.vehiculo.placa}
+                    {d.vehiculo.tipo === "tercero" && <span className="ml-1.5 text-[9px] font-black text-[#7c3aed] bg-[#f3e8ff] px-1.5 py-0.5 rounded-full align-middle">tercero</span>}
+                    <div className="text-xs text-gray-400 font-normal">{d.vehiculo.categoria}</div>
+                  </td>
                   <td className="p-3 text-gray-600">{d.regs}</td>
                   <td className="p-3">
                     <div className="flex gap-1 flex-wrap">
@@ -822,7 +866,7 @@ export default function CombustiblePage() {
                     {d.cpk ? `S/ ${fmtNum(d.cpk, 3)}/km` : "—"}
                   </td>
                   <td className="p-3">
-                    <button onClick={() => { setFiltroVeh(String(d.vehiculo.id)); setVista("historial"); }}
+                    <button onClick={() => { setFiltroVeh(d.vehiculo.uid); setVista("historial"); }}
                       className="text-xs font-bold text-[#0b315f] hover:underline">Ver →</button>
                   </td>
                 </tr>

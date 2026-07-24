@@ -598,21 +598,71 @@ function TabOportunidades({ oportunidades, creando, onCrearCotizacion, onCambiar
 
 // ── Tab: Combustible ─────────────────────────────────────────────────────────
 
-function TabCombustible({ registros, vehiculos, registrando, onRegistrar, onDescartar }: {
+// Valores editables por el revisor antes de registrar una recarga. Se inicializan con lo
+// que extrajo la IA; cada campo que cambie se guarda como lección en radar_combustible_correcciones.
+type EdicionComb = {
+  vehiculo: string;   // fleet-encoded: "propio:12" | "tercero:5" | ""
+  fecha: string;      // YYYY-MM-DD
+  grifo: string;
+  cantidad: string;   // galones o litros (según esLitros)
+  precio: string;     // precio unitario (por galón/litro)
+  monto: string;      // monto total
+};
+
+export type OverrideComb = {
+  tipo: "propio" | "tercero";
+  vehiculoId: number;
+  fecha: string | null;
+  grifo: string | null;
+  cantidad: number | null;
+  esLitros: boolean;
+  precio: number | null;
+  monto: number | null;
+};
+
+function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, onRegistrar, onDescartar }: {
   registros: RadarCombustible[];
-  vehiculos: VehiculoLite[];
+  vehiculosGuia: VehiculoGuiaOdometro[];
+  mensajesPorId: Record<string, RadarMensaje>;
   registrando: string | null;
-  onRegistrar: (c: RadarCombustible, vehiculoId: number) => void;
+  onRegistrar: (c: RadarCombustible, ov: OverrideComb) => void;
   onDescartar: (id: string) => void;
 }) {
   const [expandido, setExpandido] = useState<string | null>(null);
-  const [selVehiculo, setSelVehiculo] = useState<Record<string, string>>({});
+  const [edic, setEdic] = useState<Record<string, EdicionComb>>({});
 
   if (registros.length === 0) {
     return <CardVacia emoji="⛽" titulo="Sin recargas detectadas" detalle="Los vouchers de combustible que lleguen a los grupos aparecen aquí." />;
   }
 
-  const placaDe = (id: number | null) => vehiculos.find((v) => v.id === id)?.placa ?? null;
+  const placaDe = (id: number | null) =>
+    id == null ? null : vehiculosGuia.find((v) => v.tipo === "propio" && v.id === id)?.placa ?? null;
+  const placaTerceroDe = (id: number | null) =>
+    id == null ? null : vehiculosGuia.find((v) => v.tipo === "tercero" && v.id === id)?.placa ?? null;
+
+  // Fotos que la IA procesó: las guardadas en la fila, o (filas viejas) la del mensaje origen.
+  const fotosDe = (c: RadarCombustible): { url: string; nombre: string | null }[] => {
+    const propias = (c.fotos ?? []).filter((f) => f?.url).map((f) => ({ url: f.url, nombre: f.nombre ?? null }));
+    if (propias.length) return propias;
+    const m = c.mensaje_id ? mensajesPorId[c.mensaje_id] : null;
+    return m?.media_url ? [{ url: m.media_url, nombre: m.media_nombre ?? null }] : [];
+  };
+
+  // Estado de edición de una fila (perezoso: se crea al expandir con lo que dejó la IA).
+  const edicionDe = (c: RadarCombustible): EdicionComb => {
+    if (edic[c.id]) return edic[c.id];
+    const esLitros = c.litros != null && c.galones == null;
+    return {
+      vehiculo: c.vehiculo_id != null ? `propio:${c.vehiculo_id}` : c.vehiculo_tercero_id != null ? `tercero:${c.vehiculo_tercero_id}` : "",
+      fecha: c.fecha ?? "",
+      grifo: c.grifo ?? "",
+      cantidad: esLitros ? (c.litros != null ? String(c.litros) : "") : (c.galones != null ? String(c.galones) : ""),
+      precio: (esLitros ? c.precio_litro : c.precio_galon) != null ? String(esLitros ? c.precio_litro : c.precio_galon) : "",
+      monto: c.monto_total != null ? String(c.monto_total) : "",
+    };
+  };
+  const setCampo = (c: RadarCombustible, campo: keyof EdicionComb, valor: string) =>
+    setEdic((prev) => ({ ...prev, [c.id]: { ...edicionDe(c), [campo]: valor } }));
 
   return (
     <section className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
@@ -630,13 +680,19 @@ function TabCombustible({ registros, vehiculos, registrando, onRegistrar, onDesc
               const est = ESTADO_COMB_CFG[c.estado];
               const abierto = expandido === c.id;
               const esPendiente = c.estado === "pendiente_revision";
-              const placaMatch = placaDe(c.vehiculo_id);
+              const placaMatch = placaDe(c.vehiculo_id) ?? placaTerceroDe(c.vehiculo_tercero_id);
+              const esTercero = c.vehiculo_tercero_id != null;
               const cantidad = c.galones != null ? `${c.galones} gal` : c.litros != null ? `${c.litros} lt` : "—";
               const precio = c.precio_galon != null ? `${fmtSoles(c.precio_galon)}/gal` : c.precio_litro != null ? `${fmtSoles(c.precio_litro)}/lt` : "—";
-              const galonesEfectivos = c.galones ?? c.litros;
-              const precioEfectivo = c.precio_galon ?? c.precio_litro ?? (c.monto_total != null && galonesEfectivos ? c.monto_total / galonesEfectivos : null);
-              const vehSel = selVehiculo[c.id] ?? (c.vehiculo_id != null ? String(c.vehiculo_id) : "");
-              const puedeRegistrar = vehSel !== "" && galonesEfectivos != null && galonesEfectivos > 0 && precioEfectivo != null && precioEfectivo > 0;
+              // Edición del revisor (perezosa) — solo se usa en el bloque expandido.
+              const ed = edicionDe(c);
+              const esLitros = c.litros != null && c.galones == null;
+              const numEd = (s: string) => { const n = Number((s ?? "").replace(",", ".")); return isFinite(n) && n > 0 ? n : null; };
+              const cantEd = numEd(ed.cantidad);
+              const precioEd = numEd(ed.precio);
+              const montoEd = numEd(ed.monto);
+              const fotos = fotosDe(c);
+              const puedeRegistrar = ed.vehiculo !== "" && cantEd != null && (precioEd != null || montoEd != null);
               return (
                 <FragmentoFilaCombustible key={c.id}>
                   <tr
@@ -648,6 +704,7 @@ function TabCombustible({ registros, vehiculos, registrando, onRegistrar, onDesc
                     <td className="p-3 whitespace-nowrap">
                       <span className="font-mono font-black text-[#0b315f]">{placaMatch ?? c.placa ?? "—"}</span>
                       {!placaMatch && c.placa && <span className="ml-1.5 text-[10px] font-bold text-[#B07A0F]">sin match</span>}
+                      {esTercero && <span className="ml-1.5 text-[10px] font-black text-[#7c3aed] bg-[#f3e8ff] px-1.5 py-0.5 rounded-full">tercero</span>}
                     </td>
                     <td className="p-3 text-gray-600 max-w-[180px] truncate">{c.grifo ?? "—"}</td>
                     <td className="p-3 whitespace-nowrap font-bold text-gray-700">{cantidad}</td>
@@ -676,34 +733,81 @@ function TabCombustible({ registros, vehiculos, registrando, onRegistrar, onDesc
                   </tr>
                   {esPendiente && abierto && (
                     <tr className="border-t" style={{ borderColor: "#f1f5f9" }}>
-                      <td colSpan={8} className="p-4 bg-blue-50/40">
-                        <div className="flex flex-wrap items-end gap-3">
-                          <div>
-                            <label className="block text-[11px] font-black text-gray-400 uppercase tracking-wide mb-1">Vehículo</label>
-                            <select
-                              value={vehSel}
-                              onChange={(e) => setSelVehiculo((prev) => ({ ...prev, [c.id]: e.target.value }))}
-                              onClick={(e) => e.stopPropagation()}
-                              className="border border-gray-200 rounded-xl px-3 py-2 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f] bg-white"
-                            >
-                              <option value="">— Elegir unidad —</option>
-                              {vehiculos.map((v) => (
-                                <option key={v.id} value={String(v.id)}>{v.placa}{v.categoria ? ` · ${v.categoria}` : ""}</option>
+                      <td colSpan={8} className="p-4 bg-blue-50/40" onClick={(e) => e.stopPropagation()}>
+                        {/* Fotos que la IA procesó (voucher / surtidor / tablero) */}
+                        {fotos.length > 0 ? (
+                          <div className="mb-4">
+                            <p className="text-[11px] font-black text-gray-400 uppercase tracking-wide mb-2">
+                              {fotos.length === 1 ? "Foto procesada por la IA" : `${fotos.length} fotos procesadas por la IA`}
+                            </p>
+                            <div className="flex flex-wrap gap-2">
+                              {fotos.map((f, i) => (
+                                <a key={i} href={f.url} target="_blank" rel="noreferrer" title={f.nombre ?? "Abrir foto"} className="block">
+                                  <img src={f.url} alt={f.nombre ?? `Foto ${i + 1}`} className="h-28 w-28 object-cover rounded-xl border border-gray-200 hover:ring-2 hover:ring-[#1262bd] transition" />
+                                </a>
                               ))}
-                            </select>
+                            </div>
                           </div>
-                          {c.conductor && <p className="text-xs text-gray-500 font-semibold pb-2.5">Conductor: <span className="font-bold text-gray-700">{c.conductor}</span></p>}
-                          {c.comprobante && <p className="text-xs text-gray-500 font-semibold pb-2.5">Comprobante: <span className="font-mono">{c.comprobante}</span></p>}
+                        ) : (
+                          <p className="text-[11px] text-gray-400 font-semibold mb-4">Sin foto disponible para esta recarga.</p>
+                        )}
+
+                        {/* Edición de los campos extraídos — corrige lo que la IA leyó mal */}
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                          <CampoEdit label="Fecha">
+                            <input type="date" value={ed.fecha} onChange={(e) => setCampo(c, "fecha", e.target.value)} className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
+                          </CampoEdit>
+                          <CampoEdit label="Unidad">
+                            <select value={ed.vehiculo} onChange={(e) => setCampo(c, "vehiculo", e.target.value)} className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f] bg-white">
+                              <option value="">— Elegir —</option>
+                              <optgroup label="Flota propia">
+                                {vehiculosGuia.filter((v) => v.tipo === "propio").map((v) => (
+                                  <option key={`p${v.id}`} value={`propio:${v.id}`}>{v.placa}{v.categoria ? ` · ${v.categoria}` : ""}</option>
+                                ))}
+                              </optgroup>
+                              <optgroup label="Tercerizadas">
+                                {vehiculosGuia.filter((v) => v.tipo === "tercero").map((v) => (
+                                  <option key={`t${v.id}`} value={`tercero:${v.id}`}>{v.placa}{v.categoria ? ` · ${v.categoria}` : ""}</option>
+                                ))}
+                              </optgroup>
+                            </select>
+                          </CampoEdit>
+                          <CampoEdit label="Grifo">
+                            <input type="text" value={ed.grifo} onChange={(e) => setCampo(c, "grifo", e.target.value)} placeholder="—" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
+                          </CampoEdit>
+                          <CampoEdit label={esLitros ? "Cantidad (lt)" : "Cantidad (gal)"}>
+                            <input type="number" inputMode="decimal" step="0.001" value={ed.cantidad} onChange={(e) => setCampo(c, "cantidad", e.target.value)} placeholder="—" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
+                          </CampoEdit>
+                          <CampoEdit label={esLitros ? "Precio/lt" : "Precio/gal"}>
+                            <input type="number" inputMode="decimal" step="0.01" value={ed.precio} onChange={(e) => setCampo(c, "precio", e.target.value)} placeholder="—" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
+                          </CampoEdit>
+                          <CampoEdit label="Monto total">
+                            <input type="number" inputMode="decimal" step="0.01" value={ed.monto} onChange={(e) => setCampo(c, "monto", e.target.value)} placeholder="—" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
+                          </CampoEdit>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-3 mt-3">
+                          {c.conductor && <p className="text-xs text-gray-500 font-semibold">Conductor: <span className="font-bold text-gray-700">{c.conductor}</span></p>}
+                          {c.comprobante && <p className="text-xs text-gray-500 font-semibold">Comprobante: <span className="font-mono">{c.comprobante}</span></p>}
                           <div className="flex items-center gap-2 ml-auto">
                             <button
-                              onClick={(e) => { e.stopPropagation(); onRegistrar(c, Number(vehSel)); }}
+                              onClick={() => onRegistrar(c, {
+                                tipo: (ed.vehiculo.split(":")[0] as "propio" | "tercero"),
+                                vehiculoId: Number(ed.vehiculo.split(":")[1]),
+                                fecha: ed.fecha || null,
+                                grifo: ed.grifo.trim() || null,
+                                cantidad: cantEd,
+                                esLitros,
+                                precio: precioEd,
+                                monto: montoEd,
+                              })}
                               disabled={!puedeRegistrar || registrando === c.id}
                               className="px-3 py-2 rounded-xl text-xs font-bold bg-[#0b315f] text-white hover:bg-[#1262bd] transition-colors disabled:opacity-40"
                             >
                               {registrando === c.id ? "Registrando…" : "Registrar en Combustible"}
                             </button>
                             <button
-                              onClick={(e) => { e.stopPropagation(); onDescartar(c.id); }}
+                              onClick={() => onDescartar(c.id)}
                               className="px-3 py-2 rounded-xl text-xs font-bold text-[#EB5757] hover:bg-[#FDECEC] transition-colors"
                             >
                               Descartar
@@ -715,6 +819,7 @@ function TabCombustible({ registros, vehiculos, registrando, onRegistrar, onDesc
                             Para registrar se necesita unidad, galones o litros, y precio o monto total.
                           </p>
                         )}
+                        <p className="text-[11px] text-gray-400 mt-1">Si corriges lo que la IA leyó, se guarda como lección para que no repita el error.</p>
                       </td>
                     </tr>
                   )}
@@ -731,6 +836,16 @@ function TabCombustible({ registros, vehiculos, registrando, onRegistrar, onDesc
 // Wrapper mínimo para agrupar fila + fila expandida sin romper el <tbody>
 function FragmentoFilaCombustible({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
+}
+
+// Campo etiquetado del formulario de edición de una recarga.
+function CampoEdit({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-[11px] font-black text-gray-400 uppercase tracking-wide mb-1">{label}</label>
+      {children}
+    </div>
+  );
 }
 
 // ── Tab: Odómetro ────────────────────────────────────────────────────────────
@@ -1623,6 +1738,13 @@ export default function RadarIAPage() {
     return map;
   }, [mensajes]);
 
+  // Para el fallback de fotos en el panel de revisión de combustible (filas viejas sin `fotos`).
+  const mensajesPorId = useMemo(() => {
+    const map: Record<string, RadarMensaje> = {};
+    for (const m of mensajes) map[m.id] = m;
+    return map;
+  }, [mensajes]);
+
   // ── Chip de conexión ──
   const conexion = (() => {
     if (!estado) return { dot: "#EB5757", color: "#EB5757", texto: "Sin estado", sub: "Corre supabase/radar-ia.sql" as string | null };
@@ -1789,37 +1911,81 @@ export default function RadarIAPage() {
     }
   }
 
-  async function registrarCombustible(c: RadarCombustible, vehiculoId: number) {
-    const galones = c.galones ?? c.litros;
-    const precio = c.precio_galon ?? c.precio_litro ?? (c.monto_total != null && galones ? c.monto_total / galones : null);
-    if (!vehiculoId || !galones || !precio) {
+  // Registra la corrección del revisor (valor IA vs valor final) como lección de la IA. Best-effort.
+  async function guardarCorreccionesCombustible(c: RadarCombustible, ov: OverrideComb, fotoUrl: string | null) {
+    const iaCantidad = ov.esLitros ? c.litros : c.galones;
+    const iaPrecio = ov.esLitros ? c.precio_litro : c.precio_galon;
+    const distinto = (a: unknown, b: unknown) => {
+      const na = a == null || a === "" ? null : a, nb = b == null || b === "" ? null : b;
+      if (typeof na === "number" || typeof nb === "number") return Number(na) !== Number(nb);
+      return String(na ?? "").trim().toLowerCase() !== String(nb ?? "").trim().toLowerCase();
+    };
+    const campos: { campo: string; ia: unknown; correcto: unknown }[] = [
+      { campo: "fecha",  ia: c.fecha,   correcto: ov.fecha },
+      { campo: "grifo",  ia: c.grifo,   correcto: ov.grifo },
+      { campo: ov.esLitros ? "litros" : "galones", ia: iaCantidad, correcto: ov.cantidad },
+      { campo: "precio", ia: iaPrecio,  correcto: ov.precio },
+      { campo: "monto",  ia: c.monto_total, correcto: ov.monto },
+    ];
+    const filas = campos
+      .filter((x) => x.correcto != null && distinto(x.ia, x.correcto))
+      .map((x) => ({
+        radar_combustible_id: c.id,
+        campo: x.campo,
+        valor_ia: x.ia == null ? null : String(x.ia),
+        valor_correcto: String(x.correcto),
+        foto_url: fotoUrl,
+      }));
+    if (!filas.length) return;
+    const { error } = await supabase.from("radar_combustible_correcciones").insert(filas);
+    if (error) console.warn("radar-ia: no se pudieron guardar las correcciones de combustible", error);
+  }
+
+  async function registrarCombustible(c: RadarCombustible, ov: OverrideComb) {
+    if (!ov.vehiculoId || !ov.cantidad) {
       showToast("Faltan datos para registrar la recarga", false);
+      return;
+    }
+    // Precio unitario: el editado, o derivado del monto entre la cantidad.
+    const precio = ov.precio ?? (ov.monto != null && ov.cantidad ? Math.round((ov.monto / ov.cantidad) * 100) / 100 : null);
+    if (!precio) {
+      showToast("Ingresa el precio o el monto total", false);
       return;
     }
     setRegistrandoComb(c.id);
     try {
       const grupo = (c.mensaje_id && grupoPorMensaje[c.mensaje_id]) || "WhatsApp";
+      const fotoUrl = (c.fotos?.[0]?.url) ?? (c.mensaje_id ? mensajesPorId[c.mensaje_id]?.media_url ?? null : null);
+      // Guarda primero las correcciones (dataset de aprendizaje), sin frenar el registro.
+      await guardarCorreccionesCombustible(c, ov, fotoUrl);
+
+      const destino = ov.tipo === "tercero" ? { vehiculo_tercero_id: ov.vehiculoId } : { vehiculo_id: ov.vehiculoId };
       // OJO: nunca escribir `total` — es columna generada (galones × precio_galon)
       const { data, error } = await supabase
         .from("combustible")
         .insert({
-          vehiculo_id: vehiculoId,
-          fecha: c.fecha ?? hoyISO(),
+          ...destino,
+          fecha: ov.fecha ?? c.fecha ?? hoyISO(),
           kilometraje: c.kilometraje ?? 0,
-          galones,
+          galones: ov.cantidad,
           precio_galon: precio,
-          grifo: c.grifo,
+          grifo: ov.grifo ?? c.grifo,
           conductor: c.conductor,
-          observaciones: `Radar IA (manual) · grupo ${grupo}`,
+          observaciones: `Radar IA (manual${ov.tipo === "tercero" ? " · tercero" : ""}) · grupo ${grupo}`,
           tipo_combustible: c.tipo_combustible ?? "diesel",
-          unidad: c.galones != null ? "galones" : "litros",
+          unidad: ov.esLitros ? "litros" : "galones",
         })
         .select("id")
         .single();
       if (error || !data) throw error ?? new Error("no se pudo insertar en combustible");
       await supabase
         .from("radar_combustible")
-        .update({ estado: "registrado", combustible_id: (data as any).id, vehiculo_id: vehiculoId })
+        .update({
+          estado: "registrado",
+          combustible_id: (data as any).id,
+          vehiculo_id: ov.tipo === "propio" ? ov.vehiculoId : null,
+          vehiculo_tercero_id: ov.tipo === "tercero" ? ov.vehiculoId : null,
+        })
         .eq("id", c.id);
       showToast("Recarga registrada en Combustible");
       cargar();
@@ -2080,7 +2246,8 @@ export default function RadarIAPage() {
             {tab === "combustible" && (
               <TabCombustible
                 registros={combustibles}
-                vehiculos={vehiculos}
+                vehiculosGuia={vehiculosGuia}
+                mensajesPorId={mensajesPorId}
                 registrando={registrandoComb}
                 onRegistrar={registrarCombustible}
                 onDescartar={descartarCombustible}

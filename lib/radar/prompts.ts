@@ -22,6 +22,7 @@ export type ContextoPrompt = {
   guiaVoucher?: string | null;   // cómo leer los vouchers de grifo (radar_config.guia_voucher)
   guiasOdometro?: { placa: string; guia: string }[]; // dónde está la lectura en el tablero de cada unidad
   leccionesOdometro?: string | null; // correcciones humanas previas de lectura de odómetro (para no repetir errores)
+  leccionesCombustible?: string | null; // correcciones humanas previas de lectura de vouchers de grifo (grifo/cantidad/precio/monto)
 };
 
 /** Bloque de "errores que ya cometiste" para inyectar en la lectura de odómetro. */
@@ -29,6 +30,13 @@ function lineaLeccionesOdometro(ctx: ContextoPrompt): string {
   const lec = (ctx.leccionesOdometro ?? "").trim();
   if (!lec) return "";
   return `\n\nERRORES DE LECTURA DE ODÓMETRO que ya cometiste en esta flota (corregidos por el equipo). Revísalos y NO los repitas; si tu lectura se parece a alguno, baja "confianza_lectura" y explícalo en "observaciones":\n${lec}`;
+}
+
+/** Bloque de "correcciones de vouchers que ya te hizo el equipo" para la extracción de combustible. */
+function lineaLeccionesCombustible(ctx: ContextoPrompt): string {
+  const lec = (ctx.leccionesCombustible ?? "").trim();
+  if (!lec) return "";
+  return `\n\nCORRECCIONES DE LECTURA DE VOUCHERS que ya te hizo el equipo de AFA (grifo, cantidad, precio, monto, fecha). Revísalas y NO repitas el mismo error; si tu lectura se parece a alguno de estos casos, vuelve a mirar la foto con cuidado y baja la confianza del campo:\n${lec}`;
 }
 
 // ── Helpers de fecha (solo formateo, la fecha Lima llega ya resuelta) ────────
@@ -326,7 +334,7 @@ export function promptExtraccion(categoria: CategoriaRadar, ctx: ContextoPrompt)
   }
   const extra =
     categoria === "combustible"
-      ? `\n- Si el texto transcribe un voucher, captura TODOS los campos impresos que se mencionen (grifo, dirección, comprobante, cantidad, precio, total, fecha y hora).`
+      ? `\n- Si el texto transcribe un voucher, captura TODOS los campos impresos que se mencionen (grifo, dirección, comprobante, cantidad, precio, total, fecha y hora).${lineaLeccionesCombustible(ctx)}`
       : (categoria === "odometro" ? lineaLeccionesOdometro(ctx) : "");
   return `Eres el analista del Radar IA de AFA Transportes (operador de transporte de personal y turismo en Perú).
 
@@ -373,7 +381,7 @@ export function promptExtraccionMedia(ctx: ContextoPrompt): string {
 
 ${lineaContexto(ctx)}${lineaPalabrasClave(ctx)}
 
-${GLOSARIO}${lineaGuiasCombustible(ctx)}${lineaLeccionesOdometro(ctx)}
+${GLOSARIO}${lineaGuiasCombustible(ctx)}${lineaLeccionesOdometro(ctx)}${lineaLeccionesCombustible(ctx)}
 
 Haz DOS cosas en una sola respuesta:
 

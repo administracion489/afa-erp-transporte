@@ -848,6 +848,11 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     conductor: conductorNombre,
     proveedor,
     anomalias,
+    // Todas las fotos del cluster (voucher/surtidor/tablero) que la IA procesó, para el
+    // panel de revisión. Fallback a la foto propia del mensaje si el motor no las pasó.
+    fotos: (mensaje as any).fotos_cluster?.length
+      ? (mensaje as any).fotos_cluster
+      : (mensaje.media_url ? [{ url: mensaje.media_url, mime: mensaje.media_mime ?? null, nombre: mensaje.media_nombre ?? null }] : []),
   };
 
   // ¿Se puede registrar automáticamente en la tabla real `combustible`?

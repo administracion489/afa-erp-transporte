@@ -146,6 +146,7 @@ export type RadarCombustible = {
   estado: "registrado" | "pendiente_revision" | "descartado";
   placa: string | null;
   vehiculo_id: number | null;
+  vehiculo_tercero_id: number | null;
   fecha: string | null;
   hora: string | null;
   grifo: string | null;
@@ -161,8 +162,16 @@ export type RadarCombustible = {
   conductor: string | null;
   proveedor: string | null;
   anomalias: AnomaliaCombustible[];
+  /** Fotos que la IA procesó (voucher/surtidor/tablero): [{ url, mime, nombre }]. Vacío en filas viejas. */
+  fotos: RadarFoto[] | null;
   combustible_id: number | null;
   created_at: string;
+};
+
+export type RadarFoto = {
+  url: string;
+  mime: string | null;
+  nombre: string | null;
 };
 
 export type AnomaliaCombustible = {
