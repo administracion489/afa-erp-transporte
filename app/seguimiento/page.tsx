@@ -1325,6 +1325,23 @@ export default function SeguimientoPage() {
     setDrawer(prev => prev ? (servicios.find(s => s.reserva.id === prev.reserva.id) ?? prev) : prev);
   }, [servicios]);
 
+  // Ir al detalle de un servicio desde el panel de mensajes de pasajeros.
+  const [pendienteReserva, setPendienteReserva] = useState<number | null>(null);
+  const irAServicio = useCallback((reservaId: number, fechaServicio?: string | null) => {
+    const encontrado = servicios.find(s => s.reserva.id === reservaId);
+    if (encontrado) { setDrawer(encontrado); return; }
+    // El servicio es de otra fecha: cambia el filtro y lo abre cuando termine de cargar.
+    if (fechaServicio) setFechaFiltro(fechaServicio);
+    setPendienteReserva(reservaId);
+  }, [servicios]);
+
+  // Cuando cargan los servicios de la fecha destino, abre el pendiente.
+  useEffect(() => {
+    if (pendienteReserva == null) return;
+    const encontrado = servicios.find(s => s.reserva.id === pendienteReserva);
+    if (encontrado) { setDrawer(encontrado); setPendienteReserva(null); }
+  }, [servicios, pendienteReserva]);
+
   const totalFijos      = servicios.filter(s=>!s.es_eventual).length;
   const totalEventuales = servicios.filter(s=>s.es_eventual).length;
   const enRuta          = servicios.filter(s=>s.estado_visual==="en_ruta").length;
@@ -1365,7 +1382,7 @@ export default function SeguimientoPage() {
               <Ic.Refresh size={15} color="#0b315f"/>
             </button>
             {/* ── MENSAJES PASAJEROS ── */}
-            <PanelMensajesPasajeros />
+            <PanelMensajesPasajeros onIrAServicio={irAServicio} />
             {/* ── DESCARGA MASIVA DE DOCUMENTOS ── */}
             <button onClick={()=>setDescargaMasiva(true)}
               className="flex items-center gap-2 bg-white border border-gray-200 hover:border-[#0b315f] text-[#0b315f] px-4 py-2.5 rounded-xl text-sm font-bold transition-colors shadow-sm"

@@ -28,7 +28,16 @@ type MensajePasajero = {
   // joins
   pasajero?: { nombre: string; empresa: string | null } | null;
   parada?: { nombre: string } | null;
-  reserva?: { origen: string; destino: string } | null;
+  reserva?: ReservaInfo | null;
+};
+
+type ReservaInfo = {
+  origen: string | null;
+  destino: string | null;
+  ruta_nombre: string | null;
+  fecha_servicio: string | null;
+  hora_servicio: string | null;
+  codigo: string | null;
 };
 
 type Convo = {
@@ -37,7 +46,7 @@ type Convo = {
   reservaId: number | null;
   nombre: string;
   empresa: string | null;
-  ruta: { origen: string; destino: string } | null;
+  ruta: ReservaInfo | null;
   parada: string | null;
   mensajes: MensajePasajero[]; // asc
   ultimo: MensajePasajero;
@@ -69,13 +78,46 @@ function fmtTime(s: string) {
   return d.toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" });
 }
 
-export default function PanelMensajesPasajeros() {
+// Etiqueta corta de ruta: prioriza ruta_nombre, si no arma "origen → destino".
+function rutaLabel(r: ReservaInfo | null): string | null {
+  if (!r) return null;
+  if (r.ruta_nombre) return r.ruta_nombre;
+  if (r.origen && r.destino) return `${r.origen} → ${r.destino}`;
+  return r.origen || r.destino || null;
+}
+
+// Fecha (+hora) del servicio para dar soporte: "23 jul · 05:00".
+function fmtServicio(r: ReservaInfo | null): string | null {
+  if (!r?.fecha_servicio) return r?.hora_servicio ? r.hora_servicio.slice(0, 5) : null;
+  const d = new Date(`${r.fecha_servicio}T00:00:00`);
+  const fecha = isNaN(d.getTime())
+    ? r.fecha_servicio
+    : d.toLocaleDateString("es-PE", { day: "2-digit", month: "short" });
+  const hora = r.hora_servicio ? r.hora_servicio.slice(0, 5) : null;
+  return hora ? `${fecha} · ${hora}` : fecha;
+}
+
+// Fecha "hoy" en Perú (UTC-5), formato YYYY-MM-DD.
+function fechaHoyPeru(): string {
+  const lima = new Date(Date.now() - 5 * 3600 * 1000);
+  return lima.toISOString().slice(0, 10);
+}
+
+type Props = {
+  // Abre el detalle del servicio (drawer) en Seguimiento desde un hilo.
+  onIrAServicio?: (reservaId: number, fechaServicio?: string | null) => void;
+};
+
+export default function PanelMensajesPasajeros({ onIrAServicio }: Props = {}) {
   const [mensajes, setMensajes] = useState<MensajePasajero[]>([]);
   const [abierto, setAbierto] = useState(false);
   const [convoKey, setConvoKey] = useState<string | null>(null); // hilo abierto
   const [borrador, setBorrador] = useState("");
   const [enviando, setEnviando] = useState(false);
+  const [busqueda, setBusqueda] = useState("");     // filtro de la lista
+  const [soloHoy, setSoloHoy] = useState(false);     // filtro: solo servicios de hoy
   const finRef = useRef<HTMLDivElement | null>(null);
+  const hoyPeru = useMemo(() => fechaHoyPeru(), []);
 
   const cargar = useCallback(async () => {
     const { data } = await supabase
@@ -84,7 +126,7 @@ export default function PanelMensajesPasajeros() {
         *,
         pasajero:pasajeros(nombre, empresa),
         parada:paradas(nombre),
-        reserva:reservas(origen, destino)
+        reserva:reservas(origen, destino, ruta_nombre, fecha_servicio, hora_servicio, codigo)
       `)
       .order("created_at", { ascending: false })
       .limit(200);
@@ -130,10 +172,27 @@ export default function PanelMensajesPasajeros() {
         if (!prev.parada && m.parada?.nombre) prev.parada = m.parada.nombre;
       }
     }
-    return [...mapa.values()].sort(
-      (a, b) => new Date(b.ultimo.created_at).getTime() - new Date(a.ultimo.created_at).getTime()
-    );
-  }, [mensajes]);
+    const esHoy = (c: Convo) => c.ruta?.fecha_servicio === hoyPeru;
+    return [...mapa.values()].sort((a, b) => {
+      // 1º los servicios de hoy; 2º sin leer; 3º el mensaje más reciente.
+      if (esHoy(a) !== esHoy(b)) return esHoy(a) ? -1 : 1;
+      if ((a.noLeidos > 0) !== (b.noLeidos > 0)) return a.noLeidos > 0 ? -1 : 1;
+      return new Date(b.ultimo.created_at).getTime() - new Date(a.ultimo.created_at).getTime();
+    });
+  }, [mensajes, hoyPeru]);
+
+  // Lista visible según buscador y filtro "solo hoy".
+  const convosVisibles = useMemo(() => {
+    const q = busqueda.trim().toLowerCase();
+    return convos.filter(c => {
+      if (soloHoy && c.ruta?.fecha_servicio !== hoyPeru) return false;
+      if (!q) return true;
+      const heno = [
+        c.nombre, c.empresa, rutaLabel(c.ruta), c.parada, c.ruta?.codigo,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return heno.includes(q);
+    });
+  }, [convos, busqueda, soloHoy, hoyPeru]);
 
   const convoAbierta = useMemo(
     () => convos.find(c => c.key === convoKey) || null,
@@ -261,6 +320,33 @@ export default function PanelMensajesPasajeros() {
               </div>
             </div>
 
+            {/* ── BUSCADOR / FILTROS DE LA LISTA ── */}
+            {!convoAbierta && convos.length > 0 && (
+              <div className="flex-shrink-0 px-4 py-3 border-b bg-white space-y-2">
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300 text-sm">🔍</span>
+                  <input
+                    value={busqueda}
+                    onChange={e => setBusqueda(e.target.value)}
+                    placeholder="Buscar por pasajero, ruta, empresa o código…"
+                    className="w-full pl-8 pr-3 py-2 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-[#0b315f]/30"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setSoloHoy(v => !v)}
+                    className="text-xs font-bold px-3 py-1.5 rounded-full border transition-colors"
+                    style={soloHoy
+                      ? { background: "#0b315f", color: "white", borderColor: "#0b315f" }
+                      : { background: "white", color: "#475569", borderColor: "#e2e8f0" }}>
+                    📅 Solo hoy
+                  </button>
+                  <span className="text-[11px] text-slate-400">
+                    {convosVisibles.length} de {convos.length} conversación{convos.length !== 1 ? "es" : ""}
+                  </span>
+                </div>
+              </div>
+            )}
+
             {/* ── LISTA DE CONVERSACIONES ── */}
             {!convoAbierta && (
               <div className="flex-1 overflow-y-auto">
@@ -270,9 +356,15 @@ export default function PanelMensajesPasajeros() {
                     <p className="font-bold text-gray-700">Sin mensajes aún</p>
                     <p className="text-sm text-gray-400 mt-2">Las conversaciones con pasajeros aparecerán aquí en tiempo real</p>
                   </div>
+                ) : convosVisibles.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-full text-center px-6">
+                    <p style={{ fontSize: 40, marginBottom: 12 }}>🔍</p>
+                    <p className="font-bold text-gray-700">Sin resultados</p>
+                    <p className="text-sm text-gray-400 mt-2">Ajusta la búsqueda o quita el filtro de hoy</p>
+                  </div>
                 ) : (
                   <div className="divide-y" style={{ borderColor: "#f1f5f9" }}>
-                    {convos.map(c => {
+                    {convosVisibles.map(c => {
                       const cfg = TIPO_CFG[c.ultimo.tipo] || TIPO_CFG.novedad;
                       const suyo = c.ultimo.remitente !== "pasajero";
                       return (
@@ -288,7 +380,50 @@ export default function PanelMensajesPasajeros() {
                               <span className="text-xs text-gray-400 flex-shrink-0">{fmtTime(c.ultimo.created_at)}</span>
                             </div>
                             {c.empresa && <p className="text-xs text-gray-400 truncate">{c.empresa}</p>}
-                            <p className="text-sm text-gray-600 truncate mt-0.5">
+                            {/* Contexto del servicio: ruta + fecha/hora — clave para dar soporte */}
+                            {(rutaLabel(c.ruta) || fmtServicio(c.ruta) || c.parada) && (
+                              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-1">
+                                {rutaLabel(c.ruta) && (
+                                  onIrAServicio && c.reservaId != null ? (
+                                    <span
+                                      role="button"
+                                      tabIndex={0}
+                                      title="Ver el detalle del servicio"
+                                      onClick={e => {
+                                        e.stopPropagation();
+                                        onIrAServicio(c.reservaId!, c.ruta?.fecha_servicio ?? null);
+                                        setAbierto(false);
+                                        setConvoKey(null);
+                                      }}
+                                      onKeyDown={e => {
+                                        if (e.key === "Enter" || e.key === " ") {
+                                          e.preventDefault(); e.stopPropagation();
+                                          onIrAServicio(c.reservaId!, c.ruta?.fecha_servicio ?? null);
+                                          setAbierto(false); setConvoKey(null);
+                                        }
+                                      }}
+                                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#0b315f] bg-slate-100 hover:bg-blue-100 rounded-md px-1.5 py-0.5 max-w-full truncate cursor-pointer transition-colors">
+                                      🚌 {rutaLabel(c.ruta)} →
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-600 bg-slate-100 rounded-md px-1.5 py-0.5 max-w-full truncate">
+                                      🚌 {rutaLabel(c.ruta)}
+                                    </span>
+                                  )
+                                )}
+                                {fmtServicio(c.ruta) && (
+                                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#0b315f] bg-blue-50 rounded-md px-1.5 py-0.5">
+                                    📅 {fmtServicio(c.ruta)}
+                                  </span>
+                                )}
+                                {c.parada && (
+                                  <span className="inline-flex items-center gap-1 text-[11px] text-slate-500 truncate">
+                                    📍 {c.parada}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                            <p className="text-sm text-gray-600 truncate mt-1">
                               {suyo && <span className="text-[#0b315f] font-semibold">Tú: </span>}
                               {!suyo && <span>{cfg.ico} </span>}
                               {c.ultimo.mensaje}
@@ -316,15 +451,34 @@ export default function PanelMensajesPasajeros() {
               <>
                 {/* Contexto ruta/parada */}
                 {(convoAbierta.ruta || convoAbierta.parada) && (
-                  <div className="flex-shrink-0 px-5 py-2.5 border-b bg-slate-50 flex items-center gap-3 text-xs text-gray-500 flex-wrap">
-                    {convoAbierta.ruta && <span>🚌 {convoAbierta.ruta.origen} → {convoAbierta.ruta.destino}</span>}
-                    {convoAbierta.parada && <span>📍 {convoAbierta.parada}</span>}
-                    {convoAbierta.noLeidos > 0 && (
-                      <button onClick={() => marcarConvoAtendida(convoAbierta)}
-                        className="ml-auto text-xs font-bold text-[#0b315f] hover:underline">
-                        ✓ Marcar atendido
-                      </button>
+                  <div className="flex-shrink-0 px-5 py-2.5 border-b bg-slate-50 flex items-center gap-x-3 gap-y-1 text-xs text-gray-500 flex-wrap">
+                    {rutaLabel(convoAbierta.ruta) && (
+                      <span className="font-semibold text-slate-700">🚌 {rutaLabel(convoAbierta.ruta)}</span>
                     )}
+                    {fmtServicio(convoAbierta.ruta) && (
+                      <span className="font-semibold text-[#0b315f]">📅 {fmtServicio(convoAbierta.ruta)}</span>
+                    )}
+                    {convoAbierta.ruta?.codigo && <span className="text-slate-400">#{convoAbierta.ruta.codigo}</span>}
+                    {convoAbierta.parada && <span>📍 {convoAbierta.parada}</span>}
+                    <div className="ml-auto flex items-center gap-3">
+                      {convoAbierta.noLeidos > 0 && (
+                        <button onClick={() => marcarConvoAtendida(convoAbierta)}
+                          className="text-xs font-bold text-[#0b315f] hover:underline">
+                          ✓ Marcar atendido
+                        </button>
+                      )}
+                      {onIrAServicio && convoAbierta.reservaId != null && (
+                        <button
+                          onClick={() => {
+                            onIrAServicio(convoAbierta.reservaId!, convoAbierta.ruta?.fecha_servicio ?? null);
+                            setAbierto(false);
+                            setConvoKey(null);
+                          }}
+                          className="text-xs font-bold text-white bg-[#0b315f] hover:bg-[#1262bd] rounded-lg px-2.5 py-1 transition-colors">
+                          Ver servicio →
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
 
