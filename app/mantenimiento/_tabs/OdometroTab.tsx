@@ -96,6 +96,13 @@ export default function OdometroTab() {
   // Anulación de una lectura (con motivo → alimenta el aprendizaje de la IA)
   const [anular, setAnular]       = useState<Lectura | null>(null);
 
+  // Completar una jornada PENDIENTE (solo tuvo check-in): ingresar el odómetro final a mano.
+  // Solo se habilita desde las 00:00 del día siguiente a la jornada (ver botón en la tabla).
+  const [completar, setCompletar] = useState<(DiaRecorrido & { placa: string }) | null>(null);
+  const [cKm, setCKm]             = useState("");
+  const [cFoto, setCFoto]         = useState<File | null>(null);
+  const [cGuardando, setCGuardando] = useState(false);
+
   // Registro
   const [form, setForm] = useState({ vehiculo_id: "", km: "", fecha: hoy, fuente: "manual" as FuenteLectura });
   const [foto, setFoto] = useState<File | null>(null);
@@ -294,6 +301,73 @@ export default function OdometroTab() {
     });
     await supabase.from("lecturas_odometro").update({ estado: "reinicio", motivo: "Confirmado como reinicio" }).eq("id", l.id);
     cargar();
+  };
+
+  // ── Completar jornada pendiente (odómetro final manual) ─────────────────────
+  const abrirCompletar = (j: DiaRecorrido & { placa: string }) => {
+    setCompletar(j);
+    setCKm("");
+    setCFoto(null);
+  };
+
+  const completarJornada = async () => {
+    if (!completar) return;
+    const kmFinal = Number(cKm);
+    if (!kmFinal || kmFinal <= 0) { alert("Ingresa el kilometraje final del odómetro"); return; }
+    if (kmFinal < completar.primeraKm) {
+      alert(`El km final (${kmFinal.toLocaleString("es-PE")}) no puede ser menor al de entrada (${fmtNum(completar.primeraKm)} km).`);
+      return;
+    }
+    // Guarda anti-dedazo: como el cierre se registra forzado (aceptado), el anti-salto del
+    // servidor no lo frena; validamos aquí que el recorrido del día sea plausible.
+    const recorrido = kmFinal - completar.primeraKm;
+    if (recorrido > kmDiaMax &&
+        !confirm(`El recorrido de la jornada sería ${recorrido.toLocaleString("es-PE")} km, por encima del máximo diario esperado (${kmDiaMax.toLocaleString("es-PE")} km).\n¿El kilometraje es correcto?`)) {
+      return;
+    }
+    setCGuardando(true);
+    try {
+      const esTercero = completar.key.startsWith("t:");
+      const id = Number(completar.key.slice(2));
+      let fotoUrl: string | null = null;
+      if (cFoto) {
+        if (cFoto.size > 20 * 1024 * 1024) { alert("La foto supera 20 MB — usa una más liviana o registra sin foto."); setCGuardando(false); return; }
+        const ext = cFoto.name.split(".").pop() || "jpg";
+        const path = `odometro/${esTercero ? "t" : "p"}${id}/${Date.now()}.${ext}`;
+        const up = await supabase.storage.from("vehiculos-fotos").upload(path, cFoto, { upsert: true });
+        if (up.error) {
+          // No tragar el fallo: la foto es evidencia. Que el operador decida.
+          if (!confirm("No se pudo subir la foto del tablero. ¿Registrar la jornada sin foto?")) { setCGuardando(false); return; }
+        } else {
+          fotoUrl = supabase.storage.from("vehiculos-fotos").getPublicUrl(path).data.publicUrl;
+        }
+      }
+      // Cierre RETROACTIVO de una jornada pasada = backfill histórico confiable (el km final ya
+      // se validó ≥ el check-in del día). Se FUERZA a 'aceptada': registrarLectura valida el
+      // retroceso contra el km vigente GLOBAL, que para un día pasado ya está más alto por
+      // lecturas posteriores; sin forzar quedaría 'sospechosa' y sanearLecturas la descartaría,
+      // dejando la jornada eternamente pendiente. registrarLectura solo SUBE el vigente si
+      // km > vigente, así que un cierre de un día viejo no lo corrompe.
+      const r = await registrarLectura(supabase, {
+        vehiculo_id: id,
+        flota: esTercero ? "tercero" : "propia",
+        km: kmFinal,
+        fuente: "manual",
+        fecha: completar.fecha,
+        momento: "checkout",
+        capturado_en: `${completar.fecha}T23:59:00-05:00`,
+        foto_url: fotoUrl,
+        forzar: true,
+      });
+      if (!r.ok) throw new Error(r.error || "No se pudo registrar");
+      alert("Jornada completada ✓");
+      setCompletar(null);
+      await cargar();
+    } catch (e: any) {
+      alert("Error: " + e.message);
+    } finally {
+      setCGuardando(false);
+    }
   };
 
   const abrirAnalitica = (key: string) => {
@@ -551,7 +625,14 @@ export default function OdometroTab() {
                             <span className="text-[11px] text-green-600">✓</span>
                           )}
                         </td>
-                        <td className="p-3 text-right">
+                        <td className="p-3 text-right whitespace-nowrap">
+                          {j.pendiente && !j.reinicio && j.fecha < hoy && (
+                            <button onClick={() => abrirCompletar(j)}
+                              className="text-xs font-bold text-amber-700 border border-amber-200 bg-amber-50 rounded-lg px-2.5 py-1.5 hover:bg-amber-100 mr-2"
+                              title="Ingresar manualmente el odómetro final de esta jornada">
+                              ➕ Odómetro final
+                            </button>
+                          )}
                           <button onClick={() => abrirAnalitica(j.key)} className="text-xs font-bold text-[#0b315f] hover:underline whitespace-nowrap">Analítica →</button>
                         </td>
                       </tr>
@@ -633,6 +714,65 @@ export default function OdometroTab() {
           onAnulada={() => { cargar(); }}
         />
       )}
+
+      {/* COMPLETAR JORNADA — odómetro final manual */}
+      {completar && (() => {
+        const kmFinalNum = Number(cKm);
+        const recorridoPrev = kmFinalNum > 0 && kmFinalNum >= completar.primeraKm ? kmFinalNum - completar.primeraKm : null;
+        return (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50" onClick={() => !cGuardando && setCompletar(null)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4" onClick={e => e.stopPropagation()}>
+              <div>
+                <h2 className="text-lg font-bold text-gray-900">Odómetro final de la jornada</h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  <span className="font-mono font-bold text-[#0b315f]">{completar.placa}</span> · {fmtFecha(completar.fecha)}
+                  {completar.primeraHora ? ` · entró ${completar.primeraHora}` : ""}
+                </p>
+              </div>
+
+              <div className="rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
+                Esta jornada quedó sin cierre. Ingresa el kilometraje con que terminó el día
+                (check-out) para completarla.
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Km de entrada</label>
+                  <div className="border border-gray-200 rounded-xl px-3 py-2.5 text-sm font-mono text-gray-500 bg-gray-50">{fmtNum(completar.primeraKm)}</div>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Km final *</label>
+                  <input type="number" autoFocus className={inputCls("font-mono")} placeholder={`≥ ${fmtNum(completar.primeraKm)}`}
+                    value={cKm} onChange={e => setCKm(e.target.value)} />
+                </div>
+              </div>
+
+              {recorridoPrev != null && (
+                <p className="text-xs text-gray-500">Recorrido de la jornada: <span className="font-bold text-[#0b315f]">{recorridoPrev.toLocaleString("es-PE")} km</span></p>
+              )}
+              {cKm !== "" && kmFinalNum < completar.primeraKm && (
+                <p className="text-xs font-bold text-red-600">El km final no puede ser menor al de entrada.</p>
+              )}
+
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Foto del tablero (opcional)</label>
+                <input type="file" accept="image/*" capture="environment" onChange={e => setCFoto(e.target.files?.[0] || null)}
+                  className="text-sm file:mr-3 file:px-4 file:py-2 file:rounded-xl file:border-0 file:bg-gray-100 file:text-gray-700 file:font-bold file:text-xs" />
+              </div>
+
+              <div className="flex items-center gap-2 pt-1">
+                <button onClick={() => setCompletar(null)} disabled={cGuardando}
+                  className="px-4 py-2 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50 disabled:opacity-50">Cancelar</button>
+                <div className="flex-1" />
+                <button onClick={completarJornada} disabled={cGuardando}
+                  className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60 hover:opacity-90" style={{ background: "#0b315f" }}>
+                  {cGuardando ? "Guardando…" : "Completar jornada"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* VISOR FOTO TABLERO */}
       {fotoZoom && (
