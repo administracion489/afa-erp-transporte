@@ -1688,8 +1688,8 @@ export default function ModalManifiesto(props: Props) {
             {paradas.length > 0 ? (
               <div className="pt-4 border-t" style={{ borderColor: "#e2e8f0" }}>
                 <div className="mb-2">
-                  <h3 className="text-sm font-bold text-gray-900">Reordenar itinerario</h3>
-                  <p className="text-xs text-gray-400 mt-0.5">Arrastra para cambiar el orden. Los cambios se guardan automaticamente.</p>
+                  <h3 className="text-sm font-bold text-gray-900">Itinerario y horas</h3>
+                  <p className="text-xs text-gray-400 mt-0.5">Arrastra para reordenar · toca la hora de una parada para ajustarla. Los cambios se guardan automaticamente.</p>
                 </div>
                 <TimelineParadasEditable
                   reservaId={reservaId}

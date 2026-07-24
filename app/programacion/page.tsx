@@ -80,6 +80,63 @@ function ParadaPlacesInput({ value, onChange, onSelect, onEnter, mapsLoaded }: {
   );
 }
 
+// Editor inline de hora "solo este servicio": muestra la hora como botón y, al pulsarlo,
+// abre un <input type="time"> con confirmar/cancelar. Gestiona su propio estado local para
+// no re-renderizar toda la tabla en cada tecla; solo avisa al padre en el submit. Se usa en
+// las tres vistas (lista principal, contratos fijos, agenda). `editable=false` la deja como
+// texto (servicios finalizados / en curso / pasados, que no se deben re-horar).
+function HoraEditable({ hora, editable, onSubmit, textClass }: {
+  hora: string | null;
+  editable: boolean;
+  onSubmit: (nueva: string) => void;
+  textClass?: string;
+}) {
+  const [editando, setEditando] = useState(false);
+  const [val, setVal] = useState("");
+  const display = hora?.slice(0, 5) || "-";
+
+  if (!editable) return <span className={textClass}>{display}</span>;
+
+  if (editando) {
+    const confirmar = () => {
+      const v = val.trim();
+      setEditando(false);
+      if (v && v !== display) onSubmit(v);
+    };
+    return (
+      <span className="inline-flex items-center gap-1" onClick={e => e.stopPropagation()}>
+        <input
+          type="time"
+          value={val}
+          autoFocus
+          onChange={e => setVal(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") confirmar(); if (e.key === "Escape") setEditando(false); }}
+          onClick={e => e.stopPropagation()}
+          className="text-xs border rounded px-1 py-0.5 outline-none w-[76px]"
+          style={{ borderColor: "#0b315f" }}
+        />
+        <button onClick={e => { e.stopPropagation(); confirmar(); }} title="Aplicar" className="text-green-600 hover:text-green-700">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+        </button>
+        <button onClick={e => { e.stopPropagation(); setEditando(false); }} title="Cancelar" className="text-gray-400 hover:text-gray-600">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <button
+      onClick={e => { e.stopPropagation(); setVal(display === "-" ? "" : display); setEditando(true); }}
+      title="Editar hora (solo este servicio)"
+      className={"inline-flex items-center gap-1 group hover:text-[#0b315f] hover:underline decoration-dotted underline-offset-2 " + (textClass || "")}
+    >
+      {display}
+      <Pencil size={10} className="opacity-0 group-hover:opacity-50" />
+    </button>
+  );
+}
+
 type ParadaTP = {
   id: string; tipo: "inicio" | "intermedia" | "destino";
   nombre: string; direccion: string; lat: string; lng: string; hora: string;
@@ -224,6 +281,39 @@ function fechaLima(offsetDias = 0): string {
 function fmtFecha(f: string | null) {
   if (!f) return "-";
   return new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+// ── Helpers de hora (edición inline "solo este servicio") ──────────────────
+// Trabajan siempre sobre "HH:MM" (la BD guarda `time`, que llega como "HH:MM:SS").
+function minutosHHMM(s: string): number {
+  const [h, m] = s.slice(0, 5).split(":").map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+function fmtHHMM(min: number): string {
+  let t = min % 1440; if (t < 0) t += 1440; // envolver dentro del día (una parada podría cruzar medianoche)
+  return String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(t % 60).padStart(2, "0");
+}
+// Corre una hora "HH:MM(:SS)" por un delta en minutos, devolviendo "HH:MM".
+function correrHora(hhmm: string, deltaMin: number): string {
+  return fmtHHMM(minutosHHMM(hhmm) + deltaMin);
+}
+// Delta con signo legible: "+30 min · sale después" / "−15 min · sale antes".
+function etiquetaDelta(deltaMin: number): string {
+  if (deltaMin === 0) return "sin cambio";
+  const signo = deltaMin > 0 ? "+" : "−";
+  const abs = Math.abs(deltaMin);
+  const txt = abs >= 60
+    ? `${Math.floor(abs / 60)}h${abs % 60 ? " " + (abs % 60) + "min" : ""}`
+    : `${abs} min`;
+  return `${signo}${txt} · sale ${deltaMin > 0 ? "después" : "antes"}`;
+}
+
+// Un servicio se puede re-horar salvo que ya se esté operando o ya haya pasado: no le
+// cambiamos el bus al conductor a media ruta ni reescribimos historial.
+function horaEditable(r: Reserva): boolean {
+  if (r.estado === "finalizada" || r.estado === "cancelada" || r.estado === "en_curso") return false;
+  if (r.fecha_servicio && r.fecha_servicio < fechaLima()) return false;
+  return true;
 }
 
 function diasPara(f: string | null): number | null {
@@ -380,6 +470,18 @@ export default function ReservasPage() {
   const [aplicarOtraUnidad,    setAplicarOtraUnidad]    = useState(false);
   const [aplicando,            setAplicando]            = useState(false);
   const [sincCoords,           setSincCoords]           = useState<{ activo: boolean; msg: string }>({ activo: false, msg: "" });
+  // ── Edición de hora "solo este servicio" (MVP) ────────────────────────────
+  const [modalHora,            setModalHora]            = useState<{
+    reserva: Reserva;
+    horaOriginal: string;      // "HH:MM"
+    horaNueva: string;         // "HH:MM"
+    deltaMin: number;          // horaNueva − horaOriginal, en minutos
+    paradas: { id: number; nombre: string; de: string; a: string }[]; // preview (solo con hora)
+  } | null>(null);
+  const [guardandoHora,        setGuardandoHora]        = useState(false);
+  // Tras cambiar la hora de un servicio ya avisado/sincronizado: preguntar si re-notificar.
+  const [modalRenotificar,     setModalRenotificar]     = useState<{ reservaId: number; label: string } | null>(null);
+  const [renotificando,        setRenotificando]        = useState(false);
 
   const f = (k: keyof typeof FORM_VACIO) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -776,6 +878,78 @@ export default function ReservasPage() {
     const { data } = await supabase.from("paradas").select("*").eq("reserva_id", reservaId).order("orden");
     setParadasMap(prev => ({ ...prev, [reservaId]: data || [] }));
     return data || [];
+  };
+
+  // ── Edición de hora "solo este servicio" ──────────────────────────────────
+  // Paso 1: al confirmar la hora inline, calcula el delta, carga las paradas para el
+  // preview y abre el modal de advertencia. NO escribe nada todavía.
+  const pedirCambioHora = async (r: Reserva, nuevaHHMM: string) => {
+    const horaOriginal = r.hora_servicio?.slice(0, 5) || "";
+    if (!nuevaHHMM || nuevaHHMM === horaOriginal) return;
+    const deltaMin = horaOriginal ? minutosHHMM(nuevaHHMM) - minutosHHMM(horaOriginal) : 0;
+    // Sin delta (p. ej. el servicio no tenía hora previa) no hay nada que correr en las paradas.
+    const { data } = deltaMin === 0
+      ? { data: [] as any[] }
+      : await supabase.from("paradas").select("id,orden,nombre,hora_estimada").eq("reserva_id", r.id).order("orden");
+    const paradas = (data || [])
+      .filter((p: any) => p.hora_estimada)
+      .map((p: any) => ({ id: p.id as number, nombre: p.nombre as string, de: (p.hora_estimada as string).slice(0, 5), a: correrHora(p.hora_estimada, deltaMin) }));
+    setModalHora({ reserva: r, horaOriginal, horaNueva: nuevaHHMM, deltaMin, paradas });
+  };
+
+  // Paso 2: confirmar en el modal. Escribe SOLO esta reserva: su hora + corre las paradas.
+  // Nunca toca los hermanos del contrato ni el retorno vinculado. Sin propagación masiva.
+  const guardarHoraServicio = async () => {
+    if (!modalHora) return;
+    const { reserva, horaNueva, deltaMin, paradas } = modalHora;
+    setGuardandoHora(true);
+    const { error } = await supabase.from("reservas").update({ hora_servicio: horaNueva }).eq("id", reserva.id);
+    if (error) { alert(error.message); setGuardandoHora(false); return; }
+    if (deltaMin !== 0 && paradas.length > 0) {
+      await Promise.all(paradas.map(p => supabase.from("paradas").update({ hora_estimada: p.a }).eq("id", p.id)));
+      await recargarParadas(reserva.id);
+    }
+    setReservas(prev => prev.map(x => x.id === reserva.id ? { ...x, hora_servicio: horaNueva } : x));
+    setGuardandoHora(false);
+    setModalHora(null);
+    // Si el servicio ya estaba sincronizado con la app del pasajero, el aviso quedó con la
+    // hora vieja (el hash de sync no incluye la hora, así que nada lo detectaría solo).
+    if (reserva.sincronizado_app) {
+      setModalRenotificar({ reservaId: reserva.id, label: `${idAfa(reserva)} · ${nombreCliente(reserva.cliente_id)}` });
+    }
+  };
+
+  // Re-enviar el aviso a los pasajeros con la nueva hora (reusa el endpoint de sincronizar,
+  // que notifica y vuelve a marcar sincronizado_app = true).
+  const renotificarPasajeros = async () => {
+    if (!modalRenotificar) return;
+    const { reservaId } = modalRenotificar;
+    setRenotificando(true);
+    try {
+      const res = await fetch("/api/notificaciones/sincronizar", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reserva_id: reservaId }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "No se pudo re-notificar");
+      setReservas(prev => prev.map(x => x.id === reservaId ? { ...x, sincronizado_app: true, fecha_sincronizacion: new Date().toISOString() } : x));
+      alert(j.mensaje || "Pasajeros re-notificados con la nueva hora.");
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setRenotificando(false);
+      setModalRenotificar(null);
+    }
+  };
+
+  // "Ahora no": deja el badge honesto (sin sincronizar) para que no muestre la hora vieja
+  // como buena. El usuario re-sincroniza cuando quiera desde el manifiesto.
+  const descartarRenotificar = async () => {
+    if (!modalRenotificar) return;
+    const { reservaId } = modalRenotificar;
+    await supabase.from("reservas").update({ sincronizado_app: false }).eq("id", reservaId);
+    setReservas(prev => prev.map(x => x.id === reservaId ? { ...x, sincronizado_app: false } : x));
+    setModalRenotificar(null);
   };
 
   const agregarParadaInline = async (reservaId: number) => {
@@ -2250,6 +2424,96 @@ export default function ReservasPage() {
         </div>
       )}
 
+      {/* Advertencia al cambiar la hora de UN servicio (corre también sus paradas) */}
+      {modalHora && (() => {
+        const m = modalHora;
+        const sube = m.deltaMin > 0;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => !guardandoHora && setModalHora(null)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+              <div className="px-6 py-4 text-white" style={{ background: "#0b315f" }}>
+                <div className="flex items-center gap-2 text-[11px] font-black uppercase tracking-widest opacity-80">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                  Cambiar hora · solo este servicio
+                </div>
+                <p className="mt-1 text-sm font-bold">{idAfa(m.reserva)} · {nombreCliente(m.reserva.cliente_id)}</p>
+                <p className="text-xs opacity-80">{fmtFecha(m.reserva.fecha_servicio)}</p>
+              </div>
+              <div className="px-6 py-5">
+                <div className="flex items-center justify-center gap-3 mb-1">
+                  <span className="text-2xl font-black text-gray-300 line-through">{m.horaOriginal || "--:--"}</span>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0b315f" strokeWidth="2.5"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+                  <span className="text-2xl font-black" style={{ color: "#0b315f" }}>{m.horaNueva}</span>
+                </div>
+                {m.deltaMin !== 0 && (
+                  <p className="text-center text-xs font-bold mb-4" style={{ color: sube ? "#b45309" : "#0369a1" }}>
+                    {etiquetaDelta(m.deltaMin)}
+                  </p>
+                )}
+                {m.paradas.length > 0 ? (
+                  <>
+                    <p className="text-[11px] font-bold text-gray-500 mb-2">
+                      Se recalcularán las {m.paradas.length} parada{m.paradas.length !== 1 ? "s" : ""} del recorrido ({etiquetaDelta(m.deltaMin)}):
+                    </p>
+                    <div className="rounded-xl border max-h-44 overflow-y-auto divide-y" style={{ borderColor: "#e2e8f0" }}>
+                      {m.paradas.map((p, i) => (
+                        <div key={p.id} className="flex items-center gap-2 px-3 py-2 text-xs">
+                          <span className="w-5 h-5 rounded-full bg-gray-100 text-gray-500 flex items-center justify-center text-[10px] font-black flex-shrink-0">{i + 1}</span>
+                          <span className="flex-1 min-w-0 truncate text-gray-700">{p.nombre}</span>
+                          <span className="text-gray-300 line-through font-mono">{p.de}</span>
+                          <span className="text-gray-300">→</span>
+                          <span className="font-mono font-bold" style={{ color: "#0b315f" }}>{p.a}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-[11px] text-gray-400 mb-1">Este servicio no tiene paradas con hora que recalcular.</p>
+                )}
+                <div className="mt-4 text-[11px] px-3 py-2 rounded-lg flex items-start gap-2" style={{ background: "#eef3f8", color: "#0b315f" }}>
+                  <span>⚠</span>
+                  <span>Solo cambia <b>este</b> servicio. No se tocan los demás servicios del contrato ni el viaje de retorno.</span>
+                </div>
+              </div>
+              <div className="px-6 pb-6 flex gap-3">
+                <button onClick={() => setModalHora(null)} disabled={guardandoHora}
+                  className="flex-1 py-2.5 rounded-xl font-bold text-sm border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+                  Cancelar
+                </button>
+                <button onClick={guardarHoraServicio} disabled={guardandoHora}
+                  className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-50" style={{ background: "#0b315f" }}>
+                  {guardandoHora ? "Guardando..." : "Confirmar cambio"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Tras cambiar la hora de un servicio ya sincronizado: ofrecer re-notificar */}
+      {modalRenotificar && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => !renotificando && setModalRenotificar(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6" onClick={e => e.stopPropagation()}>
+            <div className="w-12 h-12 rounded-full bg-amber-100 flex items-center justify-center mx-auto mb-4">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#b45309" strokeWidth="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            </div>
+            <h3 className="text-lg font-bold text-gray-900 text-center mb-1">¿Re-notificar a los pasajeros?</h3>
+            <p className="text-sm text-gray-500 text-center mb-1"><b className="text-gray-800">{modalRenotificar.label}</b></p>
+            <p className="text-xs text-gray-500 text-center mb-5">Este servicio ya estaba sincronizado: los pasajeros fueron avisados con la hora anterior. ¿Enviar el aviso otra vez con la nueva hora?</p>
+            <div className="flex gap-3">
+              <button onClick={descartarRenotificar} disabled={renotificando}
+                className="flex-1 py-2.5 rounded-xl font-bold text-sm border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+                Ahora no
+              </button>
+              <button onClick={renotificarPasajeros} disabled={renotificando}
+                className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-50" style={{ background: "#b45309" }}>
+                {renotificando ? "Enviando..." : "Sí, re-notificar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {reservaModal && (
         <ModalManifiesto
           reservaId={reservaModal.id}
@@ -2824,7 +3088,9 @@ export default function ReservasPage() {
                                     </div>
                                   </td>
                                   <td className="px-4 py-2.5 capitalize text-gray-500">{diaSem}</td>
-                                  <td className="px-4 py-2.5 text-gray-500">{r.hora_servicio?.slice(0,5) || "-"}</td>
+                                  <td className="px-4 py-2.5 text-gray-500">
+                                    <HoraEditable hora={r.hora_servicio} editable={horaEditable(r)} onSubmit={nueva => pedirCambioHora(r, nueva)} textClass="text-gray-500" />
+                                  </td>
                                   <td className="px-4 py-2.5">
                                     <select
                                       value={r.estado}
@@ -2944,7 +3210,9 @@ export default function ReservasPage() {
                   return (
                     <div key={r.id} className="flex items-center gap-4 px-5 py-3 hover:bg-gray-50 transition-colors" style={{ boxShadow: sob ? "inset 3px 0 0 #dc2626" : urgenciaFila(r.fecha_servicio, r.estado) }}>
                       <div className="shrink-0 text-right min-w-[44px]">
-                        <div className="text-sm font-bold text-gray-600">{r.hora_servicio?.slice(0,5) || "--:--"}</div>
+                        <div className="text-sm font-bold text-gray-600">
+                          <HoraEditable hora={r.hora_servicio} editable={horaEditable(r)} onSubmit={nueva => pedirCambioHora(r, nueva)} textClass="text-gray-600" />
+                        </div>
                         <div className="font-mono text-[10px] text-gray-300">{idAfa(r)}</div>
                       </div>
                       <div className="w-px h-8 rounded-full shrink-0" style={{ background: estCfg.dot }} />
@@ -3148,7 +3416,9 @@ export default function ReservasPage() {
 
                       <td className="p-3 text-xs">
                         <div className="text-gray-700 font-medium">{fmtFecha(r.fecha_servicio)}</div>
-                        <div className="text-gray-400">{r.hora_servicio?.slice(0,5) || "-"}</div>
+                        <div className="text-gray-400">
+                          <HoraEditable hora={r.hora_servicio} editable={horaEditable(r)} onSubmit={nueva => pedirCambioHora(r, nueva)} textClass="text-gray-400" />
+                        </div>
                         {dias !== null && dias > 0 && <div className="text-[9px] font-bold text-gray-400">+{dias}d</div>}
                         {dias !== null && dias < 0 && <div className="text-[9px] font-bold text-gray-400">{dias}d</div>}
                       </td>

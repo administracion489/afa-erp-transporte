@@ -50,12 +50,27 @@ function ParadaItem(props: {
   onEditar?: (id: number) => void;
   onEliminar?: (id: number) => void;
   onRenombrar?: (id: number, nuevoNombre: string) => Promise<void>;
+  onRehorar?: (id: number, nuevaHora: string) => Promise<void>;
 }) {
   const { parada, index, total, compacto } = props;
   const [editando, setEditando] = useState(false);
   const [nombre, setNombre] = useState(parada.nombre);
   const [guardando, setGuardando] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Edición de la hora estimada de ESTA parada (independiente del renombrado).
+  const [editandoHora, setEditandoHora] = useState(false);
+  const [horaVal, setHoraVal] = useState(parada.hora_estimada?.slice(0, 5) || "");
+  const [guardandoHora, setGuardandoHora] = useState(false);
+
+  const guardarHora = async () => {
+    const nueva = horaVal.trim();
+    if (nueva === (parada.hora_estimada?.slice(0, 5) || "")) { setEditandoHora(false); return; }
+    setGuardandoHora(true);
+    await props.onRehorar?.(parada.id, nueva);
+    setGuardandoHora(false);
+    setEditandoHora(false);
+  };
 
   const iniciarEdicion = () => {
     setNombre(parada.nombre);
@@ -161,10 +176,40 @@ function ParadaItem(props: {
             {!compacto && parada.direccion ? (
               <p className="text-gray-400 text-xs mt-0.5 truncate">{parada.direccion}</p>
             ) : null}
-            <div className="flex gap-3 mt-0.5 text-[10px] flex-wrap">
-              {parada.hora_estimada ? (
-                <span className="text-gray-500">{parada.hora_estimada}</span>
-              ) : null}
+            <div className="flex gap-3 mt-0.5 text-[10px] flex-wrap items-center">
+              {props.onRehorar ? (
+                editandoHora ? (
+                  <span className="inline-flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                    <input
+                      type="time"
+                      value={horaVal}
+                      autoFocus
+                      disabled={guardandoHora}
+                      onChange={e => setHoraVal(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") guardarHora(); if (e.key === "Escape") { setEditandoHora(false); setHoraVal(parada.hora_estimada?.slice(0, 5) || ""); } }}
+                      className="text-[10px] border rounded px-1 py-0.5 outline-none w-[70px]"
+                      style={{ borderColor: "#0b315f" }}
+                    />
+                    <button onClick={guardarHora} disabled={guardandoHora} className="text-green-600 hover:text-green-700 disabled:opacity-40" title="Guardar hora">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+                    </button>
+                    <button onClick={() => { setEditandoHora(false); setHoraVal(parada.hora_estimada?.slice(0, 5) || ""); }} className="text-gray-400 hover:text-gray-600" title="Cancelar">
+                      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    onClick={e => { e.stopPropagation(); setHoraVal(parada.hora_estimada?.slice(0, 5) || ""); setEditandoHora(true); }}
+                    className="inline-flex items-center gap-1 text-gray-500 hover:text-[#0b315f] hover:underline decoration-dotted underline-offset-2"
+                    title="Editar hora de esta parada"
+                  >
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                    {parada.hora_estimada ? parada.hora_estimada.slice(0, 5) : <span className="italic text-gray-400">+ hora</span>}
+                  </button>
+                )
+              ) : (
+                parada.hora_estimada ? <span className="text-gray-500">{parada.hora_estimada.slice(0, 5)}</span> : null
+              )}
               {!compacto && parada.lat && parada.lng ? (
                 <a
                   href={"https://www.google.com/maps?q=" + parada.lat + "," + parada.lng}
@@ -221,6 +266,17 @@ export default function TimelineParadasEditable(props: Props) {
     if (error) { setMensaje({ tipo: "err", texto: "Error al renombrar: " + error.message }); return; }
     setItems(prev => prev.map(p => p.id === paradaId ? { ...p, nombre: nuevoNombre } : p));
     setMensaje({ tipo: "ok", texto: "Parada renombrada" });
+    setTimeout(() => setMensaje(null), 2000);
+    if (onChange) onChange();
+  };
+
+  // Cambia solo la hora estimada de una parada (no reordena ni renombra). Vaciar → null.
+  const handleReHora = async (paradaId: number, nuevaHora: string) => {
+    const valor = nuevaHora ? nuevaHora : null;
+    const { error } = await supabase.from("paradas").update({ hora_estimada: valor }).eq("id", paradaId);
+    if (error) { setMensaje({ tipo: "err", texto: "Error al cambiar la hora: " + error.message }); return; }
+    setItems(prev => prev.map(p => p.id === paradaId ? { ...p, hora_estimada: valor } : p));
+    setMensaje({ tipo: "ok", texto: valor ? "Hora actualizada" : "Hora quitada" });
     setTimeout(() => setMensaje(null), 2000);
     if (onChange) onChange();
   };
@@ -318,6 +374,7 @@ export default function TimelineParadasEditable(props: Props) {
                 compacto={compacto || false}
                 onEliminar={onEliminar}
                 onRenombrar={handleRenombrar}
+                onRehorar={handleReHora}
               />
             ))}
           </div>
@@ -325,7 +382,7 @@ export default function TimelineParadasEditable(props: Props) {
       </DndContext>
 
       <p className="text-[10px] text-gray-400 italic mt-2">
-        Tip: arrastra desde el icono de la izquierda para reordenar
+        Tip: arrastra desde el icono de la izquierda para reordenar · toca la hora de una parada para ajustarla
       </p>
     </div>
   );
