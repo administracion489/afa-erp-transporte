@@ -615,6 +615,56 @@ export function decidirPuente(roadM: number, dRecta: number): NivelPuente {
   return "puente";
 }
 
+// Velocidad MEDIA sostenida creíble para un bus urbano sobre la longitud RUTEADA de un tramo estimado
+// (es un promedio multi-minuto: incluye semáforos, giros, tráfico), por eso está MUY por debajo del pico
+// instantáneo VMAX_BUS_KMH (130, que detecta teleport en recta). Un estimado cuya longitud/dt supere esto
+// describe un rodeo que el bus no pudo recorrer en el tiempo del hueco. 85 deja pasar vías expresas de Lima.
+const V_RUTA_MAX_KMH = 85;
+
+// COHERENCIA del tramo estimado con la EVIDENCIA GPS real (regla del usuario, jul-2026: el estimado NUNCA
+// debe contradecir por dónde estuvo el bus). El bug: puentePorRuta seguía el ITINERARIO planificado sin mirar
+// los fixes → cuando el plan da un lazo pero el bus fue directo, dibujaba el lazo (7.8 km) por donde el bus
+// NO pasó, y como se aceptaba PRIMERO nunca caía al fallback. Esta función valida CUALQUIER geometría
+// candidata (ruta prevista O Google) antes de dibujarla y la RECHAZA si es incoherente. Tres candados, de más
+// robusto a más fino:
+//   1. RODEO ABSURDO vs recta: geoM/dRecta > rodeoMax(8) → un extremo quedó al otro lado de un río (misma red
+//      exterior de decidirPuente, ahora aplicada TAMBIÉN a puentePorRuta, que no tenía ninguna).
+//   2. VELOCIDAD sobre la longitud ruteada (solo con dt fiable > 0): geoM/dt > V_RUTA_MAX → el bus no pudo
+//      recorrer esa longitud en el tiempo del hueco (mata el lazo aun sin buenos fixes). Sin dt se omite.
+//   3. LONGITUD vs CAMINO REAL (con ≥2 fixes del intervalo): realPath = largo(A→fixes→B) = lo que el bus
+//      recorrió de verdad; si geoM > max(absM, factor·realPath) el candidato es mucho más largo que la
+//      evidencia = lazo/rodeo inventado → rechazar. Robusto al jitter porque promedia sobre el recorrido
+//      (no mide fix-a-fix). Sin fixes (hueco de señal puro) se omite → ahí mandan los candados 1 y 2.
+// Pura y determinista sobre inputs de un tramo YA consolidado (los candidatos excluyen la punta viva) → mismo
+// trazo, mismo veredicto en cada re-fetch (sin parpadeo). Para flota con chip no hay corridas crudas y los
+// huecos reales no traen fixes → solo aplica el candado 1 (como hoy) → dibujo idéntico. `geo` en [lng,lat].
+export function validarPuente(
+  geo: [number, number][],
+  A: { lat: number; lng: number }, B: { lat: number; lng: number },
+  fixes: { lat: number; lng: number }[],
+  dt: number, dRecta: number,
+  opts?: { rodeoMax?: number; vRutaMaxKmh?: number; factor?: number; absM?: number; minFixes?: number },
+): boolean {
+  if (!geo || geo.length < 2) return false;
+  const rodeoMax = opts?.rodeoMax ?? 8;
+  const vRutaMax = (opts?.vRutaMaxKmh ?? V_RUTA_MAX_KMH) / 3.6;   // m/s
+  const factor   = opts?.factor ?? 2.0;
+  const absM     = opts?.absM ?? 300;                             // huecos cortos: no castigar la curvatura de la vía
+  const minFixes = opts?.minFixes ?? 2;
+  let geoM = 0;
+  for (let i = 1; i < geo.length; i++) geoM += distM(geo[i - 1][1], geo[i - 1][0], geo[i][1], geo[i][0]);
+  if (geoM <= 0) return false;
+  if (dRecta > 0 && geoM / dRecta > rodeoMax) return false;       // 1. rodeo absurdo vs recta
+  if (dt > 0 && geoM / dt > vRutaMax) return false;               // 2. velocidad sobre la longitud ruteada
+  if (fixes && fixes.length >= minFixes) {                        // 3. longitud vs camino real de los fixes
+    let realPath = distM(A.lat, A.lng, fixes[0].lat, fixes[0].lng);
+    for (let i = 1; i < fixes.length; i++) realPath += distM(fixes[i - 1].lat, fixes[i - 1].lng, fixes[i].lat, fixes[i].lng);
+    realPath += distM(fixes[fixes.length - 1].lat, fixes[fixes.length - 1].lng, B.lat, B.lng);
+    if (geoM > Math.max(absM, factor * realPath)) return false;
+  }
+  return true;
+}
+
 // Conector recto máximo que se permite dibujar entre un fix crudo (A/B) y la geometría de VÍA del
 // tramo estimado. Un fix impreciso de red puede caer a 50-190 m de la vía; unirlo con una recta a la
 // calzada era EXACTAMENTE lo que hacía que el verde petróleo "cruzara casas/ríos" (reclamo del usuario,
@@ -1056,7 +1106,12 @@ export function colorearMatched(
 // (llamadores legacy) se conserva TODO (comportamiento idéntico al anterior).
 export function huellaCrudaFeatures(
   huellaPts: { lat: number; lng: number; velocidad: number; acc?: number }[],
-  maxSegM = MAX_SEG_M
+  maxSegM = MAX_SEG_M,
+  // Por defecto (true) omite la cuerda cruda de red >60 m (comportamiento actual: "nunca rectas sobre
+  // casas"). En `false` dibuja TODO tramo ≤ maxSegM aunque sea crudo — se usa SOLO para la ESTELA
+  // PROVISIONAL del modal, que necesita mostrar algo al instante (dashed/gris) mientras el Map Matching
+  // pega el trazo a la vía, en vez de dejar el mapa en blanco 1-2 min en terceros con GPS de red.
+  omitirCrudoLargo = true,
 ): any[] {
   const tramos: typeof huellaPts[] = [];
   let cur: typeof huellaPts = [];
@@ -1077,7 +1132,8 @@ export function huellaCrudaFeatures(
       const d = distM(a.lat, a.lng, b.lat, b.lng);
       // Cuerda cruda larga (extremo de red, cruza casas): se OMITE (antes gris "aprox"). Extremo sin
       // acc (legacy) NO se omite → idéntico al comportamiento previo. La cubre el estimado por ruta.
-      if ((esAccCruda(a.acc) || esAccCruda(b.acc)) && d > MAX_SEG_CRUDO_M) continue;
+      // (La estela provisional pasa omitirCrudoLargo=false para dibujarla igual y no dejar el mapa vacío.)
+      if (omitirCrudoLargo && (esAccCruda(a.acc) || esAccCruda(b.acc)) && d > MAX_SEG_CRUDO_M) continue;
       feats.push({
         type: "Feature",
         properties: { velocidad: ((a.velocidad ?? 0) + (b.velocidad ?? 0)) / 2 },

@@ -9,8 +9,8 @@ import {
   calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
-  calcularPuentes, decidirPuente, anclarImprecisos, puentePorRuta, puentesCrudos,
-  pegarIconoAVia, viasCercanasTilequery, esAccCruda,
+  calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, puentesCrudos,
+  pegarIconoAVia, viasCercanasTilequery, esAccCruda, MAX_SEG_M,
 } from "@/lib/huella";
 import { animarMarcador } from "@/lib/anim-marker";
 
@@ -135,6 +135,7 @@ export default function ModalGps({
   const puentesCacheRef = useRef<Map<string, { nivel: string; coords: [number, number][]; km: number; dt: number; expira?: number }>>(new Map());
   const cargandoHuellaRef = useRef(false); // evita ciclos solapados de cargar() (30 fetch lentos > intervalo de 15 s)
   const [mostrarPuntos,     setMostrarPuntos]     = useState(true);                  // toggle de la leyenda
+  const [mostrarEstimados,  setMostrarEstimados]  = useState(true);                  // toggle: ocultar/mostrar los tramos estimados (verde petróleo)
   const geocacheRef = useRef<Map<string, string>>(new Map());                        // caché reverse-geocode por coord redondeada
   const popupTelemRef = useRef<any>(null);                                           // popup activo de un puntito
   const stopMarkersRef = useRef<any[]>([]);
@@ -501,11 +502,26 @@ export default function ModalGps({
         if (candidatos.length > MAX_PUENTES) console.warn(`[ModalGps] ${candidatos.length} huecos, puenteando los primeros ${MAX_PUENTES}`);
         const cache = puentesCacheRef.current;
         const feats: any[] = [];
+        // Fixes GPS REALES que caen en el intervalo de un candidato (la evidencia para validarPuente):
+        //  • corrida cruda → los vértices crudos SON las posiciones GPS reales (matched[iA+1..iB-1]).
+        //  • hueco de señal → los fixes crudos con ts entre las anclas (vacío = túnel real → validarPuente acepta).
+        const fixesDelTramo = (c: any): { lat: number; lng: number }[] => {
+          if (c.origen === "crudo") {
+            const m = matchedRef.current || [];
+            return m.slice(c.iA + 1, c.iB).map(([lng, lat]: [number, number]) => ({ lat, lng }));
+          }
+          const tA = limpio[c.iA]?.ts ?? 0, tB = limpio[c.iB]?.ts ?? 0;
+          if (!(tB > tA)) return [];
+          return crudos.filter((x) => x.ts > tA && x.ts < tB).map((x) => ({ lat: x.lat, lng: x.lng }));
+        };
         for (const c of candidatos.slice(0, MAX_PUENTES)) {
           if (cancel) return;
-          // 1) Seguir la ruta planificada si el bus está cerca de ella.
-          const porRuta = puentePorRuta({ lat: c.aLat, lng: c.aLng }, { lat: c.bLat, lng: c.bLng }, rutaRef.current?.coordenadas || []);
-          if (porRuta && porRuta.length >= 2) {
+          const A = { lat: c.aLat, lng: c.aLng }, B = { lat: c.bLat, lng: c.bLng };
+          const fixes = fixesDelTramo(c);   // evidencia de por dónde fue REALMENTE el bus en este tramo
+          // 1) Seguir la ruta planificada — SOLO si es coherente con la evidencia GPS (no un lazo del itinerario
+          //    por donde el bus no pasó). Si falla la validación NO se hace `continue` → cae al fallback de Google.
+          const porRuta = puentePorRuta(A, B, rutaRef.current?.coordenadas || []);
+          if (porRuta && porRuta.length >= 2 && validarPuente(porRuta, A, B, fixes, c.dt, c.dRecta)) {
             let mts = 0;
             for (let k = 1; k < porRuta.length; k++) mts += distM(porRuta[k - 1][1], porRuta[k - 1][0], porRuta[k][1], porRuta[k][0]);
             feats.push({ type: "Feature", geometry: { type: "LineString", coordinates: porRuta }, properties: { nivel: "puente", km: Math.round(mts / 100) / 10, min: Math.round(c.dt / 60) } });
@@ -548,7 +564,9 @@ export default function ModalGps({
             // vencer (no queda sin puente para siempre) pero sin tormenta de 30 fetch cada 15 s.
             } catch { r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt, expira: Date.now() + 60000 }; cache.set(key, r); }
           }
-          if (r.nivel !== "ocultar" && r.coords.length >= 2) {
+          // Dibujar el estimado de Google SOLO si su geometría A→B directa es coherente con la evidencia GPS.
+          // (Si es incoherente, no se dibuja; validarPuente es barata y determinista → se re-evalúa sin re-fetch.)
+          if (r.nivel !== "ocultar" && r.coords.length >= 2 && validarPuente(r.coords, A, B, fixes, c.dt, c.dRecta)) {
             feats.push({
               type: "Feature",
               geometry: { type: "LineString", coordinates: r.coords },
@@ -646,6 +664,18 @@ export default function ModalGps({
         : huellaCrudaFeatures(huella);
       const data: any = { type: "FeatureCollection", features };
 
+      // ESTELA PROVISIONAL (fix jul-2026 "la huella tarda 1-2 min en aparecer"): en un tercero con GPS
+      // de red, TODAS las cuerdas crudas superan 60 m → colorearMatched/huellaCrudaFeatures las OMITEN y
+      // el trazo queda EN BLANCO hasta que el Map Matching logra pegar a la vía (throttle 12 s + llamadas
+      // secuenciales a Mapbox/Google, agravado por cold starts de Vercel). Mientras no haya NINGUNA
+      // geometría medida (features vacío), se dibuja al instante la huella cruda suavizada (cortada en
+      // saltos >300 m; omitirCrudoLargo=false para no dejarla vacía), en gris punteado fino → se lee
+      // "provisional". Apenas aparece geometría real, provFeatures se vacía y la reemplaza la línea pegada.
+      const provFeatures = (features.length === 0 && huella.length >= 2)
+        ? huellaCrudaFeatures(huella, MAX_SEG_M, false)
+        : [];
+      const provData: any = { type: "FeatureCollection", features: provFeatures };
+
       // setData en vivo (sin remove/add) para que la cola siga al bus sin parpadeo.
       const src = map.getSource("huella-gps");
       if (src && typeof src.setData === "function") {
@@ -664,6 +694,22 @@ export default function ModalGps({
             "line-color": ["case", ["==", ["get", "estimado"], 1], "#0f766e", ["interpolate", ["linear"], ["get", "velocidad"], 0, "#dc2626", 15, "#f59e0b", 35, "#eab308", 55, "#16a34a"]],
           },
         });
+      }
+
+      // Capa PROVISIONAL: por DEBAJO de la medida, gris punteada fina y semitransparente para que no se
+      // confunda con la huella real pegada a la vía. Se vacía sola cuando ya hay geometría medida.
+      const srcP = map.getSource("huella-provisional");
+      if (srcP && typeof srcP.setData === "function") {
+        srcP.setData(provData);
+      } else {
+        map.addSource("huella-provisional", { type: "geojson", data: provData });
+        const layerP: any = {
+          id: "huella-provisional-line", type: "line", source: "huella-provisional",
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: { "line-color": "#64748b", "line-width": 3, "line-opacity": 0.55, "line-dasharray": [1.5, 1.5] },
+        };
+        if (map.getLayer("huella-gps-line")) map.addLayer(layerP, "huella-gps-line");
+        else map.addLayer(layerP);
       }
     } catch (e) { console.error("[ModalGps] Error dibujando huella GPS:", e); }
   }, [huella, matchedCoords, mapListo, ubic, velCalc, suprimirCrudo, colaSnapped, colaClean, esCrudoArr, snapPos]); // eslint-disable-line
@@ -801,8 +847,10 @@ export default function ModalGps({
           popupTelemRef.current = new gl.Popup({ closeButton: true, offset: 8, maxWidth: "240px" }).setLngLat(e.lngLat).setHTML(html).addTo(map);
         });
       }
+      // Toggle de la leyenda: ocultar/mostrar TODOS los tramos estimados (verde petróleo) a pedido del operador.
+      if (map.getLayer("huella-puente-l")) map.setLayoutProperty("huella-puente-l", "visibility", mostrarEstimados ? "visible" : "none");
     } catch (e) { console.error("[ModalGps] Error dibujando puentes:", e); }
-  }, [puentes, mapListo]);
+  }, [puentes, mapListo, mostrarEstimados]);
 
   // ── Marcadores numerados con etiqueta de texto ────────────────────────────
 
@@ -1233,10 +1281,12 @@ export default function ModalGps({
                   </button>
                 )}
                 {puentes.length > 0 && (
-                  <div className="mt-1.5 flex items-center gap-1 text-[9px] font-bold text-gray-500">
-                    <span className="w-5 h-1 rounded inline-block" style={{ background: "#0f766e" }}/>
-                    Tramo estimado (ruta prevista)
-                  </div>
+                  <button
+                    onClick={() => setMostrarEstimados(v => !v)}
+                    className="mt-1.5 flex items-center gap-1 text-[9px] font-bold text-gray-500 hover:text-gray-800">
+                    <span className="w-5 h-1 rounded inline-block" style={{ background: "#0f766e", opacity: mostrarEstimados ? 1 : 0.3 }}/>
+                    {mostrarEstimados ? "Ocultar" : "Mostrar"} tramo estimado
+                  </button>
                 )}
               </div>
             )}

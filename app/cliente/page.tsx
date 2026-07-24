@@ -10,7 +10,7 @@ import { animarMarcador } from "@/lib/anim-marker";
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
-  calcularPuentes, decidirPuente, anclarImprecisos, puentePorRuta, distM, paginarFilas,
+  calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, distM, paginarFilas,
   pegarIconoAVia,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
@@ -1212,11 +1212,25 @@ export default function ClientePortal() {
       const rutaPlan = rutasEnVivoRef.current[rid] || [];
       const cache = puentesCacheCliRef.current;
       const feats: any[] = [];
+      // Fixes GPS REALES del intervalo de un candidato (evidencia para validarPuente): corrida cruda → los
+      // vértices crudos son las posiciones reales; hueco → los fixes con ts entre las anclas (vacío = túnel).
+      const fixesDelTramo = (c: any): { lat: number; lng: number }[] => {
+        if (c.origen === "crudo") {
+          const m = matchedEnVivoRefMap.current[rid] || [];
+          return m.slice(c.iA + 1, c.iB).map(([lng, lat]: [number, number]) => ({ lat, lng }));
+        }
+        const tA = limpio[c.iA]?.ts ?? 0, tB = limpio[c.iB]?.ts ?? 0;
+        if (!(tB > tA)) return [];
+        return crudos.filter((x) => x.ts > tA && x.ts < tB).map((x) => ({ lat: x.lat, lng: x.lng }));
+      };
       for (const c of candidatos.slice(0, MAX_PUENTES)) {
         if (cancel) return;
-        // 1) Seguir la ruta planificada si el bus está cerca de ella.
-        const porRuta = puentePorRuta({ lat: c.aLat, lng: c.aLng }, { lat: c.bLat, lng: c.bLng }, rutaPlan);
-        if (porRuta && porRuta.length >= 2) {
+        const A = { lat: c.aLat, lng: c.aLng }, B = { lat: c.bLat, lng: c.bLng };
+        const fixes = fixesDelTramo(c);   // evidencia de por dónde fue REALMENTE el bus en este tramo
+        // 1) Seguir la ruta planificada — SOLO si es coherente con la evidencia GPS (no un lazo del itinerario).
+        //    Si falla la validación NO se hace `continue` → cae al fallback de Google directo A→B.
+        const porRuta = puentePorRuta(A, B, rutaPlan);
+        if (porRuta && porRuta.length >= 2 && validarPuente(porRuta, A, B, fixes, c.dt, c.dRecta)) {
           let mts = 0;
           for (let k = 1; k < porRuta.length; k++) mts += distM(porRuta[k - 1][1], porRuta[k - 1][0], porRuta[k][1], porRuta[k][0]);
           feats.push({ type: "Feature", geometry: { type: "LineString", coordinates: porRuta }, properties: { nivel: "puente", km: Math.round(mts / 100) / 10, min: Math.round(c.dt / 60) } });
@@ -1255,7 +1269,8 @@ export default function ClientePortal() {
           // Fallo de RED: cachear "ocultar" CON vencimiento (reintenta al vencer, sin tormenta cada 12 s).
           } catch { r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt, expira: Date.now() + 60000 }; cache.set(key, r); }
         }
-        if (r.nivel !== "ocultar" && r.coords.length >= 2) {
+        // Dibujar el estimado de Google SOLO si su geometría A→B directa es coherente con la evidencia GPS.
+        if (r.nivel !== "ocultar" && r.coords.length >= 2 && validarPuente(r.coords, A, B, fixes, c.dt, c.dRecta)) {
           feats.push({ type: "Feature", geometry: { type: "LineString", coordinates: r.coords }, properties: { nivel: r.nivel, km: Math.round(r.km * 10) / 10, min: Math.round(c.dt / 60) } });
           if (c.origen === "crudo") suprimir.push([c.iA + 1, c.iB - 1]);
         }
