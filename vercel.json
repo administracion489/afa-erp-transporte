@@ -17,6 +17,10 @@
       "schedule": "15 13 * * *"
     },
     {
+      "path": "/api/comunicados/procesar",
+      "schedule": "30 13 * * *"
+    },
+    {
       "path": "/api/radar/procesar",
       "schedule": "45 10 * * *"
     }

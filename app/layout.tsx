@@ -315,6 +315,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       { href: "/seguimiento",  label: "Seguimiento",  sub: "Estado en tiempo real", icon: Ic.Search,        modulo: "seguimiento"  },
       { href: "/monitoreo",    label: "Monitoreo",    sub: "Mapa y unidades",       icon: Ic.Radio,         modulo: "monitoreo"    },
       { href: "/pasajeros",    label: "Pasajeros",    sub: "Base de pasajeros",     icon: Ic.Users,         modulo: "pasajeros"    },
+      { href: "/comunicados",  label: "Comunicados",  sub: "Envíos masivos WhatsApp/Correo", icon: Ic.MessageSquare, modulo: "comunicados" },
       { href: "/multas",       label: "Multas",       sub: "Infracciones",          icon: Ic.Fine,          modulo: "multas"       },
       { href: "/incidencias",  label: "Incidencias",  sub: "Eventos y alertas",     icon: Ic.AlertTriangle, modulo: "incidencias"  },
     ],

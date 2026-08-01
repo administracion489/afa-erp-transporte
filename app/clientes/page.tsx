@@ -1979,6 +1979,7 @@ export default function ClientesPage() {
                           <td style={{ padding: "14px" }} onClick={e => e.stopPropagation()}>
                             <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                               <button className="act-btn" onClick={() => editarCliente(c)} style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid #e5e7eb", background: "white", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#374151" }}>Editar</button>
+                              <a className="act-btn" href={`/comunicados?cliente=${c.id}`} title="Enviar comunicado masivo a los pasajeros de esta empresa" style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid #dbe4f0", background: "white", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#0b315f", textDecoration: "none" }}>Comunicado</a>
                               <button className="del-btn" onClick={() => setToDelete({ id: c.id, nombre: display })} style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid #fecaca", background: "white", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#dc2626" }}>Eliminar</button>
                             </div>
                           </td>

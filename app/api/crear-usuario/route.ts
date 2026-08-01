@@ -40,6 +40,7 @@ const MODULOS = [
   "despachador",
   "crm",
   "radar-ia",
+  "comunicados",
 ];
 
 export async function POST(request: Request) {

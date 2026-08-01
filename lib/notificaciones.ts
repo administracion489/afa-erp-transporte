@@ -80,8 +80,14 @@ function formatFecha(fechaISO: string): string {
 // ─── EMAIL (RESEND) ───────────────────────────────────────────────────────────
 
 export async function enviarEmail({
-  to, subject, html,
-}: { to: string; subject: string; html: string }): Promise<void> {
+  to, subject, html, attachments,
+}: {
+  to: string;
+  subject: string;
+  html: string;
+  // Adjuntos OPCIONALES (Resend). Usa `path` (URL pública) o `content` (base64).
+  attachments?: { filename: string; path?: string; content?: string }[];
+}): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) throw new Error("RESEND_API_KEY no configurada");
 
@@ -90,7 +96,10 @@ export async function enviarEmail({
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from, to, subject, html }),
+    body: JSON.stringify({
+      from, to, subject, html,
+      ...(attachments?.length ? { attachments } : {}),
+    }),
   });
 
   if (!res.ok) {

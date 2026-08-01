@@ -53,12 +53,28 @@ export async function enviarWhatsAppPlantilla(
   idioma: string,
   parametros: string[] = [],
   phoneId?: string,
-  botones?: { index: number; texto: string }[]
+  botones?: { index: number; texto: string }[],
+  // Encabezado media OPCIONAL (imagen o documento por URL pública). Solo tiene efecto
+  // si la plantilla fue creada en Meta con un componente HEADER del mismo tipo.
+  // `filename` solo aplica a documentos (nombre visible del PDF en el chat).
+  header?: { tipo: "image" | "document"; link: string; filename?: string }
 ): Promise<string | null> {
   const phone = phoneId ?? process.env.META_PHONE_NUMBER_ID;
   if (!phone) throw new Error("META_PHONE_NUMBER_ID no configurado");
 
   const components = [
+    ...(header
+      ? [{
+          type: "header",
+          parameters: [{
+            type: header.tipo,
+            [header.tipo]: {
+              link: header.link,
+              ...(header.tipo === "document" && header.filename ? { filename: header.filename } : {}),
+            },
+          }],
+        }]
+      : []),
     ...(parametros.length
       ? [{ type: "body", parameters: parametros.map((text) => ({ type: "text", text })) }]
       : []),
