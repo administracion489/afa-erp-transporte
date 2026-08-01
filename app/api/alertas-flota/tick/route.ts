@@ -72,34 +72,87 @@ async function handler(req: NextRequest) {
 
     const { data: reservas } = await admin
       .from("reservas")
-      .select("id, fecha_servicio, hora_servicio, hora_real_fin, estado, conductor_id, vehiculo_id, vehiculo_tercero_id, tipo_asignacion, origen, destino")
+      .select("id, fecha_servicio, hora_servicio, hora_real_fin, estado, conductor_id, conductor_tercero_id, vehiculo_id, vehiculo_tercero_id, tipo_asignacion, origen, destino")
       .in("fecha_servicio", [hoy, manana]);
     const todas = (reservas ?? []) as any[];
 
     // Estados de ciclo de vida (para el diff + para saber el conductor SALIENTE al reasignar).
     const propias = todas.filter((r) => r.tipo_asignacion === "propio");
-    const estados = await cargarEstados(propias.map((r) => r.id));
+    // El ciclo de vida (asignación/cambio/cancelación) cubre AMBAS flotas: la propia y
+    // la tercerizada. Incluir las tercerizadas aunque el aviso esté apagado es
+    // deliberado — así se graba su baseline y, el día que se encienda, NO se dispara
+    // una avalancha de "servicio asignado" por reservas viejas.
+    const cicloVida = todas.filter((r) => r.conductor_id || r.conductor_tercero_id);
+    const estados = await cargarEstados(cicloVida.map((r) => r.id));
 
     // Mapa de conductores: los de las reservas actuales + los "avisados" previos (salientes).
+    // Se cargan los conductores de las reservas actuales + los "avisados" previos (los
+    // SALIENTES de una reasignación). Cada id se manda a su tabla: los ids de
+    // `conductores` y `conductores_tercero` SE SOLAPAN (el 7 existe en ambas y son
+    // personas distintas), así que son dos mapas, nunca uno solo por id.
     const condIds = new Set<number>();
-    for (const r of todas) if (r.conductor_id) condIds.add(r.conductor_id);
-    for (const e of estados.values()) if (e.conductor_avisado) condIds.add(e.conductor_avisado);
-    const condMap = new Map<number, { nombre: string; telefono: string | null; email: string | null }>();
+    const terIds = new Set<number>();
+    for (const r of todas) {
+      if (r.conductor_id) condIds.add(r.conductor_id);
+      if (r.conductor_tercero_id) terIds.add(r.conductor_tercero_id);
+    }
+    for (const e of estados.values()) {
+      if (!e.conductor_avisado) continue;
+      // Default 'conductores': lo grabado antes de esta versión era solo flota propia.
+      if ((e.conductor_tabla_avisada ?? "conductores") === "conductores_tercero") terIds.add(e.conductor_avisado);
+      else condIds.add(e.conductor_avisado);
+    }
+
+    type DatosCond = { nombre: string; telefono: string | null; email: string | null };
+    const condMap = new Map<number, DatosCond>();
     if (condIds.size) {
       const { data } = await admin.from("conductores").select("id, nombre, telefono, email").in("id", [...condIds]);
       for (const c of data ?? []) condMap.set(c.id, { nombre: c.nombre, telefono: c.telefono, email: c.email });
     }
+
+    // Conductores TERCERIZADOS. Históricamente NUNCA recibían avisos del motor; ahora
+    // pueden, pero solo si el tipo de mensaje tiene `notifica_conductor_tercero`
+    // encendido (default false ⇒ al desplegar no cambia ni un envío).
+    const terMap = new Map<number, DatosCond>();
+    if (terIds.size) {
+      // `email` es columna nueva (supabase/conductores-tercero-avisos.sql): si la
+      // migración no corrió, el select falla entero → se reintenta sin ella.
+      const sel = await admin.from("conductores_tercero").select("id, nombre, telefono, email").in("id", [...terIds]);
+      const filas = sel.error
+        ? (await admin.from("conductores_tercero").select("id, nombre, telefono").in("id", [...terIds])).data
+        : sel.data;
+      for (const c of filas ?? []) {
+        terMap.set(c.id, { nombre: c.nombre, telefono: c.telefono, email: (c as any).email ?? null });
+      }
+    }
+
+    type RefCond = { id: number; tabla: "conductores" | "conductores_tercero" };
+    /** Conductor de una reserva, sea propio o tercerizado (o null si no tiene). */
+    function condDe(r: any): RefCond | null {
+      if (r.conductor_id) return { id: r.conductor_id, tabla: "conductores" };
+      if (r.conductor_tercero_id) return { id: r.conductor_tercero_id, tabla: "conductores_tercero" };
+      return null;
+    }
+    const datosCond = (ref: RefCond) => (ref.tabla === "conductores" ? condMap : terMap).get(ref.id);
+    /** ¿Este tipo de mensaje debe avisar a este conductor? */
+    const avisaA = (cfg: AlertaConfig, ref: RefCond) =>
+      ref.tabla === "conductores" ? true : cfg.notifica_conductor_tercero === true;
     // ── Helpers de envío (tri-estado: distingue "sin canal" de "fallo transitorio") ──
     // El CANAL ya no es fijo: sale por los que tenga habilitados ese tipo de mensaje
     // (canal_conductor_* en alerta_config). Ver lib/notificaciones.ts::enviarAConductor.
     async function aConductor(
-      cfg: AlertaConfig, conductorId: number, params: string[],
+      cfg: AlertaConfig, ref: RefCond | number | null, params: string[],
       extra?: { titulo?: string; reservaId?: number },
     ): Promise<ResultadoEnvio> {
-      const c = condMap.get(conductorId);
-      if (!c || !cfg.plantilla) return "sin_canal";
+      // Compat: los llamadores viejos pasan un id suelto = conductor propio.
+      const r0: RefCond | null = typeof ref === "number" ? { id: ref, tabla: "conductores" } : ref;
+      if (!r0 || !cfg.plantilla) return "sin_canal";
+      if (!avisaA(cfg, r0)) return "sin_canal";       // tercerizado con el aviso apagado
+      const c = datosCond(r0);
+      if (!c) return "sin_canal";
       const r = await enviarAConductor({
-        conductor: { id: conductorId, nombre: c.nombre, telefono: c.telefono, email: c.email },
+        conductor: { id: r0.id, nombre: c.nombre, telefono: c.telefono, email: c.email },
+        tabla: r0.tabla,
         plantilla: cfg.plantilla,
         parametros: params,
         canales: canalesConductor(cfg),
@@ -134,34 +187,41 @@ async function handler(req: NextRequest) {
             cCanc = activa("cancelacion"), cDes = activa("desasignacion");
       if (cAsig || cCamb || cCanc || cDes) {
         let n = 0;
-        for (const r of propias) {
+        for (const r of cicloVida) {
           const est = estados.get(r.id);
           const fecha = r.fecha_servicio; const hora = horaCorta(r.hora_servicio);
           const ruta = rutaDe(r);
+          const ref = condDe(r);
+          // Tabla del conductor ya avisado (default 'conductores': todo lo registrado
+          // antes de esta versión era flota propia).
+          const tablaPrev = (est?.conductor_tabla_avisada ?? "conductores") as RefCond["tabla"];
+          const refPrev: RefCond | null = est?.conductor_avisado
+            ? { id: est.conductor_avisado, tabla: tablaPrev } : null;
+          const mismoCond = !!ref && !!refPrev && ref.id === refPrev.id && ref.tabla === refPrev.tabla;
 
           // Cancelación: avisar al conductor asignado. Solo marcar si el envío salió.
           if (r.estado === "cancelada") {
-            if (cCanc && r.conductor_id && est?.conductor_avisado && !est?.cancelacion_avisada) {
-              const nombre = nombreCorto(condMap.get(r.conductor_id)?.nombre);
-              if ((await aConductor(cCanc, r.conductor_id, [nombre, fecha, ruta])) === "enviado") {
+            if (cCanc && ref && refPrev && !est?.cancelacion_avisada) {
+              const nombre = nombreCorto(datosCond(ref)?.nombre);
+              if ((await aConductor(cCanc, ref, [nombre, fecha, ruta])) === "enviado") {
                 n++;
                 await upsertEstado(r.id, { cancelacion_avisada: true });
               }
             }
             continue;
           }
-          if (!r.conductor_id) continue;
+          if (!ref) continue;
 
           let avanzar = true; // por defecto graba baseline (config off o sin cambio) para no
                               // disparar un "cambio" espurio después.
-          const tieneTel = !!condMap.get(r.conductor_id)?.telefono;
-          if (!est || est.conductor_avisado !== r.conductor_id) {
+          const tieneTel = !!datosCond(ref)?.telefono;
+          if (!mismoCond) {
             // Reasignación: avisar al conductor SALIENTE que ya no cubre el servicio.
-            if (cDes && est?.conductor_avisado && est.conductor_avisado !== r.conductor_id) {
-              const ant = nombreCorto(condMap.get(est.conductor_avisado)?.nombre);
-              await aConductor(cDes, est.conductor_avisado, [ant, fecha, ruta]);
+            if (cDes && refPrev) {
+              const ant = nombreCorto(datosCond(refPrev)?.nombre);
+              await aConductor(cDes, refPrev, [ant, fecha, ruta]);
             }
-            if (cAsig) {
+            if (cAsig && avisaA(cAsig, ref)) {
               // notificarConductor arma los datos ricos (origen/destino/dirección + botón de mapa).
               // Sin teléfono aún → no llamar (evita log-spam); avanzar=false reintenta cuando lo tenga.
               if (!tieneTel) { avanzar = false; }
@@ -171,8 +231,8 @@ async function handler(req: NextRequest) {
                 if (avanzar) n++;
               }
             }
-          } else if (est.hora_avisada !== hora || est.vehiculo_avisado !== (r.vehiculo_id ?? null)) {
-            if (cCamb) {
+          } else if (est!.hora_avisada !== hora || est!.vehiculo_avisado !== (r.vehiculo_id ?? null)) {
+            if (cCamb && avisaA(cCamb, ref)) {
               if (!tieneTel) { avanzar = false; }
               else {
                 const rc = await notificarConductor(r.id, "cambio", cCamb.plantilla ?? undefined, canalesConductor(cCamb));
@@ -183,7 +243,8 @@ async function handler(req: NextRequest) {
           }
           if (avanzar) {
             await upsertEstado(r.id, {
-              conductor_avisado: r.conductor_id,
+              conductor_avisado: ref.id,
+              conductor_tabla_avisada: ref.tabla,
               vehiculo_avisado: r.vehiculo_id ?? null,
               hora_avisada: hora,
             });
@@ -199,7 +260,8 @@ async function handler(req: NextRequest) {
     if (cRecC) {
       let n = 0;
       for (const r of todas) {
-        if (r.tipo_asignacion !== "propio" || !r.conductor_id) continue;
+        const ref = condDe(r);
+        if (!ref || !avisaA(cRecC, ref)) continue;   // tercerizado con el aviso apagado
         if (!["programada", "confirmada"].includes(r.estado)) continue;
         if (!enViaRecordatorio(cRecC, r, hoy, manana, ahora, force)) continue;
         if (!(await reclamarEnvio("recordatorio_conductor", r.id))) continue;
@@ -238,7 +300,8 @@ async function handler(req: NextRequest) {
       if (!cfg) return 0;
       let n = 0;
       for (const r of todas) {
-        if (r.tipo_asignacion !== "propio" || !r.conductor_id) continue;
+        const ref = condDe(r);
+        if (!ref || !avisaA(cfg, ref)) continue;     // tercerizado con el aviso apagado
         if (!["programada", "confirmada"].includes(r.estado)) continue; // aún no inició
         if (!enViaRecordatorio(cfg, r, hoy, manana, ahora, force)) continue;
         if (!(await reclamarEnvio(clave, r.id))) continue;

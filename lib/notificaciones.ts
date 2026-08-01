@@ -752,7 +752,7 @@ export async function notificarConductor(
     .from("reservas")
     .select(`
       id, fecha_servicio, hora_servicio, tipo_asignacion,
-      conductor_id, vehiculo_id, origen, destino,
+      conductor_id, conductor_tercero_id, vehiculo_id, vehiculo_tercero_id, origen, destino,
       direccion_servicio, tipo_servicio_detalle, reserva_vinculada_id,
       cliente:clientes(nombre,empresa)
     `)
@@ -760,21 +760,28 @@ export async function notificarConductor(
     .single();
 
   if (!reserva) throw new Error(`Reserva ${reservaId} no encontrada`);
-  if (reserva.tipo_asignacion !== "propio" || !reserva.conductor_id) {
-    return { ok: true, estado: "sin_canal", detalle: "no aplica (tercero o sin conductor)" };
+
+  // El conductor puede ser PROPIO (conductor_id → conductores) o TERCERIZADO
+  // (conductor_tercero_id → conductores_tercero). Las dos tablas tienen secuencias
+  // de id que se solapan, así que se lleva el par (id, tabla) todo el camino.
+  const esTercero = !reserva.conductor_id && !!reserva.conductor_tercero_id;
+  const condId = (reserva.conductor_id ?? reserva.conductor_tercero_id) as number | null;
+  const tablaCond: "conductores" | "conductores_tercero" = esTercero ? "conductores_tercero" : "conductores";
+  if (!condId) {
+    return { ok: true, estado: "sin_canal", detalle: "reserva sin conductor" };
   }
 
   const { data: cond } = await supabaseAdmin
-    .from("conductores")
+    .from(tablaCond)
     .select("nombre, telefono, email")
-    .eq("id", reserva.conductor_id)
+    .eq("id", condId)
     .single();
 
   // Sin NINGÚN dato de contacto no hay nada que hacer. (Antes se cortaba solo por
   // teléfono; ahora el correo o el push pueden salvar el aviso.)
   const hayDato = (cnl.whatsapp && cond?.telefono) || (cnl.email && cond?.email) || cnl.push;
   if (!cond || !hayDato) {
-    await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "sin_canal", trigger });
+    await logNotificacion({ reservaId, conductorId: condId, tipo: "whatsapp", estado: "sin_canal", trigger });
     return { ok: true, estado: "sin_canal", detalle: "conductor sin canal disponible" };
   }
 
@@ -782,6 +789,8 @@ export async function notificarConductor(
   const [vR, pR] = await Promise.all([
     reserva.vehiculo_id
       ? supabaseAdmin.from("vehiculos").select("placa").eq("id", reserva.vehiculo_id).single()
+      : reserva.vehiculo_tercero_id
+      ? supabaseAdmin.from("vehiculos_tercero").select("placa").eq("id", reserva.vehiculo_tercero_id).single()
       : Promise.resolve({ data: null } as any),
     supabaseAdmin.from("paradas").select("nombre, direccion, lat, lng, orden").eq("reserva_id", reservaId).order("orden"),
   ]);
@@ -817,7 +826,7 @@ export async function notificarConductor(
     { texto: "Ver origen",  url: mapa(origenQuery) },
     { texto: "Ver destino", url: mapa(destinoQuery) },
   ];
-  const condContacto = { id: reserva.conductor_id as number, nombre: cond.nombre, telefono: cond.telefono, email: cond.email };
+  const condContacto = { id: condId, nombre: cond.nombre, telefono: cond.telefono, email: cond.email };
 
   // ── Recordatorio COMBINADO ida+retorno (un solo mensaje con AMBOS tramos) ─────
   // Solo aplica al RECORDATORIO (no a asignación/cambio) y cuando el par vinculado es
@@ -828,27 +837,28 @@ export async function notificarConductor(
     if (reserva.reserva_vinculada_id != null) {
       // Soy el RETORNO: si mi IDA también se recuerda hoy, ella manda el combinado.
       const { data: ida } = await supabaseAdmin
-        .from("reservas").select("id, fecha_servicio, estado, conductor_id")
+        .from("reservas").select("id, fecha_servicio, estado, conductor_id, conductor_tercero_id")
         .eq("id", reserva.reserva_vinculada_id).maybeSingle();
       if (ida && ida.fecha_servicio === reserva.fecha_servicio
           && ["programada", "confirmada"].includes(ida.estado)
-          && ida.conductor_id === reserva.conductor_id) {
+          && (ida.conductor_id ?? ida.conductor_tercero_id) === condId) {
         return { ok: true, estado: "sin_canal", detalle: "cubierto por el combinado de la ida" };
       }
     } else {
       // Soy la IDA: si tengo retorno vinculado válido, mando UN mensaje con ambos tramos.
       const { data: ret } = await supabaseAdmin
         .from("reservas")
-        .select("id, fecha_servicio, hora_servicio, estado, conductor_id, origen, destino")
+        .select("id, fecha_servicio, hora_servicio, estado, conductor_id, conductor_tercero_id, origen, destino")
         .eq("reserva_vinculada_id", reservaId)
         .maybeSingle();
       if (ret && ret.fecha_servicio === reserva.fecha_servicio
           && ["programada", "confirmada"].includes(ret.estado)
-          && ret.conductor_id === reserva.conductor_id) {
+          && (ret.conductor_id ?? ret.conductor_tercero_id) === condId) {
         const origenRet  = ret.origen  || destino;   // el retorno suele invertir la ida
         const destinoRet = ret.destino || origen;
         const r = await enviarAConductor({
           conductor: condContacto,
+          tabla: tablaCond,
           plantilla: PLANTILLA_CONDUCTOR_COMPLETO,
           parametros: [
             nombreCorto(cond.nombre),
@@ -882,6 +892,7 @@ export async function notificarConductor(
 
   const r = await enviarAConductor({
     conductor: condContacto,
+    tabla: tablaCond,
     plantilla: plantilla || PLANTILLA_CONDUCTOR,
     parametros: [
       nombreCorto(cond.nombre),

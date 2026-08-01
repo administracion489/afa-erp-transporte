@@ -30,7 +30,7 @@ type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string 
 type ConductorTercero = {
   id: number; empresa_id: number; nombre: string; dni: string | null;
   licencia: string | null; categoria_licencia: string | null;
-  vencimiento_licencia: string | null; telefono: string | null;
+  vencimiento_licencia: string | null; telefono: string | null; email: string | null;
   estado: string; pin_acceso: string | null; activo_app: boolean | null;
 };
 
@@ -117,7 +117,7 @@ const FORM_EMP = {
   estado: "activo", observaciones: "",
 };
 const FORM_VEH = { placa: "", categoria: "BUS", marca: "", modelo: "", capacidad: "", estado: "disponible", foto_externa_url: "", foto_interna_url: "", descripcion_unidad: "", tipo_vehiculo_costeo: "" };
-const FORM_COND = { nombre: "", dni: "", licencia: "", categoria_licencia: "A-IIb", vencimiento_licencia: "", telefono: "", estado: "disponible", pin_acceso: "", activo_app: false };
+const FORM_COND = { nombre: "", dni: "", licencia: "", categoria_licencia: "A-IIb", vencimiento_licencia: "", telefono: "", email: "", estado: "disponible", pin_acceso: "", activo_app: false };
 const FORM_DOC = { vehiculo_id: "", tipo: "SOAT", numero: "", fecha_vencimiento: "", entidad_emisora: "", archivo_url: "", observaciones: "" };
 
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
@@ -337,6 +337,7 @@ export default function EmpresasTercerizadasPage() {
       categoria_licencia: formCond.categoria_licencia || null,
       vencimiento_licencia: formCond.vencimiento_licencia || null,
       telefono: formCond.telefono.trim() || null,
+      email: formCond.email.trim().toLowerCase() || null,
       estado: formCond.estado,
       pin_acceso: formCond.pin_acceso.trim() || null,
       activo_app: formCond.activo_app,
@@ -813,6 +814,10 @@ export default function EmpresasTercerizadasPage() {
                         <Campo label="Teléfono">
                           <input className={inputCls()} value={formCond.telefono} onChange={e => setFormCond(p => ({ ...p, telefono: e.target.value }))} />
                         </Campo>
+                        <Campo label="Correo">
+                          <input type="email" className={inputCls()} placeholder="conductor@empresa.com"
+                            value={formCond.email} onChange={e => setFormCond(p => ({ ...p, email: e.target.value }))} />
+                        </Campo>
                         <Campo label="PIN acceso app (4 dígitos)">
                           <input className={inputCls("font-mono")} type="text" inputMode="numeric" maxLength={4}
                             placeholder="Ej: 1234" value={formCond.pin_acceso} onChange={e => setFormCond(p => ({ ...p, pin_acceso: e.target.value.replace(/\D/g, "").slice(0, 4) }))} />
@@ -864,7 +869,7 @@ export default function EmpresasTercerizadasPage() {
                               <p className="text-[10px] text-gray-400">{fmtFecha(c.vencimiento_licencia)}</p>
                             </div>
                             <div className="flex gap-1">
-                              <button onClick={() => { setFormCond({ nombre: c.nombre, dni: c.dni || "", licencia: c.licencia || "", categoria_licencia: c.categoria_licencia || "A-IIb", vencimiento_licencia: c.vencimiento_licencia || "", telefono: c.telefono || "", estado: c.estado, pin_acceso: c.pin_acceso || "", activo_app: c.activo_app || false }); setEditCondId(c.id); setMostrarFormCond(true); }}
+                              <button onClick={() => { setFormCond({ nombre: c.nombre, dni: c.dni || "", licencia: c.licencia || "", categoria_licencia: c.categoria_licencia || "A-IIb", vencimiento_licencia: c.vencimiento_licencia || "", telefono: c.telefono || "", email: c.email || "", estado: c.estado, pin_acceso: c.pin_acceso || "", activo_app: c.activo_app || false }); setEditCondId(c.id); setMostrarFormCond(true); }}
                                 className="text-xs font-bold text-gray-400 hover:text-gray-800">✏️</button>
                               <button onClick={async () => { if (!confirm("¿Eliminar?")) return; await supabase.from("conductores_tercero").delete().eq("id", c.id); cargarTodo(); }}
                                 className="text-xs font-bold text-red-400 hover:text-red-600">✕</button>

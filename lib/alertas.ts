@@ -23,6 +23,10 @@ export type AlertaConfig = {
   umbral: number | null;
   notifica_conductor: boolean;
   notifica_pasajero: boolean;
+  /** Avisar también al conductor TERCERIZADO. Separado de notifica_conductor a
+   *  propósito: es personal de otra empresa, así que encenderlo es una decisión
+   *  comercial. Default false = comportamiento histórico (no se les avisaba nunca). */
+  notifica_conductor_tercero?: boolean | null;
   destinatarios: number[];               // ids de alerta_destinatarios
   plantilla: string | null;
   plantilla_directorio: string | null;
@@ -243,6 +247,10 @@ export async function liberarEnvio(clave: string, ref: string | number, fecha?: 
 export type EstadoAviso = {
   reserva_id: number;
   conductor_avisado: number | null;
+  /** Tabla del conductor avisado. Necesario porque los ids de `conductores` y
+   *  `conductores_tercero` se solapan: sin esto, pasar del propio #7 al tercerizado
+   *  #7 parecería "sin cambios" y no se avisaría la reasignación. */
+  conductor_tabla_avisada?: "conductores" | "conductores_tercero" | null;
   vehiculo_avisado: number | null;
   hora_avisada: string | null;
   cancelacion_avisada: boolean;

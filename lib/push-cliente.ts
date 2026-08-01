@@ -141,14 +141,26 @@ export async function activarPushNativo(api: PaxApi): Promise<ResultadoActivar> 
     const { PushNotifications } = await import("@capacitor/push-notifications");
     const perm = await PushNotifications.requestPermissions();
     if (perm.receive !== "granted") return "denegado";
-    // Canal Android con importancia máxima: heads-up + lock screen para los avisos del viaje.
-    try {
-      await PushNotifications.createChannel({
+    // Canales Android con importancia máxima: heads-up + lock screen.
+    // OJO: en Android 8+ una notificación cuyo channel_id NO existe en el dispositivo
+    // NO SE MUESTRA (silenciosamente). El servidor usa "afa_viaje" para el pasajero
+    // (lib/push.ts) y "afa_conductor" para el conductor (enviarPushAConductores), así
+    // que AMBOS deben crearse aquí. Crear un canal que no se use no molesta a nadie:
+    // solo aparece en los ajustes de notificaciones de la app.
+    for (const canal of [
+      {
         id: "afa_viaje", name: "Avisos de tu viaje",
         description: "Tu bus salió, está llegando o llegó a tu paradero",
-        importance: 5, visibility: 1, vibration: true,
-      });
-    } catch { /* iOS o canal ya existente */ }
+      },
+      {
+        id: "afa_conductor", name: "Avisos de tus servicios",
+        description: "Servicios asignados, cambios y recordatorios",
+      },
+    ]) {
+      try {
+        await PushNotifications.createChannel({ ...canal, importance: 5, visibility: 1, vibration: true });
+      } catch { /* iOS o canal ya existente */ }
+    }
 
     const token = await registrarYObtenerToken(PushNotifications, 15000);
     if (!token) return "error";

@@ -7,7 +7,8 @@ type ModoTiempo = "evento" | "anticipacion" | "hora_fija";
 type AlertaCfg = {
   clave: string; nombre: string; descripcion: string | null; activo: boolean;
   modo_tiempo: ModoTiempo; min_anticipacion: number | null; hora_fija: string | null; umbral: number | null;
-  notifica_conductor: boolean; notifica_pasajero: boolean; destinatarios: number[]; plantilla: string | null;
+  notifica_conductor: boolean; notifica_pasajero: boolean; notifica_conductor_tercero: boolean;
+  destinatarios: number[]; plantilla: string | null;
   // Canales por tipo (supabase/canales-por-tipo.sql)
   canal_conductor_whatsapp: boolean; canal_conductor_email: boolean; canal_conductor_push: boolean;
   canal_pasajero_push: boolean;
@@ -91,6 +92,7 @@ export default function ConfigOperacionesPage() {
       canal_pasajero_whatsapp:              x.canal_pasajero_whatsapp              ?? true,
       canal_pasajero_whatsapp_solo_sin_app: x.canal_pasajero_whatsapp_solo_sin_app ?? true,
       tiempo_editable:                      x.tiempo_editable                      ?? true,
+      notifica_conductor_tercero:           x.notifica_conductor_tercero           ?? false,
     })));
     setDests(d.data ?? []);
     setCargando(false);
@@ -107,6 +109,7 @@ export default function ConfigOperacionesPage() {
       min_anticipacion: c.modo_tiempo === "anticipacion" ? (c.min_anticipacion ?? 90) : c.min_anticipacion,
       hora_fija: c.modo_tiempo === "hora_fija" ? (c.hora_fija ?? "08:00") : c.hora_fija,
       umbral: c.umbral, notifica_conductor: c.notifica_conductor, notifica_pasajero: c.notifica_pasajero,
+      notifica_conductor_tercero: c.notifica_conductor_tercero ?? false,
       destinatarios: c.destinatarios, ...canales, updated_at: new Date().toISOString(),
     }).eq("clave", c.clave);
     showToast(error ? "Error al guardar" : `Guardado: ${c.nombre}`, !error);
@@ -339,6 +342,12 @@ export default function ConfigOperacionesPage() {
                 <label className="flex items-center gap-1"><input type="checkbox" checked={c.notifica_conductor} onChange={(e) => setCfg(c.clave, { notifica_conductor: e.target.checked })} /> Conductor</label>
                 <label className="flex items-center gap-1"><input type="checkbox" checked={c.notifica_pasajero} onChange={(e) => setCfg(c.clave, { notifica_pasajero: e.target.checked })} /> Pasajero</label>
               </div>
+              {c.notifica_conductor && (
+                <label className="flex items-end gap-1 text-xs text-gray-600" title="Los conductores tercerizados son personal de otra empresa: este aviso solo les llega si lo activas aquí.">
+                  <input type="checkbox" checked={c.notifica_conductor_tercero}
+                    onChange={(e) => setCfg(c.clave, { notifica_conductor_tercero: e.target.checked })} /> Incluir tercerizados
+                </label>
+              )}
             </div>
 
             {/* Canales de ESTE tipo de mensaje */}
