@@ -12,6 +12,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verificarUsuarioApi } from "@/lib/api-auth";
+import { refrescarCache } from "@/lib/plantilla-texto";
 
 const GRAPH = "https://graph.facebook.com/v25.0";
 
@@ -48,6 +49,16 @@ export async function GET(req: NextRequest) {
         botones: ((t.components ?? []).find((c: any) => c.type === "BUTTONS")?.buttons ?? []).length,
       };
     });
+    // Calentar el caché de textos: el canal EMAIL reusa estos mismos bodies y no puede
+    // llamar a esta ruta (exige sesión de usuario). Best-effort, no bloquea la respuesta.
+    if (numero === "avisos") {
+      await refrescarCache(
+        plantillas
+          .filter((p: any) => p.body)
+          .map((p: any) => ({ nombre: p.name, idioma: p.language, body: p.body, estado: p.status, vars: p.vars })),
+      );
+    }
+
     return NextResponse.json({ numero, plantillas });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });

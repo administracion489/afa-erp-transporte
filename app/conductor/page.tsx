@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback, type ReactElement } from "rea
 import { supabase } from "@/lib/supabase";
 import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, ubicacionTodoElTiempo, pedirUbicacionTodoElTiempo, esAppNativa, backgroundGpsActivo, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision } from "@/lib/geo";
 import { attachHidScanner } from "@/lib/hid-scanner";
+import { detectarSoportePush, permisoBloqueado, activarPushWeb, activarPushNativo, resincronizarSuscripcion } from "@/lib/push-cliente";
 import {
   CondorMark,
   IconActivity, IconAlert, IconArrowLeft, IconArrowRight, IconBell, IconBus,
@@ -26,6 +27,9 @@ type Conductor = {
   vencimiento_licencia?: string | null; categoria_licencia?: string | null;
   sctr_salud_venc?: string | null; examen_medico_venc?: string | null;
   _tabla?: "conductores" | "conductores_tercero";
+  /** Token de sesión firmado por el servidor (lib/conductor-auth.ts). Es la credencial
+   *  de las acciones sensibles; sustituye al PIN, que ya no se guarda en el dispositivo. */
+  _token?: string;
 };
 type Vehiculo  = { id: number; placa: string; categoria: string | null; marca?: string | null; };
 type Reserva   = { id: number; origen: string; destino: string; fecha_servicio: string | null; hora_servicio?: string | null; vehiculo_id?: number | null; estado?: string | null; };
@@ -422,13 +426,22 @@ function agruparThreadsCond(msgs: any[]) {
 
 const SK = "afa_cond_v2";
 function saveSession(c: Conductor) {
-  localStorage.setItem(SK, JSON.stringify({ c, exp: Date.now() + 12 * 3600000 }));
+  // El PIN NUNCA se persiste: la credencial de sesión es `_token` (firmado en el
+  // servidor). Antes se guardaba el conductor entero, PIN en claro incluido.
+  const { pin_acceso: _omitido, ...limpio } = c;
+  localStorage.setItem(SK, JSON.stringify({ c: { ...limpio, pin_acceso: null }, exp: Date.now() + 12 * 3600000 }));
 }
 function loadSession(): Conductor | null {
   try {
     const raw = localStorage.getItem(SK); if (!raw) return null;
     const { c, exp } = JSON.parse(raw);
     if (Date.now() > exp) { localStorage.removeItem(SK); return null; }
+    // Higiene: una sesión creada por la versión anterior todavía trae el PIN guardado.
+    // Se borra del almacenamiento en el primer arranque de esta versión.
+    if (c && c.pin_acceso) {
+      c.pin_acceso = null;
+      localStorage.setItem(SK, JSON.stringify({ c, exp }));
+    }
     return c;
   } catch { return null; }
 }
@@ -855,6 +868,39 @@ export default function ConductorApp() {
     return () => cleanup();
   }, []);
 
+  // ─── Notificaciones push del conductor ──────────────────────────────────────
+  // La identidad va SIEMPRE en el token firmado; el servidor ignora cualquier `cid`
+  // del body (ver lib/conductor-auth.ts). Sin token (sesión vieja) no se suscribe:
+  // el conductor la obtiene al volver a iniciar sesión.
+  const pushApi = useCallback(
+    (accion: string, params: Record<string, any> = {}) =>
+      condApi(accion, { ...params, token: conductor?._token }),
+    [conductor?._token],
+  );
+  const [pushEstado, setPushEstado] = useState<"desconocido" | "activo" | "inactivo" | "bloqueado">("desconocido");
+
+  useEffect(() => {
+    if (!conductor?._token) return;
+    if (typeof Notification === "undefined") { setPushEstado("inactivo"); return; }
+    if (permisoBloqueado()) { setPushEstado("bloqueado"); return; }
+    if (Notification.permission === "granted") {
+      // Ya autorizó antes: re-sincroniza por si el token/endpoint rotó.
+      resincronizarSuscripcion(pushApi).then((ok) => setPushEstado(ok ? "activo" : "inactivo")).catch(() => {});
+    } else {
+      setPushEstado("inactivo");
+    }
+  }, [conductor?._token, pushApi]);
+
+  async function activarNotificaciones() {
+    const soporte = detectarSoportePush();
+    if (soporte === "no-soportado" || soporte === "ios-instalar" || soporte === "app-desactualizada") {
+      setPushEstado("inactivo");
+      return;
+    }
+    const r = soporte === "fcm" ? await activarPushNativo(pushApi) : await activarPushWeb(pushApi);
+    setPushEstado(r === "activo" ? "activo" : r === "denegado" ? "bloqueado" : "inactivo");
+  }
+
   function cleanup() {
     if (watchIdRef.current) { watchIdRef.current.clear(); watchIdRef.current = null; }
     if (intervalRef.current) clearInterval(intervalRef.current);
@@ -864,34 +910,36 @@ export default function ConductorApp() {
 
   // ─── Login ──────────────────────────────────────────────────────────────────
 
+  // El PIN se valida EN EL SERVIDOR. Antes esta función leía `pin_acceso` con la clave
+  // anon y lo comparaba en el navegador — el PIN de todos los conductores quedaba al
+  // alcance de cualquiera que abriera las herramientas de desarrollo. El servidor
+  // devuelve un token firmado que es la credencial de sesión; el PIN nunca vuelve.
   async function login() {
     if (dni.length < 7) { setLoginErr("Ingresa tu DNI"); return; }
     if (pin.length < 4) { setLoginErr("PIN de 4 dígitos"); return; }
     setLoginErr(""); setLoginLoading(true);
-
-    // Buscar primero en conductores propios
-    const { data } = await supabase.from("conductores")
-      .select("id,nombre,dni,telefono,pin_acceso,activo_app,licencia,vencimiento_licencia,categoria_licencia,sctr_salud_venc,examen_medico_venc")
-      .eq("dni", dni.trim()).single();
-
-    if (data) {
-      if (!data.activo_app) { setLoginErr("Acceso no activado. Llama a central."); setLoginLoading(false); return; }
-      if (data.pin_acceso !== pin) { setLoginErr("PIN incorrecto"); setLoginLoading(false); return; }
-      const c = { ...data, _tabla: "conductores" as const };
-      saveSession(c); setConductor(c); await cargarDatos(c.id, c._tabla); setLoginLoading(false);
-      return;
+    try {
+      const r = await condApi("login", { dni: dni.trim(), pin });
+      if (!r?.ok) {
+        setLoginErr(r?.error || "No se pudo iniciar sesión");
+        setLoginLoading(false);
+        return;
+      }
+      const c: Conductor = {
+        ...r.conductor,
+        pin_acceso: null,          // nunca se guarda el PIN en el dispositivo
+        activo_app: true,
+        _tabla: r.conductor.tabla,
+        _token: r.token,
+      };
+      saveSession(c);
+      setConductor(c);
+      await cargarDatos(c.id, c._tabla);
+    } catch (e: any) {
+      setLoginErr(e?.message || "Error de conexión");
+    } finally {
+      setLoginLoading(false);
     }
-
-    // Si no se encontró, buscar en conductores de terceros
-    const { data: data2 } = await supabase.from("conductores_tercero")
-      .select("id,nombre,dni,telefono,pin_acceso,activo_app,licencia,vencimiento_licencia,categoria_licencia")
-      .eq("dni", dni.trim()).single();
-
-    if (!data2) { setLoginErr("DNI no encontrado"); setLoginLoading(false); return; }
-    if (!data2.activo_app) { setLoginErr("Acceso no activado. Llama a central."); setLoginLoading(false); return; }
-    if (data2.pin_acceso !== pin) { setLoginErr("PIN incorrecto"); setLoginLoading(false); return; }
-    const c2 = { ...data2, _tabla: "conductores_tercero" as const };
-    saveSession(c2); setConductor(c2); await cargarDatos(c2.id, c2._tabla); setLoginLoading(false);
   }
 
   // ─── Cargar datos ───────────────────────────────────────────────────────────
@@ -4143,6 +4191,44 @@ export default function ConductorApp() {
                   </p>
                 </div>
               ))}
+            </div>
+
+            {/* Notificaciones push */}
+            <div style={{
+              background: "var(--c-surface)", border: "1px solid var(--c-line)",
+              borderRadius: 16, padding: 14, marginBottom: 12,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{
+                    width: 36, height: 36, borderRadius: 12,
+                    background: "var(--c-navy-tint)", color: "var(--c-navy)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}>
+                    <IconBell size={18} color="var(--c-navy)" />
+                  </div>
+                  <div>
+                    <p style={{ margin: 0, fontWeight: 700, fontSize: 14 }}>Notificaciones</p>
+                    <p style={{ margin: 0, fontSize: 11, color: "var(--c-muted)" }}>
+                      {pushEstado === "activo"    ? "Activas en este dispositivo"
+                       : pushEstado === "bloqueado" ? "Bloqueadas — actívalas en los ajustes del teléfono"
+                       : !conductor?._token        ? "Vuelve a iniciar sesión para activarlas"
+                       : "Recibe tus servicios al instante"}
+                    </p>
+                  </div>
+                </div>
+                {pushEstado !== "activo" && pushEstado !== "bloqueado" && conductor?._token && (
+                  <button
+                    onClick={activarNotificaciones}
+                    style={{
+                      background: "none", border: "none", cursor: "pointer",
+                      color: "var(--c-navy)", fontWeight: 700, fontSize: 13, fontFamily: FONT_SANS,
+                    }}
+                  >
+                    Activar
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Cambiar PIN */}

@@ -37,7 +37,9 @@ export type PushPayload = {
 
 export type EventoViaje = "salio" | "quedan_paradas" | "aproximandose" | "llego" | "embarcado";
 
-type OpcionesEnvio = { ttl?: number; urgencia?: "high" | "normal" };
+// `canal` = canal de notificación Android (FCM). Por defecto el del pasajero
+// ("afa_viaje"); el conductor usa el suyo para poder sonar distinto.
+type OpcionesEnvio = { ttl?: number; urgencia?: "high" | "normal"; canal?: string };
 
 // ─── CONFIG PEREZOSA (no romper el build si faltan env vars) ──────────────────
 
@@ -70,10 +72,15 @@ function fcmCliente(): JWT | null {
 // ─── ENVÍO ────────────────────────────────────────────────────────────────────
 
 type Suscripcion = {
-  id: number; pasajero_id: number; tipo: "webpush" | "fcm";
+  id: number; pasajero_id: number | null; tipo: "webpush" | "fcm";
   endpoint: string | null; p256dh: string | null; auth: string | null;
   fcm_token: string | null; fallos: number;
+  // Solo en suscripciones de conductor (supabase/push-conductor.sql).
+  conductor_id?: number | null;
+  conductor_tabla?: "conductores" | "conductores_tercero" | null;
 };
+
+const COLS_SUSC = "id, pasajero_id, tipo, endpoint, p256dh, auth, fcm_token, fallos";
 
 async function podar(id: number) {
   await supabaseAdmin.from("push_suscripciones").update({ activo: false, updated_at: new Date().toISOString() }).eq("id", id);
@@ -127,7 +134,7 @@ async function enviarFcm(s: Suscripcion, payload: PushPayload, op: OpcionesEnvio
               priority: op.urgencia === "high" ? "HIGH" : "NORMAL",
               ttl: `${op.ttl ?? 900}s`,
               notification: {
-                channel_id: "afa_viaje",
+                channel_id: op.canal ?? "afa_viaje",
                 tag: payload.tag,
                 notification_priority: op.urgencia === "high" ? "PRIORITY_MAX" : "PRIORITY_DEFAULT",
               },
@@ -165,7 +172,7 @@ export async function enviarPushAPasajeros(
   try {
     const { data: subs, error } = await supabaseAdmin
       .from("push_suscripciones")
-      .select("id, pasajero_id, tipo, endpoint, p256dh, auth, fcm_token, fallos")
+      .select(COLS_SUSC)
       .in("pasajero_id", ids)
       .eq("activo", true);
     if (error) {
@@ -187,6 +194,65 @@ export async function enviarPushAPasajeros(
     console.warn("[push] envío falló:", e?.message);
     return { enviados: 0, fallidos: ids.length, sinSuscripcion: 0 };
   }
+}
+
+// ─── PUSH AL CONDUCTOR ────────────────────────────────────────────────────────
+// El conductor vive en DOS tablas (`conductores` y `conductores_tercero`) cuyas
+// secuencias de id SE SOLAPAN: el id 7 existe en ambas y son personas distintas. Por
+// eso la identidad es el PAR (conductor_id, conductor_tabla) — nunca el id solo, o el
+// aviso le llegaría al conductor equivocado.
+
+export type TablaConductor = "conductores" | "conductores_tercero";
+
+/**
+ * Envía un push a todas las suscripciones activas de los conductores dados.
+ * Nunca lanza. Si la migración de push-conductor.sql aún no corrió, la columna no
+ * existe: se detecta el error y se devuelven ceros (el aviso sale por los otros canales).
+ */
+export async function enviarPushAConductores(
+  conductorIds: number[],
+  tabla: TablaConductor,
+  payload: PushPayload,
+  opciones: OpcionesEnvio = {},
+): Promise<{ enviados: number; fallidos: number; sinSuscripcion: number }> {
+  const ids = [...new Set(conductorIds.filter((n) => Number.isFinite(n) && n > 0))];
+  if (ids.length === 0) return { enviados: 0, fallidos: 0, sinSuscripcion: 0 };
+  try {
+    const { data: subs, error } = await supabaseAdmin
+      .from("push_suscripciones")
+      .select(`${COLS_SUSC}, conductor_id, conductor_tabla`)
+      .in("conductor_id", ids)
+      .eq("conductor_tabla", tabla)
+      .eq("activo", true);
+    if (error) {
+      // 42703 = columna inexistente (migración pendiente). No es un error operativo.
+      console.warn("[push] suscripciones de conductor no disponibles:", error.message);
+      return { enviados: 0, fallidos: 0, sinSuscripcion: ids.length };
+    }
+    const lista = (subs || []) as Suscripcion[];
+    const conSub = new Set(lista.map((s) => Number(s.conductor_id)));
+    const op: OpcionesEnvio = { canal: "afa_conductor", ...opciones };
+    const resultados = await Promise.allSettled(
+      lista.map((s) => (s.tipo === "fcm" ? enviarFcm(s, payload, op) : enviarWebPush(s, payload, op))),
+    );
+    const enviados = resultados.filter((r) => r.status === "fulfilled" && r.value).length;
+    return { enviados, fallidos: lista.length - enviados, sinSuscripcion: ids.length - conSub.size };
+  } catch (e: any) {
+    console.warn("[push] envío a conductor falló:", e?.message);
+    return { enviados: 0, fallidos: ids.length, sinSuscripcion: 0 };
+  }
+}
+
+/** Payload genérico de aviso al conductor (deep-link a su app). */
+export function payloadConductor(titulo: string, cuerpo: string, tag: string, reservaId?: number): PushPayload {
+  return {
+    title: titulo,
+    body: cuerpo,
+    tag,
+    url: reservaId ? `/conductor?reserva=${reservaId}` : "/conductor",
+    renotify: true,
+    requireInteraction: false,
+  };
 }
 
 // ─── EVENTOS DE VIAJE (dedupe insert-once) ────────────────────────────────────

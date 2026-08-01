@@ -12,6 +12,10 @@ import { createClient } from "@supabase/supabase-js";
 import { registrarLectura } from "@/lib/odometro";
 import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm, enviarPushAPasajeros, payloadRespuestaChat } from "@/lib/push";
 import { evaluarProximidad, emitirLlego } from "@/lib/proximidad";
+import {
+  firmarTokenConductor, sesionDeToken,
+  loginBloqueado, registrarIntentoFallido, limpiarIntentos,
+} from "@/lib/conductor-auth";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -130,19 +134,109 @@ export async function POST(req: NextRequest) {
         if (!dni || !pin) return NextResponse.json({ error: "dni y pin requeridos" }, { status: 400 });
         const dniT = String(dni).trim();
 
+        // Freno al brute-force de PINs de 4 dígitos (best-effort, por instancia).
+        if (loginBloqueado(dniT)) {
+          return NextResponse.json({ ok: false, error: "Demasiados intentos. Espera unos minutos." }, { status: 429 });
+        }
+
         for (const tabla of ["conductores", "conductores_tercero"] as const) {
           const { data: c } = await admin.from(tabla)
             .select("id,nombre,dni,telefono,pin_acceso,activo_app")
             .eq("dni", dniT).maybeSingle();
           if (!c) continue;
           if (!c.activo_app) return NextResponse.json({ ok: false, error: "Acceso no activado. Llama a central." });
-          if (String(c.pin_acceso ?? "") !== String(pin)) return NextResponse.json({ ok: false, error: "PIN incorrecto" });
+          if (String(c.pin_acceso ?? "") !== String(pin)) {
+            registrarIntentoFallido(dniT);
+            return NextResponse.json({ ok: false, error: "PIN incorrecto" });
+          }
+          limpiarIntentos(dniT);
+          // El token es la credencial de sesión: las acciones sensibles derivan de él
+          // la identidad, en vez de confiar en el `cid` que mande el cliente.
+          // NUNCA se devuelve pin_acceso.
           return NextResponse.json({
             ok: true,
-            conductor: { id: c.id, nombre: c.nombre, dni: c.dni, tabla },
+            token: firmarTokenConductor(c.id, tabla),
+            conductor: { id: c.id, nombre: c.nombre, dni: c.dni, telefono: c.telefono, tabla },
           });
         }
+        registrarIntentoFallido(dniT);
         return NextResponse.json({ ok: false, error: "DNI no encontrado" });
+      }
+
+      // ── Suscripción a notificaciones push del conductor ─────────────────────
+      // La identidad sale del TOKEN, jamás del body: sin esto cualquiera registraría
+      // o borraría dispositivos a nombre de otro conductor (IDOR).
+      // Índices únicos PARCIALES (endpoint / fcm_token) → PostgREST no los puede usar
+      // como árbitro de ON CONFLICT, así que se hace check-then-insert capturando 23505
+      // (mismo patrón que /api/pasajero).
+      case "suscribir_push": {
+        const ses = sesionDeToken(body.token);
+        if (!ses) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+
+        const tipo = body.tipo === "fcm" ? "fcm" : body.tipo === "webpush" ? "webpush" : null;
+        if (!tipo) return NextResponse.json({ error: "tipo inválido" }, { status: 400 });
+
+        const ua = (req.headers.get("user-agent") || "").slice(0, 300) || null;
+        const plataforma = typeof body.plataforma === "string" ? body.plataforma.slice(0, 40) : null;
+
+        let fila: Record<string, any>;
+        let claveCol: "endpoint" | "fcm_token";
+        let claveVal: string;
+        const dueno = { pasajero_id: null, conductor_id: ses.cid, conductor_tabla: ses.tabla };
+        if (tipo === "webpush") {
+          const sub = body.sub || {};
+          const endpoint = String(sub.endpoint || "");
+          const p256dh = String(sub.keys?.p256dh || "");
+          const auth = String(sub.keys?.auth || "");
+          if (!endpoint.startsWith("https://") || endpoint.length > 1000 ||
+              !p256dh || p256dh.length > 300 || !auth || auth.length > 100) {
+            return NextResponse.json({ error: "Suscripción inválida" }, { status: 400 });
+          }
+          fila = { ...dueno, tipo, endpoint, p256dh, auth, fcm_token: null };
+          claveCol = "endpoint"; claveVal = endpoint;
+        } else {
+          const t = String(body.fcmToken || "");
+          if (!t || t.length > 500) return NextResponse.json({ error: "Token FCM inválido" }, { status: 400 });
+          fila = { ...dueno, tipo, fcm_token: t, endpoint: null, p256dh: null, auth: null };
+          claveCol = "fcm_token"; claveVal = t;
+        }
+        fila = { ...fila, user_agent: ua, plataforma, activo: true, fallos: 0, updated_at: new Date().toISOString() };
+
+        // Índices únicos PARCIALES (endpoint / fcm_token): PostgREST no los puede usar
+        // como árbitro de ON CONFLICT → check-then-insert capturando 23505.
+        const { data: exist } = await admin
+          .from("push_suscripciones").select("id").eq(claveCol, claveVal).maybeSingle();
+        if (exist) {
+          // Mismo dispositivo, quizá otro conductor (teléfono compartido) → se reasigna.
+          const { error } = await admin.from("push_suscripciones").update(fila).eq("id", exist.id);
+          if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+          return NextResponse.json({ ok: true, actualizada: true });
+        }
+        const { error: eIns } = await admin.from("push_suscripciones").insert(fila);
+        if (eIns) {
+          if (eIns.code === "23505" || /duplicate key value/i.test(eIns.message || "")) {
+            const { error: eUpd } = await admin.from("push_suscripciones").update(fila).eq(claveCol, claveVal);
+            if (eUpd) return NextResponse.json({ error: eUpd.message }, { status: 500 });
+            return NextResponse.json({ ok: true, actualizada: true });
+          }
+          return NextResponse.json({ error: eIns.message }, { status: 500 });
+        }
+        return NextResponse.json({ ok: true, creada: true });
+      }
+
+      case "desuscribir_push": {
+        const ses = sesionDeToken(body.token);
+        if (!ses) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
+        const claveCol = body.fcmToken ? "fcm_token" : "endpoint";
+        const claveVal = String(body.fcmToken || body.endpoint || "");
+        if (!claveVal) return NextResponse.json({ error: "identificador requerido" }, { status: 400 });
+        // Acotado al dueño del token: nadie puede desuscribir el dispositivo de otro.
+        await admin.from("push_suscripciones")
+          .update({ activo: false, updated_at: new Date().toISOString() })
+          .eq(claveCol, claveVal)
+          .eq("conductor_id", ses.cid)
+          .eq("conductor_tabla", ses.tabla);
+        return NextResponse.json({ ok: true });
       }
 
       // ── Servicios de HOY de un conductor (para el selector del lector) ───────

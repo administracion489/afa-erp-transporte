@@ -26,6 +26,27 @@ export type AlertaConfig = {
   destinatarios: number[];               // ids de alerta_destinatarios
   plantilla: string | null;
   plantilla_directorio: string | null;
+  // ── Canales por tipo (supabase/canales-por-tipo.sql) ──
+  // Opcionales: si la migración aún no corrió, llegan undefined y los helpers de
+  // abajo caen a los defaults que reproducen el comportamiento previo.
+  canal_conductor_whatsapp?: boolean | null;
+  canal_conductor_email?: boolean | null;
+  canal_conductor_push?: boolean | null;
+  canal_pasajero_push?: boolean | null;
+  canal_pasajero_email?: boolean | null;
+  canal_pasajero_email_solo_sin_app?: boolean | null;
+  canal_pasajero_whatsapp?: boolean | null;
+  canal_pasajero_whatsapp_solo_sin_app?: boolean | null;
+  tiempo_editable?: boolean | null;
+};
+
+export type CanalesConductor = { whatsapp: boolean; email: boolean; push: boolean };
+export type CanalesPasajero = {
+  push: boolean;
+  email: boolean;
+  emailSoloSinApp: boolean;
+  whatsapp: boolean;
+  whatsappSoloSinApp: boolean;
 };
 
 export type Destinatario = { id: number; nombre: string; funcion: string | null; telefono: string; activo: boolean };
@@ -80,6 +101,91 @@ export function directorioDe(cfg: AlertaConfig, destMap: Map<number, Destinatari
   return cfg.destinatarios
     .map((id) => destMap.get(Number(id)))
     .filter((d): d is Destinatario => !!d && d.activo && !!d.telefono);
+}
+
+// ─── CANALES POR TIPO DE MENSAJE ───────────────────────────────────────────────
+// El canal dejó de ser fijo: cada fila de alerta_config elige por dónde sale su
+// aviso. Ver supabase/canales-por-tipo.sql.
+//
+// REGLA DE ORO de los defaults: cuando falta el dato (migración sin correr, fila
+// inexistente, error de red) se devuelve EXACTAMENTE el comportamiento anterior —
+// conductor solo WhatsApp, pasajero los 3 canales sin filtrar por app. Así un
+// despliegue sin migración no cambia ni un envío.
+
+/** Canales del CONDUCTOR para un tipo. Default histórico: solo WhatsApp. */
+export function canalesConductor(cfg: Pick<AlertaConfig,
+  "canal_conductor_whatsapp" | "canal_conductor_email" | "canal_conductor_push">): CanalesConductor {
+  return {
+    whatsapp: cfg.canal_conductor_whatsapp ?? true,
+    email:    cfg.canal_conductor_email    ?? false,
+    push:     cfg.canal_conductor_push     ?? false,
+  };
+}
+
+/** Defaults del PASAJERO = comportamiento previo del código (lib/notificaciones.ts).
+ *  OJO: `soloSinApp` va en false aquí aunque el DDL de config_canales lo tenga en
+ *  true. No "corregir" esa asimetría: cambiarla altera envíos en producción. El
+ *  backfill copia la fila REAL, que es la que manda. */
+const CANALES_PASAJERO_DEFAULT: CanalesPasajero = {
+  push: true, email: true, emailSoloSinApp: false, whatsapp: true, whatsappSoloSinApp: false,
+};
+
+/**
+ * Canales del PASAJERO para un tipo de mensaje. Cascada:
+ *   1. alerta_config[clave]  (control por tipo — lo nuevo)
+ *   2. config_canales id=1   (bloque global viejo — fallback si (1) no existe aún)
+ *   3. defaults              (comportamiento histórico)
+ * NUNCA lanza: un fallo de red aquí no puede tumbar un envío.
+ */
+export async function cargarCanalesPasajero(clave?: string): Promise<CanalesPasajero> {
+  // 1) Por tipo
+  if (clave) {
+    try {
+      const { data } = await admin
+        .from("alerta_config")
+        .select("canal_pasajero_push, canal_pasajero_email, canal_pasajero_email_solo_sin_app, canal_pasajero_whatsapp, canal_pasajero_whatsapp_solo_sin_app")
+        .eq("clave", clave)
+        .maybeSingle();
+      // Solo se usa si la COLUMNA existe (migración corrida). Si la fila existe pero
+      // las columnas son undefined, se cae al bloque global.
+      if (data && (data as any).canal_pasajero_push !== undefined && (data as any).canal_pasajero_push !== null) {
+        const d = data as any;
+        return {
+          push:               d.canal_pasajero_push,
+          email:              d.canal_pasajero_email ?? true,
+          emailSoloSinApp:    d.canal_pasajero_email_solo_sin_app ?? false,
+          whatsapp:           d.canal_pasajero_whatsapp ?? true,
+          whatsappSoloSinApp: d.canal_pasajero_whatsapp_solo_sin_app ?? false,
+        };
+      }
+    } catch { /* sigue a la cascada */ }
+  }
+  // 2) Bloque global viejo
+  try {
+    const { data } = await admin.from("config_canales").select("*").eq("id", 1).maybeSingle();
+    if (data) {
+      return {
+        push:               data.push_activo            ?? true,
+        email:              data.email_activo           ?? true,
+        emailSoloSinApp:    data.email_solo_sin_app     ?? false,
+        whatsapp:           data.whatsapp_activo        ?? true,
+        whatsappSoloSinApp: data.whatsapp_solo_sin_app  ?? false,
+      };
+    }
+  } catch { /* sigue a defaults */ }
+  // 3) Defaults
+  return { ...CANALES_PASAJERO_DEFAULT };
+}
+
+/** Una sola fila de alerta_config por clave (para los llamadores fuera del tick). */
+export async function cargarConfigAlerta(clave: string): Promise<AlertaConfig | null> {
+  try {
+    const { data } = await admin.from("alerta_config").select("*").eq("clave", clave).maybeSingle();
+    if (!data) return null;
+    return { ...(data as any), destinatarios: Array.isArray((data as any).destinatarios) ? (data as any).destinatarios.map(Number) : [] };
+  } catch {
+    return null;
+  }
 }
 
 /**

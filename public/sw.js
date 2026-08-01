@@ -7,7 +7,7 @@
 // `activate` borra todos los cachés cuya clave no termine en VERSION, forzando que los
 // navegadores ya instalados re-descarguen los chunks de Next (evita quedar pegado en una
 // versión vieja del ERP/app tras un deploy).
-const VERSION = "afa-v5";
+const VERSION = "afa-v6";
 const STATIC_CACHE = `afa-static-${VERSION}`;
 const SHELL_CACHE = `afa-shell-${VERSION}`;
 
@@ -64,32 +64,47 @@ self.addEventListener("fetch", (e) => {
   // 3) Todo lo demás (ERP, APIs, etc.): red normal, sin interceptar.
 });
 
-// ── PUSH NATIVO (app pasajero) ────────────────────────────────────────────────
+// ── PUSH NATIVO (apps pasajero y conductor) ───────────────────────────────────
 // El servidor (lib/push.ts) manda un JSON { title, body, tag, url, renotify,
 // requireInteraction }. Mismo tag → las notificaciones colapsan en la bandeja
 // (un "ya llegó" reemplaza al "~5 min" pendiente de la misma parada).
+//
+// El destinatario se deduce de `url`: este mismo service worker atiende a las DOS
+// apps, así que nada puede quedar cableado al pasajero — un aviso de conductor con
+// icono y foco de pasajero abriría la app equivocada.
+function appDeUrl(url) {
+  return String(url || "").startsWith("/conductor") ? "conductor" : "pasajero";
+}
+
 self.addEventListener("push", (e) => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch {}
+  const url = d.url || "/pasajero";
+  const icono = appDeUrl(url) === "conductor" ? "/icon-afa-conductor.png" : "/icon-afa-pasajero.png";
   e.waitUntil(self.registration.showNotification(d.title || "AFA Transportes", {
     body: d.body || "",
     tag: d.tag || "afa",
     renotify: !!d.renotify,
     requireInteraction: !!d.requireInteraction,
-    icon: "/icon-afa-pasajero.png",
-    badge: "/icon-afa-pasajero.png",
+    icon: icono,
+    badge: icono,
     vibrate: [300, 100, 300],
-    data: { url: d.url || "/pasajero" },
+    data: { url },
   }));
 });
 
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
   const url = (e.notification.data && e.notification.data.url) || "/pasajero";
+  const base = "/" + appDeUrl(url);   // "/conductor" | "/pasajero"
   e.waitUntil((async () => {
     const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    // Enfocar una ventana de LA MISMA app; si no hay, abrir el deep-link.
     for (const w of wins) {
-      if (w.url.includes("/pasajero") && "focus" in w) return w.focus();
+      if (w.url.includes(base) && "focus" in w) {
+        if ("navigate" in w && url !== base) { try { await w.navigate(url); } catch {} }
+        return w.focus();
+      }
     }
     return self.clients.openWindow(url);
   })());

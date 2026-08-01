@@ -3,8 +3,9 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { enviarWhatsAppPlantilla } from "@/lib/crm-meta";
-import { enviarPushAPasajeros, payloadsViaje } from "@/lib/push";
-import { telefonoContingencia } from "@/lib/alertas";
+import { enviarPushAPasajeros, enviarPushAConductores, payloadConductor, payloadsViaje } from "@/lib/push";
+import { telefonoContingencia, cargarCanalesPasajero, type CanalesConductor, type CanalesPasajero } from "@/lib/alertas";
+import { emailDesdePlantilla } from "@/lib/plantilla-texto";
 
 // Admin client para escribir logs sin RLS
 const supabaseAdmin = createClient(
@@ -188,6 +189,135 @@ export async function enviarAvisoWhatsApp(
   } catch (e: any) {
     return { ok: false, error: e.message };
   }
+}
+
+/**
+ * Gemelo por EMAIL de enviarAvisoWhatsApp: manda el MISMO texto de la plantilla de
+ * WhatsApp como correo. NO lanza (a diferencia de enviarEmail, que sí lanza: un correo
+ * mal formado dentro del tick abortaría el ciclo entero y se perderían las alertas de
+ * seguridad). Si no hay texto cacheado o las variables no cuadran, NO inventa nada:
+ * devuelve ok:false y el llamador lo registra como sin_canal.
+ */
+export async function enviarAvisoEmail(
+  correo: string,
+  plantilla: string,
+  parametros: string[],
+  opts: { titulo: string; botones?: { texto: string; url: string }[] },
+): Promise<{ ok: boolean; error?: string }> {
+  if (!correo?.trim()) return { ok: false, error: "sin correo" };
+  if (!process.env.RESEND_API_KEY) return { ok: false, error: "RESEND_API_KEY no configurada" };
+  try {
+    const armado = await emailDesdePlantilla(plantilla, parametros, opts);
+    if (!armado) return { ok: false, error: "sin texto de plantilla (o variables no coinciden)" };
+    await enviarEmail({ to: correo.trim(), subject: opts.titulo, html: armado.html });
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// ─── FAN-OUT MULTICANAL AL CONDUCTOR ──────────────────────────────────────────
+
+export type ResultadoCanal = "enviado" | "sin_canal" | "fallo";
+
+/**
+ * Manda UN aviso al conductor por los canales habilitados para ese tipo de mensaje.
+ *
+ * Semántica tri-estado (la que espera el motor de alertas para su dedupe):
+ *   • "enviado"   → al menos UN canal entregó. El dedupe avanza.
+ *   • "sin_canal" → ningún canal tenía datos (sin teléfono, sin correo, sin suscripción).
+ *                   El dedupe avanza igual: reintentar no cambiaría nada.
+ *   • "fallo"     → se intentó y TODO falló (red/Meta caídos) → transitorio, se reintenta.
+ *
+ * PÉRDIDA ACEPTADA Y CONSCIENTE: `alerta_enviada` dedupea por ALERTA, no por canal. Si
+ * el correo entra y el WhatsApp falla, el resultado es "enviado" y ese WhatsApp NO se
+ * reintenta. Endurecerlo exigiría reclamar por canal (`ref:wa` / `ref:mail` / `ref:push`)
+ * en los 7 llamadores a la vez; se documenta aquí en lugar de hacerlo a medias.
+ */
+export async function enviarAConductor(args: {
+  conductor: { id: number; nombre?: string | null; telefono?: string | null; email?: string | null };
+  tabla?: "conductores" | "conductores_tercero";
+  plantilla: string;
+  parametros: string[];
+  canales: CanalesConductor;
+  botones?: { index: number; texto: string }[];
+  /** Enlaces del correo (los botones de la plantilla no vienen en el body). */
+  enlaces?: { texto: string; url: string }[];
+  titulo: string;
+  pushTexto?: string;
+  reservaId?: number;
+  trigger: TipoTrigger;
+}): Promise<{ estado: ResultadoCanal; detalle?: string }> {
+  const { conductor, plantilla, parametros, canales, botones, enlaces, titulo, trigger } = args;
+  const tabla = args.tabla ?? "conductores";
+  // Hay avisos que NO cuelgan de una reserva (p.ej. "documento por vencer"). Para esos
+  // NO se escribe en notificaciones_enviadas: esa tabla está tipada por reserva y no se
+  // ha verificado que reserva_id admita NULL. Mismo comportamiento que hoy (el envío
+  // suelto por WhatsApp tampoco loguea).
+  const puedeLoguear = typeof args.reservaId === "number" && args.reservaId > 0;
+  const logBase = { reservaId: args.reservaId ?? 0, conductorId: conductor.id, trigger };
+  const log = async (extra: { tipo: TipoCanal; estado: string; destinatario?: string; error?: string }) => {
+    if (!puedeLoguear) return;
+    await logNotificacion({ ...logBase, ...extra });
+  };
+
+  let entregado = 0, intentado = 0;
+
+  // ── Canal 1: WhatsApp ──
+  if (canales.whatsapp && conductor.telefono?.trim()) {
+    if (phoneAvisos()) {
+      intentado++;
+      const tel = normalizarTelefono(conductor.telefono);
+      try {
+        await enviarWhatsAppPlantilla(tel, plantilla, PLANTILLA_IDIOMA, parametros, phoneAvisos(), botones);
+        entregado++;
+        await log({ tipo: "whatsapp", estado: "enviado", destinatario: tel });
+      } catch (e: any) {
+        await log({ tipo: "whatsapp", estado: "error", destinatario: tel, error: e.message });
+      }
+    }
+  }
+
+  // ── Canal 2: Email (reusa el texto de la plantilla de WhatsApp) ──
+  if (canales.email && conductor.email?.trim()) {
+    intentado++;
+    const r = await enviarAvisoEmail(conductor.email, plantilla, parametros, { titulo, botones: enlaces });
+    if (r.ok) {
+      entregado++;
+      await log({ tipo: "email", estado: "enviado", destinatario: conductor.email });
+    } else {
+      await log({ tipo: "email", estado: "error", destinatario: conductor.email, error: r.error });
+    }
+  }
+
+  // ── Canal 3: Push nativo (app del conductor) ──
+  if (canales.push) {
+    intentado++;
+    try {
+      const rPush = await enviarPushAConductores(
+        [conductor.id], tabla,
+        payloadConductor(titulo, args.pushTexto ?? titulo, `cond-${trigger}-${args.reservaId ?? 0}`, args.reservaId),
+        { ttl: 43200 },
+      );
+      if (rPush.enviados > 0) {
+        entregado++;
+        await log({ tipo: "push", estado: "enviado", destinatario: "push" });
+      } else if (rPush.fallidos > 0) {
+        await log({ tipo: "push", estado: "error", destinatario: "push", error: "entrega push falló" });
+      } else {
+        intentado--; // sin suscripción = no había canal, no es un fallo
+      }
+    } catch (e: any) {
+      await log({ tipo: "push", estado: "error", destinatario: "push", error: e.message });
+    }
+  }
+
+  if (entregado > 0) return { estado: "enviado" };
+  if (intentado === 0) {
+    await log({ tipo: "whatsapp", estado: "sin_canal" });
+    return { estado: "sin_canal", detalle: "conductor sin canal disponible" };
+  }
+  return { estado: "fallo", detalle: "todos los canales fallaron" };
 }
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://www.transportesafa.com";
@@ -377,7 +507,10 @@ Por favor espera 5 minutos antes en tu parada 🙏`;
  */
 export async function notificarReserva(
   reservaId: number,
-  trigger: TipoTrigger = "manual"
+  trigger: TipoTrigger = "manual",
+  /** Clave de alerta_config que gobierna los canales de este envío. Si se omite se
+   *  deduce del trigger (recordatorio vs confirmación). */
+  claveAlerta?: string,
 ): Promise<{
   ok: boolean;
   resumen: { enviados: number; errores: number; sinCanal: number; total: number };
@@ -448,17 +581,12 @@ export async function notificarReserva(
     .select("id, nombre, email, telefono")
     .in("id", pasajeroIds);
 
-  // Config de canales (anti-spam) + quiénes YA tienen la app (suscripción push activa).
-  // Si la tabla aún no existe (migración sin correr), los defaults dejan el comportamiento
-  // previo (los 3 canales a todos, sin filtrar por app).
-  const { data: cfgCanalRow } = await supabaseAdmin.from("config_canales").select("*").eq("id", 1).maybeSingle();
-  const canal = {
-    push_activo:            cfgCanalRow?.push_activo            ?? true,
-    email_activo:           cfgCanalRow?.email_activo           ?? true,
-    email_solo_sin_app:     cfgCanalRow?.email_solo_sin_app     ?? false,
-    whatsapp_activo:        cfgCanalRow?.whatsapp_activo        ?? true,
-    whatsapp_solo_sin_app:  cfgCanalRow?.whatsapp_solo_sin_app  ?? false,
-  };
+  // Canales del PASAJERO para este tipo de mensaje. La cascada vive en lib/alertas.ts
+  // (alerta_config[clave] → config_canales global → defaults históricos) y nunca lanza,
+  // así que un despliegue sin la migración se comporta exactamente como antes.
+  const canal: CanalesPasajero = await cargarCanalesPasajero(
+    claveAlerta ?? (trigger === "cron_recordatorio" ? "recordatorio_pasajero" : "confirmacion_pasajero"),
+  );
 
   // Mapa pasajero_id → parada
   const pasajeroParada: Record<number, number> = {};
@@ -507,7 +635,7 @@ export async function notificarReserva(
     // real del push, no por la mera existencia de una suscripción (que puede estar muerta
     // sin podar). Si el push NO se entrega, email/WhatsApp SÍ salen como respaldo.
     let pushEntregado = false;
-    if (canal.push_activo) try {
+    if (canal.push) try {
       const payloadPush = esRecordatorio
         ? payloadsViaje.recordatorio(reservaId, datosN.fecha, datosN.hora, datosN.paradaNombre)
         : payloadsViaje.confirmacion(reservaId, datosN.fecha, datosN.hora, datosN.paradaNombre);
@@ -527,7 +655,7 @@ export async function notificarReserva(
     }
 
     // Canal 2: Email (respeta config; "solo si no tiene app" = solo si NO recibió push)
-    if (pas.email && process.env.RESEND_API_KEY && canal.email_activo && (!canal.email_solo_sin_app || !pushEntregado)) {
+    if (pas.email && process.env.RESEND_API_KEY && canal.email && (!canal.emailSoloSinApp || !pushEntregado)) {
       try {
         const html    = esRecordatorio ? htmlEmailRecordatorio(datosN) : htmlEmailSincronizacion(datosN);
         const prefijo = datosN.empresaCliente ? `${datosN.empresaCliente} · ` : "";
@@ -546,7 +674,7 @@ export async function notificarReserva(
     }
 
     // Canal 3: WhatsApp por plantilla Meta (config; "solo si no tiene app" = solo si NO recibió push)
-    if (pas.telefono && phoneAvisos() && canal.whatsapp_activo && (!canal.whatsapp_solo_sin_app || !pushEntregado)) {
+    if (pas.telefono && phoneAvisos() && canal.whatsapp && (!canal.whatsappSoloSinApp || !pushEntregado)) {
       const tel = normalizarTelefono(pas.telefono);
       try {
         const vehiculoTexto = datosN.vehiculoPlaca
@@ -612,8 +740,13 @@ export async function notificarConductor(
   reservaId: number,
   trigger: TipoTrigger = "manual",
   plantilla?: string,
+  canales?: CanalesConductor,
 ): Promise<{ ok: boolean; estado: "enviado" | "error" | "sin_canal"; detalle?: string }> {
-  if (!phoneAvisos()) return { ok: true, estado: "sin_canal", detalle: "sin 2do número" };
+  // Canales del tipo. Default = comportamiento histórico (solo WhatsApp).
+  const cnl: CanalesConductor = canales ?? { whatsapp: true, email: false, push: false };
+  // OJO: el guard de phoneAvisos() vive AHORA dentro del canal WhatsApp (enviarAConductor).
+  // Si estuviera aquí arriba, email y push quedarían muertos justo cuando falta el 2º
+  // número de WhatsApp — que es precisamente cuando más se necesitan los otros canales.
 
   const { data: reserva } = await supabaseAdmin
     .from("reservas")
@@ -633,13 +766,16 @@ export async function notificarConductor(
 
   const { data: cond } = await supabaseAdmin
     .from("conductores")
-    .select("nombre, telefono")
+    .select("nombre, telefono, email")
     .eq("id", reserva.conductor_id)
     .single();
 
-  if (!cond?.telefono) {
+  // Sin NINGÚN dato de contacto no hay nada que hacer. (Antes se cortaba solo por
+  // teléfono; ahora el correo o el push pueden salvar el aviso.)
+  const hayDato = (cnl.whatsapp && cond?.telefono) || (cnl.email && cond?.email) || cnl.push;
+  if (!cond || !hayDato) {
     await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "sin_canal", trigger });
-    return { ok: true, estado: "sin_canal", detalle: "conductor sin teléfono" };
+    return { ok: true, estado: "sin_canal", detalle: "conductor sin canal disponible" };
   }
 
   // Vehículo + paraderos (primer paradero = punto de partida del conductor).
@@ -672,8 +808,16 @@ export async function notificarConductor(
     : "SERVICIO PROGRAMADO";
   const fechaTexto = reserva.fecha_servicio ? formatFecha(reserva.fecha_servicio) : "-";
   const horaTexto  = reserva.hora_servicio?.slice(0, 5) ?? "-";
-  const tel        = normalizarTelefono(cond.telefono);
   const telConting = await telefonoContingencia();
+
+  // Los botones de la plantilla de WhatsApp NO viajan en el body, así que para el
+  // correo hay que reconstruir los enlaces de mapa como URLs completas.
+  const mapa = (q: string) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
+  const enlacesMapa = [
+    { texto: "Ver origen",  url: mapa(origenQuery) },
+    { texto: "Ver destino", url: mapa(destinoQuery) },
+  ];
+  const condContacto = { id: reserva.conductor_id as number, nombre: cond.nombre, telefono: cond.telefono, email: cond.email };
 
   // ── Recordatorio COMBINADO ida+retorno (un solo mensaje con AMBOS tramos) ─────
   // Solo aplica al RECORDATORIO (no a asignación/cambio) y cuando el par vinculado es
@@ -703,66 +847,66 @@ export async function notificarConductor(
           && ret.conductor_id === reserva.conductor_id) {
         const origenRet  = ret.origen  || destino;   // el retorno suele invertir la ida
         const destinoRet = ret.destino || origen;
-        try {
-          await enviarWhatsAppPlantilla(
-            tel,
-            PLANTILLA_CONDUCTOR_COMPLETO,
-            PLANTILLA_IDIOMA,
-            [
-              nombreCorto(cond.nombre),
-              fechaTexto,
-              placa ?? "Por asignar",
-              horaTexto,
-              origen,
-              destino,
-              ret.hora_servicio?.slice(0, 5) ?? "-",
-              origenRet,
-              destinoRet,
-              telConting,
-            ],
-            phoneAvisos(),
-            [
-              { index: 0, texto: encodeURIComponent(origenQuery) },
-              { index: 1, texto: encodeURIComponent(destinoQuery) },
-            ],
-          );
-          await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "enviado", destinatario: tel, trigger });
-          return { ok: true, estado: "enviado", detalle: "combinado ida+retorno" };
-        } catch (e: any) {
-          await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "error", destinatario: tel, trigger, error: e.message });
-          return { ok: false, estado: "error", detalle: e.message };
-        }
+        const r = await enviarAConductor({
+          conductor: condContacto,
+          plantilla: PLANTILLA_CONDUCTOR_COMPLETO,
+          parametros: [
+            nombreCorto(cond.nombre),
+            fechaTexto,
+            placa ?? "Por asignar",
+            horaTexto,
+            origen,
+            destino,
+            ret.hora_servicio?.slice(0, 5) ?? "-",
+            origenRet,
+            destinoRet,
+            telConting,
+          ],
+          canales: cnl,
+          botones: [
+            { index: 0, texto: encodeURIComponent(origenQuery) },
+            { index: 1, texto: encodeURIComponent(destinoQuery) },
+          ],
+          enlaces: enlacesMapa,
+          titulo: `Tus servicios de ${fechaTexto} (ida y retorno)`,
+          pushTexto: `Ida ${horaTexto} · Retorno ${ret.hora_servicio?.slice(0, 5) ?? "-"} — ${placa ?? "Por asignar"}`,
+          reservaId,
+          trigger,
+        });
+        if (r.estado === "enviado") return { ok: true, estado: "enviado", detalle: "combinado ida+retorno" };
+        if (r.estado === "sin_canal") return { ok: true, estado: "sin_canal", detalle: r.detalle };
+        return { ok: false, estado: "error", detalle: r.detalle };
       }
     }
   }
 
-  try {
-    await enviarWhatsAppPlantilla(
-      tel,
-      plantilla || PLANTILLA_CONDUCTOR,
-      PLANTILLA_IDIOMA,
-      [
-        nombreCorto(cond.nombre),
-        sentidoTexto,
-        fechaTexto,
-        horaTexto,
-        origen,
-        destino,
-        placa ?? "Por asignar",
-        telConting,
-      ],
-      phoneAvisos(),
-      [
-        { index: 0, texto: encodeURIComponent(origenQuery) },
-        { index: 1, texto: encodeURIComponent(destinoQuery) },
-      ],
-    );
-    await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "enviado", destinatario: tel, trigger });
-    return { ok: true, estado: "enviado" };
-  } catch (e: any) {
-    await logNotificacion({ reservaId, conductorId: reserva.conductor_id, tipo: "whatsapp", estado: "error", destinatario: tel, trigger, error: e.message });
-    return { ok: false, estado: "error", detalle: e.message };
-  }
+  const r = await enviarAConductor({
+    conductor: condContacto,
+    plantilla: plantilla || PLANTILLA_CONDUCTOR,
+    parametros: [
+      nombreCorto(cond.nombre),
+      sentidoTexto,
+      fechaTexto,
+      horaTexto,
+      origen,
+      destino,
+      placa ?? "Por asignar",
+      telConting,
+    ],
+    canales: cnl,
+    botones: [
+      { index: 0, texto: encodeURIComponent(origenQuery) },
+      { index: 1, texto: encodeURIComponent(destinoQuery) },
+    ],
+    enlaces: enlacesMapa,
+    titulo: `${sentidoTexto} — ${fechaTexto} ${horaTexto}`,
+    pushTexto: `${origen} → ${destino} · ${placa ?? "Por asignar"}`,
+    reservaId,
+    trigger,
+  });
+  if (r.estado === "enviado")   return { ok: true, estado: "enviado" };
+  if (r.estado === "sin_canal") return { ok: true, estado: "sin_canal", detalle: r.detalle };
+  return { ok: false, estado: "error", detalle: r.detalle };
 }
 
 // ─── AVISO "BUS LLEGÓ AL PARADERO" ─────────────────────────────────────────────
@@ -785,9 +929,9 @@ export async function avisarLlegadaWhatsApp(
   // Respeta la config de canales: si WhatsApp está apagado, no avisa; y con "solo sin app"
   // el aviso de llegada por WhatsApp solo va a quien NO tiene push (evita duplicar el push
   // de llegada que proximidad.ts ya envió).
-  const { data: cfgCanalRow } = await supabaseAdmin.from("config_canales").select("whatsapp_activo, whatsapp_solo_sin_app").eq("id", 1).maybeSingle();
-  const waActivo   = cfgCanalRow?.whatsapp_activo ?? true;
-  const waSoloSin  = cfgCanalRow?.whatsapp_solo_sin_app ?? false;
+  const cnl = await cargarCanalesPasajero("llegada_pasajero");
+  const waActivo   = cnl.whatsapp;
+  const waSoloSin  = cnl.whatsappSoloSinApp;
   if (!waActivo) return;
   const { data: susc } = await supabaseAdmin
     .from("push_suscripciones").select("pasajero_id").in("pasajero_id", pasajeroIds).eq("activo", true);
@@ -820,7 +964,7 @@ export async function avisarLlegadaWhatsApp(
 
 // ─── LOG ─────────────────────────────────────────────────────────────────────
 
-async function logNotificacion({
+export async function logNotificacion({
   reservaId, pasajeroId, conductorId, tipo, estado, destinatario, trigger, error,
 }: {
   reservaId:    number;

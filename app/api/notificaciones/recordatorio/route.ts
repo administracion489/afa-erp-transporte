@@ -89,7 +89,7 @@ export async function GET(req: NextRequest) {
     for (const reserva of pendientesPasajero) {
       if (!(await reclamarEnvio("recordatorio_pasajero", reserva.id))) continue;
       try {
-        const res = await notificarReserva(reserva.id, "cron_recordatorio");
+        const res = await notificarReserva(reserva.id, "cron_recordatorio", "recordatorio_pasajero");
         // Nada entregado y todo falló (transitorio) → liberar para que un tick reintente.
         if (res.resumen.enviados === 0 && res.resumen.errores > 0) await liberarEnvio("recordatorio_pasajero", reserva.id);
         resultados.push({ reservaId: reserva.id, tipo: "pasajeros", ...res.resumen });

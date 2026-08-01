@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Enviar notificaciones
-    const resultado = await notificarReserva(reserva_id, "manual");
+    const resultado = await notificarReserva(reserva_id, "manual", "confirmacion_pasajero");
 
     // Marcar reserva como sincronizada
     await supabaseAdmin

@@ -8,7 +8,21 @@ type AlertaCfg = {
   clave: string; nombre: string; descripcion: string | null; activo: boolean;
   modo_tiempo: ModoTiempo; min_anticipacion: number | null; hora_fija: string | null; umbral: number | null;
   notifica_conductor: boolean; notifica_pasajero: boolean; destinatarios: number[]; plantilla: string | null;
+  // Canales por tipo (supabase/canales-por-tipo.sql)
+  canal_conductor_whatsapp: boolean; canal_conductor_email: boolean; canal_conductor_push: boolean;
+  canal_pasajero_push: boolean;
+  canal_pasajero_email: boolean; canal_pasajero_email_solo_sin_app: boolean;
+  canal_pasajero_whatsapp: boolean; canal_pasajero_whatsapp_solo_sin_app: boolean;
+  tiempo_editable: boolean;
 };
+
+// Columnas de canal que DEBEN viajar en el update. Si se olvida alguna, la casilla se
+// marca en pantalla, el toast dice "Guardado" y no se guarda nada (fallo silencioso).
+const COLS_CANAL = [
+  "canal_conductor_whatsapp", "canal_conductor_email", "canal_conductor_push",
+  "canal_pasajero_push", "canal_pasajero_email", "canal_pasajero_email_solo_sin_app",
+  "canal_pasajero_whatsapp", "canal_pasajero_whatsapp_solo_sin_app",
+] as const;
 
 const input = "w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20";
 const label = "block text-[11px] font-semibold text-gray-500 mb-1";
@@ -20,6 +34,21 @@ const UMBRAL_LABEL: Record<string, string> = {
   doc_vence: "Días de anticipación",
   jornada: "Horas máx. de jornada",
 };
+
+/** Chip on/off de un canal de envío. */
+function Canal({ on, set, children }: { on: boolean; set: (v: boolean) => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={() => set(!on)}
+      className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+        on ? "bg-[#0b315f] text-white border-[#0b315f]" : "bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
 
 export default function ConfigOperacionesPage() {
   const [cfgs, setCfgs] = useState<AlertaCfg[]>([]);
@@ -33,22 +62,37 @@ export default function ConfigOperacionesPage() {
   const [nFuncion, setNFuncion] = useState("");
   const [nTel, setNTel] = useState("");
 
-  // Canales del pasajero (anti-spam)
-  type Canales = { push_activo: boolean; email_activo: boolean; email_solo_sin_app: boolean; whatsapp_activo: boolean; whatsapp_solo_sin_app: boolean };
-  const [canales, setCanales] = useState<Canales | null>(null);
+  // Los canales ya NO son un bloque global: viven dentro de cada tipo de mensaje.
+  // Si falta la migración, `faltaCanales` avisa en vez de fingir que se guarda.
+  const [faltaCanales, setFaltaCanales] = useState(false);
 
   const showToast = (msg: string, ok = true) => { setToast({ msg, ok }); setTimeout(() => setToast(null), 3500); };
 
   const cargar = useCallback(async () => {
-    const [c, d, ca] = await Promise.all([
+    const [c, d] = await Promise.all([
       supabase.from("alerta_config").select("*").order("clave"),
       supabase.from("alerta_destinatarios").select("*").order("id"),
-      supabase.from("config_canales").select("*").eq("id", 1).maybeSingle(),
     ]);
     if (c.error || d.error) { setFaltaTabla(true); setCargando(false); return; }
-    setCfgs((c.data ?? []).map((x: any) => ({ ...x, destinatarios: Array.isArray(x.destinatarios) ? x.destinatarios.map(Number) : [] })));
+    const filas = (c.data ?? []) as any[];
+    // ¿La migración de canales ya corrió? (columna presente en la primera fila)
+    setFaltaCanales(filas.length > 0 && filas[0].canal_conductor_whatsapp === undefined);
+    setCfgs(filas.map((x: any) => ({
+      ...x,
+      destinatarios: Array.isArray(x.destinatarios) ? x.destinatarios.map(Number) : [],
+      // Defaults = comportamiento histórico, para que la UI no muestre todo apagado
+      // si la migración aún no corrió.
+      canal_conductor_whatsapp:             x.canal_conductor_whatsapp             ?? true,
+      canal_conductor_email:                x.canal_conductor_email                ?? false,
+      canal_conductor_push:                 x.canal_conductor_push                 ?? false,
+      canal_pasajero_push:                  x.canal_pasajero_push                  ?? true,
+      canal_pasajero_email:                 x.canal_pasajero_email                 ?? true,
+      canal_pasajero_email_solo_sin_app:    x.canal_pasajero_email_solo_sin_app    ?? true,
+      canal_pasajero_whatsapp:              x.canal_pasajero_whatsapp              ?? true,
+      canal_pasajero_whatsapp_solo_sin_app: x.canal_pasajero_whatsapp_solo_sin_app ?? true,
+      tiempo_editable:                      x.tiempo_editable                      ?? true,
+    })));
     setDests(d.data ?? []);
-    if (ca.data) setCanales(ca.data as Canales);
     setCargando(false);
   }, []);
   useEffect(() => { cargar(); }, [cargar]);
@@ -57,22 +101,17 @@ export default function ConfigOperacionesPage() {
     setCfgs((prev) => prev.map((c) => (c.clave === clave ? { ...c, ...patch } : c)));
 
   const guardarCfg = async (c: AlertaCfg) => {
+    const canales = Object.fromEntries(COLS_CANAL.map((k) => [k, (c as any)[k] ?? false]));
     const { error } = await supabase.from("alerta_config").update({
       activo: c.activo, modo_tiempo: c.modo_tiempo,
       min_anticipacion: c.modo_tiempo === "anticipacion" ? (c.min_anticipacion ?? 90) : c.min_anticipacion,
       hora_fija: c.modo_tiempo === "hora_fija" ? (c.hora_fija ?? "08:00") : c.hora_fija,
       umbral: c.umbral, notifica_conductor: c.notifica_conductor, notifica_pasajero: c.notifica_pasajero,
-      destinatarios: c.destinatarios, updated_at: new Date().toISOString(),
+      destinatarios: c.destinatarios, ...canales, updated_at: new Date().toISOString(),
     }).eq("clave", c.clave);
     showToast(error ? "Error al guardar" : `Guardado: ${c.nombre}`, !error);
   };
 
-  const setCanal = (patch: Partial<Canales>) => setCanales((c) => (c ? { ...c, ...patch } : c));
-  const guardarCanales = async () => {
-    if (!canales) return;
-    const { error } = await supabase.from("config_canales").update({ ...canales, updated_at: new Date().toISOString() }).eq("id", 1);
-    showToast(error ? "Error al guardar" : "Canales guardados", !error);
-  };
 
   // ── Editor de plantillas Meta (textos de los mensajes WhatsApp) ──
   type PlantillaMeta = { id: string; name: string; status: string; language: string; category: string; body: string; vars: number; botones: number };
@@ -216,43 +255,11 @@ export default function ConfigOperacionesPage() {
         <p className="text-sm text-gray-500">Controla qué avisos se envían, cuándo, y a quién.</p>
       </div>
 
-      {/* Canales del pasajero (anti-spam) */}
-      {canales && (
-        <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
-          <h2 className="text-sm font-bold text-gray-700 mb-1">Canales de aviso al pasajero</h2>
-          <p className="text-xs text-gray-500 mb-4">
-            Evita el spam de 3 canales. Con <strong>“solo si no tiene la app”</strong>, ese canal se manda únicamente a quien
-            no tenga la app instalada. Recomendado: con app → solo notificación push; sin app → email y/o WhatsApp.
-          </p>
-          <div className="space-y-2 text-sm text-gray-700">
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={canales.push_activo} onChange={(e) => setCanal({ push_activo: e.target.checked })} />
-              <span className="font-semibold">📲 Push (app)</span> <span className="text-gray-400 text-xs">— el canal principal, gratis e instantáneo</span>
-            </label>
-            <div className="flex flex-wrap items-center gap-4">
-              <label className="flex items-center gap-2">
-                <input type="checkbox" checked={canales.email_activo} onChange={(e) => setCanal({ email_activo: e.target.checked })} />
-                <span className="font-semibold">📧 Email</span>
-              </label>
-              <label className="flex items-center gap-1 text-xs text-gray-500">
-                <input type="checkbox" checked={canales.email_solo_sin_app} disabled={!canales.email_activo} onChange={(e) => setCanal({ email_solo_sin_app: e.target.checked })} />
-                solo si no tiene la app
-              </label>
-            </div>
-            <div className="flex flex-wrap items-center gap-4">
-              <label className="flex items-center gap-2">
-                <input type="checkbox" checked={canales.whatsapp_activo} onChange={(e) => setCanal({ whatsapp_activo: e.target.checked })} />
-                <span className="font-semibold">💬 WhatsApp</span>
-              </label>
-              <label className="flex items-center gap-1 text-xs text-gray-500">
-                <input type="checkbox" checked={canales.whatsapp_solo_sin_app} disabled={!canales.whatsapp_activo} onChange={(e) => setCanal({ whatsapp_solo_sin_app: e.target.checked })} />
-                solo si no tiene la app
-              </label>
-            </div>
-          </div>
-          <div className="mt-4 flex justify-end">
-            <button onClick={guardarCanales} className="text-xs font-semibold text-white bg-[#0b315f] px-4 py-2 rounded-lg hover:bg-[#0a2a52]">Guardar canales</button>
-          </div>
+      {faltaCanales && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6 text-sm text-amber-800">
+          Los canales por tipo de mensaje aún no están activos en la base de datos. Ejecuta{" "}
+          <code className="font-mono">supabase/canales-por-tipo.sql</code> en el SQL Editor de Supabase y recarga.
+          Mientras tanto, los avisos siguen saliendo como hasta ahora.
         </div>
       )}
 
@@ -285,7 +292,13 @@ export default function ConfigOperacionesPage() {
       </div>
 
       {/* Configuración por tipo de mensaje */}
-      <h2 className="text-sm font-bold text-gray-700 mb-3">Tipos de mensaje ({cfgs.length})</h2>
+      <h2 className="text-sm font-bold text-gray-700 mb-1">Tipos de mensaje ({cfgs.length})</h2>
+      <p className="text-xs text-gray-500 mb-3">
+        Cada mensaje elige sus propios canales. <strong>“solo sin app”</strong> manda ese canal únicamente a quien
+        no recibió la notificación push, para no avisarle tres veces a la misma persona. Al conductor, el correo
+        y el push son <strong>aditivos</strong>: solo llegan a quien tenga correo registrado o la app con
+        notificaciones activadas — el WhatsApp sigue siendo el canal que llega a todos.
+      </p>
       <div className="space-y-3">
         {cfgs.map((c) => (
           <div key={c.clave} className="bg-white border border-gray-200 rounded-2xl p-4">
@@ -300,19 +313,21 @@ export default function ConfigOperacionesPage() {
               </label>
             </div>
             <div className="grid md:grid-cols-4 gap-3">
-              <div>
-                <label className={label}>Cuándo</label>
-                <select className={input} value={c.modo_tiempo} onChange={(e) => setCfg(c.clave, { modo_tiempo: e.target.value as ModoTiempo })}>
-                  <option value="evento">Al ocurrir (evento)</option>
-                  <option value="anticipacion">Antes del servicio</option>
-                  <option value="hora_fija">A una hora fija</option>
-                </select>
-              </div>
-              {c.modo_tiempo === "anticipacion" && (
+              {c.tiempo_editable && (
+                <div>
+                  <label className={label}>Cuándo</label>
+                  <select className={input} value={c.modo_tiempo} onChange={(e) => setCfg(c.clave, { modo_tiempo: e.target.value as ModoTiempo })}>
+                    <option value="evento">Al ocurrir (evento)</option>
+                    <option value="anticipacion">Antes del servicio</option>
+                    <option value="hora_fija">A una hora fija</option>
+                  </select>
+                </div>
+              )}
+              {c.tiempo_editable && c.modo_tiempo === "anticipacion" && (
                 <div><label className={label}>Minutos antes</label>
                   <input type="number" className={input} value={c.min_anticipacion ?? 90} onChange={(e) => setCfg(c.clave, { min_anticipacion: Number(e.target.value) })} /></div>
               )}
-              {c.modo_tiempo === "hora_fija" && (
+              {c.tiempo_editable && c.modo_tiempo === "hora_fija" && (
                 <div><label className={label}>Hora (HH:MM)</label>
                   <input type="time" className={input} value={c.hora_fija ?? "08:00"} onChange={(e) => setCfg(c.clave, { hora_fija: e.target.value })} /></div>
               )}
@@ -325,6 +340,45 @@ export default function ConfigOperacionesPage() {
                 <label className="flex items-center gap-1"><input type="checkbox" checked={c.notifica_pasajero} onChange={(e) => setCfg(c.clave, { notifica_pasajero: e.target.checked })} /> Pasajero</label>
               </div>
             </div>
+
+            {/* Canales de ESTE tipo de mensaje */}
+            {(c.notifica_conductor || c.notifica_pasajero) && (
+              <div className="mt-3 border-t border-gray-100 pt-3 space-y-2">
+                <label className={label}>¿Por dónde se envía?</label>
+
+                {c.notifica_conductor && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-gray-500 w-20 shrink-0">Conductor</span>
+                    <Canal on={c.canal_conductor_whatsapp} set={(v) => setCfg(c.clave, { canal_conductor_whatsapp: v })}>💬 WhatsApp</Canal>
+                    <Canal on={c.canal_conductor_email} set={(v) => setCfg(c.clave, { canal_conductor_email: v })}>📧 Correo</Canal>
+                    <Canal on={c.canal_conductor_push} set={(v) => setCfg(c.clave, { canal_conductor_push: v })}>📲 Push</Canal>
+                  </div>
+                )}
+
+                {c.notifica_pasajero && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-gray-500 w-20 shrink-0">Pasajero</span>
+                    <Canal on={c.canal_pasajero_push} set={(v) => setCfg(c.clave, { canal_pasajero_push: v })}>📲 Push</Canal>
+                    <Canal on={c.canal_pasajero_email} set={(v) => setCfg(c.clave, { canal_pasajero_email: v })}>📧 Correo</Canal>
+                    {c.canal_pasajero_email && (
+                      <label className="flex items-center gap-1 text-[11px] text-gray-500">
+                        <input type="checkbox" checked={c.canal_pasajero_email_solo_sin_app}
+                          onChange={(e) => setCfg(c.clave, { canal_pasajero_email_solo_sin_app: e.target.checked })} />
+                        solo sin app
+                      </label>
+                    )}
+                    <Canal on={c.canal_pasajero_whatsapp} set={(v) => setCfg(c.clave, { canal_pasajero_whatsapp: v })}>💬 WhatsApp</Canal>
+                    {c.canal_pasajero_whatsapp && (
+                      <label className="flex items-center gap-1 text-[11px] text-gray-500">
+                        <input type="checkbox" checked={c.canal_pasajero_whatsapp_solo_sin_app}
+                          onChange={(e) => setCfg(c.clave, { canal_pasajero_whatsapp_solo_sin_app: e.target.checked })} />
+                        solo sin app
+                      </label>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             {dests.length > 0 && (
               <div className="mt-3">
                 <label className={label}>También avisar a (directorio):</label>

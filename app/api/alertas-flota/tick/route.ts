@@ -12,10 +12,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { enviarAvisoWhatsApp, notificarReserva, notificarConductor } from "@/lib/notificaciones";
+import { enviarAvisoWhatsApp, enviarAConductor, notificarReserva, notificarConductor } from "@/lib/notificaciones";
 import {
   cargarMotor, directorioDe, reclamarEnvio, liberarEnvio, cargarEstados, upsertEstado,
-  hoyLima, ahoraLimaMin, hhmmAMin, telefonoContingencia, type AlertaConfig,
+  hoyLima, ahoraLimaMin, hhmmAMin, telefonoContingencia, canalesConductor, type AlertaConfig,
 } from "@/lib/alertas";
 import { detectarSolapesJornada, type ReservaFlota } from "@/lib/alertas-flota";
 
@@ -84,17 +84,30 @@ async function handler(req: NextRequest) {
     const condIds = new Set<number>();
     for (const r of todas) if (r.conductor_id) condIds.add(r.conductor_id);
     for (const e of estados.values()) if (e.conductor_avisado) condIds.add(e.conductor_avisado);
-    const condMap = new Map<number, { nombre: string; telefono: string | null }>();
+    const condMap = new Map<number, { nombre: string; telefono: string | null; email: string | null }>();
     if (condIds.size) {
-      const { data } = await admin.from("conductores").select("id, nombre, telefono").in("id", [...condIds]);
-      for (const c of data ?? []) condMap.set(c.id, { nombre: c.nombre, telefono: c.telefono });
+      const { data } = await admin.from("conductores").select("id, nombre, telefono, email").in("id", [...condIds]);
+      for (const c of data ?? []) condMap.set(c.id, { nombre: c.nombre, telefono: c.telefono, email: c.email });
     }
     // ── Helpers de envío (tri-estado: distingue "sin canal" de "fallo transitorio") ──
-    async function aConductor(cfg: AlertaConfig, conductorId: number, params: string[]): Promise<ResultadoEnvio> {
+    // El CANAL ya no es fijo: sale por los que tenga habilitados ese tipo de mensaje
+    // (canal_conductor_* en alerta_config). Ver lib/notificaciones.ts::enviarAConductor.
+    async function aConductor(
+      cfg: AlertaConfig, conductorId: number, params: string[],
+      extra?: { titulo?: string; reservaId?: number },
+    ): Promise<ResultadoEnvio> {
       const c = condMap.get(conductorId);
-      if (!c?.telefono || !cfg.plantilla) return "sin_canal";
-      const r = await enviarAvisoWhatsApp(c.telefono, cfg.plantilla, params);
-      return r.ok ? "enviado" : "fallo";
+      if (!c || !cfg.plantilla) return "sin_canal";
+      const r = await enviarAConductor({
+        conductor: { id: conductorId, nombre: c.nombre, telefono: c.telefono, email: c.email },
+        plantilla: cfg.plantilla,
+        parametros: params,
+        canales: canalesConductor(cfg),
+        titulo: extra?.titulo ?? cfg.nombre,
+        reservaId: extra?.reservaId,
+        trigger: "manual",
+      });
+      return r.estado;
     }
     async function aDirectorio(cfg: AlertaConfig, params: string[]): Promise<{ enviados: number; fallos: number }> {
       let enviados = 0, fallos = 0;
@@ -153,7 +166,7 @@ async function handler(req: NextRequest) {
               // Sin teléfono aún → no llamar (evita log-spam); avanzar=false reintenta cuando lo tenga.
               if (!tieneTel) { avanzar = false; }
               else {
-                const rc = await notificarConductor(r.id, "asignacion", cAsig.plantilla ?? undefined);
+                const rc = await notificarConductor(r.id, "asignacion", cAsig.plantilla ?? undefined, canalesConductor(cAsig));
                 avanzar = rc.estado === "enviado";
                 if (avanzar) n++;
               }
@@ -162,7 +175,7 @@ async function handler(req: NextRequest) {
             if (cCamb) {
               if (!tieneTel) { avanzar = false; }
               else {
-                const rc = await notificarConductor(r.id, "cambio", cCamb.plantilla ?? undefined);
+                const rc = await notificarConductor(r.id, "cambio", cCamb.plantilla ?? undefined, canalesConductor(cCamb));
                 avanzar = rc.estado === "enviado";
                 if (avanzar) n++;
               }
@@ -191,7 +204,7 @@ async function handler(req: NextRequest) {
         if (!enViaRecordatorio(cRecC, r, hoy, manana, ahora, force)) continue;
         if (!(await reclamarEnvio("recordatorio_conductor", r.id))) continue;
         try {
-          const rc = await notificarConductor(r.id, "cron_recordatorio");
+          const rc = await notificarConductor(r.id, "cron_recordatorio", undefined, canalesConductor(cRecC));
           if (rc.estado === "error") await liberarEnvio("recordatorio_conductor", r.id); // transitorio → reintentar
           else n++;
         } catch { await liberarEnvio("recordatorio_conductor", r.id); }
@@ -205,7 +218,7 @@ async function handler(req: NextRequest) {
         if (!enViaRecordatorio(cRecP, r, hoy, manana, ahora, force)) continue;
         if (!(await reclamarEnvio("recordatorio_pasajero", r.id))) continue;
         try {
-          const rr = await notificarReserva(r.id, "cron_recordatorio");
+          const rr = await notificarReserva(r.id, "cron_recordatorio", "recordatorio_pasajero");
           // Nada entregado y todo falló → transitorio: liberar para reintentar. Si no hubo
           // errores (simplemente no había canal), se deja reclamado para no reintentar en bucle.
           if (rr.resumen.enviados === 0 && rr.resumen.errores > 0) await liberarEnvio("recordatorio_pasajero", r.id);
@@ -408,7 +421,7 @@ async function handler(req: NextRequest) {
         const limiteISO = limite.toISOString().split("T")[0];
         const { data: conds } = await admin
           .from("conductores")
-          .select("id, nombre, telefono, estado, vencimiento_licencia, sctr_salud_venc, sctr_pension_venc, examen_medico_venc, psicosometrico_venc, antecedentes_venc, vida_ley_venc, fecha_venc_contrato");
+          .select("id, nombre, telefono, email, estado, vencimiento_licencia, sctr_salud_venc, sctr_pension_venc, examen_medico_venc, psicosometrico_venc, antecedentes_venc, vida_ley_venc, fecha_venc_contrato");
         const DOCS: [string, string][] = [
           ["vencimiento_licencia", "Licencia de conducir"], ["sctr_salud_venc", "SCTR Salud"],
           ["sctr_pension_venc", "SCTR Pensión"], ["examen_medico_venc", "Examen médico"],
@@ -416,15 +429,29 @@ async function handler(req: NextRequest) {
           ["vida_ley_venc", "Vida Ley"], ["fecha_venc_contrato", "Contrato"],
         ];
         let n = 0;
+        const cnlDoc = canalesConductor(cfg);
         for (const c of (conds ?? []) as any[]) {
-          if (c.estado === "de_baja" || !c.telefono || !cfg.plantilla) continue;
+          // OJO: NO se descarta por falta de teléfono. Antes se filtraba aquí y un
+          // conductor sin WhatsApp no recibía nada aunque tuviera correo — ahora decide
+          // el fan-out, que sabe qué canales están habilitados y con qué datos cuenta.
+          if (c.estado === "de_baja" || !cfg.plantilla) continue;
           for (const [campo, etiqueta] of DOCS) {
             const f = c[campo];
             if (!f || f < hoy || f > limiteISO) continue; // vigente, ya vencido, o fuera de ventana
             if (!(await reclamarEnvio("doc_vence", `${c.id}:${campo}`))) continue;
-            const rr = await enviarAvisoWhatsApp(c.telefono, cfg.plantilla, [nombreCorto(c.nombre), etiqueta, f]);
-            if (rr.ok) n++;
-            else await liberarEnvio("doc_vence", `${c.id}:${campo}`); // transitorio → reintentar
+            // Sin reservaId: este aviso no cuelga de ninguna reserva → no se loguea
+            // en notificaciones_enviadas (igual que antes).
+            const rr = await enviarAConductor({
+              conductor: { id: c.id, nombre: c.nombre, telefono: c.telefono, email: c.email },
+              plantilla: cfg.plantilla,
+              parametros: [nombreCorto(c.nombre), etiqueta, f],
+              canales: cnlDoc,
+              titulo: `${etiqueta} por vencer (${f})`,
+              trigger: "manual",
+            });
+            if (rr.estado === "enviado") n++;
+            else if (rr.estado === "fallo") await liberarEnvio("doc_vence", `${c.id}:${campo}`); // transitorio → reintentar
+            // sin_canal: queda reclamado para no reintentar en bucle.
           }
         }
         res.doc_vence = n;

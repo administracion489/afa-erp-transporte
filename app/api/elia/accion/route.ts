@@ -33,7 +33,7 @@ export async function POST(request: Request) {
 
   try {
     if (accion.tipo === "recordatorio_reserva") {
-      const r = await notificarReserva(Number(accion.reserva_id), "manual");
+      const r = await notificarReserva(Number(accion.reserva_id), "manual", "confirmacion_pasajero");
       const { enviados, errores, sinCanal, total } = r.resumen;
       let mensaje: string;
       if (total === 0) {
