@@ -104,15 +104,20 @@ export async function geocodificarConCache(consulta: string): Promise<Coordenada
     if (data.status !== "OK" || !data.results?.[0]) {
       if (data.status === "REQUEST_DENIED") {
         console.error("[geocode] REQUEST_DENIED — habilitar Geocoding API en Google Cloud Console");
-        // Un fallo de configuración no es "esta dirección no existe": no se memoriza, o se
-        // envenenaría la caché con negativos falsos en cuanto se arregle la key.
+      }
+      // LISTA BLANCA a propósito: ZERO_RESULTS es el ÚNICO status que significa "esta
+      // dirección no existe". Todo lo demás —OVER_DAILY_LIMIT (cuota diaria agotada o
+      // facturación caída), OVER_QUERY_LIMIT, REQUEST_DENIED, INVALID_REQUEST,
+      // UNKNOWN_ERROR, o un cuerpo sin `status`— habla de NUESTRA cuenta, no de la
+      // dirección. Memorizarlos envenenaría la caché: el negativo dura TTL_MS (30 días),
+      // así que un solo día con la cuota agotada dejaría direcciones válidas sin
+      // coordenadas durante un mes, y solo se purga borrando filas a mano.
+      if (data.status !== "ZERO_RESULTS") {
+        console.error(`[geocode] "${texto}" → ${data.status ?? "sin status"} (NO se memoriza)`);
         return null;
       }
-      // OVER_QUERY_LIMIT / UNKNOWN_ERROR tampoco son veredictos sobre la dirección.
-      if (data.status === "OVER_QUERY_LIMIT" || data.status === "UNKNOWN_ERROR") return null;
 
-      // ZERO_RESULTS y demás: Google dice que no. Se memoriza para no volver a preguntar.
-      console.log(`[geocode] "${texto}" → ${data.status} (memorizado como irresoluble)`);
+      console.log(`[geocode] "${texto}" → ZERO_RESULTS (memorizado como irresoluble)`);
       await guardarCache(clave, { encontrado: false, lat: null, lng: null });
       return null;
     }
@@ -154,9 +159,12 @@ export async function geocodificarInversoConCache(lat: number, lng: number): Pro
     const data = await res.json();
 
     if (data.status !== "OK" || !data.results?.[0]) {
-      // Mar, zona sin datos: memo negativo salvo que sea un fallo de configuración o de cuota.
-      if (data.status !== "REQUEST_DENIED" && data.status !== "OVER_QUERY_LIMIT" && data.status !== "UNKNOWN_ERROR") {
+      // Misma lista blanca que la geocodificación directa: solo ZERO_RESULTS (mar, zona sin
+      // datos) es un veredicto sobre estas coordenadas. Los demás status hablan de la cuenta.
+      if (data.status === "ZERO_RESULTS") {
         await guardarCache(clave, { encontrado: false, lat: null, lng: null, texto: null });
+      } else {
+        console.error(`[geocode-inv] ${lat},${lng} → ${data.status ?? "sin status"} (NO se memoriza)`);
       }
       return null;
     }

@@ -139,10 +139,23 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ ok: false, error: "Demasiados intentos. Espera unos minutos." }, { status: 429 });
         }
 
+        // Los vencimientos viajan en el login porque nada más los repuebla: cargarDatos()
+        // no toca setConductor, así que sin ellos la franja "Licencia vence en N días" y la
+        // tarjeta "Mis documentos" quedan vacías. conductores_tercero no tiene las columnas
+        // de SCTR ni examen médico, de ahí que el select vaya por tabla.
+        // Literales, no plantillas: el cliente tipado de Supabase parsea la cadena del
+        // select en tiempo de compilación y una interpolación le impide inferir la fila.
+        const COLS = {
+          conductores:
+            "id,nombre,dni,telefono,pin_acceso,activo_app,licencia,vencimiento_licencia,categoria_licencia,sctr_salud_venc,examen_medico_venc",
+          conductores_tercero:
+            "id,nombre,dni,telefono,pin_acceso,activo_app,licencia,vencimiento_licencia,categoria_licencia",
+        } as const;
+
         for (const tabla of ["conductores", "conductores_tercero"] as const) {
           const { data: c } = await admin.from(tabla)
-            .select("id,nombre,dni,telefono,pin_acceso,activo_app")
-            .eq("dni", dniT).maybeSingle();
+            .select(COLS[tabla])
+            .eq("dni", dniT).maybeSingle<Record<string, any>>();
           if (!c) continue;
           if (!c.activo_app) return NextResponse.json({ ok: false, error: "Acceso no activado. Llama a central." });
           if (String(c.pin_acceso ?? "") !== String(pin)) {
@@ -156,7 +169,15 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({
             ok: true,
             token: firmarTokenConductor(c.id, tabla),
-            conductor: { id: c.id, nombre: c.nombre, dni: c.dni, telefono: c.telefono, tabla },
+            // Campo a campo, nunca `...c`: pin_acceso viene en el select y no debe salir.
+            conductor: {
+              id: c.id, nombre: c.nombre, dni: c.dni, telefono: c.telefono, tabla,
+              licencia: c.licencia ?? null,
+              vencimiento_licencia: c.vencimiento_licencia ?? null,
+              categoria_licencia: c.categoria_licencia ?? null,
+              sctr_salud_venc: (c as any).sctr_salud_venc ?? null,
+              examen_medico_venc: (c as any).examen_medico_venc ?? null,
+            },
           });
         }
         registrarIntentoFallido(dniT);

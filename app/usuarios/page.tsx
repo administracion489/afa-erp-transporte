@@ -18,33 +18,45 @@ type Permiso = {
   permitido: boolean;
 };
 
+// DEBE reflejar los `modulo` de `menuGrupos` en app/layout.tsx: esta lista es la única
+// forma de otorgar permisos, y lo que no aparece aquí no tiene checkbox, así que ningún
+// no-admin puede recibirlo por más que la página exista y esté en el menú.
+// Antes faltaban 12 módulos (comunicados, despachador, monitoreo, pasajeros, multas,
+// tarifas, finanzas, liquidaciones, contabilidad, ordenes-compra, configuracion, ajustes)
+// y sobraban 4 que ningún gate consulta: calendario, tercerizadas, documentos-vehiculares
+// y reservas (verificado con grep sobre menuGrupos, usePermiso y verificarUsuarioApi).
 const GRUPOS_MODULOS = [
-  { label: "General",     icono: "🏠", modulos: ["dashboard", "calendario"] },
-  { label: "Comercial",   icono: "📋", modulos: ["reservas", "cotizaciones", "clientes", "crm", "radar-ia"] },
-  { label: "Operaciones", icono: "🚌", modulos: ["programacion", "seguimiento", "incidencias"] },
-  { label: "Proveedores", icono: "🤝", modulos: ["proveedores", "tercerizadas"] },
-  { label: "Personal",    icono: "👷", modulos: ["conductores", "personal-administrativo"] },
-  { label: "Flota",       icono: "🚗", modulos: ["vehiculos", "documentos-vehiculares", "combustible", "mantenimiento", "neumaticos", "seguros"] },
-  { label: "Documentos",  icono: "📁", modulos: ["documentos", "vencimientos"] },
-  { label: "Finanzas",    icono: "💰", modulos: ["facturacion", "gastos"] },
-  { label: "Sistema",     icono: "⚙️", modulos: ["reportes", "usuarios"] },
+  { label: "General",      icono: "🏠", modulos: ["dashboard"] },
+  { label: "Comercial",    icono: "📋", modulos: ["cotizaciones", "tarifas", "clientes"] },
+  { label: "CRM",          icono: "💬", modulos: ["crm", "radar-ia"] },
+  { label: "Operaciones",  icono: "🚌", modulos: ["despachador", "programacion", "seguimiento", "monitoreo", "pasajeros", "comunicados", "multas", "incidencias"] },
+  { label: "Flota",        icono: "🚗", modulos: ["vehiculos", "mantenimiento", "neumaticos", "combustible", "seguros"] },
+  { label: "Personal",     icono: "👷", modulos: ["conductores", "personal-administrativo"] },
+  { label: "Proveedores",  icono: "🤝", modulos: ["proveedores", "ordenes-compra"] },
+  { label: "Finanzas",     icono: "💰", modulos: ["liquidaciones", "finanzas", "facturacion", "gastos"] },
+  { label: "Contabilidad", icono: "🧮", modulos: ["contabilidad"] },
+  { label: "Documentos",   icono: "📁", modulos: ["documentos", "vencimientos"] },
+  { label: "Sistema",      icono: "⚙️", modulos: ["reportes", "configuracion", "ajustes", "usuarios"] },
 ];
 
 const MODULOS = GRUPOS_MODULOS.flatMap((g) => g.modulos);
 
 const nombresModulo: Record<string, string> = {
-  dashboard: "Dashboard", calendario: "Calendario",
-  reservas: "Reservas", cotizaciones: "Cotizaciones", clientes: "Clientes", crm: "CRM",
-  "radar-ia": "Radar IA",
-  programacion: "Programación", seguimiento: "Seguimiento", incidencias: "Incidencias",
-  proveedores: "Proveedores", tercerizadas: "Tercerizadas",
+  dashboard: "Dashboard",
+  cotizaciones: "Cotizaciones", tarifas: "Tarifas", clientes: "Clientes",
+  crm: "CRM", "radar-ia": "Radar IA",
+  despachador: "Despachador", programacion: "Programación", seguimiento: "Seguimiento",
+  monitoreo: "Monitoreo", pasajeros: "Pasajeros", comunicados: "Comunicados",
+  multas: "Multas", incidencias: "Incidencias",
+  vehiculos: "Vehículos", mantenimiento: "Mantenimiento",
+  neumaticos: "Neumáticos", combustible: "Combustible", seguros: "Seguros",
   conductores: "Conductores", "personal-administrativo": "Personal Adm.",
-  vehiculos: "Vehículos", "documentos-vehiculares": "Docs. Vehiculares",
-  combustible: "Combustible", mantenimiento: "Mantenimiento",
-  neumaticos: "Neumáticos", seguros: "Seguros",
-  documentos: "Documentos", vencimientos: "Vencimientos",
+  proveedores: "Proveedores", "ordenes-compra": "Órdenes de Compra",
+  liquidaciones: "Liquidaciones", finanzas: "Finanzas",
   facturacion: "Facturación", gastos: "Gastos",
-  reportes: "Reportes", usuarios: "Usuarios",
+  contabilidad: "Contabilidad",
+  documentos: "Documentos", vencimientos: "Vencimientos",
+  reportes: "Reportes", configuracion: "Configuración", ajustes: "Costos", usuarios: "Usuarios",
 };
 
 function iniciales(nombre: string) {
