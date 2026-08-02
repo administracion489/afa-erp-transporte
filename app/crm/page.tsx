@@ -23,17 +23,21 @@ type Conversacion = {
   display_phone_number?: string | null; phone_number_id?: string | null;
 };
 
-// Los dos números del WABA "Afa Transporte". Se filtra por display_phone_number
-// (Meta lo manda como "51966707225") y no por phone_number_id, que es un id
-// interno y además vive en variables de entorno del servidor.
-const NUMEROS = [
-  { key: "todos",   label: "Todos los números", sufijo: null },
-  { key: "ventas",  label: "Ventas · 966707225", sufijo: "966707225" },
-  { key: "avisos",  label: "Avisos · 905438216", sufijo: "905438216" },
-] as const;
+// Alias legibles para los números que ya conocemos. NO es la lista de números: esa se
+// descubre de los datos (ver cargarNumeros), así que un número recién conectado aparece
+// solo en el filtro sin tocar código. Lo que no esté aquí se muestra como "+51…".
+const ALIAS_NUMERO: Record<string, string> = {
+  "966707225": "Ventas",
+  "905438216": "Avisos",
+};
 
-const etiquetaNumero = (d?: string | null) =>
-  !d ? null : NUMEROS.find((n) => n.sufijo && d.endsWith(n.sufijo))?.label ?? `+${d}`;
+// Meta manda display_phone_number como "51966707225" (sin +). Se filtra por ahí y no por
+// phone_number_id, que es un id interno y vive en variables de entorno del servidor.
+const formatearNumero = (d: string) => {
+  const alias = Object.entries(ALIAS_NUMERO).find(([suf]) => d.endsWith(suf))?.[1];
+  const legible = d.startsWith("51") ? `+51 ${d.slice(2)}` : `+${d}`;
+  return alias ? `${alias} · ${legible}` : legible;
+};
 
 type Mensaje = {
   id: string; conversacion_id: string; direccion: "entrante" | "saliente";
@@ -99,6 +103,7 @@ export default function CRMPage() {
   const [reply, setReply] = useState("");
   const [canalFiltro, setCanalFiltro] = useState<Canal>("todos");
   const [numeroFiltro, setNumeroFiltro] = useState<string>("todos");
+  const [numeros, setNumeros] = useState<string[]>([]);
   const [conectarWaModal, setConectarWaModal] = useState(false);
   const [estadoFiltro, setEstadoFiltro] = useState<"abierta" | "en_progreso" | "resuelta">("abierta");
   const [busqueda, setBusqueda] = useState("");
@@ -144,8 +149,7 @@ export default function CRMPage() {
 
     if (canalFiltro !== "todos") q = q.eq("canal", canalFiltro);
 
-    const sufijo = NUMEROS.find((n) => n.key === numeroFiltro)?.sufijo;
-    if (sufijo) q = q.like("display_phone_number", `%${sufijo}`);
+    if (numeroFiltro !== "todos") q = q.eq("display_phone_number", numeroFiltro);
 
     const { data } = await q.limit(80);
 
@@ -167,6 +171,21 @@ export default function CRMPage() {
   }, [canalFiltro, estadoFiltro, numeroFiltro]);
 
   useEffect(() => { cargarConvs(); }, [cargarConvs]);
+
+  // Los números de la empresa se DESCUBREN de las conversaciones, no se declaran en
+  // código: al conectar uno nuevo aparece solo en el filtro. Sin filtrar por canal/estado
+  // para que la lista no cambie según lo que se esté mirando.
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase
+        .from("crm_conversaciones")
+        .select("display_phone_number")
+        .not("display_phone_number", "is", null)
+        .limit(2000);
+      const unicos = new Set<string>((data ?? []).map((r: any) => String(r.display_phone_number)));
+      setNumeros([...unicos].sort());
+    })();
+  }, []);
 
   // ── Cargar mensajes de conversación ───────────────────────────────────
 
@@ -444,16 +463,18 @@ export default function CRMPage() {
           ))}
         </div>
 
-        {/* Filtro por número de la empresa (sólo aplica a WhatsApp) */}
-        {(canalFiltro === "todos" || canalFiltro === "whatsapp") && (
+        {/* Filtro por número de la empresa. Sólo si hay más de uno: con uno solo no
+            filtra nada y sería ruido. */}
+        {(canalFiltro === "todos" || canalFiltro === "whatsapp") && numeros.length > 1 && (
           <div className="px-3 pt-2 pb-1 border-b border-gray-100">
             <select
               value={numeroFiltro}
               onChange={(e) => setNumeroFiltro(e.target.value)}
               className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 text-gray-600 focus:outline-none focus:ring-1 focus:ring-[#0b315f]/30"
             >
-              {NUMEROS.map((n) => (
-                <option key={n.key} value={n.key}>{n.label}</option>
+              <option value="todos">Todos los números ({numeros.length})</option>
+              {numeros.map((n) => (
+                <option key={n} value={n}>{formatearNumero(n)}</option>
               ))}
             </select>
           </div>
@@ -569,12 +590,12 @@ export default function CRMPage() {
               </span>
 
               {/* Por qué número de la empresa entró este hilo */}
-              {etiquetaNumero(selected.display_phone_number) && (
+              {selected.display_phone_number && (
                 <span
                   className="text-xs px-2.5 py-1 rounded-full font-medium bg-gray-100 text-gray-600"
-                  title="Número de AFA por el que entró esta conversación"
+                  title="Número de la empresa por el que entró esta conversación"
                 >
-                  📲 {etiquetaNumero(selected.display_phone_number)}
+                  📲 {formatearNumero(selected.display_phone_number)}
                 </span>
               )}
 
@@ -933,11 +954,10 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 text-center">
         <h3 className="text-lg font-bold text-[#0b315f] mb-1">Conectar WhatsApp</h3>
         <p className="text-sm text-gray-500 mb-4">
-          Vincula tu WhatsApp Business (celular) al CRM sin dejar de usarlo desde la app. Ten el celular a la mano.
+          Vincula un WhatsApp Business al CRM sin dejar de usarlo desde el celular. El número
+          lo eliges tú en la ventana de Meta: puede ser uno ya existente o uno nuevo. Ten a mano
+          el celular donde está esa cuenta.
         </p>
-        <div className="bg-indigo-50 text-[#0b315f] font-bold text-base px-4 py-2.5 rounded-xl inline-block mb-4">
-          +51 966 707 225
-        </div>
 
         <button
           onClick={lanzar}
@@ -950,9 +970,9 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
         <div className="text-left mt-4 rounded-xl overflow-hidden border border-gray-100">
           {[
             { txt: "1. Toca el botón verde de arriba", activa: paso === "listo" },
-            { txt: "2. En la ventana, elige \"conectar número existente\"", activa: paso === "conectando" },
-            { txt: "3. En tu celular llega un mensaje → escanea el código QR", activa: false },
-            { txt: "4. Listo: el número queda conectado al CRM", ok: paso === "ok" },
+            { txt: "2. Elige el número en la ventana de Meta (existente o nuevo)", activa: paso === "conectando" },
+            { txt: "3. Si es un número que ya usas: llega un mensaje al celular → escanea el QR", activa: false },
+            { txt: "4. El número queda conectado y sus mensajes entran al Inbox", ok: paso === "ok" },
           ].map((p, i) => (
             <div
               key={i}
