@@ -267,10 +267,43 @@ export async function cargarEstados(reservaIds: number[]): Promise<Map<number, E
   return m;
 }
 
-export async function upsertEstado(reservaId: number, patch: Partial<EstadoAviso>): Promise<void> {
-  await admin
+// Esta fila es el ÚNICO dedupe del bloque de ciclo de vida (a diferencia de los
+// recordatorios, que van por reclamarEnvio/alerta_enviada). Si el upsert falla, el
+// siguiente tick vuelve a ver la reserva como recién asignada y REENVÍA el WhatsApp
+// de plantilla — cada 10 min, cuota Meta facturable. Por eso aquí no se puede tragar
+// el error: PostgREST rechaza la fila ENTERA si una sola columna no existe, así que
+// una migración pendiente borraría también conductor_avisado y hora_avisada.
+export async function upsertEstado(reservaId: number, patch: Partial<EstadoAviso>): Promise<boolean> {
+  const fila = { reserva_id: reservaId, ...patch, updated_at: new Date().toISOString() };
+
+  const { error } = await admin
     .from("avisos_conductor_estado")
-    .upsert({ reserva_id: reservaId, ...patch, updated_at: new Date().toISOString() }, { onConflict: "reserva_id" });
+    .upsert(fila, { onConflict: "reserva_id" });
+  if (!error) return true;
+
+  // Columna desconocida (PGRST204 / 42703): reintentar sin las columnas que dependen
+  // de migraciones opcionales. Perder el discriminador de tabla solo degrada la
+  // detección de reasignación propio↔tercero con ids solapados; perder el baseline
+  // entero desata el reenvío en bucle.
+  const esColumnaDesconocida =
+    error.code === "PGRST204" || error.code === "42703" || /column/i.test(error.message ?? "");
+
+  if (esColumnaDesconocida && "conductor_tabla_avisada" in fila) {
+    const { conductor_tabla_avisada: _omitida, ...base } = fila as Record<string, unknown>;
+    const reintento = await admin
+      .from("avisos_conductor_estado")
+      .upsert(base, { onConflict: "reserva_id" });
+    if (!reintento.error) {
+      console.warn(
+        "[alertas] avisos_conductor_estado sin conductor_tabla_avisada — falta correr " +
+          "supabase/conductores-tercero-avisos.sql. Baseline guardado sin esa columna.",
+      );
+      return true;
+    }
+  }
+
+  console.error(`[alertas] upsertEstado falló para reserva ${reservaId}:`, error.message);
+  return false;
 }
 
 export { admin as adminAlertas };
