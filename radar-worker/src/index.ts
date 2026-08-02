@@ -49,6 +49,8 @@ const MAX_MEDIA_BYTES = 15 * 1024 * 1024;
 let sock: any = null;
 let gruposActivos: Map<string, InfoGrupoActivo> = new Map();
 let intentosReconexion = 0;
+/** 515s seguidos sin lograr un "open": tope para no caer en bucle caliente de reconexión. */
+let reinicios515Seguidos = 0;
 let timerReconexion: NodeJS.Timeout | null = null;
 let timerProcesar: NodeJS.Timeout | null = null;
 let cerrando = false;
@@ -288,6 +290,9 @@ async function conectar(): Promise<void> {
 
       if (qr) {
         // QR nuevo: publicarlo al ERP (/radar-ia lo muestra) y también en consola como respaldo.
+        // Estamos esperando un escaneo: resetear el backoff para que, cuando este ciclo de
+        // QRs caduque (408), se reconecte rápido y siempre haya un QR fresco en el ERP.
+        intentosReconexion = 0;
         try {
           const dataUrl = await qrcode.toDataURL(qr);
           await actualizarEstado({ estado: "esperando_qr", qr_data_url: dataUrl, numero: null, detalle: null });
@@ -303,6 +308,7 @@ async function conectar(): Promise<void> {
 
       if (connection === "open") {
         intentosReconexion = 0;
+        reinicios515Seguidos = 0;
         const numero: string | null = sock?.user?.id ? String(sock.user.id).split(":")[0] ?? null : null;
         console.log(`[radar-worker] Conectado a WhatsApp como ${numero ?? "(número desconocido)"}.`);
         await actualizarEstado({
@@ -323,6 +329,9 @@ async function conectar(): Promise<void> {
 
         if (codigo === DisconnectReason.loggedOut) {
           // Sesión revocada desde el teléfono: borrar credenciales y pedir QR de nuevo.
+          // OJO: no tratar el 500 (badSession) igual — en Baileys 500 es el código por
+          // defecto de cualquier error no mapeado, no un diagnóstico de sesión corrupta;
+          // borrar auth/ ante un 500 destruiría la sesión por errores transitorios.
           console.warn("[radar-worker] Sesión cerrada desde el teléfono — se pedirá un QR nuevo.");
           try {
             await rm(config.authDir, { recursive: true, force: true });
@@ -337,7 +346,19 @@ async function conectar(): Promise<void> {
             detalle: "Sesión cerrada desde el teléfono — escanea el QR de nuevo",
           });
           intentosReconexion = 0;
+          reinicios515Seguidos = 0; // re-vinculación fresca: el 515 que sigue al nuevo QR debe reconectar rápido
           programarReconexion(1_000);
+        } else if (codigo === DisconnectReason.restartRequired && reinicios515Seguidos < 3) {
+          // 515: WhatsApp SIEMPRE lo envía justo después de emparejar (escanear el QR),
+          // pidiendo reiniciar el socket para completar la vinculación. Hay que reconectar
+          // YA: si se aplica backoff, el emparejamiento caduca y el teléfono descarta la
+          // sesión recién creada (el worker quedaba en un bucle infinito de QRs).
+          // Tope de 3 seguidos (se resetea al conectar): si el 515 se repite por otra
+          // causa, cae al backoff normal en vez de reconectar en bucle caliente.
+          reinicios515Seguidos++;
+          console.log("[radar-worker] Reinicio requerido (515) — reconectando de inmediato para completar la vinculación.");
+          intentosReconexion = 0;
+          programarReconexion(500);
         } else {
           const espera = Math.min(60_000, 5_000 * 2 ** intentosReconexion);
           intentosReconexion++;

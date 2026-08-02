@@ -179,6 +179,12 @@ const Ic = {
       <rect x="3" y="14" width="7" height="7" rx="1" /><path d="M14 14h3v3" /><path d="M14 21h.01" /><path d="M21 17.5V21" />
     </svg>
   ),
+  Servidor: ({ size = 16, className = "" }: IcProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <rect x="2" y="3" width="20" height="8" rx="2" /><rect x="2" y="13" width="20" height="8" rx="2" />
+      <path d="M6 7h.01" /><path d="M6 17h.01" />
+    </svg>
+  ),
 };
 
 // ── Átomos compartidos ───────────────────────────────────────────────────────
@@ -1078,6 +1084,122 @@ function TabAlertas({ alertas, onMarcarLeida, onMarcarTodas }: {
   );
 }
 
+// ── Modal: el servidor que mantiene WhatsApp abierto ─────────────────────────
+// Referencia siempre a mano para no tener que buscar en el repo qué es lo que
+// sostiene la sesión de WhatsApp del Radar ni cómo levantarlo cuando se cae.
+// El detalle largo vive en radar-worker/README.md; esto es el resumen operativo.
+
+function Cmd({ children }: { children: string }) {
+  const [copiado, setCopiado] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        navigator.clipboard?.writeText(children);
+        setCopiado(true);
+        setTimeout(() => setCopiado(false), 1500);
+      }}
+      title="Clic para copiar"
+      className="w-full text-left font-mono text-[11px] bg-[#0b315f] text-white/90 rounded-lg px-3 py-2 hover:bg-[#123f77] transition-colors relative group"
+    >
+      <span className="whitespace-pre-wrap break-all">{children}</span>
+      <span className="absolute right-2 top-1.5 text-[9px] font-sans font-bold text-white/50 group-hover:text-white/90">
+        {copiado ? "copiado ✓" : "copiar"}
+      </span>
+    </button>
+  );
+}
+
+function ModalServidor({ estado, onClose }: { estado: RadarEstado | null; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
+      <div
+        className="bg-white rounded-2xl shadow-xl w-full max-w-2xl my-8 p-6 space-y-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-black text-[#0b315f] leading-tight">El servidor del Radar</h2>
+            <p className="text-sm text-gray-400 font-medium">Qué mantiene el WhatsApp abierto y cómo revivirlo</p>
+          </div>
+          <button onClick={onClose} className="text-gray-300 hover:text-gray-600 text-2xl leading-none font-light">×</button>
+        </div>
+
+        <div className="bg-[#eef4fb] rounded-xl p-4 text-sm text-[#0b315f]">
+          <p className="font-black">Es <span className="font-mono text-xs bg-white px-1.5 py-0.5 rounded">radar-worker</span> corriendo 24/7 bajo <span className="font-mono text-xs bg-white px-1.5 py-0.5 rounded">pm2</span>.</p>
+          <p className="mt-1 text-[#0b315f]/70 font-medium">
+            No es ningún servicio de terceros: es un proceso Node (Baileys) que corre en un servidor propio (ver &quot;Dónde vive&quot;).
+            Es lo único que sostiene la sesión de WhatsApp — si se cae, el Radar deja de recibir mensajes de los grupos.
+          </p>
+        </div>
+
+        <div>
+          <p className="text-xs font-black text-gray-500 uppercase tracking-wide mb-2">Estado ahora</p>
+          <div className="text-sm text-gray-600 space-y-1">
+            <p><span className="font-bold text-[#0b315f]">Conexión:</span> {estado?.estado ?? "sin datos"}{estado?.detalle ? ` — ${estado.detalle}` : ""}</p>
+            <p><span className="font-bold text-[#0b315f]">Último latido:</span> {estado?.ultimo_latido ? `${haceRelativo(estado.ultimo_latido)} (${new Date(estado.ultimo_latido).toLocaleString("es-PE")})` : "nunca"}</p>
+            <p className="text-xs text-gray-400">El latido lo escribe el worker en la tabla <span className="font-mono">radar_estado</span>. Si está viejo, el proceso no está corriendo o no llega a Supabase.</p>
+          </div>
+        </div>
+
+        <div className="bg-[#f4f9f0] border border-[#27AE60]/20 rounded-xl p-4">
+          <p className="text-xs font-black text-gray-500 uppercase tracking-wide mb-2">Dónde vive</p>
+          <p className="text-sm text-gray-700">
+            El servidor está en <span className="font-black">DigitalOcean</span> — droplet{" "}
+            <span className="font-mono text-xs bg-white px-1.5 py-0.5 rounded border border-gray-200">ubuntu-s-1vcpu-512mb-10gb-tor1</span>{" "}
+            (IP <span className="font-mono text-xs bg-white px-1.5 py-0.5 rounded border border-gray-200">167.99.182.128</span>), proyecto &quot;first-project&quot;.
+          </p>
+          <a
+            href="https://cloud.digitalocean.com/login"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-2 inline-flex items-center gap-1.5 text-xs font-bold text-[#1262bd] hover:underline"
+          >
+            <Ic.Externo size={13} /> Iniciar sesión en DigitalOcean
+          </a>
+          <p className="text-[11px] text-gray-400 mt-1">Para entrar a la consola/terminal del droplet: dentro de DigitalOcean → Droplets → el droplet de arriba → botón &quot;Console&quot; (no necesita SSH desde tu PC).</p>
+        </div>
+
+        <div>
+          <p className="text-xs font-black text-gray-500 uppercase tracking-wide mb-2">Operarlo (en la máquina donde corre)</p>
+          <div className="space-y-1.5">
+            <Cmd>pm2 list</Cmd>
+            <Cmd>pm2 logs radar-worker</Cmd>
+            <Cmd>pm2 restart radar-worker</Cmd>
+          </div>
+        </div>
+
+        <div>
+          <p className="text-xs font-black text-gray-500 uppercase tracking-wide mb-2">Si nunca se instaló (o se cambió de máquina)</p>
+          <Cmd>{`npm install -g pm2
+cd radar-worker
+npm install
+pm2 start node_modules/tsx/dist/cli.mjs --name radar-worker -- src/index.ts
+pm2 save`}</Cmd>
+          <ul className="text-xs text-gray-500 mt-2 space-y-1 list-disc pl-4">
+            <li>En Windows <span className="font-mono">pm2 start npm -- start</span> falla; por eso se apunta directo al CLI de <span className="font-mono">tsx</span>.</li>
+            <li>Arranque automático: Windows → <span className="font-mono">npm i -g pm2-windows-startup &amp;&amp; pm2-startup install</span>. Linux/VPS → <span className="font-mono">pm2 startup</span>.</li>
+            <li>La sesión de WhatsApp vive en <span className="font-mono">radar-worker/auth/</span>. Respaldar esa carpeta = mover el worker de máquina sin volver a escanear el QR. Nunca subirla a git.</li>
+          </ul>
+        </div>
+
+        <div>
+          <p className="text-xs font-black text-gray-500 uppercase tracking-wide mb-2">Si se cae</p>
+          <ol className="text-sm text-gray-600 space-y-1 list-decimal pl-4">
+            <li>Entrar a la máquina y correr <span className="font-mono text-xs">pm2 restart radar-worker</span>; revisar <span className="font-mono text-xs">pm2 logs</span>.</li>
+            <li>Si pide vincular de nuevo, el QR aparece aquí mismo en esta pantalla (y en ASCII en la consola del worker).</li>
+            <li>Si el QR no llega, revisar el <span className="font-mono text-xs">.env</span> del worker (Supabase, <span className="font-mono text-xs">ERP_URL</span>, <span className="font-mono text-xs">RADAR_WORKER_SECRET</span>).</li>
+          </ol>
+        </div>
+
+        <p className="text-xs text-gray-400 border-t border-gray-100 pt-3">
+          Detalle completo y solución de problemas: <span className="font-mono">radar-worker/README.md</span> (sección “Correr 24/7”) y <span className="font-mono">CLAUDE.md</span> § Radar IA.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ── Tab: Grupos ──────────────────────────────────────────────────────────────
 
 type PatchGrupo = { contexto: string | null; categorias_permitidas: CategoriaRadar[] | null };
@@ -1599,6 +1721,7 @@ export default function RadarIAPage() {
   const [vehiculosGuia, setVehiculosGuia] = useState<VehiculoGuiaOdometro[]>([]);
 
   const [tab, setTab] = useState<TabId>("feed");
+  const [verServidor, setVerServidor] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [reprocesando, setReprocesando] = useState<string | null>(null);
   const [creandoCot, setCreandoCot] = useState<string | null>(null);
@@ -2130,6 +2253,8 @@ export default function RadarIAPage() {
           </div>
         )}
 
+        {verServidor && <ModalServidor estado={estado} onClose={() => setVerServidor(false)} />}
+
         {/* Header */}
         <div className="flex items-start justify-between flex-wrap gap-3">
           <div>
@@ -2137,13 +2262,18 @@ export default function RadarIAPage() {
             <p className="text-sm text-gray-400 mt-1 font-medium">WhatsApp → ELIA → ERP</p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <div className="flex items-center gap-2 bg-white border border-gray-100 shadow-sm rounded-xl px-3 py-2">
+            <button
+              onClick={() => setVerServidor(true)}
+              title="Qué servidor mantiene el WhatsApp abierto y cómo revivirlo"
+              className="flex items-center gap-2 bg-white border border-gray-100 shadow-sm rounded-xl px-3 py-2 hover:border-gray-300 transition-colors text-left"
+            >
               <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: conexion.dot }} />
-              <div>
-                <p className="text-xs font-black leading-tight" style={{ color: conexion.color }}>{conexion.texto}</p>
-                {conexion.sub && <p className="text-[10px] text-gray-400 font-semibold leading-tight">{conexion.sub}</p>}
-              </div>
-            </div>
+              <span>
+                <span className="block text-xs font-black leading-tight" style={{ color: conexion.color }}>{conexion.texto}</span>
+                {conexion.sub && <span className="block text-[10px] text-gray-400 font-semibold leading-tight">{conexion.sub}</span>}
+              </span>
+              <Ic.Servidor size={14} className="text-gray-300 ml-0.5" />
+            </button>
             {estado && estado.estado !== "esperando_qr" && (
               <button
                 onClick={solicitarNuevoQr}
@@ -2185,8 +2315,11 @@ export default function RadarIAPage() {
                 <div>
                   <p className="font-black text-[#0b315f] text-sm">Worker desconectado</p>
                   <p className="text-sm text-gray-500 mt-1">
-                    El worker de WhatsApp está apagado o sin conexión{estado.detalle ? ` (${estado.detalle})` : ""}. Enciéndelo en el servidor — instrucciones en <span className="font-mono text-xs">radar-worker/README.md</span>.
+                    El worker de WhatsApp está apagado o sin conexión{estado.detalle ? ` (${estado.detalle})` : ""}. Enciéndelo en el servidor.
                   </p>
+                  <button onClick={() => setVerServidor(true)} className="mt-2 inline-flex items-center gap-1.5 text-xs font-bold text-[#1262bd] hover:underline">
+                    <Ic.Servidor size={13} /> ¿Cuál es el servidor y cómo lo enciendo?
+                  </button>
                 </div>
               </div>
             )}

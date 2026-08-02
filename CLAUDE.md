@@ -52,6 +52,19 @@ The actual data model lives in Supabase (Postgres). Tables referenced across the
 
 Módulo independiente que monitorea grupos de WhatsApp con un worker externo (`radar-worker/`, Baileys — cliente **no oficial**; usa un número dedicado, jamás los números de la integración Meta oficial). El worker mantiene la sesión (QR una sola vez, credenciales en `radar-worker/auth/`), escribe crudo en tablas `radar_*` (`supabase/radar-ia.sql`) + bucket `radar-media`, y dispara `POST /api/radar/procesar` (Bearer `RADAR_WORKER_SECRET`; el `GET` es cron cada 15 min con `CRON_SECRET`). El pipeline (`lib/radar/motor.ts`) hace triage con Haiku, extrae con el modelo configurado (visión para fotos/PDFs de vouchers) y ejecuta acciones por categoría (`lib/radar/acciones.ts`): oportunidades → `radar_oportunidades` (+disponibilidad/tarifario), combustible sin anomalías → inserta en `combustible` + odómetro, resto → `radar_alertas`. Config en `radar_config` (fila única). El dashboard `app/radar-ia/page.tsx` (módulo `radar-ia`) lee las tablas directo con RLS. `radar-worker/` es un proyecto Node aparte, excluido del tsconfig raíz — no lo importa nada del ERP.
 
+**El "servidor que mantiene WhatsApp abierto" es `radar-worker` corriendo 24/7 bajo `pm2`** (no es un servicio de terceros). Es lo único que sostiene la sesión de WhatsApp del Radar IA: si se cae, dejan de entrar mensajes. Arranque y detalles en `radar-worker/README.md` → sección "Correr 24/7":
+
+```bash
+npm install -g pm2
+cd radar-worker && npm install
+pm2 start node_modules/tsx/dist/cli.mjs --name radar-worker -- src/index.ts
+pm2 save
+```
+
+**Dónde corre hoy:** droplet de DigitalOcean `ubuntu-s-1vcpu-512mb-10gb-tor1` (proyecto "first-project", IP `167.99.182.128`), en `/root/radar-worker`. Acceso sin SSH desde el panel: DigitalOcean → Droplets → el droplet → **Web Console**.
+
+`pm2 list` / `pm2 logs radar-worker` / `pm2 restart radar-worker` para operarlo. Arranque automático: Windows → `npm i -g pm2-windows-startup && pm2-startup install`; Linux/VPS → `pm2 startup`. La sesión vive en `radar-worker/auth/` (respaldarla permite mover el worker de máquina sin re-escanear el QR). Para saber si está vivo sin acceso a la máquina: revisar `ultimo_latido` en la fila única de `radar_estado` en Supabase, o el chip de conexión en `/radar-ia`. **Ese chip es un botón**: abre `ModalServidor` (en `app/radar-ia/page.tsx`), la referencia de fácil acceso con el estado actual, los comandos pm2 copiables y qué hacer si se cae — mantenerlo sincronizado con esta sección y con `radar-worker/README.md`.
+
 ### Conventions
 
 - `@/*` in `tsconfig.json` resolves to the repo root, so `@/lib/supabase` ≡ `lib/supabase.ts`.
