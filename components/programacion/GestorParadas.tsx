@@ -76,7 +76,8 @@ function BuscadorGooglePlaces(props: {
         const autocomplete = new window.google.maps.places.Autocomplete(inputRef.current, {
           types: ["geocode", "establishment"],
           componentRestrictions: { country: "pe" },
-          fields: ["name", "formatted_address", "geometry", "place_id"],
+          // Solo los campos que se usan abajo (geometry.location, no geometry entero): menos datos facturados por sesion
+          fields: ["name", "formatted_address", "geometry.location", "place_id"],
         });
         autocomplete.addListener("place_changed", () => {
           const place = autocomplete.getPlace();

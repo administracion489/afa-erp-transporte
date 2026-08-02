@@ -53,6 +53,14 @@ const ESTADOS: Record<string, { label: string; color: string }> = {
   cancelada:   { label: "Cancelada",   color: AFA.rojo },
 };
 
+// Cada recálculo del ETA en vivo es una llamada facturable a Google con tráfico.
+// Ajustar aquí el ritmo (ms) sin buscar por el archivo.
+const MS_REFRESCO_ETA = 180_000;
+// Piso entre dos recálculos disparados por eventos (volver a primer plano): en móvil
+// bloquear/desbloquear la pantalla emite visibilitychange a cada rato y sin esta guarda
+// un solo pasajero genera más llamadas facturables que la propia cadencia de arriba.
+const MS_MIN_ENTRE_ETA = 30_000;
+
 // ─── UTILIDADES ───────────────────────────────────────────────────────────────
 function distanciaMetros(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371000;
@@ -76,8 +84,12 @@ function formatearTiempo(min: number): string {
   return `${h}h ${m}min`;
 }
 
-function formatearHoraLlegada(min: number): string {
-  const llegada = new Date(Date.now() + min * 60 * 1000);
+// Recibe la hora de llegada ABSOLUTA (ms epoch) ya fijada al calcular el ETA.
+// No debe derivarla de Date.now() + minutos: el componente re-renderiza con cada fix de
+// GPS (~3 s) y el ETA solo se recalcula cada MS_REFRESCO_ETA, así que el reloj mostrado
+// al pasajero se correría hacia adelante hasta 3 minutos entre recálculos.
+function formatearHoraLlegada(tsLlegada: number): string {
+  const llegada = new Date(tsLlegada);
   return llegada.toLocaleTimeString("es-PE", {
     hour: "2-digit",
     minute: "2-digit",
@@ -117,6 +129,9 @@ export default function SeguimientoPage() {
   // ETA en tiempo real (recalculado periódicamente)
   const [etaMin, setEtaMin] = useState<number | null>(null);
   const [etaKm, setEtaKm] = useState<number | null>(null);
+  // Hora de llegada absoluta (ms epoch) congelada en el instante del cálculo del ETA.
+  const [etaLlegadaMs, setEtaLlegadaMs] = useState<number | null>(null);
+  const ultimoCalculoEtaRef = useRef(0); // anti-rebote de llamadas a Google (ms epoch)
 
   // SOS
   const [sosEstado, setSosEstado] = useState<"idle" | "presionando" | "enviando" | "enviado" | "error">("idle");
@@ -321,6 +336,7 @@ export default function SeguimientoPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          // Sin conTrafico: es la ruta planificada del contrato, se sirve cacheada.
           paradas: paradasConCoords.map(p => ({
             lat: Number(p.lat), lng: Number(p.lng), nombre: p.nombre,
           })),
@@ -412,23 +428,36 @@ export default function SeguimientoPage() {
     return () => { supabase.removeChannel(channel); clearInterval(interval); };
   }, [token, cargando, error, reserva]);
 
-  // ────────── 9. Recalcular ETA con Google Directions cada 60s ──────────
+  // ────────── 9. Recalcular ETA con Google Directions por intervalo ──────────
+  // El efecto NO puede depender del objeto `ubicacion`: se reemplaza en cada fix de GPS
+  // (~3 s por realtime) y eso remontaba el efecto → una llamada a Google por fix. Lee el
+  // último fix desde ubicacionRef (ya se mantiene sincronizado en la carga inicial, el
+  // realtime y el poll) y solo depende de si hay ubicación o no.
   const paradaPendiente = paradas.find(p => p.estado !== "completada");
   useEffect(() => {
     if (!ubicacion || !paradaPendiente?.lat || !paradaPendiente?.lng) {
-      setEtaMin(null); setEtaKm(null);
+      setEtaMin(null); setEtaKm(null); setEtaLlegadaMs(null);
       return;
     }
 
     let cancelled = false;
-    const calcular = async () => {
+    // `forzar` solo para el primer cálculo tras montar o cambiar de parada pendiente:
+    // ahí sí hace falta el dato nuevo aunque acabemos de llamar a Google.
+    const calcular = async (forzar = false) => {
+      const ub = ubicacionRef.current;
+      if (!ub || cancelled) return;
+      if (document.hidden) return; // pestaña oculta: no gastar llamadas con tráfico
+      const ahora = Date.now();
+      if (!forzar && ahora - ultimoCalculoEtaRef.current < MS_MIN_ENTRE_ETA) return;
+      ultimoCalculoEtaRef.current = ahora; // se marca antes del await para no solapar llamadas
       try {
         const res = await fetch("/api/ruta", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            conTrafico: true, // ETA en vivo: aquí el tráfico sí importa
             paradas: [
-              { lat: Number(ubicacion.lat), lng: Number(ubicacion.lng), nombre: "Bus" },
+              { lat: Number(ub.lat), lng: Number(ub.lng), nombre: "Bus" },
               { lat: Number(paradaPendiente.lat), lng: Number(paradaPendiente.lng), nombre: paradaPendiente.nombre },
             ],
           }),
@@ -436,16 +465,27 @@ export default function SeguimientoPage() {
         const data = await res.json();
         if (cancelled) return;
         if (data?.total_min != null && data?.total_km != null) {
-          setEtaMin(Number(data.total_min));
+          const min = Number(data.total_min);
+          setEtaMin(min);
           setEtaKm(Number(data.total_km));
+          // Congelar aquí la hora de llegada: es el único momento en que el dato es fresco.
+          setEtaLlegadaMs(Date.now() + min * 60 * 1000);
         }
       } catch { /* silencioso */ }
     };
 
-    calcular();
-    const interval = setInterval(calcular, 60000);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [ubicacion, paradaPendiente?.id, paradaPendiente?.lat, paradaPendiente?.lng]);
+    calcular(true);
+    const interval = setInterval(() => calcular(), MS_REFRESCO_ETA);
+    // Al volver a primer plano el ETA está viejo: recalcular, respetando el anti-rebote.
+    const alVolver = () => { if (!document.hidden) calcular(); };
+    document.addEventListener("visibilitychange", alVolver);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", alVolver);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ubicacion ? "on" : "off", paradaPendiente?.id, paradaPendiente?.lat, paradaPendiente?.lng]);
 
   // ────────── 10. SOS — press-and-hold 3 segundos ──────────
   const cancelarSos = useCallback(() => {
@@ -656,11 +696,11 @@ export default function SeguimientoPage() {
                 <p className="text-lg sm:text-xl font-bold leading-tight mb-2">{paradaPendiente.nombre}</p>
                 {paradaPendiente.direccion && <p className="text-xs opacity-80 mb-3 line-clamp-2">{paradaPendiente.direccion}</p>}
                 <div className="flex items-center gap-3 pt-2 border-t border-white/20">
-                  {etaMin != null ? (
+                  {etaMin != null && etaLlegadaMs != null ? (
                     <>
                       <div className="flex-1">
                         <p className="text-[10px] uppercase opacity-70">Llega a las</p>
-                        <p className="text-xl sm:text-2xl font-bold leading-tight">{formatearHoraLlegada(etaMin)}</p>
+                        <p className="text-xl sm:text-2xl font-bold leading-tight">{formatearHoraLlegada(etaLlegadaMs)}</p>
                         <p className="text-[11px] opacity-60 mt-0.5">en {formatearTiempo(etaMin)}</p>
                       </div>
                       {etaKm != null && (

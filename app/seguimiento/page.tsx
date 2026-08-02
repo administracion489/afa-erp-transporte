@@ -1352,6 +1352,20 @@ export default function SeguimientoPage() {
   const conflictos      = servicios.filter(s=>s.conflicto_vehiculo||s.conflicto_conductor).length;
   const fatigaCount     = servicios.filter(s=>s.jornada_extensa).length;
 
+  // ModalGps redibuja la ruta con Google Directions cada vez que cambia la IDENTIDAD del array
+  // `paradas`. Como esta página se re-renderiza en cada evento realtime de reservas/paradas,
+  // un .map() inline facturaba una llamada por render. Firma primitiva + useMemo: la identidad
+  // solo cambia si cambian de verdad las paradas del servicio abierto.
+  const firmaParadasGps = (gpsModal?.paradas ?? [])
+    .map(p=>`${p.id}:${p.orden}:${p.lat ?? ""}:${p.lng ?? ""}:${p.estado}:${p.hora_estimada ?? ""}:${p.nombre}`)
+    .join("|");
+  const paradasGps = useMemo(()=>(gpsModal?.paradas ?? []).map(p=>({
+    id: p.id, nombre: p.nombre,
+    lat: p.lat ?? null, lng: p.lng ?? null,
+    hora_estimada: p.hora_estimada ?? null,
+    estado: p.estado, orden: p.orden,
+  })),[firmaParadasGps]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const filtrados = servicios.filter(s=>{
     if (filtroTipo==="fijo"&&s.es_eventual) return false;
     if (filtroTipo==="eventual"&&!s.es_eventual) return false;
@@ -1521,12 +1535,7 @@ export default function SeguimientoPage() {
           clienteNombre={gpsModal.cliente_nombre}
           origen={gpsModal.paradas[0]?.nombre ?? gpsModal.reserva.origen ?? null}
           destino={(gpsModal.paradas.length > 1 ? gpsModal.paradas[gpsModal.paradas.length - 1].nombre : null) ?? gpsModal.reserva.destino ?? null}
-          paradas={gpsModal.paradas.map(p => ({
-            id: p.id, nombre: p.nombre,
-            lat: p.lat ?? null, lng: p.lng ?? null,
-            hora_estimada: p.hora_estimada ?? null,
-            estado: p.estado, orden: p.orden,
-          }))}
+          paradas={paradasGps}
           onClose={() => setGpsModal(null)}
         />
       )}

@@ -5,7 +5,15 @@
 // sabemos cuál tomó el bus → degradar). Devuelve la geometría de la ruta principal + las distancias
 // de TODAS las rutas. Solo lectura; key server-only. Ver lib/huella.ts decidirPuente().
 
+// COSTO: un servicio con GPS entrecortado puede tener 5-15 huecos, y el bucle que los puentea
+// corre cada 12-15 s. La única caché que había vivía en un useRef del componente, así que se
+// perdía en cada F5 y no se compartía entre usuarios: reabrir el modal del mismo servicio
+// volvía a pagar los mismos 30 puentes. Un puente A→B es geometría pura y determinista (no
+// pide tráfico), así que se cachea en Postgres igual que las rutas planificadas.
+
 import { NextRequest, NextResponse } from "next/server";
+import { guardarGasto, limitarGasto } from "@/lib/api-guard";
+import { leerRutaCache, guardarRutaCache } from "@/lib/rutas-cache";
 
 function decodePoly(encoded: string): [number, number][] {
   const coords: [number, number][] = [];
@@ -24,12 +32,26 @@ function decodePoly(encoded: string): [number, number][] {
 
 export async function POST(req: NextRequest) {
   try {
+    const bloqueo = guardarGasto(req, { etiqueta: "ruta-puente" });
+    if (bloqueo) return bloqueo;
+
     const body = await req.json();
     const aLat = Number(body?.aLat), aLng = Number(body?.aLng);
     const bLat = Number(body?.bLat), bLng = Number(body?.bLng);
     if (![aLat, aLng, bLat, bLng].every(Number.isFinite)) {
       return NextResponse.json({ error: "Coordenadas A/B inválidas" }, { status: 400 });
     }
+
+    // Mismo hueco de GPS = mismas coordenadas = misma clave, entre sesiones y entre usuarios.
+    const clave = `puente:${aLat.toFixed(5)},${aLng.toFixed(5)}>${bLat.toFixed(5)},${bLng.toFixed(5)}`;
+    const cacheado = await leerRutaCache(clave);
+    if (cacheado) return NextResponse.json(cacheado);
+
+    // Solo los fallos de caché gastan. El límite es holgado a propósito: el primer ciclo de un
+    // servicio con GPS entrecortado puede pedir legítimamente ~30 puentes de golpe, y toda la
+    // oficina comparte una IP.
+    const excedido = limitarGasto(req, { etiqueta: "ruta-puente", limite: 90 });
+    if (excedido) return excedido;
 
     const key = process.env.GOOGLE_MAPS_API_KEY || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
     if (!key) return NextResponse.json({ error: "GOOGLE_MAPS_API_KEY no configurada" }, { status: 500 });
@@ -75,7 +97,11 @@ export async function POST(req: NextRequest) {
       : (principal?.overview_polyline?.points ? decodePoly(principal.overview_polyline.points) : []);
     if (coordsFinal.length < 2) return NextResponse.json({ ocultar: true, status: "SIN_GEOMETRIA" });
 
-    return NextResponse.json({ coords: coordsFinal, roadM: rutasM[0] || 0, rutasM, status: "OK" });
+    const payload = { coords: coordsFinal, roadM: rutasM[0] || 0, rutasM, status: "OK" };
+    // Solo se cachea el resultado bueno: los `ocultar: true` son estados transitorios (cuota
+    // agotada, error de red) y memorizarlos dejaría huecos sin puentear durante 30 días.
+    await guardarRutaCache(clave, payload);
+    return NextResponse.json(payload);
   } catch (e: any) {
     return NextResponse.json({ ocultar: true, status: e?.message || "error" });
   }

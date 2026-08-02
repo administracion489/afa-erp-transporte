@@ -669,6 +669,15 @@ function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],veh
 
 type PlaceResultCot={address:string;lat:number;lng:number;placeId:string;};
 
+// Distance Matrix se factura POR ELEMENTO (orígenes × destinos), así que
+// memorizamos cada par ya consultado. Los mismos origen-destino se repiten
+// muchísimo entre cotizaciones (minas, plantas, hoteles) y así no se vuelven
+// a pedir. La clave usa el placeId cuando existe —que es lo que se le manda a
+// Google— porque dos accesos distintos del mismo edificio comparten la
+// coordenada redondeada (~1 m) y devolverían el km del otro.
+const cacheTramosCot=new Map<string,number>();
+const clavePuntoCot=(p:{placeId?:string;lat:number;lng:number})=>p.placeId||`${p.lat.toFixed(5)},${p.lng.toFixed(5)}`;
+
 function useGoogleMapsCot(){
   const[loaded,setLoaded]=useState(false);
   useEffect(()=>{
@@ -697,6 +706,10 @@ function PlacesInputCot({placeholder,value,onChange,onSelect,mapsLoaded,inputCls
     if(!mapsLoaded||!inputRef.current||acRef.current)return;
     acRef.current=new (window as any).google.maps.places.Autocomplete(inputRef.current,{
       componentRestrictions:{country:"pe"},
+      // `fields` acotado a lo que se usa: el widget factura el getPlace() según
+      // las categorías de datos pedidas, y pedir de más sube el costo. No se
+      // pasa sessionToken: el widget legacy no lo acepta (no existe en
+      // AutocompleteOptions) y ya agrupa su propia sesión internamente.
       fields:["formatted_address","geometry","place_id","name"],
       types:["geocode","establishment"],
     });
@@ -822,19 +835,42 @@ export default function CotizacionesPage(){
   const mapsLoaded=useGoogleMapsCot();
   const [origenPlace,setOrigenPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
   const [destinoPlace,setDestinoPlace]=useState<{placeId:string;lat:number;lng:number}|null>(null);
-  const [kmBase,setKmBase]=useState<number>(0);
+  // `null` = todavía no hay km calculado por Maps (0 sí es un valor válido: tramos < 500 m).
+  const [kmBase,setKmBase]=useState<number|null>(null);
+  const [calculandoKm,setCalculandoKm]=useState(false);
+  const [errorKm,setErrorKm]=useState("");
   useEffect(()=>{
-    if(!mapsLoaded||!origenPlace||!destinoPlace)return;
+    // `cancelado` evita que la respuesta de un destino ya cambiado pise el km
+    // del destino actual (quedaría un kilometraje equivocado en la cotización).
+    let cancelado=false;
+    const limpiar=()=>{cancelado=true;};
+    // Sin ruta completa no hay consulta en vuelo: se libera el bloqueo de guardado.
+    if(!mapsLoaded||!origenPlace||!destinoPlace){setCalculandoKm(false);return limpiar;}
+    // Si ya conocemos este par no se vuelve a pedir a Google.
+    const clave=`${clavePuntoCot(origenPlace)}>${clavePuntoCot(destinoPlace)}`;
+    const hit=cacheTramosCot.get(clave);
+    // `undefined` = el par no está en caché; un 0 cacheado sí es un km real y debe escribirse.
+    if(hit!==undefined){setErrorKm("");setCalculandoKm(false);setKmBase(hit);return limpiar;}
     const svc=new (window as any).google.maps.DistanceMatrixService();
     const orig=origenPlace.placeId?{placeId:origenPlace.placeId}:{location:{lat:origenPlace.lat,lng:origenPlace.lng}};
     const dest=destinoPlace.placeId?{placeId:destinoPlace.placeId}:{location:{lat:destinoPlace.lat,lng:destinoPlace.lng}};
+    setErrorKm("");setCalculandoKm(true);
     svc.getDistanceMatrix({origins:[orig],destinations:[dest],travelMode:(window as any).google.maps.TravelMode.DRIVING,unitSystem:(window as any).google.maps.UnitSystem.METRIC},(resp:any)=>{
-      const el=resp?.rows[0]?.elements[0];
-      if(el?.status==="OK")setKmBase(Math.round(el.distance.value/1000));
+      const el=resp?.rows?.[0]?.elements?.[0];
+      if(el?.status==="OK"){
+        const km=Math.round(el.distance.value/1000);cacheTramosCot.set(clave,km);
+        if(!cancelado){setKmBase(km);setErrorKm("");setCalculandoKm(false);}
+      }else{
+        // Sin respuesta útil (OVER_QUERY_LIMIT, REQUEST_DENIED, red caída, ZERO_RESULTS o
+        // NOT_FOUND de campamentos y destinos rurales). Se borra el km para no conservar
+        // el del destino anterior y se avisa para que se ingrese a mano.
+        if(!cancelado){setKmBase(null);setForm(p=>({...p,km:""}));setErrorKm("⚠️ Google Maps no pudo calcular el kilometraje de esta ruta. Ingrésalo a mano.");setCalculandoKm(false);}
+      }
     });
-  },[mapsLoaded,origenPlace?.placeId,origenPlace?.lat,destinoPlace?.placeId,destinoPlace?.lat]);
+    return limpiar;
+  },[mapsLoaded,origenPlace?.placeId,origenPlace?.lat,origenPlace?.lng,destinoPlace?.placeId,destinoPlace?.lat,destinoPlace?.lng]);
   useEffect(()=>{
-    if(kmBase<=0)return;
+    if(kmBase===null)return;
     const mult=(form.tipo_servicio==="ida_retorno"||form.tipo_servicio==="transporte_personal")?2:1;
     setForm(p=>({...p,km:String(kmBase*mult)}));
   },[kmBase,form.tipo_servicio]);
@@ -943,7 +979,7 @@ export default function CotizacionesPage(){
   const updItem=(i:number,k:keyof ItemCot,v:string|number)=>setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:Number.isNaN(Number(v))?v:Number(v)}:it));
   const addItem=()=>setItems(p=>[...p,{...ITEM_VACIO}]);const delItem=(i:number)=>setItems(p=>p.filter((_,idx)=>idx!==i));
   const{subtotal,igv,total}=calcItems(items,form.incluye_igv);
-  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setKmBase(0);setVehExpandido(false);setDraftRecuperado(false);try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
+  const limpiar=()=>{setForm(FORM0);setItems([{...ITEM_VACIO}]);setConsid({incluye:cfgDefault?.condiciones_incluye?.length?cfgDefault.condiciones_incluye:DEFAULT_CONSID.incluye,no_incluye:cfgDefault?.condiciones_no_incluye?.length?cfgDefault.condiciones_no_incluye:DEFAULT_CONSID.no_incluye,generales:cfgDefault?.condiciones_generales?.length?cfgDefault.condiciones_generales:DEFAULT_CONSID.generales});setParadas([]);setParadasRetorno([]);setFechasMultidia([]);setEditandoId(null);setMostrarForm(false);setDiasCond(1);setPeajesF(0);setPernocteF(0);setViaticosF(0);setOrigenPlace(null);setDestinoPlace(null);setKmBase(null);setCalculandoKm(false);setErrorKm("");setVehExpandido(false);setDraftRecuperado(false);try{localStorage.removeItem(DRAFT_KEY);}catch{}window.scrollTo({top:0,behavior:"smooth"});};
 
   const selVeh=(id:string)=>{setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:""}));if(!id)return;const v=flota.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_flota_id:id,vehiculo_tercero_id:"",equipamiento:v.equipamiento||"full_equipo",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
   const selVehTercero=(id:string)=>{setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:""}));if(!id)return;const v=flotaTercero.find(v=>v.id===Number(id));if(!v)return;setForm(p=>({...p,vehiculo_tercero_id:id,vehiculo_flota_id:"",tipo_vehiculo:v.tipo_vehiculo_costeo||p.tipo_vehiculo}));};
@@ -1030,6 +1066,7 @@ export default function CotizacionesPage(){
   };
 
   const guardarBorrador=async()=>{
+    if(calculandoKm){alert("⏳ Se está calculando el kilometraje de la ruta. Espera un segundo antes de guardar.");return;}
     if(!form.cliente_id&&!form.origen.trim()&&!form.destino.trim()){alert("⚠️ Ingresa al menos el cliente o la ruta para guardar el borrador");return;}
     setGuardando(true);
     let nombreCreador=reprNombre||"";if(!nombreCreador){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:uRow}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(uRow?.nombre)nombreCreador=extraerNombreApellido(uRow.nombre);}}catch(e){}}
@@ -1040,6 +1077,8 @@ export default function CotizacionesPage(){
   };
 
   const guardarCotizacion=async()=>{
+    // Mientras Maps responde, form.km puede ser el del destino anterior: no se guarda.
+    if(calculandoKm){alert("⏳ Se está calculando el kilometraje de la ruta. Espera un segundo antes de guardar.");return;}
     if(!form.origen.trim()){alert("⚠️ Falta el Punto de origen");return;}
     if(!form.destino.trim()){alert("⚠️ Falta el Punto de destino");return;}
     if(!form.cliente_id){alert("⚠️ Falta seleccionar el cliente");return;}
@@ -1209,7 +1248,7 @@ export default function CotizacionesPage(){
     }
     cargar();
   };
-  const editarCot=(c:Cotizacion)=>{setOrigenPlace(null);setDestinoPlace(null);setKmBase(0);skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
+  const editarCot=(c:Cotizacion)=>{setOrigenPlace(null);setDestinoPlace(null);setKmBase(null);setCalculandoKm(false);setErrorKm("");skipDescRef.current=true;skipParadasRef.current=true;setForm({cliente_id:String(c.cliente_id||""),origen:c.origen||"",destino:c.destino||"",km:c.km?String(c.km):"",costo_estimado:c.costo_estimado?String(c.costo_estimado):"",estado:(c.estado||"pendiente") as EstadoCot,numero_cotizacion:c.numero_cotizacion||"",atencion:c.atencion||"",asunto:c.asunto||"",punto_retorno:c.punto_retorno||"",fecha_servicio:c.fecha_servicio||"",fecha_retorno:c.fecha_retorno||"",hora_ida:c.hora_ida||"",hora_retorno:c.hora_retorno||"",descuento_pct:c.descuento_pct?String(c.descuento_pct):"0",tipo_vehiculo:c.tipo_vehiculo||"",equipamiento:c.equipamiento||"full_equipo",vehiculo_flota_id:c.vehiculo_flota_id?String(c.vehiculo_flota_id):"",vehiculo_tercero_id:c.vehiculo_tercero_id?String(c.vehiculo_tercero_id):"",modo_servicio:(c.modo_servicio||"eventual") as ModoServ,tipo_servicio:c.tipo_servicio||"solo_ida",dias_servicio:String(c.dias_servicio||1),horas_servicio:String(c.horas_servicio||8),pernocte_costo:String(c.pernocte_costo||0),precio_dia:c.precio_dia?String(c.precio_dia):"",incluye_igv:c.incluye_igv!==false,itinerario_texto:c.itinerario_texto||""});if(c.items_json?.length)setItems(c.items_json);else{const p=Number(c.precio_cliente||0)/1.18;setItems([{descripcion:c.asunto||`${c.origen}→${c.destino}`,dias:1,cantidad:1,precio_unit:Math.round(p*100)/100,descuento_pct:0}]);}setConsid(c.consideraciones_json||DEFAULT_CONSID);setParadas(c.paradas_json||[]);setParadasRetorno(c.paradas_retorno_json||[]);setVehExpandido(!!c.tipo_vehiculo);skipFechasRef.current=true;setFechasMultidia((c.fechas_multidia_json||[]).map((d:any,idx:number,arr:any[])=>({dia:d.dia,fecha:d.fecha||"",hora_ida:d.hora_ida||"",hora_fin:d.hora_fin??d.hora_retorno??"",tipo_noche:d.tipo_noche!==undefined?d.tipo_noche:(idx===arr.length-1?"":"pernocte"),destino_nombre:d.destino_nombre||"",destino_lat:d.destino_lat||"",destino_lng:d.destino_lng||""})));setEditandoId(c.id);setMostrarForm(true);setTimeout(()=>window.scrollTo({top:0,behavior:"smooth"}),50);};
   const abrirPDF=async(cot:Cotizacion,plantilla:string=plantillaElegida)=>{
     const cl=clientes.find(c=>c.id===cot.cliente_id);
     const its=cot.items_json?.length?cot.items_json:[{descripcion:`${cot.asunto||"SERVICIO"} — ${cot.origen}→${cot.destino}`,dias:1,cantidad:1,precio_unit:cot.precio_cliente/1.18,descuento_pct:0}];
@@ -1429,12 +1468,12 @@ export default function CotizacionesPage(){
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <Campo label="Punto de origen" req>
                   <LocationInputCot placeholder="Av. República de Panamá 3623" value={form.origen} mapsLoaded={mapsLoaded}
-                    onChange={v=>{setForm(p=>({...p,origen:v}));setOrigenPlace(null);setKmBase(0);}}
+                    onChange={v=>{setForm(p=>({...p,origen:v,km:""}));setOrigenPlace(null);setKmBase(null);setErrorKm("");}}
                     onSelect={p=>{setOrigenPlace(p.placeId?{placeId:p.placeId,lat:p.lat,lng:p.lng}:{placeId:"",lat:p.lat,lng:p.lng});if(p.address)setForm(prev=>({...prev,origen:p.address}));}}/>
                 </Campo>
                 <Campo label="Punto de destino" req>
                   <LocationInputCot placeholder="Planta Cajamarquilla" value={form.destino} mapsLoaded={mapsLoaded}
-                    onChange={v=>{setForm(p=>({...p,destino:v}));setDestinoPlace(null);setKmBase(0);}}
+                    onChange={v=>{setForm(p=>({...p,destino:v,km:""}));setDestinoPlace(null);setKmBase(null);setErrorKm("");}}
                     onSelect={p=>{setDestinoPlace(p.placeId?{placeId:p.placeId,lat:p.lat,lng:p.lng}:{placeId:"",lat:p.lat,lng:p.lng});if(p.address)setForm(prev=>({...prev,destino:p.address}));}}/>
                 </Campo>
                 {!esSoloIda&&<Campo label="Punto de retorno">
@@ -1518,7 +1557,7 @@ export default function CotizacionesPage(){
             <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Parámetros de costing</p>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <Campo label={esFijoForm?"Km diarios":"Km del servicio"} req hint={kmBase>0?"📍 Calculado con Google Maps":undefined}><input type="number" min={0} className={iCls("font-mono"+(kmBase>0?" border-green-300 bg-green-50":""))} placeholder="0" value={form.km} onChange={e=>{setForm(p=>({...p,km:e.target.value}));setKmBase(0);}}/></Campo>
+                <Campo label={esFijoForm?"Km diarios":"Km del servicio"} req hint={calculandoKm?"⏳ Calculando con Google Maps...":errorKm||(kmBase!==null?"📍 Calculado con Google Maps":undefined)}><input type="number" min={0} className={iCls("font-mono"+(errorKm?" border-red-300 bg-red-50":calculandoKm?" border-amber-300 bg-amber-50":kmBase!==null?" border-green-300 bg-green-50":""))} placeholder="0" value={form.km} onChange={e=>{setForm(p=>({...p,km:e.target.value}));setKmBase(null);setErrorKm("");}}/></Campo>
                 <Campo label="Días de conductor"><div className="flex items-center gap-1"><button onClick={()=>setDiasCond(Math.max(1,diasCond-1))} className="w-9 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold">-</button><span className="flex-1 text-center font-black text-[#0b315f]">{diasCond}</span><button onClick={()=>setDiasCond(Math.min(30,diasCond+1))} className="w-9 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 font-bold">+</button></div></Campo>
                 <Campo label="Peajes S/"><input type="number" min={0} className={iCls()} placeholder="0" value={peajesF||""} onChange={e=>setPeajesF(Number(e.target.value))}/></Campo>
                 <Campo label="Costo interno S/"><input type="number" min={0} className={iCls()} placeholder="0" value={form.costo_estimado} onChange={f("costo_estimado")}/></Campo>
@@ -1635,10 +1674,10 @@ export default function CotizacionesPage(){
             {form.tipo_vehiculo&&form.tipo_servicio&&form.origen&&form.destino&&<div className="rounded-xl border px-4 py-3 flex items-start gap-3" style={{background:"#f0fdf4",borderColor:"#86efac"}}><input type="checkbox" id="chk_tar" checked={guardarTar} onChange={e=>setGuardarTar(e.target.checked)} className="w-4 h-4 mt-0.5 accent-green-600 flex-shrink-0"/><label htmlFor="chk_tar" className="cursor-pointer text-xs text-green-800"><b>Guardar en Tarifario</b> — {form.origen}→{form.destino} · {paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo)?.nombre||form.tipo_vehiculo} · {form.modo_servicio.toUpperCase()}</label></div>}
 
             <div className="flex gap-3 flex-wrap items-center pt-2 border-t">
-              <button onClick={guardarCotizacion} disabled={guardando} className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60 flex items-center gap-2" style={{background:"#0b315f"}}>
-                {guardando?"⏳ Guardando...":editandoId&&form.estado!=="borrador"?"✅ Actualizar cotización":"✅ Guardar cotización"}
+              <button onClick={guardarCotizacion} disabled={guardando||calculandoKm} className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60 flex items-center gap-2" style={{background:"#0b315f"}}>
+                {guardando?"⏳ Guardando...":calculandoKm?"⏳ Calculando km...":editandoId&&form.estado!=="borrador"?"✅ Actualizar cotización":"✅ Guardar cotización"}
               </button>
-              <button onClick={guardarBorrador} disabled={guardando} className="px-6 py-2.5 rounded-xl font-bold text-sm border-2 border-dashed border-gray-300 text-gray-500 hover:bg-gray-50 disabled:opacity-60 flex items-center gap-2">
+              <button onClick={guardarBorrador} disabled={guardando||calculandoKm} className="px-6 py-2.5 rounded-xl font-bold text-sm border-2 border-dashed border-gray-300 text-gray-500 hover:bg-gray-50 disabled:opacity-60 flex items-center gap-2">
                 💾 {editandoId&&form.estado==="borrador"?"Actualizar borrador":"Guardar borrador"}
               </button>
               <button onClick={limpiar} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-400 hover:bg-gray-50 ml-auto">✕ Cancelar</button>

@@ -49,11 +49,17 @@ function ParadaPlacesInput({ value, onChange, onSelect, onEnter, mapsLoaded }: {
 
   useEffect(() => {
     if (!mapsLoaded || !inputRef.current || acRef.current) return;
-    acRef.current = new (window as any).google.maps.places.Autocomplete(inputRef.current, {
+    const gmaps = (window as any).google.maps;
+    acRef.current = new gmaps.places.Autocomplete(inputRef.current, {
       componentRestrictions: { country: "pe" },
+      // Solo los campos que se leen abajo. OJO: name/formatted_address/geometry (y place_id)
+      // son todos Basic Data, así que acotarlos NO cambia el SKU que factura Google; es solo
+      // higiene, para no arrastrar datos que nadie usa.
       fields: ["formatted_address", "geometry", "name"],
       types: ["geocode", "establishment"],
     });
+    // NO se le pasa sessionToken: este widget legacy (google.maps.places.Autocomplete) no
+    // acepta esa opción — abre y cierra su propia sesión internamente en cada selección.
     acRef.current.addListener("place_changed", () => {
       const p = acRef.current.getPlace();
       if (!p.geometry?.location) return;
@@ -367,13 +373,16 @@ function riesgoEmpresa(docs: DocumentoTercero[], empresaId: number): "alto" | "o
 
 // ─── Geocodificación via Google Maps Geocoding API ───────────────────────────
 
-async function geocodificar(direccion: string): Promise<{ lat: number; lng: number } | null> {
+// `paradaId` = id REAL de la fila en `paradas`. Con id > 0 el proxy persiste lat/lng con la
+// service-role key; con id 0 (parada que todavía no existe como fila) la persistencia la cubre
+// la caché por texto del servidor, que igual evita repetir la llamada facturable a Google.
+async function geocodificar(direccion: string, paradaId = 0): Promise<{ lat: number; lng: number } | null> {
   if (!direccion.trim()) return null;
   try {
     const res = await fetch("/api/geocodificar", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paradas: [{ id: 0, nombre: direccion }] }),
+      body: JSON.stringify({ paradas: [{ id: paradaId, nombre: direccion }] }),
     });
     const data = await res.json();
     if (res.ok && data.paradas?.[0]?.lat != null) {
@@ -656,7 +665,7 @@ export default function ReservasPage() {
           // else: coords coinciden → sin cambio
         } else if (!par.lat || !par.lng) {
           // Sin fuente exacta y sin coords: geocodificar por nombre
-          const gc = await geocodificar(par.nombre);
+          const gc = await geocodificar(par.nombre, par.id);
           if (gc) { await supabase.from("paradas").update({ lat: gc.lat, lng: gc.lng }).eq("id", par.id); geocod++; }
           else fallidas++;
         }
@@ -732,7 +741,7 @@ export default function ReservasPage() {
     if (nuevas && nuevas.length > 0) {
       for (const parada of nuevas) {
         if (!parada.lat || !parada.lng) {
-          const coords = await geocodificar(parada.nombre);
+          const coords = await geocodificar(parada.nombre, parada.id);
           if (coords) {
             await supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
             parada.lat = coords.lat; parada.lng = coords.lng;
@@ -770,7 +779,7 @@ export default function ReservasPage() {
         if (creadas && creadas.length > 0) {
           for (const parada of creadas) {
             if (!parada.lat || !parada.lng) {
-              const coords = await geocodificar(parada.nombre);
+              const coords = await geocodificar(parada.nombre, parada.id);
               if (coords) {
                 await supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
                 parada.lat = coords.lat; parada.lng = coords.lng;
@@ -811,7 +820,7 @@ export default function ReservasPage() {
         if (creadas && creadas.length > 0) {
           for (const parada of creadas) {
             if (!parada.lat || !parada.lng) {
-              const coords = await geocodificar(parada.nombre);
+              const coords = await geocodificar(parada.nombre, parada.id);
               if (coords) {
                 await supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
                 parada.lat = coords.lat;
@@ -838,13 +847,17 @@ export default function ReservasPage() {
     setParadasMap(prev => ({ ...prev, [reservaId]: paradasCargadas }));
     setCargandoPar(prev => ({ ...prev, [reservaId]: false }));
 
-    // Geocodificar en background paradas existentes sin coordenadas
+    // Geocodificar en background paradas existentes sin coordenadas.
+    // COSTO: el UPDATE iba SIN await, así que la coordenada no se guardaba nunca y las mismas
+    // paradas se re-geocodificaban en cada expansión de fila, para siempre. Ahora va con await
+    // (y el id real viaja al proxy, que además persiste del lado servidor).
     const sinCoords = paradasCargadas.filter((p: any) => !p.lat || !p.lng);
     if (sinCoords.length > 0) {
       for (const parada of sinCoords) {
-        geocodificar(parada.nombre).then(coords => {
+        geocodificar(parada.nombre, parada.id).then(async coords => {
           if (!coords) return;
-          supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
+          const { error } = await supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
+          if (error) console.error("[programacion] No se pudo guardar la coordenada de la parada " + parada.id + ":", error.message);
           setParadasMap(prev => ({
             ...prev,
             [reservaId]: (prev[reservaId] || []).map((p: any) =>
@@ -996,7 +1009,7 @@ export default function ReservasPage() {
     if (creadas && creadas.length > 0) {
       for (const parada of creadas) {
         if (!parada.lat || !parada.lng) {
-          const coords = await geocodificar(parada.nombre);
+          const coords = await geocodificar(parada.nombre, parada.id);
           if (coords) {
             await supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
             parada.lat = coords.lat;

@@ -4,6 +4,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { geocodificarConCache as geocodificar } from "@/lib/geocode-cache";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -11,20 +12,9 @@ const supabaseAdmin = createClient(
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
-async function geocodificar(nombre: string): Promise<{ lat: number; lng: number } | null> {
-  try {
-    const key = process.env.GOOGLE_MAPS_API_KEY || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-    if (!key) return null;
-    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(nombre)}&key=${key}&region=pe&language=es`;
-    const res = await fetch(url);
-    const data = await res.json();
-    if (data.status !== "OK" || !data.results?.[0]) return null;
-    const loc = data.results[0].geometry.location;
-    return { lat: loc.lat, lng: loc.lng };
-  } catch {
-    return null;
-  }
-}
+// La geocodificación vive en lib/geocode-cache.ts: cachea por texto y memoriza los fallos, así
+// que los paraderos que se repiten entre reservas (los mismos hoteles, minas y plantas todos
+// los días) se resuelven una sola vez, y los irresolubles no se vuelven a preguntar.
 
 export async function GET(req: NextRequest) {
   // Mismo gate que /api/conductor: exige x-afa-key si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está

@@ -91,9 +91,12 @@ function calcETA(d:number,v:number): number { return Math.ceil((d/1000)/(v>5?v:2
 function fmtETA(m:number): string { if(m<=0) return "¡Llegando!"; if(m<60) return `${m} min`; return `${Math.floor(m/60)}h ${m%60}m`; }
 function fmtDist(m:number): string { return m>=1000?`${(m/1000).toFixed(1)} km`:`${Math.round(m)} m`; }
 function fmtHora(t: string | null | undefined): string { return t ? t.slice(0, 5) : "—"; }
-function fmtHoraLlegada(m:number): string {
-  const d = new Date(Date.now() + m * 60 * 1000);
-  return d.toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Lima" });
+// Recibe el INSTANTE de llegada ya calculado (ms epoch), no los minutos de ETA: si lo
+// recalculara con Date.now() en cada render, la hora pintada avanzaría 1 min por cada minuto
+// real (la página se re-renderiza cada ~5 s por el poll de GPS) y solo saltaría hacia atrás
+// al refrescar el ETA — con refresco de 3 min la deriva se nota.
+function fmtHoraLlegada(ts:number): string {
+  return new Date(ts).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Lima" });
 }
 // Minutos desde medianoche de un "HH:MM" / "HH:MM:SS". Sin hora válida → Infinity (queda al final).
 function minutosDelDia(h: string | null | undefined): number {
@@ -536,6 +539,16 @@ function MapaCiudad({ showBus = true, showStop = true }: { showBus?: boolean; sh
 
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
+// Cada pasajero conectado pide su PROPIO ETA en vivo a Google (SKU con tráfico, no cacheable).
+// A 3 min el dato sigue sirviendo y se corta ~2/3 del gasto por pasajero.
+const MS_REFRESCO_ETA = 180_000;
+// Al volver la app al frente, el poll de GPS también estuvo pausado: hay que dejarlo cerrar
+// un ciclo (5 s) antes de pedir el ETA, o se pagaría el SKU caro con la posición vieja.
+const MS_ESPERA_GPS_FRESCO = 6_000;
+// Piso entre dos pedidos de ETA: volver al frente justo antes de un tick del intervalo
+// pagaba dos llamadas del SKU con tráfico con segundos de diferencia.
+const MS_MIN_ENTRE_ETA = 30_000;
+
 export default function AppPasajero() {
 
   const [initing,        setIniting]        = useState(true);
@@ -550,7 +563,8 @@ export default function AppPasajero() {
   const [conductor,      setConductor]      = useState<Conductor | null>(null);
   const [busPosicion,    setBusPosicion]    = useState<UbicacionBus | null>(null);
   const [etaMin,         setEtaMin]         = useState<number | null>(null);
-  const [etaGoogle,      setEtaGoogle]      = useState<number | null>(null);
+  // Instante de llegada según Google (ms epoch), NO minutos: se congela al calcularlo.
+  const [etaLlegadaTs,   setEtaLlegadaTs]   = useState<number | null>(null);
   const [distM,          setDistM]          = useState<number | null>(null);
   const [estadoBus,      setEstadoBus]      = useState<EstadoBus>("no_iniciado");
   const [miEstado,       setMiEstado]       = useState("esperando");
@@ -641,6 +655,7 @@ export default function AppPasajero() {
   const busMarker    = useRef<mapboxgl.Marker | null>(null);
   const paradaMks    = useRef<mapboxgl.Marker[]>([]);
   const busPosicionRef = useRef<UbicacionBus | null>(null);
+  const ultimoEtaRef   = useRef(0);   // ms del último pedido de ETA a Google (anti doble cobro)
   const meMk         = useRef<mapboxgl.Marker | null>(null);  // marcador pasajero
   const [mapListo,   setMapListo]           = useState(false);
   const [qrDataUrl,  setQrDataUrl]          = useState<string | null>(null);
@@ -1038,7 +1053,8 @@ export default function AppPasajero() {
     // Trazar con coordenadas directas de inmediato (sin tráfico)
     drawRuta(coords.map(p => [Number(p.lng), Number(p.lat)]) as [number, number][]);
 
-    // Mejorar con ruta real de Google Directions
+    // Mejorar con ruta real de Google Directions. Sin conTrafico a propósito: es la ruta
+    // planificada del contrato, así entra en el SKU barato (Directions) y el server la cachea.
     let cancelled = false;
     fetch("/api/ruta", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -1090,36 +1106,67 @@ export default function AppPasajero() {
     setPasoDismiss(false);
   }, [miParada?.id, miEstado]);
 
-  // ETA vía Google Directions — recalcular cada 60 s cuando el bus está activo.
+  // ETA vía Google Directions — recalcular cada MS_REFRESCO_ETA cuando el bus está activo.
   // Cuando el pasajero ya abordó, calcula hasta el destino final (última parada).
   useEffect(() => {
     const destinoGoogle = miEstado === "embarcado"
       ? (rutaParadas[rutaParadas.length - 1] ?? miParada)
       : miParada;
     if (!destinoGoogle?.lat || !destinoGoogle?.lng || !busPosicion || estadoBus === "finalizado" || estadoBus === "sin_señal") {
-      setEtaGoogle(null); return;
+      setEtaLlegadaTs(null); return;
     }
     let cancelled = false;
-    const calcular = async () => {
+    let idVuelta: ReturnType<typeof setTimeout> | null = null;
+    // forzar = solo al montar/cambiar de destino; los recálculos periódicos y los de "volver
+    // al frente" respetan el piso de MS_MIN_ENTRE_ETA.
+    const calcular = async (forzar = false) => {
+      if (document.hidden) return; // no gastar ETA con la app en segundo plano (SKU con tráfico)
       const bp = busPosicionRef.current;
       if (!bp || cancelled) return;
+      if (!forzar && Date.now() - ultimoEtaRef.current < MS_MIN_ENTRE_ETA) return;
+      ultimoEtaRef.current = Date.now();
       try {
         const res = await fetch("/api/ruta", {
           method: "POST", headers: { "Content-Type": "application/json" },
+          // conTrafico: es un ETA en vivo bus → parada, aquí el tráfico sí importa.
           body: JSON.stringify({ paradas: [
             { lat: Number(bp.lat), lng: Number(bp.lng), nombre: "Bus" },
             { lat: Number(destinoGoogle.lat), lng: Number(destinoGoogle.lng), nombre: destinoGoogle.nombre },
-          ]}),
+          ], conTrafico: true }),
         });
         const d = await res.json();
-        if (!cancelled && d?.total_min != null) setEtaGoogle(Math.round(Number(d.total_min)));
+        // Se guarda el INSTANTE de llegada, no los minutos: así la hora pintada no se mueve
+        // entre refrescos (ver fmtHoraLlegada).
+        if (!cancelled && d?.total_min != null) setEtaLlegadaTs(Date.now() + Math.round(Number(d.total_min)) * 60_000);
       } catch {}
     };
-    calcular();
-    const id = setInterval(calcular, 60000);
-    return () => { cancelled = true; clearInterval(id); };
+    void calcular(true);
+    const id = setInterval(() => void calcular(), MS_REFRESCO_ETA);
+    // Al volver la app al frente el ETA quedó congelado, pero el GPS también estuvo pausado:
+    // recalcular ya usaría la posición previa a ocultar la pestaña (y, como las deps miran
+    // busPosicion solo como "on"/"off", la llegada del GPS fresco no re-dispararía nada).
+    // Se espera un ciclo del poll para pedirlo con la posición nueva.
+    const alVolver = () => {
+      if (document.hidden) return;
+      if (idVuelta) clearTimeout(idVuelta);
+      idVuelta = setTimeout(() => { idVuelta = null; void calcular(); }, MS_ESPERA_GPS_FRESCO);
+    };
+    document.addEventListener("visibilitychange", alVolver);
+    return () => {
+      cancelled = true; clearInterval(id);
+      if (idVuelta) clearTimeout(idVuelta);
+      document.removeEventListener("visibilitychange", alVolver);
+    };
+  // Deps SOLO primitivas estables: cualquier valor que cambie más rápido que MS_REFRESCO_ETA
+  // remonta el efecto y dispara `calcular(true)`, que saltea el piso de MS_MIN_ENTRE_ETA y
+  // reinicia el intervalo. `estadoBus` crudo hacía justo eso: alterna entre "retrasado" y
+  // "en_camino" cada vez que la velocidad cruza los 3 km/h (muestras de GPS cada 5 s), o sea
+  // constantemente en tráfico stop-and-go → una llamada del SKU con tráfico cada 5 s por
+  // pasajero. Al efecto solo le importa si el bus está operativo o no (ver la guarda de arriba).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [miParada?.id, miEstado, rutaParadas.length, estadoBus, busPosicion ? "on" : "off"]);
+  }, [miParada?.id, miEstado, rutaParadas.length,
+      (estadoBus === "finalizado" || estadoBus === "sin_señal") ? "off" : "on",
+      busPosicion ? "on" : "off"]);
 
   // ── FUNCIONES ───────────────────────────────────────────────────────────────
 
@@ -1537,7 +1584,8 @@ export default function AppPasajero() {
   // llegada "en vivo" (evita el bug de "recalcula como si aún viniera / pudiera regresar").
   const busYaNoViene = yaPaso || seAleja;
   const mostrarEta   = busActivo && etaMin !== null && !busYaNoViene;
-  const etaEnVivo    = busYaNoViene ? null : etaGoogle;
+  // Instante de llegada (ms epoch) a pintar, o null si el bus ya no viene.
+  const llegadaEnVivo = busYaNoViene ? null : etaLlegadaTs;
   // Píldora de estado (arriba a la derecha del mapa).
   const pillAlerta = yaPaso || seAleja || estadoBus === "sin_señal";
   const pillTexto  = yaPaso ? "YA PASÓ"
@@ -2555,12 +2603,12 @@ export default function AppPasajero() {
                     <div style={{ flex: 1 }} />
                     {/* Arrival time chip — En vivo con Google solo cuando el bus AÚN viene */}
                     {!busYaNoViene && (
-                      <div style={{ background: etaEnVivo !== null ? "var(--navy)" : "var(--surface)", border: `1px solid ${etaEnVivo !== null ? "transparent" : "var(--line)"}`, borderRadius: 12, padding: "8px 12px", alignSelf: "flex-end", transition: "background 0.4s" }}>
-                        <p style={{ margin: 0, fontSize: 9, fontWeight: 700, color: etaEnVivo !== null ? "rgba(255,255,255,0.7)" : "var(--mute)", letterSpacing: 0.6, textTransform: "uppercase" }}>
-                          {miEstado === "embarcado" ? "Llega destino" : etaEnVivo !== null ? "En vivo · llega" : miParada.hora_estimada ? "Tu recojo" : "Salida"}
+                      <div style={{ background: llegadaEnVivo !== null ? "var(--navy)" : "var(--surface)", border: `1px solid ${llegadaEnVivo !== null ? "transparent" : "var(--line)"}`, borderRadius: 12, padding: "8px 12px", alignSelf: "flex-end", transition: "background 0.4s" }}>
+                        <p style={{ margin: 0, fontSize: 9, fontWeight: 700, color: llegadaEnVivo !== null ? "rgba(255,255,255,0.7)" : "var(--mute)", letterSpacing: 0.6, textTransform: "uppercase" }}>
+                          {miEstado === "embarcado" ? "Llega destino" : llegadaEnVivo !== null ? "En vivo · llega" : miParada.hora_estimada ? "Tu recojo" : "Salida"}
                         </p>
-                        <p style={{ margin: "2px 0 0", fontFamily: "var(--m)", fontSize: 18, fontWeight: 700, color: etaEnVivo !== null ? "white" : "var(--ink)", letterSpacing: -0.5 }}>
-                          {etaEnVivo !== null ? fmtHoraLlegada(etaEnVivo) : (miParada.hora_estimada || fmtHora(miParada.reserva?.hora_servicio) || "—")}
+                        <p style={{ margin: "2px 0 0", fontFamily: "var(--m)", fontSize: 18, fontWeight: 700, color: llegadaEnVivo !== null ? "white" : "var(--ink)", letterSpacing: -0.5 }}>
+                          {llegadaEnVivo !== null ? fmtHoraLlegada(llegadaEnVivo) : (miParada.hora_estimada || fmtHora(miParada.reserva?.hora_servicio) || "—")}
                         </p>
                       </div>
                     )}

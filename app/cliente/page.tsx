@@ -145,6 +145,15 @@ const FAQ_ITEMS = [
   { q: "¿Puedo agregar o editar pasajeros yo mismo?", a: "Sí. En el Historial de servicios, selecciona un servicio pendiente o confirmado y presiona 'Editar manifiesto'. Podrás agregar pasajeros por nombre/DNI, eliminarlos o subir una lista completa en formato Excel/CSV." },
 ];
 
+// Refresco del loop de huella + puentes (En vivo). OJO: 12 s NO es arbitrario, está ACOPLADO al
+// throttle adaptativo de Map Matching de lib/huella.ts (`throttleMs = accMedR > ACC_DEGRADADO_M
+// ? 12000 : 60000`), calibrado para un llamador de ~12 s: con GPS degradado el ajustador quiere
+// re-pegar la cola a la vía casi en cada fetch. Subir este intervalo NO ahorra pero SÍ degrada el
+// dibujo: la punta viva de la estela se queda zigzagueando fuera de la vía todo ese tiempo extra.
+// El ahorro ya no depende del intervalo — /api/ruta-puente cachea cada hueco en Postgres, así que
+// repetir el ciclo no vuelve a facturar los mismos puentes a Google.
+const MS_REFRESCO_PUENTES = 12_000;
+
 // ─── MAIN ─────────────────────────────────────────────────────────────────
 export default function ClientePortal() {
   const [cliente,        setCliente]        = useState<Cliente | null>(null);
@@ -274,9 +283,9 @@ export default function ClientePortal() {
   const [resumenMap,        setResumenMap]        = useState<Record<number, ResumenViaje | null>>({}); // resumen del viaje por servicio
   const [puentesMap,        setPuentesMap]        = useState<Record<number, any[]>>({});                // features de tramos estimados (puente azul) por servicio
   // `expira`: fallos transitorios de /api/ruta-puente (red, 429/5xx, cuota) se cachean con
-  // vencimiento de 60 s — ni tormenta de reintentos cada 12 s ni "ocultar" envenenado de por vida.
+  // vencimiento de 60 s — ni tormenta de reintentos en cada tick ni "ocultar" envenenado de por vida.
   const puentesCacheCliRef = useRef<Map<string, { nivel: string; coords: [number, number][]; km: number; dt: number; expira?: number }>>(new Map());
-  const cargandoHuellaCliRef = useRef(false); // evita ciclos solapados de cargarHuella (fetches lentos > intervalo 12 s)
+  const cargandoHuellaCliRef = useRef(false); // evita ciclos solapados de cargarHuella (fetches lentos > MS_REFRESCO_PUENTES)
   const [mostrarPuntosCli,  setMostrarPuntosCli]  = useState(true);                                  // toggle de la leyenda
   const geocacheCliRef = useRef<Map<string, string>>(new Map());                                     // caché reverse-geocode
   const popupTelemCliRef = useRef<any>(null);                                                        // popup activo de un puntito
@@ -1061,9 +1070,11 @@ export default function ClientePortal() {
       const destino = psAll[psAll.length - 1];
       if (!destino?.lat || !destino?.lng) { setEtaDestinoMap(prev => ({ ...prev, [rid]: null })); return; }
       try {
+        // conTrafico: aquí SÍ hace falta (ETA en vivo bus → destino). Es el único punto de
+        // esta pantalla que usa el SKU caro de Google; no se cachea, por eso va una sola vez.
         const res = await fetch("/api/ruta", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ paradas: [
+          body: JSON.stringify({ conTrafico: true, paradas: [
             { lat: gps.lat, lng: gps.lng, nombre: "Posición actual" },
             { lat: destino.lat, lng: destino.lng, nombre: destino.nombre },
           ]}),
@@ -1125,6 +1136,10 @@ export default function ClientePortal() {
       const faltan = lista.filter(p => !p.lat || !p.lng);
       if (faltan.length > 0) {
         try {
+          // El id que va aquí es SINTÉTICO y negativo (paradas armadas desde paradas_json /
+          // origen-destino, que no existen en la tabla `paradas`): sirve solo para reasociar la
+          // respuesta en memoria, por eso las coords no se persisten. No factura de más igual:
+          // el servidor cachea por TEXTO de dirección y memoriza los fallos.
           const gr = await fetch("/api/geocodificar", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ paradas: faltan.map(p => ({ id: p.id, nombre: p.direccion || p.nombre })) }),
@@ -1144,6 +1159,9 @@ export default function ClientePortal() {
       if (conCoords.length < 2) { setRutasEnVivoMap(prev => ({ ...prev, [r.id]: [] })); return; }
 
       try {
+        // SIN conTrafico (default): es la ruta PLANIFICADA del contrato, el tráfico de ahora da
+        // igual. Así cae en el SKU barato y el servidor la cachea en Postgres por firma
+        // geográfica → tras la primera carga este bucle ya no llega a Google (sobrevive al F5).
         const res = await fetch("/api/ruta", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1266,7 +1284,7 @@ export default function ClientePortal() {
               r = { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt };
             }
             cache.set(key, r);
-          // Fallo de RED: cachear "ocultar" CON vencimiento (reintenta al vencer, sin tormenta cada 12 s).
+          // Fallo de RED: cachear "ocultar" CON vencimiento (reintenta al vencer, sin tormenta en cada tick).
           } catch { r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt, expira: Date.now() + 60000 }; cache.set(key, r); }
         }
         // Dibujar el estimado de Google SOLO si su geometría A→B directa es coherente con la evidencia GPS.
@@ -1293,10 +1311,26 @@ export default function ClientePortal() {
       if (!cancel) setResumenMap(prev => ({ ...prev, [rid]: rvC }));
       } finally { cargandoHuellaCliRef.current = false; }
     };
-    cargarHuella(rutaSelId);
-    // Refresca cada 12s (para servicios en curso)
-    const iv = setInterval(() => { if (rutaSelId != null) cargarHuella(rutaSelId); }, 12000);
-    return () => { cancel = true; clearInterval(iv); };
+    // Carga inicial. `cargandoHuellaCliRef` es un ref COMPARTIDO entre servicios: si al cambiar de
+    // ruta el ciclo anterior sigue en vuelo, esta primera carga se descartaría en silencio y el
+    // mapa quedaría vacío hasta el próximo tick → reintentar en cuanto el ciclo en curso libere.
+    let tReintento: ReturnType<typeof setTimeout> | null = null;
+    const cargarInicial = () => {
+      if (cancel) return;
+      if (cargandoHuellaCliRef.current) { tReintento = setTimeout(cargarInicial, 300); return; }
+      if (rutaSelId != null) cargarHuella(rutaSelId);
+    };
+    cargarInicial();
+    // Refresca cada MS_REFRESCO_PUENTES (para servicios en curso). Con la pestaña oculta se
+    // salta el tick: nadie mira el mapa y cada ciclo puede pegarle a /api/ruta-puente.
+    const iv = setInterval(() => {
+      if (document.hidden) return; // pestaña en segundo plano → no gastar cuota de Google
+      if (rutaSelId != null) cargarHuella(rutaSelId);
+    }, MS_REFRESCO_PUENTES);
+    // Al volver a la pestaña, refrescar de inmediato en vez de esperar el próximo tick.
+    const onVisible = () => { if (document.visibilityState === "visible" && rutaSelId != null) cargarHuella(rutaSelId); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { cancel = true; if (tReintento) clearTimeout(tReintento); clearInterval(iv); document.removeEventListener("visibilitychange", onVisible); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, rutaSelId]);
 

@@ -64,26 +64,34 @@ const ESTADO_PAX: Record<string, { bg: string; color: string }> = {
 
 type Tab = "pasajeros" | "paradas";
 
-async function geocodearDireccion(
-  direccion: string,
-  apiKey: string,
-): Promise<{ lat: number; lng: number; formatted_address?: string } | null> {
+// Geocodifica por el proxy del servidor (POST /api/geocodificar), igual que el resto del ERP.
+// Antes se llamaba a Google Geocoding DIRECTO desde el navegador con NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
+// en la URL: obligaba a dejar la key sin restricciones (cualquiera la copiaba del DevTools y
+// facturaba contra la cuenta) y repetía la llamada facturable en cada cargar() del modal.
+// Por el proxy la key se queda en el servidor y las respuestas pasan por la caché por texto.
+// `id` > 0 (fila real de `paradas`) ⇒ el servidor persiste lat/lng con la service-role key;
+// con id ≤ 0 (parada que aún no existe como fila) la persistencia la cubre esa misma caché.
+// Devuelve un mapa id → { coords + dirección normalizada de Google (formatted_address) };
+// los ids que Google no resuelve (geocodificada:false) simplemente no aparecen.
+async function geocodearParadas(
+  items: Array<{ id: number; nombre: string }>,
+): Promise<Map<number, { lat: number; lng: number; direccion: string | null }>> {
+  const out = new Map<number, { lat: number; lng: number; direccion: string | null }>();
+  if (items.length === 0) return out;
   try {
-    const url =
-      "https://maps.googleapis.com/maps/api/geocode/json?address=" +
-      encodeURIComponent(direccion) +
-      "&region=PE&language=es&key=" +
-      apiKey;
-    const resp = await fetch(url);
+    const resp = await fetch("/api/geocodificar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paradas: items }),
+    });
     const data = await resp.json();
-    if (data.status === "OK" && data.results[0]) {
-      const loc = data.results[0].geometry.location;
-      return { lat: loc.lat, lng: loc.lng, formatted_address: data.results[0].formatted_address };
+    for (const p of (data?.paradas || [])) {
+      if (p?.lat != null && p?.lng != null) {
+        out.set(Number(p.id), { lat: Number(p.lat), lng: Number(p.lng), direccion: p.direccion ?? null });
+      }
     }
-    return null;
-  } catch {
-    return null;
-  }
+  } catch {}
+  return out;
 }
 
 // Huella de ruta = secuencia ORDENADA de paraderos "nombre@lat,lng".
@@ -232,54 +240,47 @@ export default function ModalManifiesto(props: Props) {
 
     if (puntosTexto.length < 2) return 0;
 
-    const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || "";
-    if (!apiKey) {
-      const filas = puntosTexto.map((p, i) => ({
-        reserva_id: reservaId,
-        orden: i + 1,
-        nombre: p.nombre,
-        direccion: p.texto,
-        lat: null,
-        lng: null,
-        estado: "pendiente",
-      }));
-      const { error } = await supabase.from("paradas").insert(filas);
-      if (!error) {
-        setMensaje({ tipo: "warn", texto: filas.length + " parada(s) generadas sin coordenadas GPS (falta NEXT_PUBLIC_GOOGLE_MAPS_API_KEY)" });
-        return filas.length;
-      }
-      return 0;
-    }
-
     setMensaje({ tipo: "warn", texto: "Geocodificando paradas con Google Maps..." });
 
-    const filas: any[] = [];
-    for (let i = 0; i < puntosTexto.length; i++) {
-      const punto = puntosTexto[i];
-      const coords = await geocodearDireccion(punto.texto, apiKey);
-      filas.push({
+    // Una sola llamada al proxy para los 2-3 puntos. Ids sintéticos negativos: las filas de
+    // `paradas` todavía no existen, así que el servidor no persiste — aquí lo que evita
+    // repetir el cobro es su caché por texto.
+    const coordsPorIdx = await geocodearParadas(
+      puntosTexto.map((p, i) => ({ id: -(i + 1), nombre: p.texto }))
+    );
+
+    const filas = puntosTexto.map((punto, i) => {
+      const resultado = coordsPorIdx.get(-(i + 1));
+      return {
         reserva_id: reservaId,
         orden: i + 1,
         nombre: punto.nombre,
-        direccion: coords?.formatted_address || punto.texto,
-        lat: coords?.lat ?? null,
-        lng: coords?.lng ?? null,
+        // Dirección normalizada de Google; si no la resolvió, el texto crudo del contrato.
+        direccion: resultado?.direccion || punto.texto,
+        lat: resultado?.lat ?? null,
+        lng: resultado?.lng ?? null,
         estado: "pendiente",
-      });
-    }
+      };
+    });
 
     const { error } = await supabase.from("paradas").insert(filas);
     if (!error) {
       const conCoords = filas.filter((f) => f.lat !== null).length;
+      // Las que no volvieron geocodificadas quedan sin GPS: el operador tiene que saberlo para
+      // corregir la dirección a mano, o el servicio se queda sin mapa ni ruta.
+      const sinCoords = filas.length - conCoords;
       setMensaje({
-        tipo: conCoords === filas.length ? "ok" : "warn",
+        tipo: sinCoords === 0 ? "ok" : "warn",
         texto:
           filas.length +
           " parada(s) generadas · " +
           conCoords +
           "/" +
           filas.length +
-          " con coordenadas GPS de Google Maps",
+          " con coordenadas GPS de Google Maps" +
+          (sinCoords > 0
+            ? " · " + sinCoords + " parada(s) generadas sin coordenadas GPS: revisa la dirección"
+            : ""),
       });
       return filas.length;
     }
@@ -315,21 +316,27 @@ export default function ModalManifiesto(props: Props) {
 
     setParadas(par);
 
-    // Geocodificar en background las paradas que ya existen pero no tienen coordenadas
-    const apiKeyGeo = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || "";
-    if (apiKeyGeo) {
-      const sinCoords = par.filter(p => !p.lat || !p.lng);
-      for (const parada of sinCoords) {
-        const textoBusqueda = (parada.nombre || parada.direccion || "").trim();
-        if (!textoBusqueda) continue;
-        geocodearDireccion(textoBusqueda, apiKeyGeo).then(coords => {
-          if (!coords) return;
-          supabase.from("paradas").update({ lat: coords.lat, lng: coords.lng }).eq("id", parada.id);
-          setParadas(prev => prev.map(p =>
-            p.id === parada.id ? { ...p, lat: coords.lat, lng: coords.lng } : p
-          ));
-        });
-      }
+    // Geocodificar en background las paradas que ya existen pero no tienen coordenadas.
+    // Van todas en UNA sola llamada al proxy y con su id REAL, para que el servidor persista
+    // lat/lng. Antes el UPDATE se disparaba SIN await (nunca se guardaba) y la geocodificación
+    // se volvía a pagar en cada apertura del modal.
+    const sinCoords = par
+      .filter(p => !p.lat || !p.lng)
+      .map(p => ({ id: p.id, nombre: (p.nombre || p.direccion || "").trim() }))
+      .filter(p => p.nombre !== "");
+    if (sinCoords.length > 0) {
+      geocodearParadas(sinCoords).then(async (coordsPorId) => {
+        if (coordsPorId.size === 0) return;
+        setParadas(prev => prev.map(p => {
+          const c = coordsPorId.get(p.id);
+          return c ? { ...p, lat: c.lat, lng: c.lng } : p;
+        }));
+        // Escritura de respaldo, ahora CON await y reportando el error.
+        for (const [id, c] of Array.from(coordsPorId.entries())) {
+          const { error } = await supabase.from("paradas").update({ lat: c.lat, lng: c.lng }).eq("id", id);
+          if (error) console.error("[manifiesto] No se pudo guardar la coordenada de la parada " + id + ":", error.message);
+        }
+      });
     }
 
     const paradaIds = par.map((p) => p.id);

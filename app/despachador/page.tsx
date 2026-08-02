@@ -91,7 +91,8 @@ function PlacesInput({
     if (!mapsLoaded || !inputRef.current || acRef.current) return;
     acRef.current = new google.maps.places.Autocomplete(inputRef.current, {
       componentRestrictions: { country: "pe" },
-      fields: ["formatted_address", "geometry", "place_id", "name"],
+      // Solo los campos que se usan abajo (geometry.location, no geometry entero): menos datos facturados por sesion
+      fields: ["formatted_address", "geometry.location", "place_id", "name"],
       types: ["geocode", "establishment"],
     });
     acRef.current.addListener("place_changed", () => {

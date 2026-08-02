@@ -91,6 +91,14 @@ const GRUPO_CFG:Record<string,{color:string;bg:string}>={Ligeros:{color:"#6366f1
 
 const PUNTO_VACIO = (tipo:"inicio"|"parada"|"destino"="parada"):Punto => ({id:uid(),tipo,texto:"",place:null});
 
+// El place elegido en Places solo vale mientras el texto visible siga siendo el
+// que devolvió Google. Si el usuario edita o pega encima sin elegir sugerencia,
+// el place (y su placeId) seguiría apuntando al destino ANTERIOR: la clave del
+// tramo no cambiaría, no habría recálculo y se cotizaría el km de un destino
+// distinto al que se ve en pantalla. Al invalidarlo, el km queda "sin calcular".
+const placeVigente = (texto:string, place:PlaceResult|null):PlaceResult|null =>
+  place && texto.trim()===place.address.trim() ? place : null;
+
 function minutosTotales(duraciones:string[]):string {
   let mins=0;
   duraciones.forEach(d=>{
@@ -122,63 +130,127 @@ function useGoogleMaps(){
   return loaded;
 }
 
+// Distance Matrix se factura POR ELEMENTO (orígenes × destinos), así que
+// memorizamos cada par ya consultado. Al tocar un punto solo se piden los
+// tramos realmente nuevos, no el itinerario entero. Vive a nivel de módulo
+// para que los pares repetidos (minas, plantas, hoteles) sirvan entre
+// cotizaciones distintas sin volver a facturar.
+const cacheTramos = new Map<string,{km:number;duracion:string}>();
+// La clave es SIEMPRE el placeId, porque es lo que se le pide a Google. Dos
+// accesos distintos del mismo edificio caen en la misma coordenada redondeada
+// (~1 m) pero son destinos diferentes: con coordenadas solas se serviría el km
+// del otro. La rama de coordenadas hoy NO se alcanza —los dos hooks descartan
+// los puntos sin placeId— y queda solo como defensa por si en el futuro entra
+// un punto que no venga de Places.
+const clavePunto = (p:PlaceResult)=>p.placeId||`${p.lat.toFixed(5)},${p.lng.toFixed(5)}`;
+const claveTramo = (o:PlaceResult,d:PlaceResult)=>`${clavePunto(o)}>${clavePunto(d)}`;
+
 // Hook para calcular distancia entre múltiples puntos consecutivos
-function useMultiSegmentos(placeIds:string[], mapsLoaded:boolean):{segmentos:Segmento[];kmTotal:number;durTotal:string} {
+function useMultiSegmentos(places:(PlaceResult|null)[], mapsLoaded:boolean):{segmentos:Segmento[];kmTotal:number;durTotal:string;cargando:boolean;conError:boolean} {
   const [segmentos,setSegmentos]=useState<Segmento[]>([]);
-  const key=placeIds.filter(Boolean).join("|");
+  const pts=places.filter(p=>!!p?.placeId) as PlaceResult[];
+  const key=pts.map(clavePunto).join("|");
 
   useEffect(()=>{
-    if(!mapsLoaded)return;
-    const ids=placeIds.filter(Boolean);
-    if(ids.length<2){setSegmentos([]);return;}
+    // `cancelado` invalida esta consulta cuando la ruta cambia antes de que
+    // Google responda: una respuesta tardía del destino ANTERIOR no puede pisar
+    // el km del destino ACTUAL (sería un kilometraje equivocado en el precio).
+    let cancelado=false;
+    const limpiar=()=>{cancelado=true;};
+    if(!mapsLoaded)return limpiar;
+    if(pts.length<2){setSegmentos([]);return limpiar;}
 
-    const n=ids.length-1;
-    const result:Segmento[]=Array(n).fill(null).map(()=>({km:0,duracion:"",loading:true,error:""}));
+    const n=pts.length-1;
+    // Los tramos ya conocidos salen del caché; solo quedan en "loading" los nuevos.
+    const result:Segmento[]=Array(n).fill(null).map((_,i)=>{
+      const hit=cacheTramos.get(claveTramo(pts[i],pts[i+1]));
+      return hit
+        ?{km:hit.km,duracion:hit.duracion,loading:false,error:""}
+        :{km:0,duracion:"",loading:true,error:""};
+    });
     setSegmentos([...result]);
+
+    const pendientes=result.filter(s=>s.loading).length;
+    if(pendientes===0)return limpiar;
 
     const service=new google.maps.DistanceMatrixService();
     let done=0;
 
     for(let i=0;i<n;i++){
+      if(!result[i].loading)continue;
       const idx=i;
       service.getDistanceMatrix({
-        origins:[{placeId:ids[i]}],
-        destinations:[{placeId:ids[i+1]}],
+        origins:[{placeId:pts[i].placeId}],
+        destinations:[{placeId:pts[i+1].placeId}],
         travelMode:google.maps.TravelMode.DRIVING,
         unitSystem:google.maps.UnitSystem.METRIC,
       },(resp,status)=>{
         const el=resp?.rows[0]?.elements[0];
-        result[idx]=el?.status==="OK"
-          ?{km:Math.round(el.distance.value/1000),duracion:el.duration.text,loading:false,error:""}
-          :{km:0,duracion:"",loading:false,error:"Sin ruta"};
+        if(el?.status==="OK"){
+          const dato={km:Math.round(el.distance.value/1000),duracion:el.duration.text};
+          // El tramo se guarda en caché aunque la consulta ya esté obsoleta: la
+          // petición se facturó igual y el dato sirve para la siguiente ruta.
+          cacheTramos.set(claveTramo(pts[idx],pts[idx+1]),dato);
+          result[idx]={...dato,loading:false,error:""};
+        }else{
+          result[idx]={km:0,duracion:"",loading:false,error:"Sin ruta"};
+        }
         done++;
-        if(done===n)setSegmentos([...result]);
+        if(!cancelado&&done===pendientes)setSegmentos([...result]);
       });
     }
+    return limpiar;
   },[key,mapsLoaded]);
 
   const kmTotal=segmentos.reduce((s,g)=>s+(g?.km||0),0);
+  // Tres estados distintos, no dos: CARGANDO (con caché el arreglo ya trae
+  // tramos resueltos mientras otros siguen en curso), ERROR (un tramo terminó
+  // sin ruta y aporta 0 km) y LISTO. En los dos primeros `kmTotal` es una SUMA
+  // INCOMPLETA —menor que la real— y abarataría la cotización, así que quien
+  // consuma el km no debe propagarlo hasta que `cargando` y `conError` sean
+  // false.
+  //
+  // El error se detecta SOLO por `error`, nunca por `km<=0`: un tramo de menos
+  // de 500 m redondea a 0 km (Math.round sobre metros/1000, arriba) y es un
+  // resultado PERFECTAMENTE VÁLIDO. Tratarlo como fallo bloquearía cotizar
+  // cualquier itinerario con dos puntos cercanos —un hotel y su playa de
+  // estacionamiento, por ejemplo—. Los tramos que sí fallan ya se marcan con
+  // error:"Sin ruta" en el callback de arriba.
+  const cargando=segmentos.some(s=>s?.loading);
+  const conError=segmentos.some(s=>s&&!s.loading&&!!s.error);
   const durTotal=minutosTotales(segmentos.filter(s=>s&&!s.loading&&s.duracion).map(s=>s.duracion));
-  return{segmentos,kmTotal,durTotal};
+  return{segmentos,kmTotal,durTotal,cargando,conError};
 }
 
 // Hook para un solo segmento (retorno directo)
-function useSegmento(origenId:string, destinoId:string, mapsLoaded:boolean):Segmento {
+function useSegmento(origen:PlaceResult|null, destino:PlaceResult|null, mapsLoaded:boolean):Segmento {
   const [seg,setSeg]=useState<Segmento>({km:0,duracion:"",loading:false,error:""});
+  const kOrigen=origen?.placeId?clavePunto(origen):"";
+  const kDestino=destino?.placeId?clavePunto(destino):"";
   useEffect(()=>{
-    if(!mapsLoaded||!origenId||!destinoId){setSeg({km:0,duracion:"",loading:false,error:""});return;}
+    // Igual que en useMultiSegmentos: si el par origen-destino cambia antes de
+    // que Google responda, la respuesta vieja no debe escribir el estado.
+    let cancelado=false;
+    const limpiar=()=>{cancelado=true;};
+    if(!mapsLoaded||!kOrigen||!kDestino){setSeg({km:0,duracion:"",loading:false,error:""});return limpiar;}
+    const clave=`${kOrigen}>${kDestino}`;
+    const hit=cacheTramos.get(clave);
+    if(hit){setSeg({km:hit.km,duracion:hit.duracion,loading:false,error:""});return limpiar;}
     setSeg(s=>({...s,loading:true}));
     const service=new google.maps.DistanceMatrixService();
     service.getDistanceMatrix({
-      origins:[{placeId:origenId}],destinations:[{placeId:destinoId}],
+      origins:[{placeId:origen!.placeId}],destinations:[{placeId:destino!.placeId}],
       travelMode:google.maps.TravelMode.DRIVING,unitSystem:google.maps.UnitSystem.METRIC,
     },(resp,status)=>{
       const el=resp?.rows[0]?.elements[0];
-      setSeg(el?.status==="OK"
-        ?{km:Math.round(el.distance.value/1000),duracion:el.duration.text,loading:false,error:""}
-        :{km:0,duracion:"",loading:false,error:"Sin ruta"});
+      if(el?.status==="OK"){
+        const dato={km:Math.round(el.distance.value/1000),duracion:el.duration.text};
+        cacheTramos.set(clave,dato); // se cachea aunque esté obsoleto: ya se pagó
+        if(!cancelado)setSeg({...dato,loading:false,error:""});
+      }else if(!cancelado)setSeg({km:0,duracion:"",loading:false,error:"Sin ruta"});
     });
-  },[origenId,destinoId,mapsLoaded]);
+    return limpiar;
+  },[kOrigen,kDestino,mapsLoaded]);
   return seg;
 }
 
@@ -201,6 +273,10 @@ function PlacesInput({placeholder,value,onChange,onSelect,mapsLoaded,disabled=fa
     if(!mapsLoaded||!inputRef.current||acRef.current)return;
     acRef.current=new google.maps.places.Autocomplete(inputRef.current,{
       componentRestrictions:{country:"pe"},
+      // `fields` acotado a lo que se usa: el widget factura el getPlace() según
+      // las categorías de datos pedidas, y pedir de más (contacto, atmosphere)
+      // sube el costo. No se pasa sessionToken: el widget legacy no lo acepta
+      // (no existe en AutocompleteOptions) y ya agrupa su propia sesión.
       fields:["formatted_address","geometry","place_id","name"],
       types:["geocode","establishment"],
     });
@@ -240,7 +316,10 @@ function TramoInfo({seg}:{seg:Segmento}){
       <span className="text-[10px] text-gray-400">Calculando...</span>
     </div>
   );
-  if(seg.error||seg.km===0) return(
+  // Solo `error` significa que Google no encontró ruta. Un tramo de 0 km es un
+  // resultado válido (menos de 500 m, que redondea a 0) y debe pintarse como
+  // tal, no como fallo.
+  if(seg.error) return(
     <div className="text-center py-1"><span className="text-[10px] text-red-400">⚠ Sin ruta</span></div>
   );
   return(
@@ -268,10 +347,12 @@ function RutaSimple({tipoServ,mapsLoaded,onUpdate}:{
   const [destino,setDestino]=useState<PlaceResult|null>(null);
   const [kmManual,setKmManual]=useState<number|null>(null);
 
-  const seg=useSegmento(origen?.placeId||"",destino?.placeId||"",mapsLoaded);
+  const seg=useSegmento(origen,destino,mapsLoaded);
   const kmAuto=seg.km>0?seg.km:0;
   const multiplicador=esRetorno?2:1;
-  const kmTotal=kmManual!==null?kmManual:kmAuto*multiplicador;
+  // Mientras el tramo se recalcula, `seg.km` todavía es el del destino anterior:
+  // no se propaga al cotizador hasta que esté resuelto (0 = ruta sin calcular).
+  const kmTotal=kmManual!==null?kmManual:(seg.loading?0:kmAuto*multiplicador);
 
   useEffect(()=>{onUpdate(kmTotal,origenTxt,destinoTxt);},[kmTotal,origenTxt,destinoTxt]);
 
@@ -283,7 +364,7 @@ function RutaSimple({tipoServ,mapsLoaded,onUpdate}:{
           🟢 Origen
         </label>
         <PlacesInput placeholder="Ej: Plaza Norte, Lima" value={origenTxt} mapsLoaded={mapsLoaded}
-          onChange={v=>{setOrigenTxt(v);if(!v){setOrigen(null);setKmManual(null);}}}
+          onChange={v=>{setOrigenTxt(v);if(origen&&!placeVigente(v,origen)){setOrigen(null);setKmManual(null);}}}
           onSelect={p=>{setOrigen(p.placeId?p:null);setKmManual(null);}}/>
       </div>
 
@@ -297,7 +378,7 @@ function RutaSimple({tipoServ,mapsLoaded,onUpdate}:{
           🔴 Destino final
         </label>
         <PlacesInput placeholder="Ej: Planta Cajamarquilla" value={destinoTxt} mapsLoaded={mapsLoaded}
-          onChange={v=>{setDestinoTxt(v);if(!v){setDestino(null);setKmManual(null);}}}
+          onChange={v=>{setDestinoTxt(v);if(destino&&!placeVigente(v,destino)){setDestino(null);setKmManual(null);}}}
           onSelect={p=>{setDestino(p.placeId?p:null);setKmManual(null);}}/>
       </div>
 
@@ -365,16 +446,16 @@ function RutaConParadas({tipoServ,mapsLoaded,onUpdate}:{
   const [retornaAlOrigen,setRetornaAlOrigen]=useState(false);
   const [kmManual,setKmManual]=useState<number|null>(null);
 
-  // IDs de places para el cálculo de tramos de ida
-  const placeIdsIda=puntos.map(p=>p.place?.placeId||"");
+  // Places para el cálculo de tramos de ida
+  const placesIda=puntos.map(p=>p.place);
 
   // Tramos de ida
-  const {segmentos,kmTotal:kmIda,durTotal:durIda}=useMultiSegmentos(placeIdsIda,mapsLoaded);
+  const {segmentos,kmTotal:kmIda,durTotal:durIda,cargando:cargandoIda,conError:errorIda}=useMultiSegmentos(placesIda,mapsLoaded);
 
   // Retorno directo (último→primero)
-  const firstId=puntos[0]?.place?.placeId||"";
-  const lastId=puntos[puntos.length-1]?.place?.placeId||"";
-  const segRetornoDirecto=useSegmento(lastId,firstId,mapsLoaded);
+  const firstPlace=puntos[0]?.place||null;
+  const lastPlace=puntos[puntos.length-1]?.place||null;
+  const segRetornoDirecto=useSegmento(lastPlace,firstPlace,mapsLoaded);
 
   // KM retorno
   const kmRetorno=retornaAlOrigen
@@ -382,7 +463,23 @@ function RutaConParadas({tipoServ,mapsLoaded,onUpdate}:{
     :0;
 
   const kmCalculado=kmIda+kmRetorno;
-  const kmFinal=kmManual!==null?kmManual:kmCalculado;
+  // `kmIda` puede ser una suma PARCIAL: tramos cacheados listos + tramos nuevos
+  // aún en cálculo (cargando), o tramos que fallaron y aportan 0 km (error). En
+  // ambos casos el total es MENOR que el real, así que no se propaga al
+  // cotizador: kmFinal=0 deja la cotización sin km y bloquea el guardado. El
+  // fallo se muestra abajo en el resumen para que no sea un cero silencioso.
+  const cargandoRuta=cargandoIda||(retornaAlOrigen&&!retornaPorParadas&&segRetornoDirecto.loading);
+  // Igual que en useMultiSegmentos: el fallo se detecta por `error`, no por
+  // `km<=0`. El estado inicial de useSegmento es {km:0,error:""}, así que mirar
+  // el km pintaría el aviso rojo de «ruta con error» en un formulario todavía
+  // vacío, antes de que el usuario elija ningún punto.
+  const rutaConError=errorIda||(retornaAlOrigen&&!retornaPorParadas&&!segRetornoDirecto.loading&&!!segRetornoDirecto.error);
+  // Un punto con texto pero sin place elegido de la lista NO se le pide a
+  // Google (los hooks descartan lo que no trae placeId): el itinerario se
+  // calcularía SALTÁNDOSE ese punto y daría menos km de los reales.
+  const puntosSinPlace=puntos.some(p=>p.texto.trim()!==""&&!p.place);
+  const rutaIncompleta=rutaConError||puntosSinPlace;
+  const kmFinal=kmManual!==null?kmManual:(cargandoRuta||rutaIncompleta?0:kmCalculado);
 
   useEffect(()=>{onUpdate(kmFinal,puntos);},[kmFinal,JSON.stringify(puntos)]);
 
@@ -420,7 +517,7 @@ function RutaConParadas({tipoServ,mapsLoaded,onUpdate}:{
                 <PlacesInput size="sm"
                   placeholder={esInicio?"Dirección de inicio...":esDestino?"Dirección de destino final...":`Dirección del ${etiqueta}...`}
                   value={punto.texto} mapsLoaded={mapsLoaded}
-                  onChange={v=>updPunto(punto.id,{texto:v,place:v?punto.place:null})}
+                  onChange={v=>updPunto(punto.id,{texto:v,place:placeVigente(v,punto.place)})}
                   onSelect={p=>updPunto(punto.id,{texto:p.address,place:p.placeId?p:null})}/>
               </div>
             </div>
@@ -481,14 +578,27 @@ function RutaConParadas({tipoServ,mapsLoaded,onUpdate}:{
         )}
       </div>
 
-      {/* Resumen */}
-      {kmIda>0&&(
+      {/* Resumen — oculto mientras haya tramos en cálculo: pintar un total
+          parcial junto al «Ingresa la ruta» del panel serían dos cifras
+          contradictorias a la vez. Si algún tramo falló sí se muestra, pero
+          marcado como incompleto y con el ajuste manual a la mano. */}
+      {(kmIda>0||rutaIncompleta)&&!cargandoRuta&&(
         <div className="rounded-xl bg-[#eef3f8] border border-[#0b315f22] px-4 py-3">
           <p className="text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Resumen de ruta</p>
+          {rutaIncompleta&&(
+            <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 mb-2">
+              <p className="text-[10px] font-black text-red-600">{rutaConError?"⚠ Hay un tramo sin ruta":"⚠ Falta elegir una dirección de la lista"}</p>
+              <p className="text-[10px] text-red-500 leading-snug">
+                {rutaConError
+                  ?"El total está incompleto y NO se usa en la cotización. Corrige la dirección del tramo marcado o ingresa el km manualmente."
+                  :"Hay un punto escrito a mano: sin elegirlo de las sugerencias de Google no entra en el cálculo y el total quedaría corto. NO se usa en la cotización."}
+              </p>
+            </div>
+          )}
           <div className="space-y-1">
-            <div className="flex justify-between text-xs"><span className="text-gray-600">KM ida ({puntos.length-1} tramos)</span><span className="font-black text-[#0b315f]">{kmIda} km</span></div>
+            <div className="flex justify-between text-xs"><span className="text-gray-600">KM ida ({puntos.length-1} tramos)</span><span className="font-black text-[#0b315f]">{kmIda} km{rutaIncompleta?" (parcial)":""}</span></div>
             {retornaAlOrigen&&<div className="flex justify-between text-xs"><span className="text-gray-600">KM retorno {retornaPorParadas?"(por paradas)":"(directo)"}</span><span className="font-black text-[#0b315f]">{kmRetorno} km</span></div>}
-            <div className="flex justify-between text-sm border-t border-[#0b315f22] pt-1.5 mt-1.5"><span className="font-black text-[#0b315f]">Total</span><span className="font-black text-[#0b315f] text-base">{kmManual!==null?kmManual:kmCalculado} km</span></div>
+            <div className="flex justify-between text-sm border-t border-[#0b315f22] pt-1.5 mt-1.5"><span className="font-black text-[#0b315f]">Total</span><span className={`font-black text-base ${kmManual===null&&rutaIncompleta?"text-red-500":"text-[#0b315f]"}`}>{kmManual!==null?`${kmManual} km`:(rutaIncompleta?"Incompleto":`${kmCalculado} km`)}</span></div>
             {durIda&&<p className="text-[10px] text-gray-400">⏱ Tiempo estimado ida: {durIda}</p>}
           </div>
           {/* Ajuste manual */}
@@ -512,11 +622,18 @@ function DiaPlanRow({dia,mapsLoaded,onChange,onEliminar,puedeEliminar}:{
   dia:DiaPlan; mapsLoaded:boolean;
   onChange:(d:DiaPlan)=>void; onEliminar:()=>void; puedeEliminar:boolean;
 }){
-  const placeIds=dia.puntos.map(p=>p.place?.placeId||"");
-  const {segmentos,kmTotal,durTotal}=useMultiSegmentos(placeIds,mapsLoaded);
+  const places=dia.puntos.map(p=>p.place);
+  const {segmentos,kmTotal,durTotal,cargando,conError}=useMultiSegmentos(places,mapsLoaded);
 
-  // Sync km y segmentos al padre
-  useEffect(()=>{onChange({...dia,segmentos,});},[kmTotal]);
+  // Sync km y segmentos al padre. `cargando` y `conError` van en las
+  // dependencias para que el padre reciba el estado de los tramos aunque el km
+  // total no haya cambiado (un tramo que falla deja el km igual, en 0).
+  useEffect(()=>{onChange({...dia,segmentos,});},[kmTotal,cargando,conError]);
+
+  // Punto escrito a mano (texto sin place): no se le pide a Google, así que el
+  // día se calcularía saltándoselo y con menos km de los reales.
+  const puntosSinPlace=dia.puntos.some(p=>p.texto.trim()!==""&&!p.place);
+  const diaIncompleto=conError||puntosSinPlace;
 
   const updPunto=(id:string,campo:Partial<Punto>)=>onChange({
     ...dia,puntos:dia.puntos.map(p=>p.id===id?{...p,...campo}:p)
@@ -532,7 +649,8 @@ function DiaPlanRow({dia,mapsLoaded,onChange,onEliminar,puedeEliminar}:{
           <span className="w-7 h-7 rounded-full bg-[#0b315f] text-white text-xs font-black flex items-center justify-center">{dia.numero}</span>
           <div>
             <p className="font-black text-[#0b315f] text-sm">Día {dia.numero}</p>
-            {kmTotal>0&&<p className="text-[10px] text-gray-500">{kmTotal} km · {durTotal}</p>}
+            {/* Nada de cifras mientras se calcula: sería un total parcial. */}
+            {kmTotal>0&&!cargando&&<p className="text-[10px] text-gray-500">{kmTotal} km{diaIncompleto?" (incompleto)":""} · {durTotal}</p>}
           </div>
         </div>
         {puedeEliminar&&<button onClick={onEliminar} className="text-red-400 hover:text-red-600 text-xs font-bold border border-red-200 hover:bg-red-50 px-2 py-1 rounded-lg">✕ Eliminar día</button>}
@@ -554,7 +672,7 @@ function DiaPlanRow({dia,mapsLoaded,onChange,onEliminar,puedeEliminar}:{
                   <PlacesInput size="sm"
                     placeholder={esInicio?"Punto de inicio del día...":esDestino?"Punto de llegada (hotel, destino)...":"Parada intermedia..."}
                     value={punto.texto} mapsLoaded={mapsLoaded}
-                    onChange={v=>updPunto(punto.id,{texto:v,place:v?punto.place:null})}
+                    onChange={v=>updPunto(punto.id,{texto:v,place:placeVigente(v,punto.place)})}
                     onSelect={p=>updPunto(punto.id,{texto:p.address,place:p.placeId?p:null})}/>
                 </div>
                 {punto.tipo==="parada"&&dia.puntos.length>2&&(
@@ -592,11 +710,14 @@ function DiaPlanRow({dia,mapsLoaded,onChange,onEliminar,puedeEliminar}:{
           ))}
         </div>
 
-        {/* Resumen del día */}
-        {kmTotal>0&&(
-          <div className="rounded-lg bg-blue-50 border border-blue-200 px-3 py-2 flex justify-between items-center">
-            <span className="text-xs font-bold text-blue-700">{dia.puntos.length-1} tramo{dia.puntos.length>2?"s":""}</span>
-            <span className="font-black text-blue-700">{kmTotal} km</span>
+        {/* Resumen del día — solo con todos los tramos resueltos; si alguno
+            falló se avisa en rojo en vez de mostrar un total corto. */}
+        {(kmTotal>0||diaIncompleto)&&!cargando&&(
+          <div className={`rounded-lg border px-3 py-2 flex justify-between items-center ${diaIncompleto?"bg-red-50 border-red-200":"bg-blue-50 border-blue-200"}`}>
+            <span className={`text-xs font-bold ${diaIncompleto?"text-red-600":"text-blue-700"}`}>
+              {conError?"⚠ Tramo sin ruta · km incompleto":puntosSinPlace?"⚠ Falta elegir una dirección de la lista":`${dia.puntos.length-1} tramo${dia.puntos.length>2?"s":""}`}
+            </span>
+            <span className={`font-black ${diaIncompleto?"text-red-600":"text-blue-700"}`}>{diaIncompleto?"—":`${kmTotal} km`}</span>
           </div>
         )}
       </div>
@@ -615,8 +736,17 @@ function RutaMultiDia({mapsLoaded,onUpdate}:{
   const kmTotal=dias.reduce((s,d)=>s+d.segmentos.reduce((ss,seg)=>ss+(seg?.km||0),0),0);
   const pernocteTotal=dias.reduce((s,d)=>s+d.pernocte,0);
   const viaticosTotal=dias.reduce((s,d)=>s+d.viaticos,0);
+  // Si algún día tiene tramos en cálculo —o alguno terminó sin ruta— `kmTotal`
+  // es parcial: no se propaga al cotizador. El fallo se detecta por `error`, no
+  // por `km<=0`: un tramo de menos de 500 m redondea a 0 y es válido.
+  const cargandoDias=dias.some(d=>d.segmentos.some(s=>s?.loading));
+  const diasConError=dias.some(d=>d.segmentos.some(s=>s&&!s.loading&&!!s.error));
+  // Igual que en RutaConParadas: un punto escrito a mano no llega a Google y el
+  // día se calcularía saltándoselo.
+  const diasSinPlace=dias.some(d=>d.puntos.some(p=>p.texto.trim()!==""&&!p.place));
+  const diasIncompletos=diasConError||diasSinPlace;
 
-  useEffect(()=>{onUpdate(kmTotal,dias);},[kmTotal,JSON.stringify(dias.map(d=>({p:d.pernocte,v:d.viaticos})))]);
+  useEffect(()=>{onUpdate(cargandoDias||diasIncompletos?0:kmTotal,dias);},[kmTotal,cargandoDias,diasIncompletos,JSON.stringify(dias.map(d=>({p:d.pernocte,v:d.viaticos})))]);
 
   const agregarDia=()=>setDias(d=>[...d,{
     id:uid(),numero:d.length+1,
@@ -642,14 +772,21 @@ function RutaMultiDia({mapsLoaded,onUpdate}:{
         + Agregar día {dias.length+1}
       </button>
 
-      {/* Resumen total */}
-      {kmTotal>0&&(
+      {/* Resumen total — no se pinta mientras haya días calculando (sería un
+          total parcial contradiciendo al panel de resultados). */}
+      {(kmTotal>0||diasIncompletos)&&!cargandoDias&&(
         <div className="rounded-2xl bg-[#0b315f] text-white p-4 space-y-2">
           <p className="text-[10px] font-black uppercase tracking-wider opacity-60">Resumen del viaje completo</p>
+          {diasIncompletos&&(
+            <div className="rounded-xl bg-red-500/20 border border-red-300/40 px-3 py-2">
+              <p className="text-[10px] font-black text-red-200">{diasConError?"⚠ Algún día tiene un tramo sin ruta":"⚠ Falta elegir una dirección de la lista"}</p>
+              <p className="text-[10px] text-red-100/80 leading-snug">Los km totales están incompletos y NO se usan en la cotización. Corrige el punto marcado en rojo.</p>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             {[
               {l:"Total días",v:`${dias.length} días`,c:"#6ee7b7"},
-              {l:"KM totales",v:`${kmTotal} km`,c:"#93c5fd"},
+              {l:"KM totales",v:diasIncompletos?`${kmTotal} km (incompleto)`:`${kmTotal} km`,c:diasIncompletos?"#fca5a5":"#93c5fd"},
               {l:"Pernocte total",v:fmt(pernocteTotal),c:"#fcd34d"},
               {l:"Viáticos total",v:fmt(viaticosTotal),c:"#fca5a5"},
             ].map(k=>(

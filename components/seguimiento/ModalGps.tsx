@@ -3,7 +3,7 @@
 // ModalGps.tsx — Mapbox base + Google Directions ruta real + tráfico
 // Protegido contra: coordenadas string, respuestas vacías, campos undefined
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import {
   calcBearing, distM, limpiarHuella, colorearMatched, colaViva,
@@ -15,6 +15,14 @@ import {
 import { animarMarcador } from "@/lib/anim-marker";
 
 declare global { interface Window { mapboxgl: any; } }
+
+// Cada refresco del ETA es una llamada a Google CON tráfico (SKU caro, no cacheable):
+// 3 min es suficiente para un bus urbano y baja el gasto ~3× frente al minuto.
+const MS_REFRESCO_ETA = 180_000;
+// Piso entre dos pedidos de ETA (mismo criterio que app/pasajero/page.tsx): volver a la pestaña
+// del modal justo antes de un tick del intervalo pagaba dos llamadas del SKU con tráfico con
+// segundos de diferencia, y cada alt-tab se saltaba el refresco de 3 min por completo.
+const MS_MIN_ENTRE_ETA = 30_000;
 
 type UbicGps = {
   lat: number; lng: number; velocidad: number; rumbo: number;
@@ -52,8 +60,12 @@ type Props = {
 };
 
 // ── Helpers de formato (mismos que la página de seguimiento) ─────────────────
-const fmtHoraLlegada = (min: number) => {
-  const d = new Date(Date.now() + min * 60000);
+// Recibe el INSTANTE de llegada ABSOLUTO (ms epoch) ya congelado al recibir el ETA, no los
+// minutos: si lo recalculara con Date.now() + min en cada render, la hora pintada avanzaría con
+// cada poll de GPS y saltaría hacia atrás al refrescar el ETA — con MS_REFRESCO_ETA de 3 min la
+// deriva se nota. Mismo criterio que app/pasajero y app/seguimiento/[token].
+const fmtHoraLlegada = (ts: number) => {
+  const d = new Date(ts);
   return d.toLocaleTimeString("es-PE", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/Lima" });
 };
 const fmtTiempo = (min: number) => {
@@ -101,6 +113,11 @@ export default function ModalGps({
   const [sinMovMin,      setSinMovMin]      = useState(0); // min que la unidad lleva SIN DESPLAZARSE (>150 m) con servicio en curso — caso "teléfono quedó en la cochera" (#951: 75 min clavado en el origen con las paradas completándose)
   const [mapListo,       setMapListo]       = useState(false);
   const [ruta,              setRuta]              = useState<RutaData | null>(null);
+  // ¿La `ruta` que se está mostrando se pidió CON tráfico? La carga automática va SIN tráfico (SKU
+  // barato y cacheado) y ahí Google devuelve duracion_trafico_min = duracion_min, así que comparar
+  // ambas sería mentir: el badge diría "✓ Ruta libre" aunque la avenida esté trabada. Solo el botón
+  // «Recalcular con tráfico actual» lo pone en true, y solo entonces el badge/etiqueta hablan de tráfico.
+  const [rutaConTrafico,    setRutaConTrafico]    = useState(false);
   const rutaRef = useRef<RutaData | null>(null);   // espejo de `ruta` para leerla en el loop del puente
   const [cargandoRuta,      setCargandoRuta]      = useState(false);
   const [errorRuta,         setErrorRuta]         = useState<string | null>(null);
@@ -142,6 +159,9 @@ export default function ModalGps({
   // ETA dinámica: posición actual del vehículo → próxima parada (Google Directions)
   const [etaMin, setEtaMin] = useState<number | null>(null);
   const [etaKm,  setEtaKm]  = useState<number | null>(null);
+  // Instante ABSOLUTO de llegada (ms epoch), congelado al recibir el ETA: lo que se pinta.
+  const [etaLlegadaTs, setEtaLlegadaTs] = useState<number | null>(null);
+  const ultimoEtaRef = useRef(0);   // ms del último pedido de ETA a Google (piso anti doble cobro)
   // Control de cámara: si el usuario arrastra el mapa, dejamos de recentrar al vehículo
   const [mapDescentrado, setMapDescentrado] = useState(false);
   const mapDescentradoRef = useRef(false);
@@ -153,6 +173,11 @@ export default function ModalGps({
     if (sinCoords.length === 0) return lista;
 
     try {
+      // Ojo: aquí pueden viajar paradas con id NEGATIVO (sintéticas, ver cargarRuta), que no
+      // existen en la tabla `paradas` — por eso el servidor no puede persistir el resultado por
+      // id y las coords se pierden al cerrar el modal. Lo que evita re-facturar es la caché POR
+      // TEXTO de /api/geocodificar (memoriza también los fallos), así que repetir la llamada
+      // con el mismo nombre ya no cuesta.
       const res = await fetch("/api/geocodificar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -211,81 +236,108 @@ export default function ModalGps({
 
   // ── Ruta real de Google via /api/ruta ──────────────────────────────────────
 
-  const cargarRuta = useCallback(async () => {
-    let listaParadas = [...paradas].sort((a, b) => a.orden - b.orden);
+  // Época de carga: cada entrada a cargarRuta incrementa el contador y SOLO la ejecución vigente
+  // (la última) puede escribir estado o apagar el spinner. Sin esto dos cargas solapadas se
+  // pisaban: la respuesta CACHEADA (~100 ms, sin tráfico) vuelve mucho antes que la del botón
+  // «Recalcular con tráfico actual» (~1,5 s, sin caché), así que la tardía sobrescribía la
+  // geometría buena y la rápida apagaba el spinner con la cara todavía en vuelo.
+  const epocaRutaRef = useRef(0);
 
-    // Rellenar coords faltantes (o construir lista) desde paradas_json de la cotización
-    if (paradasJson && paradasJson.length > 0) {
-      const byNombre = new Map<string, { lat: number; lng: number }>();
-      paradasJson.forEach((p: any) => {
-        if (p.lat && p.lng) byNombre.set(String(p.nombre || "").trim().toLowerCase(), { lat: Number(p.lat), lng: Number(p.lng) });
-      });
-      if (listaParadas.length > 0) {
-        listaParadas = listaParadas.map(p => {
-          if (!p.lat || !p.lng) {
-            const coords = byNombre.get(String(p.nombre || "").trim().toLowerCase());
-            if (coords) return { ...p, lat: coords.lat, lng: coords.lng };
-          }
-          return p;
+  // `conTrafico` = lo pidió una PERSONA con el botón «Recalcular con tráfico actual». La carga
+  // automática del modal siempre entra con false (barata y cacheada en el servidor).
+  const cargarRuta = useCallback(async (conTrafico = false) => {
+    const epoca   = ++epocaRutaRef.current;
+    const vigente = () => epocaRutaRef.current === epoca;
+    const fallo   = (msg: string) => { if (vigente()) setErrorRuta(msg); };
+
+    // El try/finally envuelve TODO desde aquí: antes había caminos de salida (paradas sin
+    // coordenadas, origen == destino) que devolvían con cargandoRuta en true para siempre y
+    // dejaban el botón deshabilitado en «Actualizando...».
+    setCargandoRuta(true);
+    try {
+      let listaParadas = [...paradas].sort((a, b) => a.orden - b.orden);
+
+      // Rellenar coords faltantes (o construir lista) desde paradas_json de la cotización
+      if (paradasJson && paradasJson.length > 0) {
+        const byNombre = new Map<string, { lat: number; lng: number }>();
+        paradasJson.forEach((p: any) => {
+          if (p.lat && p.lng) byNombre.set(String(p.nombre || "").trim().toLowerCase(), { lat: Number(p.lat), lng: Number(p.lng) });
         });
-      } else {
-        listaParadas = (paradasJson as any[])
-          .filter((p: any) => p.nombre)
-          .map((p: any, i: number) => ({
-            id: -(i + 1), nombre: p.nombre,
-            lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
-            hora_estimada: p.hora || null, estado: "pendiente", orden: i + 1,
-          }));
+        if (listaParadas.length > 0) {
+          listaParadas = listaParadas.map(p => {
+            if (!p.lat || !p.lng) {
+              const coords = byNombre.get(String(p.nombre || "").trim().toLowerCase());
+              if (coords) return { ...p, lat: coords.lat, lng: coords.lng };
+            }
+            return p;
+          });
+        } else {
+          // ids NEGATIVOS sintéticos: estas paradas salen de la cotización (paradas_json), no de la
+          // tabla `paradas`, así que no hay fila donde persistir las coords geocodificadas. Se
+          // re-geocodifican en cada apertura del modal, pero /api/geocodificar cachea POR TEXTO
+          // (y memoriza los fallos), así que la repetición no vuelve a facturar en Google.
+          listaParadas = (paradasJson as any[])
+            .filter((p: any) => p.nombre)
+            .map((p: any, i: number) => ({
+              id: -(i + 1), nombre: p.nombre,
+              lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
+              hora_estimada: p.hora || null, estado: "pendiente", orden: i + 1,
+            }));
+        }
       }
-    }
 
-    // Sin paradas: intentar con origen/destino de la reserva como fallback
-    if (listaParadas.length === 0) {
-      if (origen && destino) {
-        listaParadas = [
-          { id: -1, nombre: origen,  lat: null, lng: null, hora_estimada: null, estado: "pendiente", orden: 1 },
-          { id: -2, nombre: destino, lat: null, lng: null, hora_estimada: null, estado: "pendiente", orden: 2 },
-        ];
-      } else {
-        setErrorRuta("Esta reserva no tiene paradas configuradas — agrégalas en Programación");
+      // Sin paradas: intentar con origen/destino de la reserva como fallback
+      if (listaParadas.length === 0) {
+        if (origen && destino) {
+          // Mismo caso: ids sintéticos (-1/-2) sin fila propia → el resultado no se persiste por id;
+          // la caché por texto de /api/geocodificar es la que evita repetir la llamada facturable.
+          listaParadas = [
+            { id: -1, nombre: origen,  lat: null, lng: null, hora_estimada: null, estado: "pendiente", orden: 1 },
+            { id: -2, nombre: destino, lat: null, lng: null, hora_estimada: null, estado: "pendiente", orden: 2 },
+          ];
+        } else {
+          fallo("Esta reserva no tiene paradas configuradas — agrégalas en Programación");
+          return;
+        }
+      }
+
+      // Si alguna parada no tiene coordenadas, geocodificar antes de calcular ruta
+      const sinCoords = listaParadas.filter(p => !p.lat || !p.lng);
+      if (sinCoords.length > 0) {
+        listaParadas = await geocodificarParadas(listaParadas);
+      }
+
+      const paradasConCoords = listaParadas.filter(p => p.lat !== null && p.lng !== null);
+
+      if (paradasConCoords.length < 2) {
+        fallo(
+          sinCoords.length > 0
+            ? `No se pudo geocodificar ${sinCoords.length} parada(s) — verifica los nombres o agrégalas manualmente en Programación`
+            : "Las paradas no tienen coordenadas — agrégalas en Programación"
+        );
         return;
       }
-    }
 
-    // Si alguna parada no tiene coordenadas, geocodificar antes de calcular ruta
-    const sinCoords = listaParadas.filter(p => !p.lat || !p.lng);
-    if (sinCoords.length > 0) {
-      setCargandoRuta(true);
-      listaParadas = await geocodificarParadas(listaParadas);
-    }
+      // Verificar que origen y destino no sean el mismo punto
+      const orig = paradasConCoords[0];
+      const dest = paradasConCoords[paradasConCoords.length - 1];
+      if (orig.lat === dest.lat && orig.lng === dest.lng) {
+        fallo("Origen y destino tienen las mismas coordenadas — verifica las paradas en Programación");
+        return;
+      }
 
-    const paradasConCoords = listaParadas.filter(p => p.lat !== null && p.lng !== null);
+      if (vigente()) setErrorRuta(null);
 
-    if (paradasConCoords.length < 2) {
-      setErrorRuta(
-        sinCoords.length > 0
-          ? `No se pudo geocodificar ${sinCoords.length} parada(s) — verifica los nombres o agrégalas manualmente en Programación`
-          : "Las paradas no tienen coordenadas — agrégalas en Programación"
-      );
-      return;
-    }
-
-    // Verificar que origen y destino no sean el mismo punto
-    const orig = paradasConCoords[0];
-    const dest = paradasConCoords[paradasConCoords.length - 1];
-    if (orig.lat === dest.lat && orig.lng === dest.lng) {
-      setErrorRuta("Origen y destino tienen las mismas coordenadas — verifica las paradas en Programación");
-      return;
-    }
-
-    setCargandoRuta(true);
-    setErrorRuta(null);
-
-    try {
+      // Ruta PLANIFICADA del contrato: por defecto SIN `conTrafico`. Cae en el SKU barato de
+      // Directions y el servidor la cachea en Postgres por firma geográfica (el tráfico del
+      // minuto no aporta nada al dibujo del itinerario; sí al ETA en vivo, más abajo).
+      // Con `conTrafico` (botón del panel) se paga el SKU Advanced a propósito y sin caché: es
+      // el único modo de que el badge y la etiqueta «c/tráfico» digan la verdad.
       const res = await fetch("/api/ruta", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...(conTrafico ? { conTrafico: true } : {}),
           paradas: paradasConCoords.map(p => ({
             lat:    typeof p.lat === "string" ? parseFloat(p.lat as any) : p.lat,
             lng:    typeof p.lng === "string" ? parseFloat(p.lng as any) : p.lng,
@@ -296,23 +348,23 @@ export default function ModalGps({
 
       const text = await res.text();
       if (!text || text.trim() === "") {
-        setErrorRuta("API /api/ruta no encontrada — verificar app/api/ruta/route.ts");
+        fallo("API /api/ruta no encontrada — verificar app/api/ruta/route.ts");
         return;
       }
 
       let data: any;
       try { data = JSON.parse(text); }
-      catch { setErrorRuta("Respuesta inválida de /api/ruta"); return; }
+      catch { fallo("Respuesta inválida de /api/ruta"); return; }
 
       console.log("[ModalGps] Respuesta /api/ruta:", data);
 
       if (!res.ok) {
-        setErrorRuta(data.error || `Error ${res.status}`);
+        fallo(data.error || `Error ${res.status}`);
         return;
       }
 
       if (!data.coordenadas || !Array.isArray(data.coordenadas) || data.coordenadas.length === 0) {
-        setErrorRuta("Google no devolvió coordenadas de ruta");
+        fallo("Google no devolvió coordenadas de ruta");
         return;
       }
 
@@ -320,17 +372,40 @@ export default function ModalGps({
         data.tramos = [];
       }
 
+      // Carga superada por otra más nueva: se descarta entera para no pisar la geometría vigente.
+      if (!vigente()) return;
+
       setRuta(data as RutaData);
+      setRutaConTrafico(conTrafico);   // marca de origen: sin esto el badge de tráfico sería adivinanza
       setParadasResueltas(paradasConCoords);
     } catch (e: any) {
       console.error("[ModalGps] Error fetch:", e);
-      setErrorRuta("No se pudo conectar con /api/ruta: " + e.message);
+      fallo("No se pudo conectar con /api/ruta: " + e.message);
     } finally {
-      setCargandoRuta(false);
+      // Solo la ejecución vigente apaga el spinner: si no, la carga cacheada (rápida) reactivaba
+      // el botón mientras la del botón con tráfico seguía en vuelo.
+      if (vigente()) setCargandoRuta(false);
     }
   }, [paradas, paradasJson, origen, destino, geocodificarParadas]); // eslint-disable-line
 
-  useEffect(() => { cargarRuta(); }, [cargarRuta]);
+  // FIRMAS primitivas de los props. El padre reconstruye `paradas`/`paradasJson` con un .map()
+  // inline, así que su identidad cambia en CADA render y el efecto de abajo recalculaba la ruta
+  // entera (fetch a Google) sin que hubiera cambiado ni un dato. Con un string sólo se re-dispara
+  // cuando cambia algo que sí afecta al trazo o a los marcadores (coords, nombre, orden, estado).
+  // `hora_estimada` TAMBIÉN entra: se pinta en el popup del marcador, y el padre puede actualizar
+  // las paradas cambiando SÓLO la hora (editar la hora de un servicio) — sin ella el efecto no se
+  // re-disparaba y el popup se quedaba con la hora vieja. No encarece: la hora no cambia la
+  // geometría y la caché del servidor va por coordenadas, así que ese re-fetch cae en cache HIT.
+  const firmaParadas = useMemo(
+    () => JSON.stringify((paradas || []).map(p => [p.id, p.orden, p.nombre, p.lat, p.lng, p.estado, p.hora_estimada])),
+    [paradas]
+  );
+  const firmaParadasJson = useMemo(
+    () => JSON.stringify((paradasJson || []).map((p: any) => [p.nombre, p.lat, p.lng, p.hora])),
+    [paradasJson]
+  );
+
+  useEffect(() => { cargarRuta(); }, [firmaParadas, firmaParadasJson, origen, destino]); // eslint-disable-line
   useEffect(() => { rutaRef.current = ruta; }, [ruta]);   // el loop del puente lee rutaRef.current
 
   // ── Dibujar ruta en Mapbox ────────────────────────────────────────────────
@@ -1135,45 +1210,78 @@ export default function ModalGps({
   // con sinSenal (>60s) y con el color del pulso (edad del punto).
   const fechaPunto    = ubic ? (ubic.created_at || ubic.timestamp) : null;
   const segsDesdeUlt  = fechaPunto ? Math.floor((Date.now() - new Date(fechaPunto).getTime()) / 1000) : null;
-  const hayTrafico    = ruta?.tramos?.some(t => t.duracion_trafico_min > t.duracion_min + 2) ?? false;
+  // Solo tiene sentido comparar si la ruta se pidió CON tráfico: sin él, /api/ruta rellena
+  // duracion_trafico_min con duracion_min y la resta da 0 SIEMPRE (no "no hay tráfico", sino
+  // "no se preguntó"). Ver el botón «Recalcular con tráfico actual» del panel derecho.
+  const hayTrafico    = rutaConTrafico && (ruta?.tramos?.some(t => t.duracion_trafico_min > t.duracion_min + 2) ?? false);
 
   // ── ETA dinámica: posición actual del vehículo → próxima parada ────────────
-  // Igual que /seguimiento: Google Directions vía /api/ruta. Recalcula cada 60s
+  // Igual que /seguimiento: Google Directions vía /api/ruta. Recalcula cada MS_REFRESCO_ETA
   // (y al cambiar de parada o al llegar la primera señal), no en cada poll GPS.
+  // Firma primitiva de paradasResueltas: es un array NUEVO cada vez que corre cargarRuta, y como
+  // dependencia re-disparaba el ETA (llamada cara CON tráfico) sin que cambiara ninguna coord.
+  const firmaResueltas = useMemo(
+    () => paradasResueltas.map(p => `${p.id}:${p.lat},${p.lng}`).join("|"),
+    [paradasResueltas]
+  );
   useEffect(() => {
     let cancel = false;
-    const calcular = async () => {
+    // `forzar` = solo el cálculo de montaje / cambio de parada. El intervalo y el "volver a ser
+    // visible" respetan el piso de MS_MIN_ENTRE_ETA: sin él, cada alt-tab con el modal abierto
+    // era una llamada facturable CON tráfico que se saltaba entero el MS_REFRESCO_ETA.
+    const calcular = async (forzar = false) => {
+      // El guard vive AQUÍ y no solo en los invocadores: la llamada inicial se disparaba aunque
+      // la pestaña estuviera oculta al montar el modal.
+      if (document.hidden) return;
       const lista = paradas.length > 0 ? paradas : paradasResueltas;
       const prox = lista.find(p => p.estado !== "completada");
       const u = ubicRef.current;
-      if (!prox || !u) { if (!cancel) { setEtaMin(null); setEtaKm(null); } return; }
+      if (!prox || !u) { if (!cancel) { setEtaMin(null); setEtaKm(null); setEtaLlegadaTs(null); } return; }
       // La próxima parada puede venir sin coords en `paradas`: resolverlas desde paradasResueltas.
       let plat = prox.lat, plng = prox.lng;
       if (plat == null || plng == null) {
         const r = paradasResueltas.find(x => x.id === prox.id || x.nombre === prox.nombre);
         if (r) { plat = r.lat; plng = r.lng; }
       }
-      if (plat == null || plng == null) { if (!cancel) { setEtaMin(null); setEtaKm(null); } return; }
+      if (plat == null || plng == null) { if (!cancel) { setEtaMin(null); setEtaKm(null); setEtaLlegadaTs(null); } return; }
+      if (!forzar && Date.now() - ultimoEtaRef.current < MS_MIN_ENTRE_ETA) return;
+      ultimoEtaRef.current = Date.now();
       try {
         const res = await fetch("/api/ruta", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ paradas: [
+          // Único punto del modal donde el tráfico SÍ importa (bus → próxima parada): va con
+          // conTrafico para que Google use departure_time=now. No se cachea, por eso el refresco
+          // es lento (MS_REFRESCO_ETA) y se pausa con la pestaña oculta.
+          body: JSON.stringify({ conTrafico: true, paradas: [
             { lat: u.lat, lng: u.lng, nombre: "Vehículo" },
             { lat: Number(plat), lng: Number(plng), nombre: prox.nombre },
           ] }),
         });
         const data = await res.json();
         if (!cancel && res.ok && data) {
-          setEtaMin(typeof data.total_min === "number" ? data.total_min : null);
+          const min = typeof data.total_min === "number" ? data.total_min : null;
+          setEtaMin(min);
           setEtaKm(typeof data.total_km === "number" ? data.total_km : null);
+          // Se congela el INSTANTE de llegada: la hora pintada no debe moverse entre refrescos
+          // (ver fmtHoraLlegada).
+          setEtaLlegadaTs(min != null ? Date.now() + Math.round(min) * 60_000 : null);
         }
       } catch { /* conservar ETA previa */ }
     };
-    calcular();
-    const iv = setInterval(calcular, 60000);
-    return () => { cancel = true; clearInterval(iv); };
+    calcular(true);
+    // Pausa con la pestaña oculta (mismo patrón que app/pasajero/page.tsx): el timer no gasta
+    // llamadas de Google en segundo plano y al volver a ser visible recalcula una vez, siempre
+    // que hayan pasado al menos MS_MIN_ENTRE_ETA desde el último pedido.
+    const iv = setInterval(() => { calcular(); }, MS_REFRESCO_ETA);
+    const alVolverVisible = () => { calcular(); };
+    document.addEventListener("visibilitychange", alVolverVisible);
+    return () => {
+      cancel = true;
+      clearInterval(iv);
+      document.removeEventListener("visibilitychange", alVolverVisible);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [proximaParada?.id, proximaParada?.nombre, !!ubic, paradasResueltas]);
+  }, [proximaParada?.id, proximaParada?.nombre, !!ubic, firmaResueltas]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 md:p-4" style={{ background: "rgba(15,23,42,0.65)" }}>
@@ -1209,8 +1317,13 @@ export default function ModalGps({
                           : "Conectando..."}
                 </p> ); })()}
                 {ruta && (
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${hayTrafico ? "bg-orange-500 text-white" : "bg-green-600 text-white"}`}>
-                    {hayTrafico ? `⚠ Tráfico · ${ruta.total_min} min` : `✓ Ruta libre · ${ruta.total_min} min`}
+                  // Sin recálculo con tráfico no se puede afirmar "ruta libre" (nunca se preguntó):
+                  // se muestra el tiempo planificado, en neutro. El veredicto de tráfico (naranja/verde)
+                  // aparece sólo tras pulsar «Recalcular con tráfico actual».
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${!rutaConTrafico ? "bg-white/15 text-blue-100" : hayTrafico ? "bg-orange-500 text-white" : "bg-green-600 text-white"}`}>
+                    {!rutaConTrafico
+                      ? `🕒 Ruta · ${ruta.total_min} min`
+                      : hayTrafico ? `⚠ Tráfico · ${ruta.total_min} min` : `✓ Ruta libre · ${ruta.total_min} min`}
                   </span>
                 )}
                 {cargandoRuta && <span className="text-[10px] text-blue-300">Calculando ruta...</span>}
@@ -1330,7 +1443,7 @@ export default function ModalGps({
                     <>
                       <div className="flex-1">
                         <p className="text-[10px] uppercase opacity-70">Llega a las</p>
-                        <p className="text-xl font-bold leading-tight">{fmtHoraLlegada(etaMin)}</p>
+                        <p className="text-xl font-bold leading-tight">{etaLlegadaTs != null ? fmtHoraLlegada(etaLlegadaTs) : "—"}</p>
                         <p className="text-[11px] opacity-60 mt-0.5">en {fmtTiempo(etaMin)}</p>
                       </div>
                       {etaKm != null && (
@@ -1419,9 +1532,11 @@ export default function ModalGps({
                     <p className="text-[#0b315f] font-black text-lg leading-none">{ruta.total_km}</p>
                     <p className="text-gray-400 text-[9px] font-bold">km totales</p>
                   </div>
-                  <div className={`rounded-lg px-2 py-1.5 text-center ${hayTrafico ? "bg-orange-50" : "bg-green-50"}`}>
-                    <p className={`font-black text-lg leading-none ${hayTrafico ? "text-orange-600" : "text-green-600"}`}>{ruta.total_min}</p>
-                    <p className={`text-[9px] font-bold ${hayTrafico ? "text-orange-400" : "text-green-400"}`}>min c/tráfico</p>
+                  {/* La etiqueta dice «c/tráfico» SÓLO si de verdad se pidió con tráfico; si no, el
+                      número es la duración planificada de Google y así se nombra. */}
+                  <div className={`rounded-lg px-2 py-1.5 text-center ${!rutaConTrafico ? "bg-gray-50" : hayTrafico ? "bg-orange-50" : "bg-green-50"}`}>
+                    <p className={`font-black text-lg leading-none ${!rutaConTrafico ? "text-[#0b315f]" : hayTrafico ? "text-orange-600" : "text-green-600"}`}>{ruta.total_min}</p>
+                    <p className={`text-[9px] font-bold ${!rutaConTrafico ? "text-gray-400" : hayTrafico ? "text-orange-400" : "text-green-400"}`}>{rutaConTrafico ? "min c/tráfico" : "min estimados"}</p>
                   </div>
                 </div>
                 {ruta.advertencia && (
@@ -1432,7 +1547,9 @@ export default function ModalGps({
                 {ruta.tramos && ruta.tramos.length > 0 && (
                   <div className="space-y-2">
                     {ruta.tramos.map((t, i) => {
-                      const conTrafico = t.duracion_trafico_min > t.duracion_min + 2;
+                      // Mismo criterio que `hayTrafico`: sin recálculo con tráfico la resta es 0 por
+                      // construcción, así que el tramo no se pinta de naranja por una comparación vacía.
+                      const conTrafico = rutaConTrafico && t.duracion_trafico_min > t.duracion_min + 2;
                       return (
                         <div key={i} className="border-t pt-2 first:border-t-0 first:pt-0">
                           <div className="flex justify-between items-start gap-1 mb-0.5">
@@ -1447,7 +1564,10 @@ export default function ModalGps({
                     })}
                   </div>
                 )}
-                <button onClick={cargarRuta} disabled={cargandoRuta}
+                {/* Único punto del modal donde el operador paga el SKU caro a propósito: pide el
+                    tráfico del momento, una vez, porque lo decidió una persona. La carga automática
+                    de la ruta sigue yendo sin tráfico (barata y cacheada). */}
+                <button onClick={() => cargarRuta(true)} disabled={cargandoRuta}
                   className="w-full mt-3 py-1.5 rounded-lg text-[10px] font-bold text-[#0b315f] bg-blue-50 hover:bg-blue-100 transition-colors disabled:opacity-50">
                   {cargandoRuta ? "Actualizando..." : "🔄 Recalcular con tráfico actual"}
                 </button>
