@@ -54,6 +54,8 @@ export async function POST(req: NextRequest) {
             tipo: msg.type === "text" ? "texto" : msg.type,
             mediaUrl: msg.image?.url ?? msg.audio?.url ?? msg.video?.url ?? msg.document?.url ?? null,
             metaMessageId: msg.id,
+            phoneNumberId: phoneId ?? null,
+            displayPhoneNumber: val.metadata?.display_phone_number ?? null,
           });
           if (convId && !esAvisos) conversacionesNuevas.add(convId);
         }
@@ -123,6 +125,9 @@ type MsgInput = {
   tipo: string;
   mediaUrl: string | null;
   metaMessageId: string;
+  // Sólo WhatsApp: número de la empresa por el que entró (CRM vs AVISOS).
+  phoneNumberId?: string | null;
+  displayPhoneNumber?: string | null;
 };
 
 async function processarMensaje(m: MsgInput): Promise<string | null> {
@@ -194,7 +199,13 @@ async function processarMensaje(m: MsgInput): Promise<string | null> {
   if (!conv) {
     const { data: nc } = await supabase
       .from("crm_conversaciones")
-      .insert({ contacto_id: contacto!.id, canal: m.canal, estado: "abierta" })
+      .insert({
+        contacto_id: contacto!.id,
+        canal: m.canal,
+        estado: "abierta",
+        phone_number_id: m.phoneNumberId ?? null,
+        display_phone_number: m.displayPhoneNumber ?? null,
+      })
       .select("id, no_leidos")
       .single();
     conv = nc;
@@ -207,11 +218,20 @@ async function processarMensaje(m: MsgInput): Promise<string | null> {
     contenido: m.contenido,
     media_url: m.mediaUrl,
     meta_message_id: m.metaMessageId,
+    phone_number_id: m.phoneNumberId ?? null,
+    display_phone_number: m.displayPhoneNumber ?? null,
   });
 
   await supabase
     .from("crm_conversaciones")
-    .update({ ultimo_mensaje_at: new Date().toISOString(), no_leidos: (conv!.no_leidos ?? 0) + 1 })
+    .update({
+      ultimo_mensaje_at: new Date().toISOString(),
+      no_leidos: (conv!.no_leidos ?? 0) + 1,
+      // Conversaciones antiguas (o reabiertas) quedan etiquetadas al primer
+      // mensaje que llegue tras esta migración.
+      ...(m.phoneNumberId ? { phone_number_id: m.phoneNumberId } : {}),
+      ...(m.displayPhoneNumber ? { display_phone_number: m.displayPhoneNumber } : {}),
+    })
     .eq("id", conv!.id);
 
   return conv!.id as string;

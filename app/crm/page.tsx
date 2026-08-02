@@ -18,7 +18,22 @@ type Conversacion = {
   contacto_id: string; crm_contactos: Contacto;
   ia_pausada?: boolean; borrador_ia?: string | null; borrador_ia_at?: string | null;
   _ultimo_texto?: string;
+  // Número de la empresa por el que entró (los 2 números del WABA caen en este
+  // mismo Inbox). NULL en conversaciones anteriores a ago-2026.
+  display_phone_number?: string | null; phone_number_id?: string | null;
 };
+
+// Los dos números del WABA "Afa Transporte". Se filtra por display_phone_number
+// (Meta lo manda como "51966707225") y no por phone_number_id, que es un id
+// interno y además vive en variables de entorno del servidor.
+const NUMEROS = [
+  { key: "todos",   label: "Todos los números", sufijo: null },
+  { key: "ventas",  label: "Ventas · 966707225", sufijo: "966707225" },
+  { key: "avisos",  label: "Avisos · 905438216", sufijo: "905438216" },
+] as const;
+
+const etiquetaNumero = (d?: string | null) =>
+  !d ? null : NUMEROS.find((n) => n.sufijo && d.endsWith(n.sufijo))?.label ?? `+${d}`;
 
 type Mensaje = {
   id: string; conversacion_id: string; direccion: "entrante" | "saliente";
@@ -83,6 +98,8 @@ export default function CRMPage() {
   const [mensajes, setMensajes] = useState<Mensaje[]>([]);
   const [reply, setReply] = useState("");
   const [canalFiltro, setCanalFiltro] = useState<Canal>("todos");
+  const [numeroFiltro, setNumeroFiltro] = useState<string>("todos");
+  const [conectarWaModal, setConectarWaModal] = useState(false);
   const [estadoFiltro, setEstadoFiltro] = useState<"abierta" | "en_progreso" | "resuelta">("abierta");
   const [busqueda, setBusqueda] = useState("");
   const [enviando, setEnviando] = useState(false);
@@ -127,6 +144,9 @@ export default function CRMPage() {
 
     if (canalFiltro !== "todos") q = q.eq("canal", canalFiltro);
 
+    const sufijo = NUMEROS.find((n) => n.key === numeroFiltro)?.sufijo;
+    if (sufijo) q = q.like("display_phone_number", `%${sufijo}`);
+
     const { data } = await q.limit(80);
 
     // Para cada conv, obtener el último mensaje
@@ -144,7 +164,7 @@ export default function CRMPage() {
     );
     setConvs(enriched as Conversacion[]);
     setCargando(false);
-  }, [canalFiltro, estadoFiltro]);
+  }, [canalFiltro, estadoFiltro, numeroFiltro]);
 
   useEffect(() => { cargarConvs(); }, [cargarConvs]);
 
@@ -387,6 +407,13 @@ export default function CRMPage() {
                 {sincronizando ? "⏳" : "📧↻"}
               </button>
               <button
+                onClick={() => setConectarWaModal(true)}
+                title="Vincular el WhatsApp Business existente al CRM (coexistencia)"
+                className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-[#25D366]/40 text-[#0b315f] hover:bg-[#25D366]/10 transition-colors"
+              >
+                📲 Conectar WhatsApp
+              </button>
+              <button
                 onClick={() => setNuevoContactoModal(true)}
                 className="bg-[#0b315f] text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-[#1262bd] transition-colors"
               >
@@ -416,6 +443,21 @@ export default function CRMPage() {
             </button>
           ))}
         </div>
+
+        {/* Filtro por número de la empresa (sólo aplica a WhatsApp) */}
+        {(canalFiltro === "todos" || canalFiltro === "whatsapp") && (
+          <div className="px-3 pt-2 pb-1 border-b border-gray-100">
+            <select
+              value={numeroFiltro}
+              onChange={(e) => setNumeroFiltro(e.target.value)}
+              className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 text-gray-600 focus:outline-none focus:ring-1 focus:ring-[#0b315f]/30"
+            >
+              {NUMEROS.map((n) => (
+                <option key={n.key} value={n.key}>{n.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* Filtros estado */}
         <div className="px-3 py-2 flex gap-1.5 border-b border-gray-100">
@@ -525,6 +567,16 @@ export default function CRMPage() {
               >
                 {CANAL_CFG[selected.canal]?.icon} {CANAL_CFG[selected.canal]?.label}
               </span>
+
+              {/* Por qué número de la empresa entró este hilo */}
+              {etiquetaNumero(selected.display_phone_number) && (
+                <span
+                  className="text-xs px-2.5 py-1 rounded-full font-medium bg-gray-100 text-gray-600"
+                  title="Número de AFA por el que entró esta conversación"
+                >
+                  📲 {etiquetaNumero(selected.display_phone_number)}
+                </span>
+              )}
 
               {/* Estado */}
               <select
@@ -794,6 +846,145 @@ export default function CRMPage() {
           </div>
         </div>
       )}
+
+      {/* ── Modal conectar WhatsApp Business existente (coexistencia) ── */}
+      {conectarWaModal && (
+        <ConectarWhatsAppModal onClose={() => setConectarWaModal(false)} />
+      )}
+    </div>
+  );
+}
+
+// ── Vincular el WhatsApp Business del celular (966707225) al CRM ──────────
+// Mismo flujo que public/conectar-whatsapp.html (Embedded Signup de Meta,
+// featureType "whatsapp_business_app_onboarding" = coexistencia), pero
+// embebido como modal para no salir del CRM ni depender de recordar la URL.
+declare global {
+  interface Window { FB?: any; fbAsyncInit?: () => void; }
+}
+
+const WA_APP_ID = "1776032736701552";
+const WA_CONFIG_ID = "1912835406054543";
+
+function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
+  const [paso, setPaso] = useState<"cargando" | "listo" | "conectando" | "ok" | "error">("cargando");
+  const [detalle, setDetalle] = useState<string>("");
+  const [codigo, setCodigo] = useState<string>("");
+
+  useEffect(() => {
+    function onMensaje(event: MessageEvent) {
+      if (event.origin !== "https://www.facebook.com" && event.origin !== "https://web.facebook.com") return;
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type !== "WA_EMBEDDED_SIGNUP") return;
+        if (["FINISH", "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING", "FINISH_ONLY_WABA"].includes(data.event)) {
+          setPaso("ok");
+          setDetalle(
+            `phone_number_id: ${data.data?.phone_number_id ?? "—"} · waba_id: ${data.data?.waba_id ?? "—"}`
+          );
+        } else if (data.event === "CANCEL") {
+          setPaso("error");
+          setDetalle(`Se canceló en: ${data.data?.current_step ?? "?"}`);
+        }
+      } catch { /* mensajes que no son JSON del embedded signup */ }
+    }
+    window.addEventListener("message", onMensaje);
+
+    if (window.FB) {
+      setPaso("listo");
+    } else {
+      window.fbAsyncInit = () => {
+        window.FB!.init({ appId: WA_APP_ID, cookie: true, xfbml: false, version: "v23.0" });
+        setPaso("listo");
+      };
+      if (!document.getElementById("facebook-jssdk")) {
+        const js = document.createElement("script");
+        js.id = "facebook-jssdk";
+        js.src = "https://connect.facebook.net/es_LA/sdk.js";
+        document.body.appendChild(js);
+      }
+    }
+    return () => window.removeEventListener("message", onMensaje);
+  }, []);
+
+  const lanzar = () => {
+    if (!window.FB) return;
+    setPaso("conectando");
+    window.FB.login(
+      (response: any) => {
+        if (response.authResponse?.code) {
+          setCodigo(response.authResponse.code);
+        } else if (paso !== "ok") {
+          setPaso("error");
+          setDetalle("No se completó la conexión (se cerró la ventana).");
+        }
+      },
+      {
+        config_id: WA_CONFIG_ID,
+        response_type: "code",
+        override_default_response_type: true,
+        extras: { setup: {}, featureType: "whatsapp_business_app_onboarding", sessionInfoVersion: "3" },
+      }
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 text-center">
+        <h3 className="text-lg font-bold text-[#0b315f] mb-1">Conectar WhatsApp</h3>
+        <p className="text-sm text-gray-500 mb-4">
+          Vincula tu WhatsApp Business (celular) al CRM sin dejar de usarlo desde la app. Ten el celular a la mano.
+        </p>
+        <div className="bg-indigo-50 text-[#0b315f] font-bold text-base px-4 py-2.5 rounded-xl inline-block mb-4">
+          +51 966 707 225
+        </div>
+
+        <button
+          onClick={lanzar}
+          disabled={paso === "cargando" || paso === "conectando"}
+          className="w-full bg-[#25D366] hover:bg-[#1fb855] disabled:bg-gray-300 text-white font-bold text-sm py-3 rounded-xl transition-colors"
+        >
+          {paso === "cargando" ? "Cargando conexión con Meta…" : paso === "conectando" ? "Esperando el QR…" : "Conectar mi WhatsApp"}
+        </button>
+
+        <div className="text-left mt-4 rounded-xl overflow-hidden border border-gray-100">
+          {[
+            { txt: "1. Toca el botón verde de arriba", activa: paso === "listo" },
+            { txt: "2. En la ventana, elige \"conectar número existente\"", activa: paso === "conectando" },
+            { txt: "3. En tu celular llega un mensaje → escanea el código QR", activa: false },
+            { txt: "4. Listo: el número queda conectado al CRM", ok: paso === "ok" },
+          ].map((p, i) => (
+            <div
+              key={i}
+              className={`px-3 py-2 text-xs border-b last:border-b-0 border-gray-50 ${
+                p.ok ? "bg-emerald-50 text-emerald-800 font-medium" : p.activa ? "bg-[#0b315f]/5 text-[#0b315f] font-medium" : "text-gray-500"
+              }`}
+            >
+              {p.txt}
+            </div>
+          ))}
+        </div>
+
+        {codigo && (
+          <div className="mt-4 bg-gray-50 border border-dashed border-gray-300 rounded-xl p-3 text-left text-xs font-mono break-all">
+            <b className="text-[#0b315f]">Código de autorización (guárdalo, aún falta activarlo):</b>
+            <div className="mt-1">{codigo}</div>
+          </div>
+        )}
+        {paso === "ok" && (
+          <div className="mt-4 bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-left text-xs text-emerald-800">
+            <b>Número conectado en Meta ✓</b>
+            <div className="mt-1">{detalle}</div>
+          </div>
+        )}
+        {paso === "error" && (
+          <div className="mt-4 bg-red-50 border border-red-200 rounded-xl p-3 text-left text-xs text-red-700">{detalle}</div>
+        )}
+
+        <button onClick={onClose} className="mt-5 text-xs text-gray-400 hover:text-gray-600">
+          Cerrar
+        </button>
+      </div>
     </div>
   );
 }
