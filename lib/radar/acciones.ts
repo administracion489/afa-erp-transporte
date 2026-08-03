@@ -597,7 +597,10 @@ async function accionOportunidad({ sb, mensaje, datos }: ArgsAccion): Promise<Re
 async function accionCombustible({ sb, mensaje, datos, confianza, config }: ArgsAccion): Promise<ResultadoAccion> {
   const d = datos as ExtraccionCombustible;
   const fecha = d.fecha || fechaLimaDeTs(mensaje.ts_mensaje) || fechaLima();
-  let veh = await matchVehiculo(sb, d.placa);
+  // La IA a veces deja una placa real (p.ej. "CUP 435" sin guion) en "unidad" en vez de
+  // "placa" — placaNorm() quita espacios/guiones antes de comparar, así que probarla igual
+  // contra la flota es seguro: una referencia realmente informal ("bus 45") no matchea nada.
+  let veh = (await matchVehiculo(sb, d.placa)) ?? (await matchVehiculo(sb, d.unidad));
 
   // ── Cruce de identidad: rellenar conductor y placa con lo que el sistema ya sabe ──
   // Meta: que el operador no re-teclee datos deducibles. El chofer que envía la foto del
@@ -1032,7 +1035,9 @@ const SENALES_COMPRA = /voucher|v[au]cher|comprobante|factura|boleta|importe|\bm
 
 async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAccion): Promise<ResultadoAccion> {
   const d = datos as ExtraccionOdometro;
-  const unidad = await resolverUnidadOdometro(sb, d.placa);
+  // Mismo fallback que en combustible: si la IA dejó la placa en "unidad" (p.ej. "CUP 435"
+  // sin guion), el match normalizado la encuentra igual; una referencia informal no matchea nada.
+  const unidad = (await resolverUnidadOdometro(sb, d.placa)) ?? (await resolverUnidadOdometro(sb, d.unidad));
   const km = numOpc(d.kilometraje);
   const umbral = Number(config.umbral_confianza ?? 0.7);
   // Fecha de la lectura: la que dictó la IA (si vio una en la foto/texto), o la del MENSAJE
@@ -1157,11 +1162,13 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   if (config.acciones_automaticas?.odometro !== true) motivos.push("Registro automático de odómetro desactivado en la configuración");
   if (errorRegistro) motivos.push(`No se pudo grabar automáticamente: ${errorRegistro}`);
   if (!unidad) {
-    motivos.push(
-      d.placa
-        ? `Placa ${placaFormato(d.placa)} no está registrada ni en la flota propia ni en la tercerizada`
-        : "Mensaje sin placa identificable"
-    );
+    if (d.placa) {
+      motivos.push(`Placa ${placaFormato(d.placa)} no está registrada ni en la flota propia ni en la tercerizada`);
+    } else if (d.unidad) {
+      motivos.push(`"${d.unidad}" no coincide con ninguna placa de la flota propia ni tercerizada`);
+    } else {
+      motivos.push("Mensaje sin placa identificable");
+    }
   }
   if (km == null) motivos.push("Sin lectura de kilometraje");
   if (confianza < umbral) motivos.push(`Confianza ${Math.round(confianza * 100)}% por debajo del umbral ${Math.round(umbral * 100)}%`);
