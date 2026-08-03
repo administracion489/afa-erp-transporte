@@ -6,6 +6,7 @@ import { enviarWhatsAppPlantilla } from "@/lib/crm-meta";
 import { enviarPushAPasajeros, enviarPushAConductores, payloadConductor, payloadsViaje } from "@/lib/push";
 import { telefonoContingencia, cargarCanalesPasajero, type CanalesConductor, type CanalesPasajero } from "@/lib/alertas";
 import { emailDesdePlantilla } from "@/lib/plantilla-texto";
+import { phonePara } from "@/lib/whatsapp-numeros";
 
 // Admin client para escribir logs sin RLS
 const supabaseAdmin = createClient(
@@ -162,12 +163,13 @@ const PLANTILLA_CONDUCTOR_COMPLETO = "recordatorio_conductor_completo";
 const PLANTILLA_LLEGADA = "bus_llego_paradero";
 
 /**
- * Phone Number ID del 2do número (avisos a pasajeros + conductores + campañas).
- * Un solo número para los 3 usos. Nombre canónico META_PHONE_NUMBER_ID_AVISOS,
- * con fallback al nombre histórico META_PHONE_NUMBER_ID_PASAJEROS.
+ * Phone Number ID del número de avisos (pasajeros + conductores).
+ * Sale de la tabla whatsapp_numeros (el marcado `usa_avisos`); si la tabla está vacía
+ * o no se ha migrado, cae a META_PHONE_NUMBER_ID_AVISOS y al histórico
+ * META_PHONE_NUMBER_ID_PASAJEROS. Es asíncrona por eso: antes leía sólo del entorno.
  */
-export function phoneAvisos(): string | undefined {
-  return process.env.META_PHONE_NUMBER_ID_AVISOS ?? process.env.META_PHONE_NUMBER_ID_PASAJEROS;
+export async function phoneAvisos(): Promise<string | undefined> {
+  return phonePara("avisos");
 }
 
 /**
@@ -180,7 +182,7 @@ export async function enviarAvisoWhatsApp(
   plantilla: string,
   parametros: string[],
 ): Promise<{ ok: boolean; error?: string }> {
-  const phone = phoneAvisos();
+  const phone = await phoneAvisos();
   if (!phone) return { ok: false, error: "META_PHONE_NUMBER_ID_AVISOS no configurado" };
   if (!telefonoRaw?.trim()) return { ok: false, error: "sin teléfono" };
   try {
@@ -265,11 +267,12 @@ export async function enviarAConductor(args: {
 
   // ── Canal 1: WhatsApp ──
   if (canales.whatsapp && conductor.telefono?.trim()) {
-    if (phoneAvisos()) {
+    const phoneWa = await phoneAvisos();
+    if (phoneWa) {
       intentado++;
       const tel = normalizarTelefono(conductor.telefono);
       try {
-        await enviarWhatsAppPlantilla(tel, plantilla, PLANTILLA_IDIOMA, parametros, phoneAvisos(), botones);
+        await enviarWhatsAppPlantilla(tel, plantilla, PLANTILLA_IDIOMA, parametros, phoneWa, botones);
         entregado++;
         await log({ tipo: "whatsapp", estado: "enviado", destinatario: tel });
       } catch (e: any) {
@@ -674,7 +677,7 @@ export async function notificarReserva(
     }
 
     // Canal 3: WhatsApp por plantilla Meta (config; "solo si no tiene app" = solo si NO recibió push)
-    if (pas.telefono && phoneAvisos() && canal.whatsapp && (!canal.whatsappSoloSinApp || !pushEntregado)) {
+    if (pas.telefono && await phoneAvisos() && canal.whatsapp && (!canal.whatsappSoloSinApp || !pushEntregado)) {
       const tel = normalizarTelefono(pas.telefono);
       try {
         const vehiculoTexto = datosN.vehiculoPlaca
@@ -698,7 +701,7 @@ export async function notificarReserva(
             datosN.conductorNombre ?? "Por asignar",
             vehiculoTexto,
           ],
-          phoneAvisos(),
+          await phoneAvisos(),
           [{ index: 1, texto: encodeURIComponent(ubicacionQuery) }],
         );
         resultado.canales.push({ tipo: "whatsapp", estado: "enviado" });
@@ -935,7 +938,7 @@ export async function avisarLlegadaWhatsApp(
   paradaNombre: string,
   pasajeroIds: number[],
 ): Promise<void> {
-  if (!phoneAvisos() || pasajeroIds.length === 0) return;
+  if (!await phoneAvisos() || pasajeroIds.length === 0) return;
 
   // Respeta la config de canales: si WhatsApp está apagado, no avisa; y con "solo sin app"
   // el aviso de llegada por WhatsApp solo va a quien NO tiene push (evita duplicar el push
@@ -964,7 +967,7 @@ export async function avisarLlegadaWhatsApp(
         PLANTILLA_LLEGADA,
         PLANTILLA_IDIOMA,
         [primerNombre, paradaNombre],
-        phoneAvisos(),
+        await phoneAvisos(),
       );
       await logNotificacion({ reservaId, pasajeroId: pas.id, tipo: "whatsapp", estado: "enviado", destinatario: tel, trigger: "proximidad_llego" });
     } catch (e: any) {

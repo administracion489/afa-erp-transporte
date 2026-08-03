@@ -5,21 +5,19 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verificarUsuarioApi } from "@/lib/api-auth";
+import { wabaPara, type Uso } from "@/lib/whatsapp-numeros";
 
 const GRAPH = "https://graph.facebook.com/v25.0";
-
-// IDs de WABA (no son secretos — identifican la cuenta, no autentican nada).
-const WABA: Record<string, string> = {
-  crm:    "428943170988671",   // Afa Transporte (clientes, +51 966707225)
-  avisos: "1336334522036982",  // Afa Notificaciones (+51 905438216)
-};
 
 export async function GET(req: NextRequest) {
   const auth = await verificarUsuarioApi(req, "crm");
   if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
 
-  const numero = req.nextUrl.searchParams.get("numero") === "crm" ? "crm" : "avisos";
-  const waba = WABA[numero];
+  // El WABA sale de whatsapp_numeros según el uso (con respaldo a los ids históricos),
+  // ya no de un mapa escrito a mano: así un número nuevo trae sus propias plantillas.
+  const uso: Uso = req.nextUrl.searchParams.get("numero") === "crm" ? "crm" : "avisos";
+  const waba = await wabaPara(uso);
+  if (!waba) return NextResponse.json({ error: `Sin WABA para "${uso}"` }, { status: 400 });
   const token = process.env.META_WA_TOKEN;
   if (!token) return NextResponse.json({ error: "META_WA_TOKEN no configurado" }, { status: 400 });
 
@@ -30,7 +28,7 @@ export async function GET(req: NextRequest) {
     );
     const data = await res.json();
     if (!res.ok) return NextResponse.json({ error: data.error?.message ?? "Error Meta" }, { status: 500 });
-    return NextResponse.json({ waba, numero, plantillas: data.data ?? [] });
+    return NextResponse.json({ waba, numero: uso, plantillas: data.data ?? [] });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });
   }

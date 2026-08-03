@@ -876,10 +876,12 @@ export default function CRMPage() {
   );
 }
 
-// ── Vincular el WhatsApp Business del celular (966707225) al CRM ──────────
+// ── Vincular un WhatsApp Business del celular al CRM ─────────────────────────
 // Mismo flujo que public/conectar-whatsapp.html (Embedded Signup de Meta,
-// featureType "whatsapp_business_app_onboarding" = coexistencia), pero
-// embebido como modal para no salir del CRM ni depender de recordar la URL.
+// featureType "whatsapp_business_app_onboarding" = coexistencia), pero embebido como
+// modal para no salir del CRM. El número lo elige el usuario en la ventana de Meta:
+// aquí no hay ninguno fijo. Al terminar, el número se registra en whatsapp_numeros
+// para que además de recibir se pueda ENVIAR por él.
 declare global {
   interface Window { FB?: any; fbAsyncInit?: () => void; }
 }
@@ -887,10 +889,30 @@ declare global {
 const WA_APP_ID = "1776032736701552";
 const WA_CONFIG_ID = "1912835406054543";
 
+async function registrarNumero(phoneId: string, wabaId?: string): Promise<string> {
+  try {
+    const { data: s } = await supabase.auth.getSession();
+    const r = await fetch("/api/crm/whatsapp/registrar", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${s?.session?.access_token ?? ""}`,
+      },
+      body: JSON.stringify({ phone_number_id: phoneId, waba_id: wabaId }),
+    });
+    const d = await r.json();
+    if (!r.ok) return `Conectado en Meta, pero no quedó registrado: ${d.error ?? r.status}`;
+    return `Registrado como "${d.numero?.alias}". Asígnale un uso en Configuración para enviar por él.`;
+  } catch (e: any) {
+    return `Conectado en Meta, pero falló el registro: ${e?.message ?? e}`;
+  }
+}
+
 function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
   const [paso, setPaso] = useState<"cargando" | "listo" | "conectando" | "ok" | "error">("cargando");
   const [detalle, setDetalle] = useState<string>("");
   const [codigo, setCodigo] = useState<string>("");
+  const [registro, setRegistro] = useState<string>("");
 
   useEffect(() => {
     function onMensaje(event: MessageEvent) {
@@ -900,9 +922,11 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
         if (data.type !== "WA_EMBEDDED_SIGNUP") return;
         if (["FINISH", "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING", "FINISH_ONLY_WABA"].includes(data.event)) {
           setPaso("ok");
-          setDetalle(
-            `phone_number_id: ${data.data?.phone_number_id ?? "—"} · waba_id: ${data.data?.waba_id ?? "—"}`
-          );
+          const phoneId = data.data?.phone_number_id;
+          const wabaId  = data.data?.waba_id;
+          setDetalle(`phone_number_id: ${phoneId ?? "—"} · waba_id: ${wabaId ?? "—"}`);
+          // Guardarlo para poder ENVIAR por este número, no sólo recibir.
+          if (phoneId) registrarNumero(phoneId, wabaId).then(setRegistro);
         } else if (data.event === "CANCEL") {
           setPaso("error");
           setDetalle(`Se canceló en: ${data.data?.current_step ?? "?"}`);
@@ -994,7 +1018,8 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
         {paso === "ok" && (
           <div className="mt-4 bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-left text-xs text-emerald-800">
             <b>Número conectado en Meta ✓</b>
-            <div className="mt-1">{detalle}</div>
+            <div className="mt-1 font-mono break-all">{detalle}</div>
+            {registro && <div className="mt-2 pt-2 border-t border-emerald-200">{registro}</div>}
           </div>
         )}
         {paso === "error" && (

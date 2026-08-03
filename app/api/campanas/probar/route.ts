@@ -6,8 +6,8 @@
 // puede probar ANTES de que aprueben las plantillas propias.
 
 import { NextRequest, NextResponse } from "next/server";
-import { enviarWhatsAppPlantilla, phoneCrm } from "@/lib/crm-meta";
-import { phoneAvisos } from "@/lib/notificaciones";
+import { enviarWhatsAppPlantilla } from "@/lib/crm-meta";
+import { phonePara, porPhoneId, type Uso } from "@/lib/whatsapp-numeros";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 
 /** Normaliza a formato Meta (solo dígitos, con código de país Perú). */
@@ -25,18 +25,17 @@ export async function POST(req: NextRequest) {
     const { telefono, plantilla, idioma, parametros, numero } = await req.json();
     if (!telefono) return NextResponse.json({ error: "telefono requerido" }, { status: 400 });
 
-    // Cuál de los 2 números oficiales usar:
-    //   'avisos' → +51 905438216 (notificaciones)  |  'crm' → +51 966707225 (atención + campañas)
-    const usarCrm  = numero === "crm";
-    const phoneId  = usarCrm ? phoneCrm() : phoneAvisos();
+    // Desde qué número probar. Sale de whatsapp_numeros según el uso.
+    const usarCrm = numero === "crm";
+    const uso: Uso = usarCrm ? "crm" : "avisos";
+    const phoneId = await phonePara(uso);
     if (!phoneId) {
       return NextResponse.json(
-        { error: usarCrm
-            ? "Falta META_PHONE_NUMBER_ID (número del CRM) en las variables de entorno."
-            : "Falta META_PHONE_NUMBER_ID_AVISOS (número de avisos) en las variables de entorno (Vercel)." },
+        { error: `No hay número de WhatsApp para "${uso}": márcalo en whatsapp_numeros o configura la variable de entorno correspondiente.` },
         { status: 400 },
       );
     }
+    const numeroInfo = await porPhoneId(phoneId);
 
     const to = normalizar(String(telefono));
     const tpl = (plantilla || "hello_world").trim();
@@ -46,7 +45,9 @@ export async function POST(req: NextRequest) {
     const id = await enviarWhatsAppPlantilla(to, tpl, lang, parametros ?? [], phoneId);
     return NextResponse.json({
       ok: true, enviadoA: to, plantilla: tpl, idioma: lang,
-      desde: usarCrm ? "CRM (966707225)" : "Avisos (905438216)",
+      desde: numeroInfo
+        ? `${numeroInfo.alias} (${numeroInfo.display_phone_number ?? phoneId})`
+        : uso,
       phoneId, messageId: id,
     });
   } catch (e: any) {

@@ -13,13 +13,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verificarUsuarioApi } from "@/lib/api-auth";
 import { refrescarCache } from "@/lib/plantilla-texto";
+import { wabaPara, type Uso } from "@/lib/whatsapp-numeros";
 
 const GRAPH = "https://graph.facebook.com/v25.0";
 
-const WABA: Record<string, string> = {
-  crm:    "428943170988671",   // Afa Transporte (clientes/campañas, +51 966707225)
-  avisos: "1336334522036982",  // Afa Notificaciones (+51 905438216)
-};
+// El WABA sale de whatsapp_numeros (wabaPara), no de un mapa fijo.
 
 function extraerVars(texto: string): string[] {
   return [...new Set((texto.match(/\{\{\s*\d+\s*\}\}/g) ?? []).map((v) => v.replace(/\s/g, "")))].sort();
@@ -29,13 +27,15 @@ export async function GET(req: NextRequest) {
   const auth = await verificarUsuarioApi(req, "configuracion");
   if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
 
-  const numero = req.nextUrl.searchParams.get("numero") === "crm" ? "crm" : "avisos";
+  const uso: Uso = req.nextUrl.searchParams.get("numero") === "crm" ? "crm" : "avisos";
   const token = process.env.META_WA_TOKEN;
   if (!token) return NextResponse.json({ error: "META_WA_TOKEN no configurado" }, { status: 400 });
+  const waba = await wabaPara(uso);
+  if (!waba) return NextResponse.json({ error: `Sin WABA para "${uso}"` }, { status: 400 });
 
   try {
     const res = await fetch(
-      `${GRAPH}/${WABA[numero]}/message_templates?fields=id,name,status,language,category,components&limit=100`,
+      `${GRAPH}/${waba}/message_templates?fields=id,name,status,language,category,components&limit=100`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     const data = await res.json();
@@ -51,7 +51,7 @@ export async function GET(req: NextRequest) {
     });
     // Calentar el caché de textos: el canal EMAIL reusa estos mismos bodies y no puede
     // llamar a esta ruta (exige sesión de usuario). Best-effort, no bloquea la respuesta.
-    if (numero === "avisos") {
+    if (uso === "avisos") {
       await refrescarCache(
         plantillas
           .filter((p: any) => p.body)
@@ -59,7 +59,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    return NextResponse.json({ numero, plantillas });
+    return NextResponse.json({ numero: uso, plantillas });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
@@ -82,7 +82,7 @@ export async function POST(req: NextRequest) {
   // parámetros extra al enviar el aviso (a diferencia de los botones dinámicos que ya usa
   // recordatorio_conductor, esos sí llevan {{1}} y se arman en lib/notificaciones.ts).
   if (payload.accion === "crear") {
-    const numero = payload.numero === "crm" ? "crm" : "avisos";
+    const uso: Uso = payload.numero === "crm" ? "crm" : "avisos";
     const name = String(payload.name ?? "").trim().toLowerCase();
     const category = payload.category === "MARKETING" ? "MARKETING" : "UTILITY";
     const bodyTexto = String(payload.body ?? "").trim();
@@ -112,7 +112,9 @@ export async function POST(req: NextRequest) {
     ];
 
     try {
-      const rCrear = await fetch(`${GRAPH}/${WABA[numero]}/message_templates`, {
+      const wabaCrear = await wabaPara(uso);
+      if (!wabaCrear) return NextResponse.json({ error: `Sin WABA para "${uso}"` }, { status: 400 });
+      const rCrear = await fetch(`${GRAPH}/${wabaCrear}/message_templates`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ name, language: "es", category, components }),

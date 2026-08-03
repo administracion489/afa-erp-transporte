@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { responderConIA } from "@/lib/crm-ia";
+import { esNumeroDeAvisos } from "@/lib/whatsapp-numeros";
 
 const db = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
@@ -42,7 +43,7 @@ export async function POST(req: NextRequest) {
         // campañas). Un pasajero que responde a un recordatorio NO debe recibir al
         // bot de ventas: se registra el mensaje y el opt-in/baja, pero sin IA.
         const phoneId  = val.metadata?.phone_number_id;
-        const esAvisos = !!phoneId && phoneId === process.env.META_PHONE_NUMBER_ID_AVISOS;
+        const esAvisos = await esNumeroDeAvisos(phoneId);
 
         for (const msg of val.messages ?? []) {
           const convId = await processarMensaje({

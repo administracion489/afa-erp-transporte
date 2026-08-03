@@ -7,6 +7,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@supabase/supabase-js";
 import { enviarWhatsApp, enviarMessenger, enviarInstagram } from "@/lib/crm-meta";
 import { enviarEmail } from "@/lib/crm-gmail";
+import { phonePara } from "@/lib/whatsapp-numeros";
 
 const anthropic = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
 
@@ -435,7 +436,9 @@ async function enviarPorCanal(sb: SB, conv: any, contacto: any, texto: string): 
   let gmailMsgId: string | null = null;
   let error: string | null = null;
   try {
-    if (conv.canal === "whatsapp" && contacto?.wa_id) metaId = await enviarWhatsApp(contacto.wa_id, texto);
+    // Por el mismo número que usó el cliente (ver app/api/crm/mensajes/enviar).
+    if (conv.canal === "whatsapp" && contacto?.wa_id)
+      metaId = await enviarWhatsApp(contacto.wa_id, texto, conv.phone_number_id ?? (await phonePara("crm")));
     else if (conv.canal === "messenger" && contacto?.fb_psid) metaId = await enviarMessenger(contacto.fb_psid, texto);
     else if (conv.canal === "instagram" && contacto?.ig_id) metaId = await enviarInstagram(contacto.ig_id, texto);
     else if (conv.canal === "gmail" && contacto?.gmail_email) {
@@ -492,7 +495,7 @@ export async function responderConIA(
   // Conversación + contacto
   const { data: conv } = await sb
     .from("crm_conversaciones")
-    .select("id, canal, estado, asunto, gmail_thread_id, pipeline_id, ia_pausada, contacto_id, crm_contactos(*)")
+    .select("id, canal, estado, asunto, gmail_thread_id, pipeline_id, ia_pausada, contacto_id, phone_number_id, crm_contactos(*)")
     .eq("id", convId)
     .single();
   if (!conv) return { ok: false, accion: "omitido", error: "Conversación no encontrada." };

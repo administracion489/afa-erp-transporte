@@ -231,7 +231,7 @@ export async function procesarComunicado(
 
   const plantilla = com.wa_plantilla?.trim() || PLANTILLA_DEFECTO;
   const idioma = com.wa_idioma?.trim() || "es";
-  const phoneWa = phoneAvisos();
+  const phoneWa = await phoneAvisos();
 
   let procesados = 0;
   for (const envio of lote) {
@@ -335,7 +335,7 @@ export async function enviarPrueba(
   const empresa = await empresaDe(com.cliente_id);
 
   if (canal === "whatsapp") {
-    const phoneWa = phoneAvisos();
+    const phoneWa = await phoneAvisos();
     if (!phoneWa) throw new Error("META_PHONE_NUMBER_ID_AVISOS no configurado");
     const pdf = await asegurarPdf(comunicadoId);
     if (!pdf) throw new Error("Para WhatsApp adjunta al menos una imagen o un PDF (se envía como documento).");

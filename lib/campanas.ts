@@ -18,7 +18,8 @@
 // doble envío cuando el cron y el botón "Continuar" corren a la vez.
 
 import { createClient } from "@supabase/supabase-js";
-import { enviarWhatsAppPlantilla, phoneCrm } from "@/lib/crm-meta";
+import { enviarWhatsAppPlantilla } from "@/lib/crm-meta";
+import { phonePara } from "@/lib/whatsapp-numeros";
 import { enviarEmail } from "@/lib/notificaciones";
 
 const db = createClient(
@@ -153,8 +154,14 @@ export async function procesarCampana(
   if (!c) throw new Error("Campaña no encontrada");
   const campana = c as Campana;
   if (campana.estado === "cancelada") return { ok: false, procesados: 0, restantes: 0, estado: "cancelada" };
-  if (campana.canal === "whatsapp" && !phoneCrm()) {
-    throw new Error("Falta META_PHONE_NUMBER_ID (número del CRM, +51 966707225)");
+  // Número de salida de las campañas: el marcado `usa_campanas` en whatsapp_numeros,
+  // con respaldo a META_PHONE_NUMBER_ID. Se resuelve una vez por lote, no por envío.
+  const phoneCampanas = campana.canal === "whatsapp" ? await phonePara("campanas") : undefined;
+  if (campana.canal === "whatsapp" && !phoneCampanas) {
+    throw new Error(
+      "No hay número de WhatsApp para campañas: marca uno con `usa_campanas` en whatsapp_numeros " +
+        "o configura META_PHONE_NUMBER_ID.",
+    );
   }
 
   // Recuperación: re-encolar filas 'procesando' colgadas (worker que murió a mitad).
@@ -205,7 +212,7 @@ export async function procesarCampana(
           campana.plantilla!,
           campana.idioma ?? "es",
           params,
-          phoneCrm(),   // campañas salen del número del CRM
+          phoneCampanas,
         );
       } else {
         const asunto = personalizar(campana.asunto ?? "", { nombre, empresa });
