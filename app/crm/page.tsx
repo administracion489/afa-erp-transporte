@@ -149,7 +149,11 @@ export default function CRMPage() {
 
     if (canalFiltro !== "todos") q = q.eq("canal", canalFiltro);
 
-    if (numeroFiltro !== "todos") q = q.eq("display_phone_number", numeroFiltro);
+    // Sólo aplica a WhatsApp: los demás canales no tienen número de la empresa, así que
+    // filtrar por él los dejaría a todos fuera con el selector ya oculto — una lista
+    // vacía sin motivo visible.
+    const filtraNumero = numeroFiltro !== "todos" && (canalFiltro === "todos" || canalFiltro === "whatsapp");
+    if (filtraNumero) q = q.eq("display_phone_number", numeroFiltro);
 
     const { data } = await q.limit(80);
 
@@ -260,9 +264,14 @@ export default function CRMPage() {
     const texto = base.trim();
     if (override === undefined) setReply("");
 
+    // La ruta exige sesión: envía texto libre a clientes reales.
+    const { data: s } = await supabase.auth.getSession();
     const res = await fetch("/api/crm/mensajes/enviar", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${s?.session?.access_token ?? ""}`,
+      },
       body: JSON.stringify({ conversacion_id: selected.id, texto }),
     });
     const data = await res.json();

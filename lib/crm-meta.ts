@@ -19,12 +19,20 @@ export async function enviarWhatsApp(to: string, texto: string, phoneId?: string
   const phone = phoneId ?? process.env.META_PHONE_NUMBER_ID;
   if (!phone) throw new Error("META_PHONE_NUMBER_ID no configurado");
 
-  // Limpieza y formateo del número para Perú
-  let limpioTo = to.replace(/\D/g, ""); 
-
-  if (limpioTo.startsWith("51") && limpioTo.length === 11) {
-    limpioTo = "519" + limpioTo.substring(2);
-  }
+  // Normalización a E.164 sin "+", igual que normalizarTelefono() de notificaciones.ts
+  // y comunicados.ts y normalizar() de campanas/probar: un móvil peruano son 9 dígitos
+  // y con prefijo país queda en 11.
+  //
+  // OJO — aquí vivía `if (startsWith("51") && length === 11) "519" + substring(2)`, que
+  // insertaba un 9 de más: 51987654321 → 519987654321. Perú no tiene el prefijo extra de
+  // móvil de México (521) ni Argentina (549), así que ese caso NUNCA era correcto; con
+  // un wa_id bien formado (los del webhook siempre lo están) se cumplía SIEMPRE. El
+  // propio número de la empresa, 51966707225, acababa como 519966707225.
+  // Se añadió el 2026-07-08 13:28 (d8e5d65) y 54 min después (82d8a99) el Inbox se
+  // desvió a la plantilla hello_world, la única ruta que lo esquivaba: de ahí venía que
+  // los clientes recibieran "Hello World". Quitar esto es lo que arregla la causa.
+  const d = to.replace(/\D/g, "");
+  const limpioTo = d.length === 9 ? "51" + d : d;
 
   const res = await fetch(`${GRAPH}/${phone}/messages`, {
     method: "POST",

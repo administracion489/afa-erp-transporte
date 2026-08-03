@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { enviarWhatsApp, enviarMessenger, enviarInstagram } from "@/lib/crm-meta";
 import { enviarEmail } from "@/lib/crm-gmail";
 import { phonePara } from "@/lib/whatsapp-numeros";
+import { verificarUsuarioApi } from "@/lib/api-auth";
 
 const db = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
@@ -11,6 +12,13 @@ const db = () =>
 
 export async function POST(req: NextRequest) {
   try {
+    // Esta ruta manda texto LIBRE a clientes reales por WhatsApp/Messenger/Instagram y
+    // por correo. Estaba abierta: cualquiera que conociera un conversacion_id podía
+    // escribirle a un cliente en nombre de la empresa. Pesaba menos cuando sólo enviaba
+    // la plantilla hello_world; ahora envía lo que le manden, así que va con guard.
+    const auth = await verificarUsuarioApi(req, "crm");
+    if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+
     const { conversacion_id, texto, usuario_id } = await req.json();
     if (!conversacion_id || !texto?.trim()) {
       return NextResponse.json({ error: "Faltan datos" }, { status: 400 });

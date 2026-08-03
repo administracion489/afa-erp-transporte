@@ -53,24 +53,37 @@ export async function POST(req: NextRequest) {
     { auth: { autoRefreshToken: false, persistSession: false } },
   );
 
-  // Sin usos marcados a propósito: activarlo para CRM o avisos desplazaría al número
-  // que hoy cumple ese papel (los índices únicos lo impiden) y cambiaría en silencio
-  // por dónde salen los mensajes. Se asigna a mano desde la configuración.
-  const { data, error } = await db
+  // display_phone_number también es UNIQUE, así que un upsert por phone_number_id no
+  // basta: si el mismo número físico se reconecta y Meta le da otro phone_number_id,
+  // el upsert intenta INSERTAR y choca contra ese otro índice con un error críptico.
+  // Por eso se busca antes por cualquiera de las dos claves.
+  const { data: existente } = await db
     .from("whatsapp_numeros")
-    .upsert(
-      {
-        phone_number_id: String(phone_number_id),
-        display_phone_number: display,
-        waba_id: waba_id ? String(waba_id) : null,
-        alias: (alias || nombreMeta || display || "Número nuevo").toString().slice(0, 60),
-        activo: true,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "phone_number_id" },
+    .select("*")
+    .or(
+      display
+        ? `phone_number_id.eq.${phone_number_id},display_phone_number.eq.${display}`
+        : `phone_number_id.eq.${phone_number_id}`,
     )
-    .select()
-    .single();
+    .maybeSingle();
+
+  // Sin usos a propósito: activarlos aquí desplazaría al número que hoy cumple ese
+  // papel y cambiaría en silencio por dónde salen los mensajes. Se asignan a mano.
+  // `activo` NO se fuerza al actualizar: si alguien dio de baja un número, reconectarlo
+  // no debe revivirlo con sus usos intactos (y el índice único parcial daría un 500).
+  const fila = {
+    phone_number_id: String(phone_number_id),
+    display_phone_number: display,
+    waba_id: waba_id ? String(waba_id) : existente?.waba_id ?? null,
+    alias: (alias || nombreMeta || existente?.alias || display || "Número nuevo").toString().slice(0, 60),
+    updated_at: new Date().toISOString(),
+  };
+
+  const q = existente
+    ? db.from("whatsapp_numeros").update(fila).eq("id", existente.id)
+    : db.from("whatsapp_numeros").insert({ ...fila, activo: true });
+
+  const { data, error } = await q.select().single();
 
   if (error) {
     return NextResponse.json(

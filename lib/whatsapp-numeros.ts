@@ -128,7 +128,14 @@ export async function porPhoneId(phoneId: string): Promise<NumeroWhatsApp | unde
  */
 export async function esNumeroDeAvisos(phoneId: string | undefined): Promise<boolean> {
   if (!phoneId) return false;
+
+  // El entorno se consulta PRIMERO y manda. Si sólo se mirara la fila, registrar el
+  // número de avisos desde el modal lo rompería: /registrar lo guarda sin usos
+  // (usa_avisos = false a propósito, para no desplazar en silencio al número que hoy
+  // cumple ese papel), así que la fila existiría diciendo "no soy avisos" y el bot de
+  // ventas se pondría a contestarle a los pasajeros que responden un recordatorio.
+  if (phoneId === envPhone("avisos")) return true;
+
   const fila = await porPhoneId(phoneId);
-  if (fila) return fila.usa_avisos;
-  return phoneId === envPhone("avisos");
+  return fila?.usa_avisos ?? false;
 }
