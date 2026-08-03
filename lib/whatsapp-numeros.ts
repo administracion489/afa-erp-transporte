@@ -34,13 +34,20 @@ const COLUMNA_USO: Record<Uso, keyof NumeroWhatsApp> = {
 
 // WABA histórico de cada uso, para cuando la fila existe pero le falta waba_id (por
 // ejemplo si se registró desde el Embedded Signup antes de que Meta lo devolviera).
-const WABA_FALLBACK: Record<Uso, string | undefined> = {
+// Se exporta porque /api/crm/whatsapp/detectar los usa como punto de partida para
+// preguntarle a Meta qué números tiene cada cuenta.
+export const WABA_FALLBACK: Record<Uso, string | undefined> = {
   crm: "428943170988671",       // Afa Transporte (+51 966707225)
   campanas: "428943170988671",  // las campañas salen del mismo número que el CRM
   avisos: "1336334522036982",   // Afa Notificaciones (+51 905438216)
 };
 
-function envPhone(uso: Uso): string | undefined {
+/**
+ * Número que el entorno tiene configurado para un uso. Es el respaldo mientras la tabla
+ * esté vacía, y además lo que /api/crm/whatsapp/detectar consulta para deducir los usos
+ * al sembrar por primera vez: así la migración no cambia por dónde sale ningún mensaje.
+ */
+export function envPhone(uso: Uso): string | undefined {
   if (uso === "avisos") {
     // Nombre canónico y el histórico, que sigue configurado en algunos entornos.
     return process.env.META_PHONE_NUMBER_ID_AVISOS ?? process.env.META_PHONE_NUMBER_ID_PASAJEROS;

@@ -917,11 +917,59 @@ async function registrarNumero(phoneId: string, wabaId?: string): Promise<string
   }
 }
 
+type NumeroFila = {
+  id: string; alias: string; display_phone_number: string | null;
+  usa_crm: boolean; usa_avisos: boolean; usa_campanas: boolean; activo: boolean;
+};
+
 function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
   const [paso, setPaso] = useState<"cargando" | "listo" | "conectando" | "ok" | "error">("cargando");
   const [detalle, setDetalle] = useState<string>("");
   const [codigo, setCodigo] = useState<string>("");
   const [registro, setRegistro] = useState<string>("");
+  // null = aún cargando; [] = la tabla existe pero está vacía, o todavía no se creó.
+  const [numerosTabla, setNumerosTabla] = useState<NumeroFila[] | null>(null);
+  const [detectando, setDetectando] = useState(false);
+  const [resultadoDeteccion, setResultadoDeteccion] = useState<string>("");
+
+  const cargarTabla = useCallback(async () => {
+    // Si la tabla aún no existe el error se ignora: se muestra la lista vacía con la
+    // explicación de que se está usando el respaldo del entorno.
+    const { data } = await supabase
+      .from("whatsapp_numeros")
+      .select("id, alias, display_phone_number, usa_crm, usa_avisos, usa_campanas, activo")
+      .order("alias");
+    setNumerosTabla((data ?? []) as NumeroFila[]);
+  }, []);
+
+  useEffect(() => { cargarTabla(); }, [cargarTabla]);
+
+  const detectar = async () => {
+    setDetectando(true);
+    setResultadoDeteccion("");
+    try {
+      const { data: s } = await supabase.auth.getSession();
+      const r = await fetch("/api/crm/whatsapp/detectar", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${s?.session?.access_token ?? ""}` },
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        setResultadoDeteccion(`No se pudo detectar: ${d.error ?? r.status}`);
+      } else {
+        const partes: string[] = [];
+        if (d.creados?.length) partes.push(`Nuevos: ${d.creados.join(", ")}`);
+        if (d.actualizados?.length) partes.push(`Actualizados: ${d.actualizados.join(", ")}`);
+        if (!partes.length) partes.push("Sin cambios: ya estaba todo registrado.");
+        if (d.avisos?.length) partes.push(`Avisos: ${d.avisos.join(" · ")}`);
+        setResultadoDeteccion(partes.join("\n"));
+        await cargarTabla();
+      }
+    } catch (e: any) {
+      setResultadoDeteccion(`Error al detectar: ${e?.message ?? e}`);
+    }
+    setDetectando(false);
+  };
 
   useEffect(() => {
     function onMensaje(event: MessageEvent) {
@@ -935,7 +983,12 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
           const wabaId  = data.data?.waba_id;
           setDetalle(`phone_number_id: ${phoneId ?? "—"} · waba_id: ${wabaId ?? "—"}`);
           // Guardarlo para poder ENVIAR por este número, no sólo recibir.
-          if (phoneId) registrarNumero(phoneId, wabaId).then(setRegistro);
+          if (phoneId) {
+            registrarNumero(phoneId, wabaId).then((msg) => {
+              setRegistro(msg);
+              cargarTabla();   // que el número recién conectado salga en la lista de arriba
+            });
+          }
         } else if (data.event === "CANCEL") {
           setPaso("error");
           setDetalle(`Se canceló en: ${data.data?.current_step ?? "?"}`);
@@ -982,15 +1035,85 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
     );
   };
 
+  const USOS: { campo: keyof NumeroFila; etiqueta: string }[] = [
+    { campo: "usa_crm", etiqueta: "Atención" },
+    { campo: "usa_avisos", etiqueta: "Avisos" },
+    { campo: "usa_campanas", etiqueta: "Campañas" },
+  ];
+
   return (
     <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 text-center">
-        <h3 className="text-lg font-bold text-[#0b315f] mb-1">Conectar WhatsApp</h3>
-        <p className="text-sm text-gray-500 mb-4">
-          Vincula un WhatsApp Business al CRM sin dejar de usarlo desde el celular. El número
-          lo eliges tú en la ventana de Meta: puede ser uno ya existente o uno nuevo. Ten a mano
-          el celular donde está esa cuenta.
-        </p>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 text-center max-h-[92vh] overflow-y-auto">
+        <h3 className="text-lg font-bold text-[#0b315f] mb-1">Números de WhatsApp</h3>
+
+        {/* ── Números ya registrados ── */}
+        <div className="text-left mt-4 mb-5">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+              Registrados
+            </span>
+            <button
+              onClick={detectar}
+              disabled={detectando}
+              title="Preguntarle a Meta qué números tienes y registrarlos"
+              className="text-xs font-semibold px-2.5 py-1 rounded-lg border border-[#0b315f]/30 text-[#0b315f] hover:bg-[#0b315f]/5 disabled:opacity-40"
+            >
+              {detectando ? "Detectando…" : "↻ Detectar números"}
+            </button>
+          </div>
+
+          {numerosTabla === null ? (
+            <p className="text-xs text-gray-400 py-2">Cargando…</p>
+          ) : numerosTabla.length === 0 ? (
+            <p className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-xl p-3">
+              Todavía no hay números registrados. Toca <b>Detectar números</b> para que el ERP
+              se los pida a Meta. Mientras tanto se usan los de las variables de entorno, así
+              que los envíos siguen funcionando igual.
+            </p>
+          ) : (
+            <div className="rounded-xl border border-gray-100 overflow-hidden">
+              {numerosTabla.map((n) => (
+                <div key={n.id} className="px-3 py-2 border-b last:border-b-0 border-gray-50">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="text-sm font-medium text-gray-800">{n.alias}</span>
+                    <span className="text-xs text-gray-400 font-mono">
+                      {n.display_phone_number ? formatearNumero(n.display_phone_number) : "sin número"}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {USOS.filter((u) => n[u.campo]).map((u) => (
+                      <span key={u.campo} className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 font-medium">
+                        {u.etiqueta}
+                      </span>
+                    ))}
+                    {!USOS.some((u) => n[u.campo]) && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">
+                        sin uso asignado — no envía
+                      </span>
+                    )}
+                    {!n.activo && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-50 text-red-600">inactivo</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {resultadoDeteccion && (
+            <p className="text-xs text-gray-600 mt-2 whitespace-pre-line bg-gray-50 border border-gray-200 rounded-xl p-2.5">
+              {resultadoDeteccion}
+            </p>
+          )}
+        </div>
+
+        {/* ── Conectar uno nuevo ── */}
+        <div className="border-t border-gray-100 pt-4">
+          <p className="text-sm text-gray-500 mb-3 text-left">
+            <b className="text-[#0b315f]">Conectar otro número.</b> Vincula un WhatsApp Business
+            al CRM sin dejar de usarlo desde el celular. El número lo eliges tú en la ventana de
+            Meta: puede ser uno ya existente o uno nuevo. Ten a mano el celular donde está esa cuenta.
+          </p>
 
         <button
           onClick={lanzar}
@@ -1034,6 +1157,7 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
         {paso === "error" && (
           <div className="mt-4 bg-red-50 border border-red-200 rounded-xl p-3 text-left text-xs text-red-700">{detalle}</div>
         )}
+        </div>
 
         <button onClick={onClose} className="mt-5 text-xs text-gray-400 hover:text-gray-600">
           Cerrar
