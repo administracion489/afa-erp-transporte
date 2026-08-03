@@ -61,6 +61,12 @@ function db() {
 let cache: { filas: NumeroWhatsApp[]; hasta: number } | null = null;
 const TTL_MS = 5 * 60 * 1000;
 
+// El fallo TAMBIÉN se cachea, con una ventana corta. Mientras la tabla no exista (el
+// .sql se corre a mano) cada consulta falla, y sin esto un aviso a una reserva de 40
+// pasajeros dispararía 40 consultas fallidas: phoneAvisos() se llama por pasajero.
+// La ventana es corta para que, al correr por fin la migración, se note enseguida.
+const TTL_FALLO_MS = 60 * 1000;
+
 export function invalidarCacheNumeros() {
   cache = null;
 }
@@ -80,6 +86,7 @@ export async function listarNumeros(): Promise<NumeroWhatsApp[]> {
   // Tabla inexistente o RLS: se degrada a las env vars, no se rompe el envío.
   if (error) {
     console.warn("[whatsapp-numeros] no se pudo leer la tabla, usando env:", error.message);
+    cache = { filas: [], hasta: Date.now() + TTL_FALLO_MS };
     return [];
   }
 
