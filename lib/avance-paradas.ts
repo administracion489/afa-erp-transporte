@@ -124,6 +124,12 @@ const GLITCH_MAX_DT_S = 60;
 // estuvo a un kilómetro del paradero.
 const MIN_CERCA_A_M = 900;
 
+// Por debajo de esta distancia se da por hecho que el bus estuvo EN el paradero, y salir de ahí
+// es pasarlo — sin exigir la prueba de cruce (ver `cruzo`). Por encima, la dirección paradero→bus
+// sí es significativa. 120 m ≈ el radio de llegada mínimo de lib/proximidad.ts (clamp 120…250 m
+// según precisión), o sea el mismo criterio con el que el servidor ya declara "llegó".
+const CRUCE_EXENTO_M = 120;
+
 // Veto geométrico (ver `prepararRuta`): corredor perpendicular dentro del cual se considera que
 // un punto "va sobre la ruta", y margen de avance exigido sobre la polilínea.
 const PERP_CORREDOR_M = 70;
@@ -168,6 +174,11 @@ export type OpcionesAvance = {
 
 export type EstadoParada = {
   minDist: number;        // Infinity si nunca se alimentó
+  // Dónde estaba el BUS cuando alcanzó ese mínimo. Es lo que permite distinguir "cruzó el
+  // paradero y siguió" de "se acercó y volvió por donde vino": ambas cosas producen la misma
+  // distancia creciente, y sin esto la segunda se leía como un "ya pasó" que nunca ocurrió.
+  minLat: number | null;
+  minLng: number | null;
   lastD: number | null;
   recStreak: number;
   apprStreak: number;
@@ -297,7 +308,7 @@ function vetaGeometria(r: RutaProyeccion, fix: FixAvance, pLat: number, pLng: nu
 export function estadoAvanceVacio(n: number): EstadoAvance {
   return {
     porParada: Array.from({ length: Math.max(0, n) }, () => ({
-      minDist: Infinity, lastD: null, recStreak: 0, apprStreak: 0,
+      minDist: Infinity, minLat: null, minLng: null, lastD: null, recStreak: 0, apprStreak: 0,
       pasada: false, alejando: false, vetoTs: 0, vetoActivo: false,
     })),
     lastTs: 0, lastLat: null, lastLng: null, lastMovLat: null, lastMovLng: null,
@@ -429,13 +440,20 @@ export function avanzarAvance(
     // post-hueco borraba justo la evidencia que necesitan las dos señales fuertes, y un bus que
     // pasó por el paradero antes de perder señal ya no podía declararse pasado nunca más.
     if (resembrar) { s.recStreak = 0; s.apprStreak = 0; s.lastD = null; }
-    if (d < s.minDist) s.minDist = d;   // mínimo monótono
+    if (d < s.minDist) { s.minDist = d; s.minLat = fix.lat; s.minLng = fix.lng; }   // mínimo monótono
     if (quieto) continue;
 
     const gap     = d - s.minDist;
     const bajando = s.lastD != null && d < s.lastD - BAJANDO_M;
-    if (gap > GAP_ALEJA_M) { s.recStreak++; s.apprStreak = 0; }
-    else if (gap < GAP_CERCA_M || bajando) { s.apprStreak++; s.recStreak = 0; }
+    // `bajando` se evalúa PRIMERO. El original mira el gap antes, y entonces un bus que vuelve
+    // al paradero seguía contando como "alejándose" mientras su distancia superara el mínimo por
+    // más de 60 m — es decir, durante casi todo el regreso. Con el mínimo re-sembrado por el
+    // trinquete eso pasaba desapercibido; sin él, el aviso de "ya pasó" no llegaba a limpiarse
+    // aunque el bus estuviera volviendo a recoger. Acercarse de verdad (>40 m menos que la
+    // muestra anterior) es inequívoco y no puede leerse como alejamiento.
+    if (bajando)                   { s.apprStreak++; s.recStreak  = 0; }
+    else if (gap > GAP_ALEJA_M)    { s.recStreak++;  s.apprStreak = 0; }
+    else if (gap < GAP_CERCA_M)    { s.apprStreak++; s.recStreak  = 0; }
     // zona intermedia (25-60 m sin acercarse): conservar ambas rachas (pasajero, línea 937)
     s.lastD = d;
 
@@ -453,7 +471,24 @@ export function avanzarAvance(
     const masCercaDelSiguiente = sig != null && !juntas &&
       distM(fix.lat, fix.lng, Number(sig.lat), Number(sig.lng)) < d &&
       (!endurecer || s.minDist < MIN_CERCA_A_M);
-    const dejoAtrasClaro = s.minDist < MIN_CERCA_M && gap > GAP_ATRAS_M;
+    // ¿El bus CRUZÓ el paradero, o se acercó y volvió por donde vino? Las dos cosas producen
+    // exactamente la misma señal de "distancia creciente", y sin distinguirlas un bus que se
+    // aproximó a 300 m y retrocedió quedaba declarado "ya pasó" sin haber llegado nunca.
+    // Se compara la dirección paradero→bus en el punto MÁS CERCANO contra la de ahora: si el bus
+    // siguió de largo, quedó al otro lado y el producto escalar es negativo; si volvió sobre sus
+    // pasos, sigue del mismo lado y es positivo.
+    // Con el bus prácticamente EN el paradero (<120 m) esa dirección es puro ruido de GPS y no
+    // hace falta: estar ahí y salir ES pasar.
+    const cruzo = (() => {
+      if (s.minDist < CRUCE_EXENTO_M) return true;
+      if (s.minLat == null) return true;
+      const pLat = Number(paradas[i].lat), pLng = Number(paradas[i].lng);
+      const kLng = Math.cos((pLat * Math.PI) / 180);
+      const v1x = (s.minLng! - pLng) * kLng, v1y = s.minLat - pLat;
+      const v2x = (fix.lng - pLng) * kLng,   v2y = fix.lat - pLat;
+      return v1x * v2x + v1y * v2y < 0;
+    })();
+    const dejoAtrasClaro = s.minDist < MIN_CERCA_M && gap > GAP_ATRAS_M && cruzo;
     const sostenido      = s.recStreak >= RACHA_ALEJA;
 
     if (sostenido && (masCercaDelSiguiente || dejoAtrasClaro)) {
@@ -489,8 +524,20 @@ export function avanzarAvance(
       // El bus REGRESÓ y está cerca otra vez (fue al retorno / dio la vuelta a recoger).
       // Exigir cercanía (<400 m) distingue un retorno real de una curva de la vía que solo
       // acorta la distancia en recta mientras el bus se va de verdad.
-      s.alejando = false; s.pasada = false; s.minDist = d; s.recStreak = 0;
-      s.vetoTs = 0; s.vetoActivo = false;
+      //
+      // EL MÍNIMO SOLO SE RE-SIEMBRA SI HAY UN VEREDICTO QUE DESHACER. Ésta es una divergencia
+      // deliberada respecto del original (app/pasajero:962-971), que lo re-sembraba siempre.
+      // Motivo: re-sembrarlo incondicionalmente crea un TRINQUETE. Al salir de un paradero el
+      // bus todavía está a <400 m y su gap es pequeño, así que cae aquí; al asignar minDist = d
+      // el gap vuelve a 0, la muestra siguiente vuelve a caer aquí, y minDist va SUBIENDO
+      // pegado a la distancia real (medido: 0 → 400 m mientras el bus se alejaba). Como
+      // `dejoAtrasClaro` exige gap > 600 m, el veredicto "ya pasó" se retrasaba unos 400 m —
+      // y si REGRESO_M llegara a igualar MIN_CERCA_M (450) se volvería inalcanzable.
+      // Re-sembrar SÍ tiene sentido cuando se está revirtiendo un "ya pasó"/"se aleja": ahí le
+      // da al bus una oportunidad limpia en vez de re-disparar el aviso de inmediato. Cuando no
+      // hay nada que revertir, el mínimo monótono de más arriba ya hace lo correcto solo.
+      if (s.pasada || s.alejando) { s.minDist = d; s.vetoTs = 0; s.vetoActivo = false; }
+      s.alejando = false; s.pasada = false; s.recStreak = 0;
     }
   }
 
