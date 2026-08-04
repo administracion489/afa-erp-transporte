@@ -13,6 +13,8 @@ import {
   pegarIconoAVia, viasCercanasTilequery, esAccCruda, MAX_SEG_M,
 } from "@/lib/huella";
 import { animarMarcador } from "@/lib/anim-marker";
+import { useAvanceParadas } from "@/lib/useAvanceParadas";
+import { prepararRuta, type FixAvance, type MotivoPaso, type ParadaAvance } from "@/lib/avance-paradas";
 
 declare global { interface Window { mapboxgl: any; } }
 
@@ -56,6 +58,10 @@ type Props = {
   paradasJson?: any[] | null;
   origen?: string | null;
   destino?: string | null;
+  /** El modal lo ve el CLIENTE (portal), no el despachador. Cambia la redacción de lo inferido:
+   *  el cliente necesita saber en qué punto va su bus, no que el conductor incumplió el registro
+   *  — eso es información interna de operación y no se le imputa a nadie delante del cliente. */
+  modoCliente?: boolean;
   onClose: () => void;
 };
 
@@ -91,7 +97,7 @@ const fmtHoraTs = (ts: number) => // sin segundos, para el resumen del viaje
 
 export default function ModalGps({
   reservaId, vehiculoId, vehiculoTerceroId = null, vehiculoPlaca, conductorNombre,
-  conductorTel, clienteNombre, paradas, paradasJson, origen, destino, onClose,
+  conductorTel, clienteNombre, paradas, paradasJson, origen, destino, modoCliente = false, onClose,
 }: Props) {
   const mapRef    = useRef<HTMLDivElement>(null);
   const mapInst   = useRef<any>(null);
@@ -161,7 +167,20 @@ export default function ModalGps({
   const [etaKm,  setEtaKm]  = useState<number | null>(null);
   // Instante ABSOLUTO de llegada (ms epoch), congelado al recibir el ETA: lo que se pinta.
   const [etaLlegadaTs, setEtaLlegadaTs] = useState<number | null>(null);
+  // Índice de la parada para la que se pidió la estimación vigente. Sin esto, al avanzar el
+  // objetivo la hora de la parada ANTERIOR se seguiría pintando como si fuera la de la nueva.
+  const [etaDe, setEtaDe] = useState<number | null>(null);
+  // Google devolvió dos veces seguidas un rodeo absurdo hacia el objetivo: se dejó de preguntar.
+  // Hay que DECIRLO — si no, el panel se queda en "Calculando tiempo estimado…" para siempre.
+  const [etaSinRuta, setEtaSinRuta] = useState(false);
   const ultimoEtaRef = useRef(0);   // ms del último pedido de ETA a Google (piso anti doble cobro)
+  const etaRechazosRef = useRef(0); // respuestas de Google descartadas por rodeo absurdo (ver calcular)
+  const ultimoDestinoEtaRef = useRef<number | null>(null); // índice de parada del último ETA pedido
+  // Huella CRUDA para el motor direccional (lib/avance-paradas.ts). Va en un REF y no en estado:
+  // son hasta 35 000 puntos y meterlos en state re-renderizaría el modal entero cada 15 s.
+  // El contador de versión es la señal de "hay huella nueva" para el hook.
+  const puntosRef = useRef<FixAvance[]>([]);
+  const [huellaVer, setHuellaVer] = useState(0);
   // Control de cámara: si el usuario arrastra el mapa, dejamos de recentrar al vehículo
   const [mapDescentrado, setMapDescentrado] = useState(false);
   const mapDescentradoRef = useRef(false);
@@ -544,7 +563,17 @@ export default function ModalGps({
         // off-road de un fix de red de ±100 m). Luego limpiar UNA sola vez (colapsa rachas detenidas
         // + dedup en marcha). El mismo set limpio alimenta el dibujo (setHuella) y el ajuste por
         // ventanas → coherentes. crudos (ya anclado) alimenta telemetría/resumen/puentes.
-        const crudos = anclarImprecisos(filasAPuntos(arr));
+        const brutos = filasAPuntos(arr);
+        // Publicar el set BRUTO (no `crudos`, no `limpio`) para el motor direccional:
+        //  • anclarImprecisos PUEDE mover lat/lng de puntos ya consumidos cuando llega un vecino
+        //    confiable posterior → el veredicto parpadearía entre ciclos. Lo que ese anclaje
+        //    corrige (fixes de red) ya lo rechaza la puerta de precisión (acc ≤ 150 m) del motor.
+        //  • limpiarHuella colapsa cada detención a UN centroide y dedupea a 8 m → destruye la
+        //    cadencia sobre la que están calibradas las rachas del algoritmo.
+        // Cambiar esto "para mejorar la calidad" rompe la máquina en silencio. Ver sembrarAvance().
+        puntosRef.current = brutos;
+        if (!cancel) setHuellaVer(v => v + 1);
+        const crudos = anclarImprecisos(brutos);
         const limpio = conVelocidadColor(limpiarHuella(crudos));
         // `acc` viaja con cada punto: el dibujo marca `aprox` (gris punteado, no "medido") las
         // cuerdas >60 m con extremo crudo de red — el primer render ya no pinta el zigzag sólido.
@@ -927,6 +956,114 @@ export default function ModalGps({
     } catch (e) { console.error("[ModalGps] Error dibujando puentes:", e); }
   }, [puentes, mapListo, mostrarEstimados]);
 
+  const paradasDisplay = paradas.length > 0 ? paradas : paradasResueltas;
+
+  // ── AVANCE REAL DEL BUS (lib/avance-paradas.ts) ────────────────────────────
+  // Antes: `proximaParada = paradasDisplay.find(p => p.estado !== "completada")`. Eso no dice
+  // dónde va el bus, dice si alguien tocó un botón. Con el conductor sin marcar —lo habitual—
+  // el modal pedía a Google la ruta HACIA ATRÁS (vuelta en U) y pintaba una hora de llegada
+  // inventada que saltaba en cada refresco. Ahora el marcado sigue mandando (autoridad máxima)
+  // y el GPS solo añade un piso: piso = max(conductor, gps). Con marcado correcto la salida es
+  // idéntica a la de antes; con la huella vacía, también.
+
+  // Las paradas con lat/lng NULL en la base solo se geocodifican hacia `paradasResueltas`, que
+  // además EXCLUYE las que fallaron → los índices no son 1:1. Se fusionan por id y, si no, por
+  // nombre normalizado (la misma reconciliación que ya hacía el efecto de ETA).
+  const paradasAvance: ParadaAvance[] = useMemo(() => {
+    const norm = (s: string) => (s || "").trim().toLowerCase();
+    return paradasDisplay.map(p => {
+      let lat = p.lat, lng = p.lng;
+      if (lat == null || lng == null) {
+        const r = paradasResueltas.find(x => x.id === p.id) ||
+                  paradasResueltas.find(x => norm(x.nombre) === norm(p.nombre));
+        if (r) { lat = r.lat; lng = r.lng; }
+      }
+      return { lat: lat != null ? Number(lat) : null, lng: lng != null ? Number(lng) : null,
+               completada: p.estado === "completada" };
+    });
+  }, [paradasDisplay, paradasResueltas]);
+
+  const firmaAvance = useMemo(
+    () => paradasAvance.map(p => `${p.lat},${p.lng},${p.completada ? 1 : 0}`).join("|"),
+    [paradasAvance]
+  );
+
+  // Geometría de la ruta para el VETO del motor: suprime un "ya pasó" cuando el bus todavía va
+  // aguas arriba de la parada sobre la vía (desvío, retorno de avenida). Solo resta, nunca suma.
+  const rutaProy = useMemo(() => prepararRuta(ruta?.coordenadas), [ruta?.coordenadas]);
+
+  // La huella se entrega como LECTOR: el hook la consume solo cuando `huellaVer` dice que hay
+  // puntos nuevos, en vez de leer el ref en cada render del modal (que son varios por fix).
+  const leerHuellaAvance = useCallback(() => puntosRef.current, []);
+
+  // El fix en vivo alimenta el motor entre ciclos de huella (que llega cada 15 s).
+  const fixVivo: FixAvance | null = useMemo(() => {
+    if (!ubic) return null;
+    const ts = new Date(ubic.created_at || ubic.timestamp || 0).getTime();
+    if (!(ts > 0)) return null;
+    return { lat: Number(ubic.lat), lng: Number(ubic.lng), ts,
+             acc: Number.isFinite(Number(ubic.precision_m)) ? Number(ubic.precision_m) : 25 };
+  }, [ubic]);
+
+  const avance = useAvanceParadas({
+    paradas: paradasAvance,
+    firmaParadas: firmaAvance,
+    leerHuella: leerHuellaAvance,
+    huellaVersion: huellaVer,
+    fixVivo,
+    // El GPS congelado NO se filtra aquí: el motor ya lo neutraliza por geometría (puerta
+    // MOV_MIN_M — un fix re-enviado no se desplaza, así que no aporta dirección). Pasarlo como
+    // bandera cortaba también la SIEMBRA histórica y el avance ya inferido se desplomaba a cero
+    // en pantalla justo cuando el equipo del conductor falla.
+    opts: useMemo(() => ({ ruta: rutaProy }), [rutaProy]),
+  });
+
+  const proximaIdx    = avance.proximaIdx;
+  const proximaParada = proximaIdx != null ? paradasDisplay[proximaIdx] : undefined;
+  // El bus se aleja de la parada objetivo. Cede ante SIN SEÑAL (igual que en el app pasajero):
+  // es una afirmación en PRESENTE sobre el movimiento y no puede sostenerse con un GPS obsoleto.
+  // "Se aleja" es una afirmación en PRESENTE sobre el movimiento del bus. Cede ante todo lo que
+  // invalide esa afirmación: sin señal y GPS congelado (el dato no describe el ahora) y también
+  // precisión degradada — el header ya suprime el chip de avance con ±60 m de mediana, así que
+  // sería incoherente callar ahí y a la vez borrar el ETA por un veredicto del mismo lote de
+  // muestras. Con ese ruido, "gap > 60 m" se cumple por azar con el bus parado embarcando.
+  const seAleja       = avance.seAleja && !sinSenal && congeladoMin === 0 && avance.confianza !== "degradada";
+  // Motivo por parada, indexable desde el efecto de los marcadores. Ese efecto recorre
+  // `paradasResueltas` (el array geocodificado) y NO tiene por qué ser 1:1 con `paradasDisplay`
+  // —las paradas que no geocodifican se caen—, así que se busca por id y luego por nombre
+  // normalizado en vez de por posición: un desfase de índices pintaría el ✓ en la parada errónea.
+  const motivoPorParada = useMemo(() => {
+    const m = new Map<string, MotivoPaso>();
+    paradasDisplay.forEach((p, i) => {
+      const mo = avance.motivo[i] ?? null;
+      m.set(`id:${p.id}`, mo);
+      m.set(`n:${(p.nombre || "").trim().toLowerCase()}`, mo);
+    });
+    return m;
+  }, [paradasDisplay, avance.motivo]);
+  // Firma primitiva: sin esto los marcadores se recrearían en cada render (el Map es nuevo).
+  const firmaMotivos = avance.motivo.map(m => m ?? "-").join("");
+
+  // Distancia en línea recta bus → parada objetivo. Es lo único honesto que se puede mostrar
+  // cuando el bus se aleja: no depende de Google ni de suponer que va a dar la vuelta.
+  const distObjetivoM = useMemo(() => {
+    if (proximaIdx == null || !ubic) return null;
+    const p = paradasAvance[proximaIdx];
+    if (!p || p.lat == null || p.lng == null) return null;
+    return distM(Number(ubic.lat), Number(ubic.lng), p.lat, p.lng);
+  }, [proximaIdx, ubic, paradasAvance]);
+  // Se cuentan sobre paradasDisplay y no sobre el prop `paradas`: en el portal del cliente
+  // `paradas` puede venir vacío (todo sale de paradasResueltas) y el contador se quedaba
+  // permanentemente en "0/N · 0%".
+  const paradasComp   = avance.pasadas.filter(Boolean).length;
+  const compConductor = avance.motivo.filter(m => m === "conductor").length;
+  // "gps" (el motor la vio pasar) y "arrastre" (quedó detrás del piso, sin evidencia propia) son
+  // cosas distintas y NO pueden contarse juntas: el arrastre también lo produce el marcado del
+  // conductor, así que sumarlas hacía que un servicio sin GPS anunciara "7 detectadas por GPS".
+  const compGps       = avance.motivo.filter(m => m === "gps").length;
+  const compArrastre  = avance.motivo.filter(m => m === "arrastre").length;
+  const pct           = paradasDisplay.length > 0 ? Math.round((paradasComp / paradasDisplay.length) * 100) : 0;
+
   // ── Marcadores numerados con etiqueta de texto ────────────────────────────
 
   useEffect(() => {
@@ -945,11 +1082,20 @@ export default function ModalGps({
 
       const isFirst    = i === 0;
       const isLast     = i === total - 1;
-      const completada = p.estado === "completada";
+      // El motivo se busca por id/nombre y NO por posición: paradasResueltas puede no ser 1:1
+      // con paradasDisplay (las paradas que no geocodifican se caen del array).
+      const motivo = motivoPorParada.get(`id:${p.id}`)
+        ?? motivoPorParada.get(`n:${(p.nombre || "").trim().toLowerCase()}`)
+        ?? (p.estado === "completada" ? "conductor" : null);
+      const completada = motivo === "conductor";
+      const porGpsM    = motivo === "gps";
+      const inferida   = porGpsM || motivo === "arrastre";
 
-      const bg  = completada ? "#16a34a" : isFirst ? "#16a34a" : isLast ? "#dc2626" : "#0b315f";
+      // Ámbar, no verde: el verde es del conductor. Una parada inferida por GPS no puede
+      // pintarse igual que una confirmada por una persona.
+      const bg  = completada ? "#16a34a" : inferida ? "#d97706" : isFirst ? "#16a34a" : isLast ? "#dc2626" : "#0b315f";
       const tag = isFirst ? "ORIGEN" : isLast ? "DESTINO" : `PARADA ${i + 1}`;
-      const num = completada ? "✓" : String(i + 1);
+      const num = completada ? "✓" : inferida ? "↷" : String(i + 1);
 
       // wrapper: ancla de Mapbox — NO aplicar transform aquí (conflicto con translate de Mapbox)
       const wrapper = document.createElement("div");
@@ -972,7 +1118,8 @@ export default function ModalGps({
             </div>
             <p style="margin:2px 0 0;color:${bg};font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">${tag}</p>
             ${p.hora_estimada ? `<p style="margin:4px 0 0;color:#64748b;font-size:11px">⏰ ${p.hora_estimada.slice(0, 5)}</p>` : ""}
-            ${completada ? `<p style="margin:4px 0 0;color:#16a34a;font-weight:700;font-size:11px">✓ Completada</p>` : ""}
+            ${completada ? `<p style="margin:4px 0 0;color:#16a34a;font-weight:700;font-size:11px">✓ Completada (marcada por el conductor)</p>` : ""}
+            ${inferida ? `<p style="margin:4px 0 0;color:#d97706;font-weight:700;font-size:11px">↷ ${porGpsM ? "Pasada — detectado por GPS, sin marcar" : "Sin marcar — el vehículo ya está más adelante"}</p>` : ""}
           </div>`);
 
       const marker = new window.mapboxgl.Marker({ element: wrapper, anchor: "center" })
@@ -982,7 +1129,10 @@ export default function ModalGps({
 
       stopMarkersRef.current.push(marker);
     });
-  }, [paradasResueltas, mapListo]);
+  // firmaMotivos (primitiva) y no `avance.motivo`: el array es nuevo en cada render y
+  // recrearía los 30 marcadores de Mapbox varias veces por segundo.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paradasResueltas, mapListo, firmaMotivos]);
 
   // ── GPS: última posición ──────────────────────────────────────────────────
 
@@ -1200,10 +1350,6 @@ export default function ModalGps({
 
   // ── Derivados ─────────────────────────────────────────────────────────────
 
-  const paradasDisplay = paradas.length > 0 ? paradas : paradasResueltas;
-  const proximaParada  = paradasDisplay.find(p => p.estado !== "completada");
-  const paradasComp    = paradas.filter(p => p.estado === "completada").length;
-  const pct            = paradas.length > 0 ? Math.round((paradasComp / paradas.length) * 100) : 0;
   // "hace Ns" = antigüedad del FIX GPS real (created_at del punto), NO del último fetch.
   // Antes usaba ultimaActualiz (momento del poll), que se reinicia a 0 cada 10 s aunque el
   // punto esté congelado → mostraba "hace 3s" con el bus parado hace 1 min. Ahora coincide
@@ -1215,37 +1361,68 @@ export default function ModalGps({
   // "no se preguntó"). Ver el botón «Recalcular con tráfico actual» del panel derecho.
   const hayTrafico    = rutaConTrafico && (ruta?.tramos?.some(t => t.duracion_trafico_min > t.duracion_min + 2) ?? false);
 
+  // Espejos por REF de lo que el efecto de ETA necesita leer SIN tenerlo como dependencia.
+  // `seAleja` alterna varias veces por servicio (retornos de avenida); como dependencia
+  // desmontaría el setInterval de MS_REFRESCO_ETA en cada flip y el refresco de 3 min nunca
+  // llegaría a dispararse: el ETA pasaría a gobernarlo la llamada de montaje de cada remonte,
+  // acotada solo por el piso de 30 s — hasta 6× el gasto de la línea base.
+  const seAlejaRef  = useRef(false);
+  const sinSenalRef = useRef(false);
+  const snapPosRef  = useRef<{ lat: number; lng: number } | null>(null);
+  const objetivoEtaRef = useRef<{ idx: number; lat: number; lng: number; nombre: string } | null>(null);
+  const objetivoEta = useMemo(() => {
+    if (proximaIdx == null) return null;
+    const p = paradasAvance[proximaIdx];
+    if (!p || p.lat == null || p.lng == null) return null;
+    return { idx: proximaIdx, lat: p.lat, lng: p.lng, nombre: paradasDisplay[proximaIdx]?.nombre || "Parada" };
+  }, [proximaIdx, paradasAvance, paradasDisplay]);
+  // Sincronización tras el commit (no durante el render): los espejos solo se leen dentro de
+  // callbacks asíncronos y del intervalo, así que basta con que estén al día en cada commit.
+  useEffect(() => {
+    seAlejaRef.current  = seAleja;
+    sinSenalRef.current = sinSenal;
+    snapPosRef.current  = snapPos ? { lat: snapPos.lat, lng: snapPos.lng } : null;
+    objetivoEtaRef.current = objetivoEta;
+  });
+
   // ── ETA dinámica: posición actual del vehículo → próxima parada ────────────
   // Igual que /seguimiento: Google Directions vía /api/ruta. Recalcula cada MS_REFRESCO_ETA
   // (y al cambiar de parada o al llegar la primera señal), no en cada poll GPS.
   // Firma primitiva de paradasResueltas: es un array NUEVO cada vez que corre cargarRuta, y como
   // dependencia re-disparaba el ETA (llamada cara CON tráfico) sin que cambiara ninguna coord.
-  const firmaResueltas = useMemo(
-    () => paradasResueltas.map(p => `${p.id}:${p.lat},${p.lng}`).join("|"),
-    [paradasResueltas]
-  );
   useEffect(() => {
     let cancel = false;
-    // `forzar` = solo el cálculo de montaje / cambio de parada. El intervalo y el "volver a ser
+    const limpiar = () => { if (!cancel) { setEtaMin(null); setEtaKm(null); setEtaLlegadaTs(null); } };
+    // `forzar` = solo el primer cálculo y el AVANCE de parada. El intervalo y el "volver a ser
     // visible" respetan el piso de MS_MIN_ENTRE_ETA: sin él, cada alt-tab con el modal abierto
     // era una llamada facturable CON tráfico que se saltaba entero el MS_REFRESCO_ETA.
     const calcular = async (forzar = false) => {
       // El guard vive AQUÍ y no solo en los invocadores: la llamada inicial se disparaba aunque
       // la pestaña estuviera oculta al montar el modal.
       if (document.hidden) return;
-      const lista = paradas.length > 0 ? paradas : paradasResueltas;
-      const prox = lista.find(p => p.estado !== "completada");
       const u = ubicRef.current;
-      if (!prox || !u) { if (!cancel) { setEtaMin(null); setEtaKm(null); setEtaLlegadaTs(null); } return; }
-      // La próxima parada puede venir sin coords en `paradas`: resolverlas desde paradasResueltas.
-      let plat = prox.lat, plng = prox.lng;
-      if (plat == null || plng == null) {
-        const r = paradasResueltas.find(x => x.id === prox.id || x.nombre === prox.nombre);
-        if (r) { plat = r.lat; plng = r.lng; }
-      }
-      if (plat == null || plng == null) { if (!cancel) { setEtaMin(null); setEtaKm(null); setEtaLlegadaTs(null); } return; }
+      const obj = objetivoEtaRef.current;
+      // Nada que estimar: ruta terminada, sin objetivo con coords, o sin GPS.
+      if (!obj || !u) { limpiar(); return; }
+      // El bus SE ALEJA de la parada objetivo: pedir la ruta hacia ella devuelve una vuelta en U
+      // y pintarla es exactamente el bug ("llega a las X" con el bus yéndose). No se llama a
+      // Google — se ahorra el SKU caro y se deja de mentir. Mismo criterio en /pasajero.
+      if (seAlejaRef.current) { limpiar(); return; }
+      // Servicio terminado o sin señal: un modal olvidado abierto compraba una llamada Directions
+      // con tráfico cada 3 minutos indefinidamente, para pintar una hora sin sentido.
+      if (u.estado === "finalizado" || sinSenalRef.current) { limpiar(); return; }
+      // Dos rechazos seguidos por rodeo absurdo = la condición es persistente (bus fuera de ruta,
+      // parada mal geocodificada). Dejar de pagar hasta que el objetivo cambie.
+      if (etaRechazosRef.current >= 2 && ultimoDestinoEtaRef.current === obj.idx) return;
       if (!forzar && Date.now() - ultimoEtaRef.current < MS_MIN_ENTRE_ETA) return;
+      // ORIGEN pegado a la vía, no el fix crudo: con GPS de red el punto cae en la calzada
+      // contraria o fuera de vía y Google rodea la manzana para salir — una vuelta en U que
+      // inyecta el propio punto de partida. Su geometría se descarta aquí abajo (solo se usan
+      // total_min/total_km), así que ese error hoy es invisible en el mapa pero sí falsea la hora.
+      const origen = snapPosRef.current ?? { lat: Number(u.lat), lng: Number(u.lng) };
+      const dRectaM = distM(origen.lat, origen.lng, obj.lat, obj.lng);
       ultimoEtaRef.current = Date.now();
+      ultimoDestinoEtaRef.current = obj.idx;
       try {
         const res = await fetch("/api/ruta", {
           method: "POST", headers: { "Content-Type": "application/json" },
@@ -1253,22 +1430,49 @@ export default function ModalGps({
           // conTrafico para que Google use departure_time=now. No se cachea, por eso el refresco
           // es lento (MS_REFRESCO_ETA) y se pausa con la pestaña oculta.
           body: JSON.stringify({ conTrafico: true, paradas: [
-            { lat: u.lat, lng: u.lng, nombre: "Vehículo" },
-            { lat: Number(plat), lng: Number(plng), nombre: prox.nombre },
+            { lat: origen.lat, lng: origen.lng, nombre: "Vehículo" },
+            { lat: obj.lat, lng: obj.lng, nombre: obj.nombre },
           ] }),
         });
         const data = await res.json();
         if (!cancel && res.ok && data) {
           const min = typeof data.total_min === "number" ? data.total_min : null;
+          const km  = typeof data.total_km  === "number" ? data.total_km  : null;
+          // PRUEBA DE CORDURA sobre lo que Google acaba de devolver. Un rodeo de más de 3× la
+          // distancia en línea recta (+2 km de holgura para tramos cortos, donde cualquier
+          // manzana multiplica la razón) es una vuelta en U, no un trayecto: significa que el
+          // destino quedó detrás del bus. Conservar el ETA anterior en vez de pintar una hora
+          // absurda; el motor direccional debería estar a punto de avanzar el objetivo.
+          if (km != null && km * 1000 > dRectaM * 3 + 2000) {
+            etaRechazosRef.current++;
+            // Al segundo rechazo se deja de pedir (arriba), así que la hora que quedara pintada
+            // se congelaría sin que nada la contradiga: a los 30 min seguiría diciendo "llega a
+            // las 3:42" de una hora ya pasada. Se apaga y el panel explica por qué.
+            if (etaRechazosRef.current >= 2 && !cancel) {
+              setEtaDe(null); setEtaMin(null); setEtaKm(null); setEtaLlegadaTs(null);
+              setEtaSinRuta(true);
+            }
+            return;
+          }
+          if (!cancel) setEtaSinRuta(false);
+          etaRechazosRef.current = 0;
+          setEtaDe(obj.idx);   // la estimación queda atada a la parada para la que se pidió
           setEtaMin(min);
-          setEtaKm(typeof data.total_km === "number" ? data.total_km : null);
+          setEtaKm(km);
           // Se congela el INSTANTE de llegada: la hora pintada no debe moverse entre refrescos
           // (ver fmtHoraLlegada).
           setEtaLlegadaTs(min != null ? Date.now() + Math.round(min) * 60_000 : null);
         }
       } catch { /* conservar ETA previa */ }
     };
-    calcular(true);
+    // Saltarse el piso de 30 s solo cuando el objetivo AVANZA (o en el primer cálculo). Si
+    // retrocede —el bus volvió al retorno a recoger, única regresión posible del piso— se
+    // recalcula respetando el piso: un retroceso no debe poder comprar llamadas en ráfaga.
+    const prevIdx = ultimoDestinoEtaRef.current;
+    // Objetivo nuevo ⇒ los rechazos eran de la parada anterior: se empieza de cero, si no una
+    // parada "sin ruta directa" dejaría muda a la siguiente.
+    if (prevIdx !== proximaIdx) { etaRechazosRef.current = 0; setEtaSinRuta(false); }
+    calcular(prevIdx == null || (proximaIdx != null && proximaIdx > prevIdx));
     // Pausa con la pestaña oculta (mismo patrón que app/pasajero/page.tsx): el timer no gasta
     // llamadas de Google en segundo plano y al volver a ser visible recalcula una vez, siempre
     // que hayan pasado al menos MS_MIN_ENTRE_ETA desde el último pedido.
@@ -1280,8 +1484,21 @@ export default function ModalGps({
       clearInterval(iv);
       document.removeEventListener("visibilitychange", alVolverVisible);
     };
+  // `seAleja` NO va aquí a propósito (ver seAlejaRef): como dependencia haría starvation del
+  // intervalo de 3 min. Su efecto inmediato en pantalla lo cubre el efecto de abajo.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [proximaParada?.id, proximaParada?.nombre, !!ubic, firmaResueltas]);
+  }, [proximaIdx, !!ubic, firmaAvance]);
+
+  // VIGENCIA DE LA ESTIMACIÓN — derivada, no borrada por un efecto. Un efecto que limpiara el
+  // estado dejaría un render intermedio pintando todavía la hora vieja; derivarlo la apaga en el
+  // mismo render en que deja de ser cierta. Se descarta cuando:
+  //   • es de OTRA parada (el objetivo avanzó) — nunca se hereda una hora entre destinos;
+  //   • el bus se aleja — calcularla exige una ruta de regreso que el bus no va a hacer;
+  //   • no hay señal GPS — no se puede afirmar nada del presente.
+  const etaVigente = etaDe != null && etaDe === proximaIdx && !seAleja && !sinSenal;
+  const etaMinVis  = etaVigente ? etaMin : null;
+  const etaKmVis   = etaVigente ? etaKm : null;
+  const etaLlegVis = etaVigente ? etaLlegadaTs : null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 md:p-4" style={{ background: "rgba(15,23,42,0.65)" }}>
@@ -1316,6 +1533,21 @@ export default function ModalGps({
                           ? `GPS en vivo · hace ${segsDesdeUlt}s${debilM > 0 ? ` · ⚠ GPS débil ±${debilM}m (activar Alta precisión)` : ""}`
                           : "Conectando..."}
                 </p> ); })()}
+                {/* Paradas que el bus ya pasó pero nadie marcó. Hoy no existe ninguna alerta para
+                    "servicio en curso con todas las paradas pendientes" (supabase/alertas-operativas.sql
+                    solo cubre no_inicio y gps_silencio): esto convierte un fallo silencioso —que
+                    además ensucia el reporte del servicio— en algo accionable por el despachador.
+                    Con precisión degradada NO se muestra: con ±200 m de ruido no se afirma nada. */}
+                {/* Solo para operación: es un aviso de incumplimiento de registro. Al cliente no
+                    se le entrega una instrucción interna ni la imputación al conductor. */}
+                {!modoCliente && avance.pisoGps > avance.pisoConductor && avance.confianza !== "degradada" && (
+                  <span
+                    className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-400/20 text-amber-200 border border-amber-400/40"
+                    title="Detectado por la huella GPS: el vehículo ya dejó atrás estas paradas y el conductor no las marcó en su app. El sistema NO las marca solo (una marca falsa avisaría a los pasajeros); llámalo para que regularice."
+                  >
+                    ↷ {avance.pisoGps - avance.pisoConductor} parada(s) pasada(s) sin marcar
+                  </span>
+                )}
                 {ruta && (
                   // Sin recálculo con tráfico no se puede afirmar "ruta libre" (nunca se preguntó):
                   // se muestra el tiempo planificado, en neutro. El veredicto de tráfico (naranja/verde)
@@ -1430,33 +1662,82 @@ export default function ModalGps({
           {/* PANEL DERECHO */}
           <div className="w-64 flex-shrink-0 overflow-y-auto p-3 space-y-3" style={{ background: "#f8fafc", borderLeft: "1px solid #e2e8f0" }}>
 
+            {/* El bus ya pasó la ÚLTIMA parada: antes esta tarjeta simplemente desaparecía y el
+                panel quedaba mudo, sin decir que el recorrido terminó. */}
+            {proximaParada == null && paradasDisplay.length > 0 && (
+              <div className="rounded-xl p-4 text-white" style={{ background: "linear-gradient(135deg, #166534 0%, #16a34a 100%)" }}>
+                <p className="text-[10px] font-bold uppercase tracking-wider opacity-80 mb-1">Recorrido</p>
+                <p className="text-lg font-bold leading-tight">Todas las paradas cubiertas</p>
+                <p className="text-[11px] opacity-75 mt-1">
+                  {avance.pisoGps > avance.pisoConductor
+                    ? (modoCliente
+                        ? "Según el GPS el vehículo ya llegó al destino final."
+                        : "Según el GPS el vehículo ya pasó el destino final. El conductor no lo marcó.")
+                    : compArrastre > 0
+                      ? `El conductor marcó la parada final; ${compArrastre} anterior(es) quedaron sin marcar.`
+                      : "El conductor marcó el recorrido completo."}
+                </p>
+              </div>
+            )}
+
             {proximaParada && (
-              <div className="rounded-xl p-4 text-white" style={{ background: "linear-gradient(135deg, #0b315f 0%, #1d4ed8 100%)" }}>
+              <div className="rounded-xl p-4 text-white"
+                style={{ background: seAleja
+                  ? "linear-gradient(135deg, #92400e 0%, #b45309 100%)"
+                  : "linear-gradient(135deg, #0b315f 0%, #1d4ed8 100%)" }}>
                 <p className="text-[10px] font-bold uppercase tracking-wider opacity-80 mb-1">
-                  {proximaParada.id === paradasDisplay[0]?.id ? "Vehículo en camino a"
-                    : proximaParada.id === paradasDisplay[paradasDisplay.length - 1]?.id ? "Destino final"
+                  {seAleja ? "El vehículo se aleja de"
+                    : proximaIdx === 0 ? "Vehículo en camino a"
+                    : proximaIdx === paradasDisplay.length - 1 ? "Destino final"
                     : "Próxima parada"}
                 </p>
                 <p className="text-lg font-bold leading-tight mb-2">{proximaParada.nombre}</p>
                 <div className="flex items-center gap-3 pt-2 border-t border-white/20">
-                  {etaMin != null ? (
+                  {/* El bus se ALEJA: no se pinta cuenta regresiva. Calcularla exige pedirle a
+                      Google una ruta de regreso (vuelta en U) y el número resultante es correcto
+                      pero operativamente falso — es el bug que este panel tenía. */}
+                  {seAleja ? (
+                    <div className="flex-1">
+                      <p className="text-sm font-bold leading-tight">Se está alejando</p>
+                      <p className="text-[11px] opacity-75 mt-0.5">
+                        {distObjetivoM != null ? `A ${fmtDistancia(distObjetivoM)} en línea recta. ` : ""}
+                        Sin hora de llegada mientras no vuelva a acercarse.
+                      </p>
+                    </div>
+                  ) : etaMinVis != null ? (
                     <>
                       <div className="flex-1">
                         <p className="text-[10px] uppercase opacity-70">Llega a las</p>
-                        <p className="text-xl font-bold leading-tight">{etaLlegadaTs != null ? fmtHoraLlegada(etaLlegadaTs) : "—"}</p>
-                        <p className="text-[11px] opacity-60 mt-0.5">en {fmtTiempo(etaMin)}</p>
+                        <p className="text-xl font-bold leading-tight">{etaLlegVis != null ? fmtHoraLlegada(etaLlegVis) : "—"}</p>
+                        <p className="text-[11px] opacity-60 mt-0.5">en {fmtTiempo(etaMinVis)}</p>
                       </div>
-                      {etaKm != null && (
+                      {etaKmVis != null && (
                         <div className="text-right">
                           <p className="text-[10px] uppercase opacity-70">Distancia</p>
-                          <p className="text-base font-bold">{etaKm < 1 ? fmtDistancia(etaKm * 1000) : `${etaKm.toFixed(1)} km`}</p>
+                          <p className="text-base font-bold">{etaKmVis < 1 ? fmtDistancia(etaKmVis * 1000) : `${etaKmVis.toFixed(1)} km`}</p>
                         </div>
                       )}
                     </>
                   ) : (
-                    <p className="text-sm opacity-80">Calculando tiempo estimado…</p>
+                    <p className="text-sm opacity-80">
+                      {sinSenal ? "Sin señal GPS — no se puede estimar"
+                        : ubic?.estado === "finalizado" ? "Servicio finalizado"
+                        : etaSinRuta ? "Sin ruta directa: el destino quedó detrás del vehículo"
+                        : "Calculando tiempo estimado…"}
+                    </p>
                   )}
                 </div>
+                {/* De dónde sale que ésta es la próxima: una inferencia NUNCA se presenta como
+                    si el conductor la hubiera confirmado. */}
+                {proximaIdx != null && proximaIdx > 0 && avance.pisoGps > avance.pisoConductor && (
+                  <p className="text-[10px] opacity-70 mt-2 pt-2 border-t border-white/20 leading-snug">
+                    {avance.confianza === "degradada"
+                      ? "Estimado con GPS de baja precisión: las paradas anteriores posiblemente ya se pasaron."
+                      : modoCliente
+                        ? "Progreso estimado por GPS, pendiente de confirmación."
+                        : `Según el GPS — el conductor no marcó ${avance.pisoGps - avance.pisoConductor} parada(s) anterior(es).`}
+                  </p>
+                )}
               </div>
             )}
 
@@ -1582,16 +1863,46 @@ export default function ModalGps({
               <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden mb-3">
                 <div className="h-full rounded-full bg-[#0b315f] transition-all" style={{ width: `${pct}%` }} />
               </div>
+              {(compGps > 0 || compArrastre > 0) && (
+                <p className="text-[9px] text-amber-600 font-bold mb-2 -mt-1">
+                  {compConductor} confirmada(s) por el conductor
+                  {compGps > 0 && ` · ${compGps} detectada(s) por GPS`}
+                  {compArrastre > 0 && ` · ${compArrastre} sin marcar`}
+                </p>
+              )}
               <div className="space-y-1.5">
-                {paradasDisplay.map((p, i) => (
-                  <div key={p.id} className="flex items-center gap-1.5">
-                    <div className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-black flex-shrink-0 text-white ${p.estado === "completada" ? "bg-green-500" : i === 0 ? "bg-green-600" : i === paradasDisplay.length - 1 ? "bg-red-500" : "bg-[#0b315f]"}`}>
-                      {p.estado === "completada" ? "✓" : i + 1}
+                {paradasDisplay.map((p, i) => {
+                  // REGLA: el check verde sólido es SOLO del conductor. Lo inferido va con
+                  // contorno y etiqueta "GPS". Presentar una inferencia como confirmación
+                  // humana convierte "el sistema miente pasivamente" en "miente con autoridad".
+                  const motivo   = avance.motivo[i];
+                  const confirm  = motivo === "conductor";
+                  const porGps   = motivo === "gps";        // el motor la vio pasar
+                  const arrastre = motivo === "arrastre";   // quedó detrás, sin evidencia propia
+                  const inferida = porGps || arrastre;
+                  const esProxima = i === proximaIdx;
+                  return (
+                    <div key={p.id} className="flex items-center gap-1.5">
+                      <div
+                        className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-black flex-shrink-0 ${confirm ? "bg-green-500 text-white" : inferida ? "bg-white text-amber-600 border-2 border-amber-400" : `text-white ${i === 0 ? "bg-green-600" : i === paradasDisplay.length - 1 ? "bg-red-500" : "bg-[#0b315f]"}`}`}
+                        title={confirm ? "Completada — marcada por el conductor"
+                          : porGps ? (modoCliente ? "Pasada — según el GPS del vehículo" : "Pasada — detectado por GPS, el conductor no la marcó")
+                          : arrastre ? "Sin marcar — el vehículo ya está más adelante en la ruta"
+                          : undefined}
+                      >
+                        {confirm ? "✓" : inferida ? "↷" : i + 1}
+                      </div>
+                      <span className={`flex-1 truncate text-xs ${confirm ? "text-green-600 line-through" : inferida ? "text-amber-600" : esProxima ? "text-[#0b315f] font-bold" : "text-gray-700 font-medium"}`}>
+                        {p.nombre}
+                        {/* Solo se nombra al GPS cuando el GPS de verdad la vio pasar. El arrastre
+                            no tiene fuente propia — decir "· GPS" ahí sería inventarle evidencia. */}
+                        {porGps   && <span className="text-[9px] text-amber-500 font-bold ml-1">· GPS</span>}
+                        {arrastre && <span className="text-[9px] text-amber-500 font-bold ml-1">· sin marcar</span>}
+                      </span>
+                      {p.hora_estimada && <span className="text-gray-400 font-mono text-[9px] flex-shrink-0">{p.hora_estimada.slice(0,5)}</span>}
                     </div>
-                    <span className={`flex-1 truncate text-xs ${p.estado === "completada" ? "text-green-600 line-through" : "text-gray-700 font-medium"}`}>{p.nombre}</span>
-                    {p.hora_estimada && <span className="text-gray-400 font-mono text-[9px] flex-shrink-0">{p.hora_estimada.slice(0,5)}</span>}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 

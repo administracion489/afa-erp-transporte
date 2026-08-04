@@ -299,8 +299,17 @@ export default function ClientePortal() {
   // Dashboard — info enriquecida por servicio destacado
   const [condInfoMap,   setCondInfoMap]   = useState<Record<number, {nombre: string; tel: string}>>({});
   const [vehPlacaMap,   setVehPlacaMap]   = useState<Record<number, string>>({});
-  const [gpsCardMap,    setGpsCardMap]    = useState<Record<number, {lat:number;lng:number;velocidad:number} | null>>({});
-  const [etaDestinoMap, setEtaDestinoMap] = useState<Record<number, string | null>>({});
+  const [gpsCardMap,    setGpsCardMap]    = useState<Record<number, {lat:number;lng:number;velocidad:number;estado:string|null;ts:number} | null>>({});
+  // `alejando` = Google devolvió un rodeo absurdo hacia el destino → el bus ya lo pasó o va en
+  // sentido contrario. En ese caso NO se pinta hora: una cuenta regresiva que la dirección
+  // contradice es exactamente el bug que se está corrigiendo en el modal.
+  const [etaDestinoMap, setEtaDestinoMap] = useState<Record<number, { hora: string | null; ts: number; alejando: boolean }>>({});
+  // Control de gasto del ETA de las tarjetas (SKU Directions Advanced, sin caché — ver la
+  // auditoría de costos de Google del 1-ago-2026). Los tres candados: cadencia por reserva,
+  // piso global entre dos llamadas cualesquiera y tope duro por sesión de pestaña.
+  const etaCalcRef  = useRef<Record<number, number>>({});
+  const etaUltimaRef = useRef(0);
+  const etaGastoRef  = useRef(0);
   const ajustadoresRef   = useRef<Record<number, ReturnType<typeof crearAjustadorHuella>>>({}); // 1 ajustador de Map Matching por servicio
   const matchedEnVivoRefMap = useRef<Record<number, [number, number][]>>({}); // última geometría ajustada por servicio (para puentesCrudos aunque el ciclo devuelva null)
   const esCrudoEnVivoRefMap = useRef<Record<number, boolean[]>>({}); // espejo del estado esCrudoEnVivoMap para el efecto de MARCADORES (par ref+ref con matchedEnVivoRefMap → siempre alineados)
@@ -1034,11 +1043,20 @@ export default function ClientePortal() {
         }
       }
       // GPS más reciente de esta reserva
+      // `created_at` y `estado` viajan también: sin la edad del fix no se puede distinguir un bus
+      // en marcha de uno cuyo GPS murió hace una hora, y el ETA de la tarjeta se refrescaba
+      // igual (comprando llamadas caras a Google para pintar una hora imposible).
       const { data: gd } = await supabase.from("ubicaciones_gps")
-        .select("lat,lng,velocidad").eq("reserva_id", r.id)
+        .select("lat,lng,velocidad,estado,created_at").eq("reserva_id", r.id)
         .order("created_at", { ascending: false }).limit(1).maybeSingle();
-      if ((gd as any)?.lat && (gd as any)?.lng) {
-        setGpsCardMap(prev => ({ ...prev, [r.id]: { lat: Number((gd as any).lat), lng: Number((gd as any).lng), velocidad: Number((gd as any).velocidad) || 0 } }));
+      const g = gd as { lat?: unknown; lng?: unknown; velocidad?: unknown; estado?: string | null; created_at?: string | null } | null;
+      if (g?.lat && g?.lng) {
+        setGpsCardMap(prev => ({ ...prev, [r.id]: {
+          lat: Number(g.lat), lng: Number(g.lng),
+          velocidad: Number(g.velocidad) || 0,
+          estado: g.estado || null,
+          ts: g.created_at ? new Date(g.created_at).getTime() : 0,
+        } }));
       } else {
         setGpsCardMap(prev => ({ ...prev, [r.id]: null }));
       }
@@ -1049,14 +1067,29 @@ export default function ClientePortal() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, reservas.length]);
 
-  // ─── Dashboard: ETA al destino con tráfico real (se ejecuta cuando llega GPS) ─
+  // ─── Dashboard: ETA al destino con tráfico real ──────────────────────────────
+  // ANTES se calculaba UNA sola vez por reserva y por sesión (`if (rid in etaDestinoMap) return`)
+  // y se pintaba en verde con la leyenda "con tráfico real" aunque llevara horas congelado: el
+  // cliente veía una hora de hace tres horas presentada como si fuera en vivo. Ahora se refresca,
+  // pero el refresco es CARO (Directions Advanced, sin caché), así que va con tres candados de
+  // gasto y solo para servicios que de verdad están en marcha. Ver la memoria de costos de Google.
   useEffect(() => {
-    const entries = Object.entries(gpsCardMap).filter(([, v]) => v !== null);
-    if (!entries.length) return;
-    entries.forEach(async ([idStr, gps]) => {
-      if (!gps) return;
-      const rid = Number(idStr);
-      if (rid in etaDestinoMap) return; // ya calculado
+    // "dashboard" y NO "activos": la tarjeta que muestra esta hora vive en el dashboard, y
+    // `gpsCardMap` —su única fuente— solo se rellena mientras esa pestaña está activa. Calcularlo
+    // en otra pestaña gastaría llamadas de Google sobre un GPS que ya no se refresca, para
+    // pintarlas donde nadie las ve.
+    if (tab !== "dashboard") return;
+
+    const MS_REFRESCO_CARD  = 180_000; // por reserva — mismo criterio que el modal
+    const MS_PISO_GLOBAL    = 20_000;  // entre DOS llamadas cualesquiera: acota ráfagas con N servicios
+    const MAX_ETA_SESION    = 150;     // techo por pestaña: una pestaña olvidada no puede vaciar la cuota
+    const MS_FIX_FRESCO     = 300_000; // GPS más viejo que esto = no hay nada que estimar
+
+    const calcularUno = async (rid: number, gps: NonNullable<typeof gpsCardMap[number]>) => {
+      // El sello va PRIMERO y en todos los caminos: `ronda` elige un solo candidato y corta, así
+      // que una reserva que salga temprano sin sellar (sin destino geocodificado, por ejemplo) se
+      // vuelve a elegir cada 30 s y deja sin ETA a todas las demás tarjetas, para siempre.
+      etaCalcRef.current[rid] = Date.now();
       const r = serviciosHoyRef.current.find(x => x.id === rid);
       if (!r) return;
       const pjson = (r as any).paradas_json as any[] | null;
@@ -1068,10 +1101,17 @@ export default function ClientePortal() {
             hora_estimada: p.hora || null, estado: "pendiente",
           } as Parada));
       const destino = psAll[psAll.length - 1];
-      if (!destino?.lat || !destino?.lng) { setEtaDestinoMap(prev => ({ ...prev, [rid]: null })); return; }
+      const marcar = (v: { hora: string | null; alejando: boolean }) =>
+        setEtaDestinoMap(prev => ({ ...prev, [rid]: { ...v, ts: Date.now() } }));
+      if (!destino?.lat || !destino?.lng) { marcar({ hora: null, alejando: false }); return; }
+
+      etaUltimaRef.current = Date.now();
+      etaGastoRef.current++;
+      // Distancia en línea recta: es gratis y es la referencia para detectar la vuelta en U.
+      const dRectaM = distM(gps.lat, gps.lng, Number(destino.lat), Number(destino.lng));
       try {
         // conTrafico: aquí SÍ hace falta (ETA en vivo bus → destino). Es el único punto de
-        // esta pantalla que usa el SKU caro de Google; no se cachea, por eso va una sola vez.
+        // esta pantalla que usa el SKU caro de Google y no se cachea — de ahí los candados.
         const res = await fetch("/api/ruta", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ conTrafico: true, paradas: [
@@ -1080,6 +1120,17 @@ export default function ClientePortal() {
           ]}),
         });
         const data = await res.json();
+        // PRUEBA DE CORDURA: un trayecto desproporcionado respecto de la recta no es un
+        // trayecto, es una vuelta en U — el destino quedó detrás del vehículo.
+        // El umbral NO se aplica cerca del destino: a 120 m en línea recta, un retorno normal
+        // por el puente siguiente da 3 km y el cociente se dispara con el bus ENTRANDO. Por
+        // debajo de 1 km la razón rodeo/recta no distingue nada, así que no se afirma.
+        const rodeoAbsurdo = typeof data.total_km === "number" &&
+          dRectaM > 1000 && data.total_km * 1000 > dRectaM * 3 + 2000;
+        if (rodeoAbsurdo) {
+          marcar({ hora: null, alejando: true });
+          return;
+        }
         if (typeof data.total_min === "number") {
           const llegada = new Date(Date.now() + data.total_min * 60 * 1000);
           // Ajustar a hora Lima (UTC-5)
@@ -1087,14 +1138,39 @@ export default function ClientePortal() {
           const limaDate = new Date(limaMs);
           const h = String(limaDate.getUTCHours()).padStart(2, "0");
           const m = String(limaDate.getUTCMinutes()).padStart(2, "0");
-          setEtaDestinoMap(prev => ({ ...prev, [rid]: `${h}:${m}` }));
+          marcar({ hora: `${h}:${m}`, alejando: false });
         } else {
-          setEtaDestinoMap(prev => ({ ...prev, [rid]: null }));
+          marcar({ hora: null, alejando: false });
         }
-      } catch { setEtaDestinoMap(prev => ({ ...prev, [rid]: null })); }
-    });
+      } catch { /* conservar el valor previo: un fallo de red no debe borrar la hora */ }
+    };
+
+    const ronda = () => {
+      // La pestaña oculta no mira nada: no se compran llamadas en segundo plano.
+      if (document.hidden) return;
+      if (etaGastoRef.current >= MAX_ETA_SESION) return;
+      const ahora = Date.now();
+      if (ahora - etaUltimaRef.current < MS_PISO_GLOBAL) return;
+      for (const [idStr, gps] of Object.entries(gpsCardMap)) {
+        if (!gps) continue;
+        const rid = Number(idStr);
+        // Sin fix fresco o con el servicio terminado no hay hora de llegada que estimar; el
+        // valor anterior se conserva y la UI lo etiqueta como viejo.
+        if (gps.estado === "finalizado") continue;
+        if (gps.ts > 0 && ahora - gps.ts > MS_FIX_FRESCO) continue;
+        if (ahora - (etaCalcRef.current[rid] || 0) < MS_REFRESCO_CARD) continue;
+        void calcularUno(rid, gps);
+        return;   // UNA por ronda: el piso global hace el resto del reparto
+      }
+    };
+
+    ronda();
+    const iv = setInterval(ronda, 30_000);
+    const alVolver = () => ronda();
+    document.addEventListener("visibilitychange", alVolver);
+    return () => { clearInterval(iv); document.removeEventListener("visibilitychange", alVolver); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [JSON.stringify(Object.keys(gpsCardMap))]);
+  }, [tab, gpsCardMap]);
 
   // ─── En vivo: CAPA 1 — ruta planificada (geocodifica paradas → Google) ───
   useEffect(() => {
@@ -2312,6 +2388,7 @@ export default function ClientePortal() {
           paradasJson={(gpsModalRes as any)?.paradas_json}
           origen={gpsModalRes.origen}
           destino={gpsModalRes.destino}
+          modoCliente
           onClose={() => { setGpsModalOpen(false); setGpsModalRes(null); }}
         />
       )}
@@ -2631,7 +2708,12 @@ export default function ClientePortal() {
               const gpsCard = gpsCardMap[r.id];
               const condCard = condInfoMap[r.id];
               const placaCard = vehPlacaMap[r.id];
-              const etaCard = etaDestinoMap[r.id];
+              const etaCard    = etaDestinoMap[r.id];
+              const etaAlejando = !!etaCard?.alejando;
+              const etaHora     = etaCard?.hora || null;
+              // Antigüedad del cálculo: es lo que separa "en vivo" de "una hora de hace 3 horas
+              // pintada en verde", que era lo que veía el cliente.
+              const etaViejoMin = etaCard?.ts ? Math.floor((Date.now() - etaCard.ts) / 60000) : 0;
               const destinoDisplay = psDisplay[psDisplay.length - 1];
               return (
                 <div key={r.id} style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
@@ -2687,19 +2769,35 @@ export default function ClientePortal() {
                           </p>
                         </div>
                       )}
-                      {/* ETA destino */}
+                      {/* ETA destino. La hora "en vivo" solo se presenta como tal si de verdad
+                          lo es: pasados unos minutos se etiqueta su antigüedad, y si el bus se
+                          aleja del destino no se pinta ninguna hora (era el bug: una llegada
+                          calculada sobre una ruta de regreso que el bus no va a hacer). */}
                       {destinoDisplay && (
                         <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
                           <p style={{ fontSize: 8.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: "0 0 2px" }}>
-                            {etaCard ? "Llega ~" : "Planif. destino"}
+                            {etaAlejando ? "Se aleja del destino" : etaHora ? "Llega ~" : "Planif. destino"}
                           </p>
-                          <p style={{ fontFamily: C.fontMono, fontWeight: 800, fontSize: 19, color: etaCard ? C.success : C.navy, margin: 0, lineHeight: 1 }}>
-                            {etaCard || destinoDisplay.hora_estimada?.slice(0, 5) || "–"}
+                          <p style={{ fontFamily: C.fontMono, fontWeight: 800, fontSize: 19, color: etaAlejando ? C.warn : etaHora ? C.success : C.navy, margin: 0, lineHeight: 1 }}>
+                            {etaAlejando ? "–" : etaHora || destinoDisplay.hora_estimada?.slice(0, 5) || "–"}
                           </p>
-                          {etaCard && destinoDisplay.hora_estimada && (
-                            <p style={{ fontSize: 9, color: C.mute, margin: "3px 0 0" }}>plan {destinoDisplay.hora_estimada.slice(0, 5)}</p>
-                          )}
-                          {etaCard && <p style={{ fontSize: 8.5, color: C.mute, margin: "2px 0 0" }}>con tráfico real</p>}
+                          {etaAlejando ? (
+                            // La frase está en PRESENTE, así que caduca: pasados unos minutos sin
+                            // dato nuevo deja de afirmarse (el servicio pudo terminar y el GPS
+                            // callar, y esto se quedaría en pantalla durante horas).
+                            <p style={{ fontSize: 8.5, color: C.mute, margin: "3px 0 0", lineHeight: 1.3 }}>
+                              {etaViejoMin >= 6 ? `Sin datos recientes (hace ${etaViejoMin} min)` : "El vehículo no va hacia el destino ahora mismo"}
+                            </p>
+                          ) : etaHora ? (
+                            <>
+                              {destinoDisplay.hora_estimada && (
+                                <p style={{ fontSize: 9, color: C.mute, margin: "3px 0 0" }}>plan {destinoDisplay.hora_estimada.slice(0, 5)}</p>
+                              )}
+                              <p style={{ fontSize: 8.5, color: C.mute, margin: "2px 0 0" }}>
+                                {etaViejoMin >= 5 ? `calculado hace ${etaViejoMin} min` : "con tráfico real"}
+                              </p>
+                            </>
+                          ) : null}
                         </div>
                       )}
                     </div>
@@ -2711,7 +2809,7 @@ export default function ClientePortal() {
                         <p style={{ fontSize: 9.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: 0 }}>
                           Progreso del recorrido · {psDisplay.length} paradas
                         </p>
-                        {etaCard && <span style={{ fontSize: 9, background: "rgba(21,128,61,0.1)", color: C.success, fontWeight: 700, padding: "1px 7px", borderRadius: 4 }}>ETA con tráfico real</span>}
+                        {etaHora && !etaAlejando && etaViejoMin < 5 && <span style={{ fontSize: 9, background: "rgba(21,128,61,0.1)", color: C.success, fontWeight: 700, padding: "1px 7px", borderRadius: 4 }}>ETA con tráfico real</span>}
                       </div>
                       <div style={{ display: "flex", alignItems: "flex-start", minWidth: "max-content" }}>
                         {psDisplay.map((p, i, arr) => {
@@ -2747,9 +2845,9 @@ export default function ClientePortal() {
                                   </p>
                                 )}
                                 {/* ETA con tráfico — solo en destino */}
-                                {isDestino && etaCard && (
+                                {isDestino && etaHora && !etaAlejando && (
                                   <p style={{ fontFamily: C.fontMono, fontSize: 9, color: C.success, margin: "1px 0 0", fontWeight: 800 }}>
-                                    ~{etaCard}
+                                    ~{etaHora}
                                   </p>
                                 )}
                               </div>
