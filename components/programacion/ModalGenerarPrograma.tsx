@@ -2,7 +2,8 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { X, Calendar, RefreshCw, ArrowRight, ArrowLeftRight, Layers } from "lucide-react";
+import { X, Calendar, RefreshCw, ArrowRight, ArrowLeftRight, Layers, Signpost } from "lucide-react";
+import { sugerirNombreRuta } from "@/lib/nombre-ruta";
 
 type ItemCot = {
   descripcion: string;
@@ -17,6 +18,7 @@ type ItemCot = {
 type CotizacionFija = {
   id: number;
   cliente_id: number | null;
+  asunto: string | null;
   tipo_servicio: string | null;
   precio_dia: number | null;
   precio_cliente: number | null;
@@ -99,12 +101,19 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
   const [hora,             setHora]             = useState<string>("07:00");
   const [generando,        setGenerando]        = useState(false);
   const [cargando,         setCargando]         = useState(true);
+  // Nombre de ruta visible al pasajero. Se sugiere solo y el operador lo corrige
+  // ANTES de generar: ponerlo después obliga a abrir el manifiesto servicio por
+  // servicio, que es justo lo que se olvidaba. `tocado` congela la sugerencia
+  // para no pisar lo que el operador ya escribió al mover la hora.
+  const [nombreIda,        setNombreIda]        = useState("");
+  const [nombreRetorno,    setNombreRetorno]    = useState("");
+  const [nombreTocado,     setNombreTocado]     = useState(false);
 
   useEffect(() => {
     Promise.all([
       supabase
         .from("cotizaciones")
-        .select("id, cliente_id, tipo_servicio, precio_dia, precio_cliente, paradas_json, hora_ida, hora_retorno, paradas_retorno_json, items_json")
+        .select("id, cliente_id, asunto, tipo_servicio, precio_dia, precio_cliente, paradas_json, hora_ida, hora_retorno, paradas_retorno_json, items_json")
         .eq("modo_servicio", "fijo")
         .order("id", { ascending: false }),
       supabase.from("vehiculos_tercero").select("id, empresa_id, placa, categoria"),
@@ -124,6 +133,25 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
 
   const cot          = cotizaciones.find(c => c.id === Number(cotizacionId));
   const tieneRetorno = !!cot?.hora_retorno;
+
+  // Paradas con las que se NOMBRA el retorno: las propias si existen; si no, las
+  // de la ida con los extremos invertidos — el mismo criterio que usa la
+  // generación para `origen`/`destino` del retorno.
+  const paradasRetornoNombre = useMemo(() => {
+    if (cot?.paradas_retorno_json?.length) return cot.paradas_retorno_json;
+    const ini = cot?.paradas_json?.find((p: any) => p.tipo === "inicio")?.nombre  || "";
+    const des = cot?.paradas_json?.find((p: any) => p.tipo === "destino")?.nombre || "";
+    if (!ini && !des) return null;
+    return [{ tipo: "inicio", nombre: des }, { tipo: "destino", nombre: ini }];
+  }, [cot]);
+
+  useEffect(() => {
+    if (nombreTocado) return;
+    setNombreIda(cot ? sugerirNombreRuta({ asunto: cot.asunto, paradas: cot.paradas_json, hora, sentido: "ida" }) : "");
+    setNombreRetorno(cot && tieneRetorno
+      ? sugerirNombreRuta({ asunto: cot.asunto, paradas: paradasRetornoNombre, hora: cot.hora_retorno, sentido: "retorno" })
+      : "");
+  }, [cot, hora, tieneRetorno, paradasRetornoNombre, nombreTocado]);
 
   // ── Construir slots: un slot por ítem de la cotización ──────────────────
   const slots = useMemo<Slot[]>(() => {
@@ -230,6 +258,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
         paradas_json:          cot.paradas_json,
         origen:                origenIda,
         destino:               destinoIda,
+        ruta_nombre:           nombreIda.trim() || null,
         lote_generacion:       lote,
         ...camposVehiculo,
       };
@@ -289,6 +318,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
           paradas_json:          paradasRetorno,
           origen:                origenRetorno,
           destino:               destinoRetorno,
+          ruta_nombre:           nombreRetorno.trim() || null,
           direccion_servicio:    "retorno",
           lote_generacion:       lote,
           ...camposVehiculo,
@@ -426,6 +456,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
             ) : (
               <select className={inputCls()} value={cotizacionId} onChange={e => {
                 setCotizacionId(e.target.value);
+                setNombreTocado(false); // otra cotización ⇒ otra ruta: vuelve a sugerir
                 // La hora arranca en la del contrato (primer paradero → hora_ida). Tipearla a mano
                 // es lo que deja reservas.hora_servicio desfasada de los paraderos reales.
                 const c = cotizaciones.find(c => c.id === Number(e.target.value));
@@ -559,6 +590,35 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
               </div>
             )}
           </div>
+
+          {/* Nombre de ruta — lo que verá el pasajero al elegir su bus */}
+          {cot && (
+            <div>
+              <label className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                <Signpost size={12} className="shrink-0" />
+                Nombre de ruta {tieneRetorno ? "(IDA)" : ""}
+              </label>
+              <input
+                className={inputCls()}
+                value={nombreIda}
+                onChange={e => { setNombreTocado(true); setNombreIda(e.target.value); }}
+                placeholder="Ej. RUTA B/ ENTRADA 05:10/ CHILCA→BSF PUNTA HERMOSA"
+              />
+              {tieneRetorno && (
+                <input
+                  className={inputCls() + " mt-2"}
+                  value={nombreRetorno}
+                  onChange={e => { setNombreTocado(true); setNombreRetorno(e.target.value); }}
+                  placeholder="Nombre de ruta (RETORNO)"
+                />
+              )}
+              <p className="text-[10px] text-gray-400 mt-1 leading-snug">
+                Así lo verá el pasajero al elegir su bus. Sugerido desde la cotización;
+                corrígelo aquí y se aplica a los {totalServicios || 0} servicios de una vez.
+                {!nombreIda && " Si lo dejas vacío habrá que ponerlo servicio por servicio."}
+              </p>
+            </div>
+          )}
 
           {/* Preview */}
           {fechasGeneradas.length > 0 && (
