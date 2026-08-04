@@ -176,6 +176,12 @@ export default function ModalManifiesto(props: Props) {
   const [configDesde,      setConfigDesde]      = useState("");
   const [configHasta,      setConfigHasta]      = useState("");
   const [incluirActual,    setIncluirActual]    = useState(true);
+  // Restringir los candidatos al vehículo del servicio actual. Por defecto NO:
+  // una misma programación suele rotar el recurso entre días (hoy D4V-955, mañana
+  // CUP-435), y el nombre de ruta/toggles no dependen del vehículo. Filtrar por
+  // vehículo dejaba el preview en 1 servicio aunque el rango tuviera decenas
+  // con exactamente la misma ruta.
+  const [soloMismoVehiculo, setSoloMismoVehiculo] = useState(false);
   const [aplicandoConfig,  setAplicandoConfig]  = useState(false);
   const [previewIds,       setPreviewIds]       = useState<number[]>([]);
   // Candidatos totales en el rango (mismo vehículo + mismo tramo) — para distinguir
@@ -421,7 +427,7 @@ export default function ModalManifiesto(props: Props) {
   // coincidía el servicio actual consigo mismo.
   useEffect(() => {
     const vidActivo = vehiculoId || vehiculoTerceroId;
-    if (!modalConfigRango || !cotizacionId || !vidActivo || !configDesde || !configHasta) {
+    if (!modalConfigRango || !cotizacionId || !configDesde || !configHasta || (soloMismoVehiculo && !vidActivo)) {
       setMatchRaw(null); setPreviewCargando(false); setPreviewError(false); return;
     }
     let cancelado = false;
@@ -430,17 +436,20 @@ export default function ModalManifiesto(props: Props) {
 
     (async () => {
      try {
-      // 1. Candidatos: misma cotización + vehículo + rango + estado activo.
+      // 1. Candidatos: misma cotización + rango + estado activo (+ vehículo solo si
+      //    el usuario lo pidió explícitamente).
       //    Se PAGINA: PostgREST corta CUALQUIER respuesta a 1000 filas y una
       //    programación masiva puede tener miles de servicios idénticos; sin
       //    paginar solo veíamos 1000 (de ahí el "999 omitidos").
-      const cand = await paginarFilas(() =>
-        supabase.from("reservas")
+      const cand = await paginarFilas(() => {
+        let q = supabase.from("reservas")
           .select("id, direccion_servicio, paradas_json")
-          .eq("cotizacion_id", cotizacionId).eq(campo, vidActivo)
+          .eq("cotizacion_id", cotizacionId)
           .gte("fecha_servicio", configDesde).lte("fecha_servicio", configHasta)
-          .not("estado", "in", "(cancelada,finalizada)")
-          .order("fecha_servicio").order("id")); // orden estable para paginar
+          .not("estado", "in", "(cancelada,finalizada)");
+        if (soloMismoVehiculo && vidActivo) q = q.eq(campo, vidActivo);
+        return q.order("fecha_servicio").order("id"); // orden estable para paginar
+      });
       const candIds = (cand as any[]).map((r: any) => r.id as number);
       const rowById = new Map<number, any>((cand as any[]).map((r: any) => [r.id, r]));
 
@@ -525,7 +534,7 @@ export default function ModalManifiesto(props: Props) {
     })();
 
     return () => { cancelado = true; };
-  }, [modalConfigRango, cotizacionId, vehiculoId, vehiculoTerceroId, configDesde, configHasta, reservaId]);
+  }, [modalConfigRango, cotizacionId, vehiculoId, vehiculoTerceroId, soloMismoVehiculo, configDesde, configHasta, reservaId]);
 
   // Preview (parte barata): deriva previewIds/previewTotal desde el resultado crudo
   // aplicando el filtro de "Incluir este servicio". Togglear el checkbox solo re-corre
@@ -1715,7 +1724,7 @@ export default function ModalManifiesto(props: Props) {
               <div className="px-6 py-4" style={{ background: "#0b315f" }}>
                 <p className="text-white font-bold text-sm">Aplicar config a rango de fechas</p>
                 <p className="text-blue-200 text-xs mt-0.5">
-                  Aplica el nombre de ruta y los toggles al mismo vehículo en el rango seleccionado.
+                  Aplica el nombre de ruta y los toggles a los servicios con la misma ruta en el rango seleccionado.
                 </p>
               </div>
               <div className="px-6 py-5 flex flex-col gap-4">
@@ -1800,6 +1809,20 @@ export default function ModalManifiesto(props: Props) {
                   <span className="text-xs text-gray-600">Incluir este servicio (#{reservaId})</span>
                 </label>
 
+                {/* Checkbox restringir al vehículo actual */}
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={soloMismoVehiculo}
+                    onChange={e => setSoloMismoVehiculo(e.target.checked)}
+                    className="w-4 h-4 rounded accent-[#0b315f]"
+                  />
+                  <span className="text-xs text-gray-600">
+                    Solo servicios con el mismo vehículo
+                    <span className="text-gray-400"> (normalmente no hace falta: el recurso rota entre días)</span>
+                  </span>
+                </label>
+
                 {/* Preview count */}
                 {configDesde && configHasta && (
                   <div>
@@ -1816,7 +1839,9 @@ export default function ModalManifiesto(props: Props) {
                             ? `Se actualizarán ${previewIds.length} servicio(s) con la misma ruta`
                             : previewTotal > 0
                               ? "Ningún servicio del rango tiene la misma ruta que este"
-                              : "No se encontraron servicios del mismo vehículo en ese rango"}
+                              : soloMismoVehiculo
+                                ? "No se encontraron servicios del mismo vehículo en ese rango"
+                                : "No se encontraron servicios de esta cotización en ese rango"}
                     </p>
                     {!previewCargando && !previewError && previewTotal > previewIds.length && (
                       <p className="text-[11px] text-gray-500 text-center mt-1.5 leading-snug">
