@@ -23,17 +23,19 @@ const paradasIda = [
   { tipo: "intermedia", nombre: "Bertello", direccion: "Bertello, Callao 07036, Perú", lat: "-12.01976", lng: "-77.10140", hora: "21:18" },
   { tipo: "destino", nombre: "Mixing Center Callao", direccion: "D, XVXJ+5GV, Callao 07031, Perú", lat: "-12.00363", lng: "-77.11881", hora: "21:30" },
 ];
+// Retorno SIN direccion a proposito: asi la muestra cubre tambien las cotizaciones
+// donde el nombre del paradero ya es la direccion completa (la columna se oculta).
 const paradasRet = [
-  { tipo: "inicio", nombre: "Mixing Center Callao", direccion: "D, XVXJ+5GV, Callao 07031, Perú", lat: "-12.00363", lng: "-77.11881", hora: "22:30" },
-  { tipo: "intermedia", nombre: "Bertello", direccion: "Bertello, Callao 07036, Perú", lat: "-12.01976", lng: "-77.10140", hora: "22:40" },
-  { tipo: "intermedia", nombre: "Puente Nuevo", direccion: "Puente Nuevo, El Agustino 15006, Perú", lat: "-12.03009", lng: "-77.00011", hora: "23:00" },
-  { tipo: "intermedia", nombre: "Puente Santa Anita", direccion: "Puente Santa Anita, El Agustino 15022, Perú", lat: "-12.05711", lng: "-76.97420", hora: "23:10" },
-  { tipo: "intermedia", nombre: "Javier Prado", direccion: "Javier Prado, Ate 15022, Perú", lat: "-12.08220", lng: "-76.97977", hora: "23:18" },
-  { tipo: "intermedia", nombre: "Primavera", direccion: "Primavera, San Borja 15037, Perú", lat: "-12.10855", lng: "-76.97870", hora: "23:25" },
-  { tipo: "intermedia", nombre: "Paradero Puente Benavides", direccion: "1S, Santiago de Surco 15039, Perú", lat: "-12.13110", lng: "-76.97830", hora: "23:30" },
-  { tipo: "intermedia", nombre: "Próceres", direccion: "Próceres, Santiago de Surco 15056, Perú", lat: "-12.15221", lng: "-76.98387", hora: "23:35" },
-  { tipo: "intermedia", nombre: "Puente Alipio", direccion: "Puente Alipio, San Juan de Miraflores 15801, Perú", lat: "-12.16400", lng: "-76.98900", hora: "" },
-  { tipo: "destino", nombre: "Av. Las Gaviotas Mz.BLK B", direccion: "Av. Las Gaviotas Mz.BLK B, Chorrillos 15000, Perú", lat: "-12.17053", lng: "-77.01911", hora: "23:55" },
+  { tipo: "inicio", nombre: "Mixing Center Callao", direccion: "", lat: "-12.00363", lng: "-77.11881", hora: "22:30" },
+  { tipo: "intermedia", nombre: "Bertello", direccion: "", lat: "-12.01976", lng: "-77.10140", hora: "22:40" },
+  { tipo: "intermedia", nombre: "Puente Nuevo", direccion: "", lat: "-12.03009", lng: "-77.00011", hora: "23:00" },
+  { tipo: "intermedia", nombre: "Puente Santa Anita", direccion: "", lat: "-12.05711", lng: "-76.97420", hora: "23:10" },
+  { tipo: "intermedia", nombre: "Javier Prado", direccion: "", lat: "-12.08220", lng: "-76.97977", hora: "23:18" },
+  { tipo: "intermedia", nombre: "Primavera", direccion: "", lat: "-12.10855", lng: "-76.97870", hora: "23:25" },
+  { tipo: "intermedia", nombre: "Paradero Puente Benavides", direccion: "", lat: "-12.13110", lng: "-76.97830", hora: "23:30" },
+  { tipo: "intermedia", nombre: "Próceres", direccion: "", lat: "-12.15221", lng: "-76.98387", hora: "23:35" },
+  { tipo: "intermedia", nombre: "Puente Alipio", direccion: "", lat: "-12.16400", lng: "-76.98900", hora: "" },
+  { tipo: "destino", nombre: "Av. Las Gaviotas Mz.BLK B", direccion: "", lat: "-12.17053", lng: "-77.01911", hora: "23:55" },
 ];
 
 const pIda = construirPuntos(paradasIda, "I");

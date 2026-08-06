@@ -47,6 +47,9 @@ export type FichaRutaDatos = {
 const celda = (v: string, extra = "") => `<td style="padding:5px 6px;border:1px solid #d7dde5;${extra}">${v}</td>`;
 
 function buildTablaPuntos(filas: FilaFicha[], color: string): string {
+  // En muchas cotizaciones el nombre del paradero YA es la dirección completa y el campo
+  // dirección viene vacío: mostrar una columna entera de guiones solo roba ancho.
+  const hayDirs = filas.some(f => f.direccion.trim() !== "");
   const cuerpo = filas.map(f => {
     const bg = f.rol === "embarque" ? "#dcfce7" : f.rol === "llegada" ? "#fee2e2" : "#f1f5f9";
     const fg = f.rol === "embarque" ? "#166534" : f.rol === "llegada" ? "#991b1b" : "#475569";
@@ -57,7 +60,7 @@ function buildTablaPuntos(filas: FilaFicha[], color: string): string {
     return `<tr>`
       + celda(`<b style="color:${color};">${esc(f.codigo)}</b>`, "text-align:center;white-space:nowrap;")
       + celda(`<b>${esc(f.nombre)}</b><br/>${badge}`)
-      + celda(esc(f.direccion || "—"), "font-size:9px;color:#475569;")
+      + (hayDirs ? celda(esc(f.direccion || "—"), "font-size:9px;color:#475569;") : "")
       + celda(fmtCoord(f), "font-size:8.5px;color:#64748b;text-align:center;white-space:nowrap;")
       + celda(hora, "text-align:center;white-space:nowrap;")
       + celda(f.km_tramo === null ? "—" : fmtKm(f.km_tramo), "text-align:right;white-space:nowrap;")
@@ -65,8 +68,8 @@ function buildTablaPuntos(filas: FilaFicha[], color: string): string {
       + celda(f.min_acum === null ? "—" : fmtDuracion(f.min_acum), "text-align:right;white-space:nowrap;")
       + `</tr>`;
   }).join("");
-  const th = ["CÓD.", "PUNTO", "REFERENCIA / DIRECCIÓN", "COORDENADAS", "HORA", "TRAMO", "ACUM.", "T. ACUM."]
-    .map((h, i) => `<th style="border:1px solid ${color};padding:5px 6px;font-size:8.5px;color:#fff;text-align:${i === 1 || i === 2 ? "left" : "center"};">${h}</th>`).join("");
+  const th = ["CÓD.", "PUNTO", ...(hayDirs ? ["REFERENCIA / DIRECCIÓN"] : []), "COORDENADAS", "HORA", "TRAMO", "ACUM.", "T. ACUM."]
+    .map((h, i) => `<th style="border:1px solid ${color};padding:5px 6px;font-size:8.5px;color:#fff;text-align:${i === 1 || (hayDirs && i === 2) ? "left" : "center"};">${h}</th>`).join("");
   return `<table class="tbl-puntos"><thead style="background:${color};"><tr>${th}</tr></thead><tbody>${cuerpo}</tbody></table>`;
 }
 
@@ -110,18 +113,22 @@ export function buildFichaRutaHtml(d: FichaRutaDatos): string {
     /* Es un documento para imprimir: el modo oscuro del navegador apagaba las tablas. */
     :root{color-scheme:light}
     html,body{background:#fff;color:#1a1a1a}
-    /* Encabezado y pie se repiten en cada página como thead/tfoot de una tabla que
-       envuelve todo el documento. Con position:fixed (lo que usan los PDF de cotización)
-       Chrome los ancla al área de contenido y terminan encima del texto de la página 2
-       en adelante; como thead ocupan espacio real y eso no puede pasar. Los márgenes
-       laterales van en el cuerpo, no en @page, para que la franja azul llegue al borde. */
-    @page{size:A4;margin:7mm 0}
+    /* Encabezado y pie sangran a los bordes del papel, como en el PDF de cotización:
+       por eso @page va sin márgenes y los laterales se los pone el cuerpo.
+       - El encabezado va en un thead, que se repite por página OCUPANDO espacio: con
+         position:fixed Chrome lo ancla al área de contenido y tapaba el texto desde la
+         página 2.
+       - El pie sí queda fijo al fondo de la hoja (si fuera tfoot, en la última página
+         quedaría flotando a media hoja, justo debajo del contenido). El tfoot vacío
+         existe solo para reservarle el sitio y que nada pase por debajo. */
+    @page{size:A4;margin:0}
     body{padding:0}
     .doc{width:100%;border-collapse:collapse}
     .doc>thead{display:table-header-group}
     .doc>tfoot{display:table-footer-group}
-    .doc .pdf-header,.doc .pdf-footer{position:static}
-    .doc td.cuerpo{padding:12px 12mm 16px;vertical-align:top}
+    .doc .pdf-header{position:static}
+    .doc td.cuerpo{padding:14px 12mm 10px;vertical-align:top}
+    .doc td.hueco-pie{height:42px}
     .ficha-grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
     .box{border:1px solid #d7dde5;border-radius:5px;padding:8px 10px}
     .box-title{font-weight:900;font-size:9.5px;color:${CP_FICHA};text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #e5e7eb;padding-bottom:4px;margin-bottom:6px}
@@ -158,7 +165,8 @@ export function buildFichaRutaHtml(d: FichaRutaDatos): string {
   const footer = buildFooterPDFHtml(CP_FICHA, esc(d.empresa.direccion), esc(d.empresa.telefono), esc(d.empresa.email), esc(d.empresa.web));
 
   return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><title>Ficha Técnica de Ruta — ${esc(d.nCot)}</title><style>${css}</style></head><body>
-<table class="doc"><thead><tr><td>${header}</td></tr></thead><tfoot><tr><td>${footer}</td></tr></tfoot><tbody><tr><td class="cuerpo">
+${footer}
+<table class="doc"><thead><tr><td>${header}</td></tr></thead><tfoot><tr><td class="hueco-pie"></td></tr></tfoot><tbody><tr><td class="cuerpo">
 <div class="ficha-grid2">
   <div class="box"><div class="box-title">Cliente</div>
     <div class="box-row"><b>RAZÓN SOCIAL:</b> ${esc(d.cliente.nombre)}</div>
