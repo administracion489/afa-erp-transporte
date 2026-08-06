@@ -4,7 +4,7 @@ import { supabase } from "@/lib/supabase";
 import { sugerirNombreRuta } from "@/lib/nombre-ruta";
 import { construirPuntos, puntosDesdeTexto, puntosConCoords, firmaRutaFicha, encodePolyline, diezmar, urlMapaEstatico, urlGoogleMapsRuta, type PuntoFicha, type FichaRutaCache, type MetricaSentido } from "@/lib/ficha-ruta";
 import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
-import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS } from "@/lib/pdf-chrome";
+import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS, driveImg, buildVehsHtml } from "@/lib/pdf-chrome";
 
 type FechaMultidia={dia:number;fecha:string;hora_ida:string;hora_fin:string;tipo_noche:"pernocte"|"cochera"|"";destino_nombre:string;destino_lat:string;destino_lng:string;};
 type ParamCosto={tipo_vehiculo:string;nombre:string;capacidad:number;activo:boolean;icono:string|null;grupo_vehiculo:string|null;euronorm:string|null;usa_urea:boolean;consumo_urea_pct:number|null;tipo_combustible_1:string;rendimiento_1:number;pct_uso_1:number;tipo_combustible_2:string|null;rendimiento_2:number|null;pct_uso_2:number|null;n_neumaticos:number;costo_neumatico:number;vida_neumatico_km:number;mantenimiento_km:number;valor_compra:number;residual_pct:number;vida_util_anios:number;km_anio:number;seguro_anual:number;soat_anual:number;revision_semestral:number;permisos_anual:number;otros_fijos_mensual:number;conductor_dia:number;};
@@ -36,7 +36,6 @@ const fmtF=(f:string|null)=>f?new Date(f+"T00:00:00").toLocaleDateString("es-PE"
 const calcItems=(items:ItemCot[],conIGV=true)=>{const s=items.reduce((t,it)=>t+it.dias*it.cantidad*it.precio_unit*(1-it.descuento_pct/100),0);return{subtotal:s,igv:conIGV?s*0.18:0,total:conIGV?s*1.18:s};};
 const norm=(s:string)=>s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
 const iCls=(e="")=>`w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all ${e}`;
-const driveImg=(url:string)=>{if(!url)return url;const m=url.match(/\/d\/([a-zA-Z0-9_-]{20,})/)||url.match(/[?&]id=([a-zA-Z0-9_-]{20,})/);return m?`https://drive.google.com/thumbnail?id=${m[1]}&sz=w800`:url;};
 function extraerNombreApellido(nombre:string):string{const p=nombre.toUpperCase().trim().split(/\s+/).filter(Boolean);if(p.length===0)return nombre.toUpperCase();if(p.length<=2)return p.join(" ");if(p.length===3)return p[0]+" "+p[1];return p[0]+" "+p[2];}
 const enHorario=()=>{const l=new Date(new Date().toLocaleString("en-US",{timeZone:"America/Lima"}));return l.getDay()>=1&&l.getDay()<=5&&l.getHours()>=8&&l.getHours()<18;};
 const GRUPO_COLOR:{[k:string]:{color:string;bg:string}}={Ligeros:{color:"#6366f1",bg:"#eef2ff"},Vans:{color:"#0891b2",bg:"#ecfeff"},Buses:{color:"#0b315f",bg:"#eef3f8"},Otros:{color:"#6b7280",bg:"#f3f4f6"}};
@@ -450,20 +449,6 @@ function buildCronogramaMultidiaPDF(cot:Cotizacion,cp:string):string{
   </div>`;
 }
 
-function buildVehsHtml(vehiculos:VehiculoFlota[],cp:string,opts?:{imgH?:string;radius?:string;gap?:string;contain?:boolean}):string{
-  if(!vehiculos.length)return"";
-  const imgH=opts?.imgH||"200px";const radius=opts?.radius||"12px";const gap=opts?.gap||"12px";const contain=opts?.contain||false;
-  return vehiculos.map((veh,idx)=>{
-    const esFull=(veh.equipamiento||"full_equipo")==="full_equipo";
-    const desc=veh.descripcion_unidad||(esFull?`Bus con capacidad para ${veh.capacidad_pasajeros||"—"} pasajeros, con A/C, sistema de audio, asientos reclinables, bodega y GPS.`:`Bus con capacidad para ${veh.capacidad_pasajeros||"—"} pasajeros, estándar, bodega y GPS.`);
-    const mkImg=(url:string)=>contain?`<div style="background:#f3f4f6;border-radius:${radius};border:1px solid #e5e7eb;height:${imgH};display:flex;align-items:center;justify-content:center;overflow:hidden;"><img src="${driveImg(url)}" style="max-width:100%;max-height:${imgH};object-fit:contain;"/></div>`:`<div style="border-radius:${radius};overflow:hidden;height:${imgH};"><img src="${driveImg(url)}" style="width:100%;height:100%;object-fit:cover;"/></div>`;
-    const fotos=veh.foto_externa_url||veh.foto_interna_url?`<div style="display:grid;grid-template-columns:${veh.foto_externa_url&&veh.foto_interna_url?"1fr 1fr":"1fr"};gap:${gap};margin:10px 0;">${veh.foto_externa_url?mkImg(veh.foto_externa_url):""}${veh.foto_interna_url?mkImg(veh.foto_interna_url):""}</div>`:"";
-    const sep=idx>0?`<div style="height:1px;background:#e5e7eb;margin:10px 0 12px;"></div>`:"";
-    const tipoEquip=esFull?"FULL EQUIPO":"BÁSICO";
-    const lbl=vehiculos.length>1?`<p style="font-size:10px;font-weight:900;color:${cp};margin:0 0 5px;">${(veh.categoria||"UNIDAD").toUpperCase()} ${tipoEquip}${veh.capacidad_pasajeros?" DE "+veh.capacidad_pasajeros+" PASAJEROS":""}</p>`:"";
-    return`${sep}${lbl}<p style="color:#475569;font-size:11px;margin:0;">${desc}</p>${fotos}`;
-  }).join("");
-}
 
 function generarPDFModerno(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],vehiculos:VehiculoFlota[],repr:string,consid:ConsidCot,cfg:CotPlantillaConfig|null,empresa:EmpresaPerfilPDF|null){
   const conIGV=cot.incluye_igv!==false;
@@ -1312,16 +1297,15 @@ export default function CotizacionesPage(){
       const tk=process.env.NEXT_PUBLIC_MAPBOX_TOKEN||"";
       const mapaIda=urlMapaEstatico(pIda,metrica?.ida?.poly||"","#0b315f",tk);
       const mapaRet=urlMapaEstatico(pRet,metrica?.retorno?.poly||"","#6d28d9",tk);
-      const urlRuta=urlGoogleMapsRuta(pIda)||urlGoogleMapsRuta(pRet);
-      let qr="";
-      if(urlRuta){try{const{default:QRCode}=await import("qrcode");qr=await QRCode.toDataURL(urlRuta,{margin:1,width:240});}catch{}}
+      // Un QR por sentido: el retorno no es el inverso de la ida, tiene sus propios puntos.
+      let qrIda="",qrRet="";
+      try{
+        const{default:QRCode}=await import("qrcode");
+        const uIda=urlGoogleMapsRuta(pIda),uRet=urlGoogleMapsRuta(pRet);
+        if(uIda)qrIda=await QRCode.toDataURL(uIda,{margin:1,width:240});
+        if(uRet)qrRet=await QRCode.toDataURL(uRet,{margin:1,width:240});
+      }catch{}
 
-      const tv=paramsDB.find(p=>p.tipo_vehiculo===cot.tipo_vehiculo);
-      const equip=cot.equipamiento==="full_equipo"?"Full equipo":cot.equipamiento?cot.equipamiento.replace(/_/g," "):"";
-      const unidadTexto=[tv?.nombre||cot.tipo_vehiculo||"Unidad por asignar",tv?.capacidad?`${tv.capacidad} pasajeros`:"",equip].filter(Boolean).join(" · ");
-
-      let repr=(cot as any).creado_por||"";
-      if(!repr){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:u}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(u?.nombre)repr=extraerNombreApellido(u.nombre);}}catch{}}
       const{data:empData}=await supabase.from("empresa_perfil").select("nombre,razon_social,ruc,logo_url,telefono,email,direccion,color_primario,web").eq("id",1).maybeSingle();
 
       const emp=empData as EmpresaPerfilPDF|null;
@@ -1343,11 +1327,10 @@ export default function CotizacionesPage(){
           retorno:cot.fecha_retorno?fechaLarga(cot.fecha_retorno):"Según programación acordada",
         },
         horaIda:cot.hora_ida||"",horaRetorno:cot.hora_retorno||"",
-        puntosIda:pIda,puntosRet:pRet,metrica,mapaIda,mapaRet,qr,urlRuta,
-        unidadTexto,
+        puntosIda:pIda,puntosRet:pRet,metrica,mapaIda,mapaRet,qrIda,qrRet,
+        vehiculos:vehs,
         unidadDetalle:vehs.map(v=>[v.placa,v.marca,v.modelo,v.capacidad_pasajeros?`${v.capacidad_pasajeros} pax`:""].filter(Boolean).join(" · ")).join("   |   "),
         empresa:{nombre:emp?.nombre||"AFA Tours Peru S.A.C.",email:emp?.email||"transporte@afatoursperu.com",telefono:emp?.telefono||"(01) 3453707 – 966 707 225",web:emp?.web||"www.afatoursperu.com",direccion:emp?.direccion||"Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima",logo:emp?.logo_url||LOGO_DEFAULT},
-        repr:repr||"JENNY ELYZABETH URBINA AFATA",
         aviso,
       });
     }catch(e:any){

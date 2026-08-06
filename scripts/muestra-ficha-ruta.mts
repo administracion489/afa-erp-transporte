@@ -9,17 +9,31 @@ const RAIZ = "C:/Users/trans/afa-erp-transporte";
 const env = fs.readFileSync(path.join(RAIZ, ".env.local"), "utf8");
 const TOKEN = (/NEXT_PUBLIC_MAPBOX_TOKEN=(.+)/.exec(env)?.[1] || "").trim();
 
+// Ruta larga a propósito (10 puntos por sentido, como un transporte de personal real):
+// así la muestra ocupa varias páginas y se ve cómo pagina el documento al imprimir.
 const paradasIda = [
-  { tipo: "inicio", nombre: "Óvalo La Curva", direccion: "Óvalo La Curva, Chorrillos 15056", lat: "-12.17462", lng: "-77.01654", hora: "20:15" },
-  { tipo: "intermedia", nombre: "Paradero Matellini", direccion: "Av. Guardia Civil 1250, Chorrillos", lat: "-12.18122", lng: "-76.99852", hora: "" },
-  { tipo: "intermedia", nombre: "Puente Benavides", direccion: "Av. Paseo de la República, Surco", lat: "-12.12735", lng: "-77.01251", hora: "20:40" },
-  { tipo: "intermedia", nombre: "Plaza San Miguel", direccion: "Av. La Marina 2000, San Miguel", lat: "-12.07714", lng: "-77.08283", hora: "" },
-  { tipo: "destino", nombre: "Mixing Center Callao", direccion: "D, XVXJ+5GV, Callao 07031", lat: "-12.03514", lng: "-77.11423", hora: "21:30" },
+  { tipo: "inicio", nombre: "Óvalo La Curva", direccion: "Óvalo La Curva, Chorrillos 15056, Perú", lat: "-12.17462", lng: "-77.01654", hora: "20:15" },
+  { tipo: "intermedia", nombre: "Paradero Matellini", direccion: "Av. Guardia Civil 1250, Chorrillos 15064, Perú", lat: "-12.18122", lng: "-76.99852", hora: "" },
+  { tipo: "intermedia", nombre: "Próceres", direccion: "Próceres, Santiago de Surco 15056, Perú", lat: "-12.15221", lng: "-76.98387", hora: "20:28" },
+  { tipo: "intermedia", nombre: "Paradero Puente Benavides", direccion: "1S, Santiago de Surco 15039, Perú", lat: "-12.13110", lng: "-76.97830", hora: "" },
+  { tipo: "intermedia", nombre: "Primavera", direccion: "Primavera, San Borja 15037, Perú", lat: "-12.10855", lng: "-76.97870", hora: "20:45" },
+  { tipo: "intermedia", nombre: "Javier Prado", direccion: "Javier Prado, Ate 15022, Perú", lat: "-12.08220", lng: "-76.97977", hora: "" },
+  { tipo: "intermedia", nombre: "Puente Santa Anita", direccion: "Puente Santa Anita, El Agustino 15022, Perú", lat: "-12.05711", lng: "-76.97420", hora: "21:02" },
+  { tipo: "intermedia", nombre: "Puente Nuevo", direccion: "Puente Nuevo, El Agustino 15006, Perú", lat: "-12.03009", lng: "-77.00011", hora: "" },
+  { tipo: "intermedia", nombre: "Bertello", direccion: "Bertello, Callao 07036, Perú", lat: "-12.01976", lng: "-77.10140", hora: "21:18" },
+  { tipo: "destino", nombre: "Mixing Center Callao", direccion: "D, XVXJ+5GV, Callao 07031, Perú", lat: "-12.00363", lng: "-77.11881", hora: "21:30" },
 ];
 const paradasRet = [
-  { tipo: "inicio", nombre: "Mixing Center Callao", direccion: "D, XVXJ+5GV, Callao 07031", lat: "-12.03514", lng: "-77.11423", hora: "22:30" },
-  { tipo: "intermedia", nombre: "Av. Universitaria", direccion: "Av. Universitaria 1801, San Miguel", lat: "-12.07026", lng: "-77.08037", hora: "" },
-  { tipo: "destino", nombre: "Defensores del Morro", direccion: "Av. Defensores del Morro Lt 17-18, Chorrillos 15000", lat: "-12.17053", lng: "-77.01911", hora: "23:45" },
+  { tipo: "inicio", nombre: "Mixing Center Callao", direccion: "D, XVXJ+5GV, Callao 07031, Perú", lat: "-12.00363", lng: "-77.11881", hora: "22:30" },
+  { tipo: "intermedia", nombre: "Bertello", direccion: "Bertello, Callao 07036, Perú", lat: "-12.01976", lng: "-77.10140", hora: "22:40" },
+  { tipo: "intermedia", nombre: "Puente Nuevo", direccion: "Puente Nuevo, El Agustino 15006, Perú", lat: "-12.03009", lng: "-77.00011", hora: "23:00" },
+  { tipo: "intermedia", nombre: "Puente Santa Anita", direccion: "Puente Santa Anita, El Agustino 15022, Perú", lat: "-12.05711", lng: "-76.97420", hora: "23:10" },
+  { tipo: "intermedia", nombre: "Javier Prado", direccion: "Javier Prado, Ate 15022, Perú", lat: "-12.08220", lng: "-76.97977", hora: "23:18" },
+  { tipo: "intermedia", nombre: "Primavera", direccion: "Primavera, San Borja 15037, Perú", lat: "-12.10855", lng: "-76.97870", hora: "23:25" },
+  { tipo: "intermedia", nombre: "Paradero Puente Benavides", direccion: "1S, Santiago de Surco 15039, Perú", lat: "-12.13110", lng: "-76.97830", hora: "23:30" },
+  { tipo: "intermedia", nombre: "Próceres", direccion: "Próceres, Santiago de Surco 15056, Perú", lat: "-12.15221", lng: "-76.98387", hora: "23:35" },
+  { tipo: "intermedia", nombre: "Puente Alipio", direccion: "Puente Alipio, San Juan de Miraflores 15801, Perú", lat: "-12.16400", lng: "-76.98900", hora: "" },
+  { tipo: "destino", nombre: "Av. Las Gaviotas Mz.BLK B", direccion: "Av. Las Gaviotas Mz.BLK B, Chorrillos 15000, Perú", lat: "-12.17053", lng: "-77.01911", hora: "23:55" },
 ];
 
 const pIda = construirPuntos(paradasIda, "I");
@@ -45,9 +59,9 @@ const metrica = {
   retorno: (await metricaReal(pRet)) || EJEMPLO_RET,
 };
 
-const urlRuta = urlGoogleMapsRuta(pIda);
 const QRCode = (await import("qrcode")).default;
-const qr = await QRCode.toDataURL(urlRuta, { margin: 1, width: 240 });
+const qrIda = await QRCode.toDataURL(urlGoogleMapsRuta(pIda), { margin: 1, width: 240 });
+const qrRet = await QRCode.toDataURL(urlGoogleMapsRuta(pRet), { margin: 1, width: 240 });
 
 const html = buildFichaRutaHtml({
   nCot: "00365", anio: 2026, emitida: "06/08/2026",
@@ -57,11 +71,11 @@ const html = buildFichaRutaHtml({
   puntosIda: pIda, puntosRet: pRet, metrica,
   mapaIda: urlMapaEstatico(pIda, metrica.ida.poly, "#0b315f", TOKEN),
   mapaRet: urlMapaEstatico(pRet, metrica.retorno.poly, "#6d28d9", TOKEN),
-  qr, urlRuta,
-  unidadTexto: "Custer 25 pax · 25 pasajeros · Full equipo",
-  unidadDetalle: "B2K-885 · Hyundai County · 25 pax   |   D4T-712 · Mercedes Benz Sprinter · 19 pax",
+  qrIda, qrRet,
+  unidadDetalle: "B2K-885 · Hyundai County · 25 pax",
+  vehiculos: [{ categoria: "Custer", capacidad_pasajeros: 25, equipamiento: "full_equipo", foto_externa_url: `file:///${RAIZ}/public/bussinfondo3.png`, foto_interna_url: null, descripcion_unidad: null }],
   empresa: { nombre: "AFA Tours Peru S.A.C.", email: "transporte@afatoursperu.com", telefono: "(01) 3453707 – 966 707 225", web: "www.afatoursperu.com", direccion: "Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima", logo: `file:///${RAIZ}/public/logoafacotizacion-removebg-preview.png` },
-  repr: "JENNY URBINA", aviso: "",
+  aviso: "",
 });
 
 const salida = path.join(process.env.TEMP || ".", "ficha-ruta-muestra.html");

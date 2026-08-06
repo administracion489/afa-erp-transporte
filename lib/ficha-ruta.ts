@@ -121,7 +121,7 @@ export function diezmar<T>(arr: T[], max: number): T[] {
  * token o si no hay nada que dibujar, y el documento simplemente omite el bloque.
  * Con más de MAX_PINES puntos solo se marcan los extremos, si no el mapa se vuelve ilegible.
  */
-export function urlMapaEstatico(puntos: PuntoFicha[], poly: string, colorHex: string, token: string, ancho = 880, alto = 480): string {
+export function urlMapaEstatico(puntos: PuntoFicha[], poly: string, colorHex: string, token: string, ancho = 880, alto = 360): string {
   if (!token) return "";
   const con = puntosConCoords(puntos);
   if (!con.length && !poly) return "";
@@ -171,12 +171,20 @@ export function filasConAcumulados(puntos: PuntoFicha[], metrica: MetricaSentido
   const kmPorPunto = new Map<number, number>(), minPorPunto = new Map<number, number>();
   idxCon.forEach((idx, k) => { if (k > 0 && tramos[k - 1]) { kmPorPunto.set(idx, tramos[k - 1].distancia_km); minPorPunto.set(idx, tramos[k - 1].duracion_min); } });
 
-  const base = aMin(puntos.find(p => aMin(p.hora) !== null)?.hora || "");
-  const idxBase = puntos.findIndex(p => aMin(p.hora) !== null);
   let km = 0, min = 0;
   const acumHasta: number[] = [];
   puntos.forEach((_, i) => { min += minPorPunto.get(i) || 0; acumHasta[i] = min; });
   min = 0;
+
+  // Cada hora estimada se ancla al punto CON hora programada más cercano hacia atrás (y si
+  // no hay ninguno, al primero hacia adelante). Anclar siempre a la primera hora del tramo
+  // hacía que un retraso cargado a mitad de ruta dejara estimaciones ya desfasadas.
+  const idxConHora = puntos.map((p, i) => (aMin(p.hora) !== null ? i : -1)).filter(i => i >= 0);
+  const anclaDe = (i: number): number | null => {
+    if (!idxConHora.length) return null;
+    const previos = idxConHora.filter(k => k < i);
+    return previos.length ? previos[previos.length - 1] : idxConHora[0];
+  };
 
   return puntos.map((p, i) => {
     const kmT = kmPorPunto.get(i) ?? null;
@@ -185,9 +193,13 @@ export function filasConAcumulados(puntos: PuntoFicha[], metrica: MetricaSentido
     const hayMetrica = tramos.length > 0;
     const propia = aMin(p.hora);
     let horaMostrada = p.hora, estimada = false;
-    if (propia === null && base !== null && hayMetrica && idxBase >= 0) {
-      horaMostrada = aHora(base + (acumHasta[i] - acumHasta[idxBase]));
-      estimada = true;
+    if (propia === null && hayMetrica) {
+      const ancla = anclaDe(i);
+      const baseMin = ancla === null ? null : aMin(puntos[ancla].hora);
+      if (ancla !== null && baseMin !== null) {
+        horaMostrada = aHora(baseMin + (acumHasta[i] - acumHasta[ancla]));
+        estimada = true;
+      }
     }
     return {
       ...p,
