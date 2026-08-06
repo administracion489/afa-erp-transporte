@@ -1298,12 +1298,13 @@ export default function CotizacionesPage(){
       const mapaIda=urlMapaEstatico(pIda,metrica?.ida?.poly||"","#0b315f",tk);
       const mapaRet=urlMapaEstatico(pRet,metrica?.retorno?.poly||"","#6d28d9",tk);
       // Un QR por sentido: el retorno no es el inverso de la ida, tiene sus propios puntos.
+      // La URL además va como hipervínculo, para abrir la ruta desde el PDF con un clic.
+      const urlIda=urlGoogleMapsRuta(pIda),urlRet=urlGoogleMapsRuta(pRet);
       let qrIda="",qrRet="";
       try{
         const{default:QRCode}=await import("qrcode");
-        const uIda=urlGoogleMapsRuta(pIda),uRet=urlGoogleMapsRuta(pRet);
-        if(uIda)qrIda=await QRCode.toDataURL(uIda,{margin:1,width:240});
-        if(uRet)qrRet=await QRCode.toDataURL(uRet,{margin:1,width:240});
+        if(urlIda)qrIda=await QRCode.toDataURL(urlIda,{margin:1,width:240});
+        if(urlRet)qrRet=await QRCode.toDataURL(urlRet,{margin:1,width:240});
       }catch{}
 
       const{data:empData}=await supabase.from("empresa_perfil").select("nombre,razon_social,ruc,logo_url,telefono,email,direccion,color_primario,web").eq("id",1).maybeSingle();
@@ -1327,7 +1328,7 @@ export default function CotizacionesPage(){
           retorno:cot.fecha_retorno?fechaLarga(cot.fecha_retorno):"Según programación acordada",
         },
         horaIda:cot.hora_ida||"",horaRetorno:cot.hora_retorno||"",
-        puntosIda:pIda,puntosRet:pRet,metrica,mapaIda,mapaRet,qrIda,qrRet,
+        puntosIda:pIda,puntosRet:pRet,metrica,mapaIda,mapaRet,qrIda,qrRet,urlIda,urlRet,
         vehiculos:vehs,
         unidadDetalle:vehs.map(v=>[v.placa,v.marca,v.modelo,v.capacidad_pasajeros?`${v.capacidad_pasajeros} pax`:""].filter(Boolean).join(" · ")).join("   |   "),
         empresa:{nombre:emp?.nombre||"AFA Tours Peru S.A.C.",email:emp?.email||"transporte@afatoursperu.com",telefono:emp?.telefono||"(01) 3453707 – 966 707 225",web:emp?.web||"www.afatoursperu.com",direccion:emp?.direccion||"Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima",logo:emp?.logo_url||LOGO_DEFAULT},

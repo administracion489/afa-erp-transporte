@@ -62,8 +62,10 @@ const metrica = {
 };
 
 const QRCode = (await import("qrcode")).default;
-const qrIda = await QRCode.toDataURL(urlGoogleMapsRuta(pIda), { margin: 1, width: 240 });
-const qrRet = await QRCode.toDataURL(urlGoogleMapsRuta(pRet), { margin: 1, width: 240 });
+const urlIda = urlGoogleMapsRuta(pIda);
+const urlRet = urlGoogleMapsRuta(pRet);
+const qrIda = await QRCode.toDataURL(urlIda, { margin: 1, width: 240 });
+const qrRet = await QRCode.toDataURL(urlRet, { margin: 1, width: 240 });
 
 const html = buildFichaRutaHtml({
   nCot: "00365", anio: 2026, emitida: "06/08/2026",
@@ -73,7 +75,7 @@ const html = buildFichaRutaHtml({
   puntosIda: pIda, puntosRet: pRet, metrica,
   mapaIda: urlMapaEstatico(pIda, metrica.ida.poly, "#0b315f", TOKEN),
   mapaRet: urlMapaEstatico(pRet, metrica.retorno.poly, "#6d28d9", TOKEN),
-  qrIda, qrRet,
+  qrIda, qrRet, urlIda, urlRet,
   unidadDetalle: "B2K-885 · Hyundai County · 25 pax",
   vehiculos: [{ categoria: "Custer", capacidad_pasajeros: 25, equipamiento: "full_equipo", foto_externa_url: `file:///${RAIZ}/public/bussinfondo3.png`, foto_interna_url: null, descripcion_unidad: null }],
   empresa: { nombre: "AFA Tours Peru S.A.C.", email: "transporte@afatoursperu.com", telefono: "(01) 3453707 – 966 707 225", web: "www.afatoursperu.com", direccion: "Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima", logo: `file:///${RAIZ}/public/logoafacotizacion-removebg-preview.png` },

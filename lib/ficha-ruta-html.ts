@@ -36,6 +36,9 @@ export type FichaRutaDatos = {
   /** QR por sentido: el recorrido de retorno no es el inverso del de ida, son otras coordenadas. */
   qrIda: string;
   qrRet: string;
+  /** Enlaces de Google Maps por sentido; hacen clicable el QR y las líneas del pie. */
+  urlIda: string;
+  urlRet: string;
   /** Unidades asignadas: se muestran con foto y descripción, igual que en la cotización. */
   vehiculos: VehiculoPDF[];
   /** Placas y modelos en una línea; vacío si todavía no hay unidad asignada. */
@@ -73,7 +76,7 @@ function buildTablaPuntos(filas: FilaFicha[], color: string): string {
   return `<table class="tbl-puntos"><thead style="background:${color};"><tr>${th}</tr></thead><tbody>${cuerpo}</tbody></table>`;
 }
 
-function buildSeccion(titulo: string, sentido: string, color: string, filas: FilaFicha[], mapa: string, metrica: MetricaSentido | null, qr: string): string {
+function buildSeccion(titulo: string, sentido: string, color: string, filas: FilaFicha[], mapa: string, metrica: MetricaSentido | null, qr: string, url: string): string {
   if (!filas.length) {
     return `<div class="ficha-sec"><div class="ficha-sec-h" style="border-color:${color};"><span style="color:${color};">${titulo}</span></div>`
       + `<p style="font-size:10px;color:#94a3b8;margin:8px 0 0;">No se ha definido un tramo de ${sentido} para este servicio.</p></div>`;
@@ -82,10 +85,13 @@ function buildSeccion(titulo: string, sentido: string, color: string, filas: Fil
     ? `<span style="font-size:9px;color:#64748b;">${fmtKm(metrica.total_km)} · ${fmtDuracion(metrica.total_min)} · ${filas.length} puntos</span>`
     : `<span style="font-size:9px;color:#64748b;">${filas.length} puntos</span>`;
   // El QR va sobre el mapa, en la esquina superior izquierda: cada sentido tiene el suyo
-  // porque el recorrido de retorno no es el inverso del de ida.
-  const qrSobreMapa = qr
-    ? `<div class="ficha-qr"><img src="${qr}"/><p>Abrir<br/>${esc(sentido)}<br/>en Maps</p></div>`
-    : "";
+  // porque el recorrido de retorno no es el inverso del de ida. Todo el bloque es un
+  // hipervínculo: Chrome conserva los <a href> al guardar como PDF, así que desde el PDF
+  // se abre con un clic — el QR queda para cuando la ficha está impresa en papel.
+  const etiquetaQr = `<img src="${qr}"/><p>Abrir<br/>${esc(sentido)}<br/>en Maps</p>${url ? `<p class="dominio">google.com/maps</p>` : ""}`;
+  const qrSobreMapa = !qr ? ""
+    : url ? `<a class="ficha-qr" href="${esc(url)}" target="_blank" rel="noopener">${etiquetaQr}</a>`
+    : `<div class="ficha-qr">${etiquetaQr}</div>`;
   const img = mapa
     ? `<div class="ficha-mapa"><img class="mapa" src="${mapa}" onerror="this.closest('.ficha-mapa').style.display='none'"/>${qrSobreMapa}<p class="pie">Recorrido referencial por vía — ${esc(sentido)}</p></div>`
     : (qr ? `<div class="ficha-qr-suelto">${qrSobreMapa}</div>` : "");
@@ -148,11 +154,14 @@ export function buildFichaRutaHtml(d: FichaRutaDatos): string {
     .ficha-mapa{position:relative;margin-top:8px;text-align:center;page-break-inside:avoid}
     .ficha-mapa img.mapa{width:100%;max-width:100%;max-height:300px;object-fit:cover;border:1px solid #d7dde5;border-radius:5px;display:block}
     .ficha-mapa p.pie{margin:3px 0 0;font-size:8px;color:#94a3b8}
-    .ficha-qr{position:absolute;top:7px;left:7px;background:#fff;border:1px solid #cbd5e1;border-radius:5px;padding:4px 4px 3px;width:72px;box-shadow:0 1px 3px rgba(0,0,0,.18)}
+    .ficha-qr{position:absolute;top:7px;left:7px;background:#fff;border:1px solid #cbd5e1;border-radius:5px;padding:4px 4px 3px;width:72px;box-shadow:0 1px 3px rgba(0,0,0,.18);display:block;text-decoration:none}
     .ficha-qr img{width:64px;height:64px;display:block;margin:0 auto}
     .ficha-qr p{margin:2px 0 0;font-size:6px;font-weight:700;text-transform:uppercase;letter-spacing:.2px;color:#475569;line-height:1.25;text-align:center}
+    .ficha-qr p.dominio{margin-top:1px;font-size:5.5px;font-weight:700;text-transform:none;letter-spacing:0;color:#1d4ed8;text-decoration:underline}
     .ficha-qr-suelto{margin-top:8px;position:relative;height:96px}
     .ficha-cond li{font-size:9.5px;color:#334155;line-height:1.7}
+    .ficha-links{font-size:9px;color:#475569;margin:3px 0 0}
+    .ficha-links a{color:#1d4ed8;font-weight:700;text-decoration:underline}
     .ficha-firmas{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:34px;page-break-inside:avoid}
     .ficha-firma{text-align:center}
     .ficha-firma .linea{border-top:1px solid #64748b;margin-bottom:4px}
@@ -183,8 +192,8 @@ ${footer}
 </div>
 <div class="ficha-kpis">${kpis}</div>
 ${d.aviso ? `<div style="border:1px solid #fcd34d;background:#fffbeb;border-radius:5px;padding:6px 9px;font-size:9px;color:#92400e;margin-top:6px;">${esc(d.aviso)}</div>` : ""}
-${buildSeccion("Puntos de entrada (ida)", "ida", C_IDA, filasIda, d.mapaIda, d.metrica?.ida || null, d.qrIda)}
-${buildSeccion("Puntos de retorno (salida)", "retorno", C_RET, filasRet, d.mapaRet, d.metrica?.retorno || null, d.qrRet)}
+${buildSeccion("Puntos de entrada (ida)", "ida", C_IDA, filasIda, d.mapaIda, d.metrica?.ida || null, d.qrIda, d.urlIda)}
+${buildSeccion("Puntos de retorno (salida)", "retorno", C_RET, filasRet, d.mapaRet, d.metrica?.retorno || null, d.qrRet, d.urlRet)}
 <div class="ficha-sec entera">
   <div class="ficha-sec-h" style="border-color:${CP_FICHA};"><span style="color:${CP_FICHA};">Unidad asignada</span></div>
   <div class="box">
@@ -196,6 +205,11 @@ ${buildSeccion("Puntos de retorno (salida)", "retorno", C_RET, filasRet, d.mapaR
   <div class="ficha-sec-h" style="border-color:${CP_FICHA};"><span style="color:${CP_FICHA};">Condiciones operativas</span></div>
   <ul class="ficha-cond">${CONDICIONES_FICHA.map(c => `<li>${esc(c)}</li>`).join("")}</ul>
   <p style="font-size:9px;color:#475569;margin:6px 0 0;"><b>Central de operaciones:</b> ${esc(d.empresa.telefono)} · ${esc(d.empresa.email)}</p>
+  ${d.urlIda || d.urlRet ? `<p class="ficha-links"><b>Recorrido en Google Maps:</b>
+    ${d.urlIda ? `<a href="${esc(d.urlIda)}" target="_blank" rel="noopener">abrir tramo de entrada (ida)</a>` : ""}
+    ${d.urlIda && d.urlRet ? " · " : ""}
+    ${d.urlRet ? `<a href="${esc(d.urlRet)}" target="_blank" rel="noopener">abrir tramo de retorno</a>` : ""}
+  </p>` : ""}
 </div>
 <div class="ficha-firmas">
   <div class="ficha-firma"><div class="linea"></div><p class="rol">${esc(d.empresa.nombre)}</p><p>Coordinación de operaciones</p><p>Firma y sello</p></div>
