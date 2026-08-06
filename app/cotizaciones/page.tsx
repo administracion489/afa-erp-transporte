@@ -2,6 +2,9 @@
 import React, { useEffect, useState, useMemo, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { sugerirNombreRuta } from "@/lib/nombre-ruta";
+import { construirPuntos, puntosDesdeTexto, puntosConCoords, firmaRutaFicha, encodePolyline, diezmar, urlMapaEstatico, urlGoogleMapsRuta, type PuntoFicha, type FichaRutaCache, type MetricaSentido } from "@/lib/ficha-ruta";
+import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
+import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS } from "@/lib/pdf-chrome";
 
 type FechaMultidia={dia:number;fecha:string;hora_ida:string;hora_fin:string;tipo_noche:"pernocte"|"cochera"|"";destino_nombre:string;destino_lat:string;destino_lng:string;};
 type ParamCosto={tipo_vehiculo:string;nombre:string;capacidad:number;activo:boolean;icono:string|null;grupo_vehiculo:string|null;euronorm:string|null;usa_urea:boolean;consumo_urea_pct:number|null;tipo_combustible_1:string;rendimiento_1:number;pct_uso_1:number;tipo_combustible_2:string|null;rendimiento_2:number|null;pct_uso_2:number|null;n_neumaticos:number;costo_neumatico:number;vida_neumatico_km:number;mantenimiento_km:number;valor_compra:number;residual_pct:number;vida_util_anios:number;km_anio:number;seguro_anual:number;soat_anual:number;revision_semestral:number;permisos_anual:number;otros_fijos_mensual:number;conductor_dia:number;};
@@ -10,7 +13,7 @@ type ModoServ="eventual"|"fijo";
 type ItemCot={descripcion:string;dias:number;cantidad:number;precio_unit:number;descuento_pct:number;vehiculo_flota_id?:number|null;vehiculo_tercero_id?:number|null;};
 type ConsidCot={incluye:string[];no_incluye:string[];generales:string[];};
 type Cliente={id:number;nombre:string;empresa?:string;tipo?:string;ruc?:string;dni?:string;telefono?:string;email?:string;direccion?:string;estado?:string;operativo_nombre?:string;};
-type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;};
+type Cotizacion={id:number;cliente_id:number|null;origen:string;destino:string;km:number;precio_cliente:number;costo_estimado:number;margen_estimado:number;estado:EstadoCot;numero_cotizacion:string|null;atencion:string|null;asunto:string|null;punto_retorno:string|null;fecha_servicio:string|null;fecha_retorno:string|null;hora_ida:string|null;hora_retorno:string|null;descuento_pct:number;items_json:ItemCot[]|null;numero_aprobacion:string|null;tipo_aprobacion:string|null;medio_envio:string|null;tipo_vehiculo:string|null;tipo_servicio:string|null;equipamiento:string|null;vehiculo_flota_id:number|null;vehiculo_tercero_id:number|null;consideraciones_json:ConsidCot|null;paradas_json:ParadaTP[]|null;paradas_retorno_json:ParadaTP[]|null;created_at:string;modo_servicio:ModoServ|null;dias_servicio:number|null;horas_servicio:number|null;pernocte_costo:number|null;precio_dia:number|null;precio_mes_estimado:number|null;precio_tarifario:number|null;precio_cotizador:number|null;costo_cotizador:number|null;margen_cotizador:number|null;vehiculo_cotizador:string|null;precio_sugerido:number|null;modo_precio:string|null;enviado_automatico:boolean;descuento_solicitado:boolean;descuento_pct_solicitado:number|null;descuento_autorizado:boolean;hora_solicitud_descuento:string|null;plantilla_pdf:string|null;incluye_igv:boolean|null;itinerario_texto:string|null;fechas_multidia_json:FechaMultidia[]|null;ficha_ruta_json?:FichaRutaCache|null;};
 type EmpresaPerfilPDF={nombre:string|null;razon_social:string|null;ruc:string|null;logo_url:string|null;telefono:string|null;email:string|null;direccion:string|null;color_primario:string|null;web:string|null;};
 type CotPlantillaConfig={id:string;color_primario:string;color_secundario:string;color_acento:string;titulo_documento:string;subtitulo:string|null;mensaje_cierre:string|null;mostrar_logo:boolean;mostrar_fotos_vehiculo:boolean;mostrar_itinerario:boolean;mostrar_precio_pax:boolean;mostrar_cuentas_bancarias:boolean;mostrar_firma:boolean;condiciones_incluye:string[]|null;condiciones_no_incluye:string[]|null;condiciones_generales:string[]|null;banco_1_nombre:string|null;banco_1_cuenta:string|null;banco_1_cci:string|null;banco_2_nombre:string|null;banco_2_cuenta:string|null;banco_2_cci:string|null;banco_3_nombre:string|null;banco_3_cuenta:string|null;banco_3_cci:string|null;usar_bancos_propios:boolean;idioma:string;};
 type ParadaTP={id:string;tipo:"inicio"|"intermedia"|"destino";nombre:string;direccion:string;lat:string;lng:string;hora:string;};
@@ -386,34 +389,6 @@ function formatItinerarioHtml(texto:string,cp:string,acento:string):string{
     return`<p style="margin:4px 0;font-size:11px;">${l}</p>`;
   }).join('');
 }
-const LOGO_DEFAULT="/logoafacotizacion-removebg-preview.png";
-
-function buildHeaderPDFHtml(logoUrl:string,cp:string,titulo:string,subtitulo:string):string{
-  return`<div class="pdf-header" style="background:${cp};display:flex;align-items:stretch;height:65px;">
-    <div style="background:white;border-radius:0 20px 20px 0;padding:8px 20px 8px 14px;display:flex;align-items:center;min-width:140px;max-width:160px;flex-shrink:0;">
-      <img src="${logoUrl}" style="max-height:46px;max-width:130px;object-fit:contain;"/>
-    </div>
-    <div style="flex:1;display:flex;align-items:center;justify-content:flex-end;padding:0 24px;">
-      <div style="text-align:right;">
-        <p style="font-size:16px;font-weight:900;color:white;margin:0;letter-spacing:.3px;">${titulo}</p>
-        <p style="font-size:9.5px;color:rgba(255,255,255,0.72);margin:3px 0 0;">${subtitulo}</p>
-      </div>
-    </div>
-  </div>`;
-}
-function buildFooterPDFHtml(cp:string,empDir:string,empTel:string,empEmail:string,empWeb:string):string{
-  return`<div class="pdf-footer" style="background:${cp};padding:9px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-    <span style="color:white;font-size:8.5px;">&#8962; Dir.: ${empDir}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9990; ${empTel}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9993; ${empEmail}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9741; ${empWeb}</span>
-  </div>`;
-}
-const sharedCSS=(extraCss="")=>`@page{size:A4;margin:0}*{box-sizing:border-box}body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:11px;color:#1a1a1a;margin:0;padding:82px 15mm 55px;line-height:1.4}.pdf-header{position:fixed;top:0;left:0;right:0;z-index:100;}.pdf-footer{position:fixed;bottom:0;left:0;right:0;z-index:100;}.page-break{page-break-before:always}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}${extraCss}`;
-
 function buildAnexoHtml(cot:Cotizacion,nomCl:string,nCot:string,cp:string,acento:string):string{
   const texto=(cot.itinerario_texto||'').trim();if(!texto)return'';
   const itHtml=formatItinerarioHtml(texto,cp,acento);
@@ -670,6 +645,14 @@ function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],veh
   win.document.close();
 }
 
+// Ficha Técnica de Ruta: el documento se arma en lib/ficha-ruta-html.ts (así se puede
+// generar y revisar sin navegador). Aquí solo se abre la ventana y se imprime.
+function generarFichaRuta(datos:FichaRutaDatos){
+  const win=window.open("","_blank");if(!win)return;
+  win.document.write(buildFichaRutaHtml(datos).replace("</body>","<script>window.onload=()=>setTimeout(()=>window.print(),400);<\/script></body>"));
+  win.document.close();
+}
+
 type PlaceResultCot={address:string;lat:number;lng:number;placeId:string;};
 
 // Distance Matrix se factura POR ELEMENTO (orígenes × destinos), así que
@@ -823,6 +806,7 @@ export default function CotizacionesPage(){
   const [modalEnvio,setModalEnvio]=useState<Cotizacion|null>(null);
   const [rolUsuario,setRolUsuario]=useState<string>("operador");
   const [modalEliminar,setModalEliminar]=useState<Cotizacion|null>(null);
+  const [fichaCargando,setFichaCargando]=useState<number|null>(null);
   const [modalPropagar,setModalPropagar]=useState<{cotId:number;reservas:{id:number;direccion_servicio:string|null}[];paradasIda:ParadaTP[];paradasRet:ParadaTP[]}|null>(null);
   const [propagando,setPropagando]=useState(false);
   const [vehExpandido,setVehExpandido]=useState(false);
@@ -1270,6 +1254,107 @@ export default function CotizacionesPage(){
     setModalPlantilla(null);
     const considFinal=editandoId===cot.id?consid:(cot.consideraciones_json||consid);
     generarPDF(cot,cl,its,vehiculos,nombreFinal||"JENNY ELYZABETH URBINA AFATA",considFinal,plantilla,cfgData as CotPlantillaConfig|null,empData as EmpresaPerfilPDF|null);
+  };
+
+  // Vehículos asignados a la cotización (mismo criterio que el PDF: nivel cotización + por ítem).
+  const vehiculosDeCot=(cot:Cotizacion):VehiculoFlota[]=>{
+    const m=new Map<number,VehiculoFlota>();
+    const addF=(id?:number|null)=>{if(!id)return;const v=flota.find(v=>v.id===id);if(v)m.set(v.id,v);};
+    const addT=(id?:number|null)=>{if(!id)return;const t=flotaTercero.find(v=>v.id===id);if(t)m.set(-t.id,{id:t.id,placa:t.placa,categoria:t.categoria,marca:t.marca,modelo:t.modelo,anio:null,capacidad_pasajeros:t.capacidad,equipamiento:null,foto_externa_url:t.foto_externa_url,foto_interna_url:t.foto_interna_url,descripcion_unidad:t.descripcion_unidad,tipo_vehiculo_costeo:t.tipo_vehiculo_costeo});};
+    const its=cot.items_json||[];
+    if(!its.some(it=>it.vehiculo_flota_id||it.vehiculo_tercero_id)){addF(cot.vehiculo_flota_id);addT(cot.vehiculo_tercero_id);}
+    its.forEach(it=>{addF(it.vehiculo_flota_id);addT(it.vehiculo_tercero_id);});
+    return[...m.values()];
+  };
+
+  // Pide la geometría y los km/min de un sentido. Sin tráfico: es el SKU barato y además
+  // el server ya cachea esas respuestas, así que repetir la misma ruta no le pega a Google.
+  const metricaDeSentido=async(puntos:PuntoFicha[]):Promise<MetricaSentido|null>=>{
+    const con=puntosConCoords(puntos);
+    if(con.length<2)return null;
+    const r=await fetch("/api/ruta",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({paradas:con.map(p=>({nombre:p.nombre,lat:p.lat,lng:p.lng})),conTrafico:false})});
+    if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||`Ruta HTTP ${r.status}`);
+    const d=await r.json();
+    // La polilínea se guarda diezmada: entra en la URL del mapa y pesa poco en la BD.
+    return{poly:encodePolyline(diezmar((d.coordenadas||[]) as [number,number][],160)),tramos:(d.tramos||[]).map((t:any)=>({distancia_km:Number(t.distancia_km)||0,duracion_min:Number(t.duracion_min)||0})),total_km:Number(d.total_km)||0,total_min:Number(d.total_min)||0};
+  };
+
+  const abrirFicha=async(cot:Cotizacion)=>{
+    if(fichaCargando)return;
+    setFichaCargando(cot.id);
+    try{
+      // 1. Puntos. Si la cotización no tiene paraderos cargados, se arma con origen/destino
+      //    para que el botón nunca emita un documento vacío (eso sí, sin mapa ni km).
+      const pIda=cot.paradas_json?.length?construirPuntos(cot.paradas_json,"I"):puntosDesdeTexto(cot.origen,cot.destino,"I",cot.hora_ida||"","");
+      const pRet=cot.paradas_retorno_json?.length?construirPuntos(cot.paradas_retorno_json,"R")
+        :(cot.punto_retorno?puntosDesdeTexto(cot.destino,cot.punto_retorno,"R",cot.hora_retorno||"",""):[]);
+
+      // 2. Métricas: se reusan mientras las coordenadas no cambien.
+      const firma=firmaRutaFicha(pIda,pRet);
+      let metrica=cot.ficha_ruta_json&&cot.ficha_ruta_json.firma===firma?cot.ficha_ruta_json:null;
+      let aviso="";
+      if(!metrica){
+        if(puntosConCoords(pIda).length<2&&puntosConCoords(pRet).length<2){
+          aviso="Los paraderos de esta cotización no tienen coordenadas cargadas: la ficha se emite sin mapa ni distancias.";
+        }else{
+          try{
+            const[ida,retorno]=await Promise.all([metricaDeSentido(pIda),metricaDeSentido(pRet)]);
+            metrica={firma,calculado_at:new Date().toISOString(),ida,retorno};
+            await supabase.from("cotizaciones").update({ficha_ruta_json:metrica}).eq("id",cot.id);
+            setCotizas(prev=>prev.map(c=>c.id===cot.id?{...c,ficha_ruta_json:metrica}:c));
+          }catch(e:any){
+            aviso=`No se pudieron calcular distancias y tiempos (${e?.message||"error de ruta"}). La ficha se emite con las horas programadas.`;
+          }
+        }
+      }
+
+      // 3. Mapa, QR y datos de la unidad.
+      const tk=process.env.NEXT_PUBLIC_MAPBOX_TOKEN||"";
+      const mapaIda=urlMapaEstatico(pIda,metrica?.ida?.poly||"","#0b315f",tk);
+      const mapaRet=urlMapaEstatico(pRet,metrica?.retorno?.poly||"","#6d28d9",tk);
+      const urlRuta=urlGoogleMapsRuta(pIda)||urlGoogleMapsRuta(pRet);
+      let qr="";
+      if(urlRuta){try{const{default:QRCode}=await import("qrcode");qr=await QRCode.toDataURL(urlRuta,{margin:1,width:240});}catch{}}
+
+      const tv=paramsDB.find(p=>p.tipo_vehiculo===cot.tipo_vehiculo);
+      const equip=cot.equipamiento==="full_equipo"?"Full equipo":cot.equipamiento?cot.equipamiento.replace(/_/g," "):"";
+      const unidadTexto=[tv?.nombre||cot.tipo_vehiculo||"Unidad por asignar",tv?.capacidad?`${tv.capacidad} pasajeros`:"",equip].filter(Boolean).join(" · ");
+
+      let repr=(cot as any).creado_por||"";
+      if(!repr){try{const{data:{user}}=await supabase.auth.getUser();if(user?.email){const{data:u}=await supabase.from("usuarios").select("nombre").eq("email",user.email).maybeSingle();if(u?.nombre)repr=extraerNombreApellido(u.nombre);}}catch{}}
+      const{data:empData}=await supabase.from("empresa_perfil").select("nombre,razon_social,ruc,logo_url,telefono,email,direccion,color_primario,web").eq("id",1).maybeSingle();
+
+      const emp=empData as EmpresaPerfilPDF|null;
+      const cl=clientes.find(c=>c.id===cot.cliente_id);
+      const nomCl=cl?.tipo==="b2b"?(cl.empresa||cl.nombre):cl?.nombre||"—";
+      const vehs=vehiculosDeCot(cot);
+      const servLabel=[...SERVS_EVENTUAL,...SERVS_FIJO].find(s=>s.id===cot.tipo_servicio)?.label.replace(/^\S+\s/,"")||"Servicio de transporte";
+      const fechaLarga=(f:string|null)=>f?new Date(f+"T00:00:00").toLocaleDateString("es-PE",{day:"2-digit",month:"long",year:"numeric"}).toUpperCase():"—";
+      generarFichaRuta({
+        nCot:cot.numero_cotizacion||String(cot.id).padStart(5,"0"),
+        anio:cot.created_at?new Date(cot.created_at).getFullYear():new Date().getFullYear(),
+        emitida:new Date().toLocaleDateString("es-PE",{day:"2-digit",month:"2-digit",year:"numeric"}),
+        cliente:{nombre:nomCl,docLabel:cl?.ruc?"RUC":"DOC",doc:cl?.ruc||cl?.dni||"—",contacto:cot.atencion||cl?.operativo_nombre||"—",telefono:cl?.telefono||"—"},
+        servicio:{
+          ruta:cot.asunto||`${cot.origen||"—"} → ${cot.destino||"—"}`,
+          modalidad:`${cot.modo_servicio==="fijo"?"Servicio fijo (recurrente)":"Servicio eventual"} · ${servLabel}`,
+          inicio:fechaLarga(cot.fecha_servicio),
+          retornoLabel:cot.fecha_retorno?"RETORNO":"VIGENCIA",
+          retorno:cot.fecha_retorno?fechaLarga(cot.fecha_retorno):"Según programación acordada",
+        },
+        horaIda:cot.hora_ida||"",horaRetorno:cot.hora_retorno||"",
+        puntosIda:pIda,puntosRet:pRet,metrica,mapaIda,mapaRet,qr,urlRuta,
+        unidadTexto,
+        unidadDetalle:vehs.map(v=>[v.placa,v.marca,v.modelo,v.capacidad_pasajeros?`${v.capacidad_pasajeros} pax`:""].filter(Boolean).join(" · ")).join("   |   "),
+        empresa:{nombre:emp?.nombre||"AFA Tours Peru S.A.C.",email:emp?.email||"transporte@afatoursperu.com",telefono:emp?.telefono||"(01) 3453707 – 966 707 225",web:emp?.web||"www.afatoursperu.com",direccion:emp?.direccion||"Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima",logo:emp?.logo_url||LOGO_DEFAULT},
+        repr:repr||"JENNY ELYZABETH URBINA AFATA",
+        aviso,
+      });
+    }catch(e:any){
+      alert(`No se pudo generar la ficha: ${e?.message||e}`);
+    }finally{
+      setFichaCargando(null);
+    }
   };
 
   const totC=cotizas.length;const pend=cotizas.filter(c=>c.estado==="pendiente").length;const env=cotizas.filter(c=>c.estado==="enviado").length;const apr=cotizas.filter(c=>c.estado==="aprobado").length;const tasa=totC>0?Math.round(apr/totC*100):0;const pendDesc=cotizas.filter(c=>c.descuento_solicitado&&!c.descuento_autorizado).length;
@@ -1737,6 +1822,7 @@ export default function CotizacionesPage(){
                           <button onClick={()=>editarCot(c)} className="flex-1 py-2 rounded-xl text-xs font-bold border hover:bg-gray-50 text-gray-700">✏️ Editar</button>
                           <button onClick={()=>duplicarCotizacion(c)} className="py-2 px-3 rounded-xl text-xs font-bold border hover:bg-purple-50" style={{color:"#7c3aed",borderColor:"#ddd6fe"}} title="Duplicar cotización">📋</button>
                           <button onClick={()=>{setModalPlantilla(c);setPlantillaElegida(c.plantilla_pdf||"corporativo");}} className="flex-1 py-2 rounded-xl text-xs font-bold border" style={{background:"#eef3f8",color:"#0b315f"}}>📄 PDF</button>
+                          <button onClick={()=>abrirFicha(c)} disabled={fichaCargando!==null} className="flex-1 py-2 rounded-xl text-xs font-bold border disabled:opacity-40" style={{background:"#f5f3ff",color:"#6d28d9",borderColor:"#ddd6fe"}} title="Ficha Técnica de Ruta — puntos de entrada y retorno, sin precios">{fichaCargando===c.id?"⏳ Ficha…":"🗺️ Ficha"}</button>
                           <button onClick={()=>convertirAReserva(c)} disabled={c.estado!=="aprobado"} className="flex-1 py-2 rounded-xl text-xs font-bold border disabled:opacity-30" style={{background:"#dcfce7",color:"#166534"}}>→ Res.</button>
                           {rolUsuario==="admin"&&<button onClick={()=>setModalEliminar(c)} className="py-2 px-3 rounded-xl text-xs font-bold border hover:bg-red-50" style={{color:"#dc2626",borderColor:"#fca5a5"}} title="Eliminar cotización">🗑️</button>}
                         </div>
@@ -1776,7 +1862,7 @@ export default function CotizacionesPage(){
                         </select>
                         {c.estado==="enviado"&&c.medio_envio&&<p className="text-[9px] text-gray-400 mt-0.5 font-medium">{c.medio_envio==="WhatsApp"?"💬":c.medio_envio.startsWith("Correo")?"✉️":"📋"} {c.medio_envio}</p>}
                       </td>
-                      <td className="p-3"><div className="flex gap-1 flex-wrap"><button onClick={()=>editarCot(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">✏️</button><button onClick={()=>duplicarCotizacion(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-purple-50" style={{color:"#7c3aed",borderColor:"#ddd6fe"}} title="Duplicar cotización">📋</button><button onClick={()=>{setModalPlantilla(c);setPlantillaElegida(c.plantilla_pdf||"corporativo");}} className="px-2 py-1.5 rounded-lg text-xs font-bold border" style={{background:"#eef3f8",color:"#0b315f"}}>📄 PDF</button><button onClick={()=>convertirAReserva(c)} disabled={c.estado!=="aprobado"} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-30" style={{background:"#dcfce7",color:"#166534"}}>→Res</button>{rolUsuario==="admin"&&<button onClick={()=>setModalEliminar(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-red-50" style={{color:"#dc2626",borderColor:"#fca5a5"}} title="Eliminar cotización">🗑️</button>}</div></td>
+                      <td className="p-3"><div className="flex gap-1 flex-wrap"><button onClick={()=>editarCot(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">✏️</button><button onClick={()=>duplicarCotizacion(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-purple-50" style={{color:"#7c3aed",borderColor:"#ddd6fe"}} title="Duplicar cotización">📋</button><button onClick={()=>{setModalPlantilla(c);setPlantillaElegida(c.plantilla_pdf||"corporativo");}} className="px-2 py-1.5 rounded-lg text-xs font-bold border" style={{background:"#eef3f8",color:"#0b315f"}}>📄 PDF</button><button onClick={()=>abrirFicha(c)} disabled={fichaCargando!==null} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-40" style={{background:"#f5f3ff",color:"#6d28d9",borderColor:"#ddd6fe"}} title="Ficha Técnica de Ruta — puntos de entrada y retorno, sin precios">{fichaCargando===c.id?"⏳":"🗺️ Ficha"}</button><button onClick={()=>convertirAReserva(c)} disabled={c.estado!=="aprobado"} className="px-2 py-1.5 rounded-lg text-xs font-bold border disabled:opacity-30" style={{background:"#dcfce7",color:"#166534"}}>→Res</button>{rolUsuario==="admin"&&<button onClick={()=>setModalEliminar(c)} className="px-2 py-1.5 rounded-lg text-xs font-bold border hover:bg-red-50" style={{color:"#dc2626",borderColor:"#fca5a5"}} title="Eliminar cotización">🗑️</button>}</div></td>
                     </tr>
                     {panelId===c.id&&<tr><td colSpan={10} className="px-4 pb-3 pt-0"><PanelDecision c={c} onAct={cargar}/></td></tr>}
                   </React.Fragment>);
