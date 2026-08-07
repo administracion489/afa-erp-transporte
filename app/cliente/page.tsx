@@ -199,6 +199,11 @@ export default function ClientePortal() {
 
   // Facturación
   const [facturas,          setFacturas]          = useState<Factura[]>([]);
+  // Liquidaciones del periodo pendientes de conformidad (Formato AFA-FL-07). El
+  // cliente las aprueba desde aquí sin salir del portal; el mismo enlace le llega
+  // por correo y WhatsApp, así que aprobar en cualquiera de los tres cierra el caso.
+  const [liquidaciones,     setLiquidaciones]     = useState<any[]>([]);
+  const [sedesLiq,          setSedesLiq]          = useState<Record<number, string>>({});
   const [loadingFact,       setLoadingFact]       = useState(false);
 
   // Documentos
@@ -438,6 +443,14 @@ export default function ClientePortal() {
     setLoading(true);
     setLoadingFact(true);
     const { ok, data } = await portalApi("datos");
+    // Las liquidaciones van en su propia llamada: si la tabla todavía no existe, la
+    // sección simplemente no aparece y el resto del portal no se entera.
+    portalApi("liquidaciones_listar").then(({ data: d }) => {
+      setLiquidaciones((d?.liquidaciones ?? []) as any[]);
+      const m: Record<number, string> = {};
+      for (const s of ((d?.sedes ?? []) as any[])) m[s.id] = s.nombre;
+      setSedesLiq(m);
+    }).catch(() => {});
     if (!ok) { setLoading(false); setLoadingFact(false); return; } // falla transitoria: conservar estado
     const rList = (data.reservas || []) as Reserva[];
     // No borrar reservas existentes si la consulta devuelve vacío (falla transitoria).
@@ -4098,6 +4111,56 @@ export default function ClientePortal() {
         {/* FACTURACIÓN */}
         {tab === "facturacion" && (
           <div style={{ display: "flex", flexDirection: "column" as const, gap: 16, animation: "fadeIn 0.3s ease" }}>
+            {/* Liquidaciones del periodo — conformidad del servicio */}
+            {liquidaciones.length > 0 && (
+              <div style={{ background: C.surface, borderRadius: 14, border: `1px solid ${C.line}`, overflow: "hidden" }}>
+                <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", gap: 10 }}>
+                  <div>
+                    <p style={{ margin: 0, fontSize: 13, fontWeight: 900, color: C.navy }}>Liquidaciones del servicio</p>
+                    <p style={{ margin: "2px 0 0", fontSize: 11, color: C.mute }}>
+                      Valorización del periodo para su revisión y conformidad, antes de la facturación.
+                    </p>
+                  </div>
+                  {liquidaciones.some(l => l.conformidad_estado === "pendiente") && (
+                    <span style={{ marginLeft: "auto", background: C.warnTint, color: C.warn, fontSize: 10, fontWeight: 900, padding: "4px 10px", borderRadius: 20 }}>
+                      {liquidaciones.filter(l => l.conformidad_estado === "pendiente").length} POR APROBAR
+                    </span>
+                  )}
+                </div>
+                <div>
+                  {liquidaciones.map((l, i) => {
+                    const pend = l.conformidad_estado === "pendiente";
+                    const obs  = l.conformidad_estado === "observada";
+                    const color = pend ? C.warn : obs ? C.danger : C.success;
+                    const fondo = pend ? C.warnTint : obs ? C.dangerTint : C.successTint;
+                    return (
+                      <div key={l.id} style={{ padding: "12px 20px", borderTop: i ? `1px solid ${C.line}` : "none", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" as const }}>
+                        <div style={{ flex: 1, minWidth: 180 }}>
+                          <p style={{ margin: 0, fontSize: 12, fontWeight: 800, color: C.ink }}>
+                            {l.codigo}
+                            {l.cliente_sede_id && sedesLiq[l.cliente_sede_id] && (
+                              <span style={{ color: C.mute, fontWeight: 600 }}> · {sedesLiq[l.cliente_sede_id]}</span>
+                            )}
+                          </p>
+                          <p style={{ margin: "2px 0 0", fontSize: 11, color: C.mute }}>{l.periodo}</p>
+                        </div>
+                        <p style={{ margin: 0, fontFamily: C.fontMono, fontSize: 14, fontWeight: 900, color: C.ink }}>
+                          {fmtSoles(Number(l.total ?? 0))}
+                        </p>
+                        <span style={{ background: fondo, color, fontSize: 10, fontWeight: 900, padding: "4px 10px", borderRadius: 20, textTransform: "uppercase" as const }}>
+                          {pend ? "Por aprobar" : obs ? "Observada" : "Conforme"}
+                        </span>
+                        <a href={`/conformidad/${l.token}`} target="_blank" rel="noopener noreferrer"
+                          style={{ background: pend ? C.navy : C.surfaceAlt, color: pend ? "#fff" : C.ink2, textDecoration: "none", fontSize: 11, fontWeight: 800, padding: "8px 14px", borderRadius: 8, border: `1px solid ${pend ? C.navy : C.line2}` }}>
+                          {pend ? "Revisar y aprobar" : "Ver documento"}
+                        </a>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* KPIs */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(155px,1fr))", gap: 12 }}>
               {([

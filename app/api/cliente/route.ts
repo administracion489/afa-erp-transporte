@@ -377,6 +377,30 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ url: data.signedUrl });
       }
 
+      // ── LIQUIDACIONES del cliente (formato de conformidad del periodo) ─────
+      // Solo las que ya salieron de borrador: un documento sin emitir no existe
+      // para el cliente. Se devuelve el token para armar el enlace de conformidad,
+      // el mismo que le llegó por correo o WhatsApp.
+      case "liquidaciones_listar": {
+        const { data, error } = await admin
+          .from("liquidacion_cliente")
+          .select("id,codigo,periodo,fecha,moneda,total,estado,conformidad_estado,conformidad_por,conformidad_at,token,cliente_sede_id,enviada_at")
+          .eq("cliente_id", cid)
+          .neq("estado", "borrador")
+          .neq("estado", "anulada")
+          .order("id", { ascending: false })
+          .limit(60);
+        // La tabla puede no existir todavía (falta correr liquidaciones-v2.sql):
+        // el portal no debe romperse por eso, simplemente no muestra la sección.
+        if (error) return NextResponse.json({ liquidaciones: [], sedes: [] });
+
+        const sedeIds = [...new Set(((data as any[]) ?? []).map((l) => l.cliente_sede_id).filter(Boolean))];
+        const { data: sedes } = sedeIds.length
+          ? await admin.from("cliente_sedes").select("id,nombre").in("id", sedeIds)
+          : { data: [] as any[] };
+        return NextResponse.json({ liquidaciones: data ?? [], sedes: sedes ?? [] });
+      }
+
       default:
         return err("Acción no reconocida");
     }
