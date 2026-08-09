@@ -14,6 +14,7 @@ import {
   pegarIconoAVia,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
+import { fmtCoord } from "@/lib/coordenadas";
 import { estadoCliente, normalizaEstado } from "@/lib/estados";
 import { manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado } from "@/lib/documentos-servicio";
 import { saveSession, loadSession, clearSession, getPortalToken, portalApi } from "@/lib/portal-sesion";
@@ -1581,11 +1582,11 @@ export default function ClientePortal() {
           try {
             const res = await fetch("/api/geocodificar-inverso", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lng }) });
             const j = await res.json();
-            const dir = j?.direccion || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+            const dir = j?.direccion || fmtCoord(lat, lng);
             // Cachear solo con dirección o status terminal; no el fallback por cuota transitoria.
             if (j?.direccion || j?.status === "ZERO_RESULTS") geocacheCliRef.current.set(key, dir);
             pintar(dir);
-          } catch { pintar(`${lat.toFixed(5)}, ${lng.toFixed(5)}`); }
+          } catch { pintar(fmtCoord(lat, lng)); }
         });
       }
       if (map.getLayer("telem-cli-c")) {

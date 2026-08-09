@@ -13,6 +13,7 @@ import {
   pegarIconoAVia, viasCercanasTilequery, esAccCruda, MAX_SEG_M,
 } from "@/lib/huella";
 import { animarMarcador } from "@/lib/anim-marker";
+import { fmtCoord } from "@/lib/coordenadas";
 import { useAvanceParadas } from "@/lib/useAvanceParadas";
 import { prepararRuta, type FixAvance, type MotivoPaso, type ParadaAvance } from "@/lib/avance-paradas";
 
@@ -895,13 +896,13 @@ export default function ModalGps({
               body: JSON.stringify({ lat, lng }),
             });
             const j = await res.json();
-            const dir = j?.direccion || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+            const dir = j?.direccion || fmtCoord(lat, lng);
             // Cachear solo con dirección o status terminal (ZERO_RESULTS). Un null por cuota
             // transitoria (OVER_QUERY_LIMIT/REQUEST_DENIED) NO se cachea → reintenta al reabrir.
             if (j?.direccion || j?.status === "ZERO_RESULTS") geocacheRef.current.set(key, dir);
             pintar(dir);
           } catch {
-            pintar(`${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+            pintar(fmtCoord(lat, lng));
           }
         });
       }

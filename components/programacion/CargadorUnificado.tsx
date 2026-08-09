@@ -3,6 +3,7 @@
 import React, { useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { normalizarEmpresa } from "@/lib/empresa";
+import { fmtCoord } from "@/lib/coordenadas";
 import {
   parsearManifiestoUnificado,
   descargarPlantillaUnificada,
@@ -385,7 +386,7 @@ export default function CargadorUnificado(props: Props) {
                             </div>
                             <div className="min-w-0">
                               <p className="text-sm font-bold text-gray-900 truncate">{p.nombre}</p>
-                              <p className="text-[10px] text-gray-500 font-mono">{p.lat.toFixed(4)}, {p.lng.toFixed(4)} {p.hora ? "- " + p.hora : ""}</p>
+                              <p className="text-[10px] text-gray-500 font-mono">{fmtCoord(p.lat, p.lng)} {p.hora ? "- " + p.hora : ""}</p>
                             </div>
                           </div>
                           <span

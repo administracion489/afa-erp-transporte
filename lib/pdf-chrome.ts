@@ -4,6 +4,14 @@
 
 export const LOGO_DEFAULT = "/logoafacotizacion-removebg-preview.png";
 
+/**
+ * Escapa texto que entra al HTML de un documento. Los documentos se abren con
+ * document.write en una ventana que hereda el origen de la app, así que un dato de la
+ * BD con markup (descripción de unidad, nombre de paradero) no puede entrar crudo.
+ */
+export const esc = (s: unknown): string =>
+  String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
 export function buildHeaderPDFHtml(logoUrl: string, cp: string, titulo: string, subtitulo: string): string {
   return `<div class="pdf-header" style="background:${cp};display:flex;align-items:stretch;height:65px;">
     <div style="background:white;border-radius:0 20px 20px 0;padding:8px 20px 8px 14px;display:flex;align-items:center;min-width:140px;max-width:160px;flex-shrink:0;">
@@ -56,17 +64,17 @@ export function buildVehsHtml(vehiculos: VehiculoPDF[], cp: string, opts?: { img
       ? `Bus con capacidad para ${veh.capacidad_pasajeros || "—"} pasajeros, con A/C, sistema de audio, asientos reclinables, bodega y GPS.`
       : `Bus con capacidad para ${veh.capacidad_pasajeros || "—"} pasajeros, estándar, bodega y GPS.`);
     const mkImg = (url: string) => contain
-      ? `<div style="background:#f3f4f6;border-radius:${radius};border:1px solid #e5e7eb;height:${imgH};display:flex;align-items:center;justify-content:center;overflow:hidden;"><img src="${driveImg(url)}" style="max-width:100%;max-height:${imgH};object-fit:contain;"/></div>`
-      : `<div style="border-radius:${radius};overflow:hidden;height:${imgH};"><img src="${driveImg(url)}" style="width:100%;height:100%;object-fit:cover;"/></div>`;
+      ? `<div style="background:#f3f4f6;border-radius:${radius};border:1px solid #e5e7eb;height:${imgH};display:flex;align-items:center;justify-content:center;overflow:hidden;"><img src="${esc(driveImg(url))}" style="max-width:100%;max-height:${imgH};object-fit:contain;"/></div>`
+      : `<div style="border-radius:${radius};overflow:hidden;height:${imgH};"><img src="${esc(driveImg(url))}" style="width:100%;height:100%;object-fit:cover;"/></div>`;
     const fotos = veh.foto_externa_url || veh.foto_interna_url
       ? `<div style="display:grid;grid-template-columns:${veh.foto_externa_url && veh.foto_interna_url ? "1fr 1fr" : "1fr"};gap:${gap};margin:10px 0;">${veh.foto_externa_url ? mkImg(veh.foto_externa_url) : ""}${veh.foto_interna_url ? mkImg(veh.foto_interna_url) : ""}</div>`
       : "";
     const sep = idx > 0 ? `<div style="height:1px;background:#e5e7eb;margin:10px 0 12px;"></div>` : "";
     const tipoEquip = esFull ? "FULL EQUIPO" : "BÁSICO";
     const lbl = vehiculos.length > 1
-      ? `<p style="font-size:10px;font-weight:900;color:${cp};margin:0 0 5px;">${(veh.categoria || "UNIDAD").toUpperCase()} ${tipoEquip}${veh.capacidad_pasajeros ? " DE " + veh.capacidad_pasajeros + " PASAJEROS" : ""}</p>`
+      ? `<p style="font-size:10px;font-weight:900;color:${cp};margin:0 0 5px;">${esc((veh.categoria || "UNIDAD").toUpperCase())} ${tipoEquip}${veh.capacidad_pasajeros ? " DE " + veh.capacidad_pasajeros + " PASAJEROS" : ""}</p>`
       : "";
-    return `${sep}${lbl}<p style="color:#475569;font-size:11px;margin:0;">${desc}</p>${fotos}`;
+    return `${sep}${lbl}<p style="color:#475569;font-size:11px;margin:0;">${esc(desc)}</p>${fotos}`;
   }).join("");
 }
 

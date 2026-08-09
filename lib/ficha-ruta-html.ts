@@ -5,7 +5,7 @@
 // La página solo resuelve los datos, abre la ventana y escribe lo que devuelve esto.
 
 import { buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS, LOGO_DEFAULT, buildVehsHtml, type VehiculoPDF } from "./pdf-chrome";
-import { filasConAcumulados, rolLabel, fmtKm, fmtDuracion, fmtCoord, esc, type PuntoFicha, type FilaFicha, type FichaRutaCache, type MetricaSentido } from "./ficha-ruta";
+import { filasConAcumulados, rolLabel, fmtKm, fmtDuracion, fmtCoord, esc, coberturaMaps, MAX_PUNTOS_MAPS, type PuntoFicha, type FilaFicha, type FichaRutaCache, type MetricaSentido } from "./ficha-ruta";
 
 export const CP_FICHA = "#0b315f";
 export const C_IDA = "#0b315f";
@@ -92,9 +92,12 @@ function buildSeccion(titulo: string, sentido: string, color: string, filas: Fil
   const qrSobreMapa = !qr ? ""
     : url ? `<a class="ficha-qr" href="${esc(url)}" target="_blank" rel="noopener">${etiquetaQr}</a>`
     : `<div class="ficha-qr">${etiquetaQr}</div>`;
+  // Si el mapa no carga se quita solo la imagen: antes se ocultaba el contenedor entero y
+  // con él se iban el QR y su enlace, que es lo único que no depende de la red al imprimir.
+  const alFallar = "var c=this.closest('.ficha-mapa');c.className='ficha-mapa sin-mapa';var p=c.querySelector('p.pie');if(p)p.remove();this.remove();";
   const img = mapa
-    ? `<div class="ficha-mapa"><img class="mapa" src="${mapa}" onerror="this.closest('.ficha-mapa').style.display='none'"/>${qrSobreMapa}<p class="pie">Recorrido referencial por vía — ${esc(sentido)}</p></div>`
-    : (qr ? `<div class="ficha-qr-suelto">${qrSobreMapa}</div>` : "");
+    ? `<div class="ficha-mapa"><img class="mapa" src="${mapa}" onerror="${alFallar}"/>${qrSobreMapa}<p class="pie">Recorrido referencial por vía — ${esc(sentido)}</p></div>`
+    : (qr ? `<div class="ficha-mapa sin-mapa">${qrSobreMapa}</div>` : "");
   return `<div class="ficha-sec">
     <div class="ficha-sec-h" style="border-color:${color};"><span style="color:${color};">${titulo}</span>${resumen}</div>
     ${buildTablaPuntos(filas, color)}
@@ -105,6 +108,10 @@ function buildSeccion(titulo: string, sentido: string, color: string, filas: Fil
 export function buildFichaRutaHtml(d: FichaRutaDatos): string {
   const filasIda = filasConAcumulados(d.puntosIda, d.metrica?.ida || null);
   const filasRet = filasConAcumulados(d.puntosRet, d.metrica?.retorno || null);
+  // Cuando la ruta tiene más puntos de los que admite un enlace de Maps, se dice.
+  const resumidos = ([[d.urlIda, coberturaMaps(d.puntosIda), "el de entrada"], [d.urlRet, coberturaMaps(d.puntosRet), "el de retorno"]] as const)
+    .filter(([url, c]) => url && c.total > c.incluidos)
+    .map(([, c, etiqueta]) => `${etiqueta} resume ${c.incluidos} de ${c.total}`);
   const kpi = (t: string, v: string, c = CP_FICHA) => `<div class="ficha-kpi"><p class="k">${t}</p><p class="v" style="color:${c};">${esc(v)}</p></div>`;
   const kpis = [
     kpi("Recorrido de entrada", d.metrica?.ida ? fmtKm(d.metrica.ida.total_km) : "—"),
@@ -158,7 +165,7 @@ export function buildFichaRutaHtml(d: FichaRutaDatos): string {
     .ficha-qr img{width:64px;height:64px;display:block;margin:0 auto}
     .ficha-qr p{margin:2px 0 0;font-size:6px;font-weight:700;text-transform:uppercase;letter-spacing:.2px;color:#475569;line-height:1.25;text-align:center}
     .ficha-qr p.dominio{margin-top:1px;font-size:5.5px;font-weight:700;text-transform:none;letter-spacing:0;color:#1d4ed8;text-decoration:underline}
-    .ficha-qr-suelto{margin-top:8px;position:relative;height:96px}
+    .ficha-mapa.sin-mapa{height:96px}
     .ficha-cond li{font-size:9.5px;color:#334155;line-height:1.7}
     .ficha-links{font-size:9px;color:#475569;margin:3px 0 0}
     .ficha-links a{color:#1d4ed8;font-weight:700;text-decoration:underline}
@@ -209,7 +216,7 @@ ${buildSeccion("Puntos de retorno (salida)", "retorno", C_RET, filasRet, d.mapaR
     ${d.urlIda ? `<a href="${esc(d.urlIda)}" target="_blank" rel="noopener">abrir tramo de entrada (ida)</a>` : ""}
     ${d.urlIda && d.urlRet ? " · " : ""}
     ${d.urlRet ? `<a href="${esc(d.urlRet)}" target="_blank" rel="noopener">abrir tramo de retorno</a>` : ""}
-  </p>` : ""}
+  </p>${resumidos.length ? `<p class="ficha-links" style="color:#94a3b8;">Google Maps admite hasta ${MAX_PUNTOS_MAPS} puntos por enlace: ${resumidos.join(" y ")}. El listado completo es el de las tablas.</p>` : ""}` : ""}
 </div>
 <div class="ficha-firmas">
   <div class="ficha-firma"><div class="linea"></div><p class="rol">${esc(d.empresa.nombre)}</p><p>Coordinación de operaciones</p><p>Firma y sello</p></div>

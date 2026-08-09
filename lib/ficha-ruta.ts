@@ -32,15 +32,12 @@ export type FilaFicha = PuntoFicha & {
 const ROL_LABEL: Record<PuntoFicha["rol"], string> = { embarque: "Embarque", intermedio: "Intermedio", llegada: "Llegada" };
 export const rolLabel = (r: PuntoFicha["rol"]) => ROL_LABEL[r];
 
-const num = (v: string | number | null | undefined): number | null => {
-  if (v === null || v === undefined || v === "") return null;
-  const n = typeof v === "string" ? parseFloat(v) : Number(v);
-  return Number.isFinite(n) ? n : null;
-};
+import { aNum as num, coordTexto, coordUrl } from "./coordenadas";
 
-/** Escapa texto que entra al HTML del documento (nombres y direcciones son datos de usuario). */
-export const esc = (s: unknown): string =>
-  String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+// Vive en pdf-chrome porque la comparten todos los documentos imprimibles; se reexporta
+// para no cambiar a quien ya la importa desde aquí.
+export { esc } from "./pdf-chrome";
+import { esc } from "./pdf-chrome";
 
 /**
  * Convierte las paradas guardadas en la cotización a puntos numerados.
@@ -79,6 +76,10 @@ export const puntosConCoords = (ps: PuntoFicha[]) => ps.filter(p => p.lat !== nu
 /**
  * Firma de la geometría: si cambia, las métricas guardadas dejan de ser válidas y hay
  * que volver a consultar. Solo entran coordenadas — mover un nombre no reabre la ruta.
+ *
+ * El toFixed(5) es a propósito y NO toca el dato: es una clave de caché, y mover un
+ * paradero un metro no cambia el kilometraje de la ruta. Lo que se muestra, exporta y
+ * enlaza va sin recortar (ver lib/coordenadas.ts).
  */
 export function firmaRutaFicha(ida: PuntoFicha[], retorno: PuntoFicha[]): string {
   const f = (ps: PuntoFicha[]) => puntosConCoords(ps).map(p => `${p.lat!.toFixed(5)},${p.lng!.toFixed(5)}`).join(";");
@@ -130,20 +131,41 @@ export function urlMapaEstatico(puntos: PuntoFicha[], poly: string, colorHex: st
   const marcar = con.length <= MAX_PINES ? con : [con[0], con[con.length - 1]];
   const overlays: string[] = [];
   if (poly) overlays.push(`path-4+${color}-0.85(${encodeURIComponent(poly)})`);
+  // El pin lleva el número del punto en la lista COMPLETA, no en la de puntos con
+  // coordenadas: si no, en una ruta con paraderos sin coordenadas el pin "2" del mapa
+  // señalaba al I-04 de la tabla, y el código es justamente para referenciar los puntos.
+  const posicion = new Map(puntos.map((p, i) => [p, i + 1] as const));
   marcar.forEach((p, i) => {
-    const etiqueta = con.length <= MAX_PINES ? String(i + 1) : i === 0 ? "a" : "b";
-    overlays.push(`pin-s-${etiqueta}+${color}(${p.lng!.toFixed(5)},${p.lat!.toFixed(5)})`);
+    const etiqueta = con.length <= MAX_PINES ? String(posicion.get(p) ?? i + 1) : i === 0 ? "a" : "b";
+    overlays.push(`pin-s-${etiqueta}+${color}(${coordUrl(p.lng)},${coordUrl(p.lat)})`);
   });
   if (!overlays.length) return "";
   return `https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/${overlays.join(",")}/auto/${ancho}x${alto}?padding=48&logo=false&attribution=false&access_token=${token}`;
 }
 
-/** Enlace de Google Maps con el recorrido completo — es lo que codifica el QR de la ficha. */
+/** Google Maps no acepta rutas de cualquier largo en la URL; este es el tope que usamos. */
+export const MAX_PUNTOS_MAPS = 10;
+
+/** Enlace de Google Maps con el recorrido — es lo que codifica el QR de la ficha. */
 export function urlGoogleMapsRuta(puntos: PuntoFicha[]): string {
-  const con = diezmar(puntosConCoords(puntos), 10);
+  const con = diezmar(puntosConCoords(puntos), MAX_PUNTOS_MAPS);
   if (con.length < 2) return "";
-  const coords = con.map(p => `${p.lat!.toFixed(6)},${p.lng!.toFixed(6)}`);
+  // Sin redondear: es el enlace que el conductor abre y el que codifica el QR. Recortarlo
+  // a 6 decimales movía el punto ~11 cm —inocuo—, pero la URL no tiene límite de dígitos,
+  // así que no hay nada que ganar recortando y sí una regla más simple: el enlace lleva
+  // exactamente el punto que se cargó.
+  const coords = con.map(p => `${coordUrl(p.lat)},${coordUrl(p.lng)}`);
   return `https://www.google.com/maps/dir/${coords.join("/")}`;
+}
+
+/**
+ * Cuántos puntos entran realmente en el enlace de Maps y cuántos hay. Con más de
+ * MAX_PUNTOS_MAPS la ruta se resume, y el documento lo dice en vez de dar a entender
+ * que el enlace trae todos los paraderos.
+ */
+export function coberturaMaps(puntos: PuntoFicha[]): { incluidos: number; total: number } {
+  const total = puntosConCoords(puntos).length;
+  return { incluidos: Math.min(total, MAX_PUNTOS_MAPS), total };
 }
 
 // ── Acumulados por tramo ────────────────────────────────────────────────────
@@ -201,11 +223,14 @@ export function filasConAcumulados(puntos: PuntoFicha[], metrica: MetricaSentido
         estimada = true;
       }
     }
+    // Un punto sin coordenadas no está en la ruta medida: mostrarle el acumulado del punto
+    // anterior lo haría pasar por dato medido. Va en "—", como su columna de tramo.
+    const sinPos = p.lat === null || p.lng === null;
     return {
       ...p,
       km_tramo: kmT,
-      km_acum: hayMetrica ? Math.round(km * 10) / 10 : null,
-      min_acum: hayMetrica ? min : null,
+      km_acum: hayMetrica && !sinPos ? Math.round(km * 10) / 10 : null,
+      min_acum: hayMetrica && !sinPos ? min : null,
       hora_mostrada: horaMostrada || "",
       hora_estimada: estimada,
     };
@@ -219,5 +244,8 @@ export const fmtDuracion = (min: number | null | undefined): string => {
 };
 export const fmtKm = (km: number | null | undefined): string =>
   km === null || km === undefined || !Number.isFinite(km) ? "—" : `${km.toLocaleString("es-PE", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} km`;
+// La ficha impresa es de donde el operador y el cliente copian el punto para pegarlo en
+// Google Maps, así que no puede recortarlo: con 5 decimales el punto se corría ~1 m y con
+// 4 hasta ~11 m. Ver lib/coordenadas.ts.
 export const fmtCoord = (p: { lat: number | null; lng: number | null }): string =>
-  p.lat === null || p.lng === null ? "—" : `${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`;
+  p.lat === null || p.lng === null ? "—" : `${coordTexto(p.lat)}, ${coordTexto(p.lng)}`;

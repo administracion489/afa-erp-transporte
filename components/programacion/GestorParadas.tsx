@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { parsearParadasArchivo, descargarPlantillaParadas } from "@/lib/paradas-csv";
+import { fmtCoord, urlMapsPunto, parsearCoordenada, parsearParCoordenadas } from "@/lib/coordenadas";
 
 declare global {
   interface Window {
@@ -36,6 +37,17 @@ type FormEdit = {
   lng: string;
   hora_estimada: string;
 };
+
+// Pegar el par entero de Google Maps ("-12.276661696156975, -76.86959687911232") en el
+// campo de latitud o en el de longitud llena los dos. Sin esto, ese pegado dejaba la
+// longitud vieja al lado de una latitud nueva: el paradero terminaba en otro distrito.
+function aplicarCoord(f: FormEdit, campo: "lat" | "lng", valor: string): FormEdit {
+  if (/[,;/\s]/.test(valor.trim())) {
+    const par = parsearParCoordenadas(valor);
+    if (par) return { ...f, lat: String(par.lat), lng: String(par.lng) };
+  }
+  return { ...f, [campo]: valor };
+}
 
 function cargarGoogleMaps(apiKey: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -152,11 +164,11 @@ export default function GestorParadas(props: Props) {
     if (!editandoId) return;
     if (!formEdit.nombre.trim()) { setMensaje({ tipo: "err", texto: "El nombre es obligatorio" }); return; }
 
-    const latNum = formEdit.lat ? parseFloat(formEdit.lat) : null;
-    const lngNum = formEdit.lng ? parseFloat(formEdit.lng) : null;
+    const latNum = formEdit.lat ? parsearCoordenada(formEdit.lat) : null;
+    const lngNum = formEdit.lng ? parsearCoordenada(formEdit.lng) : null;
 
-    if (formEdit.lat && isNaN(latNum!)) { setMensaje({ tipo: "err", texto: "Latitud invalida (ej: -12.0219)" }); return; }
-    if (formEdit.lng && isNaN(lngNum!)) { setMensaje({ tipo: "err", texto: "Longitud invalida (ej: -77.1143)" }); return; }
+    if (formEdit.lat && latNum === null) { setMensaje({ tipo: "err", texto: "Latitud invalida (ej: -12.0219)" }); return; }
+    if (formEdit.lng && lngNum === null) { setMensaje({ tipo: "err", texto: "Longitud invalida (ej: -77.1143)" }); return; }
 
     setGuardando(true);
     const { error } = await supabase.from("paradas").update({
@@ -336,8 +348,8 @@ export default function GestorParadas(props: Props) {
                       {p.hora_estimada && <span className="text-gray-500">{p.hora_estimada}</span>}
                       {tieneCoords ? (
                         <>
-                          <span className="font-mono text-gray-400">{Number(p.lat).toFixed(4)}, {Number(p.lng).toFixed(4)}</span>
-                          <a href={"https://www.google.com/maps?q=" + p.lat + "," + p.lng} target="_blank" rel="noreferrer" className="text-blue-500 font-bold hover:underline">Ver mapa</a>
+                          <span className="font-mono text-gray-400">{fmtCoord(p.lat, p.lng)}</span>
+                          <a href={urlMapsPunto(p.lat, p.lng)} target="_blank" rel="noreferrer" className="text-blue-500 font-bold hover:underline">Ver mapa</a>
                         </>
                       ) : (
                         <span className="text-red-500 font-bold">Sin coordenadas - no funcionara en apps</span>
@@ -394,8 +406,8 @@ export default function GestorParadas(props: Props) {
                         <input
                           className={inputCls()}
                           value={formEdit.lat}
-                          onChange={e => setFormEdit(f => ({ ...f, lat: e.target.value }))}
-                          placeholder="-12.0219"
+                          onChange={e => setFormEdit(f => aplicarCoord(f, "lat", e.target.value))}
+                          placeholder="-12.0219 (o pega el par entero)"
                         />
                       </div>
                       <div>
@@ -403,8 +415,8 @@ export default function GestorParadas(props: Props) {
                         <input
                           className={inputCls()}
                           value={formEdit.lng}
-                          onChange={e => setFormEdit(f => ({ ...f, lng: e.target.value }))}
-                          placeholder="-77.1143"
+                          onChange={e => setFormEdit(f => aplicarCoord(f, "lng", e.target.value))}
+                          placeholder="-77.1143 (o pega el par entero)"
                         />
                       </div>
                       <div>

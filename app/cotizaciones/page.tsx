@@ -4,6 +4,7 @@ import { supabase } from "@/lib/supabase";
 import { sugerirNombreRuta } from "@/lib/nombre-ruta";
 import { construirPuntos, puntosDesdeTexto, puntosConCoords, firmaRutaFicha, encodePolyline, diezmar, urlMapaEstatico, urlGoogleMapsRuta, type PuntoFicha, type FichaRutaCache, type MetricaSentido } from "@/lib/ficha-ruta";
 import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
+import { fmtCoord, urlMapsPunto, parsearParCoordenadas, parsearCoordenada } from "@/lib/coordenadas";
 import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS, driveImg, buildVehsHtml } from "@/lib/pdf-chrome";
 
 type FechaMultidia={dia:number;fecha:string;hora_ida:string;hora_fin:string;tipo_noche:"pernocte"|"cochera"|"";destino_nombre:string;destino_lat:string;destino_lng:string;};
@@ -279,7 +280,11 @@ function CardParada({ p, lbl, col, onUpd, onSel, onDel, mapsLoaded, draggable, o
           ) : (
             <input className={inp} value={p.nombre} onChange={e => onUpd(p.id, "nombre", e.target.value)} placeholder="—" />
           )}
-          {p.lat && p.lng && <p className="text-[9px] text-gray-300 mt-1 font-mono">📍 {Number(p.lat).toFixed(5)}, {Number(p.lng).toFixed(5)}</p>}
+          {p.lat && p.lng && (
+            <p className="text-[9px] text-gray-300 mt-1 font-mono break-all">
+              📍 <a href={urlMapsPunto(p.lat, p.lng)} target="_blank" rel="noreferrer" className="hover:text-blue-500 hover:underline">{fmtCoord(p.lat, p.lng)}</a>
+            </p>
+          )}
         </div>
         <div>
           <label className="block text-[10px] font-bold uppercase text-gray-400 mb-1">Hora</label>
@@ -633,7 +638,9 @@ function generarPDF(cot:Cotizacion,cliente:Cliente|undefined,items:ItemCot[],veh
 // Ficha Técnica de Ruta: el documento se arma en lib/ficha-ruta-html.ts (así se puede
 // generar y revisar sin navegador). Aquí solo se abre la ventana y se imprime.
 function generarFichaRuta(datos:FichaRutaDatos){
-  const win=window.open("","_blank");if(!win)return;
+  // Sin aviso, un popup bloqueado se veía como que el botón no hacía nada.
+  const win=window.open("","_blank");
+  if(!win)throw new Error("El navegador bloqueó la ventana emergente. Permite las ventanas emergentes para este sitio y vuelve a intentarlo.");
   win.document.write(buildFichaRutaHtml(datos).replace("</body>","<script>window.onload=()=>setTimeout(()=>window.print(),400);<\/script></body>"));
   win.document.close();
 }
@@ -714,10 +721,21 @@ function LocationInputCot({placeholder,value,onChange,onSelect,mapsLoaded,inputC
   const[lngInput,setLngInput]=useState("");
   const[buscando,setBuscando]=useState(false);
   const[coordError,setCoordError]=useState("");
+  // Pegar el par entero ("-12.276661696156975, -76.86959687911232", tal como lo copia
+  // Google Maps) en cualquiera de los dos campos reparte lat y lng. Antes eso dejaba una
+  // latitud buena junto a una longitud vieja, o directamente "coordenadas inválidas".
+  const pegarPar=(texto:string):boolean=>{
+    if(!/[,;/\s]/.test(texto.trim()))return false;   // un solo número: no hay par que repartir
+    const par=parsearParCoordenadas(texto);
+    if(!par)return false;
+    setLatInput(String(par.lat));setLngInput(String(par.lng));setCoordError("");
+    return true;
+  };
   const geocodificar=async()=>{
-    const lat=parseFloat(latInput.replace(",","."));
-    const lng=parseFloat(lngInput.replace(",","."));
-    if(isNaN(lat)||isNaN(lng)){setCoordError("Coordenadas inválidas");return;}
+    const lat=parsearCoordenada(latInput);
+    const lng=parsearCoordenada(lngInput);
+    if(lat===null||lng===null){setCoordError("Coordenadas inválidas");return;}
+    if(Math.abs(lat)>90||Math.abs(lng)>180){setCoordError("Coordenadas fuera de rango (lat ±90, lng ±180)");return;}
     if(!mapsLoaded||(window as any).google?.maps?.Geocoder===undefined){setCoordError("Google Maps no está listo");return;}
     setBuscando(true);setCoordError("");
     try{
@@ -726,8 +744,12 @@ function LocationInputCot({placeholder,value,onChange,onSelect,mapsLoaded,inputC
       const results=response?.results??response;
       if(results&&results[0]){
         const address=results[0].formatted_address;
-        const placeId=results[0].place_id||"";
-        onChange(address);onSelect({address,lat,lng,placeId});
+        // A propósito SIN place_id: el de la geocodificación inversa es el de la dirección
+        // más cercana (una manzana, un tramo de avenida), y su centroide puede quedar a
+        // decenas de metros. Como el place_id manda sobre las coordenadas al pedirle el
+        // kilometraje a Google, devolverlo aquí tiraría a la basura el punto exacto que se
+        // acaba de tipear. El operador dio coordenadas: mandan las coordenadas.
+        onChange(address);onSelect({address,lat,lng,placeId:""});
         setModoCoord(false);setLatInput("");setLngInput("");
       }else{setCoordError("Sin resultados para estas coordenadas");}
     }catch(e:any){
@@ -746,18 +768,19 @@ function LocationInputCot({placeholder,value,onChange,onSelect,mapsLoaded,inputC
             <div>
               <label className="block text-[9px] font-bold uppercase text-gray-500 mb-1">Latitud</label>
               <input type="text" inputMode="decimal" placeholder="-12.04648" value={latInput}
-                onChange={e=>{setLatInput(e.target.value);setCoordError("");}}
+                onChange={e=>{if(pegarPar(e.target.value))return;setLatInput(e.target.value);setCoordError("");}}
                 onKeyDown={e=>e.key==="Enter"&&lngInput&&geocodificar()}
                 className="w-full border border-blue-200 rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:border-blue-500 font-mono bg-white" autoFocus/>
             </div>
             <div>
               <label className="block text-[9px] font-bold uppercase text-gray-500 mb-1">Longitud</label>
               <input type="text" inputMode="decimal" placeholder="-77.04280" value={lngInput}
-                onChange={e=>{setLngInput(e.target.value);setCoordError("");}}
+                onChange={e=>{if(pegarPar(e.target.value))return;setLngInput(e.target.value);setCoordError("");}}
                 onKeyDown={e=>e.key==="Enter"&&latInput&&geocodificar()}
                 className="w-full border border-blue-200 rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:border-blue-500 font-mono bg-white"/>
             </div>
           </div>
+          <p className="text-[9px] text-blue-500/80 leading-tight">Pega el par completo de Google Maps en cualquiera de los dos campos y se reparte solo. Se guarda con todos sus decimales.</p>
           {coordError&&<p className="text-[10px] text-red-500 font-medium">⚠ {coordError}</p>}
           <button type="button" onClick={geocodificar} disabled={!latInput||!lngInput||buscando}
             className="w-full py-2 rounded-xl font-bold text-xs text-white bg-blue-600 hover:bg-blue-500 disabled:opacity-40 transition-colors">
@@ -1227,7 +1250,7 @@ export default function CotizacionesPage(){
     // Recopilar todos los vehículos únicos: nivel cotización + por ítem
     const vehsMap=new Map<number,VehiculoFlota>();
     const addF=(id?:number|null)=>{if(!id)return;const v=flota.find(v=>v.id===id);if(v)vehsMap.set(v.id,v);};
-    const addT=(id?:number|null)=>{if(!id)return;const vt=flotaTercero.find(v=>v.id===id);if(vt)vehsMap.set(-(vt.id),{id:vt.id,placa:vt.placa,categoria:vt.categoria,marca:vt.marca,modelo:vt.modelo,anio:null,capacidad_pasajeros:vt.capacidad,equipamiento:null,foto_externa_url:vt.foto_externa_url||null,foto_interna_url:vt.foto_interna_url||null,descripcion_unidad:vt.descripcion_unidad||`${vt.empresa_nombre||"Tercero"} — ${vt.placa} ${vt.categoria||""} ${vt.marca||""} ${vt.capacidad?`(${vt.capacidad} pax)`:""}`,tipo_vehiculo_costeo:vt.tipo_vehiculo_costeo});};
+    const addT=(id?:number|null)=>{if(!id)return;const vt=flotaTercero.find(v=>v.id===id);if(vt)vehsMap.set(-(vt.id),terceroAFlota(vt));};
     const itemsConVeh=its.some(it=>it.vehiculo_flota_id||it.vehiculo_tercero_id);
     if(!itemsConVeh){addF(cot.vehiculo_flota_id);addT(cot.vehiculo_tercero_id);}
     its.forEach(it=>{addF(it.vehiculo_flota_id);addT(it.vehiculo_tercero_id);});
@@ -1241,11 +1264,22 @@ export default function CotizacionesPage(){
     generarPDF(cot,cl,its,vehiculos,nombreFinal||"JENNY ELYZABETH URBINA AFATA",considFinal,plantilla,cfgData as CotPlantillaConfig|null,empData as EmpresaPerfilPDF|null);
   };
 
+  // Un vehículo de tercero visto como uno de flota, para los documentos. El texto de
+  // respaldo importa: sin él, buildVehsHtml inventa la descripción genérica de la flota
+  // propia ("con A/C, audio, asientos reclinables") para una unidad que no conocemos.
+  const terceroAFlota=(t:VehiculoTerceroFlota):VehiculoFlota=>({
+    id:t.id,placa:t.placa,categoria:t.categoria,marca:t.marca,modelo:t.modelo,anio:null,
+    capacidad_pasajeros:t.capacidad,equipamiento:null,
+    foto_externa_url:t.foto_externa_url,foto_interna_url:t.foto_interna_url,
+    descripcion_unidad:t.descripcion_unidad||`${t.empresa_nombre||"Tercero"} — ${t.placa} ${t.categoria||""} ${t.marca||""} ${t.capacidad?`(${t.capacidad} pax)`:""}`.replace(/\s+/g," ").trim(),
+    tipo_vehiculo_costeo:t.tipo_vehiculo_costeo,
+  });
+
   // Vehículos asignados a la cotización (mismo criterio que el PDF: nivel cotización + por ítem).
   const vehiculosDeCot=(cot:Cotizacion):VehiculoFlota[]=>{
     const m=new Map<number,VehiculoFlota>();
     const addF=(id?:number|null)=>{if(!id)return;const v=flota.find(v=>v.id===id);if(v)m.set(v.id,v);};
-    const addT=(id?:number|null)=>{if(!id)return;const t=flotaTercero.find(v=>v.id===id);if(t)m.set(-t.id,{id:t.id,placa:t.placa,categoria:t.categoria,marca:t.marca,modelo:t.modelo,anio:null,capacidad_pasajeros:t.capacidad,equipamiento:null,foto_externa_url:t.foto_externa_url,foto_interna_url:t.foto_interna_url,descripcion_unidad:t.descripcion_unidad,tipo_vehiculo_costeo:t.tipo_vehiculo_costeo});};
+    const addT=(id?:number|null)=>{if(!id)return;const t=flotaTercero.find(v=>v.id===id);if(t)m.set(-t.id,terceroAFlota(t));};
     const its=cot.items_json||[];
     if(!its.some(it=>it.vehiculo_flota_id||it.vehiculo_tercero_id)){addF(cot.vehiculo_flota_id);addT(cot.vehiculo_tercero_id);}
     its.forEach(it=>{addF(it.vehiculo_flota_id);addT(it.vehiculo_tercero_id);});
@@ -1282,13 +1316,21 @@ export default function CotizacionesPage(){
         if(puntosConCoords(pIda).length<2&&puntosConCoords(pRet).length<2){
           aviso="Los paraderos de esta cotización no tienen coordenadas cargadas: la ficha se emite sin mapa ni distancias.";
         }else{
-          try{
-            const[ida,retorno]=await Promise.all([metricaDeSentido(pIda),metricaDeSentido(pRet)]);
-            metrica={firma,calculado_at:new Date().toISOString(),ida,retorno};
+          // allSettled y no all: si Google falla en un sentido (ZERO_RESULTS, corte de red,
+          // tope de consultas), el otro ya está pagado y sirve — con all se tiraban los dos.
+          const[rIda,rRet]=await Promise.allSettled([metricaDeSentido(pIda),metricaDeSentido(pRet)]);
+          const falló=(r:PromiseSettledResult<MetricaSentido|null>)=>r.status==="rejected";
+          metrica={firma,calculado_at:new Date().toISOString(),
+            ida:rIda.status==="fulfilled"?rIda.value:null,
+            retorno:rRet.status==="fulfilled"?rRet.value:null};
+          if(falló(rIda)||falló(rRet)){
+            const motivo=[falló(rIda)?"entrada":"",falló(rRet)?"retorno":""].filter(Boolean).join(" y ");
+            const err=(falló(rIda)?(rIda as PromiseRejectedResult).reason:(rRet as PromiseRejectedResult).reason);
+            aviso=`No se pudieron calcular distancias y tiempos del tramo de ${motivo} (${err?.message||"error de ruta"}). Ese tramo se emite con las horas programadas.`;
+          }else{
+            // Solo se cachea el cálculo completo: guardar un sentido caído lo congelaría.
             await supabase.from("cotizaciones").update({ficha_ruta_json:metrica}).eq("id",cot.id);
             setCotizas(prev=>prev.map(c=>c.id===cot.id?{...c,ficha_ruta_json:metrica}:c));
-          }catch(e:any){
-            aviso=`No se pudieron calcular distancias y tiempos (${e?.message||"error de ruta"}). La ficha se emite con las horas programadas.`;
           }
         }
       }
