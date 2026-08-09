@@ -67,6 +67,13 @@ export type DiaRecorrido = {
   recorrido: number | null;      // ultima − primera; null = jornada incompleta
   primeraHora: string | null;    // HH:MM (Lima)
   ultimaHora: string | null;     // HH:MM (Lima)
+  /**
+   * ¿La hora sale de `capturado_en` (cuándo se TOMÓ) o de `created_at` (cuándo ENTRÓ al ERP)?
+   * Sin la marca, una hora de inserción —que puede ir minutos u horas por detrás del momento
+   * real— se lee como si fuera la hora del tablero, y con ella se juzgan retrocesos y jornadas.
+   */
+  primeraHoraExacta: boolean;
+  ultimaHoraExacta: boolean;
   minutosOperacion: number | null;
   nLecturas: number;
   pendiente: boolean;            // true = solo 1 lectura → no se puede calcular
@@ -341,6 +348,8 @@ export function recorridosDiarios(limpias: LecturaSana[]): DiaRecorrido[] {
       recorrido,
       primeraHora,
       ultimaHora,
+      primeraHoraExacta: !!horaIni.capturado_en,
+      ultimaHoraExacta: !!horaFin.capturado_en,
       minutosOperacion,
       nLecturas: orden.length,
       pendiente,

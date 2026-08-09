@@ -5,7 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { paginarFilas } from "@/lib/huella";
 import { registrarLectura, aceptarLectura, marcarReinicio, type FuenteLectura } from "@/lib/odometro";
 import {
-  analizarVehiculo, resumenPeriodo, claveVehiculo, hoyLima, sumarDias,
+  analizarVehiculo, resumenPeriodo, claveVehiculo, hoyLima, sumarDias, horaLima,
   type LecturaCruda, type DiaRecorrido, type Anomalia,
 } from "@/lib/odometro-analitica";
 import { BarrasHorizontal } from "./_charts";
@@ -39,6 +39,40 @@ function fmtFecha(f: string | null | undefined) {
   return new Date(f + (f.length <= 10 ? "T00:00:00" : "")).toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 function fmtNum(n: number | null | undefined) { return n == null ? "—" : Number(n).toLocaleString("es-PE"); }
+
+/**
+ * Hora de una lectura para mostrar en tabla. `capturado_en` es cuándo se TOMÓ; si falta
+ * (lecturas viejas, check-out sin foto) se cae a `created_at`, que es cuándo ENTRÓ al ERP y
+ * puede ir minutos u horas por detrás. Se devuelve marcada con `~` para que el operador sepa
+ * que esa hora es aproximada y no la use como evidencia dura.
+ */
+/** Instante efectivo de una lectura: cuándo se TOMÓ, o cuándo entró al ERP si no se guardó. */
+function tsEfectivoDe(l: { capturado_en?: string | null; created_at: string }): number {
+  return new Date(l.capturado_en || l.created_at).getTime() || 0;
+}
+
+const TITULO_HORA_APROX =
+  "Hora aproximada: la lectura no guardó cuándo se tomó, se muestra cuándo entró al ERP";
+
+function horaLectura(l: { capturado_en?: string | null; created_at: string }): { txt: string; exacta: boolean } {
+  const h = horaLima(l.capturado_en || l.created_at);
+  if (!h) return { txt: "—", exacta: true };
+  return l.capturado_en ? { txt: h, exacta: true } : { txt: `~${h}`, exacta: false };
+}
+
+/** Celda de fecha + hora (la hora aproximada va en gris y con tooltip que lo explica). */
+function CeldaFechaHora({ l }: { l: { fecha: string; capturado_en?: string | null; created_at: string } }) {
+  const h = horaLectura(l);
+  return (
+    <span className="whitespace-nowrap">
+      {fmtFecha(l.fecha)}
+      <span className={h.exacta ? "text-gray-400" : "text-gray-300 italic"}
+        title={h.exacta ? "Hora en que se tomó la lectura" : TITULO_HORA_APROX}>
+        {" · "}{h.txt}
+      </span>
+    </span>
+  );
+}
 
 function fileToAdjunto(file: File): Promise<{ tipo: "image"; media_type: string; data: string }> {
   return new Promise((resolve, reject) => {
@@ -393,6 +427,33 @@ export default function OdometroTab() {
   const porRevisar = sospechosas;
   const fuentesDisponibles = useMemo(() => [...new Set(lecturas.map((l) => l.fuente))], [lecturas]);
 
+  /**
+   * Para cada lectura por revisar, la lectura viva con la que hay que contrastarla: la
+   * inmediatamente ANTERIOR en el tiempo de captura, no el km vigente (que es el máximo
+   * histórico y puede ser de horas después). Sin esto la bandeja acusa un "retroceso" sin
+   * decir contra qué, y una foto legítima de las 06:06 parece un error porque el operador no
+   * ve que a las 05:09 ya había entrado otra lectura.
+   */
+  const refDeSospechosa = useMemo(() => {
+    const vivasPorVeh = new Map<string, Lectura[]>();
+    for (const l of lecturas) {
+      if (l.estado !== "aceptada" && l.estado !== "reinicio") continue;
+      const k = claveVehiculo(l);
+      const arr = vivasPorVeh.get(k); if (arr) arr.push(l); else vivasPorVeh.set(k, [l]);
+    }
+    const m = new Map<string, Lectura>();
+    for (const s of porRevisar) {
+      const tsS = tsEfectivoDe(s);
+      let mejor: Lectura | null = null;
+      for (const v of vivasPorVeh.get(claveVehiculo(s)) || []) {
+        const t = tsEfectivoDe(v);
+        if (t <= tsS && (!mejor || t > tsEfectivoDe(mejor))) mejor = v;
+      }
+      if (mejor) m.set(s.id, mejor);
+    }
+    return m;
+  }, [lecturas, porRevisar]);
+
   // ─── RENDER ───────────────────────────────────────────────────────────────────
 
   return (
@@ -466,7 +527,7 @@ export default function OdometroTab() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr style={{ background: "#fffbeb" }}>
-                {["Foto", "Vehículo", "Km", "Fecha", "Fuente", "Motivo", "Acciones"].map(h =>
+                {["Foto", "Vehículo", "Km", "Fecha y hora", "Fuente", "Motivo", "Acciones"].map(h =>
                   <th key={h} className="p-3 text-left text-xs font-bold text-amber-700 uppercase tracking-wide">{h}</th>)}
               </tr></thead>
               <tbody>
@@ -475,7 +536,7 @@ export default function OdometroTab() {
                     <td className="p-2">
                       {l.foto_url ? (
                         <button type="button"
-                          onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${vehName(l)} · ${Number(l.km).toLocaleString("es-PE")} km · ${fmtFecha(l.fecha)}`, lectura: l })}
+                          onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${vehName(l)} · ${Number(l.km).toLocaleString("es-PE")} km · ${fmtFecha(l.fecha)} ${horaLectura(l).txt}`, lectura: l })}
                           className="block rounded-lg overflow-hidden border border-amber-200 hover:ring-2 hover:ring-amber-400"
                           title="Ver foto del tablero">
                           <img src={l.foto_url} alt="Tablero" className="w-16 h-12 object-cover" />
@@ -486,9 +547,31 @@ export default function OdometroTab() {
                     </td>
                     <td className="p-3 font-mono font-bold text-[#0b315f] text-xs">{vehName(l)}</td>
                     <td className="p-3 font-mono text-xs">{Number(l.km).toLocaleString("es-PE")}</td>
-                    <td className="p-3 text-xs text-gray-600">{fmtFecha(l.fecha)}</td>
+                    <td className="p-3 text-xs text-gray-600"><CeldaFechaHora l={l} /></td>
                     <td className="p-3 text-xs text-gray-600">{FUENTE_LABEL[l.fuente] || l.fuente}</td>
-                    <td className="p-3 text-xs text-amber-800">{l.motivo}</td>
+                    <td className="p-3 text-xs text-amber-800">
+                      {l.motivo}
+                      {(() => {
+                        const ref = refDeSospechosa.get(l.id);
+                        if (!ref) return null;
+                        const h = horaLectura(ref);
+                        return (
+                          <div className="mt-1 text-[11px] text-amber-600/90 font-normal">
+                            Comparada con la lectura anterior:{" "}
+                            <span className="font-mono font-bold">{Number(ref.km).toLocaleString("es-PE")} km</span>
+                            {" · "}{fmtFecha(ref.fecha)} {h.txt}
+                            {" · "}{FUENTE_LABEL[ref.fuente] || ref.fuente}
+                            {ref.foto_url && (
+                              <button type="button" className="ml-1.5 underline hover:text-amber-800"
+                                onClick={() => setFotoZoom({ url: ref.foto_url!, titulo: `${vehName(ref)} · ${Number(ref.km).toLocaleString("es-PE")} km · ${fmtFecha(ref.fecha)} ${h.txt}`, lectura: ref })}
+                                title="Ver la foto de la lectura anterior para comparar los dos tableros">
+                                ver su foto
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </td>
                     <td className="p-3">
                       <div className="flex gap-1.5 flex-wrap">
                         <button onClick={() => aceptar(l)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-green-700 border border-green-200 hover:bg-green-50">✓ Aceptar</button>
@@ -602,8 +685,14 @@ export default function OdometroTab() {
                       <tr key={`${j.key}-${j.fecha}`} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
                         <td className="p-3 font-mono font-bold text-[#0b315f] text-xs">{j.placa}</td>
                         <td className="p-3 text-xs text-gray-600">{fmtFecha(j.fecha)}</td>
-                        <td className="p-3 text-xs text-gray-600 font-mono">{fmtNum(j.primeraKm)}<span className="text-gray-300"> · {j.primeraHora || "—"}</span></td>
-                        <td className="p-3 text-xs text-gray-600 font-mono">{j.pendiente ? "—" : fmtNum(j.ultimaKm)}<span className="text-gray-300">{j.ultimaHora && !j.pendiente ? ` · ${j.ultimaHora}` : ""}</span></td>
+                        <td className="p-3 text-xs text-gray-600 font-mono">{fmtNum(j.primeraKm)}
+                          <span className="text-gray-300" title={j.primeraHoraExacta ? "Hora en que se tomó la lectura" : TITULO_HORA_APROX}>
+                            {" · "}{j.primeraHora ? (j.primeraHoraExacta ? j.primeraHora : `~${j.primeraHora}`) : "—"}
+                          </span></td>
+                        <td className="p-3 text-xs text-gray-600 font-mono">{j.pendiente ? "—" : fmtNum(j.ultimaKm)}
+                          <span className="text-gray-300" title={j.ultimaHoraExacta ? "Hora en que se tomó la lectura" : TITULO_HORA_APROX}>
+                            {j.ultimaHora && !j.pendiente ? ` · ${j.ultimaHoraExacta ? j.ultimaHora : `~${j.ultimaHora}`}` : ""}
+                          </span></td>
                         <td className="p-3 text-xs font-mono font-bold">
                           {j.pendiente ? <span className="text-amber-600 font-sans font-normal">Pendiente</span>
                             : j.reinicio ? <span className="text-blue-600 font-sans font-normal">Reinicio</span>
@@ -615,7 +704,7 @@ export default function OdometroTab() {
                           <div className="flex gap-1">
                             {j.lecturas.filter(l => l.foto_url).slice(0, 4).map(l => (
                               <button key={l.id} type="button" title={`${fmtNum(Number(l.km))} km · ver / corregir`}
-                                onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${j.placa} · ${fmtNum(Number(l.km))} km · ${fmtFecha(j.fecha)}`, lectura: l as unknown as Lectura })}
+                                onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${j.placa} · ${fmtNum(Number(l.km))} km · ${fmtFecha(j.fecha)} ${horaLectura(l).txt}`, lectura: l as unknown as Lectura })}
                                 className={`block rounded-md overflow-hidden border hover:ring-2 hover:ring-[#0b315f]/40 ${l.esReinicio ? "border-blue-300" : "border-gray-200"}`}>
                                 <img src={l.foto_url!} alt="Tablero" className="w-10 h-8 object-cover" />
                               </button>
@@ -671,7 +760,7 @@ export default function OdometroTab() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                {["Vehículo", "Km", "Fecha", "Fuente", "Estado", "Foto", ""].map(h =>
+                {["Vehículo", "Km", "Fecha y hora", "Fuente", "Estado", "Foto", ""].map(h =>
                   <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>)}
               </tr></thead>
               <tbody>
@@ -685,7 +774,7 @@ export default function OdometroTab() {
                     <tr key={l.id} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
                       <td className="p-3 font-mono font-bold text-[#0b315f] text-xs">{vehName(l)}</td>
                       <td className="p-3 font-mono text-xs text-gray-700">{Number(l.km).toLocaleString("es-PE")}</td>
-                      <td className="p-3 text-xs text-gray-600">{fmtFecha(l.fecha)}</td>
+                      <td className="p-3 text-xs text-gray-600"><CeldaFechaHora l={l} /></td>
                       <td className="p-3 text-xs text-gray-600">{FUENTE_LABEL[l.fuente] || l.fuente}</td>
                       <td className="p-3">
                         <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={{ background: est.bg, color: est.color }}>{est.label}</span>
@@ -693,7 +782,7 @@ export default function OdometroTab() {
                       <td className="p-3 text-xs">
                         {l.foto_url
                           ? <button type="button" className="text-blue-600 hover:underline"
-                              onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${vehName(l)} · ${Number(l.km).toLocaleString("es-PE")} km · ${fmtFecha(l.fecha)}`, lectura: l })}>ver</button>
+                              onClick={() => setFotoZoom({ url: l.foto_url!, titulo: `${vehName(l)} · ${Number(l.km).toLocaleString("es-PE")} km · ${fmtFecha(l.fecha)} ${horaLectura(l).txt}`, lectura: l })}>ver</button>
                           : "—"}
                       </td>
                       <td className="p-3 text-right whitespace-nowrap">

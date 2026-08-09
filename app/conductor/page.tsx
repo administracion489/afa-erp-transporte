@@ -2373,7 +2373,10 @@ export default function ConductorApp() {
       km_ocr:       fotoCheckout?.kmOcr ?? null,
       gps_lat:      fotoCheckout?.lat ?? null,
       gps_lng:      fotoCheckout?.lng ?? null,
-      capturado_en: fotoCheckout?.capturadoEn ?? null,
+      // Sin foto (unidad en taller, tablero apagado) no hay hora de captura, pero el cierre SÍ
+      // ocurre ahora: sin este fallback la lectura entra sin `capturado_en` y todo el ERP la
+      // ordena por su hora de INSERCIÓN, que con la cola offline puede caer horas después.
+      capturado_en: fotoCheckout?.capturadoEn ?? new Date().toISOString(),
       sin_foto_motivo: fotoCheckout ? null : (sinFotoMotivo || null),
       ...(fotoCheckout ? { foto_adjunto: { media_type: "image/jpeg", data: fotoCheckout.base64 } } : {}),
     } };

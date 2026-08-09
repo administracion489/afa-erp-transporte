@@ -18,6 +18,34 @@ export type FuenteLectura =
 
 export type EvalLectura = { estado: EstadoLectura; motivo: string | null };
 
+/**
+ * Lectura viva VECINA en el tiempo (la de antes o la de después de la que se evalúa).
+ * `ts` es el instante EFECTIVO (capturado_en, o created_at si aquella falta).
+ */
+export type RefLectura = {
+  km: number;
+  ts: number | null;
+  fuente?: string | null;
+  momento?: string | null;
+  foto_url?: string | null;
+  /** false = el instante viene de created_at (inserción), no de capturado_en: es aproximado. */
+  horaExacta?: boolean;
+};
+
+/** Etiqueta legible de una lectura de referencia: "de las 05:09 (97,271 km)". */
+function describirRef(r: RefLectura | null | undefined): string {
+  if (!r) return "el km vigente";
+  const hora = r.ts != null ? horaLimaDeTs(r.ts) : null;
+  const cuando = hora ? (r.horaExacta === false ? `de ~${hora}` : `de las ${hora}`) : "anterior";
+  return `${cuando} (${Number(r.km).toLocaleString("es-PE")} km)`;
+}
+
+/** HH:MM en hora Lima (UTC-5) a partir de un epoch ms. */
+function horaLimaDeTs(ts: number): string | null {
+  if (!Number.isFinite(ts)) return null;
+  return new Date(ts - 5 * 3600_000).toISOString().slice(11, 16);
+}
+
 /** Flota a la que pertenece la lectura. Default "propia" (retrocompatible). */
 export type Flota = "propia" | "tercero";
 
@@ -47,6 +75,17 @@ export function evaluarLectura(opts: {
   duplicadoProbable?: boolean;        // misma foto/mismo evento/ventana corta → casi seguro repetido
   fechaLectura?: string | null;       // fecha (o timestamp) de la lectura, para el guard de "futuro"
   ahora?: Date;                       // inyectable (default: ahora)
+  /**
+   * Vecinas EN EL TIEMPO de la lectura que se evalúa (por hora de captura, no de inserción).
+   * Comparar contra el km vigente —que es el MÁXIMO histórico— acusa de "retroceso" a toda
+   * lectura que llega tarde pero pertenece a un momento anterior (foto de WhatsApp procesada
+   * después del check-out, reproceso del Radar, carga manual de un día pasado). El vecino
+   * anterior es la única referencia correcta; el posterior detecta el error simétrico
+   * (una lectura que no puede ser mayor que la que vino después).
+   * Si no se pasan, se cae al comportamiento anterior (comparar contra el vigente).
+   */
+  refAnterior?: RefLectura | null;
+  refPosterior?: RefLectura | null;
 }): EvalLectura {
   const kmNuevo = Number(opts.kmNuevo);
   const kmVigente = Number(opts.kmVigente || 0);
@@ -64,35 +103,56 @@ export function evaluarLectura(opts: {
     return { estado: "sospechosa", motivo: "Fecha/hora futura: revisar reloj del dispositivo" };
   }
 
-  if (kmVigente <= 0) return { estado: "aceptada", motivo: null }; // primera lectura
+  // Base de comparación, en este orden:
+  //   1. la lectura viva inmediatamente ANTERIOR en el tiempo (lo correcto);
+  //   2. si no hay anterior pero sí posterior, esta es la más antigua de la serie: no hay nada
+  //      contra qué compararla hacia atrás (el vigente es de un momento futuro → base 0);
+  //   3. sin vecinos —unidad dada de alta con su odómetro a mano, o llamador que no los
+  //      informa— manda el vigente, igual que antes.
+  const ref = opts.refAnterior ?? null;
+  const post = opts.refPosterior ?? null;
+  const kmBase = ref ? Number(ref.km) || 0 : (post ? 0 : kmVigente);
 
-  if (kmNuevo < kmVigente) {
-    // Retroceso graduado: un ruido de OCR de pocos km no es lo mismo que un rollback grande.
-    const retro = kmVigente - kmNuevo;
-    const tol = Math.max(5, Math.round(kmVigente * 0.001)); // ±0.1% del vigente, mínimo 5 km
-    return retro <= tol
-      ? { estado: "sospechosa", motivo: `Retroceso leve (−${retro.toLocaleString("es-PE")} km): posible ruido de lectura` }
-      : { estado: "sospechosa", motivo: `Retrocede: ${kmNuevo.toLocaleString("es-PE")} < vigente ${kmVigente.toLocaleString("es-PE")} (posible manipulación)` };
+  // Una lectura que llega DESPUÉS de otra cuya captura es posterior es retroactiva: no puede
+  // superar a la que ya vino después (el odómetro solo avanza).
+  if (post && kmNuevo > Number(post.km)) {
+    return {
+      estado: "sospechosa",
+      motivo: `Incoherente con la lectura ${describirRef(post)}, que es posterior: el odómetro no puede bajar después`,
+    };
   }
 
-  if (kmNuevo === kmVigente) {
+  if (kmBase <= 0) return { estado: "aceptada", motivo: null }; // primera lectura de la unidad
+
+  if (kmNuevo < kmBase) {
+    // Retroceso graduado: un ruido de OCR de pocos km no es lo mismo que un rollback grande.
+    const retro = kmBase - kmNuevo;
+    const tol = Math.max(5, Math.round(kmBase * 0.001)); // ±0.1% de la base, mínimo 5 km
+    const contra = ref ? `frente a la lectura ${describirRef(ref)}` : `frente al vigente ${kmBase.toLocaleString("es-PE")}`;
+    return retro <= tol
+      ? { estado: "sospechosa", motivo: `Retroceso leve (−${retro.toLocaleString("es-PE")} km) ${contra}: posible ruido de lectura` }
+      : { estado: "sospechosa", motivo: `Retrocede ${retro.toLocaleString("es-PE")} km ${contra} (posible manipulación)` };
+  }
+
+  if (kmNuevo === kmBase) {
     // Sin avance. Del conductor (check-in/out manual de un bus parqueado) es legítimo; de una
     // fuente automática/IA es casi siempre una foto reenviada o un doble registro → advertir.
     if (!opts.origenIA) return { estado: "aceptada", motivo: null };
+    const contra = ref ? `a la ${describirRef(ref)}` : "al vigente";
     return opts.duplicadoProbable
-      ? { estado: "sospechosa", motivo: "Duplicada: mismo km y misma foto/origen (posible reenvío)" }
-      : { estado: "sospechosa", motivo: "Sin avance: km igual al vigente — ¿unidad detenida o lectura repetida?" };
+      ? { estado: "sospechosa", motivo: `Duplicada: mismo km y misma foto/origen que la lectura ${describirRef(ref)} (posible reenvío)` }
+      : { estado: "sospechosa", motivo: `Sin avance: km igual ${contra} — ¿unidad detenida o lectura repetida?` };
   }
 
-  // Mayor al vigente.
-  const salto = kmNuevo - kmVigente;
+  // Mayor a la base.
+  const salto = kmNuevo - kmBase;
 
   // 1) Salto de ORDEN DE MAGNITUD (dígito de más, p.ej. 43,546 → 435,461 = ×10). Un umbral
   //    de km/día no lo captura por diseño; el ratio sí. Solo con el vigente ya ALTO: en
   //    odómetros bajos (unidad nueva) un ×8 legítimo es posible, así que el piso evita
   //    falsos positivos sin perder el caso real (un dígito de más siempre deja el vigente alto).
-  if (kmVigente >= 5000 && kmNuevo >= kmVigente * RATIO_DIGITO_DE_MAS) {
-    const veces = Math.round(kmNuevo / kmVigente);
+  if (kmBase >= 5000 && kmNuevo >= kmBase * RATIO_DIGITO_DE_MAS) {
+    const veces = Math.round(kmNuevo / kmBase);
     return { estado: "sospechosa", motivo: `Salto ×${veces} (${kmNuevo.toLocaleString("es-PE")}): posible dígito de más` };
   }
 
@@ -101,7 +161,11 @@ export function evaluarLectura(opts: {
   //    presupuesto de una jornada entera y no se marca por prorratear el tope a pocas horas
   //    (un bus interprovincial recorre en 10–14 h más de lo que daría kmDiaMax×horas/24).
   //    Sin tiempo conocido se cae a 30 días; el guard de ratio de arriba es el respaldo.
-  const dias = opts.horasDesdeUltima != null && opts.horasDesdeUltima > 0
+  //    Ojo con el 0: dos lecturas del mismo instante (o una retroactiva, cuyo delta se aplasta
+  //    a 0) NO significan "no se sabe" — significan "sin tiempo para avanzar". Tratarlas como
+  //    desconocido daba 30 días de presupuesto y desactivaba este guard justo cuando más hace
+  //    falta, así que solo `null` cae al fallback.
+  const dias = opts.horasDesdeUltima != null
     ? Math.max(opts.horasDesdeUltima / 24, 1)  // piso de 1 día completo
     : 30;
   const saltoMax = kmDiaMax * dias;
@@ -152,7 +216,23 @@ export type ContextoOdometro = {
   horasDesdeUltima: number | null;
   kmDiaMax: number;             // tope de plausibilidad km/día (misma fórmula que registrarLectura)
   hayHistorial: boolean;        // hay al menos una lectura viva (aceptada/reinicio)
+  /** Lectura viva inmediatamente ANTERIOR a `tsRef` (por hora de captura). */
+  anterior: RefLectura | null;
+  /** Lectura viva inmediatamente POSTERIOR a `tsRef`; si existe, la nueva llega retroactiva. */
+  posterior: RefLectura | null;
 };
+
+/** Fila cruda de lecturas_odometro → referencia con su instante efectivo. */
+function aRef(f: { km: number; created_at: string; capturado_en: string | null; fuente?: string; momento?: string | null; foto_url?: string | null }): RefLectura {
+  return {
+    km: Number(f.km),
+    ts: tsDe(f.capturado_en) ?? tsDe(f.created_at),
+    fuente: f.fuente ?? null,
+    momento: f.momento ?? null,
+    foto_url: f.foto_url ?? null,
+    horaExacta: !!f.capturado_en,
+  };
+}
 
 export async function contextoOdometro(
   client: any,
@@ -161,6 +241,7 @@ export async function contextoOdometro(
   const vacio: ContextoOdometro = {
     existe: false, kmVigente: 0, ritmoKmDia: null, ritmoFiable: false,
     horasDesdeUltima: null, kmDiaMax: 1500, hayHistorial: false,
+    anterior: null, posterior: null,
   };
   if (!opts.vehiculo_id) return vacio;
   const { tabla, fk } = targetFlota(opts.flota);
@@ -170,15 +251,40 @@ export async function contextoOdometro(
   if (!veh) return vacio;
   const kmVigente = Number(veh?.kilometraje_actual || 0);
 
-  const { data: histAcept } = await client
-    .from("lecturas_odometro").select("km,fecha,created_at,capturado_en,estado")
-    .eq(fk, opts.vehiculo_id).in("estado", ["aceptada", "reinicio"])
-    .order("created_at", { ascending: false }).limit(30);
-  const vivas = (histAcept || []) as { km: number; fecha: string; created_at: string; capturado_en: string | null; estado: string }[];
-
-  const tsUltima = vivas.length ? tsDe(vivas[0].capturado_en) ?? tsDe(vivas[0].created_at) : null;
   const tsNueva = tsDe(opts.tsRef ?? null) ?? Date.now();
-  const horasDesdeUltima = tsUltima != null ? Math.max(0, (tsNueva - tsUltima) / 3600_000) : null;
+  const diaRef = new Date(tsNueva - 5 * 3600_000).toISOString().slice(0, 10); // día Lima de la lectura
+
+  // Vecinas en el TIEMPO, no en el orden de inserción. Se acota por la columna `fecha` (día
+  // Lima, indexada) y se afina en JS con el instante efectivo, porque `capturado_en` puede ser
+  // NULL y PostgREST no ordena por un COALESCE. El día de la propia lectura entra en ambas
+  // consultas a propósito: sus vecinas más probables son del mismo día.
+  const cols = "km,fecha,created_at,capturado_en,estado,fuente,momento,foto_url";
+  const [{ data: prevRaw }, { data: postRaw }] = await Promise.all([
+    client.from("lecturas_odometro").select(cols)
+      .eq(fk, opts.vehiculo_id).in("estado", ["aceptada", "reinicio"])
+      .lte("fecha", diaRef).order("fecha", { ascending: false }).order("created_at", { ascending: false }).limit(40),
+    client.from("lecturas_odometro").select(cols)
+      .eq(fk, opts.vehiculo_id).in("estado", ["aceptada", "reinicio"])
+      .gte("fecha", diaRef).order("fecha", { ascending: true }).order("created_at", { ascending: true }).limit(20),
+  ]);
+
+  type Fila = { km: number; fecha: string; created_at: string; capturado_en: string | null; estado: string; fuente?: string; momento?: string | null; foto_url?: string | null };
+  const todas = [...((prevRaw || []) as Fila[]), ...((postRaw || []) as Fila[])];
+  const conTs = todas.map((f) => ({ f, ts: tsDe(f.capturado_en) ?? tsDe(f.created_at) ?? 0 }));
+
+  // Anterior = la de mayor ts que no supera el de la nueva; posterior = la de menor ts por encima.
+  let anterior: RefLectura | null = null, tsAnt = -Infinity;
+  let posterior: RefLectura | null = null, tsPost = Infinity;
+  for (const { f, ts } of conTs) {
+    if (ts <= tsNueva) { if (ts > tsAnt) { tsAnt = ts; anterior = aRef(f); } }
+    else if (ts < tsPost) { tsPost = ts; posterior = aRef(f); }
+  }
+
+  // El histórico que alimenta el ritmo es el ANTERIOR a esta lectura (al reprocesar una foto
+  // vieja, lo que vino después todavía no había ocurrido).
+  const vivas = ((prevRaw || []) as Fila[]);
+
+  const horasDesdeUltima = anterior?.ts != null ? Math.max(0, (tsNueva - anterior.ts) / 3600_000) : null;
 
   const aceptadas = vivas.filter((v) => v.estado === "aceptada");
   const ritmoKmDia = kmPorDia(aceptadas.map((a) => ({ km: a.km, fecha: a.fecha })));
@@ -195,7 +301,11 @@ export async function contextoOdometro(
     ? Math.min(Math.max(Math.round(ritmoKmDia * 3), 1500), 8000)
     : 1500;
 
-  return { existe: true, kmVigente, ritmoKmDia, ritmoFiable, horasDesdeUltima, kmDiaMax, hayHistorial: vivas.length > 0 };
+  return {
+    existe: true, kmVigente, ritmoKmDia, ritmoFiable, horasDesdeUltima, kmDiaMax,
+    hayHistorial: anterior != null || posterior != null,
+    anterior, posterior,
+  };
 }
 
 /**
@@ -261,23 +371,17 @@ export async function registrarLectura(
   if (!ctx.existe) {
     return { ok: false, estado: "rechazada", motivo: "Vehículo no encontrado", error: "Vehículo no encontrado" };
   }
-  const { kmVigente, horasDesdeUltima } = ctx;
+  const { kmVigente, horasDesdeUltima, anterior, posterior } = ctx;
   const tsNueva = tsDe(l.capturado_en) ?? tsDe(fecha) ?? Date.now();
   // El caller puede fijar el tope; si no, manda el adaptativo del contexto.
   const kmDiaMax = l.kmDiaMax && l.kmDiaMax > 0 ? l.kmDiaMax : ctx.kmDiaMax;
 
-  // Señal de duplicado: última lectura viva con el MISMO km en una ventana corta (≤ 12 h).
+  // Señal de duplicado: la lectura viva ANTERIOR EN EL TIEMPO trae el mismo km en una ventana
+  // corta (≤ 12 h) o viene de la misma foto. El vecino ya lo resolvió contextoOdometro.
   let duplicadoProbable = false;
-  if (kmVigente > 0 && km === kmVigente) {
-    const { data: ultViva } = await client
-      .from("lecturas_odometro").select("km,created_at,capturado_en,foto_url")
-      .eq(fk, l.vehiculo_id).neq("estado", "anulada")
-      .order("created_at", { ascending: false }).limit(1).maybeSingle();
-    if (ultViva && Number(ultViva.km) === km) {
-      const tPrev = tsDe(ultViva.capturado_en) ?? tsDe(ultViva.created_at);
-      const horas = tPrev != null ? Math.abs(tsNueva - tPrev) / 3600_000 : null;
-      duplicadoProbable = (horas != null && horas <= 12) || (!!l.foto_url && ultViva.foto_url === l.foto_url);
-    }
+  if (anterior && Number(anterior.km) === km) {
+    const horas = anterior.ts != null ? Math.abs(tsNueva - anterior.ts) / 3600_000 : null;
+    duplicadoProbable = (horas != null && horas <= 12) || (!!l.foto_url && anterior.foto_url === l.foto_url);
   }
 
   const origenIA = l.fuente === "whatsapp_foto" || l.fuente === "whatsapp_manual" || l.fuente === "combustible";
@@ -287,6 +391,7 @@ export async function registrarLectura(
     : evaluarLectura({
         kmVigente, kmNuevo: km, kmDiaMax, horasDesdeUltima, origenIA, duplicadoProbable,
         fechaLectura: l.capturado_en ?? fecha,
+        refAnterior: anterior, refPosterior: posterior,
       });
 
   // El motivo del caller (p.ej. "el sistema corrigió el número de la IA") se antepone al de
