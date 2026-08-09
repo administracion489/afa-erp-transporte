@@ -228,8 +228,11 @@ export default function OdometroTab() {
     setLeyendo(true);
     try {
       const adj = await fileToAdjunto(foto);
+      // Con el vehículo, el servidor aplica la guía de ESE tablero y valida el número contra
+      // su km vigente (evita que entre el parcial o un dígito de más).
       const res = await fetch("/api/mantenimiento/leer-odometro", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ adjunto: adj }),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ adjunto: adj, vehiculo_id: Number(form.vehiculo_id) || null, flota: "propia" }),
       });
       const raw = await res.text();
       let data: any;
@@ -241,9 +244,16 @@ export default function OdometroTab() {
       }
       if (!res.ok || !data.ok) throw new Error(data?.error || `Error ${res.status}`);
       if (!data.km) { alert("La IA no pudo leer el km con seguridad. Ingrésalo manualmente."); }
-      else {
+      else if (data.auto_ok === false) {
+        // No se pre-llena: el número no cuadra con el kilometraje de esta unidad.
+        alert(`El número leído (${Number(data.km).toLocaleString("es-PE")}) no cuadra con el kilometraje de esta unidad${data.motivo_seleccion ? `:\n${data.motivo_seleccion}` : "."}\nRevisa la foto e ingrésalo a mano.`);
+      } else {
         setForm(f => ({ ...f, km: String(data.km), fuente: "whatsapp_foto" }));
-        alert(`Leído: ${Number(data.km).toLocaleString("es-PE")} km (confianza ${data.confianza}). Revisa antes de registrar.`);
+        alert(
+          data.corregido
+            ? `Leído: ${Number(data.km).toLocaleString("es-PE")} km.\nLa foto mostraba dos contadores: se tomó el total y se descartó el parcial. Revisa antes de registrar.`
+            : `Leído: ${Number(data.km).toLocaleString("es-PE")} km (confianza ${data.confianza}). Revisa antes de registrar.`
+        );
       }
     } catch (e: any) {
       alert("Error: " + e.message);

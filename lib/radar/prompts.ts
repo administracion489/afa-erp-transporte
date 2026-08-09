@@ -20,10 +20,29 @@ export type ContextoPrompt = {
   palabrasClave?: string[];    // pistas extra configuradas en radar_config.palabras_clave
   contextoGrupo?: string | null; // nota del operador sobre qué es este grupo (radar_grupos.contexto)
   guiaVoucher?: string | null;   // cómo leer los vouchers de grifo (radar_config.guia_voucher)
-  guiasOdometro?: { placa: string; guia: string }[]; // dónde está la lectura en el tablero de cada unidad
+  /**
+   * Dónde está la lectura en el tablero de cada unidad + cuántos dígitos tiene su odómetro.
+   * Se pasa la FORMA (nº de dígitos), nunca el km vigente exacto: un número exacto en el
+   * prompt es un número que el modelo puede copiar cuando no logra leer la foto, y un eco así
+   * es indistinguible de una lectura buena. Los dígitos bastan para no confundir un parcial
+   * de 4 cifras con un total de 6, que es el error real que se quiere evitar.
+   */
+  guiasOdometro?: { placa: string; guia: string; digitos: number | null }[];
   leccionesOdometro?: string | null; // correcciones humanas previas de lectura de odómetro (para no repetir errores)
   leccionesCombustible?: string | null; // correcciones humanas previas de lectura de vouchers de grifo (grifo/cantidad/precio/monto)
 };
+
+/**
+ * Cómo leer un tablero. Va PEGADO al bloque de guías por unidad (y no enterrado al final del
+ * prompt, que es donde estaba) para que la instrucción específica de la placa y la regla
+ * general se lean juntas y no se contradigan.
+ */
+const CASO_ODOMETRO = `
+
+LECTURA DEL TABLERO (aplica a las categorías "odometro" y "combustible"): si ves una foto del tablero sin ningún dato de recarga (sin monto, sin grifo, sin galones/litros), la categoría es "odometro". Al leerlo:
+- El odómetro TOTAL es el número MAYOR de kilómetros de la pantalla y va sin decimales. El "Trip"/parcial es el MENOR y casi siempre lleva un decimal (p. ej. "1803.6").
+- Nunca conviertas el parcial en el total ni al revés. Si dudas de cuál es cuál, pon los DOS: el mayor en "kilometraje" y el otro en "trip_km".
+- "16.3 L/100km" es una tasa de consumo, y la temperatura ("28.0°C") y la hora ("20:25") no son kilómetros.`;
 
 /** Bloque de "errores que ya cometiste" para inyectar en la lectura de odómetro. */
 function lineaLeccionesOdometro(ctx: ContextoPrompt): string {
@@ -212,8 +231,14 @@ Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.`;
 const FORMA_ODOMETRO = `{
   "placa": string|null,                 // normalizada AAA-123 en MAYÚSCULAS
   "unidad": string|null,                // referencia informal ("bus 45") si no hay placa
-  "kilometraje": number|null,           // odómetro TOTAL (número puro, sin puntos ni comas). Ignora el "Trip"/parcial
-  "trip_km": number|null,               // cuentakm PARCIAL del tablero si se ve (NO es el odómetro total)
+  "kilometraje": number|null,           // odómetro TOTAL (número puro, sin puntos ni comas). Ignora el "Trip"/parcial.
+                                        // ANTI-INVERSIÓN: en un mismo tablero el TOTAL es SIEMPRE el número MAYOR y no
+                                        // lleva decimales; el parcial es el menor y suele llevar un decimal. Si el número
+                                        // que ibas a poner aquí es MENOR que otro número de kilómetros de la pantalla,
+                                        // los estás intercambiando: el mayor va aquí y el menor en "trip_km".
+  "trip_km": number|null,               // cuentakm PARCIAL del tablero. Si la pantalla muestra DOS contadores de km,
+                                        // este campo NUNCA debe ser null: pon aquí el otro número que viste (así se puede
+                                        // verificar cuál es cuál). null solo si de verdad hay un único contador.
   "fecha": "YYYY-MM-DD"|null,
   "hora": "HH:MM"|null,
   "conductor": string|null,             // nombre del conductor si se menciona
@@ -332,10 +357,15 @@ export function promptExtraccion(categoria: CategoriaRadar, ctx: ContextoPrompt)
     // Defensivo: el motor nunca debería pedir extracción de "otros".
     return `${lineaContexto(ctx)}\n\nDevuelve SOLO un JSON válido: {}. Responde únicamente el JSON.`;
   }
+  const guiasOdo = bloqueGuiasOdometro(ctx);
   const extra =
     categoria === "combustible"
       ? `\n- Si el texto transcribe un voucher, captura TODOS los campos impresos que se mencionen (grifo, dirección, comprobante, cantidad, precio, total, fecha y hora).${lineaLeccionesCombustible(ctx)}`
-      : (categoria === "odometro" ? lineaLeccionesOdometro(ctx) : "");
+      : categoria === "odometro"
+        // El reporte dictado por texto ("el kilometraje de la BUI-272 es …") también merece la
+        // guía de la unidad y las lecciones: antes este camino no recibía ninguna de las dos.
+        ? `${guiasOdo ? `\n\n${guiasOdo}` : ""}${CASO_ODOMETRO}${lineaLeccionesOdometro(ctx)}`
+        : "";
   return `Eres el analista del Radar IA de AFA Transportes (operador de transporte de personal y turismo en Perú).
 
 ${lineaContexto(ctx)}
@@ -357,6 +387,23 @@ Responde únicamente el JSON.`;
 // Guías del operador para leer vouchers/odómetros (definidas en Radar IA > Configuración).
 // La de vouchers solo aplica a "combustible"; la de odómetro aplica a "combustible" Y a
 // "odometro" (una unidad puede reportar SOLO el kilometraje, sin ninguna recarga).
+/** Guías del operador por unidad: dónde mirar el odómetro en ESE tablero. */
+function bloqueGuiasOdometro(ctx: ContextoPrompt): string | null {
+  const guias = (ctx.guiasOdometro ?? []).filter((g) => g.guia?.trim());
+  if (!guias.length) return null;
+  return (
+    `Dónde está la lectura del odómetro en el tablero de cada unidad (cada vehículo es distinto; usa la que corresponda según la placa que identifiques en la imagen o el texto). Si la placa que identificas NO aparece en esta lista, IGNORA todas estas guías: son de otras unidades y describen tableros distintos.\n` +
+    guias
+      .map((g) => {
+        // La forma del número es la señal que desambigua parcial vs total sin dar una
+        // cifra copiable: un trip de 4 dígitos no puede ser un total de 6.
+        const forma = g.digitos ? ` (en esta unidad el odómetro TOTAL es un número de ${g.digitos} dígitos)` : "";
+        return `- ${g.placa}${forma}: ${g.guia.trim()}`;
+      })
+      .join("\n")
+  );
+}
+
 function lineaGuiasCombustible(ctx: ContextoPrompt): string {
   const bloques: string[] = [];
   const guiaVoucher = (ctx.guiaVoucher ?? "").trim();
@@ -365,13 +412,8 @@ function lineaGuiasCombustible(ctx: ContextoPrompt): string {
       `Si lo que ves resulta ser de categoría "combustible", cómo leer los vouchers de grifo (indicado por el operador de AFA): ${guiaVoucher}`
     );
   }
-  const guias = (ctx.guiasOdometro ?? []).filter((g) => g.guia?.trim());
-  if (guias.length) {
-    bloques.push(
-      `Si lo que ves resulta ser de categoría "combustible" u "odometro", dónde está la lectura del odómetro en el tablero de cada unidad (cada vehículo es distinto; usa la que corresponda según la placa que identifiques en la imagen o el texto):\n` +
-        guias.map((g) => `- ${g.placa}: ${g.guia.trim()}`).join("\n")
-    );
-  }
+  const guiasOdo = bloqueGuiasOdometro(ctx);
+  if (guiasOdo) bloques.push(`Si lo que ves resulta ser de categoría "combustible" u "odometro", ${guiasOdo}`);
   return bloques.length ? `\n\n${bloques.join("\n\n")}` : "";
 }
 
@@ -381,7 +423,7 @@ export function promptExtraccionMedia(ctx: ContextoPrompt): string {
 
 ${lineaContexto(ctx)}${lineaPalabrasClave(ctx)}
 
-${GLOSARIO}${lineaGuiasCombustible(ctx)}${lineaLeccionesOdometro(ctx)}${lineaLeccionesCombustible(ctx)}
+${GLOSARIO}${lineaGuiasCombustible(ctx)}${CASO_ODOMETRO}${lineaLeccionesOdometro(ctx)}${lineaLeccionesCombustible(ctx)}
 
 Haz DOS cosas en una sola respuesta:
 
@@ -400,8 +442,6 @@ ${DESCRIPCION_CATEGORIAS}
 - "otros" → {}
 
 ${GUIA_COMBUSTIBLE_MEDIA}
-
-Caso "odometro": si SOLO ves una foto del tablero/odómetro sin ningún dato de recarga (sin monto, sin grifo, sin galones/litros), clasifícalo "odometro": lee la lectura TOTAL del odómetro (ignora el "trip"/viaje parcial si el tablero muestra varios contadores) y la placa/unidad si aparece. Aplica igual la regla de que "16.3 L/100km" o el "Trip" NO son el kilometraje total.
 
 ${REGLAS_EXTRACCION}
 

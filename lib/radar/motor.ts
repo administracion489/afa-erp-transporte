@@ -138,14 +138,17 @@ export async function procesarPendientes(opts?: {
   // Contexto por grupo (nota del operador + restricción de categorías) — se carga en lote
   // para no hacer una consulta por mensaje.
   const gruposInfo = await cargarGruposInfo(sb, lote);
-  // Guías de odómetro por vehículo — solo si el lote trae algo con pinta de combustible.
-  const guiasOdometro = lote.some(pareceCombustible) ? await cargarGuiasOdometro(sb) : [];
+  // ¿El lote trae algo que pueda ser un tablero o un voucher? (una foto siempre puede serlo;
+  // un texto solo si menciona el rubro). Gobierna las tres cargas de contexto de abajo para no
+  // gastar consultas en lotes de puro texto irrelevante.
+  const traeCombustibleOFoto = lote.some((m) => pareceCombustible(m) || m.media_url);
+  // Guías de odómetro por vehículo. Antes el gate era `lote.some(pareceCombustible)`, más
+  // estrecho: un reporte de kilometraje sin vocabulario de combustible ("el km de la móvil
+  // BUI-272 es …") llegaba a la extracción SIN las guías que el operador había configurado.
+  const guiasOdometro = traeCombustibleOFoto ? await cargarGuiasOdometro(sb) : [];
   // Correcciones humanas de lectura de odómetro (dataset de aprendizaje). Se inyectan en el
   // prompt de extracción para que el Radar —el único camino que auto-registra— no repita
-  // el dígito mal leído ni confunda el parcial con el total. Solo si el lote trae algo con
-  // pinta de combustible/odómetro (foto o texto de recarga) → evita el round-trip en lotes
-  // de puro texto irrelevante.
-  const traeCombustibleOFoto = lote.some((m) => pareceCombustible(m) || m.media_url);
+  // el dígito mal leído ni confunda el parcial con el total.
   const leccionesOdo = traeCombustibleOFoto ? await leccionesOdometro(sb).catch(() => "") : "";
   // Correcciones humanas de lectura de vouchers (grifo/cantidad/precio/monto) → mismo
   // gate que odómetro: solo si el lote trae algo con pinta de combustible o una foto.
@@ -344,16 +347,26 @@ function seleccionarMediaCluster(candidatos: any[], cap: number): any[] {
  * vehiculos_tercero.guia_odometro). Se cargan una sola vez por lote, solo si hay algún
  * candidato con pinta de combustible (para no gastar la consulta en lotes sin eso).
  */
-async function cargarGuiasOdometro(sb: any): Promise<{ placa: string; guia: string }[]> {
+async function cargarGuiasOdometro(sb: any): Promise<{ placa: string; guia: string; digitos: number | null }[]> {
   try {
+    // `kilometraje_actual` viaja en la MISMA fila: de ahí sale cuántos dígitos tiene el odómetro
+    // de esa unidad, que es lo que distingue un parcial de 4 cifras de un total de 6. Se manda
+    // la cantidad de dígitos, nunca el km exacto (ver ContextoPrompt.guiasOdometro).
     const [{ data: propios }, { data: terceros }] = await Promise.all([
-      sb.from("vehiculos").select("placa, guia_odometro").not("guia_odometro", "is", null),
-      sb.from("vehiculos_tercero").select("placa, guia_odometro").not("guia_odometro", "is", null),
+      sb.from("vehiculos").select("placa, guia_odometro, kilometraje_actual").not("guia_odometro", "is", null),
+      sb.from("vehiculos_tercero").select("placa, guia_odometro, kilometraje_actual").not("guia_odometro", "is", null),
     ]);
     const filas = [...((propios as any[]) ?? []), ...((terceros as any[]) ?? [])];
     return filas
       .filter((f) => String(f.guia_odometro ?? "").trim())
-      .map((f) => ({ placa: String(f.placa ?? ""), guia: String(f.guia_odometro).trim() }));
+      .map((f) => {
+        const km = Number(f.kilometraje_actual ?? 0);
+        return {
+          placa: String(f.placa ?? ""),
+          guia: String(f.guia_odometro).trim(),
+          digitos: km > 0 ? Math.round(km).toString().length : null,
+        };
+      });
   } catch {
     return [];
   }
@@ -391,7 +404,7 @@ async function procesarMensaje(
   config: RadarConfig,
   forzar: boolean,
   grupoInfo: GrupoInfo | null,
-  guiasOdometro: { placa: string; guia: string }[],
+  guiasOdometro: { placa: string; guia: string; digitos: number | null }[],
   leccionesOdo: string,
   leccionesComb: string
 ): Promise<ResultadoMensaje> {

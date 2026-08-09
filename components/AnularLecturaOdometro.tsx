@@ -33,10 +33,16 @@ export default function AnularLecturaOdometro({
   const [confirmar, setConfirmar] = useState(false);   // 2º paso: confirmación explícita
   const [guardando, setGuardando] = useState(false);
 
-  const esIA = lectura.fuente === "whatsapp_foto";
+  // Carriles donde el número lo propuso una lectura automática. Debe coincidir con FUENTES_IA
+  // de lib/odometro.ts (leccionesOdometro): es el mismo criterio que decide qué correcciones
+  // se le enseñan a la IA, así que si aquí dijera otra cosa el aviso mentiría.
+  const esIA = ["whatsapp_foto", "whatsapp_manual", "checklist", "servicio", "combustible"].includes(String(lectura.fuente));
   const kmFmt = Number(lectura.km).toLocaleString("es-PE");
 
   const motivoCfg = MOTIVOS_ANULACION.find(m => m.id === motivo) || null;
+  // Espejo de MOTIVOS_NO_ENSENAN en lib/odometro.ts: todo lo que salió de un carril de IA
+  // enseña, salvo los motivos que describen un acierto de la IA o un hecho del mundo.
+  const ensenaEsteCaso = !!motivo && !["duplicada", "otra_unidad", "reinicio"].includes(motivo);
   const pideKm = !!motivoCfg?.corrige;                 // este motivo corrige el número
   const kmObligatorio = pideKm && motivo !== "otro";   // en "otro" el km es opcional
   const esReinicio = motivo === "reinicio";            // no anula: re-ancla el vigente a este km
@@ -114,13 +120,24 @@ export default function AnularLecturaOdometro({
                 </button>
               ))}
             </div>
-            {motivo && motivoCfg?.ensena && (
+            {/* Qué se le enseña a la IA y qué no. Antes solo se confirmaba el caso bueno y se
+                callaba el malo: el operador reformulaba la corrección creyendo que enseñaba y
+                se archivaba en silencio. Ahora el aviso dice siempre en qué caso está. */}
+            {motivo && esIA && ensenaEsteCaso && (
               <p className="text-[11px] text-green-700 mt-1.5">
-                🤖 Este caso se le enseña a la IA: la próxima lectura por foto verá este error como ejemplo.
+                🤖 Esto se le enseña a la IA: {nota.trim()
+                  ? "tu explicación se usará en las próximas lecturas de esta placa."
+                  : "escribe abajo DÓNDE está el odómetro en este tablero y lo aplicará la próxima vez."}
               </p>
             )}
-            {motivo && !esIA && motivoCfg?.ensena && (
-              <p className="text-[11px] text-amber-700 mt-1">Ojo: esta lectura no vino de foto con IA.</p>
+            {motivo && esIA && !ensenaEsteCaso && (
+              <p className="text-[11px] text-amber-700 mt-1.5">
+                Este motivo no le enseña nada a la IA (describe un problema de flujo, no una lectura mal hecha).
+                Si el número lo leyó mal, elige otro motivo y explica en el detalle dónde está el odómetro.
+              </p>
+            )}
+            {motivo && !esIA && (
+              <p className="text-[11px] text-gray-500 mt-1.5">Esta lectura no la propuso la IA, así que no se usa como ejemplo.</p>
             )}
           </div>
 
@@ -148,7 +165,7 @@ export default function AnularLecturaOdometro({
 
           <div>
             <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Detalle (opcional)</label>
-            <input value={nota} onChange={e => setNota(e.target.value)} placeholder="Ej: confundió el 3 con un 8"
+            <input value={nota} onChange={e => setNota(e.target.value)} placeholder="Ej: el odómetro está debajo del texto km, antes del ícono de combustible"
               className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20" />
           </div>
 

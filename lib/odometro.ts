@@ -134,6 +134,71 @@ function hoyISO(): string {
 }
 
 /**
+ * Lo que el ERP YA SABE del odómetro de una unidad: el km vigente, el ritmo histórico y
+ * cuánto tiempo pasó desde la última lectura viva.
+ *
+ * Vivía dentro de registrarLectura, es decir se calculaba DESPUÉS de que el número ya
+ * estaba elegido. Extraído aquí para que también lo usen (a) el selector que decide cuál
+ * de los números del tablero es el odómetro (lib/odometro-seleccion.ts) y (b) los prompts
+ * de visión, que sin este ancla no tienen forma de distinguir el total del parcial.
+ *
+ * Es una función de LECTURA pura contra la BD: no escribe nada.
+ */
+export type ContextoOdometro = {
+  existe: boolean;              // el vehículo existe en la tabla de su flota
+  kmVigente: number;            // 0 si no hay ninguno (unidad nueva)
+  ritmoKmDia: number | null;    // ritmo histórico, null si no hay suficiente historia
+  ritmoFiable: boolean;         // ≥5 lecturas aceptadas y ≥7 días de historia
+  horasDesdeUltima: number | null;
+  kmDiaMax: number;             // tope de plausibilidad km/día (misma fórmula que registrarLectura)
+  hayHistorial: boolean;        // hay al menos una lectura viva (aceptada/reinicio)
+};
+
+export async function contextoOdometro(
+  client: any,
+  opts: { vehiculo_id: number; flota?: Flota; tsRef?: string | null }
+): Promise<ContextoOdometro> {
+  const vacio: ContextoOdometro = {
+    existe: false, kmVigente: 0, ritmoKmDia: null, ritmoFiable: false,
+    horasDesdeUltima: null, kmDiaMax: 1500, hayHistorial: false,
+  };
+  if (!opts.vehiculo_id) return vacio;
+  const { tabla, fk } = targetFlota(opts.flota);
+
+  const { data: veh } = await client
+    .from(tabla).select("kilometraje_actual").eq("id", opts.vehiculo_id).maybeSingle();
+  if (!veh) return vacio;
+  const kmVigente = Number(veh?.kilometraje_actual || 0);
+
+  const { data: histAcept } = await client
+    .from("lecturas_odometro").select("km,fecha,created_at,capturado_en,estado")
+    .eq(fk, opts.vehiculo_id).in("estado", ["aceptada", "reinicio"])
+    .order("created_at", { ascending: false }).limit(30);
+  const vivas = (histAcept || []) as { km: number; fecha: string; created_at: string; capturado_en: string | null; estado: string }[];
+
+  const tsUltima = vivas.length ? tsDe(vivas[0].capturado_en) ?? tsDe(vivas[0].created_at) : null;
+  const tsNueva = tsDe(opts.tsRef ?? null) ?? Date.now();
+  const horasDesdeUltima = tsUltima != null ? Math.max(0, (tsNueva - tsUltima) / 3600_000) : null;
+
+  const aceptadas = vivas.filter((v) => v.estado === "aceptada");
+  const ritmoKmDia = kmPorDia(aceptadas.map((a) => ({ km: a.km, fecha: a.fecha })));
+  // Fiable = hay masa suficiente para que el ritmo signifique algo. Con menos historia el
+  // ritmo existe pero es ruido, así que quien lo consuma debe caer a un tope conservador.
+  const fechas = aceptadas.map((a) => a.fecha).filter(Boolean).sort();
+  const diasHistoria = fechas.length >= 2
+    ? (new Date(fechas[fechas.length - 1]).getTime() - new Date(fechas[0]).getTime()) / 86400000
+    : 0;
+  const ritmoFiable = ritmoKmDia != null && aceptadas.length >= 5 && diasHistoria >= 7;
+
+  // MISMA fórmula que usaba registrarLectura (no se toca el comportamiento existente).
+  const kmDiaMax = ritmoKmDia != null
+    ? Math.min(Math.max(Math.round(ritmoKmDia * 3), 1500), 8000)
+    : 1500;
+
+  return { existe: true, kmVigente, ritmoKmDia, ritmoFiable, horasDesdeUltima, kmDiaMax, hayHistorial: vivas.length > 0 };
+}
+
+/**
  * Registra una lectura y, si es aceptada, actualiza vehiculos.kilometraje_actual.
  * Recibe el cliente supabase (anon o service-role) para reusarse desde páginas
  * cliente y desde rutas API.
@@ -153,6 +218,12 @@ export async function registrarLectura(
     capturado_en?: string | null; // cuándo se TOMÓ la lectura (no cuándo se insertó)
     momento?: "checkin" | "checkout" | null; // rol en la jornada
     idemKey?: string | null;   // clave estable por evento de origen → dedupe idempotente
+    /**
+     * Nota que se ANTEPONE al motivo derivado de evaluarLectura. Aditiva: no cambia el
+     * estado ni ninguna decisión. La usa el selector de odómetro para dejar visible en la
+     * bandeja que el sistema cambió el número que devolvió la IA (auditoría sin SQL).
+     */
+    motivo?: string | null;
   }
 ): Promise<{ ok: boolean; estado: EstadoLectura; motivo: string | null; lecturaId?: string; error?: string }> {
   const km = Number(l.km);
@@ -178,38 +249,22 @@ export async function registrarLectura(
     if (yaFoto) return { ok: true, estado: yaFoto.estado, motivo: yaFoto.motivo, lecturaId: yaFoto.id };
   }
 
-  const { data: veh } = await client
-    .from(tabla).select("kilometraje_actual").eq("id", l.vehiculo_id).maybeSingle();
-  if (!veh) {
-    return { ok: false, estado: "rechazada", motivo: "Vehículo no encontrado", error: "Vehículo no encontrado" };
-  }
-  const kmVigente = Number(veh?.kilometraje_actual || 0);
-
   // Momento de CAPTURA de esta lectura (no el de inserción/proceso): al reprocesar una foto
   // vieja el tiempo transcurrido y las validaciones deben medirse contra cuándo se tomó.
   const fecha = l.fecha || hoyISO();
+
+  // Vigente + historial (horas desde la última, km/día adaptativo). Mismo cálculo de siempre,
+  // ahora compartido con el selector de odómetro y con los prompts de visión.
+  const ctx = await contextoOdometro(client, {
+    vehiculo_id: l.vehiculo_id, flota: l.flota, tsRef: l.capturado_en ?? fecha,
+  });
+  if (!ctx.existe) {
+    return { ok: false, estado: "rechazada", motivo: "Vehículo no encontrado", error: "Vehículo no encontrado" };
+  }
+  const { kmVigente, horasDesdeUltima } = ctx;
   const tsNueva = tsDe(l.capturado_en) ?? tsDe(fecha) ?? Date.now();
-
-  // Historial reciente para (1) el tiempo real desde la última lectura y (2) el km/día
-  // adaptativo. Se incluye 'reinicio': tras un cambio de tablero, es el ancla temporal
-  // correcto (si solo miráramos 'aceptada' y no hay ninguna posterior, caeríamos al
-  // fallback de 30 días y el anti-salto quedaría casi desactivado).
-  const { data: histAcept } = await client
-    .from("lecturas_odometro").select("km,fecha,created_at,capturado_en,estado")
-    .eq(fk, l.vehiculo_id).in("estado", ["aceptada", "reinicio"])
-    .order("created_at", { ascending: false }).limit(30);
-  const vivas = (histAcept || []) as { km: number; fecha: string; created_at: string; capturado_en: string | null; estado: string }[];
-  const tsUltima = vivas.length ? tsDe(vivas[0].capturado_en) ?? tsDe(vivas[0].created_at) : null;
-  // Horas entre la captura de la última y la captura de ESTA lectura (no "ahora").
-  const horasDesdeUltima = tsUltima != null ? Math.max(0, (tsNueva - tsUltima) / 3600_000) : null;
-
-  // km/día adaptativo: si el caller no lo fija, se deriva del ritmo histórico (kmPorDia × 3)
-  // pero nunca por DEBAJO del default de 1500 — un promedio diluido por días ociosos no debe
-  // sub-topar a un interprovincial de ráfaga. Solo lecturas 'aceptada' para el ritmo.
-  const ritmo = kmPorDia(vivas.filter(v => v.estado === "aceptada").map(a => ({ km: a.km, fecha: a.fecha })));
-  const kmDiaMax = l.kmDiaMax && l.kmDiaMax > 0
-    ? l.kmDiaMax
-    : (ritmo != null ? Math.min(Math.max(Math.round(ritmo * 3), 1500), 8000) : 1500);
+  // El caller puede fijar el tope; si no, manda el adaptativo del contexto.
+  const kmDiaMax = l.kmDiaMax && l.kmDiaMax > 0 ? l.kmDiaMax : ctx.kmDiaMax;
 
   // Señal de duplicado: última lectura viva con el MISMO km en una ventana corta (≤ 12 h).
   let duplicadoProbable = false;
@@ -234,6 +289,10 @@ export async function registrarLectura(
         fechaLectura: l.capturado_en ?? fecha,
       });
 
+  // El motivo del caller (p.ej. "el sistema corrigió el número de la IA") se antepone al de
+  // evaluarLectura para que quede visible en la bandeja; no altera el estado.
+  const motivoFinal = [l.motivo?.trim() || null, evalr.motivo].filter(Boolean).join(" · ") || null;
+
   const { data: ins, error } = await client.from("lecturas_odometro").insert({
     [fk]: l.vehiculo_id,
     km,
@@ -245,7 +304,7 @@ export async function registrarLectura(
     momento: l.momento ?? null,
     idem_key: l.idemKey ?? null,
     estado: evalr.estado,
-    motivo: evalr.motivo,
+    motivo: motivoFinal,
   }).select("id").single();
 
   if (error) {
@@ -331,7 +390,7 @@ export async function marcarReinicio(
 export const MOTIVOS_ANULACION = [
   { id: "ia_digito",   label: "La IA leyó mal un dígito",      ensena: true,  corrige: true  },
   { id: "ia_trip",     label: "La IA leyó el parcial (trip)",  ensena: true,  corrige: true  },
-  { id: "tipeo",       label: "Error al tipear el km",         ensena: false, corrige: true  },
+  { id: "tipeo",       label: "Se leyó/tecleó mal el número",  ensena: false, corrige: true  },
   { id: "otra_unidad", label: "Foto de otra unidad",           ensena: false, corrige: false },
   { id: "duplicada",   label: "Lectura duplicada",             ensena: false, corrige: false },
   { id: "reinicio",    label: "Era un reinicio de tablero",    ensena: false, corrige: false },
@@ -503,21 +562,83 @@ export async function anularLectura(
  * como ejemplos en el prompt de visión. Solo los motivos que enseñan algo sobre
  * cómo mirar la foto (dígito mal leído, parcial confundido con total).
  */
-export async function leccionesOdometro(client: any, limite = 12): Promise<string> {
-  const ensenables = MOTIVOS_ANULACION.filter(m => m.ensena).map(m => m.id);
+/** Motivos que describen un ACIERTO de la IA o un hecho del mundo, no un error de lectura. */
+const MOTIVOS_NO_ENSENAN: string[] = ["duplicada", "otra_unidad", "reinicio"];
+
+/** Carriles donde el número lo propuso una lectura automática (por foto o por WhatsApp). */
+const FUENTES_IA: FuenteLectura[] = ["whatsapp_foto", "whatsapp_manual", "checklist", "servicio", "combustible"];
+
+/** ¿La nota del operador dice que la foto no se podía leer? Entonces enseña a ABSTENERSE. */
+const NOTA_ILEGIBLE = /no se ve|no se lee|no logr|borros|no est[aá] clar|no se distin|mucha luz|reflejo|apagad|no es un tablero|no parece|no hay n[uú]mero/i;
+
+/** Frase base según el tipo de error que reportó el operador. */
+function encabezadoLeccion(motivo: string): string {
+  if (motivo === "ia_trip") return "Confundiste el parcial/trip con el odómetro TOTAL.";
+  if (motivo === "ia_digito") return "Añadiste o perdiste un dígito al leer el número.";
+  if (motivo === "tipeo") return "El número quedó mal leído.";
+  return "";
+}
+
+export async function leccionesOdometro(
+  client: any,
+  opts?: { placa?: string | null; limite?: number }
+): Promise<string> {
+  const limite = opts?.limite ?? 10;
   const { data } = await client
     .from("odometro_correcciones")
-    .select("km_leido,km_correcto,motivo_tipo,nota")
-    .in("motivo_tipo", ensenables)
+    .select("placa,km_leido,km_correcto,motivo_tipo,nota,fuente,created_at")
+    .in("fuente", FUENTES_IA)
     .order("created_at", { ascending: false })
-    .limit(limite);
-  const filas = (data || []) as any[];
+    .limit(120);
+
+  // Qué entra y qué no:
+  //  - Se filtra por FUENTE (el número lo propuso la IA), no por el motivo que eligió el
+  //    operador. Antes solo enseñaban 'ia_trip'/'ia_digito', así que 23 de 28 correcciones
+  //    reales —incluidas las notas más precisas que ha escrito el operador— se descartaban
+  //    en silencio: esa es la mitad "le corrijo y no aprende" del problema.
+  //  - Se excluyen los motivos que NO describen un error de lectura ('duplicada' viene con
+  //    notas del tipo "la IA hizo lo correcto": enseñarlas produciría abstenciones espurias).
+  //  - Se emiten SIN CIFRAS. Los ejemplos numéricos eran contraproducentes: 10 de 11
+  //    correcciones históricas terminan en un número MENOR, y ese patrón es exactamente el
+  //    que empuja al modelo a elegir el parcial en una unidad donde el total es el mayor.
+  //    Lo que enseña es la instrucción del operador sobre DÓNDE mirar, no los números.
+  const filas = ((data || []) as any[]).filter(
+    (c) => !MOTIVOS_NO_ENSENAN.includes(String(c.motivo_tipo)) && (c.nota || c.km_correcto != null)
+  );
   if (!filas.length) return "";
-  return filas.map(c => {
-    const corr = c.km_correcto ? `lo correcto era ${Number(c.km_correcto).toLocaleString("es-PE")}` : "el valor era incorrecto";
-    const tipo = c.motivo_tipo === "ia_trip" ? "leíste el parcial/trip en vez del total" : "leíste mal un dígito";
-    return `- Devolviste ${Number(c.km_leido).toLocaleString("es-PE")} y ${corr}: ${tipo}${c.nota ? ` (${c.nota})` : ""}.`;
-  }).join("\n");
+
+  const placaObj = (opts?.placa ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const mismaPlaca = (p: unknown) => placaObj && String(p ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "") === placaObj;
+
+  // Dedupe por (placa, tipo de error, ¿trae número correcto?) quedándose con la más reciente:
+  // hay unidades con 8 redacciones distintas del mismo "no se ve el número" que si no ahogan
+  // al resto de la flota.
+  const vistas = new Set<string>();
+  const unicas = filas.filter((c) => {
+    const k = `${c.placa ?? "?"}|${c.motivo_tipo}|${c.km_correcto != null}`;
+    if (vistas.has(k)) return false;
+    vistas.add(k);
+    return true;
+  });
+
+  // La unidad que se está leyendo va primero y nunca se queda fuera del cupo.
+  const propias = unicas.filter((c) => mismaPlaca(c.placa));
+  const otras = unicas.filter((c) => !mismaPlaca(c.placa));
+  const elegidas = [...propias.slice(0, 6), ...otras.slice(0, Math.max(0, limite - Math.min(propias.length, 6)))];
+
+  return elegidas
+    .map((c) => {
+      const placa = c.placa ? `[${c.placa}] ` : "";
+      const nota = String(c.nota ?? "").trim().slice(0, 200);
+      const cab = encabezadoLeccion(String(c.motivo_tipo));
+      // Nota que describe una foto ilegible → la lección es abstenerse, no adivinar.
+      if (!cab && nota && NOTA_ILEGIBLE.test(nota)) {
+        return `- ${placa}«${nota}» → cuando la foto esté así, devuelve "kilometraje": null y dilo en "observaciones"; no adivines un número.`;
+      }
+      const detalle = nota ? ` El operador precisó: «${nota}»` : "";
+      return `- ${placa}${cab || "Lectura corregida por el operador."}${detalle}`;
+    })
+    .join("\n");
 }
 
 /** Promedio km/día a partir de lecturas aceptadas ordenadas. Null si no es fiable. */

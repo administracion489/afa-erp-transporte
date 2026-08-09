@@ -13,7 +13,8 @@
 // demás queda como alerta + registro para revisión humana. NUNCA se cancela un servicio
 // automáticamente.
 
-import { registrarLectura, type Flota } from "@/lib/odometro";
+import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
+import { elegirOdometro } from "@/lib/odometro-seleccion";
 import type {
   AnomaliaCombustible,
   CategoriaRadar,
@@ -1046,7 +1047,33 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   // Mismo fallback que en combustible: si la IA dejó la placa en "unidad" (p.ej. "CUP 435"
   // sin guion), el match normalizado la encuentra igual; una referencia informal no matchea nada.
   const unidad = (await resolverUnidadOdometro(sb, d.placa)) ?? (await resolverUnidadOdometro(sb, d.unidad));
-  const km = numOpc(d.kilometraje);
+
+  // ── ¿Cuál de los números del tablero es el odómetro? ──────────────────────────────────
+  // La IA transcribe bien el total y el parcial pero a veces los intercambia de campo (caso
+  // BUI-272: kilometraje=1.803 / trip_km=174.159, con el bueno viajando en el JSON). El km
+  // vigente de la unidad desempata sin ambigüedad. Degrada limpio: sin unidad o si la consulta
+  // falla, el veredicto es neutro y el comportamiento es exactamente el de antes.
+  let ctxOdo: ContextoOdometro | null = null;
+  if (unidad) {
+    try {
+      ctxOdo = await contextoOdometro(sb, {
+        vehiculo_id: unidad.id, flota: unidad.flota, tsRef: mensaje.ts_mensaje ?? null,
+      });
+    } catch {
+      ctxOdo = null;
+    }
+  }
+  const veredicto = elegirOdometro({
+    kmIA: numOpc(d.kilometraje),
+    tripIA: numOpc(d.trip_km),
+    textoLeido: d.texto_leido ?? null,
+    kmVigente: ctxOdo?.kmVigente ?? 0,
+    kmDiaMax: ctxOdo?.kmDiaMax ?? 1500,
+    horasDesdeUltima: ctxOdo?.horasDesdeUltima ?? null,
+    hayHistorial: ctxOdo?.hayHistorial ?? false,
+  });
+  const km = veredicto.km;
+  const kmCorregido = veredicto.origen === "corregido";
   const umbral = Number(config.umbral_confianza ?? 0.7);
   // Fecha de la lectura: la que dictó la IA (si vio una en la foto/texto), o la del MENSAJE
   // original (ts_mensaje) — así reprocesar días después conserva el día real, no el del proceso.
@@ -1058,7 +1085,6 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   const esFoto = !!mensaje.media_url;
   const calidad = d.calidad_imagen ?? null;
   const confLectura = d.confianza_lectura != null ? Number(d.confianza_lectura) : null;
-  const tripKm = numOpc(d.trip_km);
   const kmDigitos = km != null ? String(Math.round(km)).replace(/[^0-9]/g, "").length : 0;
 
   const calidadMala   = esFoto && calidad === "mala";                       // foto ilegible
@@ -1066,7 +1092,6 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   const lecturaDudosa = esFoto && confLectura != null && confLectura < umbral;
   // Un odómetro real tiene 3–7 dígitos (una unidad nueva puede ir en cientos de km).
   const kmImplausible = km != null && (kmDigitos < 3 || kmDigitos > 7);
-  const tripComoOdo   = tripKm != null && km != null && km === tripKm;      // leyó el parcial como total
 
   // Identidad: ¿la unidad de la foto es la que el conductor remitente tenía asignada el día en
   // que ENVIÓ el mensaje? Solo flota propia (la asignación por reserva usa vehiculo_id). Se usa
@@ -1089,8 +1114,12 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   if (calidadMala)   bloqueos.push("Foto del tablero ilegible (borrosa/reflejo/oscura) — pedir una nueva foto");
   if (lecturaDudosa) bloqueos.push(`La IA no está segura del número (confianza de lectura ${Math.round((confLectura ?? 0) * 100)}%)`);
   if (kmImplausible) bloqueos.push(`Kilometraje con ${kmDigitos} dígito(s): fuera del rango de un odómetro real`);
-  if (tripComoOdo)   bloqueos.push(`El km coincide con el "Trip"/parcial (${km!.toLocaleString("es-PE")}) — probable confusión con el odómetro total`);
   if (identidadConflicto) bloqueos.push(`La foto es de ${unidad!.placa} pero quien la envió tiene asignada la ${placaAsignadaOtra} hoy — ¿foto de otra unidad?`);
+  // OJO: el veredicto del selector NUNCA entra en `bloqueos`. Un bloqueo apaga `puedeAuto` y
+  // entonces no se llama a registrarLectura, o sea que la lectura dejaría de existir como fila
+  // y desaparecería de "Lecturas por revisar" — que es justo donde el operador la corrige y
+  // donde nace el dataset de aprendizaje. El selector corrige el número cuando puede y, cuando
+  // no puede, deja que la lectura entre igual y sea evaluarLectura quien la marque sospechosa.
 
   const puedeAuto = config.acciones_automaticas?.odometro === true
     && !!unidad && km != null && confianza >= umbral && bloqueos.length === 0;
@@ -1120,12 +1149,17 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
       flota: unidad!.flota,
       capturado_en: mensaje.ts_mensaje ?? null,
       idemKey: `radar_odo:${mensaje.id}`,
+      // Deja rastro visible en la bandeja de que el número registrado no es el que devolvió
+      // la IA (auditoría sin columnas nuevas). ref_origen sigue siendo "radar_ia" para no
+      // sacar la lectura del panel de /radar-ia, que filtra por ese valor exacto.
+      motivo: kmCorregido ? `Corregido por el sistema: ${veredicto.motivo}` : null,
     });
     if (res.ok && res.estado === "aceptada") {
       // Registrada, pero hay dos casos que igual conviene que un humano revise: la PRIMERA
       // lectura de una unidad (se aceptó sin poder validarla) y un posible voucher mal
       // clasificado. En esos casos se deja también una alerta (el km ya quedó grabado igual).
       const avisos: string[] = [];
+      if (kmCorregido) avisos.push(`Lectura corregida automáticamente: ${veredicto.motivo}`);
       if (esPrimeraLectura) avisos.push("Es la PRIMERA lectura de esta unidad: se aceptó como base sin poder validarla — confirmar que el número es correcto");
       if (sospechaVoucher) avisos.push("El mensaje menciona términos de compra (grifo/monto/voucher): revisar si en realidad era una recarga de combustible y no solo el odómetro");
       let alertaId: string | null = null;
@@ -1142,24 +1176,27 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
       return {
         accion: "odometro_registrado",
         detalle: `Lectura de ${unidad!.placa}${etiquetaFlota} registrada: ${km!.toLocaleString("es-PE")} km${avisos.length ? " (con aviso de revisión)" : ""}`,
-        datos: { vehiculo_id: unidad!.id, flota: unidad!.flota, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, primera_lectura: esPrimeraLectura, sospecha_voucher: sospechaVoucher },
+        datos: { vehiculo_id: unidad!.id, flota: unidad!.flota, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, primera_lectura: esPrimeraLectura, sospecha_voucher: sospechaVoucher, veredicto },
       };
     }
     if (res.ok) {
       // "sospechosa"/"rechazada": registrarLectura YA la guardó sin tocar el vigente — solo falta avisar.
       const titulo = `🛞 Lectura de odómetro por revisar: ${unidad!.placa}${etiquetaFlota} — ${km!.toLocaleString("es-PE")} km`;
+      // Si el selector vio otro número posible en la MISMA foto, va en la alerta: es la pista
+      // que convierte "revisa esto" en "¿era este otro número?".
+      const pista = !veredicto.autoOk && veredicto.motivo ? ` · ${veredicto.motivo}` : "";
       const alertaId = await crearAlerta(sb, {
         mensaje_id: mensaje.id,
         tipo: "odometro_anomalia",
         severidad: "atencion",
         titulo,
-        detalle: `${res.motivo ?? "Lectura fuera de rango"} · revisar y aceptar en ${dondeRevisar}`,
+        detalle: `${res.motivo ?? "Lectura fuera de rango"}${pista} · revisar y aceptar en ${dondeRevisar}`,
         href: hrefOdometro,
       });
       return {
         accion: "odometro_en_revision",
         detalle: `Lectura capturada pero quedó "${res.estado}" — revisar en ${dondeRevisar}`,
-        datos: { vehiculo_id: unidad!.id, flota: unidad!.flota, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, estado_lectura: res.estado },
+        datos: { vehiculo_id: unidad!.id, flota: unidad!.flota, kilometraje: km, lectura_id: res.lecturaId, alerta_id: alertaId, estado_lectura: res.estado, veredicto },
       };
     }
     errorRegistro = res.error ?? "error desconocido";
@@ -1179,6 +1216,7 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
     }
   }
   if (km == null) motivos.push("Sin lectura de kilometraje");
+  if (!veredicto.autoOk && veredicto.motivo) motivos.push(veredicto.motivo);
   if (confianza < umbral) motivos.push(`Confianza ${Math.round(confianza * 100)}% por debajo del umbral ${Math.round(umbral * 100)}%`);
   // Guards de lectura que bloquearon el auto-registro (calidad, trip, plausibilidad, identidad).
   for (const b of bloqueos) motivos.push(b);
@@ -1200,7 +1238,7 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
   return {
     accion: "odometro_pendiente",
     detalle: motivos[0] ?? `Requiere registro manual en ${dondeRevisar}`,
-    datos: { alerta_id: alertaId, motivos, kilometraje: km, flota: unidad?.flota ?? null },
+    datos: { alerta_id: alertaId, motivos, kilometraje: km, flota: unidad?.flota ?? null, veredicto },
   };
 }
 

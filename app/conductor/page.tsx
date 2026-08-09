@@ -31,7 +31,10 @@ type Conductor = {
    *  de las acciones sensibles; sustituye al PIN, que ya no se guarda en el dispositivo. */
   _token?: string;
 };
-type Vehiculo  = { id: number; placa: string; categoria: string | null; marca?: string | null; };
+// `_flota` marca de qué tabla salió el vehículo. Es imprescindible: la lista mezcla flota
+// propia y tercerizada, y los ids se SOLAPAN entre `vehiculos` y `vehiculos_tercero` (el id 5
+// es CWQ400 en una y C8Z-955 en la otra), así que un id suelto es ambiguo.
+type Vehiculo  = { id: number; placa: string; categoria: string | null; marca?: string | null; _flota?: "propia" | "tercero" };
 type Reserva   = { id: number; origen: string; destino: string; fecha_servicio: string | null; hora_servicio?: string | null; vehiculo_id?: number | null; estado?: string | null; };
 type Parada    = { id: number; reserva_id: number; orden: number; nombre: string; direccion: string | null; lat: number | null; lng: number | null; hora_estimada: string | null; estado: string; hora_llegada?: string | null; };
 type Pasajero  = { id: number; nombre: string; dni: string | null; empresa: string | null; qr_code: string | null; foto_url: string | null; };
@@ -953,8 +956,8 @@ export default function ConductorApp() {
       const r: Reserva[] = d.reservas || [];
       const vIds  = new Set(r.map(x => x.vehiculo_id).filter(Boolean));
       const vtIds = new Set(r.map(x => (x as any).vehiculo_tercero_id).filter(Boolean));
-      const propios  = ((d.vehiculos        || []) as Vehiculo[]).filter(v => vIds.has(v.id));
-      const terceros = ((d.vehiculosTercero || []) as Vehiculo[]).filter(v => vtIds.has(v.id));
+      const propios  = ((d.vehiculos        || []) as Vehiculo[]).filter(v => vIds.has(v.id)).map(v => ({ ...v, _flota: "propia" as const }));
+      const terceros = ((d.vehiculosTercero || []) as Vehiculo[]).filter(v => vtIds.has(v.id)).map(v => ({ ...v, _flota: "tercero" as const }));
       setVehiculos([...propios, ...terceros]);
       setReservasHoy(r);
       const unicos = [...new Set([...vIds, ...vtIds])];
@@ -2184,9 +2187,17 @@ export default function ConductorApp() {
       try {
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), 8000);
+        // Mandar la unidad permite que el servidor use la guía de ESE tablero y contraste el
+        // número contra el km vigente (así no entra un parcial ni un dígito de más). Si aún no
+        // se eligió unidad, se lee igual pero sin esa validación.
+        const vSel = vehiculos.find(v => v.id === vehiculoId);
         const res = await fetch("/api/mantenimiento/leer-odometro", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ adjunto: { tipo: "image", media_type: "image/jpeg", data: base64 } }),
+          body: JSON.stringify({
+            adjunto: { tipo: "image", media_type: "image/jpeg", data: base64 },
+            vehiculo_id: vehiculoId ?? null,
+            flota: vSel?._flota ?? "propia",
+          }),
           signal: ctrl.signal,
         });
         clearTimeout(t);
@@ -2194,12 +2205,20 @@ export default function ConductorApp() {
         if (!res.ok || !data.ok) data = null;
       } catch { data = null; }
       const km = data ? Number(data.kilometraje ?? data.km ?? 0) : 0;
-      if (data && km && data.calidad_imagen !== "mala") {
+      // `auto_ok === false` = el número no cuadra con el kilometraje de esta unidad. No se
+      // prellena: es preferible que el conductor lo escriba mirando el tablero a arrastrar una
+      // lectura mala hasta la bandeja del operador.
+      const dudoso = data ? data.auto_ok === false : false;
+      if (data && km && data.calidad_imagen !== "mala" && !dudoso) {
         setKm(String(km));
         setFoto((prev) => (prev ? { ...prev, kmOcr: km } : prev));
-        if (data.confianza !== "alta") {
+        if (data.corregido) {
+          alert(`Km leído: ${km.toLocaleString("es-PE")}.\nOjo: la foto muestra dos contadores y se tomó el total (el otro número es el parcial). Verifícalo.`);
+        } else if (data.confianza !== "alta") {
           alert(`Km leído: ${km.toLocaleString("es-PE")}${data.motivo ? ` (${data.motivo})` : ""}.\nRevísalo y corrige si hace falta.`);
         }
+      } else if (dudoso) {
+        alert(`El número leído (${km.toLocaleString("es-PE")}) no cuadra con el kilometraje de esta unidad.\nEscribe el kilometraje mirando el tablero — la foto ya quedó registrada.`);
       } else {
         alert("No se pudo leer el km automáticamente. Escribe el kilometraje a mano — la foto ya quedó registrada.");
       }
@@ -2276,10 +2295,12 @@ export default function ConductorApp() {
     if (checks.some(c => c.ok === null)) {
       alert(`Faltan ${checks.filter(c => c.ok === null).length} ítems por completar`); return;
     }
-    // `es_tercero` enruta el odómetro en el backend hacia vehiculos_tercero (el id de
-    // `vehiculoId` es de esa tabla cuando el conductor es tercerizado). El server lo
-    // usa y lo descarta antes de insertar checklist_conductor (no es columna de esa tabla).
-    const esTercero = conductor._tabla === "conductores_tercero";
+    // `es_tercero` enruta el odómetro en el backend hacia vehiculos_tercero. Se deriva del
+    // VEHÍCULO elegido, no de la tabla del conductor: un conductor tercerizado puede manejar
+    // una unidad propia, y como los ids se solapan entre las dos tablas, equivocarse aquí
+    // registraría el kilometraje en OTRO bus. El server lo usa y lo descarta antes de
+    // insertar checklist_conductor (no es columna de esa tabla).
+    const esTercero = (vehiculos.find(v => v.id === vehiculoId)?._flota ?? (conductor._tabla === "conductores_tercero" ? "tercero" : "propia")) === "tercero";
     const payload = { checklist: {
       conductor_id: conductor.id,
       vehiculo_id:  vehiculoId,
@@ -2339,7 +2360,8 @@ export default function ConductorApp() {
     if (fotoCheckout && (!kmFin || Number(kmFin) <= 0)) {
       alert("Ingresa el kilometraje final (revisa el número que leyó la foto)"); return;
     }
-    const esTercero = conductor._tabla === "conductores_tercero";
+    // Misma regla que en el check-in: la flota la manda el vehículo elegido, no el conductor.
+    const esTercero = (vehiculos.find(v => v.id === vehiculoId)?._flota ?? (conductor._tabla === "conductores_tercero" ? "tercero" : "propia")) === "tercero";
     const payload = { checkout: {
       conductor_id: conductor.id,
       vehiculo_id:  vehiculoId,

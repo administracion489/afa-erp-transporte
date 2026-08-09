@@ -114,32 +114,56 @@ export async function extraerPlanFabricante(adjuntos: Adjunto[]): Promise<any> {
 
 const PROMPT_ODO = `Te paso la foto del ODÓMETRO (cuentakilómetros) del tablero de un vehículo.
 Devuelve SOLO un JSON:
-{"km": number, "confianza": "alta"|"media"|"baja", "calidad_imagen": "buena"|"regular"|"mala", "motivo": string, "texto_leido": string}.
-"km" es el kilometraje TOTAL del vehículo (entero, ignora el cuentakilómetros parcial/trip y los decimales).
+{"km": number, "trip_km": number|null, "confianza": "alta"|"media"|"baja", "calidad_imagen": "buena"|"regular"|"mala", "motivo": string, "texto_leido": string}.
+"km" es el kilometraje TOTAL del vehículo (entero, sin decimales).
+"trip_km" es el cuentakilómetros PARCIAL/trip. Si la pantalla muestra DOS contadores de km, este campo NUNCA debe ser null: pon aquí el otro número que viste.
+ANTI-INVERSIÓN: en un mismo tablero el TOTAL es SIEMPRE el número MAYOR y va sin decimales; el parcial es el MENOR y suele llevar un decimal (p. ej. "1803.6"). Si el número que ibas a poner en "km" es MENOR que otro número de kilómetros de la pantalla, los estás intercambiando.
+La temperatura ("28.0°C"), la hora ("20:25") y una tasa de consumo ("16.3 L/100km") NO son kilómetros.
 "calidad_imagen"="mala" si la foto está borrosa, con reflejo/brillo que tape dígitos, muy oscura, o el odómetro no es legible; "regular" si se lee con algo de esfuerzo; "buena" si es nítida.
 "motivo" = por qué esa confianza/calidad, en pocas palabras (ej "lectura nítida", "reflejo sobre el último dígito", "foto borrosa").
-Si no puedes leerlo con seguridad, devuelve km=0 y confianza="baja". Responde únicamente el JSON.`;
+Si no puedes leerlo con seguridad devuelve km=0 y confianza="baja"; NUNCA inventes un número ni lo deduzcas de lo que creas que debería marcar. Responde únicamente el JSON.`;
+
+/** Lo que el ERP ya sabe de ESTA unidad y ayuda a leer su tablero. */
+export type ContextoLecturaOdometro = {
+  lecciones?: string | null;
+  guia?: string | null;      // vehiculos(_tercero).guia_odometro: dónde mirar en ESE tablero
+  placa?: string | null;
+  digitos?: number | null;   // cuántos dígitos tiene su odómetro (nunca el km exacto: sería copiable)
+};
 
 export async function extraerOdometro(
   adjunto: Adjunto,
-  // Correcciones que el equipo hizo sobre lecturas anteriores (lib/odometro.ts →
-  // leccionesOdometro). Se inyectan como ejemplos para no repetir el mismo error.
-  lecciones?: string | null
-): Promise<{ km: number; kilometraje: number; confianza: string; calidad_imagen: string; motivo: string; texto_leido: string }> {
-  const prompt = lecciones
-    ? `${PROMPT_ODO}\n\nERRORES QUE YA COMETISTE en este mismo parque automotor (corregidos por el equipo). Revísalos y no los repitas:\n${lecciones}\nSi tu lectura se parece a alguno de esos casos, baja la confianza y explica por qué en "motivo".`
-    : PROMPT_ODO;
+  // string = solo las lecciones (firma vieja, retrocompatible).
+  ctx?: string | null | ContextoLecturaOdometro
+): Promise<{ km: number; kilometraje: number; trip_km: number | null; confianza: string; calidad_imagen: string; motivo: string; texto_leido: string }> {
+  const c: ContextoLecturaOdometro = typeof ctx === "string" || ctx == null ? { lecciones: ctx ?? null } : ctx;
+
+  const bloques: string[] = [PROMPT_ODO];
+  if (c.guia?.trim()) {
+    bloques.push(
+      `Cómo leer el tablero de ESTA unidad${c.placa ? ` (${c.placa})` : ""}, según el operador de AFA: ${c.guia.trim()}` +
+        (c.digitos ? `\nEn esta unidad el odómetro TOTAL es un número de ${c.digitos} dígitos.` : "")
+    );
+  }
+  if (c.lecciones?.trim()) {
+    bloques.push(
+      `ERRORES QUE YA COMETISTE en este mismo parque automotor (corregidos por el equipo). Revísalos y no los repitas:\n${c.lecciones.trim()}\nSi tu lectura se parece a alguno de esos casos, baja la confianza y explica por qué en "motivo".`
+    );
+  }
+
   const reqOdo: any = {
     model: MODELO_VISION,
     max_tokens: 300,
-    messages: [{ role: "user", content: [{ type: "text", text: prompt }, bloqueAdjunto(adjunto)] }],
+    messages: [{ role: "user", content: [{ type: "text", text: bloques.join("\n\n") }, bloqueAdjunto(adjunto)] }],
   };
   const resp: any = await getAnthropic().messages.create(reqOdo);
   const r = extraerJSON(textoDe(resp));
   const km = Math.round(Number(r.km || 0));
+  const trip = r.trip_km != null && Number.isFinite(Number(r.trip_km)) ? Math.round(Number(r.trip_km)) : null;
   return {
     km,                              // alias retrocompatible (OdometroTab lee data.km)
     kilometraje: km,
+    trip_km: trip,
     confianza: r.confianza || "baja",
     calidad_imagen: r.calidad_imagen || "regular",
     motivo: r.motivo || "",
