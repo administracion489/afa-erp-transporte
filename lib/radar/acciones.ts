@@ -921,6 +921,8 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
         foto_url: mensaje.media_url ?? null,
         ref_origen: "radar_ia",
         capturado_en: mensaje.ts_mensaje ?? null,
+        // El sello es de cuándo se ENVIÓ el mensaje: la foto del surtidor pudo tomarse antes.
+        horaEsTope: true,
         // el km de una recarga se ata al mensaje → reproceso no duplica la lectura
         idemKey: `radar_odo_comb:${mensaje.id}`,
       });
@@ -1148,6 +1150,11 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
       ref_origen: "radar_ia",
       flota: unidad!.flota,
       capturado_en: mensaje.ts_mensaje ?? null,
+      // `ts_mensaje` es cuándo se ENVIÓ, no cuándo se tomó la foto: el conductor fotografía el
+      // tablero al arrancar y manda el mensaje después ("buenos días, km inicial"). Tratarlo
+      // como hora exacta ponía la lectura detrás de check-ins posteriores y la acusaba de
+      // retroceder. Ver [[project_odometro_hora_envio_vs_captura]].
+      horaEsTope: true,
       idemKey: `radar_odo:${mensaje.id}`,
       // Deja rastro visible en la bandeja de que el número registrado no es el que devolvió
       // la IA (auditoría sin columnas nuevas). ref_origen sigue siendo "radar_ia" para no

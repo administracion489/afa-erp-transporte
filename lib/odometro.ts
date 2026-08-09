@@ -53,6 +53,13 @@ function horaLimaDeTs(ts: number): string | null {
  */
 const TOLERANCIA_RELOJ_MS = 5 * 60_000;
 
+/**
+ * Cuánto puede adelantarse la hora de una lectura con hora-tope para que su kilometraje encaje.
+ * Cubre el retraso real entre fotografiar el tablero y mandar el mensaje (minutos u horas);
+ * más allá, la explicación probable ya no es "la foto es vieja" sino "el número está mal".
+ */
+const MAX_AJUSTE_HORA_MS = 24 * 3600_000;
+
 /** "3 h 20 min" / "45 min" — para explicarle al operador cuánto miente un reloj. */
 function fmtDesfase(ms: number): string {
   const min = Math.round(Math.abs(ms) / 60_000);
@@ -271,6 +278,13 @@ export type ContextoOdometro = {
   anterior: RefLectura | null;
   /** Lectura viva inmediatamente POSTERIOR a `tsRef`; si existe, la nueva llega retroactiva. */
   posterior: RefLectura | null;
+  /**
+   * Instante en el que la lectura queda realmente ubicada. Difiere de `tsRef` solo cuando la
+   * hora conocida es un TOPE (ver `horaEsTope`) y el kilometraje exige colocarla antes.
+   */
+  tsUbicado: number;
+  /** Explicación del reajuste de hora, si lo hubo (va al motivo de la lectura). */
+  notaHora: string | null;
 };
 
 /** Fila cruda de lecturas_odometro → referencia con su instante efectivo. */
@@ -287,12 +301,25 @@ function aRef(f: { km: number; created_at: string; capturado_en: string | null; 
 
 export async function contextoOdometro(
   client: any,
-  opts: { vehiculo_id: number; flota?: Flota; tsRef?: string | null }
+  opts: {
+    vehiculo_id: number;
+    flota?: Flota;
+    tsRef?: string | null;
+    /**
+     * `tsRef` es la hora de ENVÍO, no la de la foto: una imagen de WhatsApp puede haberse
+     * tomado mucho antes de mandarse ("buenos días, km inicial" a las 06:06 con una foto del
+     * tablero de las 04:50). Con esto la hora se trata como COTA SUPERIOR y la lectura se
+     * ubica en el hueco que su kilometraje exige, en vez de acusar un retroceso inexistente.
+     */
+    horaEsTope?: boolean;
+    /** Kilometraje que se va a registrar: necesario para ubicar una lectura con hora-tope. */
+    kmNuevo?: number | null;
+  }
 ): Promise<ContextoOdometro> {
   const vacio: ContextoOdometro = {
     existe: false, kmVigente: 0, ritmoKmDia: null, ritmoFiable: false,
     horasDesdeUltima: null, kmDiaMax: 1500, hayHistorial: false,
-    anterior: null, posterior: null,
+    anterior: null, posterior: null, tsUbicado: Date.now(), notaHora: null,
   };
   if (!opts.vehiculo_id) return vacio;
   const { tabla, fk } = targetFlota(opts.flota);
@@ -323,11 +350,46 @@ export async function contextoOdometro(
   const todas = [...((prevRaw || []) as Fila[]), ...((postRaw || []) as Fila[])];
   const conTs = todas.map((f) => ({ f, ts: tsDe(f.capturado_en) ?? tsDe(f.created_at) ?? 0 }));
 
-  // Anterior = la de mayor ts que no supera el de la nueva; posterior = la de menor ts por encima.
+  // ── Ubicación temporal de la lectura ───────────────────────────────────────────────────
+  // Con hora exacta, la lectura va donde dice su reloj. Con hora-TOPE (la de envío del
+  // mensaje) solo se sabe que se tomó en o antes de ese instante: si entre su hueco por
+  // kilometraje y el tope ya hay lecturas de km MAYOR, la foto es necesariamente anterior a
+  // ellas y se la ubica justo antes. Es la diferencia entre "el odómetro retrocedió" y "la
+  // foto llegó tarde", que hasta ahora el ERP no distinguía.
+  let tsUbicado = tsNueva;
+  let notaHora: string | null = null;
+  const kmNuevo = opts.kmNuevo != null ? Number(opts.kmNuevo) : null;
+  if (opts.horaEsTope && kmNuevo != null && Number.isFinite(kmNuevo)) {
+    const serie = conTs.filter((x) => x.ts > 0).sort((a, b) => a.ts - b.ts);
+    // Última lectura hasta el tope cuyo km no supera al nuevo: el piso del hueco.
+    let iAnt = -1;
+    for (let i = 0; i < serie.length; i++) {
+      if (serie[i].ts <= tsNueva && Number(serie[i].f.km) <= kmNuevo) iAnt = i;
+    }
+    const sig = serie[iAnt + 1];
+    // Solo se reubica si esa siguiente lectura ya ocurrió antes del tope y tiene MÁS km: es
+    // la prueba de que la foto se tomó antes que ella.
+    if (sig && sig.ts <= tsNueva && Number(sig.f.km) > kmNuevo) {
+      const techo = sig.ts - 60_000;                       // un minuto antes de la que la supera
+      const piso = iAnt >= 0 ? serie[iAnt].ts + 1_000 : techo;
+      const candidato = Math.max(Math.min(techo, tsNueva), piso);
+      // Un conductor manda la foto del tablero con horas de retraso, no con días. Si para que
+      // el kilometraje encaje hubiera que retroceder más que eso, lo probable no es que la foto
+      // sea vieja sino que el número esté mal: no se reubica y la lectura va a revisión.
+      if (tsNueva - candidato <= MAX_AJUSTE_HORA_MS) {
+        tsUbicado = candidato;
+        notaHora =
+          `Hora ajustada a ${horaLimaDeTs(tsUbicado)}: la foto llegó ${horaLimaDeTs(tsNueva)} pero su kilometraje ` +
+          `exige que se tomara antes de la lectura de las ${horaLimaDeTs(sig.ts)} (${Number(sig.f.km).toLocaleString("es-PE")} km)`;
+      }
+    }
+  }
+
+  // Anterior = la de mayor ts que no supera el de la lectura; posterior = la de menor ts por encima.
   let anterior: RefLectura | null = null, tsAnt = -Infinity;
   let posterior: RefLectura | null = null, tsPost = Infinity;
   for (const { f, ts } of conTs) {
-    if (ts <= tsNueva) { if (ts > tsAnt) { tsAnt = ts; anterior = aRef(f); } }
+    if (ts <= tsUbicado) { if (ts > tsAnt) { tsAnt = ts; anterior = aRef(f); } }
     else if (ts < tsPost) { tsPost = ts; posterior = aRef(f); }
   }
 
@@ -335,7 +397,7 @@ export async function contextoOdometro(
   // vieja, lo que vino después todavía no había ocurrido).
   const vivas = ((prevRaw || []) as Fila[]);
 
-  const horasDesdeUltima = anterior?.ts != null ? Math.max(0, (tsNueva - anterior.ts) / 3600_000) : null;
+  const horasDesdeUltima = anterior?.ts != null ? Math.max(0, (tsUbicado - anterior.ts) / 3600_000) : null;
 
   const aceptadas = vivas.filter((v) => v.estado === "aceptada");
   const ritmoKmDia = kmPorDia(aceptadas.map((a) => ({ km: a.km, fecha: a.fecha })));
@@ -355,7 +417,7 @@ export async function contextoOdometro(
   return {
     existe: true, kmVigente, ritmoKmDia, ritmoFiable, horasDesdeUltima, kmDiaMax,
     hayHistorial: anterior != null || posterior != null,
-    anterior, posterior,
+    anterior, posterior, tsUbicado, notaHora,
   };
 }
 
@@ -377,6 +439,13 @@ export async function registrarLectura(
     forzar?: boolean;          // saltar validación (aceptar desde panel de revisión)
     flota?: Flota;             // "propia" (default) | "tercero"
     capturado_en?: string | null; // cuándo se TOMÓ la lectura (no cuándo se insertó)
+    /**
+     * `capturado_en` es la hora de ENVÍO, no la de la foto (mensajes de WhatsApp): se trata
+     * como cota superior y la lectura se ubica donde su kilometraje lo exige. Ver
+     * `contextoOdometro`. Las fuentes que sellan la captura en el momento —el check-in y el
+     * check-out de la app del conductor— NO deben usarlo: ahí la hora es exacta.
+     */
+    horaEsTope?: boolean;
     momento?: "checkin" | "checkout" | null; // rol en la jornada
     idemKey?: string | null;   // clave estable por evento de origen → dedupe idempotente
     /**
@@ -437,12 +506,23 @@ export async function registrarLectura(
   // ahora compartido con el selector de odómetro y con los prompts de visión.
   const ctx = await contextoOdometro(client, {
     vehiculo_id: l.vehiculo_id, flota: l.flota, tsRef: capturadoEn ?? fecha,
+    horaEsTope: l.horaEsTope, kmNuevo: km,
   });
   if (!ctx.existe) {
     return { ok: false, estado: "rechazada", motivo: "Vehículo no encontrado", error: "Vehículo no encontrado" };
   }
   const { kmVigente, horasDesdeUltima, anterior, posterior } = ctx;
-  const tsNueva = tsDe(capturadoEn) ?? tsDe(fecha) ?? Date.now();
+  let tsNueva = tsDe(capturadoEn) ?? tsDe(fecha) ?? Date.now();
+
+  // La hora era un tope y el kilometraje obligó a adelantarla: se guarda la hora ubicada (es la
+  // mejor estimación coherente de cuándo se tomó la foto) con la explicación en el motivo.
+  if (ctx.notaHora && ctx.tsUbicado !== tsNueva) {
+    notaReloj = [notaReloj, ctx.notaHora].filter(Boolean).join(" · ");
+    tsNueva = ctx.tsUbicado;
+    capturadoEn = new Date(ctx.tsUbicado).toISOString();
+    const diaUbicado = new Date(ctx.tsUbicado - 5 * 3600_000).toISOString().slice(0, 10);
+    if (diaUbicado !== fecha) fecha = diaUbicado; // el ajuste cruzó la medianoche → cambia la jornada
+  }
   // El caller puede fijar el tope; si no, manda el adaptativo del contexto.
   const kmDiaMax = l.kmDiaMax && l.kmDiaMax > 0 ? l.kmDiaMax : ctx.kmDiaMax;
 
@@ -505,6 +585,9 @@ function esViolacionUnica(error: any): boolean {
   return error?.code === "23505" || /duplicate key|unique constraint/i.test(String(error?.message ?? ""));
 }
 
+/** Fuentes cuya hora es la del ENVÍO del mensaje, no la de la foto. */
+const FUENTES_HORA_TOPE: string[] = ["whatsapp_foto", "whatsapp_manual", "combustible"];
+
 /** Acepta manualmente una lectura sospechosa (desde el panel de revisión). */
 export async function aceptarLectura(
   client: any,
@@ -521,8 +604,27 @@ export async function aceptarLectura(
   const esTercero = l.vehiculo_tercero_id != null;
   const tabla = esTercero ? "vehiculos_tercero" : "vehiculos";
   const vid = esTercero ? l.vehiculo_tercero_id : l.vehiculo_id;
-  await client.from("lecturas_odometro")
-    .update({ estado: "aceptada", motivo: "Aceptada manualmente" }).eq("id", lecturaId);
+
+  // Si la lectura viene de una fuente cuya hora es la del ENVÍO (foto de WhatsApp), aceptarla
+  // sin más la dejaría con una hora que la ordena DESPUÉS de lecturas de más km: la analítica
+  // la descartaría por "retroceder" y el operador la habría aceptado para nada. Se la reubica
+  // en el hueco que su kilometraje exige, igual que al registrarla.
+  const parche: Record<string, any> = { estado: "aceptada", motivo: "Aceptada manualmente" };
+  if (FUENTES_HORA_TOPE.includes(String(l.fuente))) {
+    const ctx = await contextoOdometro(client, {
+      vehiculo_id: vid, flota: esTercero ? "tercero" : "propia",
+      tsRef: l.capturado_en ?? l.created_at ?? l.fecha,
+      horaEsTope: true, kmNuevo: Number(l.km),
+    });
+    if (ctx.notaHora) {
+      parche.capturado_en = new Date(ctx.tsUbicado).toISOString();
+      parche.motivo = `Aceptada manualmente · ${ctx.notaHora}`;
+      const diaUbicado = new Date(ctx.tsUbicado - 5 * 3600_000).toISOString().slice(0, 10);
+      if (diaUbicado !== l.fecha) parche.fecha = diaUbicado;
+    }
+  }
+
+  await client.from("lecturas_odometro").update(parche).eq("id", lecturaId);
   const { data: veh } = await client
     .from(tabla).select("kilometraje_actual").eq("id", vid).single();
   if (Number(l.km) > Number(veh?.kilometraje_actual || 0)) {
