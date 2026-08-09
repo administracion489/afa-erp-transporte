@@ -46,6 +46,57 @@ function horaLimaDeTs(ts: number): string | null {
   return new Date(ts - 5 * 3600_000).toISOString().slice(11, 16);
 }
 
+/**
+ * Margen por debajo del cual un desfase de reloj es indistinguible de la latencia normal
+ * (subida de la foto, cola de reintentos, redondeos). Corregir dentro de este margen sería
+ * ruido; por encima, el reloj del dispositivo está realmente mal puesto.
+ */
+const TOLERANCIA_RELOJ_MS = 5 * 60_000;
+
+/** "3 h 20 min" / "45 min" — para explicarle al operador cuánto miente un reloj. */
+function fmtDesfase(ms: number): string {
+  const min = Math.round(Math.abs(ms) / 60_000);
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60), r = min % 60;
+  return r ? `${h} h ${r} min` : `${h} h`;
+}
+
+/**
+ * Corrige la hora de captura que reporta un dispositivo usando el desfase de SU reloj.
+ *
+ * `capturado_en` sale de `new Date()` en el celular del conductor: si tiene la hora mal puesta,
+ * miente, y con ella mienten el orden de la jornada y el juicio de retroceso. El truco es que
+ * el cliente sella también el instante del ENVÍO con ese mismo reloj: comparándolo con el del
+ * servidor se mide el error del reloj —sin confundirlo con el tiempo que la lectura pasó en la
+ * cola offline, que afecta a ambos sellos por igual— y se le aplica a la hora de captura.
+ *
+ * Detecta relojes ATRASADOS, que el clamp de "no puede venir del futuro" de registrarLectura
+ * no puede ver. Sin `clienteTs` (llamador que no lo manda) devuelve la hora tal cual.
+ */
+export function corregirCapturaPorReloj(opts: {
+  capturado_en?: string | null;
+  clienteTs?: string | null;   // reloj del dispositivo en el instante del envío
+  ahora?: Date;                // reloj del servidor (inyectable para pruebas)
+}): { capturado_en: string | null; desfaseMin: number | null; nota: string | null } {
+  const cap = opts.capturado_en ?? null;
+  const tsCap = tsDe(cap);
+  const tsCli = tsDe(opts.clienteTs ?? null);
+  const ahora = (opts.ahora ?? new Date()).getTime();
+  if (tsCap == null || tsCli == null) return { capturado_en: cap, desfaseMin: null, nota: null };
+
+  const desfase = ahora - tsCli; // > 0 → el reloj del dispositivo va ATRASADO
+  const desfaseMin = Math.round(desfase / 60_000);
+  if (Math.abs(desfase) <= TOLERANCIA_RELOJ_MS) return { capturado_en: cap, desfaseMin, nota: null };
+
+  // Nunca por delante del servidor: no se puede haber capturado después de llegar aquí.
+  const corregido = Math.min(tsCap + desfase, ahora);
+  return {
+    capturado_en: new Date(corregido).toISOString(),
+    desfaseMin,
+    nota: `Hora corregida: el reloj del dispositivo va ${fmtDesfase(desfase)} ${desfase > 0 ? "atrasado" : "adelantado"}`,
+  };
+}
+
 /** Flota a la que pertenece la lectura. Default "propia" (retrocompatible). */
 export type Flota = "propia" | "tercero";
 
@@ -361,18 +412,37 @@ export async function registrarLectura(
 
   // Momento de CAPTURA de esta lectura (no el de inserción/proceso): al reprocesar una foto
   // vieja el tiempo transcurrido y las validaciones deben medirse contra cuándo se tomó.
-  const fecha = l.fecha || hoyISO();
+  //
+  // `capturado_en` lo pone el ORIGEN (el reloj del celular del conductor, el sello del mensaje
+  // de WhatsApp), así que un reloj mal configurado puede mentir. La única cota que el ERP
+  // controla es la suya: nada puede haberse capturado DESPUÉS de llegar aquí. Si lo dice, el
+  // reloj de origen está adelantado y la hora se ancla a la de llegada — de lo contrario esa
+  // lectura se ordenaría al final de la jornada y falsearía el anti-retroceso y el recorrido.
+  // (Un reloj ATRASADO no se puede detectar así; para eso las rutas que reciben un sello del
+  //  dispositivo usan `corregirCapturaPorReloj`.)
+  const ahoraSrv = Date.now();
+  let capturadoEn = l.capturado_en ?? null;
+  let fecha = l.fecha || hoyISO();
+  let notaReloj: string | null = null;
+  const tsCapOriginal = tsDe(capturadoEn);
+  if (tsCapOriginal != null && tsCapOriginal > ahoraSrv + TOLERANCIA_RELOJ_MS) {
+    notaReloj = `Hora corregida: el dispositivo la reportó ${fmtDesfase(tsCapOriginal - ahoraSrv)} en el futuro (revisar su reloj)`;
+    capturadoEn = new Date(ahoraSrv).toISOString();
+    // La fecha del día venía del MISMO reloj que mintió: si ya no coincide, manda la corregida.
+    const diaReal = new Date(ahoraSrv - 5 * 3600_000).toISOString().slice(0, 10);
+    if (diaReal !== fecha) fecha = diaReal;
+  }
 
   // Vigente + historial (horas desde la última, km/día adaptativo). Mismo cálculo de siempre,
   // ahora compartido con el selector de odómetro y con los prompts de visión.
   const ctx = await contextoOdometro(client, {
-    vehiculo_id: l.vehiculo_id, flota: l.flota, tsRef: l.capturado_en ?? fecha,
+    vehiculo_id: l.vehiculo_id, flota: l.flota, tsRef: capturadoEn ?? fecha,
   });
   if (!ctx.existe) {
     return { ok: false, estado: "rechazada", motivo: "Vehículo no encontrado", error: "Vehículo no encontrado" };
   }
   const { kmVigente, horasDesdeUltima, anterior, posterior } = ctx;
-  const tsNueva = tsDe(l.capturado_en) ?? tsDe(fecha) ?? Date.now();
+  const tsNueva = tsDe(capturadoEn) ?? tsDe(fecha) ?? Date.now();
   // El caller puede fijar el tope; si no, manda el adaptativo del contexto.
   const kmDiaMax = l.kmDiaMax && l.kmDiaMax > 0 ? l.kmDiaMax : ctx.kmDiaMax;
 
@@ -394,9 +464,9 @@ export async function registrarLectura(
         refAnterior: anterior, refPosterior: posterior,
       });
 
-  // El motivo del caller (p.ej. "el sistema corrigió el número de la IA") se antepone al de
-  // evaluarLectura para que quede visible en la bandeja; no altera el estado.
-  const motivoFinal = [l.motivo?.trim() || null, evalr.motivo].filter(Boolean).join(" · ") || null;
+  // El motivo del caller (p.ej. "el sistema corrigió el número de la IA") y el aviso de reloj
+  // se anteponen al de evaluarLectura para que queden visibles en la bandeja; no alteran el estado.
+  const motivoFinal = [l.motivo?.trim() || null, notaReloj, evalr.motivo].filter(Boolean).join(" · ") || null;
 
   const { data: ins, error } = await client.from("lecturas_odometro").insert({
     [fk]: l.vehiculo_id,
@@ -405,7 +475,7 @@ export async function registrarLectura(
     fecha,
     foto_url: l.foto_url ?? null,
     ref_origen: l.ref_origen ?? null,
-    capturado_en: l.capturado_en ?? null,
+    capturado_en: capturadoEn,
     momento: l.momento ?? null,
     idem_key: l.idemKey ?? null,
     estado: evalr.estado,

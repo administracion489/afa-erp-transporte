@@ -777,7 +777,11 @@ export default function OdometroTab() {
                       <td className="p-3 text-xs text-gray-600"><CeldaFechaHora l={l} /></td>
                       <td className="p-3 text-xs text-gray-600">{FUENTE_LABEL[l.fuente] || l.fuente}</td>
                       <td className="p-3">
-                        <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={{ background: est.bg, color: est.color }}>{est.label}</span>
+                        <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={{ background: est.bg, color: est.color }}
+                          title={l.motivo || undefined}>{est.label}</span>
+                        {/* El motivo también lleva avisos de lecturas ACEPTADAS (p.ej. "el reloj del
+                            dispositivo va 3 h atrasado"), que solo se veían consultando la BD. */}
+                        {l.motivo && <p className="text-[11px] text-gray-400 mt-0.5 max-w-[280px]">{l.motivo}</p>}
                       </td>
                       <td className="p-3 text-xs">
                         {l.foto_url

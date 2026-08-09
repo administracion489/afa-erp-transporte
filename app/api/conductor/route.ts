@@ -9,7 +9,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { registrarLectura } from "@/lib/odometro";
+import { registrarLectura, corregirCapturaPorReloj } from "@/lib/odometro";
 import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm, enviarPushAPasajeros, payloadRespuestaChat } from "@/lib/push";
 import { evaluarProximidad, emitirLlego } from "@/lib/proximidad";
 import {
@@ -709,6 +709,13 @@ export async function POST(req: NextRequest) {
         delete checklistRow.es_tercero;
         delete checklistRow.foto_adjunto;
 
+        // La hora de la foto la pone el reloj del celular: si está mal puesto, la jornada se
+        // ordena mal y el anti-retroceso juzga contra la lectura equivocada. `_cliente_ts` mide
+        // ese error contra el reloj del servidor y lo descuenta.
+        const relojCheckin = corregirCapturaPorReloj({ capturado_en: checklist.capturado_en, clienteTs: body._cliente_ts });
+        checklistRow.capturado_en = relojCheckin.capturado_en;
+        if (relojCheckin.nota) console.warn(`[checklist] conductor ${checklist.conductor_id}: ${relojCheckin.nota}`);
+
         // 0) Subir la foto del odómetro (evidencia). Si falla la subida se lanza → el cliente lo
         //    trata como fallo de red y re-encola: nunca se responde "ok" sin guardar la evidencia.
         let fotoUrl: string | null = null;
@@ -741,7 +748,8 @@ export async function POST(req: NextRequest) {
                 foto_url: fotoUrl,
                 ref_origen: "checklist_conductor",
                 flota: esTercero ? "tercero" : "propia",
-                capturado_en: checklist.capturado_en ?? null,
+                capturado_en: relojCheckin.capturado_en,
+                motivo: relojCheckin.nota,
                 momento: "checkin",
                 // idempotencia por CONDUCTOR (no solo unidad): dos conductores pueden usar la
                 // misma unidad el mismo día en servicios distintos y ambas lecturas son válidas.
@@ -784,6 +792,11 @@ export async function POST(req: NextRequest) {
         delete checkoutRow.reserva_id;    // solo para la lectura; no es columna
         delete checkoutRow.foto_adjunto;  // se sube aparte; no es columna
 
+        // Mismo descuento del error de reloj que en el check-in (ver allí).
+        const relojCheckout = corregirCapturaPorReloj({ capturado_en: checkout.capturado_en, clienteTs: body._cliente_ts });
+        checkoutRow.capturado_en = relojCheckout.capturado_en;
+        if (relojCheckout.nota) console.warn(`[checkout] conductor ${checkout.conductor_id}: ${relojCheckout.nota}`);
+
         // 0) Subir la foto (si vino — el check-out permite cerrar SIN foto con motivo, p.ej. unidad
         //    en taller / tablero apagado). Falla de subida → 502 y el cliente reintenta.
         let fotoUrl: string | null = null;
@@ -813,7 +826,8 @@ export async function POST(req: NextRequest) {
                 foto_url: fotoUrl,
                 ref_origen: "checkout_conductor",
                 flota: esTercero ? "tercero" : "propia",
-                capturado_en: checkout.capturado_en ?? null,
+                capturado_en: relojCheckout.capturado_en,
+                motivo: relojCheckout.nota,
                 momento: "checkout",
                 idemKey: `checkout:${esTercero ? "t" : "p"}:${checkout.vehiculo_id}:${checkout.fecha}:${checkout.conductor_id}`,
               });

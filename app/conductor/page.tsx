@@ -111,7 +111,11 @@ const esAbordado = (e?: string | null) => e === "abordado" || e === "embarcado";
 // Llama al endpoint con service_role del conductor (saltea RLS — el conductor es
 // anónimo porque usa PIN, no sesión Supabase). Lanza Error con el mensaje del server.
 async function condApi(accion: string, params: Record<string, any> = {}) {
-  const bodyObj = { accion, ...params };
+  // Sello del reloj del DISPOSITIVO en el instante del envío. El servidor lo compara con el
+  // suyo para saber cuánto miente este celular y corregir las horas de captura que manda
+  // (ver corregirCapturaPorReloj). Se toma aquí, en cada intento, y no al armar el payload:
+  // así una lectura que estuvo horas en la cola offline mide el error del reloj, no la espera.
+  const bodyObj = { accion, ...params, _cliente_ts: new Date().toISOString() };
   // HTTP nativo (CapacitorHttp) SOLO para los envíos de GPS y SOLO cuando el plugin
   // de background está activo (APK recompilado): NO se throttlea en segundo plano
   // como el fetch del WebView. En todo lo demás y en APK viejos → fetch (probado).
