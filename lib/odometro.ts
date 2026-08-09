@@ -28,6 +28,8 @@ export type RefLectura = {
   fuente?: string | null;
   momento?: string | null;
   foto_url?: string | null;
+  /** SHA-256 del binario de la foto: identifica la MISMA imagen aunque cambie la URL. */
+  foto_hash?: string | null;
   /** false = el instante viene de created_at (inserción), no de capturado_en: es aproximado. */
   horaExacta?: boolean;
 };
@@ -130,7 +132,10 @@ export function evaluarLectura(opts: {
   kmDiaMax?: number;                  // tope de plausibilidad km/día
   horasDesdeUltima?: number | null;   // horas reales desde la última lectura aceptada
   origenIA?: boolean;                 // la fuente es automática/IA (whatsapp_foto/manual, combustible)
-  duplicadoProbable?: boolean;        // misma foto/mismo evento/ventana corta → casi seguro repetido
+  /** La MISMA imagen (igual URL o igual hash) ya se registró → una evidencia contada dos veces. */
+  duplicadoProbable?: boolean;
+  /** Mismo km desde una fuente DISTINTA: las dos evidencias se confirman entre sí. */
+  corroborada?: boolean;
   fechaLectura?: string | null;       // fecha (o timestamp) de la lectura, para el guard de "futuro"
   ahora?: Date;                       // inyectable (default: ahora)
   /**
@@ -193,13 +198,24 @@ export function evaluarLectura(opts: {
   }
 
   if (kmNuevo === kmBase) {
-    // Sin avance. Del conductor (check-in/out manual de un bus parqueado) es legítimo; de una
-    // fuente automática/IA es casi siempre una foto reenviada o un doble registro → advertir.
+    // ── Mismo kilometraje que la lectura anterior ──────────────────────────────────────
+    // Lo que decide aquí es la IMAGEN, no el número. Dos fotos DISTINTAS con el mismo km son
+    // dos evidencias de que la unidad no se movió: el patrón normal de la flota (check-out
+    // ~21:00 y check-in ~05:20 del día siguiente, bus en cochera). La regla anterior marcaba
+    // como "posible reenvío" todo lo que cayera dentro de 12 h, así que acusaba justamente a
+    // ese patrón: en 58 grupos con km repetido de la BD, NINGUNO compartía foto.
+    // El reenvío real —la misma imagen contada dos veces— lo detecta `duplicadoProbable`
+    // por URL o por hash del binario, y ese sí sigue yendo a revisión.
+    if (opts.duplicadoProbable) {
+      return { estado: "sospechosa", motivo: `Duplicada: es la MISMA foto de la lectura ${describirRef(ref)} (reenvío)` };
+    }
+    // Dos fuentes independientes que coinciden no son un problema: son la confirmación más
+    // fuerte de que el número es correcto (la app del conductor y la foto del grupo).
+    if (opts.corroborada && ref) {
+      return { estado: "aceptada", motivo: `Confirmada: coincide con la lectura ${describirRef(ref)}, de otra fuente` };
+    }
     if (!opts.origenIA) return { estado: "aceptada", motivo: null };
-    const contra = ref ? `a la ${describirRef(ref)}` : "al vigente";
-    return opts.duplicadoProbable
-      ? { estado: "sospechosa", motivo: `Duplicada: mismo km y misma foto/origen que la lectura ${describirRef(ref)} (posible reenvío)` }
-      : { estado: "sospechosa", motivo: `Sin avance: km igual ${contra} — ¿unidad detenida o lectura repetida?` };
+    return { estado: "aceptada", motivo: ref ? `Sin avance: unidad detenida desde la lectura ${describirRef(ref)}` : null };
   }
 
   // Mayor a la base.
@@ -288,15 +304,48 @@ export type ContextoOdometro = {
 };
 
 /** Fila cruda de lecturas_odometro → referencia con su instante efectivo. */
-function aRef(f: { km: number; created_at: string; capturado_en: string | null; fuente?: string; momento?: string | null; foto_url?: string | null }): RefLectura {
+function aRef(f: { km: number; created_at: string; capturado_en: string | null; fuente?: string; momento?: string | null; foto_url?: string | null; foto_hash?: string | null }): RefLectura {
   return {
     km: Number(f.km),
     ts: tsDe(f.capturado_en) ?? tsDe(f.created_at),
     fuente: f.fuente ?? null,
     momento: f.momento ?? null,
     foto_url: f.foto_url ?? null,
+    foto_hash: f.foto_hash ?? null,
     horaExacta: !!f.capturado_en,
   };
+}
+
+/**
+ * SHA-256 del binario de una foto, para reconocer la MISMA imagen aunque llegue con otra URL
+ * (un reenvío de WhatsApp es un mensaje nuevo: el worker lo sube con otro nombre).
+ *
+ * Es best-effort a propósito: si la descarga falla, tarda o el bucket no responde, devuelve
+ * null y el registro sigue su curso sin hash. Perder la huella de una foto degrada el dedupe;
+ * bloquear la lectura del odómetro por eso perdería el dato que importa.
+ */
+export async function hashDeFoto(
+  origen: { url?: string | null; base64?: string | null },
+  opts: { timeoutMs?: number } = {}
+): Promise<string | null> {
+  try {
+    const { createHash } = await import("node:crypto");
+    if (origen.base64) return createHash("sha256").update(Buffer.from(origen.base64, "base64")).digest("hex");
+    if (!origen.url) return null;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 8000);
+    try {
+      const r = await fetch(origen.url, { signal: ctrl.signal });
+      if (!r.ok) return null;
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (!buf.length || buf.length > 25 * 1024 * 1024) return null;
+      return createHash("sha256").update(buf).digest("hex");
+    } finally {
+      clearTimeout(t);
+    }
+  } catch {
+    return null; // sin red, sin crypto (navegador), timeout… → se sigue sin hash
+  }
 }
 
 export async function contextoOdometro(
@@ -336,7 +385,10 @@ export async function contextoOdometro(
   // Lima, indexada) y se afina en JS con el instante efectivo, porque `capturado_en` puede ser
   // NULL y PostgREST no ordena por un COALESCE. El día de la propia lectura entra en ambas
   // consultas a propósito: sus vecinas más probables son del mismo día.
-  const cols = "km,fecha,created_at,capturado_en,estado,fuente,momento,foto_url";
+  // select("*") en vez de nombrar las columnas: migration-safe. `foto_hash` es nueva
+  // (supabase/odometro-foto-hash.sql) y nombrarla antes de correr la migración haría fallar
+  // el SELECT entero, dejando el odómetro sin contexto. Son ≤60 filas: el coste es nulo.
+  const cols = "*";
   const [{ data: prevRaw }, { data: postRaw }] = await Promise.all([
     client.from("lecturas_odometro").select(cols)
       .eq(fk, opts.vehiculo_id).in("estado", ["aceptada", "reinicio"])
@@ -346,7 +398,7 @@ export async function contextoOdometro(
       .gte("fecha", diaRef).order("fecha", { ascending: true }).order("created_at", { ascending: true }).limit(20),
   ]);
 
-  type Fila = { km: number; fecha: string; created_at: string; capturado_en: string | null; estado: string; fuente?: string; momento?: string | null; foto_url?: string | null };
+  type Fila = { km: number; fecha: string; created_at: string; capturado_en: string | null; estado: string; fuente?: string; momento?: string | null; foto_url?: string | null; foto_hash?: string | null };
   const todas = [...((prevRaw || []) as Fila[]), ...((postRaw || []) as Fila[])];
   const conTs = todas.map((f) => ({ f, ts: tsDe(f.capturado_en) ?? tsDe(f.created_at) ?? 0 }));
 
@@ -434,6 +486,12 @@ export async function registrarLectura(
     fuente: FuenteLectura;
     fecha?: string;            // YYYY-MM-DD
     foto_url?: string | null;
+    /**
+     * SHA-256 del binario de la foto. Si el caller ya tiene el archivo en memoria conviene
+     * pasarlo (evita una descarga); si no, se calcula desde `foto_url`. Identifica la MISMA
+     * imagen aunque cambie la URL, que es como llega un reenvío de WhatsApp.
+     */
+    foto_hash?: string | null;
     ref_origen?: string | null;
     kmDiaMax?: number;
     forzar?: boolean;          // saltar validación (aceptar desde panel de revisión)
@@ -477,6 +535,17 @@ export async function registrarLectura(
       .from("lecturas_odometro").select("id,estado,motivo")
       .eq(fk, l.vehiculo_id).eq("foto_url", l.foto_url).neq("estado", "anulada").limit(1).maybeSingle();
     if (yaFoto) return { ok: true, estado: yaFoto.estado, motivo: yaFoto.motivo, lecturaId: yaFoto.id };
+  }
+  // (c) Por CONTENIDO de la foto: un reenvío de WhatsApp es un mensaje nuevo, el worker lo sube
+  //     con otro nombre y (b) no lo ve — pero el binario es el mismo. El hash lo delata.
+  //     Si el caller no lo trae, se calcula aquí (best-effort: null si la descarga falla).
+  const fotoHash = l.foto_hash ?? (await hashDeFoto({ url: l.foto_url }));
+  if (fotoHash) {
+    const { data: yaHash, error: eHash } = await client
+      .from("lecturas_odometro").select("id,estado,motivo")
+      .eq(fk, l.vehiculo_id).eq("foto_hash", fotoHash).neq("estado", "anulada").limit(1).maybeSingle();
+    // Si la columna aún no existe (migración sin correr) el error se ignora: se sigue sin (c).
+    if (!eHash && yaHash) return { ok: true, estado: yaHash.estado, motivo: yaHash.motivo, lecturaId: yaHash.id };
   }
 
   // Momento de CAPTURA de esta lectura (no el de inserción/proceso): al reprocesar una foto
@@ -526,12 +595,18 @@ export async function registrarLectura(
   // El caller puede fijar el tope; si no, manda el adaptativo del contexto.
   const kmDiaMax = l.kmDiaMax && l.kmDiaMax > 0 ? l.kmDiaMax : ctx.kmDiaMax;
 
-  // Señal de duplicado: la lectura viva ANTERIOR EN EL TIEMPO trae el mismo km en una ventana
-  // corta (≤ 12 h) o viene de la misma foto. El vecino ya lo resolvió contextoOdometro.
+  // Mismo km que la lectura anterior: lo que decide es la IMAGEN, no el intervalo de tiempo.
+  //   · misma imagen (URL o hash del binario) → una evidencia contada dos veces = reenvío;
+  //   · fotos distintas y otra fuente          → dos evidencias que se confirman entre sí;
+  //   · fotos distintas y la misma fuente      → la unidad simplemente no se movió.
   let duplicadoProbable = false;
+  let corroborada = false;
   if (anterior && Number(anterior.km) === km) {
-    const horas = anterior.ts != null ? Math.abs(tsNueva - anterior.ts) / 3600_000 : null;
-    duplicadoProbable = (horas != null && horas <= 12) || (!!l.foto_url && anterior.foto_url === l.foto_url);
+    const mismaImagen =
+      (!!l.foto_url && anterior.foto_url === l.foto_url) ||
+      (!!fotoHash && !!anterior.foto_hash && anterior.foto_hash === fotoHash);
+    duplicadoProbable = mismaImagen;
+    corroborada = !mismaImagen && !!anterior.fuente && anterior.fuente !== l.fuente;
   }
 
   const origenIA = l.fuente === "whatsapp_foto" || l.fuente === "whatsapp_manual" || l.fuente === "combustible";
@@ -539,7 +614,7 @@ export async function registrarLectura(
   const evalr: EvalLectura = l.forzar
     ? { estado: "aceptada", motivo: null }
     : evaluarLectura({
-        kmVigente, kmNuevo: km, kmDiaMax, horasDesdeUltima, origenIA, duplicadoProbable,
+        kmVigente, kmNuevo: km, kmDiaMax, horasDesdeUltima, origenIA, duplicadoProbable, corroborada,
         fechaLectura: l.capturado_en ?? fecha,
         refAnterior: anterior, refPosterior: posterior,
       });
@@ -548,19 +623,28 @@ export async function registrarLectura(
   // se anteponen al de evaluarLectura para que queden visibles en la bandeja; no alteran el estado.
   const motivoFinal = [l.motivo?.trim() || null, notaReloj, evalr.motivo].filter(Boolean).join(" · ") || null;
 
-  const { data: ins, error } = await client.from("lecturas_odometro").insert({
+  const fila: Record<string, any> = {
     [fk]: l.vehiculo_id,
     km,
     fuente: l.fuente,
     fecha,
     foto_url: l.foto_url ?? null,
+    foto_hash: fotoHash,
     ref_origen: l.ref_origen ?? null,
     capturado_en: capturadoEn,
     momento: l.momento ?? null,
     idem_key: l.idemKey ?? null,
     estado: evalr.estado,
     motivo: motivoFinal,
-  }).select("id").single();
+  };
+  let { data: ins, error } = await client.from("lecturas_odometro").insert(fila).select("id").single();
+  // Migration-safe: si `foto_hash` todavía no existe en la tabla, se reintenta sin ella. El
+  // dedupe por contenido queda inactivo hasta correr supabase/odometro-foto-hash.sql, pero la
+  // lectura —el dato que importa— no se pierde por una migración pendiente.
+  if (error && esColumnaInexistenteOdo(error)) {
+    delete fila.foto_hash;
+    ({ data: ins, error } = await client.from("lecturas_odometro").insert(fila).select("id").single());
+  }
 
   if (error) {
     // Carrera perdida contra el índice único parcial (otro proceso insertó el mismo idem_key):
@@ -583,6 +667,12 @@ export async function registrarLectura(
 /** ¿El error de Postgres/PostgREST es una violación de índice único (23505)? */
 function esViolacionUnica(error: any): boolean {
   return error?.code === "23505" || /duplicate key|unique constraint/i.test(String(error?.message ?? ""));
+}
+
+/** ¿El error se debe a una columna que aún no existe (migración sin correr)? */
+function esColumnaInexistenteOdo(error: any): boolean {
+  return error?.code === "42703" || error?.code === "PGRST204" ||
+    /column .* does not exist|could not find the .* column/i.test(String(error?.message ?? ""));
 }
 
 /** Fuentes cuya hora es la del ENVÍO del mensaje, no la de la foto. */

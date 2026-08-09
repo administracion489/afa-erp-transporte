@@ -9,7 +9,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { registrarLectura, corregirCapturaPorReloj } from "@/lib/odometro";
+import { registrarLectura, corregirCapturaPorReloj, hashDeFoto } from "@/lib/odometro";
 import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm, enviarPushAPasajeros, payloadRespuestaChat } from "@/lib/push";
 import { evaluarProximidad, emitirLlego } from "@/lib/proximidad";
 import {
@@ -749,6 +749,9 @@ export async function POST(req: NextRequest) {
                 ref_origen: "checklist_conductor",
                 flota: esTercero ? "tercero" : "propia",
                 capturado_en: relojCheckin.capturado_en,
+                // El binario ya está aquí: se hashea en memoria y se evita que registrarLectura
+                // tenga que descargar la foto que acabamos de subir.
+                foto_hash: await hashDeFoto({ base64: fotoAdjunto?.data ?? null }),
                 motivo: relojCheckin.nota,
                 momento: "checkin",
                 // idempotencia por CONDUCTOR (no solo unidad): dos conductores pueden usar la
@@ -827,6 +830,7 @@ export async function POST(req: NextRequest) {
                 ref_origen: "checkout_conductor",
                 flota: esTercero ? "tercero" : "propia",
                 capturado_en: relojCheckout.capturado_en,
+                foto_hash: await hashDeFoto({ base64: fotoAdjunto?.data ?? null }),
                 motivo: relojCheckout.nota,
                 momento: "checkout",
                 idemKey: `checkout:${esTercero ? "t" : "p"}:${checkout.vehiculo_id}:${checkout.fecha}:${checkout.conductor_id}`,
