@@ -641,10 +641,19 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
     return <CardVacia emoji="⛽" titulo="Sin recargas detectadas" detalle="Los vouchers de combustible que lleguen a los grupos aparecen aquí." />;
   }
 
-  const placaDe = (id: number | null) =>
-    id == null ? null : vehiculosGuia.find((v) => v.tipo === "propio" && v.id === id)?.placa ?? null;
-  const placaTerceroDe = (id: number | null) =>
-    id == null ? null : vehiculosGuia.find((v) => v.tipo === "tercero" && v.id === id)?.placa ?? null;
+  // Unidad de una recarga: por la FK que dejó el motor o, si no la trae, por la PLACA que leyó
+  // la IA cruzada contra la flota (comparando solo alfanumérico, como matchVehiculo del motor).
+  // El respaldo por placa es lo que rescata las filas capturadas antes de que el motor guardara
+  // `vehiculo_tercero_id`: la IA ya había leído la placa, así que no hay nada que re-teclear.
+  const placaNorm = (s?: string | null) => (s ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const unidadDe = (c: RadarCombustible): VehiculoGuiaOdometro | null => {
+    if (c.vehiculo_id != null)
+      return vehiculosGuia.find((v) => v.tipo === "propio" && v.id === c.vehiculo_id) ?? null;
+    if (c.vehiculo_tercero_id != null)
+      return vehiculosGuia.find((v) => v.tipo === "tercero" && v.id === c.vehiculo_tercero_id) ?? null;
+    const p = placaNorm(c.placa);
+    return p ? vehiculosGuia.find((v) => placaNorm(v.placa) === p) ?? null : null;
+  };
 
   // Fotos que la IA procesó: las guardadas en la fila, o (filas viejas) la del mensaje origen.
   const fotosDe = (c: RadarCombustible): { url: string; nombre: string | null }[] => {
@@ -658,8 +667,9 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
   const edicionDe = (c: RadarCombustible): EdicionComb => {
     if (edic[c.id]) return edic[c.id];
     const esLitros = c.litros != null && c.galones == null;
+    const u = unidadDe(c);
     return {
-      vehiculo: c.vehiculo_id != null ? `propio:${c.vehiculo_id}` : c.vehiculo_tercero_id != null ? `tercero:${c.vehiculo_tercero_id}` : "",
+      vehiculo: u ? `${u.tipo}:${u.id}` : "",
       fecha: c.fecha ?? "",
       grifo: c.grifo ?? "",
       cantidad: esLitros ? (c.litros != null ? String(c.litros) : "") : (c.galones != null ? String(c.galones) : ""),
@@ -686,8 +696,9 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
               const est = ESTADO_COMB_CFG[c.estado];
               const abierto = expandido === c.id;
               const esPendiente = c.estado === "pendiente_revision";
-              const placaMatch = placaDe(c.vehiculo_id) ?? placaTerceroDe(c.vehiculo_tercero_id);
-              const esTercero = c.vehiculo_tercero_id != null;
+              const unidad = unidadDe(c);
+              const placaMatch = unidad?.placa ?? null;
+              const esTercero = unidad?.tipo === "tercero";
               const cantidad = c.galones != null ? `${c.galones} gal` : c.litros != null ? `${c.litros} lt` : "—";
               const precio = c.precio_galon != null ? `${fmtSoles(c.precio_galon)}/gal` : c.precio_litro != null ? `${fmtSoles(c.precio_litro)}/lt` : "—";
               // Edición del revisor (perezosa) — solo se usa en el bloque expandido.

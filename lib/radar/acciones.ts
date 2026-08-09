@@ -193,7 +193,7 @@ export async function matchVehiculo(sb: any, placa: string | null | undefined): 
  * cambio NUNCA se auto-registra en `combustible` (esa tabla es el gasto propio de AFA);
  * ahí este match es solo informativo (dar el motivo "es una unidad tercerizada").
  */
-async function matchVehiculoTercero(
+export async function matchVehiculoTercero(
   sb: any,
   placa: string | null | undefined,
 ): Promise<{ id: number; placa: string; marca: string | null; modelo: string | null; kilometraje_actual: number | null } | null> {
@@ -601,6 +601,11 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   // "placa" — placaNorm() quita espacios/guiones antes de comparar, así que probarla igual
   // contra la flota es seguro: una referencia realmente informal ("bus 45") no matchea nada.
   let veh = (await matchVehiculo(sb, d.placa)) ?? (await matchVehiculo(sb, d.unidad));
+  // La flota de AFA es mayoritariamente TERCERIZADA: si la placa no está en `vehiculos` hay que
+  // buscarla también en `vehiculos_tercero` y guardar esa FK. Sin esto el panel de revisión
+  // mostraba "sin match" y pedía elegir la unidad a mano aunque la IA ya hubiera leído la placa.
+  // (El auto-registro en `combustible` sigue siendo solo de flota propia — ver `puedeAuto`.)
+  const terc = veh ? null : (await matchVehiculoTercero(sb, d.placa)) ?? (await matchVehiculoTercero(sb, d.unidad));
 
   // ── Cruce de identidad: rellenar conductor y placa con lo que el sistema ya sabe ──
   // Meta: que el operador no re-teclee datos deducibles. El chofer que envía la foto del
@@ -608,8 +613,11 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   let condMatch = await matchConductor(sb, { jid: mensaje.remitente_wa, nombre: d.conductor });
   // Si el voucher no trae placa pero sí sabemos quién es el chofer, se infiere el vehículo
   // desde su única asignación del día (si es ambigua no se infiere, para no adivinar mal).
+  // Solo cuando NO hay placa legible en el voucher: si la IA leyó una placa, esa manda —
+  // inferir otra unidad del conductor cargaría el gasto a un vehículo que el voucher desmiente.
   let placaInferida = false;
-  if (!veh && condMatch) {
+  const placaLeida = placaNorm(d.placa).length >= 5;
+  if (!veh && !terc && !placaLeida && condMatch) {
     const vid = await vehiculoAsignadoAlConductor(sb, condMatch.id, fecha);
     if (vid) {
       const inferido = await vehiculoPorId(sb, vid);
@@ -627,7 +635,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   }
 
   // Placa resuelta (leída del voucher o inferida) y nombre canónico del conductor identificado.
-  const placa = placaFormato(d.placa) ?? veh?.placa ?? null;
+  const placa = placaFormato(d.placa) ?? veh?.placa ?? terc?.placa ?? null;
   const conductorNombre = condMatch?.nombre ?? d.conductor ?? null;
   const tipoComb = String(d.tipo_combustible || "diesel").toLowerCase();
   const cantidad = numOpc(d.galones) ?? numOpc(d.litros);
@@ -836,6 +844,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     mensaje_id: mensaje.id,
     placa,
     vehiculo_id: veh?.id ?? null,
+    vehiculo_tercero_id: terc?.id ?? null,
     fecha,
     hora: d.hora ?? null,
     grifo,
@@ -939,9 +948,8 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   const motivos: string[] = anomalias.map((a) => a.detalle);
   if (config.acciones_automaticas?.combustible !== true) motivos.push("Registro automático de combustible desactivado en la configuración");
   if (!veh) {
-    const tercero = placa ? await matchVehiculoTercero(sb, placa) : null;
-    if (tercero) {
-      motivos.push(`${tercero.placa} es una unidad TERCERIZADA (${[tercero.marca, tercero.modelo].filter(Boolean).join(" ") || "sin marca/modelo"}) — no se registra automático, revisar manualmente si corresponde`);
+    if (terc) {
+      motivos.push(`${terc.placa} es una unidad TERCERIZADA (${[terc.marca, terc.modelo].filter(Boolean).join(" ") || "sin marca/modelo"}) — no se registra automático, revisar manualmente si corresponde`);
     } else {
       motivos.push(placa ? `Placa ${placa} no está registrada en la flota propia ni en tercerizadas` : "Mensaje sin placa identificable");
     }
