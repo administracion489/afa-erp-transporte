@@ -10,6 +10,12 @@ type Fila = {
   km_no_justificados: number | null; servicios: number;
   medido_pct: number | null; tiene_checkin: boolean; tiene_checkout: boolean;
   clasificacion: "sin_datos" | "normal" | "advertencia" | "revision" | "alto";
+  // Verificación por GPS: mira el desplazamiento de la unidad, no solo sus servicios, así que
+  // también ve el recorrido que no cuelga de ninguna reserva.
+  gps_veredicto: "sin_gps" | "sin_odometro" | "detenida" | "coherente" | "supera";
+  gps_km_probado: number | null; gps_excede_km: number | null;
+  gps_radio_km: number | null; gps_cobertura_pct: number | null;
+  gps_puntos: number; gps_detalle: string | null;
 };
 type Config = { umbral_advertencia: number; umbral_revision: number; umbral_alto: number; recordar_checkout_cada_min: number };
 
@@ -19,6 +25,19 @@ const CLASE: Record<string, { label: string; color: string; bg: string }> = {
   advertencia: { label: "Advertencia",  color: "#92400e", bg: "#fef3c7" },
   revision:    { label: "Revisión",     color: "#9a3412", bg: "#ffedd5" },
   alto:        { label: "Alta difer.",  color: "#991b1b", bg: "#fee2e2" },
+};
+
+/**
+ * Verificación por GPS. `supera` es el único que pide acción: el desplazamiento demuestra un
+ * recorrido mayor que el que registró el odómetro. La redacción evita acusar a nadie — puede
+ * faltar la lectura de cierre o el odómetro pudo leerse de una foto anterior.
+ */
+const GPS_CLASE: Record<Fila["gps_veredicto"], { label: string; color: string; bg: string }> = {
+  sin_gps:      { label: "Sin GPS",       color: "#9ca3af", bg: "#f9fafb" },
+  sin_odometro: { label: "Sin cierre",    color: "#92400e", bg: "#fef3c7" },
+  detenida:     { label: "0 km confirm.", color: "#166534", bg: "#dcfce7" },
+  coherente:    { label: "Coincide",      color: "#166534", bg: "#dcfce7" },
+  supera:       { label: "GPS > odóm.",   color: "#991b1b", bg: "#fee2e2" },
 };
 
 const hoyLima = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
@@ -140,14 +159,14 @@ export default function AuditoriaJornadaPage() {
         <table className="w-full text-sm">
           <thead>
             <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-              {["Unidad", "Check-in", "Check-out", "Km jornada", "Km servicio (GPS)", "Km no justificado", "Servicios", "Estado"].map(h => (
+              {["Unidad", "Check-in", "Check-out", "Km jornada", "Km servicio (GPS)", "Km no justificado", "Servicios", "Estado", "Verificación GPS"].map(h => (
                 <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {filas.length === 0 ? (
-              <tr><td colSpan={8} className="p-10 text-center text-gray-400">{loading ? "Cargando…" : "Sin actividad registrada en la fecha"}</td></tr>
+              <tr><td colSpan={9} className="p-10 text-center text-gray-400">{loading ? "Cargando…" : "Sin actividad registrada en la fecha"}</td></tr>
             ) : filas.map(f => {
               const c = CLASE[f.clasificacion];
               return (
@@ -167,6 +186,26 @@ export default function AuditoriaJornadaPage() {
                   </td>
                   <td className="p-3 text-gray-600">{f.servicios}</td>
                   <td className="p-3"><span className="px-2 py-1 rounded-lg text-xs font-bold whitespace-nowrap" style={{ color: c.color, background: c.bg }}>{c.label}</span></td>
+                  <td className="p-3">
+                    {(() => {
+                      const gc = GPS_CLASE[f.gps_veredicto] || GPS_CLASE.sin_gps;
+                      return (
+                        <div title={f.gps_detalle || undefined}>
+                          <span className="px-2 py-1 rounded-lg text-xs font-bold whitespace-nowrap" style={{ color: gc.color, background: gc.bg }}>
+                            {gc.label}
+                          </span>
+                          {f.gps_veredicto === "supera" && f.gps_excede_km != null && (
+                            <span className="ml-1.5 text-xs font-bold text-red-700 whitespace-nowrap">faltan {fmt(f.gps_excede_km, 1)} km</span>
+                          )}
+                          {f.gps_radio_km != null && f.gps_radio_km > 0 && (
+                            <p className="text-[10px] text-gray-400 mt-0.5 whitespace-nowrap">
+                              se alejó {fmt(f.gps_radio_km, 1)} km · señal {f.gps_cobertura_pct ?? 0}%
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </td>
                 </tr>
               );
             })}
@@ -178,6 +217,15 @@ export default function AuditoriaJornadaPage() {
         <b>Km jornada</b> = check-out − check-in (odómetro). <b>Km servicio</b> = distancia GPS de los servicios finalizados.
         <b> Km no justificado</b> = jornada − servicio (traslados a cochera/taller/lavado o uso no registrado). Un valor negativo suele ser GPS inflado u odómetro mal leído.
         <b> ⚠ GPS</b> bajo = huella con huecos → el km de servicio puede estar subestimado.
+      </p>
+      <p className="text-xs text-gray-400 leading-relaxed">
+        <b>Verificación GPS</b> mira el desplazamiento de la unidad, no solo sus servicios, así que también
+        ve el recorrido que no cuelga de ninguna reserva. Del GPS solo se toma lo que puede demostrar:
+        cuánto se alejó del punto de partida (y el doble si volvió), nunca la suma de tramos, que con señal
+        de antena se dispara sola. <b>Coincide</b> = lo que el GPS prueba cabe en el km del odómetro.
+        <b> 0 km confirmado</b> = la unidad no se movió de verdad. <b>Sin cierre</b> = se movió pero la
+        jornada no tiene con qué medirla. <b>GPS &gt; odóm.</b> = el recorrido demostrable supera al
+        registrado: revisar si falta una lectura o si el tablero se fotografió antes de tiempo.
       </p>
     </main>
   );

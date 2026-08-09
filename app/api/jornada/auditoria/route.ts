@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { kmDeServicio } from "@/lib/km-servicio";
+import { desplazamientoGps, verificarConGps, type Verificacion } from "@/lib/gps-desplazamiento";
 
 export const maxDuration = 60;
 
@@ -87,7 +88,10 @@ export async function POST(req: NextRequest) {
       admin.from("checkout_conductor").select("vehiculo_id,es_tercero,km_fin,fecha").eq("fecha", fecha),
       admin.from("vehiculos").select("id,placa"),
       admin.from("vehiculos_tercero").select("id,placa"),
-      admin.from("lecturas_odometro").select("vehiculo_id,vehiculo_tercero_id,km,fecha,estado").eq("fecha", fecha),
+      // capturado_en/created_at: acotan la ventana real de la jornada para pedirle al GPS
+      // exactamente el mismo intervalo que cubre el odómetro.
+      admin.from("lecturas_odometro")
+        .select("vehiculo_id,vehiculo_tercero_id,km,fecha,estado,capturado_en,created_at").eq("fecha", fecha),
     ]);
 
     const reservas = (rRes.data || []) as any[];
@@ -116,8 +120,56 @@ export async function POST(req: NextRequest) {
       if (r.estado === "finalizada") grupos.get(key)!.reservaIds.push(r.id);
     }
 
+    // Unidades con lecturas de odómetro pero SIN ninguna reserva ese día. Antes no aparecían en
+    // la auditoría —la tabla se armaba solo desde `reservas`—, y son precisamente las que hay
+    // que mirar: un recorrido que no cuelga de ningún servicio es el que nadie está revisando.
+    for (const l of lecturas) {
+      const esTercero = l.vehiculo_tercero_id != null;
+      const vid = Number(esTercero ? l.vehiculo_tercero_id : l.vehiculo_id);
+      if (!vid) continue;
+      const key = `${esTercero ? "t" : "p"}:${vid}`;
+      if (grupos.has(key)) continue;
+      grupos.set(key, {
+        flota: esTercero ? "tercero" : "propia",
+        vid,
+        placa: (esTercero ? placaTercero.get(vid) : placaPropia.get(vid)) || `#${vid}`,
+        reservaIds: [],
+      });
+    }
+
+    // ── Desplazamiento GPS de todas las unidades, en paralelo ───────────────────────────────
+    // Una consulta paginada por unidad. En serie son ~0,5 s cada una y el route tiene
+    // maxDuration=60 compartido con las queries de km por reserva: en paralelo el GPS deja de
+    // competir por ese presupuesto (12 unidades: ~9 s → ~1 s medido contra la BD real).
+    const inicioDiaLima = new Date(`${fecha}T00:00:00-05:00`).getTime();
+    const finDiaLima = inicioDiaLima + 24 * 3600_000;
+    const gpsPorUnidad = new Map<string, Awaited<ReturnType<typeof desplazamientoGps>>>();
+    await Promise.all(
+      [...grupos.entries()].map(async ([key, g]) => {
+        const esT = g.flota === "tercero";
+        const ts = lecturas
+          .filter((l) => (esT ? Number(l.vehiculo_tercero_id) === g.vid : Number(l.vehiculo_id) === g.vid))
+          .filter((l) => l.estado === "aceptada" || l.estado === "reinicio")
+          .map((l) => new Date(l.capturado_en || l.created_at).getTime())
+          .filter((t) => Number.isFinite(t) && t > 0)
+          .sort((a, b) => a - b);
+        try {
+          const gps = await desplazamientoGps(admin, {
+            vehiculo_id: g.vid, flota: g.flota,
+            // La ventana es la que cubren las lecturas del odómetro (así el GPS responde por el
+            // mismo intervalo que se está auditando); sin lecturas, el día Lima completo.
+            desde: new Date(ts.length ? ts[0] : inicioDiaLima),
+            hasta: new Date(ts.length > 1 ? ts[ts.length - 1] : finDiaLima),
+          });
+          gpsPorUnidad.set(key, gps);
+        } catch (e) {
+          console.warn("[auditoria] GPS de", g.placa, e); // complemento: si falla, la fila igual sale
+        }
+      })
+    );
+
     const filas: any[] = [];
-    for (const g of grupos.values()) {
+    for (const [key, g] of grupos.entries()) {
       // km operativos = Σ km de sus servicios finalizados (GPS)
       let kmOperativos = 0;
       let medidoMin = 100;
@@ -150,6 +202,15 @@ export async function POST(req: NextRequest) {
       const kmJornada = kmInicio != null && kmFin != null && kmFin >= kmInicio ? kmFin - kmInicio : null;
       const noJustificados = kmJornada != null ? Math.round((kmJornada - kmOperativos) * 10) / 10 : null;
 
+      // El km operativo de arriba solo ve lo que ocurrió DENTRO de una reserva; el GPS de esta
+      // unidad (calculado en paralelo más arriba) también ve lo que pasó fuera de servicio, que
+      // es donde un odómetro desactualizado no deja rastro. La tolerancia reusa el umbral de
+      // revisión ya editable en jornada_config: no se inventa un número ni se pide otro ajuste.
+      const gpsUnidad = gpsPorUnidad.get(key);
+      const verif: Verificacion | null = gpsUnidad
+        ? verificarConGps(kmJornada, gpsUnidad, { toleranciaKm: Number(u.umbral_revision) || 16 })
+        : null;
+
       filas.push({
         unidad: g.placa,
         flota: g.flota,
@@ -163,6 +224,17 @@ export async function POST(req: NextRequest) {
         tiene_checkin: !!ci,
         tiene_checkout: !!co,
         clasificacion: clasificar(noJustificados, u),
+        // Verificación por GPS (independiente de las reservas). `gps_veredicto`:
+        //   detenida  → el GPS confirma 0 km;  coherente → cabe en el odómetro;
+        //   supera    → el GPS demuestra MÁS recorrido del que registró el odómetro;
+        //   sin_gps   → no hay señal utilizable, no se puede opinar.
+        gps_veredicto: verif?.veredicto ?? "sin_gps",
+        gps_km_probado: verif?.kmProbado ?? null,
+        gps_excede_km: verif?.excedeKm ?? null,
+        gps_radio_km: verif?.gps.radioKm ?? null,
+        gps_cobertura_pct: verif?.gps.coberturaPct ?? null,
+        gps_puntos: verif?.gps.puntos ?? 0,
+        gps_detalle: verif?.detalle ?? null,
       });
     }
 
