@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { supabase } from "@/lib/supabase";
 import { kmPorDia } from "@/lib/odometro";
+import { abrirImprimible } from "@/lib/documentos-servicio";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -16,7 +17,13 @@ type Plan = {
   id: string; marca: string; modelo: string; motor?: string;
   intervalo_base_km?: number; intervalo_base_meses?: number;
 };
-type Enrol = { vehiculo_id: number; km_base?: number; fecha_base?: string; plan: Plan | null };
+type Enrol = {
+  id?: string; vehiculo_id: number; plan_id?: string;
+  km_base?: number | null; fecha_base?: string | null;
+  intervalo_km_override?: number | null; intervalo_meses_override?: number | null;
+  notas?: string | null;
+  plan: Plan | null;
+};
 type Mant = { vehiculo_id: number; fecha: string; kilometraje: number; tipo: string };
 type Lectura = { vehiculo_id: number; km: number; fecha: string };
 
@@ -26,7 +33,8 @@ type Config = {
 };
 
 type Venc = {
-  vehiculo: Vehiculo; plan: Plan;
+  vehiculo: Vehiculo; plan: Plan; enrol: Enrol;
+  interKm: number | null; interMeses: number | null;
   kmActual: number; kmDia: number | null;
   dueKm: number | null; faltanKm: number | null; diasPorKm: number | null;
   dueFecha: string | null; faltanDias: number | null;
@@ -59,6 +67,9 @@ function diasHasta(fechaISO: string): number {
     (new Date(fechaISO + "T00:00:00").getTime() - new Date(hoyLima() + "T00:00:00").getTime()) / 86400000
   );
 }
+function esc(s: any) {
+  return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
 function inputCls(extra = "") {
   return `w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all ${extra}`;
 }
@@ -69,6 +80,7 @@ export default function ProgramaTab() {
   const [vehiculos, setVehiculos] = useState<Vehiculo[]>([]);
   const [terceros, setTerceros]   = useState<Vehiculo[]>([]);
   const [enrol, setEnrol]         = useState<Enrol[]>([]);
+  const [planes, setPlanes]       = useState<Plan[]>([]);
   const [mants, setMants]         = useState<Mant[]>([]);
   const [lecturas, setLecturas]   = useState<Lectura[]>([]);
   const [cfg, setCfg]             = useState<Config>({
@@ -84,19 +96,33 @@ export default function ProgramaTab() {
   const [catSel, setCatSel]               = useState("todas");
   const [incluirTerceros, setIncluirTerceros] = useState(false);
 
+  // Edición del programa de una unidad
+  type EditDraft = {
+    vehiculo: Vehiculo; enrolId: string | null; planId: string;
+    kmActual: string; kmBase: string; fechaBase: string;
+    interKm: string; interMeses: string; notas: string;
+  };
+  const [edit, setEdit] = useState<EditDraft | null>(null);
+  const [guardandoEdit, setGuardandoEdit] = useState(false);
+
   const cargar = async () => {
     setLoading(true);
     const desde = addMeses(hoyLima(), -4);
-    const [vRes, tRes, eRes, mRes, lRes, cRes] = await Promise.all([
+    const [vRes, tRes, eRes, mRes, lRes, cRes, pRes] = await Promise.all([
       supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,color,nro_serie,kilometraje_actual").order("placa"),
       supabase.from("vehiculos_tercero").select("id,placa,categoria,marca,modelo").order("placa"),
-      supabase.from("vehiculos_plan").select("vehiculo_id,km_base,fecha_base,plan:planes_mantenimiento(id,marca,modelo,motor,intervalo_base_km,intervalo_base_meses)").eq("activo", true),
+      // `*` a propósito: los override por unidad son columnas nuevas (ver
+      // supabase/mantenimiento-programa-editable.sql). Nombrarlas rompería la
+      // consulta en una base donde ese SQL todavía no se corrió.
+      supabase.from("vehiculos_plan").select("*,plan:planes_mantenimiento(id,marca,modelo,motor,intervalo_base_km,intervalo_base_meses)").eq("activo", true),
       supabase.from("mantenimiento").select("vehiculo_id,fecha,kilometraje,tipo").eq("tipo", "preventivo").order("fecha", { ascending: false }),
       supabase.from("lecturas_odometro").select("vehiculo_id,km,fecha").not("vehiculo_id", "is", null).eq("estado", "aceptada").gte("fecha", desde),
       supabase.from("config_mantenimiento").select("*").eq("id", 1).maybeSingle(),
+      supabase.from("planes_mantenimiento").select("id,marca,modelo,motor,intervalo_base_km,intervalo_base_meses").order("marca"),
     ]);
     setVehiculos(vRes.data || []);
     setTerceros(tRes.data || []);
+    setPlanes(pRes.data || []);
     setEnrol((eRes.data || []).map((e: any) => ({ ...e, plan: Array.isArray(e.plan) ? e.plan[0] : e.plan })));
     setMants(mRes.data || []);
     setLecturas(lRes.data || []);
@@ -135,8 +161,12 @@ export default function ProgramaTab() {
       // re-ancla a él (próximo = servicio + intervalo, puede quedar vencido). Si no
       // hay historial, se toma el siguiente hito de la rejilla MAYOR al km actual
       // (una unidad con 7 217 km y plan de 5 000 → próximo 10 000, no 12 217).
+      // El intervalo por unidad (si se editó en el modal) manda sobre el del plan.
+      const interKm    = e.intervalo_km_override    ?? plan.intervalo_base_km    ?? null;
+      const interMeses = e.intervalo_meses_override ?? plan.intervalo_base_meses ?? null;
+
       let dueKm: number | null = null, faltanKm: number | null = null, diasPorKm: number | null = null;
-      const inter = Number(plan.intervalo_base_km || 0);
+      const inter = Number(interKm || 0);
       if (inter > 0) {
         const ultServ = um?.kilometraje ?? null;
         dueKm = ultServ !== null
@@ -146,8 +176,8 @@ export default function ProgramaTab() {
         diasPorKm = kmDia && kmDia > 0 && faltanKm > 0 ? Math.round(faltanKm / kmDia) : null;
       }
       let dueFecha: string | null = null, faltanDias: number | null = null;
-      if (plan.intervalo_base_meses && baseFecha) {
-        dueFecha = addMeses(baseFecha, Number(plan.intervalo_base_meses));
+      if (interMeses && baseFecha) {
+        dueFecha = addMeses(baseFecha, Number(interMeses));
         faltanDias = diasHasta(dueFecha);
       }
 
@@ -157,7 +187,7 @@ export default function ProgramaTab() {
       const estado = vencido ? "vencido" : (proximoKm || proximoFe) ? "proximo" : "ok";
       const motivo = vencido ? "Vencido" : proximoKm && proximoFe ? "km y fecha" : proximoKm ? "km" : proximoFe ? "fecha" : "—";
 
-      out.push({ vehiculo: v, plan, kmActual, kmDia, dueKm, faltanKm, diasPorKm, dueFecha, faltanDias, estado, motivo });
+      out.push({ vehiculo: v, plan, enrol: e, interKm, interMeses, kmActual, kmDia, dueKm, faltanKm, diasPorKm, dueFecha, faltanDias, estado, motivo });
     }
     // Vencidos primero, luego próximos, luego ok; dentro, por lo que menos falta
     const peso = { vencido: 0, proximo: 1, ok: 2 } as const;
@@ -186,6 +216,98 @@ export default function ProgramaTab() {
     setGuardandoCfg(false);
     if (error) alert("Error al guardar: " + error.message);
     else alert("Configuración guardada ✓");
+  };
+
+  // ── Edición del programa por unidad ───────────────────────────────────────────
+
+  const sinPlan = useMemo(() => {
+    const conPlan = new Set(enrol.map(e => e.vehiculo_id));
+    return vehiculos.filter(v => !conPlan.has(v.id));
+  }, [vehiculos, enrol]);
+
+  const abrirEdit = (v: Vehiculo) => {
+    const e = enrol.find(x => x.vehiculo_id === v.id);
+    setEdit({
+      vehiculo: v,
+      enrolId: e?.id ?? null,
+      planId: e?.plan_id ?? e?.plan?.id ?? "",
+      kmActual: String(v.kilometraje_actual ?? ""),
+      kmBase: e?.km_base != null ? String(e.km_base) : "",
+      fechaBase: e?.fecha_base ?? "",
+      interKm: e?.intervalo_km_override != null ? String(e.intervalo_km_override) : "",
+      interMeses: e?.intervalo_meses_override != null ? String(e.intervalo_meses_override) : "",
+      notas: e?.notas ?? "",
+    });
+  };
+
+  const numOrNull = (s: string) => (s.trim() === "" ? null : Number(s));
+
+  const guardarEdit = async () => {
+    if (!edit) return;
+    if (!edit.planId) { alert("Elige un plan para esta unidad"); return; }
+    setGuardandoEdit(true);
+    try {
+      // 1) Km actual del vehículo (vive en `vehiculos`, no en el enrolamiento)
+      const kmAct = numOrNull(edit.kmActual);
+      if (kmAct !== (edit.vehiculo.kilometraje_actual ?? null)) {
+        const { error } = await supabase.from("vehiculos").update({ kilometraje_actual: kmAct }).eq("id", edit.vehiculo.id);
+        if (error) throw error;
+      }
+
+      // 2) Enrolamiento. Cambiar de plan = desactivar los otros y activar/crear el elegido.
+      const campos: any = {
+        km_base: numOrNull(edit.kmBase),
+        fecha_base: edit.fechaBase || null,
+        intervalo_km_override: numOrNull(edit.interKm),
+        intervalo_meses_override: numOrNull(edit.interMeses),
+        notas: edit.notas.trim() || null,
+        activo: true,
+      };
+      // Si el SQL de override todavía no se corrió, PostgREST rechaza esas columnas:
+      // se reintenta sin ellas para que la edición del resto no se pierda.
+      const sinOverride = (o: any) => { const { intervalo_km_override, intervalo_meses_override, notas, ...r } = o; return r; };
+      const esColumnaFaltante = (err: any) => err?.code === "PGRST204" || err?.code === "42703" || /column .* does not exist|Could not find the/i.test(err?.message || "");
+
+      await supabase.from("vehiculos_plan")
+        .update({ activo: false }).eq("vehiculo_id", edit.vehiculo.id).neq("plan_id", edit.planId);
+
+      const { data: existente } = await supabase.from("vehiculos_plan")
+        .select("id").eq("vehiculo_id", edit.vehiculo.id).eq("plan_id", edit.planId).maybeSingle();
+
+      let faltanColumnas = false;
+      const ejecutar = async (payload: any) =>
+        existente
+          ? supabase.from("vehiculos_plan").update(payload).eq("id", existente.id)
+          : supabase.from("vehiculos_plan").insert({ ...payload, vehiculo_id: edit.vehiculo.id, plan_id: edit.planId });
+
+      let { error } = await ejecutar(campos);
+      if (error && esColumnaFaltante(error)) {
+        faltanColumnas = true;
+        ({ error } = await ejecutar(sinOverride(campos)));
+      }
+      if (error) throw error;
+
+      setEdit(null);
+      await cargar();
+      alert(faltanColumnas
+        ? "Guardado ✓ — pero los intervalos por unidad NO se guardaron: falta correr supabase/mantenimiento-programa-editable.sql"
+        : "Programa actualizado ✓");
+    } catch (e: any) {
+      alert("Error al guardar: " + e.message);
+    } finally {
+      setGuardandoEdit(false);
+    }
+  };
+
+  const quitarDelPlan = async () => {
+    if (!edit || !edit.enrolId) return;
+    if (!confirm(`¿Quitar a ${edit.vehiculo.placa} de su plan? Dejará de aparecer en el programa.`)) return;
+    setGuardandoEdit(true);
+    const { error } = await supabase.from("vehiculos_plan").update({ activo: false }).eq("id", edit.enrolId);
+    setGuardandoEdit(false);
+    if (error) { alert("Error: " + error.message); return; }
+    setEdit(null);
+    await cargar();
   };
 
   // ── Export Excel ──────────────────────────────────────────────────────────────
@@ -274,6 +396,88 @@ export default function ProgramaTab() {
     setExportOpen(false);
   };
 
+  // ── Export PDF (imprimible A4 apaisado → "Guardar como PDF") ──────────────────
+  // Mismo criterio que el Excel: las placas seleccionadas en el modal.
+
+  const generarPDF = () => {
+    const sel100 = vehiculos.filter(v => sel.has(v.id));
+    if (sel100.length === 0) { alert("Selecciona al menos un vehículo"); return; }
+
+    const vencMap = new Map(vencimientos.map(x => [x.vehiculo.id, x]));
+    const ultMant: Record<number, Mant> = {};
+    for (const m of mants) if (!ultMant[m.vehiculo_id]) ultMant[m.vehiculo_id] = m;
+
+    const filas = sel100.map(v => {
+      const x = vencMap.get(v.id);
+      const um = ultMant[v.id];
+      const est = x ? (x.estado === "vencido" ? "VENCIDO" : x.estado === "proximo" ? "PRÓXIMO" : "OK") : "SIN PLAN";
+      const clase = est === "VENCIDO" ? "e-ven" : est === "PRÓXIMO" ? "e-pro" : est === "OK" ? "e-ok" : "e-sp";
+      return `<tr>
+  <td class="mono b">${esc(v.placa)}</td>
+  <td>${esc(descripcionVeh(v))}</td>
+  <td>${x ? esc(`${x.plan.marca} ${x.plan.modelo}${x.plan.motor ? " " + x.plan.motor : ""}`) : "Sin plan"}</td>
+  <td class="mono r">${fmtNum(v.kilometraje_actual)}</td>
+  <td class="mono r">${um ? fmtNum(um.kilometraje) : "—"}</td>
+  <td class="r">${um ? fmtFecha(um.fecha) : "—"}</td>
+  <td class="mono r">${fmtNum(x?.dueKm)}</td>
+  <td class="mono r">${x?.faltanKm == null ? "—" : x.faltanKm <= 0 ? "Vencido" : fmtNum(x.faltanKm)}</td>
+  <td class="r">${fmtFecha(x?.dueFecha)}</td>
+  <td class="r">${x?.faltanDias == null ? "—" : x.faltanDias <= 0 ? "Vencido" : `${x.faltanDias} d`}</td>
+  <td><span class="chip ${clase}">${est}</span></td>
+</tr>`;
+    }).join("");
+
+    const css = `@page{size:A4 landscape;margin:12mm 10mm}
+*{box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;font-size:10px;color:#1e293b;margin:0;background:#fff}
+.hd{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #0b315f;padding-bottom:8px;margin-bottom:4px}
+.hd h1{font-size:15px;margin:0;color:#0b315f;text-transform:uppercase;letter-spacing:1px}
+.hd p{margin:2px 0 0;font-size:9px;color:#64748b}
+.kpis{display:flex;gap:8px;margin:10px 0}
+.kpi{border:1px solid #e2e8f0;border-radius:6px;padding:6px 12px;min-width:90px}
+.kpi span{display:block;font-size:8px;text-transform:uppercase;letter-spacing:.6px;color:#94a3b8;font-weight:700}
+.kpi b{font-size:16px}
+table{width:100%;border-collapse:collapse;font-size:9.5px}
+thead tr{background:#f1f5f9}
+th{padding:6px 5px;text-align:left;font-size:8px;color:#475569;font-weight:800;text-transform:uppercase;letter-spacing:.4px;border-bottom:2px solid #cbd5e1}
+td{padding:5px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+tbody tr:nth-child(even){background:#f8fafc}
+.mono{font-family:'Consolas',monospace}
+.b{font-weight:800;color:#0b315f}
+.r{text-align:right}
+.chip{display:inline-block;padding:1.5px 6px;border-radius:5px;font-weight:800;font-size:8px}
+.e-ven{background:#fee2e2;color:#991b1b}.e-pro{background:#fef9c3;color:#854d0e}
+.e-ok{background:#dcfce7;color:#166534}.e-sp{background:#f3f4f6;color:#4b5563}
+.ft{margin-top:14px;border-top:1px solid #e2e8f0;padding-top:8px;text-align:center;font-size:8px;color:#94a3b8}
+@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}thead{display:table-header-group}}`;
+
+    const body = `<div class="hd">
+  <div><h1>Programa de Mantenimiento Preventivo</h1>
+  <p>AFA Tours Peru SAC · Próximo servicio por km y por tiempo (lo que ocurra primero)</p></div>
+  <div style="text-align:right;font-size:9px;color:#64748b">
+    Emitido: <b>${fmtFecha(hoyLima())}</b><br/>Unidades: <b>${sel100.length}</b>
+  </div>
+</div>
+<div class="kpis">
+  <div class="kpi"><span>Vencidos</span><b style="color:#991b1b">${nVencidos}</b></div>
+  <div class="kpi"><span>Próximos</span><b style="color:#854d0e">${nProximos}</b></div>
+  <div class="kpi"><span>Con plan</span><b style="color:#166534">${enrol.length}</b></div>
+  <div class="kpi"><span>Sin plan</span><b style="color:#4b5563">${nSinPlan}</b></div>
+</div>
+<table><thead><tr>
+  <th>Placa</th><th>Descripción</th><th>Plan</th><th class="r">Odóm. actual</th>
+  <th class="r">Últ. mnto (km)</th><th class="r">Últ. mnto (fecha)</th>
+  <th class="r">Próximo km</th><th class="r">Faltan km</th>
+  <th class="r">Próxima fecha</th><th class="r">Faltan días</th><th>Estado</th>
+</tr></thead><tbody>${filas}</tbody></table>
+<p class="ft">Umbrales de aviso: ≤ ${cfg.umbral_km} km / ≤ ${cfg.umbral_dias} días · Generado por el ERP AFA Transportes</p>`;
+
+    abrirImprimible(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/>
+<title>Programa de Mantenimiento AFA — ${hoyLima()}</title><style>${css}</style></head>
+<body>${body}<script>window.onload=()=>window.print()<\/script></body></html>`);
+    setExportOpen(false);
+  };
+
   // ─── RENDER ───────────────────────────────────────────────────────────────────
 
   return (
@@ -287,11 +491,18 @@ export default function ProgramaTab() {
             Próximos servicios por km y por tiempo (lo que ocurra primero) · alertas · exportación
           </p>
         </div>
-        <button onClick={abrirExport}
-          className="px-5 py-2.5 rounded-xl font-bold text-sm text-white transition-all hover:opacity-90"
-          style={{ background: "#166534" }}>
-          ⬇ Exportar Excel
-        </button>
+        <div className="flex gap-2">
+          <button onClick={abrirExport}
+            className="px-5 py-2.5 rounded-xl font-bold text-sm text-white transition-all hover:opacity-90"
+            style={{ background: "#166534" }}>
+            ⬇ Exportar Excel
+          </button>
+          <button onClick={abrirExport}
+            className="px-5 py-2.5 rounded-xl font-bold text-sm text-white transition-all hover:opacity-90"
+            style={{ background: "#991b1b" }}>
+            🖨 Exportar PDF
+          </button>
+        </div>
       </div>
 
       {/* KPIs */}
@@ -319,16 +530,16 @@ export default function ProgramaTab() {
           <table className="w-full text-sm">
             <thead>
               <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                {["Placa", "Modelo / Plan", "Km actual", "Próximo km", "Faltan km", "Próxima fecha", "Faltan días", "Estado"].map(h => (
+                {["Placa", "Modelo / Plan", "Km actual", "Próximo km", "Faltan km", "Próxima fecha", "Faltan días", "Estado", ""].map(h => (
                   <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={8} className="p-10 text-center text-gray-400">Cargando…</td></tr>
+                <tr><td colSpan={9} className="p-10 text-center text-gray-400">Cargando…</td></tr>
               ) : vencimientos.length === 0 ? (
-                <tr><td colSpan={8} className="p-10 text-center text-gray-400">
+                <tr><td colSpan={9} className="p-10 text-center text-gray-400">
                   <p className="text-3xl mb-2">🗓️</p>
                   <p className="font-medium">No hay vehículos enrolados a un plan</p>
                   <p className="text-xs mt-1">Crea un plan en <b>Planes Fabricante</b> y enrola unidades.</p>
@@ -344,6 +555,11 @@ export default function ProgramaTab() {
                     <td className="p-3 font-black font-mono text-[#0b315f] text-xs">{x.vehiculo.placa}</td>
                     <td className="p-3 text-xs text-gray-600">
                       {x.plan.marca} {x.plan.modelo}{x.plan.motor ? ` · ${x.plan.motor}` : ""}
+                      {x.enrol.intervalo_km_override || x.enrol.intervalo_meses_override ? (
+                        <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded" style={{ background: "#e0e7ff", color: "#3730a3" }}>
+                          ajustado
+                        </span>
+                      ) : null}
                     </td>
                     <td className="p-3 font-mono text-xs text-gray-700">{fmtNum(x.kmActual)}</td>
                     <td className="p-3 font-mono text-xs text-gray-700">{fmtNum(x.dueKm)}</td>
@@ -362,6 +578,12 @@ export default function ProgramaTab() {
                         {cfgEst.label}
                       </span>
                     </td>
+                    <td className="p-3 text-right">
+                      <button onClick={() => abrirEdit(x.vehiculo)}
+                        className="px-2.5 py-1.5 rounded-lg text-xs font-bold border text-gray-700 hover:bg-gray-50">
+                        ✎ Editar
+                      </button>
+                    </td>
                   </tr>
                 );
               })}
@@ -369,6 +591,29 @@ export default function ProgramaTab() {
           </table>
         </div>
       </section>
+
+      {/* SIN PLAN */}
+      {!loading && sinPlan.length > 0 && (
+        <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b flex items-center justify-between">
+            <h2 className="font-bold text-gray-800 text-sm">Unidades sin plan</h2>
+            <span className="text-xs text-gray-400">{sinPlan.length} sin programa</span>
+          </div>
+          <div className="divide-y">
+            {sinPlan.map(v => (
+              <div key={v.id} className="flex items-center gap-3 px-5 py-2.5 text-sm hover:bg-gray-50">
+                <span className="font-mono font-black text-[#0b315f] text-xs w-24">{v.placa}</span>
+                <span className="text-gray-600 flex-1 text-xs">{v.marca} {v.modelo}{v.categoria ? ` · ${v.categoria}` : ""}</span>
+                <span className="text-gray-400 font-mono text-xs">{fmtNum(v.kilometraje_actual)} km</span>
+                <button onClick={() => abrirEdit(v)}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white hover:opacity-90" style={{ background: "#0b315f" }}>
+                  + Asignar plan
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* CONFIG ALERTAS */}
       <section className="bg-white rounded-2xl border shadow-sm p-6 space-y-4">
@@ -414,12 +659,111 @@ export default function ProgramaTab() {
         </button>
       </section>
 
+      {/* MODAL EDITAR PROGRAMA DE LA UNIDAD */}
+      {edit && (() => {
+        const planSel = planes.find(p => p.id === edit.planId);
+        const setE = (patch: Partial<typeof edit>) => setEdit(d => d ? { ...d, ...patch } : d);
+        return (
+          <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center p-4 overflow-y-auto" onClick={() => setEdit(null)}>
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-xl mt-10" onClick={e => e.stopPropagation()}>
+              <div className="px-6 py-4 border-b flex items-center justify-between">
+                <div>
+                  <h3 className="font-bold text-gray-900">Programa de {edit.vehiculo.placa}</h3>
+                  <p className="text-xs text-gray-400">{[edit.vehiculo.marca, edit.vehiculo.modelo, edit.vehiculo.anio].filter(Boolean).join(" ")}</p>
+                </div>
+                <button onClick={() => setEdit(null)} className="text-gray-400 hover:text-gray-600">✕</button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Plan del fabricante *</label>
+                  <select className={inputCls()} value={edit.planId} onChange={e => setE({ planId: e.target.value })}>
+                    <option value="">— Elegir plan —</option>
+                    {planes.map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.marca} {p.modelo}{p.motor ? ` · ${p.motor}` : ""}
+                        {p.intervalo_base_km ? ` — cada ${p.intervalo_base_km.toLocaleString("es-PE")} km` : ""}
+                        {p.intervalo_base_meses ? ` / ${p.intervalo_base_meses} m` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {planes.length === 0 && (
+                    <p className="text-xs text-amber-700 mt-1">No hay planes cargados. Crea uno en <b>Planes Fabricante</b>.</p>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Odómetro actual (km)</label>
+                    <input type="number" className={inputCls("font-mono")} value={edit.kmActual}
+                      onChange={e => setE({ kmActual: e.target.value })} />
+                    <p className="text-[10px] text-gray-400 mt-1">Se guarda en la ficha del vehículo.</p>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Km del último servicio</label>
+                    <input type="number" className={inputCls("font-mono")} value={edit.kmBase}
+                      onChange={e => setE({ kmBase: e.target.value })} />
+                    <p className="text-[10px] text-gray-400 mt-1">Ancla de cálculo si no hay servicio registrado.</p>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Fecha del último servicio</label>
+                    <input type="date" className={inputCls()} value={edit.fechaBase}
+                      onChange={e => setE({ fechaBase: e.target.value })} />
+                  </div>
+                </div>
+
+                <div className="rounded-xl border bg-gray-50 p-4 space-y-3">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500">Intervalo solo para esta unidad</p>
+                  <p className="text-[11px] text-gray-500 -mt-2">
+                    Vacío = usa el plan
+                    {planSel ? ` (${planSel.intervalo_base_km ? planSel.intervalo_base_km.toLocaleString("es-PE") + " km" : "sin km"}${planSel.intervalo_base_meses ? " / " + planSel.intervalo_base_meses + " meses" : ""})` : ""}.
+                    Cambiarlo aquí NO afecta a las demás unidades del modelo.
+                  </p>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Servicio cada (km)</label>
+                      <input type="number" className={inputCls("font-mono bg-white")} placeholder={planSel?.intervalo_base_km ? String(planSel.intervalo_base_km) : "—"}
+                        value={edit.interKm} onChange={e => setE({ interKm: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Servicio cada (meses)</label>
+                      <input type="number" className={inputCls("font-mono bg-white")} placeholder={planSel?.intervalo_base_meses ? String(planSel.intervalo_base_meses) : "—"}
+                        value={edit.interMeses} onChange={e => setE({ interMeses: e.target.value })} />
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Notas</label>
+                  <textarea className={inputCls()} rows={2} value={edit.notas} onChange={e => setE({ notas: e.target.value })}
+                    placeholder="Ej. unidad de ruta larga, se adelanta el cambio de aceite" />
+                </div>
+              </div>
+              <div className="px-6 py-4 border-t flex justify-between items-center">
+                {edit.enrolId ? (
+                  <button onClick={quitarDelPlan} disabled={guardandoEdit}
+                    className="px-4 py-2.5 rounded-xl font-bold text-xs text-red-600 border border-red-100 hover:bg-red-50 disabled:opacity-60">
+                    Quitar del plan
+                  </button>
+                ) : <span />}
+                <div className="flex gap-3">
+                  <button onClick={() => setEdit(null)} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">Cancelar</button>
+                  <button onClick={guardarEdit} disabled={guardandoEdit}
+                    className="px-5 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60 hover:opacity-90" style={{ background: "#0b315f" }}>
+                    {guardandoEdit ? "Guardando…" : "Guardar cambios"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* MODAL EXPORT */}
       {exportOpen && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center p-4 overflow-y-auto" onClick={() => setExportOpen(false)}>
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl mt-10" onClick={e => e.stopPropagation()}>
             <div className="px-6 py-4 border-b flex items-center justify-between">
-              <h3 className="font-bold text-gray-900">Exportar a Excel — selección de placas</h3>
+              <h3 className="font-bold text-gray-900">Exportar programa — selección de placas</h3>
               <button onClick={() => setExportOpen(false)} className="text-gray-400 hover:text-gray-600">✕</button>
             </div>
             <div className="p-6 space-y-4">
@@ -455,6 +799,9 @@ export default function ProgramaTab() {
             </div>
             <div className="px-6 py-4 border-t flex justify-end gap-3">
               <button onClick={() => setExportOpen(false)} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">Cancelar</button>
+              <button onClick={generarPDF} className="px-5 py-2.5 rounded-xl font-bold text-sm text-white hover:opacity-90" style={{ background: "#991b1b" }}>
+                🖨 Descargar PDF
+              </button>
               <button onClick={generarExcel} className="px-5 py-2.5 rounded-xl font-bold text-sm text-white hover:opacity-90" style={{ background: "#166534" }}>
                 ⬇ Descargar Excel
               </button>
