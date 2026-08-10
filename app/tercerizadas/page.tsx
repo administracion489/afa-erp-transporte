@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { paginarFilas } from "@/lib/huella";
 import OdometroTerceroModal from "./_components/OdometroTerceroModal";
+import { DISTRITOS_LIMA, distanciaDistritos, etiquetaDistancia } from "@/lib/distritos-lima";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -14,6 +15,9 @@ type Empresa = {
   autorizacion_mtc: string | null; habilitacion_sutran: string | null;
   venc_autorizacion: string | null; venc_habilitacion: string | null;
   estado: string; observaciones?: string | null; created_at?: string;
+  direccion_fiscal?: string | null; distrito_fiscal?: string | null;
+  direccion_cochera?: string | null; distrito_cochera?: string | null;
+  lat_cochera?: number | null; lng_cochera?: number | null;
 };
 
 type VehiculoTercero = {
@@ -24,6 +28,7 @@ type VehiculoTercero = {
   descripcion_unidad?: string | null;
   tipo_vehiculo_costeo?: string | null;
   kilometraje_actual?: number | null;
+  direccion_cochera?: string | null; distrito_cochera?: string | null; // override — si es null, usa el de la empresa
 };
 
 type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null };
@@ -221,8 +226,10 @@ const FORM_EMP = {
   autorizacion_mtc: "", habilitacion_sutran: "",
   venc_autorizacion: "", venc_habilitacion: "",
   estado: "activo", observaciones: "",
+  direccion_fiscal: "", distrito_fiscal: "",
+  direccion_cochera: "", distrito_cochera: "",
 };
-const FORM_VEH = { placa: "", categoria: "BUS", marca: "", modelo: "", capacidad: "", estado: "disponible", foto_externa_url: "", foto_interna_url: "", descripcion_unidad: "", tipo_vehiculo_costeo: "" };
+const FORM_VEH = { placa: "", categoria: "BUS", marca: "", modelo: "", capacidad: "", estado: "disponible", foto_externa_url: "", foto_interna_url: "", descripcion_unidad: "", tipo_vehiculo_costeo: "", distrito_cochera: "" };
 const FORM_COND = { nombre: "", dni: "", licencia: "", categoria_licencia: "A-IIb", vencimiento_licencia: "", telefono: "", email: "", estado: "disponible", pin_acceso: "", activo_app: false };
 const FORM_DOC = { vehiculo_id: "", tipo: "SOAT", numero: "", fecha_vencimiento: "", entidad_emisora: "", archivo_url: "", observaciones: "" };
 
@@ -260,12 +267,14 @@ export default function EmpresasTercerizadasPage() {
   const [modalOdoVeh, setModalOdoVeh] = useState<VehiculoTercero | null>(null);
   const [confirmarBorrado, setConfirmarBorrado] = useState<Empresa | null>(null);
   const [textoBorrado, setTextoBorrado] = useState("");
+  const [geocodificando, setGeocodificando] = useState(false);
 
   // Búsqueda + filtros de la lista.
   const [busqueda,   setBusqueda]   = useState("");
   const [busqActiva, setBusqActiva] = useState("");
   const [filtroRiesgo, setFiltroRiesgo] = useState<"todos" | Nivel | "sin_docs">("todos");
   const [filtroEstado, setFiltroEstado] = useState("activo");
+  const [filtroDistrito, setFiltroDistrito] = useState(""); // "" = sin filtro de cercanía
   const [orden,        setOrden]        = useState<"riesgo" | "az" | "flota">("riesgo");
   const [limiteLista,  setLimiteLista]  = useState(60);
   const debRef  = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -300,10 +309,10 @@ export default function EmpresasTercerizadasPage() {
     setLoading(true);
     const [eRows, vRows, cRows, dRows] = await Promise.all([
       paginarFilas(() => supabase.from("empresas_tercerizadas")
-        .select("id,razon_social,ruc,estado,telefono,email,contacto_nombre,contacto_telefono,autorizacion_mtc,habilitacion_sutran,venc_autorizacion,venc_habilitacion")
+        .select("id,razon_social,ruc,estado,telefono,email,contacto_nombre,contacto_telefono,autorizacion_mtc,habilitacion_sutran,venc_autorizacion,venc_habilitacion,direccion_fiscal,distrito_fiscal,direccion_cochera,distrito_cochera,lat_cochera,lng_cochera")
         .order("razon_social").order("id")),
       paginarFilas(() => supabase.from("vehiculos_tercero")
-        .select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado")
+        .select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,distrito_cochera")
         .order("placa").order("id")),
       paginarFilas(() => supabase.from("conductores_tercero")
         .select("id,empresa_id,nombre,dni,licencia,categoria_licencia,vencimiento_licencia,telefono")
@@ -499,6 +508,34 @@ export default function EmpresasTercerizadasPage() {
     return s;
   }, [buscando, resultados]);
 
+  // Distritos donde una empresa realmente tiene unidades: el de su cochera general, más el
+  // override de cada vehículo que lo tenga distinto (una empresa grande puede tener unidades
+  // repartidas en varios puntos de Lima). Vacío si no cargó ningún distrito.
+  const distritosPorEmpresa = useMemo(() => {
+    const out: Record<number, Set<string>> = {};
+    for (const e of empresas) {
+      const s = new Set<string>();
+      if (e.distrito_cochera) s.add(e.distrito_cochera);
+      out[e.id] = s;
+    }
+    for (const v of vehIdx) {
+      if (v.distrito_cochera && out[v.empresa_id]) out[v.empresa_id].add(v.distrito_cochera);
+    }
+    return out;
+  }, [empresas, vehIdx]);
+
+  /** Menor cantidad de saltos entre el distrito buscado y CUALQUIER distrito de esta empresa. */
+  const distanciaEmpresa = (empId: number, distritoObjetivo: string): number | null => {
+    const disponibles = distritosPorEmpresa[empId];
+    if (!disponibles || disponibles.size === 0) return null;
+    let mejor: number | null = null;
+    for (const d of disponibles) {
+      const h = distanciaDistritos(distritoObjetivo, d);
+      if (h !== null && (mejor === null || h < mejor)) mejor = h;
+    }
+    return mejor;
+  };
+
   const listaFiltrada = useMemo(() => {
     const ordRiesgo: Record<Nivel, number> = { alto: 0, medio: 1, ok: 2 };
     let out = empresas.filter(e => {
@@ -510,13 +547,22 @@ export default function EmpresasTercerizadasPage() {
       return true;
     });
     out = out.sort((a, b) => {
+      // Con un distrito buscado activo, la cercanía manda sobre el orden elegido — pero
+      // dentro del mismo nivel de cercanía (ej. dos empresas "a 1 distrito"), el orden
+      // elegido sigue desempatando.
+      if (filtroDistrito) {
+        const da = distanciaEmpresa(a.id, filtroDistrito);
+        const db = distanciaEmpresa(b.id, filtroDistrito);
+        const pa = da === null ? 99 : da, pb = db === null ? 99 : db;
+        if (pa !== pb) return pa - pb;
+      }
       if (orden === "az") return a.razon_social.localeCompare(b.razon_social);
       if (orden === "flota") return (porEmpresa.vehs[b.id]?.length || 0) - (porEmpresa.vehs[a.id]?.length || 0);
       const ra = ordRiesgo[riesgoPorEmp[a.id]?.nivel ?? "ok"], rb = ordRiesgo[riesgoPorEmp[b.id]?.nivel ?? "ok"];
       return ra - rb || a.razon_social.localeCompare(b.razon_social);
     });
     return out;
-  }, [empresas, filtroEstado, filtroRiesgo, empresasIdsConMatch, orden, riesgoPorEmp, porEmpresa]);
+  }, [empresas, filtroEstado, filtroRiesgo, empresasIdsConMatch, orden, riesgoPorEmp, porEmpresa, filtroDistrito, distritosPorEmpresa]);
 
   const selFueraDeFiltro = !!empresaSel && !listaFiltrada.some(e => e.id === empresaSel);
 
@@ -564,6 +610,10 @@ export default function EmpresasTercerizadasPage() {
       venc_habilitacion: formEmp.venc_habilitacion || null,
       estado: formEmp.estado,
       observaciones: formEmp.observaciones.trim() || null,
+      direccion_fiscal: formEmp.direccion_fiscal.trim() || null,
+      distrito_fiscal: formEmp.distrito_fiscal || null,
+      direccion_cochera: formEmp.direccion_cochera.trim() || null,
+      distrito_cochera: formEmp.distrito_cochera || null,
     };
     const { error } = editEmpId
       ? await supabase.from("empresas_tercerizadas").update(payload).eq("id", editEmpId)
@@ -586,8 +636,38 @@ export default function EmpresasTercerizadasPage() {
       venc_autorizacion: e.venc_autorizacion || "",
       venc_habilitacion: e.venc_habilitacion || "",
       estado: e.estado || "activo", observaciones: e.observaciones || "",
+      direccion_fiscal: e.direccion_fiscal || "", distrito_fiscal: e.distrito_fiscal || "",
+      direccion_cochera: e.direccion_cochera || "", distrito_cochera: e.distrito_cochera || "",
     });
     setEditEmpId(e.id); setMostrarFormEmp(true);
+  };
+
+  // Coordenadas exactas de la cochera — detalle OPCIONAL, el filtro de cercanía principal
+  // usa solo distrito_cochera (arriba). Reusa el mismo pipeline de geocodificación cacheada
+  // que ya usan las paradas (lib/geocode-cache.ts vía /api/geocodificar-punto), pero sin
+  // escribir en la tabla `paradas` — el resultado se guarda directo en la empresa.
+  const geocodificarCochera = async () => {
+    if (!formEmp.direccion_cochera.trim()) { alert("Escribe la dirección de la cochera primero"); return; }
+    setGeocodificando(true);
+    try {
+      const res = await fetch("/api/geocodificar-punto", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ direccion: formEmp.direccion_cochera.trim() }),
+      });
+      const data = await res.json();
+      if (data.status !== "OK" || data.lat == null) {
+        alert("No se pudo ubicar esa dirección. Verifica que esté bien escrita (con distrito/referencia).");
+        return;
+      }
+      if (!editEmpId) { alert("Guarda la empresa primero, luego geocodifica la cochera."); return; }
+      const { error } = await supabase.from("empresas_tercerizadas")
+        .update({ lat_cochera: data.lat, lng_cochera: data.lng }).eq("id", editEmpId);
+      if (error) { alert("Error al guardar coordenadas: " + error.message); return; }
+      await cargarIndice();
+      alert(`Ubicado: ${data.direccion || formEmp.direccion_cochera}`);
+    } finally {
+      setGeocodificando(false);
+    }
   };
 
   // Borrar arrastra en cascada las lecturas de odómetro de todas sus unidades: se confirma
@@ -651,6 +731,7 @@ export default function EmpresasTercerizadasPage() {
       foto_interna_url: formVeh.foto_interna_url.trim() || null,
       descripcion_unidad: formVeh.descripcion_unidad.trim() || null,
       tipo_vehiculo_costeo: formVeh.tipo_vehiculo_costeo || null,
+      distrito_cochera: formVeh.distrito_cochera || null,
     };
     const { error } = editVehId
       ? await supabase.from("vehiculos_tercero").update(payload).eq("id", editVehId)
@@ -1021,6 +1102,12 @@ export default function EmpresasTercerizadasPage() {
                 <option value="flota">Más vehículos</option>
               </select>
             </div>
+            <select value={filtroDistrito} onChange={e => setFiltroDistrito(e.target.value)}
+              className="w-full border border-gray-200 rounded-xl px-2 py-1.5 text-[11px] focus:outline-none focus:border-[#0b315f]"
+              title="Ordena por cercanía de cochera al distrito elegido, sin ocultar a nadie">
+              <option value="">📍 Cercano a un distrito…</option>
+              {DISTRITOS_LIMA.map(d => <option key={d} value={d}>{d}</option>)}
+            </select>
             {selFueraDeFiltro && (
               <p className="text-[10px] text-amber-700 bg-amber-50 rounded-lg px-2 py-1">
                 1 seleccionada fuera del filtro
@@ -1041,6 +1128,7 @@ export default function EmpresasTercerizadasPage() {
               const activa = empresaSel === e.id;
               const franja = activa ? "#0b315f" : r?.nivel === "alto" ? "#dc2626" : r?.nivel === "medio" ? "#eab308" : "#d1d5db";
               const motivo = motivoMatch(e.id);
+              const distanciaTxt = filtroDistrito ? etiquetaDistancia(distanciaEmpresa(e.id, filtroDistrito), filtroDistrito) : null;
               return (
                 <button key={e.id} onClick={() => setEmpresaSel(e.id)}
                   className="w-full text-left flex items-center gap-2 pl-0 pr-2.5 py-2 border-b hover:bg-gray-50 transition-colors"
@@ -1050,7 +1138,9 @@ export default function EmpresasTercerizadasPage() {
                     <span className="block text-[13px] font-bold truncate" style={{ color: activa ? "#0b315f" : "#111827" }}>
                       {e.razon_social}
                     </span>
-                    {motivo
+                    {distanciaTxt
+                      ? <span className="block text-[10px] font-bold truncate" style={{ color: distanciaTxt.startsWith("🎯") ? "#166534" : "#854d0e" }}>{distanciaTxt}</span>
+                      : motivo
                       ? <span className="block text-[10px] text-[#0b315f] truncate">coincide {motivo}</span>
                       : e.estado !== "activo" && <span className="block text-[10px] text-red-500 uppercase font-bold">{e.estado}</span>}
                   </span>
@@ -1112,6 +1202,9 @@ export default function EmpresasTercerizadasPage() {
                         </span>
                       )}
                       {empActual.email && <a href={`mailto:${empActual.email}`} className="hover:underline">✉️ {empActual.email}</a>}
+                      {empActual.distrito_cochera && (
+                        <span title={empActual.direccion_cochera || undefined}>🅿️ Cochera: {empActual.distrito_cochera}</span>
+                      )}
                     </p>
                     {empActual.contacto_nombre && (
                       <p className="text-xs text-gray-500 mt-1 flex items-center gap-1.5">
@@ -1288,6 +1381,13 @@ export default function EmpresasTercerizadasPage() {
                             <option value="inactivo">Inactivo</option>
                           </select>
                         </Campo>
+                        <Campo label="Distrito de cochera (si difiere del de la empresa)">
+                          <select className={inputCls()} value={formVeh.distrito_cochera}
+                            onChange={e => setFormVeh(p => ({ ...p, distrito_cochera: e.target.value }))}>
+                            <option value="">— Usa el de la empresa —</option>
+                            {DISTRITOS_LIMA.map(d => <option key={d} value={d}>{d}</option>)}
+                          </select>
+                        </Campo>
                         <Campo label="Foto exterior">
                           <div className="space-y-1.5">
                             {formVeh.foto_externa_url && (
@@ -1404,7 +1504,7 @@ export default function EmpresasTercerizadasPage() {
                                     <div className="flex gap-1.5" onClick={ev => ev.stopPropagation()}>
                                       <button onClick={() => setModalOdoVeh(v)} title="Odómetro" className="hover:opacity-70">📷</button>
                                       <button title="Editar" className="text-gray-400 hover:text-gray-800"
-                                        onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}>✏️</button>
+                                        onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}>✏️</button>
                                       <button className="text-red-400 hover:text-red-600" title="Eliminar"
                                         onClick={async () => { if (!confirm(`¿Eliminar la unidad ${v.placa}?`)) return; await supabase.from("vehiculos_tercero").delete().eq("id", v.id); await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]); }}>✕</button>
                                     </div>
@@ -1483,7 +1583,7 @@ export default function EmpresasTercerizadasPage() {
                                   style={{ background: v.estado === "disponible" ? "#dcfce7" : "#f3f4f6", color: v.estado === "disponible" ? "#166534" : "#4b5563" }}>
                                   {v.estado}
                                 </span>
-                                <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}
+                                <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}
                                   className="text-xs font-bold text-gray-500 hover:text-gray-800">✏️</button>
                                 <button onClick={async () => { if (!confirm("¿Eliminar?")) return; await supabase.from("vehiculos_tercero").delete().eq("id", v.id); await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]); }}
                                   className="text-xs font-bold text-red-400 hover:text-red-600">✕</button>
@@ -1796,6 +1896,39 @@ export default function EmpresasTercerizadasPage() {
               </div>
             </div>
             <div>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Ubicación</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Campo label="Dirección fiscal">
+                  <input className={inputCls()} placeholder="Dirección legal/administrativa" value={formEmp.direccion_fiscal} onChange={fe("direccion_fiscal")} />
+                </Campo>
+                <Campo label="Distrito fiscal">
+                  <select className={inputCls()} value={formEmp.distrito_fiscal} onChange={fe("distrito_fiscal")}>
+                    <option value="">— Sin especificar —</option>
+                    {DISTRITOS_LIMA.map(d => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </Campo>
+                <Campo label="Dirección de cochera / estacionamiento" span={2}>
+                  <div className="flex gap-2">
+                    <input className={inputCls()} placeholder="Dónde estaciona la flota — usada para 'proveedor más cercano'" value={formEmp.direccion_cochera} onChange={fe("direccion_cochera")} />
+                    <button type="button" onClick={geocodificarCochera} disabled={geocodificando}
+                      className="px-3 py-2.5 rounded-xl text-xs font-bold border whitespace-nowrap hover:bg-gray-50 disabled:opacity-60"
+                      title="Opcional: ubica la dirección exacta en coordenadas">
+                      {geocodificando ? "…" : "📍 Ubicar"}
+                    </button>
+                  </div>
+                  {editEmpId && empresas.find(e => e.id === editEmpId)?.lat_cochera && (
+                    <p className="text-[10px] text-green-700 mt-1">✓ Coordenadas guardadas</p>
+                  )}
+                </Campo>
+                <Campo label="Distrito de cochera (filtro de cercanía)">
+                  <select className={inputCls()} value={formEmp.distrito_cochera} onChange={fe("distrito_cochera")}>
+                    <option value="">— Sin especificar —</option>
+                    {DISTRITOS_LIMA.map(d => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </Campo>
+              </div>
+            </div>
+            <div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Habilitaciones legales</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <Campo label="N° Autorización MTC">
@@ -1873,6 +2006,7 @@ export default function EmpresasTercerizadasPage() {
           onSaved={() => refrescarDetalle(modalOdoVeh.empresa_id)}
         />
       )}
+
     </main>
   );
 }
