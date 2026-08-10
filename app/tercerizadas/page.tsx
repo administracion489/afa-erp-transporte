@@ -47,6 +47,19 @@ type DocumentoTercero = {
   archivo_url?: string | null; observaciones?: string | null;
 };
 
+// Documento que un proveedor subió desde /proveedor/[token], pendiente de aprobar. NO es lo
+// mismo que DocumentoTercero: mientras esté "pendiente" el ERP sigue viendo el documento
+// viejo (o la ausencia de documento) como vencido/por vencer — ver lib/proveedor-documentos.ts.
+type RevisionPendiente = {
+  id: number; empresa_id: number; documento_id: number | null; vehiculo_id: number | null;
+  tipo: string; numero: string | null;
+  fecha_vencimiento_actual: string | null; fecha_vencimiento_propuesta: string | null;
+  entidad_emisora: string | null; archivo_url: string; observaciones_proveedor: string | null;
+  creado_en: string;
+  empresa: { razon_social: string; email: string | null } | null;
+  vehiculo: { placa: string } | null;
+};
+
 type TabActiva = "flota" | "conductores" | "documentos";
 type Nivel = "alto" | "medio" | "ok";
 
@@ -269,6 +282,11 @@ export default function EmpresasTercerizadasPage() {
   const [textoBorrado, setTextoBorrado] = useState("");
   const [geocodificando, setGeocodificando] = useState(false);
 
+  // Documentos que algún proveedor subió desde su link público, pendientes de aprobar.
+  const [revisionesPend, setRevisionesPend] = useState<RevisionPendiente[]>([]);
+  const [mostrarModalRevision, setMostrarModalRevision] = useState(false);
+  const [procesandoRevision, setProcesandoRevision] = useState<number | null>(null);
+
   // Búsqueda + filtros de la lista.
   const [busqueda,   setBusqueda]   = useState("");
   const [busqActiva, setBusqActiva] = useState("");
@@ -334,6 +352,74 @@ export default function EmpresasTercerizadasPage() {
   };
 
   useEffect(() => { cargarIndice(); }, []);
+
+  // Documentos subidos por proveedores desde su link público, esperando aprobación. Tabla
+  // aparte (documentos_tercero_revisiones): no afecta el semáforo hasta que se aprueban —
+  // ver supabase/proveedor-documentos-autoservicio.sql.
+  const cargarRevisionesPendientes = async () => {
+    const { data } = await supabase
+      .from("documentos_tercero_revisiones")
+      .select("*, empresa:empresas_tercerizadas(razon_social,email), vehiculo:vehiculos_tercero(placa)")
+      .eq("estado", "pendiente")
+      .order("creado_en", { ascending: true });
+    setRevisionesPend((data || []) as unknown as RevisionPendiente[]);
+  };
+
+  useEffect(() => { cargarRevisionesPendientes(); }, []);
+
+  const aprobarRevision = async (r: RevisionPendiente) => {
+    setProcesandoRevision(r.id);
+    try {
+      const payloadDoc = {
+        empresa_id: r.empresa_id,
+        vehiculo_id: r.vehiculo_id,
+        tipo: r.tipo,
+        numero: r.numero,
+        fecha_vencimiento: r.fecha_vencimiento_propuesta,
+        entidad_emisora: r.entidad_emisora,
+        archivo_url: r.archivo_url,
+      };
+      const { error: errDoc } = r.documento_id
+        ? await supabase.from("documentos_tercero").update(payloadDoc).eq("id", r.documento_id)
+        : await supabase.from("documentos_tercero").insert(payloadDoc);
+      if (errDoc) { alert(errDoc.message); return; }
+
+      const { data: { session } } = await supabase.auth.getSession();
+      await supabase.from("documentos_tercero_revisiones").update({
+        estado: "aprobado", revisado_en: new Date().toISOString(), revisado_por: session?.user?.email || null,
+      }).eq("id", r.id);
+
+      await Promise.all([
+        cargarRevisionesPendientes(), cargarIndice(),
+        empresaSel === r.empresa_id ? refrescarDetalle(r.empresa_id) : Promise.resolve(),
+      ]);
+    } finally {
+      setProcesandoRevision(null);
+    }
+  };
+
+  const rechazarRevision = async (r: RevisionPendiente) => {
+    const motivo = prompt(`¿Por qué se rechaza "${r.tipo}"? Se lo enviamos al proveedor para que lo corrija.`);
+    if (motivo === null) return;
+    setProcesandoRevision(r.id);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const { error } = await supabase.from("documentos_tercero_revisiones").update({
+        estado: "rechazado", motivo_rechazo: motivo, revisado_en: new Date().toISOString(), revisado_por: session?.user?.email || null,
+      }).eq("id", r.id);
+      if (error) { alert(error.message); return; }
+
+      if (r.empresa?.email) {
+        fetch("/api/tercerizadas/notificar-rechazo", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: r.empresa.email, empresaId: r.empresa_id, empresaNombre: r.empresa.razon_social, tipo: r.tipo, motivo }),
+        }).catch(() => {});
+      }
+      await cargarRevisionesPendientes();
+    } finally {
+      setProcesandoRevision(null);
+    }
+  };
 
   // ── Carga: capa 2, detalle bajo demanda con caché ──────────────────────────
 
@@ -900,6 +986,12 @@ export default function EmpresasTercerizadasPage() {
           <button onClick={cargarIndice} disabled={loading}
             className="px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-sm text-gray-500 hover:text-[#0b315f] disabled:opacity-50"
             title="Recargar">{loading ? "⏳" : "↻"}</button>
+          {revisionesPend.length > 0 && (
+            <button onClick={() => setMostrarModalRevision(true)}
+              className="px-3 py-2.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-800 text-xs font-bold hover:bg-amber-100 flex items-center gap-1.5 whitespace-nowrap">
+              🕓 {revisionesPend.length} por revisar
+            </button>
+          )}
           <button onClick={() => { setFormEmp(FORM_EMP); setEditEmpId(null); setMostrarFormEmp(true); }}
             className="px-4 py-2.5 rounded-xl font-bold text-sm text-white hover:opacity-90"
             style={{ background: "#0b315f" }}>+ Nueva empresa</button>
@@ -2007,6 +2099,67 @@ export default function EmpresasTercerizadasPage() {
         />
       )}
 
+      {/* ── MODAL: documentos subidos por proveedores, pendientes de aprobar ── */}
+      {mostrarModalRevision && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{ background: "rgba(0,0,0,0.5)" }}
+          onClick={() => setMostrarModalRevision(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 space-y-4 max-h-[85vh] overflow-y-auto"
+            onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-black text-[#0b315f]">🕓 Documentos por revisar</h2>
+                <p className="text-[11px] text-gray-400 mt-0.5">Subidos por el proveedor desde su link de autoservicio — no actualizan el ERP hasta que apruebas.</p>
+              </div>
+              <button onClick={() => setMostrarModalRevision(false)} className="text-gray-400 hover:text-gray-700 text-xl leading-none">✕</button>
+            </div>
+
+            {revisionesPend.length === 0 ? (
+              <p className="text-sm text-gray-400 text-center py-8">No hay nada pendiente. 🎉</p>
+            ) : (
+              <div className="space-y-3">
+                {revisionesPend.map(r => (
+                  <div key={r.id} className="border border-gray-200 rounded-xl p-4 space-y-2.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="font-bold text-sm text-gray-900">{r.empresa?.razon_social || "—"}</p>
+                        <p className="text-xs text-gray-500">{r.tipo} · {r.vehiculo?.placa ? `Unidad ${r.vehiculo.placa}` : "Empresa (general)"}</p>
+                      </div>
+                      <a href={r.archivo_url} target="_blank" rel="noreferrer"
+                        className="text-xs font-bold text-[#0b315f] hover:underline whitespace-nowrap flex-shrink-0">Ver archivo →</a>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div className="bg-gray-50 rounded-lg px-2.5 py-1.5">
+                        <p className="text-[10px] text-gray-400 uppercase font-bold">Vencimiento actual</p>
+                        <p className="font-mono text-gray-700">{fmtFecha(r.fecha_vencimiento_actual)}</p>
+                      </div>
+                      <div className="bg-blue-50 rounded-lg px-2.5 py-1.5">
+                        <p className="text-[10px] text-blue-500 uppercase font-bold">Propone</p>
+                        <p className="font-mono text-blue-800">{fmtFecha(r.fecha_vencimiento_propuesta)}</p>
+                      </div>
+                    </div>
+                    {(r.numero || r.entidad_emisora) && (
+                      <p className="text-[11px] text-gray-500">
+                        {r.numero ? `N° ${r.numero}` : ""}{r.numero && r.entidad_emisora ? " · " : ""}{r.entidad_emisora || ""}
+                      </p>
+                    )}
+                    {r.observaciones_proveedor && <p className="text-[11px] text-gray-500 italic">"{r.observaciones_proveedor}"</p>}
+                    <div className="flex gap-2 pt-1">
+                      <button onClick={() => aprobarRevision(r)} disabled={procesandoRevision === r.id}
+                        className="flex-1 py-2 rounded-lg text-xs font-bold text-white bg-green-600 hover:bg-green-700 disabled:opacity-50">
+                        {procesandoRevision === r.id ? "…" : "✅ Aprobar"}
+                      </button>
+                      <button onClick={() => rechazarRevision(r)} disabled={procesandoRevision === r.id}
+                        className="flex-1 py-2 rounded-lg text-xs font-bold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50">
+                        ❌ Rechazar
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 }
