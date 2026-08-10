@@ -33,3 +33,12 @@ ALTER TABLE ordenes_trabajo ADD COLUMN IF NOT EXISTS km_cierre INT;
 ALTER TABLE ordenes_trabajo ADD COLUMN IF NOT EXISTS fecha_limite_sugerida DATE;
 COMMENT ON COLUMN ordenes_trabajo.km_cierre IS 'Odómetro real al cerrar la OT — con esto se re-ancla mantenimiento.kilometraje al cerrar.';
 COMMENT ON COLUMN ordenes_trabajo.fecha_limite_sugerida IS 'Fecha por la que el plan del fabricante pedía este servicio (solo OT automáticas).';
+
+-- ── 4. Cuándo y a qué taller se lleva la unidad ────────────────────────────────
+-- taller_proveedor_id apunta al directorio ya existente de Proveedores (tipo='taller');
+-- el campo de texto libre `taller` (ya existía) queda como respaldo para talleres
+-- ocasionales que no están registrados ahí — la UI prioriza el proveedor si hay uno.
+ALTER TABLE ordenes_trabajo ADD COLUMN IF NOT EXISTS taller_proveedor_id INT REFERENCES proveedores(id);
+ALTER TABLE ordenes_trabajo ADD COLUMN IF NOT EXISTS fecha_programada DATE;
+COMMENT ON COLUMN ordenes_trabajo.taller_proveedor_id IS 'Taller del directorio de Proveedores (tipo=taller). Si es null, se usa el texto libre de la columna taller.';
+COMMENT ON COLUMN ordenes_trabajo.fecha_programada IS 'Cuándo se planea llevar la unidad al taller. Las OT automáticas nacen sin esto — lo completa quien coordina el ingreso.';

@@ -16,6 +16,11 @@ type PlanFabricante = {
   intervalo_base_km: number | null; intervalo_base_meses: number | null;
 };
 
+type Proveedor = {
+  id: number; nombre: string; telefono: string | null;
+  direccion: string | null; tipo: string; estado: string;
+};
+
 type Plantilla = {
   id: number; vehiculo_id: number | null; nombre: string;
   tipo: string; km_intervalo: number | null; meses_intervalo: number | null;
@@ -37,6 +42,8 @@ type OrdenTrabajo = {
   plan_mantenimiento_id?: string | null;
   km_cierre?: number | null;
   fecha_limite_sugerida?: string | null; // solo OT automáticas
+  taller_proveedor_id?: number | null;   // del directorio de Proveedores (tipo=taller)
+  fecha_programada?: string | null;      // cuándo se planea llevar la unidad
 };
 
 type ChecklistOT = {
@@ -140,6 +147,15 @@ function fmtFecha(f: string | null) {
   return new Date(f).toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
+// Prefiere el proveedor del directorio; si no hay, cae al texto libre (taller ocasional).
+function nombreTaller(ot: OrdenTrabajo, talleres: Proveedor[]): string | null {
+  if (ot.taller_proveedor_id) {
+    const t = talleres.find(x => x.id === ot.taller_proveedor_id);
+    if (t) return t.nombre + (t.telefono ? ` · ${t.telefono}` : "");
+  }
+  return ot.taller || null;
+}
+
 function diasAbierta(fechaApertura: string): number {
   return Math.floor((Date.now() - new Date(fechaApertura + "T00:00:00").getTime()) / 86400000);
 }
@@ -154,6 +170,7 @@ export default function OrdenesTab() {
   const [ordenes,     setOrdenes]   = useState<OrdenTrabajo[]>([]);
   const [checklistOT, setChecklistOT] = useState<ChecklistOT[]>([]);
   const [planesFab,   setPlanesFab] = useState<PlanFabricante[]>([]);
+  const [talleres,    setTalleres]  = useState<Proveedor[]>([]);
   const [loading,     setLoading]   = useState(false);
   const [guardando,   setGuardando] = useState(false);
 
@@ -168,7 +185,7 @@ export default function OrdenesTab() {
   const [subiendoFotoId,  setSubiendoFotoId]  = useState<number | null>(null);
 
   // Form OT
-  const FORM_OT_VACIO = { vehiculo_id: "", plantilla_id: "", km_apertura: "", fecha_apertura: new Date().toISOString().split("T")[0], mecanico: "", taller: "", costo_total: "", estado: "abierta", observaciones: "" };
+  const FORM_OT_VACIO = { vehiculo_id: "", plantilla_id: "", km_apertura: "", fecha_apertura: new Date().toISOString().split("T")[0], fecha_programada: "", mecanico: "", taller_proveedor_id: "", taller: "", costo_total: "", estado: "abierta", observaciones: "" };
   const [formOT, setFormOT] = useState(FORM_OT_VACIO);
 
   // Form Plantilla
@@ -188,13 +205,14 @@ export default function OrdenesTab() {
 
   const cargarDatos = async () => {
     setLoading(true);
-    const [vRes, plRes, chPlRes, otRes, chOtRes, pfRes] = await Promise.all([
+    const [vRes, plRes, chPlRes, otRes, chOtRes, pfRes, tlRes] = await Promise.all([
       supabase.from("vehiculos").select("id,placa,categoria,kilometraje_actual,nro_serie").order("placa"),
       supabase.from("plantillas_mantenimiento").select("*").order("nombre"),
       supabase.from("checklist_plantilla").select("*").order("orden"),
       supabase.from("ordenes_trabajo").select("*").order("created_at", { ascending: false }),
       supabase.from("checklist_ot").select("*"),
       supabase.from("planes_mantenimiento").select("id,marca,modelo,motor,intervalo_base_km,intervalo_base_meses"),
+      supabase.from("proveedores").select("id,nombre,telefono,direccion,tipo,estado").eq("tipo", "taller").order("nombre"),
     ]);
     setVehiculos(vRes.data    || []);
     setPlantillas(plRes.data  || []);
@@ -202,6 +220,7 @@ export default function OrdenesTab() {
     setOrdenes(otRes.data     || []);
     setChecklistOT(chOtRes.data || []);
     setPlanesFab(pfRes.data   || []);
+    setTalleres(tlRes.data    || []);
     setLoading(false);
   };
 
@@ -263,7 +282,9 @@ export default function OrdenesTab() {
       plantilla_id:   formOT.plantilla_id ? Number(formOT.plantilla_id) : null,
       km_apertura:    formOT.km_apertura  ? Number(formOT.km_apertura)  : null,
       fecha_apertura: formOT.fecha_apertura,
+      fecha_programada: formOT.fecha_programada || null,
       mecanico:       formOT.mecanico.trim()     || null,
+      taller_proveedor_id: formOT.taller_proveedor_id ? Number(formOT.taller_proveedor_id) : null,
       taller:         formOT.taller.trim()       || null,
       costo_total:    formOT.costo_total ? Number(formOT.costo_total) : 0,
       estado:         formOT.estado,
@@ -417,13 +438,14 @@ body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#1e293b;margin
     <div class="kv"><span class="lbl">Vehículo</span><span class="val">${esc(veh?.placa || "—")}${veh?.categoria ? " · " + esc(veh.categoria) : ""}</span></div>
     <div class="kv"><span class="lbl">Km de apertura</span><span class="val">${ot.km_apertura ? Number(ot.km_apertura).toLocaleString("es-PE") + " km" : "—"}</span></div>
     <div class="kv"><span class="lbl">Fecha de apertura</span><span class="val">${fmtFecha(ot.fecha_apertura)}</span></div>
+    <div class="kv"><span class="lbl">Programado para</span><span class="val">${ot.fecha_programada ? fmtFecha(ot.fecha_programada) : "—"}</span></div>
     <div class="kv"><span class="lbl">Estado</span><span class="val">${esc(ESTADO_OT[ot.estado]?.label || ot.estado)}</span></div>
   </div>
   <div class="box2">
-    <div class="kv"><span class="lbl">Taller</span><span class="val">${esc(ot.taller || "—")}</span></div>
+    <div class="kv"><span class="lbl">Taller</span><span class="val">${esc(nombreTaller(ot, talleres) || "—")}</span></div>
+    <div class="kv"><span class="lbl">Dirección taller</span><span class="val">${esc((ot.taller_proveedor_id && talleres.find(t => t.id === ot.taller_proveedor_id)?.direccion) || "—")}</span></div>
     <div class="kv"><span class="lbl">Mecánico</span><span class="val">${esc(ot.mecanico || "—")}</span></div>
     <div class="kv"><span class="lbl">Costo</span><span class="val">${ot.costo_total ? fmtSoles(ot.costo_total) : "—"}</span></div>
-    <div class="kv"><span class="lbl">Observaciones</span><span class="val">${esc(ot.observaciones || "—")}</span></div>
   </div>
   <div class="box2">
     <div class="kv"><span class="lbl">Plan fabricante</span><span class="val">${plan ? esc(`${plan.marca} ${plan.modelo}${plan.motor ? " · " + plan.motor : ""}`) : "—"}</span></div>
@@ -432,6 +454,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#1e293b;margin
     <div class="kv"><span class="lbl">Fecha límite sugerida</span><span class="val">${ot.fecha_limite_sugerida ? fmtFecha(ot.fecha_limite_sugerida) : "—"}</span></div>
   </div>
 </div>
+${ot.observaciones ? `<p style="font-size:10px;color:#64748b;margin:-4px 0 12px"><b>Observaciones:</b> ${esc(ot.observaciones)}</p>` : ""}
 ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el checklist.</p>'}
 <div class="firmas">
   <div class="firma">Conductor<br/>Nombre y firma</div>
@@ -688,6 +711,9 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
             <Campo label="Fecha de apertura">
               <input type="date" className={inputCls()} value={formOT.fecha_apertura} onChange={fot("fecha_apertura")} />
             </Campo>
+            <Campo label="Programado para (ingreso al taller)">
+              <input type="date" className={inputCls()} value={formOT.fecha_programada} onChange={fot("fecha_programada")} />
+            </Campo>
             <Campo label="KM al abrir OT">
               <input type="number" className={inputCls("font-mono")} placeholder="Ej: 150000" value={formOT.km_apertura} onChange={fot("km_apertura")} />
             </Campo>
@@ -697,7 +723,13 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
             <Campo label="Mecánico responsable">
               <input className={inputCls()} placeholder="Nombre del mecánico" value={formOT.mecanico} onChange={fot("mecanico")} />
             </Campo>
-            <Campo label="Taller / Proveedor">
+            <Campo label="Taller (directorio de Proveedores)">
+              <select className={inputCls()} value={formOT.taller_proveedor_id} onChange={fot("taller_proveedor_id")}>
+                <option value="">— Sin registrar —</option>
+                {talleres.map(t => <option key={t.id} value={t.id}>{t.nombre}{t.telefono ? ` · ${t.telefono}` : ""}</option>)}
+              </select>
+            </Campo>
+            <Campo label="Taller ocasional (si no está en el directorio)">
               <input className={inputCls()} placeholder="Nombre del taller" value={formOT.taller} onChange={fot("taller")} />
             </Campo>
             <Campo label="Observaciones">
@@ -803,6 +835,8 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                         🚌 <b>{veh?.placa || "—"}</b> · {veh?.categoria}
                         {ot.km_apertura && <> · <span className="font-mono">{Number(ot.km_apertura).toLocaleString()} km</span></>}
                         {ot.mecanico && <> · 👤 {ot.mecanico}</>}
+                        {ot.fecha_programada && <> · 📅 {fmtFecha(ot.fecha_programada)}</>}
+                        {!ot.fecha_programada && nombreTaller(ot, talleres) && <> · 🏢 {nombreTaller(ot, talleres)}</>}
                       </div>
                     </div>
                   </div>
@@ -846,7 +880,7 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                         <option value="cerrada">Cerrada</option>
                         <option value="cancelada">Cancelada</option>
                       </select>
-                      <button onClick={() => { setFormOT({ vehiculo_id: String(ot.vehiculo_id || ""), plantilla_id: String(ot.plantilla_id || ""), km_apertura: String(ot.km_apertura || ""), fecha_apertura: ot.fecha_apertura, mecanico: ot.mecanico || "", taller: ot.taller || "", costo_total: String(ot.costo_total || ""), estado: ot.estado, observaciones: ot.observaciones || "" }); setEditandoOtId(ot.id); setMostrarFormOT(true); setMostrarFormPl(false); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                      <button onClick={() => { setFormOT({ vehiculo_id: String(ot.vehiculo_id || ""), plantilla_id: String(ot.plantilla_id || ""), km_apertura: String(ot.km_apertura || ""), fecha_apertura: ot.fecha_apertura, fecha_programada: ot.fecha_programada || "", mecanico: ot.mecanico || "", taller_proveedor_id: String(ot.taller_proveedor_id || ""), taller: ot.taller || "", costo_total: String(ot.costo_total || ""), estado: ot.estado, observaciones: ot.observaciones || "" }); setEditandoOtId(ot.id); setMostrarFormOT(true); setMostrarFormPl(false); window.scrollTo({ top: 0, behavior: "smooth" }); }}
                         className="px-3 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">
                         ✏️ Editar OT
                       </button>
@@ -858,7 +892,15 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                         className="px-3 py-1.5 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50">
                         ✕ Eliminar
                       </button>
-                      {ot.taller && <span className="text-xs text-gray-400">🏢 {ot.taller}</span>}
+                      {nombreTaller(ot, talleres) && <span className="text-xs text-gray-400">🏢 {nombreTaller(ot, talleres)}</span>}
+                      {ot.fecha_programada && (() => {
+                        const vencido = (ot.estado === "abierta" || ot.estado === "en_proceso") && new Date(ot.fecha_programada + "T00:00:00") < new Date(new Date().toISOString().split("T")[0] + "T00:00:00");
+                        return (
+                          <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={{ background: vencido ? "#fee2e2" : "#f0fdf4", color: vencido ? "#991b1b" : "#166534" }}>
+                            📅 Programado: {fmtFecha(ot.fecha_programada)}
+                          </span>
+                        );
+                      })()}
                       {ot.observaciones && <span className="text-xs text-gray-400 italic">"{ot.observaciones}"</span>}
                     </div>
 
