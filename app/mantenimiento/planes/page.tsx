@@ -12,6 +12,8 @@ type Tarea = {
   cada_servicio?: boolean; acciones?: { km: number; accion: string }[];
 };
 type PlanDraft = {
+  /** null = plan nuevo; con id = se está editando uno ya guardado */
+  id?: string | null;
   marca: string; modelo: string; motor?: string | null;
   anio_desde?: number | null; anio_hasta?: number | null;
   intervalo_base_km?: number | null; intervalo_base_meses?: number | null;
@@ -19,6 +21,7 @@ type PlanDraft = {
 };
 type PlanRow = {
   id: string; marca: string; modelo: string; motor: string | null;
+  anio_desde: number | null; anio_hasta: number | null;
   intervalo_base_km: number | null; intervalo_base_meses: number | null;
   estado: string; parsed_por_ia: boolean; fuente_doc_url: string | null; created_at: string;
 };
@@ -110,6 +113,7 @@ export default function PlanesPage() {
       if (!res.ok || !data.ok) throw new Error(data?.error || `Error ${res.status}`);
       const p = data.plan;
       setDraft({
+        id: null,
         marca: p.marca || "", modelo: p.modelo || "", motor: p.motor || "",
         anio_desde: p.anio_desde ?? null, anio_hasta: p.anio_hasta ?? null,
         intervalo_base_km: p.intervalo_base_km ?? null, intervalo_base_meses: p.intervalo_base_meses ?? null,
@@ -120,6 +124,36 @@ export default function PlanesPage() {
     } finally {
       setLeyendo(false);
     }
+  };
+
+  // ── Abrir el editor: plan existente o plan nuevo en blanco ────────────────────
+
+  const editarPlan = async (p: PlanRow) => {
+    setArchivo(null);
+    const { data, error } = await supabase.from("plan_tareas").select("*").eq("plan_id", p.id).order("orden");
+    if (error) { alert("Error al leer las tareas: " + error.message); return; }
+    setDraft({
+      id: p.id,
+      marca: p.marca || "", modelo: p.modelo || "", motor: p.motor || "",
+      anio_desde: p.anio_desde ?? null, anio_hasta: p.anio_hasta ?? null,
+      intervalo_base_km: p.intervalo_base_km ?? null, intervalo_base_meses: p.intervalo_base_meses ?? null,
+      tareas: (data || []).map((t: any) => ({
+        tarea: t.tarea || "", especificacion: t.especificacion, categoria: t.categoria,
+        cantidad: t.cantidad, unidad: t.unidad,
+        km_intervalo: t.km_intervalo, meses_intervalo: t.meses_intervalo,
+        cada_servicio: !!t.cada_servicio, acciones: t.acciones || [],
+      })),
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const nuevoPlanManual = () => {
+    setArchivo(null);
+    setDraft({
+      id: null, marca: "", modelo: "", motor: "",
+      anio_desde: null, anio_hasta: null,
+      intervalo_base_km: null, intervalo_base_meses: null, tareas: [],
+    });
   };
 
   const setD = (patch: Partial<PlanDraft>) => setDraft(d => d ? { ...d, ...patch } : d);
@@ -145,13 +179,33 @@ export default function PlanesPage() {
         if (!up.error) fuenteUrl = supabase.storage.from("documentos").getPublicUrl(path).data.publicUrl;
       }
 
-      const { data: plan, error } = await supabase.from("planes_mantenimiento").insert({
+      const campos: any = {
         marca: draft.marca.trim(), modelo: draft.modelo.trim(), motor: draft.motor?.trim() || null,
         anio_desde: draft.anio_desde || null, anio_hasta: draft.anio_hasta || null,
         intervalo_base_km: draft.intervalo_base_km || null, intervalo_base_meses: draft.intervalo_base_meses || null,
-        fuente_doc_url: fuenteUrl, parsed_por_ia: true, estado: "borrador",
-      }).select("*").single();
-      if (error) throw error;
+      };
+      // Al editar no se pisa el documento fuente si esta vez no se subió ninguno,
+      // ni se toca el estado (aprobado/borrador) ya decidido por el usuario.
+      if (fuenteUrl) campos.fuente_doc_url = fuenteUrl;
+
+      let plan: any;
+      if (draft.id) {
+        campos.updated_at = new Date().toISOString();
+        const { data, error } = await supabase.from("planes_mantenimiento")
+          .update(campos).eq("id", draft.id).select("*").single();
+        if (error) throw error;
+        plan = data;
+        // Las tareas se reemplazan en bloque: el editor es la verdad completa de la
+        // matriz y así el `orden` queda consistente sin diffear fila por fila.
+        const { error: eDel } = await supabase.from("plan_tareas").delete().eq("plan_id", draft.id);
+        if (eDel) throw eDel;
+      } else {
+        const { data, error } = await supabase.from("planes_mantenimiento")
+          .insert({ ...campos, fuente_doc_url: fuenteUrl, parsed_por_ia: !!archivo, estado: "borrador" })
+          .select("*").single();
+        if (error) throw error;
+        plan = data;
+      }
 
       const tareas = draft.tareas.filter(t => t.tarea.trim()).map((t, idx) => ({
         plan_id: plan.id, orden: idx, tarea: t.tarea.trim(),
@@ -165,9 +219,11 @@ export default function PlanesPage() {
         if (e2) throw e2;
       }
 
+      const eraEdicion = !!draft.id;
       setDraft(null); setArchivo(null);
       await cargar();
-      abrirEnrolar(plan as PlanRow); // pasar directo a enrolar
+      if (eraEdicion) alert("Plan actualizado ✓");
+      else abrirEnrolar(plan as PlanRow); // plan nuevo → pasar directo a enrolar
     } catch (e: any) {
       alert("Error al guardar: " + e.message);
     } finally {
@@ -280,6 +336,11 @@ export default function PlanesPage() {
               className="px-5 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60 hover:opacity-90" style={{ background: "#0b315f" }}>
               {leyendo ? "Leyendo con IA…" : "Leer con IA"}
             </button>
+            <span className="text-xs text-gray-300">o</span>
+            <button onClick={nuevoPlanManual}
+              className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-700 hover:bg-gray-50">
+              ✎ Crear plan a mano
+            </button>
           </div>
         </section>
       )}
@@ -288,12 +349,24 @@ export default function PlanesPage() {
       {draft && (
         <section className="bg-white rounded-2xl border shadow-sm p-6 space-y-5">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-bold text-gray-900">Revisa y corrige el plan</h2>
-            <button onClick={() => setDraft(null)} className="text-gray-400 hover:text-gray-600 text-sm">✕ Descartar</button>
+            <h2 className="text-lg font-bold text-gray-900">
+              {draft.id ? `Editar plan — ${draft.marca} ${draft.modelo}` : "Revisa y corrige el plan"}
+            </h2>
+            <button onClick={() => setDraft(null)} className="text-gray-400 hover:text-gray-600 text-sm">
+              {draft.id ? "✕ Cerrar sin guardar" : "✕ Descartar"}
+            </button>
           </div>
-          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-800">
-            ⚠️ La IA puede equivocarse al leer la matriz. Verifica intervalos y tareas antes de guardar.
-          </div>
+          {draft.id ? (
+            <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-2.5 text-xs text-sky-800">
+              ℹ️ Los intervalos de este plan aplican a <b>todas las unidades enroladas</b>. Para cambiar solo una,
+              usa el botón ✎ de esa fila en <b>Programa de Mantenimiento</b>. Al guardar, la lista de tareas
+              reemplaza por completo a la anterior.
+            </div>
+          ) : (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-800">
+              ⚠️ La IA puede equivocarse al leer la matriz. Verifica intervalos y tareas antes de guardar.
+            </div>
+          )}
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div><label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Marca *</label>
@@ -308,6 +381,10 @@ export default function PlanesPage() {
               <div><label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Cada (meses)</label>
                 <input type="number" className={inputCls("font-mono")} value={draft.intervalo_base_meses ?? ""} onChange={e => setD({ intervalo_base_meses: e.target.value ? Number(e.target.value) : null })} /></div>
             </div>
+            <div><label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Año desde</label>
+              <input type="number" className={inputCls("font-mono")} value={draft.anio_desde ?? ""} onChange={e => setD({ anio_desde: e.target.value ? Number(e.target.value) : null })} /></div>
+            <div><label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Año hasta</label>
+              <input type="number" className={inputCls("font-mono")} value={draft.anio_hasta ?? ""} onChange={e => setD({ anio_hasta: e.target.value ? Number(e.target.value) : null })} /></div>
           </div>
 
           {/* tareas */}
@@ -343,7 +420,7 @@ export default function PlanesPage() {
           <div className="flex gap-3">
             <button onClick={guardarPlan} disabled={guardando}
               className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60 hover:opacity-90" style={{ background: "#0b315f" }}>
-              {guardando ? "Guardando…" : "Guardar y enrolar unidades"}
+              {guardando ? "Guardando…" : draft.id ? "Guardar cambios del plan" : "Guardar y enrolar unidades"}
             </button>
             <button onClick={() => setDraft(null)} className="px-6 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">Cancelar</button>
           </div>
@@ -391,6 +468,7 @@ export default function PlanesPage() {
                     </td>
                     <td className="p-3">
                       <div className="flex items-center gap-1.5 flex-wrap">
+                        <button onClick={() => editarPlan(p)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white hover:opacity-90" style={{ background: "#0b315f" }}>✎ Editar</button>
                         <button onClick={() => abrirEnrolar(p)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">🚍 Enrolar</button>
                         <button onClick={() => aprobarPlan(p)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">{aprob ? "↩ A borrador" : "✓ Aprobar"}</button>
                         <button onClick={() => eliminarPlan(p)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50">✕</button>
