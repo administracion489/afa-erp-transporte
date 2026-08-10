@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { abrirImprimible } from "@/lib/documentos-servicio";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -105,6 +106,9 @@ function Campo({ label, span, children }: { label: string; span?: number; childr
   );
 }
 
+function esc(s: any) {
+  return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
 function fmtSoles(n: number) {
   return `S/ ${n.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -272,6 +276,90 @@ export default function OrdenesTab() {
     await supabase.from("ordenes_trabajo").delete().eq("id", id);
     if (otActiva === id) setOtActiva(null);
     cargarDatos();
+  };
+
+  // ── Descargar OT en PDF (para entregar al conductor/taller) ──────────────────
+
+  const generarPdfOT = (ot: OrdenTrabajo) => {
+    const veh = vehiculos.find(v => v.id === ot.vehiculo_id);
+    const pl = plantillas.find(p => p.id === ot.plantilla_id);
+    const items = checklistOT.filter(c => c.orden_trabajo_id === ot.id);
+    const grupos = [
+      ...CATEGORIAS_CHECKLIST.filter(cat => items.some(i => i.categoria === cat)),
+      ...(items.some(i => !i.categoria || !CATEGORIAS_CHECKLIST.includes(i.categoria)) ? ["Otros ítems"] : []),
+    ];
+    const itemsDe = (cat: string) => cat === "Otros ítems"
+      ? items.filter(i => !i.categoria || !CATEGORIAS_CHECKLIST.includes(i.categoria))
+      : items.filter(i => i.categoria === cat);
+
+    const filasGrupo = grupos.map(cat => `
+      <div class="grupo">
+        <p class="cat">${esc(cat)}</p>
+        ${itemsDe(cat).map(it => `
+          <div class="item">
+            <span class="box">${it.completado ? "☑" : "☐"}</span>
+            <div class="item-txt">
+              <p class="${it.completado ? "tachado" : ""}">${esc(it.item)}</p>
+              ${it.observacion ? `<p class="obs">Obs: ${esc(it.observacion)}</p>` : `<p class="obs linea">Obs: _______________________________________________</p>`}
+            </div>
+          </div>`).join("")}
+      </div>`).join("");
+
+    const css = `@page{size:A4;margin:14mm 12mm}*{box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#1e293b;margin:0;background:#fff}
+.hd{display:flex;justify-content:space-between;align-items:center;border:1.5px solid #cbd5e1;border-left:5px solid #0b315f;padding:12px 18px;border-radius:6px;margin-bottom:14px;background:#f8faff}
+.hd h1{font-size:16px;margin:0;color:#0b315f}
+.hd p{margin:3px 0 0;font-size:10px;color:#64748b}
+.hd-right{text-align:right}
+.chip{display:inline-block;padding:2px 8px;border-radius:6px;font-weight:800;font-size:9px;margin-left:6px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+.box2{border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px}
+.kv{display:flex;justify-content:space-between;padding:3px 0;font-size:10.5px;border-bottom:1px solid #f1f5f9}
+.kv:last-child{border-bottom:none}
+.kv .lbl{color:#64748b}.kv .val{font-weight:700}
+.grupo{margin-bottom:12px;break-inside:avoid}
+.cat{font-size:9.5px;font-weight:800;text-transform:uppercase;letter-spacing:.6px;color:#0b315f;border-bottom:1.5px solid #e2e8f0;padding-bottom:4px;margin:0 0 6px}
+.item{display:flex;gap:8px;padding:6px 0;border-bottom:1px dashed #f1f5f9;break-inside:avoid}
+.box{font-size:15px;line-height:1.1}
+.item-txt p{margin:0}
+.item-txt .tachado{text-decoration:line-through;color:#94a3b8}
+.item-txt .obs{font-size:9.5px;color:#94a3b8;margin-top:2px}
+.item-txt .obs.linea{color:#cbd5e1}
+.firmas{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:28px}
+.firma{border-top:1.5px solid #1e293b;padding-top:6px;text-align:center;font-size:9.5px;color:#64748b}
+.ft{border-top:1.5px solid #e2e8f0;padding-top:8px;margin-top:18px;text-align:center;font-size:8.5px;color:#94a3b8}
+@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}`;
+
+    const body = `<div class="hd">
+  <div><h1>Orden de Trabajo #${ot.id}${ot.origen === "automatica" ? '<span class="chip" style="background:#e0e7ff;color:#3730a3">🤖 Auto</span>' : ""}</h1>
+    <p>AFA Tours Peru SAC · Mantenimiento preventivo${pl ? " · " + esc(pl.nombre) : ""}</p></div>
+  <div class="hd-right"><p style="font-size:11px;font-weight:800;color:#0b315f">${esc(veh?.placa || "—")}</p>
+    <p>${esc(veh?.categoria || "")}</p></div>
+</div>
+<div class="g2">
+  <div class="box2">
+    <div class="kv"><span class="lbl">Vehículo</span><span class="val">${esc(veh?.placa || "—")}${veh?.categoria ? " · " + esc(veh.categoria) : ""}</span></div>
+    <div class="kv"><span class="lbl">Km de apertura</span><span class="val">${ot.km_apertura ? Number(ot.km_apertura).toLocaleString("es-PE") + " km" : "—"}</span></div>
+    <div class="kv"><span class="lbl">Fecha de apertura</span><span class="val">${fmtFecha(ot.fecha_apertura)}</span></div>
+    <div class="kv"><span class="lbl">Estado</span><span class="val">${esc(ESTADO_OT[ot.estado]?.label || ot.estado)}</span></div>
+  </div>
+  <div class="box2">
+    <div class="kv"><span class="lbl">Taller</span><span class="val">${esc(ot.taller || "—")}</span></div>
+    <div class="kv"><span class="lbl">Mecánico</span><span class="val">${esc(ot.mecanico || "—")}</span></div>
+    <div class="kv"><span class="lbl">Costo</span><span class="val">${ot.costo_total ? fmtSoles(ot.costo_total) : "—"}</span></div>
+    <div class="kv"><span class="lbl">Observaciones</span><span class="val">${esc(ot.observaciones || "—")}</span></div>
+  </div>
+</div>
+${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el checklist.</p>'}
+<div class="firmas">
+  <div class="firma">Conductor<br/>Nombre y firma</div>
+  <div class="firma">Taller / Mecánico<br/>Nombre y firma</div>
+</div>
+<p class="ft">AFA Transportes · R.D. N° 1946-2009-MTC-15 · Tel: 966707225 / 01-3453707 · Generado ${fmtFecha(new Date().toISOString())}</p>`;
+
+    abrirImprimible(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/>
+<title>OT #${ot.id} — ${esc(veh?.placa || "AFA")}</title><style>${css}</style></head>
+<body>${body}<script>window.onload=()=>window.print()<\/script></body></html>`);
   };
 
   // ── Checklist OT ──────────────────────────────────────────────────────────
@@ -635,6 +723,10 @@ export default function OrdenesTab() {
                       <button onClick={() => { setFormOT({ vehiculo_id: String(ot.vehiculo_id || ""), plantilla_id: String(ot.plantilla_id || ""), km_apertura: String(ot.km_apertura || ""), fecha_apertura: ot.fecha_apertura, mecanico: ot.mecanico || "", taller: ot.taller || "", costo_total: String(ot.costo_total || ""), estado: ot.estado, observaciones: ot.observaciones || "" }); setEditandoOtId(ot.id); setMostrarFormOT(true); setMostrarFormPl(false); window.scrollTo({ top: 0, behavior: "smooth" }); }}
                         className="px-3 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700">
                         ✏️ Editar OT
+                      </button>
+                      <button onClick={() => generarPdfOT(ot)}
+                        className="px-3 py-1.5 rounded-lg text-xs font-bold text-white hover:opacity-90" style={{ background: "#991b1b" }}>
+                        🖨 PDF
                       </button>
                       <button onClick={() => eliminarOT(ot.id)}
                         className="px-3 py-1.5 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50">

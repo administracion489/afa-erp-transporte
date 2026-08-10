@@ -189,9 +189,17 @@ async function handler(req: NextRequest) {
           tieneOtAbierta = true;
         } else {
           try {
-            const tareasHito = (tareasPorPlan[plan.id] || []).filter((t: any) =>
-              t.cada_servicio || (Array.isArray(t.acciones) && t.acciones.some((a: any) => Number(a.km) === dueKm))
-            );
+            // Convención del plan (ver PROMPT_PLAN en lib/vision-ia.ts): C = Cambio,
+            // I = Inspección (y cambio si hace falta), R = cada servicio. Cada tarea
+            // se etiqueta con la acción real de ESE hito, no solo el nombre pelado.
+            const tareasHito = (tareasPorPlan[plan.id] || [])
+              .map((t: any) => {
+                const entrada = Array.isArray(t.acciones) ? t.acciones.find((a: any) => Number(a.km) === dueKm) : null;
+                const accion = entrada?.accion || (t.cada_servicio ? "R" : null);
+                return { ...t, accion };
+              })
+              .filter((t: any) => t.accion);
+            const ACCION_LABEL: Record<string, string> = { C: "Cambio", I: "Inspección", R: "Cada servicio" };
             const motivoOt = porOtKm && porOtDias ? "km y fecha" : porOtKm ? "km" : "fecha";
             const { data: nuevaOt, error: errOt } = await admin.from("ordenes_trabajo").insert({
               vehiculo_id: e.vehiculo_id,
@@ -206,7 +214,7 @@ async function handler(req: NextRequest) {
             if (nuevaOt && tareasHito.length) {
               await admin.from("checklist_ot").insert(tareasHito.map((t: any) => ({
                 orden_trabajo_id: nuevaOt.id,
-                item: t.especificacion ? `${t.tarea} — ${t.especificacion}` : t.tarea,
+                item: `[${ACCION_LABEL[t.accion] || t.accion}] ${t.tarea}${t.especificacion ? " — " + t.especificacion : ""}`,
                 categoria: t.categoria || "Otros",
                 completado: false,
               })));
