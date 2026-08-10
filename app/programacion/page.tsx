@@ -406,6 +406,10 @@ export default function ReservasPage() {
   const [otPendientePorVeh, setOtPendientePorVeh] = useState<Set<number>>(new Set()); // vehiculo_id (flota propia) con OT abierta
   const [reservas,     setReservas]     = useState<Reserva[]>([]);
   const [resumen,      setResumen]      = useState<Resumen | null>(null); // agregados globales del tablero
+  // KPIs financieros (Ventas/Costos/Margen): a diferencia de `resumen`, SÍ dependen de la
+  // ventana de fechas visible (filtroDesde/filtroHasta, o mes en curso si no hay filtro) y
+  // excluyen canceladas — ver `rangoFinanciero()`.
+  const [resumenFin,   setResumenFin]   = useState<{ ventas: number; costos: number; margen: number; desde: string | null; hasta: string | null } | null>(null);
   const [verTodo,      setVerTodo]      = useState(false);                // true = histórico completo (fuera de la ventana)
   const [limiteVista,  setLimiteVista]  = useState(100);                  // filas renderizadas ("Cargar más")
   const [cotMapNum,    setCotMapNum]    = useState<Record<number, string>>({}); // cotizacion_id → numero_cotizacion
@@ -1173,6 +1177,33 @@ export default function ReservasPage() {
     };
   };
 
+  // Rango para los KPIs financieros (Ventas/Costos/Margen): usa el mismo filtro Desde/Hasta
+  // de la tabla; si no hay filtro activo, cae al mes en curso (no al histórico completo).
+  const rangoFinanciero = (): { desde: string | null; hasta: string | null } => {
+    if (verTodo) return { desde: null, hasta: null };
+    if (filtroDesde || filtroHasta) return { desde: filtroDesde || null, hasta: filtroHasta || null };
+    const hoyP = fechaLima();
+    return { desde: hoyP.slice(0, 8) + "01", hasta: hoyP };
+  };
+
+  // Ventas/costos/margen del rango de `rangoFinanciero()`, excluyendo canceladas.
+  const cargarResumenFinanciero = async () => {
+    const { desde, hasta } = rangoFinanciero();
+    const filas = await fetchReservasCols("precio_cliente,costo_proveedor,margen", (q: any) => {
+      let qq = q.neq("estado", "cancelada");
+      if (desde) qq = qq.gte("fecha_servicio", desde);
+      if (hasta) qq = qq.lte("fecha_servicio", hasta);
+      return qq;
+    });
+    let ventas = 0, costos = 0, margen = 0;
+    for (const r of filas) {
+      ventas += Number(r.precio_cliente || 0);
+      costos += Number(r.costo_proveedor || 0);
+      margen += Number(r.margen || 0);
+    }
+    setResumenFin({ ventas, costos, margen, desde, hasta });
+  };
+
   // Catálogos (clientes, vehículos, conductores, terceros): no cambian al operar reservas,
   // se cargan una sola vez al montar.
   const cargarCatalogos = async () => {
@@ -1243,14 +1274,14 @@ export default function ReservasPage() {
 
   // Refresco tras una mutación (guardar, eliminar, aplicar masivo…): lista + totales.
   const cargarDatos = async () => {
-    await Promise.all([cargarLista(), cargarResumen()]);
+    await Promise.all([cargarLista(), cargarResumen(), cargarResumenFinanciero()]);
   };
 
-  useEffect(() => { cargarCatalogos(); cargarResumen(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  // Recarga la lista cuando cambia la ventana (rango de fechas o "Ver todo"). Debounce corto
-  // para no disparar dos veces al elegir Desde y Hasta seguidos.
+  useEffect(() => { cargarCatalogos(); cargarResumen(); cargarResumenFinanciero(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Recarga la lista y los KPIs financieros cuando cambia la ventana (rango de fechas o "Ver
+  // todo"). Debounce corto para no disparar dos veces al elegir Desde y Hasta seguidos.
   useEffect(() => {
-    const t = setTimeout(() => { cargarLista(); }, 300);
+    const t = setTimeout(() => { cargarLista(); cargarResumenFinanciero(); }, 300);
     return () => clearTimeout(t);
   }, [filtroDesde, filtroHasta, verTodo]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1680,6 +1711,7 @@ export default function ReservasPage() {
     await supabase.from("reservas").update({ estado }).eq("id", id);
     setReservas(prev => prev.map(r => r.id === id ? { ...r, estado } : r));
     cargarResumen(); // los KPIs/flujo de estados salen del resumen global: refrescarlo
+    cargarResumenFinanciero(); // el cambio de estado (p.ej. a cancelada) puede afectar Ventas/Costos/Margen
   };
 
   const confirmarFinalizar = async () => {
@@ -1736,9 +1768,9 @@ export default function ReservasPage() {
   const facturadas   = gAdmin("facturada");
   const cobradas     = gAdmin("cobrada");
   const hoyCount     = resumen ? resumen.hoy    : reservas.filter(r => r.fecha_servicio === hoy).length;
-  const ventas       = resumen ? resumen.ventas : reservas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
-  const costos       = resumen ? resumen.costos : reservas.reduce((s, r) => s + Number(r.costo_proveedor || 0), 0);
-  const margenTotal  = resumen ? resumen.margen : reservas.reduce((s, r) => s + Number(r.margen || 0), 0);
+  const ventas       = resumenFin ? resumenFin.ventas : 0;
+  const costos       = resumenFin ? resumenFin.costos : 0;
+  const margenTotal  = resumenFin ? resumenFin.margen : 0;
   const conSobrecupo = resumen ? resumen.sobrecupo : Object.values(ocupacionMap).filter(o => o.sobrecupo).length;
   const sincronizadas = resumen ? resumen.sincronizadas : reservas.filter(r => r.sincronizado_app).length;
   const proximos7d    = resumen ? resumen.prox7d : reservas.filter(r => r.fecha_servicio && r.fecha_servicio >= hoy && r.fecha_servicio <= en7d && r.estado !== "cancelada" && r.estado !== "finalizada").length;
@@ -2635,6 +2667,12 @@ export default function ReservasPage() {
 
       {/* KPIs financieros */}
       <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="md:col-span-3 -mb-1 text-[11px] font-bold text-gray-400">
+          Periodo: {resumenFin?.desde ? fmtFecha(resumenFin.desde) : "inicio"} – {resumenFin?.hasta ? fmtFecha(resumenFin.hasta) : "hoy"}
+          {!(filtroDesde || filtroHasta || verTodo) && " (mes en curso)"}
+          {verTodo && " (todo el histórico)"}
+          {" · excluye canceladas"}
+        </div>
         {[
           { label: "Ventas reservas",  valor: fmtSoles(ventas),      color: "#166534", bg: "#dcfce7" },
           { label: "Costos proveedor", valor: fmtSoles(costos),      color: "#991b1b", bg: "#fee2e2" },
