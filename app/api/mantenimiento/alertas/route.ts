@@ -190,8 +190,9 @@ async function handler(req: NextRequest) {
         } else {
           try {
             // Convención del plan (ver PROMPT_PLAN en lib/vision-ia.ts): C = Cambio,
-            // I = Inspección (y cambio si hace falta), R = cada servicio. Cada tarea
-            // se etiqueta con la acción real de ESE hito, no solo el nombre pelado.
+            // I = Inspección (y cambio si hace falta), R = cada servicio. La acción
+            // queda en su propia columna (accion_plan/accion_final), no incrustada
+            // en el texto del ítem — así se puede editar sin tocar la descripción.
             const tareasHito = (tareasPorPlan[plan.id] || [])
               .map((t: any) => {
                 const entrada = Array.isArray(t.acciones) ? t.acciones.find((a: any) => Number(a.km) === dueKm) : null;
@@ -199,13 +200,13 @@ async function handler(req: NextRequest) {
                 return { ...t, accion };
               })
               .filter((t: any) => t.accion);
-            const ACCION_LABEL: Record<string, string> = { C: "Cambio", I: "Inspección", R: "Cada servicio" };
             const motivoOt = porOtKm && porOtDias ? "km y fecha" : porOtKm ? "km" : "fecha";
             const { data: nuevaOt, error: errOt } = await admin.from("ordenes_trabajo").insert({
               vehiculo_id: e.vehiculo_id,
               plan_mantenimiento_id: plan.id,
               km_apertura: dueKm,
               fecha_apertura: hoy,
+              fecha_limite_sugerida: dueFecha,
               estado: "abierta",
               origen: "automatica",
               observaciones: `Generada automáticamente: servicio preventivo por ${motivoOt} (plan ${plan.marca} ${plan.modelo}).`,
@@ -214,8 +215,10 @@ async function handler(req: NextRequest) {
             if (nuevaOt && tareasHito.length) {
               await admin.from("checklist_ot").insert(tareasHito.map((t: any) => ({
                 orden_trabajo_id: nuevaOt.id,
-                item: `[${ACCION_LABEL[t.accion] || t.accion}] ${t.tarea}${t.especificacion ? " — " + t.especificacion : ""}`,
+                item: t.especificacion ? `${t.tarea} — ${t.especificacion}` : t.tarea,
                 categoria: t.categoria || "Otros",
+                accion_plan: t.accion,
+                accion_final: t.accion,
                 completado: false,
               })));
             }

@@ -8,7 +8,12 @@ import { abrirImprimible } from "@/lib/documentos-servicio";
 
 type Vehiculo = {
   id: number; placa: string; categoria: string | null;
-  kilometraje_actual: number | null;
+  kilometraje_actual: number | null; nro_serie?: string | null;
+};
+
+type PlanFabricante = {
+  id: string; marca: string; modelo: string; motor: string | null;
+  intervalo_base_km: number | null; intervalo_base_meses: number | null;
 };
 
 type Plantilla = {
@@ -29,11 +34,18 @@ type OrdenTrabajo = {
   taller: string | null; costo_total: number; estado: string;
   observaciones: string | null; created_at: string;
   origen?: string | null; // 'manual' | 'automatica' — la crea el cron de alertas al llegar al umbral_ot
+  plan_mantenimiento_id?: string | null;
+  km_cierre?: number | null;
+  fecha_limite_sugerida?: string | null; // solo OT automáticas
 };
 
 type ChecklistOT = {
   id: number; orden_trabajo_id: number; item: string;
   categoria: string | null; completado: boolean; observacion: string | null;
+  accion_plan?: string | null;  // C/I/R — snapshot del plan al crear el ítem, no se edita
+  accion_final?: string | null; // editable: qué pasó realmente
+  foto_url?: string | null;
+  repuesto?: string | null;
 };
 
 // ─── CONSTANTES ───────────────────────────────────────────────────────────────
@@ -51,6 +63,16 @@ const CATEGORIAS_CHECKLIST = [
   "Motor", "Frenos", "Fluidos", "Neumáticos", "Eléctrico",
   "Carrocería", "Transmisión", "Suspensión", "Seguridad", "Otros",
 ];
+
+// Categorías con impacto directo en seguridad — se resaltan aparte en la tarjeta de OT.
+const CATEGORIAS_SEGURIDAD = new Set(["Frenos", "Suspensión", "Seguridad"]);
+
+// Convención del plan del fabricante (ver PROMPT_PLAN en lib/vision-ia.ts).
+const ACCION_CFG: Record<string, { label: string; bg: string; color: string }> = {
+  C: { label: "Cambio",        bg: "#fee2e2", color: "#991b1b" },
+  I: { label: "Inspección",    bg: "#dbeafe", color: "#1d4ed8" },
+  R: { label: "Cada servicio", bg: "#f3f4f6", color: "#4b5563" },
+};
 
 // Checklist base según rutina
 const CHECKLIST_BASE: Record<string, { categoria: string; item: string }[]> = {
@@ -118,6 +140,10 @@ function fmtFecha(f: string | null) {
   return new Date(f).toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
+function diasAbierta(fechaApertura: string): number {
+  return Math.floor((Date.now() - new Date(fechaApertura + "T00:00:00").getTime()) / 86400000);
+}
+
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 export default function OrdenesTab() {
@@ -127,6 +153,7 @@ export default function OrdenesTab() {
   const [checklistPl, setChecklistPl] = useState<ChecklistItem[]>([]);
   const [ordenes,     setOrdenes]   = useState<OrdenTrabajo[]>([]);
   const [checklistOT, setChecklistOT] = useState<ChecklistOT[]>([]);
+  const [planesFab,   setPlanesFab] = useState<PlanFabricante[]>([]);
   const [loading,     setLoading]   = useState(false);
   const [guardando,   setGuardando] = useState(false);
 
@@ -136,6 +163,9 @@ export default function OrdenesTab() {
   const [otActiva,       setOtActiva]       = useState<number | null>(null); // OT con checklist abierto
   const [editandoOtId,   setEditandoOtId]   = useState<number | null>(null);
   const [editandoPlId,   setEditandoPlId]   = useState<number | null>(null);
+  const [catColapsada,   setCatColapsada]   = useState<Set<string>>(new Set()); // claves "otId:categoria"
+  const [cerrarOT,        setCerrarOT]        = useState<{ ot: OrdenTrabajo; km: string } | null>(null);
+  const [subiendoFotoId,  setSubiendoFotoId]  = useState<number | null>(null);
 
   // Form OT
   const FORM_OT_VACIO = { vehiculo_id: "", plantilla_id: "", km_apertura: "", fecha_apertura: new Date().toISOString().split("T")[0], mecanico: "", taller: "", costo_total: "", estado: "abierta", observaciones: "" };
@@ -158,18 +188,20 @@ export default function OrdenesTab() {
 
   const cargarDatos = async () => {
     setLoading(true);
-    const [vRes, plRes, chPlRes, otRes, chOtRes] = await Promise.all([
-      supabase.from("vehiculos").select("id,placa,categoria,kilometraje_actual").order("placa"),
+    const [vRes, plRes, chPlRes, otRes, chOtRes, pfRes] = await Promise.all([
+      supabase.from("vehiculos").select("id,placa,categoria,kilometraje_actual,nro_serie").order("placa"),
       supabase.from("plantillas_mantenimiento").select("*").order("nombre"),
       supabase.from("checklist_plantilla").select("*").order("orden"),
       supabase.from("ordenes_trabajo").select("*").order("created_at", { ascending: false }),
       supabase.from("checklist_ot").select("*"),
+      supabase.from("planes_mantenimiento").select("id,marca,modelo,motor,intervalo_base_km,intervalo_base_meses"),
     ]);
     setVehiculos(vRes.data    || []);
     setPlantillas(plRes.data  || []);
     setChecklistPl(chPlRes.data || []);
     setOrdenes(otRes.data     || []);
     setChecklistOT(chOtRes.data || []);
+    setPlanesFab(pfRes.data   || []);
     setLoading(false);
   };
 
@@ -264,11 +296,49 @@ export default function OrdenesTab() {
     if (otId && !editandoOtId) setOtActiva(otId);
   };
 
-  const cambiarEstadoOT = async (id: number, estado: string) => {
-    const update: Record<string, unknown> = { estado };
-    if (estado === "cerrada") update.fecha_cierre = new Date().toISOString().split("T")[0];
-    await supabase.from("ordenes_trabajo").update(update).eq("id", id);
-    setOrdenes(prev => prev.map(o => o.id === id ? { ...o, estado, fecha_cierre: estado === "cerrada" ? new Date().toISOString().split("T")[0] : o.fecha_cierre } : o));
+  // Cerrar pide el km real aparte (abre el modal); los demás estados se aplican directo.
+  const cambiarEstadoOT = async (ot: OrdenTrabajo, estado: string) => {
+    if (estado === "cerrada") {
+      const veh = vehiculos.find(v => v.id === ot.vehiculo_id);
+      setCerrarOT({ ot, km: String(veh?.kilometraje_actual ?? ot.km_apertura ?? "") });
+      return;
+    }
+    await supabase.from("ordenes_trabajo").update({ estado }).eq("id", ot.id);
+    setOrdenes(prev => prev.map(o => o.id === ot.id ? { ...o, estado } : o));
+  };
+
+  // Cerrar una OT re-ancla "próximo mantenimiento": sin escribir en `mantenimiento`,
+  // el cron seguiría viendo el mismo hito vencido mañana y crearía otra OT automática
+  // para exactamente lo mismo. `mantenimiento` es la tabla que usan ProgramaTab y el
+  // cron como "último servicio conocido" — no es exclusiva de las OT automáticas.
+  const confirmarCierre = async () => {
+    if (!cerrarOT) return;
+    const km = Number(cerrarOT.km);
+    if (!km || km <= 0) { alert("Ingresa el kilometraje real de cierre"); return; }
+    setGuardando(true);
+    const { ot } = cerrarOT;
+    const hoy = new Date().toISOString().split("T")[0];
+
+    const { error } = await supabase.from("ordenes_trabajo")
+      .update({ estado: "cerrada", fecha_cierre: hoy, km_cierre: km }).eq("id", ot.id);
+    if (error) { alert("Error al cerrar: " + error.message); setGuardando(false); return; }
+
+    const veh = vehiculos.find(v => v.id === ot.vehiculo_id);
+    const { error: eMant } = await supabase.from("mantenimiento").insert({
+      vehiculo_id: ot.vehiculo_id, fecha: hoy, tipo: "preventivo", kilometraje: km,
+      descripcion: `OT #${ot.id}${veh ? " — " + veh.placa : ""}`,
+      proveedor: ot.taller || null, costo: Number(ot.costo_total || 0), estado: "finalizado",
+      proximo_km: 0, observaciones: ot.observaciones || null,
+    });
+    if (eMant) {
+      // La OT sí quedó cerrada; que falle el ancla no debe bloquear al usuario, pero
+      // sí avisarle — si no, el "próximo mantenimiento" queda desfasado en silencio.
+      alert("La OT se cerró, pero no se pudo actualizar el historial de mantenimiento: " + eMant.message);
+    }
+
+    setCerrarOT(null);
+    setGuardando(false);
+    cargarDatos();
   };
 
   const eliminarOT = async (id: number) => {
@@ -283,6 +353,7 @@ export default function OrdenesTab() {
   const generarPdfOT = (ot: OrdenTrabajo) => {
     const veh = vehiculos.find(v => v.id === ot.vehiculo_id);
     const pl = plantillas.find(p => p.id === ot.plantilla_id);
+    const plan = ot.plan_mantenimiento_id ? planesFab.find(p => p.id === ot.plan_mantenimiento_id) : null;
     const items = checklistOT.filter(c => c.orden_trabajo_id === ot.id);
     const grupos = [
       ...CATEGORIAS_CHECKLIST.filter(cat => items.some(i => i.categoria === cat)),
@@ -295,14 +366,18 @@ export default function OrdenesTab() {
     const filasGrupo = grupos.map(cat => `
       <div class="grupo">
         <p class="cat">${esc(cat)}</p>
-        ${itemsDe(cat).map(it => `
+        ${itemsDe(cat).map(it => {
+          const acc = it.accion_final && ACCION_CFG[it.accion_final] ? ACCION_CFG[it.accion_final].label : null;
+          return `
           <div class="item">
             <span class="box">${it.completado ? "☑" : "☐"}</span>
             <div class="item-txt">
-              <p class="${it.completado ? "tachado" : ""}">${esc(it.item)}</p>
-              ${it.observacion ? `<p class="obs">Obs: ${esc(it.observacion)}</p>` : `<p class="obs linea">Obs: _______________________________________________</p>`}
+              <p class="${it.completado ? "tachado" : ""}">${acc ? `<span class="acc">[${esc(acc)}]</span> ` : ""}${esc(it.item)}</p>
+              <p class="obs ${it.observacion ? "" : "linea"}">Obs: ${it.observacion ? esc(it.observacion) : "____________________________"}</p>
+              <p class="obs ${it.repuesto ? "" : "linea"}">Repuesto: ${it.repuesto ? esc(it.repuesto) : "________________"} &nbsp;&nbsp; Costo: S/ __________</p>
             </div>
-          </div>`).join("")}
+          </div>`;
+        }).join("")}
       </div>`).join("");
 
     const css = `@page{size:A4;margin:14mm 12mm}*{box-sizing:border-box}
@@ -312,7 +387,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#1e293b;margin
 .hd p{margin:3px 0 0;font-size:10px;color:#64748b}
 .hd-right{text-align:right}
 .chip{display:inline-block;padding:2px 8px;border-radius:6px;font-weight:800;font-size:9px;margin-left:6px}
-.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+.g2{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px}
 .box2{border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px}
 .kv{display:flex;justify-content:space-between;padding:3px 0;font-size:10.5px;border-bottom:1px solid #f1f5f9}
 .kv:last-child{border-bottom:none}
@@ -325,6 +400,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#1e293b;margin
 .item-txt .tachado{text-decoration:line-through;color:#94a3b8}
 .item-txt .obs{font-size:9.5px;color:#94a3b8;margin-top:2px}
 .item-txt .obs.linea{color:#cbd5e1}
+.acc{font-weight:800;color:#0b315f}
 .firmas{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:28px}
 .firma{border-top:1.5px solid #1e293b;padding-top:6px;text-align:center;font-size:9.5px;color:#64748b}
 .ft{border-top:1.5px solid #e2e8f0;padding-top:8px;margin-top:18px;text-align:center;font-size:8.5px;color:#94a3b8}
@@ -348,6 +424,12 @@ body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#1e293b;margin
     <div class="kv"><span class="lbl">Mecánico</span><span class="val">${esc(ot.mecanico || "—")}</span></div>
     <div class="kv"><span class="lbl">Costo</span><span class="val">${ot.costo_total ? fmtSoles(ot.costo_total) : "—"}</span></div>
     <div class="kv"><span class="lbl">Observaciones</span><span class="val">${esc(ot.observaciones || "—")}</span></div>
+  </div>
+  <div class="box2">
+    <div class="kv"><span class="lbl">Plan fabricante</span><span class="val">${plan ? esc(`${plan.marca} ${plan.modelo}${plan.motor ? " · " + plan.motor : ""}`) : "—"}</span></div>
+    <div class="kv"><span class="lbl">Intervalo del plan</span><span class="val">${plan ? esc([plan.intervalo_base_km ? Number(plan.intervalo_base_km).toLocaleString("es-PE") + " km" : null, plan.intervalo_base_meses ? plan.intervalo_base_meses + " m" : null].filter(Boolean).join(" / ") || "—") : "—"}</span></div>
+    <div class="kv"><span class="lbl">N° serie / chasis</span><span class="val">${esc(veh?.nro_serie || "—")}</span></div>
+    <div class="kv"><span class="lbl">Fecha límite sugerida</span><span class="val">${ot.fecha_limite_sugerida ? fmtFecha(ot.fecha_limite_sugerida) : "—"}</span></div>
   </div>
 </div>
 ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el checklist.</p>'}
@@ -379,6 +461,38 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
     if (!item.trim()) return;
     const { data } = await supabase.from("checklist_ot").insert({ orden_trabajo_id: otId, item: item.trim(), categoria: categoria || "Otros", completado: false }).select().single();
     if (data) setChecklistOT(prev => [...prev, data]);
+  };
+
+  // Qué pasó realmente con el ítem — puede diferir de lo que decía el plan (una
+  // inspección que terminó en cambio real, por ejemplo). "" = quitar la acción.
+  const cambiarAccion = async (item: ChecklistOT, accion: string) => {
+    const valor = accion || null;
+    await supabase.from("checklist_ot").update({ accion_final: valor }).eq("id", item.id);
+    setChecklistOT(prev => prev.map(c => c.id === item.id ? { ...c, accion_final: valor } : c));
+  };
+
+  const actualizarRepuesto = async (id: number, repuesto: string) => {
+    await supabase.from("checklist_ot").update({ repuesto: repuesto || null }).eq("id", id);
+    setChecklistOT(prev => prev.map(c => c.id === id ? { ...c, repuesto } : c));
+  };
+
+  // Foto de evidencia por ítem — subida desde el ERP (no desde el app del conductor,
+  // ver conversación: el taller manda su propio reporte y factura aparte).
+  const subirFotoItem = async (item: ChecklistOT, file: File) => {
+    setSubiendoFotoId(item.id);
+    const ext = file.name.split(".").pop() || "jpg";
+    const path = `ot-checklist/${item.id}-${Date.now()}.${ext}`;
+    const up = await supabase.storage.from("vehiculos-fotos").upload(path, file, { upsert: true });
+    if (up.error) { alert("Error al subir la foto: " + up.error.message); setSubiendoFotoId(null); return; }
+    const url = supabase.storage.from("vehiculos-fotos").getPublicUrl(path).data.publicUrl;
+    await supabase.from("checklist_ot").update({ foto_url: url }).eq("id", item.id);
+    setChecklistOT(prev => prev.map(c => c.id === item.id ? { ...c, foto_url: url } : c));
+    setSubiendoFotoId(null);
+  };
+
+  const toggleCategoria = (otId: number, cat: string) => {
+    const clave = `${otId}:${cat}`;
+    setCatColapsada(prev => { const n = new Set(prev); n.has(clave) ? n.delete(clave) : n.add(clave); return n; });
   };
 
   // ── KPIs ──────────────────────────────────────────────────────────────────
@@ -672,6 +786,18 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                             🤖 Auto
                           </span>
                         )}
+                        {(ot.estado === "abierta" || ot.estado === "en_proceso") && (() => {
+                          const d = diasAbierta(ot.fecha_apertura);
+                          if (d < 3) return null;
+                          const urgente = d >= 7;
+                          return (
+                            <span className="text-xs font-bold px-2 py-0.5 rounded-lg"
+                              style={{ background: urgente ? "#fee2e2" : "#fef9c3", color: urgente ? "#991b1b" : "#854d0e" }}
+                              title="Días desde que se abrió, sin cerrar">
+                              ⏱ {d} d abierta
+                            </span>
+                          );
+                        })()}
                       </div>
                       <div className="text-sm text-gray-500 mt-0.5">
                         🚌 <b>{veh?.placa || "—"}</b> · {veh?.categoria}
@@ -712,7 +838,7 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                     {/* Acciones OT */}
                     <div className="flex items-center gap-2 flex-wrap">
                       <select value={ot.estado}
-                        onChange={e => cambiarEstadoOT(ot.id, e.target.value)}
+                        onChange={e => cambiarEstadoOT(ot, e.target.value)}
                         className="text-xs font-bold px-3 py-1.5 rounded-lg border-0 cursor-pointer"
                         style={{ background: estCfg.bg, color: estCfg.color }}>
                         <option value="abierta">Abierta</option>
@@ -741,45 +867,91 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                       <p className="text-sm text-gray-400 text-center py-4">
                         Sin items en el checklist. Agrega items manualmente abajo.
                       </p>
-                    ) : (
-                      <div className="space-y-3">
-                        {CATEGORIAS_CHECKLIST.filter(cat => items.some(i => i.categoria === cat)).map(cat => (
-                          <div key={cat}>
-                            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2">{cat}</p>
-                            <div className="space-y-1.5">
-                              {items.filter(i => i.categoria === cat).map(item => (
-                                <div key={item.id} className={`flex items-start gap-3 p-3 rounded-xl border transition-all ${item.completado ? "bg-green-50 border-green-100" : "bg-gray-50 border-gray-100"}`}>
-                                  <input type="checkbox" checked={item.completado}
-                                    onChange={() => toggleItem(item)}
-                                    className="mt-0.5 w-4 h-4 accent-green-600 cursor-pointer flex-shrink-0" />
-                                  <div className="flex-1 min-w-0">
-                                    <p className={`text-sm font-medium ${item.completado ? "line-through text-gray-400" : "text-gray-800"}`}>
-                                      {item.item}
-                                    </p>
-                                    <input
-                                      className="mt-1 w-full text-xs border-0 bg-transparent text-gray-400 placeholder-gray-300 focus:outline-none"
-                                      placeholder="Observación (opcional)..."
-                                      defaultValue={item.observacion || ""}
-                                      onBlur={e => actualizarObservacion(item.id, e.target.value)}
-                                    />
-                                  </div>
-                                  {item.completado && <span className="text-green-500 text-base flex-shrink-0">✓</span>}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        ))}
-                        {/* Items sin categoría */}
-                        {items.filter(i => !i.categoria || !CATEGORIAS_CHECKLIST.includes(i.categoria)).map(item => (
-                          <div key={item.id} className={`flex items-start gap-3 p-3 rounded-xl border ${item.completado ? "bg-green-50 border-green-100" : "bg-gray-50 border-gray-100"}`}>
+                    ) : (() => {
+                      const renderItem = (item: ChecklistOT) => (
+                        <div key={item.id} className={`p-3 rounded-xl border transition-all ${item.completado ? "bg-green-50 border-green-100" : "bg-gray-50 border-gray-100"}`}>
+                          <div className="flex items-start gap-3">
                             <input type="checkbox" checked={item.completado}
                               onChange={() => toggleItem(item)}
-                              className="mt-0.5 w-4 h-4 accent-green-600 cursor-pointer" />
-                            <p className={`text-sm font-medium ${item.completado ? "line-through text-gray-400" : "text-gray-800"}`}>{item.item}</p>
+                              className="mt-0.5 w-4 h-4 accent-green-600 cursor-pointer flex-shrink-0" />
+                            <div className="flex-1 min-w-0 space-y-1.5">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <p className={`text-sm font-medium ${item.completado ? "line-through text-gray-400" : "text-gray-800"}`}>
+                                  {item.item}
+                                </p>
+                                <select value={item.accion_final || ""} onChange={e => cambiarAccion(item, e.target.value)}
+                                  onClick={e => e.stopPropagation()}
+                                  className="text-[10px] font-bold px-2 py-0.5 rounded-lg border-0 cursor-pointer"
+                                  style={item.accion_final && ACCION_CFG[item.accion_final]
+                                    ? { background: ACCION_CFG[item.accion_final].bg, color: ACCION_CFG[item.accion_final].color }
+                                    : { background: "#f3f4f6", color: "#9ca3af" }}>
+                                  <option value="">Sin acción</option>
+                                  <option value="C">Cambio</option>
+                                  <option value="I">Inspección</option>
+                                  <option value="R">Cada servicio</option>
+                                </select>
+                                {item.accion_plan && item.accion_final && item.accion_plan !== item.accion_final && (
+                                  <span className="text-[10px] text-gray-400" title="Lo que decía el plan del fabricante para este hito">
+                                    plan: {ACCION_CFG[item.accion_plan]?.label || item.accion_plan}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1">
+                                <input
+                                  className="w-full text-xs border-0 bg-transparent text-gray-400 placeholder-gray-300 focus:outline-none"
+                                  placeholder="Observación (opcional)..."
+                                  defaultValue={item.observacion || ""}
+                                  onBlur={e => actualizarObservacion(item.id, e.target.value)}
+                                />
+                                <input
+                                  className="w-full text-xs border-0 bg-transparent text-gray-400 placeholder-gray-300 focus:outline-none"
+                                  placeholder="Repuesto/insumo usado (opcional)..."
+                                  defaultValue={item.repuesto || ""}
+                                  onBlur={e => actualizarRepuesto(item.id, e.target.value)}
+                                />
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {item.foto_url && (
+                                  <a href={item.foto_url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>
+                                    <img src={item.foto_url} alt="Evidencia" className="w-9 h-9 rounded-lg object-cover border" />
+                                  </a>
+                                )}
+                                <label className="text-[10px] font-bold text-[#0b315f] cursor-pointer hover:underline" onClick={e => e.stopPropagation()}>
+                                  {subiendoFotoId === item.id ? "Subiendo…" : item.foto_url ? "📷 Cambiar foto" : "📷 Adjuntar foto"}
+                                  <input type="file" accept="image/*" className="hidden"
+                                    onChange={e => { const f = e.target.files?.[0]; if (f) subirFotoItem(item, f); e.target.value = ""; }} />
+                                </label>
+                              </div>
+                            </div>
+                            {item.completado && <span className="text-green-500 text-base flex-shrink-0">✓</span>}
                           </div>
-                        ))}
-                      </div>
-                    )}
+                        </div>
+                      );
+
+                      return (
+                        <div className="space-y-3">
+                          {CATEGORIAS_CHECKLIST.filter(cat => items.some(i => i.categoria === cat)).map(cat => {
+                            const catItems = items.filter(i => i.categoria === cat);
+                            const clave = `${ot.id}:${cat}`;
+                            const colapsada = catColapsada.has(clave);
+                            const esSeguridad = CATEGORIAS_SEGURIDAD.has(cat);
+                            return (
+                              <div key={cat} className={esSeguridad ? "border-l-4 pl-3" : ""} style={esSeguridad ? { borderColor: "#dc2626" } : undefined}>
+                                <button onClick={() => toggleCategoria(ot.id, cat)} className="flex items-center gap-2 w-full text-left mb-2">
+                                  <span className="text-gray-300 text-[10px]">{colapsada ? "▶" : "▼"}</span>
+                                  <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">{cat}</p>
+                                  {esSeguridad && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded" style={{ background: "#fee2e2", color: "#991b1b" }}>⚠ Seguridad</span>}
+                                  <span className="text-[10px] text-gray-300">({catItems.filter(i => i.completado).length}/{catItems.length})</span>
+                                </button>
+                                {!colapsada && <div className="space-y-1.5">{catItems.map(renderItem)}</div>}
+                              </div>
+                            );
+                          })}
+                          {/* Items sin categoría */}
+                          {items.filter(i => !i.categoria || !CATEGORIAS_CHECKLIST.includes(i.categoria)).map(renderItem)}
+                        </div>
+                      );
+                    })()}
 
                     {/* Agregar item manual */}
                     <div className="flex gap-2 pt-2 border-t" style={{ borderColor: "#f1f5f9" }}>
@@ -869,6 +1041,33 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* MODAL CERRAR OT — pide el km real para re-anclar el próximo mantenimiento */}
+      {cerrarOT && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setCerrarOT(null)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm" onClick={e => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b">
+              <h3 className="font-bold text-gray-900">Cerrar OT #{cerrarOT.ot.id}</h3>
+              <p className="text-xs text-gray-400 mt-1">
+                El km real de cierre mueve el próximo mantenimiento de este vehículo — si no lo indicas,
+                el sistema seguirá viéndolo vencido y volverá a generar la misma OT.
+              </p>
+            </div>
+            <div className="p-6 space-y-2">
+              <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Odómetro real al cerrar (km) *</label>
+              <input type="number" autoFocus className={inputCls("font-mono")}
+                value={cerrarOT.km} onChange={e => setCerrarOT(c => c ? { ...c, km: e.target.value } : c)} />
+            </div>
+            <div className="px-6 py-4 border-t flex justify-end gap-3">
+              <button onClick={() => setCerrarOT(null)} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">Cancelar</button>
+              <button onClick={confirmarCierre} disabled={guardando}
+                className="px-5 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60 hover:opacity-90" style={{ background: "#166534" }}>
+                {guardando ? "Cerrando…" : "Cerrar OT"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </main>
