@@ -27,6 +27,7 @@ type OrdenTrabajo = {
   fecha_cierre: string | null; mecanico: string | null;
   taller: string | null; costo_total: number; estado: string;
   observaciones: string | null; created_at: string;
+  origen?: string | null; // 'manual' | 'automatica' — la crea el cron de alertas al llegar al umbral_ot
 };
 
 type ChecklistOT = {
@@ -578,6 +579,11 @@ export default function OrdenesTab() {
                         <span className="text-xs font-bold px-2.5 py-1 rounded-lg"
                           style={{ background: estCfg.bg, color: estCfg.color }}>{estCfg.label}</span>
                         {pl && <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded">{pl.nombre}</span>}
+                        {ot.origen === "automatica" && (
+                          <span className="text-xs font-bold px-2 py-0.5 rounded-lg" style={{ background: "#e0e7ff", color: "#3730a3" }} title="Creada automáticamente al llegar al kilometraje/fecha del plan del fabricante">
+                            🤖 Auto
+                          </span>
+                        )}
                       </div>
                       <div className="text-sm text-gray-500 mt-0.5">
                         🚌 <b>{veh?.placa || "—"}</b> · {veh?.categoria}

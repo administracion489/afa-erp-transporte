@@ -325,8 +325,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
     items: [
       { href: "/vehiculos",              label: "Vehículos",          sub: "Flota",              icon: Ic.Bus,       modulo: "vehiculos"    },
       { href: "/documentos-vehiculares", label: "Docs. Vehiculares",  sub: "SOAT · CITV · MTC",  icon: Ic.FileCheck, modulo: "vehiculos"    },
-      { href: "/mantenimiento",          label: "Mantenimiento",      sub: "Próximos · OT · odómetro", icon: Ic.Wrench,    modulo: "mantenimiento"},
-      { href: "/mantenimiento/planes",   label: "Planes Fabricante",  sub: "Plan IA por modelo",       icon: Ic.FileText,  modulo: "mantenimiento"},
+      { href: "/mantenimiento",          label: "Mantenimiento",      sub: "Próximos · OT · planes · odómetro", icon: Ic.Wrench,    modulo: "mantenimiento"},
       { href: "/neumaticos",             label: "Neumáticos",         sub: "Vida útil",           icon: Ic.Circle,    modulo: "neumaticos"   },
       { href: "/combustible",            label: "Combustible",        sub: "Consumo",             icon: Ic.Fuel,      modulo: "combustible"  },
       { href: "/auditoria-jornada",      label: "Auditoría km",       sub: "Jornada vs servicio", icon: Ic.Scale,     modulo: "combustible"  },

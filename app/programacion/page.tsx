@@ -403,6 +403,7 @@ export default function ReservasPage() {
   const [vehTercero,   setVehTercero]   = useState<VehiculoTercero[]>([]);
   const [condTercero,  setCondTercero]  = useState<ConductorTercero[]>([]);
   const [docsTercero,  setDocsTercero]  = useState<DocumentoTercero[]>([]);
+  const [otPendientePorVeh, setOtPendientePorVeh] = useState<Set<number>>(new Set()); // vehiculo_id (flota propia) con OT abierta
   const [reservas,     setReservas]     = useState<Reserva[]>([]);
   const [resumen,      setResumen]      = useState<Resumen | null>(null); // agregados globales del tablero
   const [verTodo,      setVerTodo]      = useState(false);                // true = histórico completo (fuera de la ventana)
@@ -1175,7 +1176,7 @@ export default function ReservasPage() {
   // Catálogos (clientes, vehículos, conductores, terceros): no cambian al operar reservas,
   // se cargan una sola vez al montar.
   const cargarCatalogos = async () => {
-    const [clRes, vRes, cRes, etRes, vtRes, ctRes, dtRes] = await Promise.all([
+    const [clRes, vRes, cRes, etRes, vtRes, ctRes, dtRes, otRes] = await Promise.all([
       supabase.from("clientes").select("id,nombre,empresa,tipo").order("nombre"),
       supabase.from("vehiculos").select("id,placa,categoria,estado,estado_operativo,capacidad_pasajeros").order("placa"),
       supabase.from("conductores").select("id,nombre,licencia,vencimiento_licencia,estado,telefono").order("nombre"),
@@ -1183,6 +1184,9 @@ export default function ReservasPage() {
       supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,capacidad,estado,marca").order("placa"),
       supabase.from("conductores_tercero").select("id,empresa_id,nombre,licencia,vencimiento_licencia,telefono,estado").order("nombre"),
       supabase.from("documentos_tercero").select("id,empresa_id,tipo,fecha_vencimiento"),
+      // Solo informativo (ver badge "🔧 OT pendiente" en los selects de vehículo):
+      // NO se usa para filtrar ni bloquear ninguna asignación.
+      supabase.from("ordenes_trabajo").select("vehiculo_id").in("estado", ["abierta", "en_proceso"]),
     ]);
     setClientes(clRes.data     || []);
     setVehiculos(vRes.data     || []);
@@ -1191,6 +1195,7 @@ export default function ReservasPage() {
     setVehTercero(vtRes.data   || []);
     setCondTercero(ctRes.data  || []);
     setDocsTercero(dtRes.data  || []);
+    setOtPendientePorVeh(new Set((otRes.data || []).map((o: any) => o.vehiculo_id).filter((id: any) => id != null)));
   };
 
   // Totales del tablero (KPIs, flujo de estados, sumas): SIEMPRE globales, no dependen de la
@@ -1282,6 +1287,9 @@ export default function ReservasPage() {
 
   const vehiculosAptos         = vehiculos.filter(v => v.estado === "disponible" && (v.estado_operativo === "apto" || !v.estado_operativo));
   const conductoresDisponibles = conductores.filter(c => c.estado !== "no_disponible" && (!c.vencimiento_licencia || new Date(c.vencimiento_licencia) >= new Date()));
+  // Solo alerta visual — NO saca al vehículo de `vehiculosAptos` ni impide asignarlo:
+  // el mantenimiento se puede coordinar en un horario fuera del servicio.
+  const tieneOtPendiente = (id: number | string | null) => id != null && otPendientePorVeh.has(Number(id));
 
   const empSelId     = form.empresa_tercerizada_id ? Number(form.empresa_tercerizada_id) : null;
   const vehEmpSel    = empSelId ? vehTercero.filter(v => v.empresa_id === empSelId && v.estado === "disponible") : [];
@@ -2245,10 +2253,16 @@ export default function ReservasPage() {
                         <option value="">Seleccionar vehículo...</option>
                         {vehiculos.filter(v => v.estado !== "inactivo").map(v => (
                           <option key={v.id} value={v.id}>
-                            {v.placa} — {v.categoria || "Sin categoría"}{v.capacidad_pasajeros ? ` · ${v.capacidad_pasajeros} pax` : ""}
+                            {tieneOtPendiente(v.id) ? "🔧 " : ""}{v.placa} — {v.categoria || "Sin categoría"}{v.capacidad_pasajeros ? ` · ${v.capacidad_pasajeros} pax` : ""}
                           </option>
                         ))}
                       </select>
+                      {asignarVehId && tieneOtPendiente(asignarVehId) && (
+                        <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+                          🔧 Esta unidad tiene una orden de trabajo de mantenimiento pendiente. Puedes asignarla igual;
+                          revisa Mantenimiento → Órdenes de Trabajo.
+                        </div>
+                      )}
                     </div>
                     <div>
                       <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Conductor <span className="text-gray-300 font-normal normal-case">(opcional)</span></label>
@@ -2712,9 +2726,17 @@ export default function ReservasPage() {
                   <select className={inputCls()} value={form.vehiculo_id} onChange={f("vehiculo_id")}>
                     <option value="">Seleccionar vehiculo</option>
                     {vehiculosAptos.map(v => (
-                      <option key={v.id} value={v.id}>{v.placa} · {v.categoria}{v.capacidad_pasajeros ? " · " + v.capacidad_pasajeros + " pax" : ""}</option>
+                      <option key={v.id} value={v.id}>
+                        {tieneOtPendiente(v.id) ? "🔧 " : ""}{v.placa} · {v.categoria}{v.capacidad_pasajeros ? " · " + v.capacidad_pasajeros + " pax" : ""}
+                      </option>
                     ))}
                   </select>
+                  {form.vehiculo_id && tieneOtPendiente(form.vehiculo_id) && (
+                    <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+                      🔧 Esta unidad tiene una orden de trabajo de mantenimiento pendiente. Puedes asignarla igual
+                      (coordínalo en un horario fuera del servicio) — revisa <b>Mantenimiento → Órdenes de Trabajo</b>.
+                    </div>
+                  )}
                 </Campo>
                 <Campo label={"Conductor (" + conductoresDisponibles.length + " disponibles) *"}>
                   <select className={inputCls()} value={form.conductor_id} onChange={f("conductor_id")}>

@@ -11,10 +11,12 @@ import ProgramaTab from "./_tabs/ProgramaTab";
 import OrdenesTab from "./_tabs/OrdenesTab";
 import HistorialTab from "./_tabs/HistorialTab";
 import OdometroTab from "./_tabs/OdometroTab";
+import PlanesTab from "./_tabs/PlanesTab";
 
 const TABS = [
   { key: "proximos",  label: "Próximos",            Comp: ProgramaTab },
   { key: "ordenes",   label: "Órdenes de Trabajo",  Comp: OrdenesTab },
+  { key: "planes",    label: "Planes Fabricante",   Comp: PlanesTab },
   { key: "historial", label: "Historial",           Comp: HistorialTab },
   { key: "odometro",  label: "Odómetro",            Comp: OdometroTab },
 ] as const;

@@ -65,11 +65,22 @@ async function handler(req: NextRequest) {
 
     const umbralKm = Number(conf.umbral_km ?? 500);
     const umbralDias = Number(conf.umbral_dias ?? 7);
+    // Umbral de creación de OT: más ajustado que el de aviso (conf.umbral_km/dias
+    // arriba), para que el correo avise con anticipación pero la orden de trabajo
+    // real solo nazca cerca del vencimiento. Columnas nuevas: si el SQL de
+    // mantenimiento-ot-automatica.sql no se corrió todavía, caen a estos defaults
+    // y la OT automática simplemente no se activa (conf.ot_automatica_activa
+    // vendrá undefined → false con el `?? false` de abajo).
+    const umbralOtKm = Number(conf.umbral_ot_km ?? 100);
+    const umbralOtDias = Number(conf.umbral_ot_dias ?? 2);
+    const otAutomaticaActiva = conf.ot_automatica_activa ?? false;
 
-    // Enrolamientos activos + datos del plan
+    // Enrolamientos activos + datos del plan (intervalo por unidad manda sobre el
+    // del plan — ver supabase/mantenimiento-programa-editable.sql; debe coincidir
+    // con el cálculo de ProgramaTab).
     const { data: enrol } = await admin
       .from("vehiculos_plan")
-      .select("vehiculo_id, km_base, fecha_base, plan:planes_mantenimiento(marca, modelo, intervalo_base_km, intervalo_base_meses)")
+      .select("vehiculo_id, km_base, fecha_base, intervalo_km_override, intervalo_meses_override, plan:planes_mantenimiento(id, marca, modelo, intervalo_base_km, intervalo_base_meses)")
       .eq("activo", true);
 
     if (!enrol || enrol.length === 0) {
@@ -100,7 +111,29 @@ async function handler(req: NextRequest) {
     const lectPorVeh: Record<number, { km: number; fecha: string }[]> = {};
     for (const l of (lect || [])) (lectPorVeh[l.vehiculo_id] ??= []).push(l);
 
+    // Tareas de cada plan involucrado, para armar el checklist de las OT
+    // automáticas (una consulta en lote, no una por vehículo).
+    const planIds = [...new Set((enrol as any[]).map(e => {
+      const p = Array.isArray(e.plan) ? e.plan[0] : e.plan;
+      return p?.id;
+    }).filter(Boolean))];
+    const { data: tareasPlan } = planIds.length
+      ? await admin.from("plan_tareas").select("plan_id, tarea, especificacion, categoria, cada_servicio, acciones").in("plan_id", planIds)
+      : { data: [] as any[] };
+    const tareasPorPlan: Record<string, any[]> = {};
+    for (const t of (tareasPlan || [])) (tareasPorPlan[t.plan_id] ??= []).push(t);
+
+    // OT automáticas ya abiertas hoy, para no duplicar (además del índice único
+    // ux_ordenes_trabajo_auto_dedupe en la base, que es la red de seguridad real
+    // ante corridas concurrentes del cron).
+    const { data: otsAuto } = await admin
+      .from("ordenes_trabajo")
+      .select("vehiculo_id, km_apertura")
+      .eq("origen", "automatica").in("estado", ["abierta", "en_proceso"]).in("vehiculo_id", vehIds);
+    const otsAutoDedupe = new Set((otsAuto || []).map((o: any) => `${o.vehiculo_id}:${o.km_apertura}`));
+
     const alertas: Alerta[] = [];
+    let otsCreadas = 0;
 
     for (const e of enrol as any[]) {
       const plan: any = Array.isArray(e.plan) ? e.plan[0] : e.plan;
@@ -112,12 +145,17 @@ async function handler(req: NextRequest) {
       const kmActual = Number(v.kilometraje_actual ?? 0);
       const kmDia = kmPorDia(lectPorVeh[e.vehiculo_id] || []);
 
+      // El intervalo por unidad (ajustado en Programa de Mantenimiento) manda
+      // sobre el del plan — debe coincidir con ProgramaTab.tsx.
+      const interKm = e.intervalo_km_override ?? plan.intervalo_base_km ?? null;
+      const interMeses = e.intervalo_meses_override ?? plan.intervalo_base_meses ?? null;
+
       // Próximo servicio por KM = rejilla del fabricante (odómetro absoluto). Si hay
       // servicio preventivo registrado, se re-ancla a él (puede quedar vencido); si
       // no, se toma el siguiente hito MAYOR al km actual. (Debe coincidir con la
       // pestaña Próximos en ProgramaTab.)
       let dueKm: number | null = null, faltanKm: number | null = null, diasPorKm: number | null = null;
-      const inter = Number(plan.intervalo_base_km || 0);
+      const inter = Number(interKm || 0);
       if (inter > 0) {
         const ultServ = um?.kilometraje ?? null;
         dueKm = ultServ !== null
@@ -128,28 +166,81 @@ async function handler(req: NextRequest) {
       }
 
       let dueFecha: string | null = null, faltanDias: number | null = null;
-      if (plan.intervalo_base_meses && baseFecha) {
-        dueFecha = addMeses(baseFecha, Number(plan.intervalo_base_meses));
+      if (interMeses && baseFecha) {
+        dueFecha = addMeses(baseFecha, Number(interMeses));
         faltanDias = diasHasta(dueFecha);
       }
 
       const porKm = faltanKm !== null && faltanKm <= umbralKm;
       const porFecha = faltanDias !== null && faltanDias <= umbralDias;
+      if (!porKm && !porFecha) continue;
 
-      if (porKm || porFecha) {
-        alertas.push({
-          placa: v.placa,
-          modelo: `${plan.marca} ${plan.modelo}`.trim(),
-          kmActual, dueKm, faltanKm, diasPorKm, dueFecha, faltanDias,
-          motivo: porKm && porFecha ? "km y fecha" : porKm ? "km" : "fecha",
-          vencido: (faltanKm !== null && faltanKm <= 0) || (faltanDias !== null && faltanDias <= 0),
-        });
+      // ── OT automática: umbral más ajustado que el de aviso ──────────────────
+      // No bloquea la asignación del servicio en Programación (eso vive aparte,
+      // solo se muestra como badge informativo) ni excluye al vehículo de nada;
+      // acá solo decide si además del correo se abre una orden de trabajo.
+      const porOtKm = faltanKm !== null && faltanKm <= umbralOtKm;
+      const porOtDias = faltanDias !== null && faltanDias <= umbralOtDias;
+      let tieneOtAbierta = false;
+
+      if (otAutomaticaActiva && dueKm !== null && (porOtKm || porOtDias)) {
+        const dedupeKey = `${e.vehiculo_id}:${dueKm}`;
+        if (otsAutoDedupe.has(dedupeKey)) {
+          tieneOtAbierta = true;
+        } else {
+          try {
+            const tareasHito = (tareasPorPlan[plan.id] || []).filter((t: any) =>
+              t.cada_servicio || (Array.isArray(t.acciones) && t.acciones.some((a: any) => Number(a.km) === dueKm))
+            );
+            const motivoOt = porOtKm && porOtDias ? "km y fecha" : porOtKm ? "km" : "fecha";
+            const { data: nuevaOt, error: errOt } = await admin.from("ordenes_trabajo").insert({
+              vehiculo_id: e.vehiculo_id,
+              plan_mantenimiento_id: plan.id,
+              km_apertura: dueKm,
+              fecha_apertura: hoy,
+              estado: "abierta",
+              origen: "automatica",
+              observaciones: `Generada automáticamente: servicio preventivo por ${motivoOt} (plan ${plan.marca} ${plan.modelo}).`,
+            }).select("id").single();
+            if (errOt) throw errOt;
+            if (nuevaOt && tareasHito.length) {
+              await admin.from("checklist_ot").insert(tareasHito.map((t: any) => ({
+                orden_trabajo_id: nuevaOt.id,
+                item: t.especificacion ? `${t.tarea} — ${t.especificacion}` : t.tarea,
+                categoria: t.categoria || "Otros",
+                completado: false,
+              })));
+            }
+            otsAutoDedupe.add(dedupeKey);
+            tieneOtAbierta = true;
+            otsCreadas++;
+          } catch (err: any) {
+            // Columnas nuevas ausentes (SQL no corrido) u otro error puntual: no
+            // debe tumbar el resto del cron ni el envío de correos.
+            console.error("[mantenimiento/alertas] OT automática", v.placa, err?.message || err);
+          }
+        }
       }
+
+      // El correo se suspende para lo que ya tiene una OT abierta rastreándolo —
+      // sigue viéndose "Próximo/Vencido" en el ERP, solo deja de spamear.
+      if (tieneOtAbierta) continue;
+
+      alertas.push({
+        placa: v.placa,
+        modelo: `${plan.marca} ${plan.modelo}`.trim(),
+        kmActual, dueKm, faltanKm, diasPorKm, dueFecha, faltanDias,
+        motivo: porKm && porFecha ? "km y fecha" : porKm ? "km" : "fecha",
+        vencido: (faltanKm !== null && faltanKm <= 0) || (faltanDias !== null && faltanDias <= 0),
+      });
     }
 
     if (alertas.length === 0) {
       await admin.from("config_mantenimiento").update({ ultima_alerta_fecha: hoy }).eq("id", 1);
-      return NextResponse.json({ ok: true, alertas: 0, mensaje: "Sin mantenimientos próximos" });
+      return NextResponse.json({
+        ok: true, alertas: 0, otsCreadas,
+        mensaje: otsCreadas > 0 ? "Sin correos por enviar (todo lo próximo ya tiene OT abierta)" : "Sin mantenimientos próximos",
+      });
     }
 
     // Orden: vencidos primero, luego por los que menos falta
@@ -173,7 +264,7 @@ async function handler(req: NextRequest) {
 
     await admin.from("config_mantenimiento").update({ ultima_alerta_fecha: hoy }).eq("id", 1);
 
-    return NextResponse.json({ ok: true, alertas: alertas.length, enviados, detalle: alertas });
+    return NextResponse.json({ ok: true, alertas: alertas.length, enviados, otsCreadas, detalle: alertas });
   } catch (error: any) {
     console.error("[mantenimiento/alertas]", error);
     return NextResponse.json({ error: error.message }, { status: 500 });

@@ -30,6 +30,7 @@ type Lectura = { vehiculo_id: number; km: number; fecha: string };
 type Config = {
   correos_alerta: string; umbral_km: number; umbral_dias: number;
   km_dia_max: number; alertas_activas: boolean;
+  umbral_ot_km: number; umbral_ot_dias: number; ot_automatica_activa: boolean;
 };
 
 type Venc = {
@@ -85,6 +86,7 @@ export default function ProgramaTab() {
   const [lecturas, setLecturas]   = useState<Lectura[]>([]);
   const [cfg, setCfg]             = useState<Config>({
     correos_alerta: "", umbral_km: 500, umbral_dias: 7, km_dia_max: 1500, alertas_activas: true,
+    umbral_ot_km: 100, umbral_ot_dias: 2, ot_automatica_activa: true,
   });
   const [loading, setLoading]   = useState(true);
   const [guardandoCfg, setGuardandoCfg] = useState(false);
@@ -132,6 +134,9 @@ export default function ProgramaTab() {
       umbral_dias: cRes.data.umbral_dias ?? 7,
       km_dia_max: cRes.data.km_dia_max ?? 1500,
       alertas_activas: cRes.data.alertas_activas ?? true,
+      umbral_ot_km: cRes.data.umbral_ot_km ?? 100,
+      umbral_ot_dias: cRes.data.umbral_ot_dias ?? 2,
+      ot_automatica_activa: cRes.data.ot_automatica_activa ?? true,
     });
     setLoading(false);
   };
@@ -205,17 +210,29 @@ export default function ProgramaTab() {
 
   const guardarConfig = async () => {
     setGuardandoCfg(true);
-    const { error } = await supabase.from("config_mantenimiento").update({
+    const campos: any = {
       correos_alerta: cfg.correos_alerta.trim() || null,
       umbral_km: Number(cfg.umbral_km) || 0,
       umbral_dias: Number(cfg.umbral_dias) || 0,
       km_dia_max: Number(cfg.km_dia_max) || 1500,
       alertas_activas: cfg.alertas_activas,
+      umbral_ot_km: Number(cfg.umbral_ot_km) || 0,
+      umbral_ot_dias: Number(cfg.umbral_ot_dias) || 0,
+      ot_automatica_activa: cfg.ot_automatica_activa,
       updated_at: new Date().toISOString(),
-    }).eq("id", 1);
+    };
+    let { error } = await supabase.from("config_mantenimiento").update(campos).eq("id", 1);
+    let faltanColumnas = false;
+    if (error && (error.code === "PGRST204" || /column .* does not exist|Could not find the/i.test(error.message || ""))) {
+      faltanColumnas = true;
+      const { umbral_ot_km, umbral_ot_dias, ot_automatica_activa, ...resto } = campos;
+      ({ error } = await supabase.from("config_mantenimiento").update(resto).eq("id", 1));
+    }
     setGuardandoCfg(false);
     if (error) alert("Error al guardar: " + error.message);
-    else alert("Configuración guardada ✓");
+    else alert(faltanColumnas
+      ? "Guardado ✓ — pero la OT automática NO se guardó: falta correr supabase/mantenimiento-ot-automatica.sql"
+      : "Configuración guardada ✓");
   };
 
   // ── Edición del programa por unidad ───────────────────────────────────────────
@@ -653,6 +670,40 @@ tbody tr:nth-child(even){background:#f8fafc}
             </label>
           </div>
         </div>
+
+        <div className="rounded-xl border bg-gray-50 p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">🔧</span>
+            <div>
+              <p className="text-sm font-bold text-gray-800">OT automática</p>
+              <p className="text-[11px] text-gray-500">
+                Umbral aparte, más ajustado que el aviso de arriba: al entrar en este rango se abre sola una
+                orden de trabajo (checklist tomado del plan del fabricante) y ese vehículo deja de mandar
+                correo — sigue viéndose Próximo/Vencido en esta tabla, y NO se le quita la unidad de Programación.
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Crear OT cuando falten ≤ (km)</label>
+              <input type="number" className={inputCls("font-mono bg-white")} value={cfg.umbral_ot_km}
+                onChange={e => setCfg(c => ({ ...c, umbral_ot_km: Number(e.target.value) }))} />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Crear OT cuando falten ≤ (días)</label>
+              <input type="number" className={inputCls("font-mono bg-white")} value={cfg.umbral_ot_dias}
+                onChange={e => setCfg(c => ({ ...c, umbral_ot_dias: Number(e.target.value) }))} />
+            </div>
+            <div className="flex items-end">
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input type="checkbox" checked={cfg.ot_automatica_activa}
+                  onChange={e => setCfg(c => ({ ...c, ot_automatica_activa: e.target.checked }))} />
+                OT automática activa
+              </label>
+            </div>
+          </div>
+        </div>
+
         <button onClick={guardarConfig} disabled={guardandoCfg}
           className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60 hover:opacity-90" style={{ background: "#0b315f" }}>
           {guardandoCfg ? "Guardando…" : "Guardar configuración"}
