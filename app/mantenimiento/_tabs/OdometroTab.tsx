@@ -99,26 +99,47 @@ function fileToAdjunto(file: File): Promise<{ tipo: "image"; media_type: string;
 type ExtremoFalta = "cierre" | "apertura";
 
 /**
- * Qué extremo falta. Solo el rol explícito de la lectura (checkin/checkout) es CONCLUYENTE; la
- * hora, como mucho, sugiere.
+ * Qué extremo le falta a la jornada, mirando TODAS sus lecturas.
  *
- * La primera versión daba por segura cualquier lectura anterior a las 11:00 y la trataba como
- * entrada — pero una jornada corta cierra a media mañana, y entonces el sistema ofrecía completar
- * el extremo equivocado sin dejar corregirlo. La franja concluyente se reduce a lo que de verdad
- * no admite discusión (nadie cierra la jornada antes de las 08:00 ni la abre pasadas las 19:00) y
- * en todo lo demás manda el operador: el modal siempre deja elegir.
+ * Dos errores que corrige esta versión:
+ *   1. Contar lecturas no dice si la jornada está completa. Dos lecturas pueden ser las dos de
+ *      la mañana —el conductor abre por la app y a la vez manda la foto al grupo— y entonces el
+ *      día se cierra con el kilometraje de las 05:36 (CWZ-371 el 10/08: 0 km frente a los 87 km
+ *      que hace normalmente). Lo que cuenta es si hay un extremo de APERTURA y uno de CIERRE.
+ *   2. Solo el rol explícito (checkin/checkout) es concluyente; la hora, como mucho, sugiere.
+ *      Antes se daba por segura cualquier lectura anterior a las 11:00, y una jornada corta
+ *      cierra a media mañana. La franja concluyente se reduce a lo que no admite discusión:
+ *      nadie cierra jornada antes de las 08:00 ni la abre pasadas las 19:00. En el resto manda
+ *      el operador — el modal siempre deja elegir.
  */
-function extremoQueFalta(j: DiaRecorrido): { falta: ExtremoFalta; seguro: boolean } {
-  const l = j.lecturas[0];
-  if (l?.momento === "checkin") return { falta: "cierre", seguro: true };
-  if (l?.momento === "checkout") return { falta: "apertura", seguro: true };
-  const hh = Number((j.primeraHora || "").slice(0, 2));
-  if (!Number.isFinite(hh)) return { falta: "cierre", seguro: false };
-  if (hh <= 7) return { falta: "cierre", seguro: true };     // de madrugada solo se abre jornada
-  if (hh >= 19) return { falta: "apertura", seguro: true };  // de noche solo se cierra
-  // Resto del día: se propone lo más probable, pero como SUPOSICIÓN — puede ser el cierre de una
-  // jornada corta tanto como la entrada de una que empezó tarde.
-  return { falta: hh <= 13 ? "cierre" : "apertura", seguro: false };
+function extremoQueFalta(j: DiaRecorrido): { falta: ExtremoFalta; seguro: boolean; completa: boolean } {
+  const ls = j.lecturas || [];
+  const hIni = Number((j.primeraHora || "").slice(0, 2));
+  const hFin = Number((j.ultimaHora || "").slice(0, 2));
+  const marcaApertura = ls.some((l) => l.momento === "checkin");
+  const marcaCierre   = ls.some((l) => l.momento === "checkout");
+
+  // Con una sola lectura la jornada está a medias con total seguridad; lo único a decidir es
+  // por qué extremo. Solo el rol explícito es concluyente: antes de las 08:00 nadie cierra la
+  // jornada y pasadas las 19:00 nadie la abre; en el resto del día se sugiere y el operador manda.
+  if (ls.length <= 1) {
+    if (marcaApertura) return { falta: "cierre", seguro: true, completa: false };
+    if (marcaCierre)   return { falta: "apertura", seguro: true, completa: false };
+    if (Number.isFinite(hIni) && hIni <= 7)  return { falta: "cierre", seguro: true, completa: false };
+    if (Number.isFinite(hIni) && hIni >= 19) return { falta: "apertura", seguro: true, completa: false };
+    return { falta: Number.isFinite(hIni) && hIni > 13 ? "apertura" : "cierre", seguro: false, completa: false };
+  }
+
+  // Con varias lecturas se da por buena la jornada, SALVO que sus extremos no sean creíbles: en
+  // esta flota los cierres reales caen entre las 15:00 y las 23:00, así que una jornada cuya
+  // última lectura es de media mañana no tiene cierre —tiene dos tomas del arranque, como cuando
+  // el conductor abre por la app y manda la foto al grupo casi a la vez (CWZ-371 el 10/08: dos
+  // lecturas a las 05:35 y 05:36, 0 km frente a los 87 km de un día suyo normal).
+  const cierreCreible   = marcaCierre   || !(Number.isFinite(hFin) && hFin < 13);
+  const aperturaCreible = marcaApertura || !(Number.isFinite(hIni) && hIni > 13);
+  if (cierreCreible && aperturaCreible) return { falta: "cierre", seguro: false, completa: true };
+  if (!cierreCreible)                   return { falta: "cierre", seguro: true, completa: false };
+  return { falta: "apertura", seguro: true, completa: false };
 }
 
 export type PropuestaKm = { km: number; origen: string; contiguo: boolean };
@@ -142,9 +163,11 @@ function proponerKm(j: DiaRecorrido, dias: DiaRecorrido[], falta: ExtremoFalta):
 
   const km = falta === "cierre" ? vecina.primeraKm : vecina.ultimaKm;
   if (!Number.isFinite(km) || km <= 0) return null;
-  // Coherencia mínima: el cierre no puede ser menor que la entrada, ni la apertura mayor que la salida.
-  if (falta === "cierre" && km < j.primeraKm) return null;
-  if (falta === "apertura" && km > j.ultimaKm) return null;
+  // Coherencia: el cierre va por encima de la lectura MÁS ALTA que ya tiene la jornada y la
+  // apertura por debajo de la MÁS BAJA. Con una sola lectura ambas coinciden; con varias, no —
+  // comparar contra la de entrada al añadir un cierre dejaba pasar valores intermedios.
+  if (falta === "cierre" && km < j.ultimaKm) return null;
+  if (falta === "apertura" && km > j.primeraKm) return null;
 
   const dist = Math.abs(diasEntreFechas(j.fecha, vecina.fecha));
   const hora = falta === "cierre" ? vecina.primeraHora : vecina.ultimaHora;
@@ -444,14 +467,16 @@ export default function OdometroTab() {
     const km = Number(cKm);
     if (!km || km <= 0) { alert(`Ingresa el kilometraje ${esCierre ? "final" : "inicial"} del odómetro`); return; }
 
-    // El extremo que se agrega no puede cruzarse con el que ya existe: el cierre va por encima
-    // de la entrada y la apertura por debajo de la salida.
-    if (esCierre && km < completar.primeraKm) {
-      alert(`El km final (${km.toLocaleString("es-PE")}) no puede ser menor al de entrada (${fmtNum(completar.primeraKm)} km).`);
+    // El extremo que se agrega no puede cruzarse con NINGUNA lectura que la jornada ya tenga:
+    // el cierre va por encima de la más alta y la apertura por debajo de la más baja. (Con una
+    // sola lectura da igual; con varias, comparar contra la de entrada dejaba colar un cierre
+    // por debajo de una lectura intermedia.)
+    if (esCierre && km < completar.ultimaKm) {
+      alert(`El km final (${km.toLocaleString("es-PE")}) no puede ser menor que la última lectura del día (${fmtNum(completar.ultimaKm)} km).`);
       return;
     }
-    if (!esCierre && km > completar.ultimaKm) {
-      alert(`El km inicial (${km.toLocaleString("es-PE")}) no puede ser mayor al de salida (${fmtNum(completar.ultimaKm)} km).`);
+    if (!esCierre && km > completar.primeraKm) {
+      alert(`El km inicial (${km.toLocaleString("es-PE")}) no puede ser mayor que la primera lectura del día (${fmtNum(completar.primeraKm)} km).`);
       return;
     }
     // La apertura tampoco puede quedar por debajo del cierre del día anterior: sería un retroceso
@@ -800,13 +825,14 @@ export default function OdometroTab() {
                     </td></tr>
                   ) : jornadas.map((j) => {
                     const sev = peorSeveridad(j.anomalias);
-                    // En una jornada a medias, la única lectura va en SU columna: si es la de
-                    // salida, ponerla bajo "Primera" haría creer que el día empezó con ese km.
-                    // Solo se recoloca cuando se sabe con certeza; si es una suposición se deja
-                    // donde está y el modal se encarga de preguntar.
-                    const det = j.pendiente && !j.reinicio ? extremoQueFalta(j) : null;
+                    // El diagnóstico se hace en TODAS las jornadas, no solo en las de una lectura:
+                    // una con dos lecturas de la misma mañana tampoco tiene cierre. En las de una
+                    // sola lectura, además, esa lectura va en SU columna — ponerla bajo "Primera"
+                    // cuando era la de salida haría creer que el día empezó con ese km (solo se
+                    // recoloca si se sabe con certeza; si es suposición, lo pregunta el modal).
+                    const det = j.reinicio ? null : extremoQueFalta(j);
                     const faltaEn = det?.falta ?? null;
-                    const soloCierre = faltaEn === "apertura" && det!.seguro;
+                    const soloCierre = j.pendiente && faltaEn === "apertura" && !!det?.seguro;
                     return (
                       <tr key={`${j.key}-${j.fecha}`} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
                         <td className="p-3 font-mono font-bold text-[#0b315f] text-xs">{j.placa}</td>
@@ -855,15 +881,24 @@ export default function OdometroTab() {
                             // Ámbar = falta el cierre; índigo = falta la apertura. El color separa
                             // los dos casos de un vistazo. Cuando la hora no basta para saberlo, el
                             // botón NO afirma cuál es: va neutro y se decide dentro del modal.
+                            // Y si la jornada ya tiene sus dos extremos, queda un botón discreto:
+                            // siempre debe poder añadirse una lectura, aunque el sistema no la eche
+                            // en falta (una jornada puede tener tres tomas legítimas).
                             const cfg = EXTREMO_CFG[faltaEn];
-                            const seguro = det!.seguro;
+                            const completa = !!det?.completa;
+                            const seguro = !!det?.seguro;
                             return (
                               <button onClick={() => abrirCompletar(j, faltaEn)}
-                                className={`text-xs font-bold border rounded-lg px-2.5 py-1.5 mr-2 ${seguro ? cfg.boton : "text-gray-600 border-gray-200 bg-gray-50 hover:bg-gray-100"}`}
-                                title={seguro
-                                  ? `Ingresar manualmente el ${cfg.etiqueta.toLowerCase()} de esta jornada`
-                                  : "Falta un extremo de la jornada; la hora no aclara cuál — se elige al abrir"}>
-                                ➕ {seguro ? cfg.etiqueta : "Completar jornada"}
+                                className={`text-xs font-bold border rounded-lg px-2.5 py-1.5 mr-2 ${
+                                  completa ? "text-gray-400 border-gray-100 hover:bg-gray-50"
+                                  : seguro ? cfg.boton
+                                  : "text-gray-600 border-gray-200 bg-gray-50 hover:bg-gray-100"}`}
+                                title={completa
+                                  ? "La jornada tiene apertura y cierre; aun así puedes añadir otra lectura"
+                                  : seguro
+                                    ? `Ingresar manualmente el ${cfg.etiqueta.toLowerCase()} de esta jornada`
+                                    : "Falta un extremo de la jornada; la hora no aclara cuál — se elige al abrir"}>
+                                {completa ? "＋" : `➕ ${seguro ? cfg.etiqueta : "Completar jornada"}`}
                               </button>
                             );
                           })()}
@@ -958,13 +993,16 @@ export default function OdometroTab() {
         const esCierre = completar.falta === "cierre";
         const cfg = EXTREMO_CFG[completar.falta];
         const kmNum = Number(cKm);
-        // El extremo que YA existe: entrada si falta el cierre, salida si falta la apertura.
-        const kmConocido = esCierre ? completar.primeraKm : completar.ultimaKm;
-        const horaConocida = esCierre ? completar.primeraHora : completar.ultimaHora;
+        const varias = completar.nLecturas > 1;
+        // Límite del número nuevo: el cierre va por encima de la lectura más ALTA del día y la
+        // apertura por debajo de la más BAJA (con una sola lectura ambas son la misma).
+        const kmLimite = esCierre ? completar.ultimaKm : completar.primeraKm;
+        const horaLimite = esCierre ? completar.ultimaHora : completar.primeraHora;
         const recorridoPrev = kmNum > 0
-          ? (esCierre ? (kmNum >= kmConocido ? kmNum - kmConocido : null) : (kmNum <= kmConocido ? kmConocido - kmNum : null))
+          ? (esCierre ? (kmNum >= completar.ultimaKm ? kmNum - completar.primeraKm : null)
+                      : (kmNum <= completar.primeraKm ? completar.ultimaKm - kmNum : null))
           : null;
-        const cruzado = cKm !== "" && (esCierre ? kmNum < kmConocido : kmNum > kmConocido);
+        const cruzado = cKm !== "" && (esCierre ? kmNum < kmLimite : kmNum > kmLimite);
         const p = completar.propuesta;
         return (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50" onClick={() => !cGuardando && setCompletar(null)}>
@@ -973,14 +1011,20 @@ export default function OdometroTab() {
                 <h2 className="text-lg font-bold" style={{ color: cfg.color }}>{cfg.etiqueta} de la jornada</h2>
                 <p className="text-xs text-gray-500 mt-0.5">
                   <span className="font-mono font-bold text-[#0b315f]">{completar.placa}</span> · {fmtFecha(completar.fecha)}
-                  {horaConocida ? ` · ${esCierre ? "entró" : "salió"} ${horaConocida}` : ""}
+                  {varias
+                    ? ` · ${completar.nLecturas} lecturas (${completar.primeraHora}–${completar.ultimaHora})`
+                    : completar.primeraHora ? ` · ${esCierre ? "entró" : "salió"} ${completar.primeraHora}` : ""}
                 </p>
               </div>
 
               <div className="rounded-xl px-3 py-2 text-xs" style={{ background: cfg.bg, borderWidth: 1, borderColor: cfg.borde, color: cfg.color }}>
                 {esCierre
-                  ? "Esta jornada quedó sin cierre: solo tiene la lectura de entrada. Ingresa el kilometraje con que terminó el día."
-                  : "Esta jornada solo tiene la lectura de salida: falta con cuánto empezó el día. Ingresa el kilometraje de apertura."}
+                  ? (varias
+                      ? `Esta jornada tiene ${completar.nLecturas} lecturas, pero ninguna es el cierre del día: la última es de las ${completar.ultimaHora}. Ingresa el kilometraje con que terminó.`
+                      : "Esta jornada quedó sin cierre: solo tiene la lectura de entrada. Ingresa el kilometraje con que terminó el día.")
+                  : (varias
+                      ? `Esta jornada tiene ${completar.nLecturas} lecturas, pero ninguna es la apertura: la primera es de las ${completar.primeraHora}. Ingresa el kilometraje con que empezó.`
+                      : "Esta jornada solo tiene la lectura de salida: falta con cuánto empezó el día. Ingresa el kilometraje de apertura.")}
               </div>
 
               {/* SIEMPRE se puede cambiar de extremo: la hora sugiere, pero quien sabe si esa
@@ -998,22 +1042,33 @@ export default function OdometroTab() {
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                {/* El extremo conocido va SIEMPRE en su columna real, para no leer al revés la jornada. */}
+                {/* Lo que la jornada YA tiene, en su columna real para no leerla al revés. Con
+                    varias lecturas se enseñan las dos puntas: el número nuevo tiene que caber fuera. */}
                 <div className={esCierre ? "" : "order-2"}>
                   <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
-                    {esCierre ? "Km de entrada" : "Km de salida"}
+                    {varias ? "Ya registrado" : esCierre ? "Km de entrada" : "Km de salida"}
                   </label>
-                  <div className="border border-gray-200 rounded-xl px-3 py-2.5 text-sm font-mono text-gray-500 bg-gray-50">{fmtNum(kmConocido)}</div>
+                  <div className="border border-gray-200 rounded-xl px-3 py-2.5 text-sm font-mono text-gray-500 bg-gray-50 whitespace-nowrap overflow-x-auto">
+                    {varias
+                      ? `${fmtNum(completar.primeraKm)} → ${fmtNum(completar.ultimaKm)}`
+                      : fmtNum(kmLimite)}
+                  </div>
                 </div>
                 <div className={esCierre ? "" : "order-1"}>
                   <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
                     {esCierre ? "Km final *" : "Km inicial *"}
                   </label>
                   <input type="number" autoFocus className={inputCls("font-mono")}
-                    placeholder={esCierre ? `≥ ${fmtNum(kmConocido)}` : `≤ ${fmtNum(kmConocido)}`}
+                    placeholder={esCierre ? `≥ ${fmtNum(kmLimite)}` : `≤ ${fmtNum(kmLimite)}`}
                     value={cKm} onChange={e => setCKm(e.target.value)} />
                 </div>
               </div>
+              {varias && (
+                <p className="text-[11px] text-gray-400 -mt-1">
+                  Las {completar.nLecturas} lecturas del día van de las {completar.primeraHora} a las {completar.ultimaHora}
+                  {horaLimite ? ` · el nuevo valor debe quedar ${esCierre ? "por encima" : "por debajo"} de la de las ${horaLimite}` : ""}.
+                </p>
+              )}
 
               {/* El número que falta suele estar ya en la jornada vecina. Se propone con su
                   procedencia; el operador puede aceptarlo tal cual o escribir otro. */}
@@ -1047,7 +1102,9 @@ export default function OdometroTab() {
               )}
               {cruzado && (
                 <p className="text-xs font-bold text-red-600">
-                  {esCierre ? "El km final no puede ser menor al de entrada." : "El km inicial no puede ser mayor al de salida."}
+                  {esCierre
+                    ? `El km final no puede ser menor que ${fmtNum(kmLimite)}${varias ? " (la última lectura del día)" : " (el de entrada)"}.`
+                    : `El km inicial no puede ser mayor que ${fmtNum(kmLimite)}${varias ? " (la primera lectura del día)" : " (el de salida)"}.`}
                 </p>
               )}
 
