@@ -11,7 +11,7 @@
 // de pop-ups; luego se escribe el HTML ya generado.
 // ══════════════════════════════════════════════════════════════════════════════
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   cargarServiciosRango, agruparPorRuta,
   construirManifiestosLoteHTML, construirReportesLoteHTML,
@@ -58,20 +58,29 @@ export default function DescargaMasivaModal({ fechaInicial, onClose }: { fechaIn
     return () => window.removeEventListener("keydown", h);
   }, [onClose]);
 
+  // Evita la condición de carrera al cambiar de fechas rápido: si una consulta vieja
+  // (de un rango anterior) tarda más y resuelve DESPUÉS de la consulta nueva, no debe
+  // pisar los resultados ya mostrados de la búsqueda más reciente.
+  const cargaIdRef = useRef(0);
   const cargar = useCallback(async () => {
     if (desde > hasta) { setError("La fecha 'desde' no puede ser mayor que 'hasta'."); return; }
+    const miCarga = ++cargaIdRef.current;
     setLoading(true); setError(null);
     try {
       const { servicios, empresa } = await cargarServiciosRango(desde, hasta);
+      if (cargaIdRef.current !== miCarga) return; // ya hay una consulta más nueva en curso
       setServicios(servicios); setEmpresa(empresa);
       setSel(new Set()); setPlacaFiltro(""); setSentidoFiltro("todos");
       // Abrir por defecto la ruta con más servicios (la primera del agrupado).
       const g = agruparPorRuta(servicios);
       setAbiertos(g.length ? new Set([g[0].firma]) : new Set());
     } catch (e: any) {
+      if (cargaIdRef.current !== miCarga) return;
       setError(e?.message || "No se pudieron cargar los servicios.");
       setServicios([]);
-    } finally { setLoading(false); }
+    } finally {
+      if (cargaIdRef.current === miCarga) setLoading(false);
+    }
   }, [desde, hasta]);
 
   useEffect(() => { cargar(); }, [cargar]);
