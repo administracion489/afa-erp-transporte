@@ -98,19 +98,27 @@ function fileToAdjunto(file: File): Promise<{ tipo: "image"; media_type: string;
 
 type ExtremoFalta = "cierre" | "apertura";
 
-/** Qué extremo falta: manda el rol explícito de la lectura; si no lo trae, lo dice su hora. */
+/**
+ * Qué extremo falta. Solo el rol explícito de la lectura (checkin/checkout) es CONCLUYENTE; la
+ * hora, como mucho, sugiere.
+ *
+ * La primera versión daba por segura cualquier lectura anterior a las 11:00 y la trataba como
+ * entrada — pero una jornada corta cierra a media mañana, y entonces el sistema ofrecía completar
+ * el extremo equivocado sin dejar corregirlo. La franja concluyente se reduce a lo que de verdad
+ * no admite discusión (nadie cierra la jornada antes de las 08:00 ni la abre pasadas las 19:00) y
+ * en todo lo demás manda el operador: el modal siempre deja elegir.
+ */
 function extremoQueFalta(j: DiaRecorrido): { falta: ExtremoFalta; seguro: boolean } {
   const l = j.lecturas[0];
   if (l?.momento === "checkin") return { falta: "cierre", seguro: true };
   if (l?.momento === "checkout") return { falta: "apertura", seguro: true };
   const hh = Number((j.primeraHora || "").slice(0, 2));
-  if (Number.isFinite(hh)) {
-    if (hh <= 11) return { falta: "cierre", seguro: true };   // lectura de la mañana = entrada
-    if (hh >= 18) return { falta: "apertura", seguro: true }; // lectura de la noche  = salida
-  }
-  // Mediodía sin rol: no se puede afirmar cuál es. Se ofrece el cierre (el caso mayoritario)
-  // pero el modal deja cambiar de extremo.
-  return { falta: "cierre", seguro: false };
+  if (!Number.isFinite(hh)) return { falta: "cierre", seguro: false };
+  if (hh <= 7) return { falta: "cierre", seguro: true };     // de madrugada solo se abre jornada
+  if (hh >= 19) return { falta: "apertura", seguro: true };  // de noche solo se cierra
+  // Resto del día: se propone lo más probable, pero como SUPOSICIÓN — puede ser el cierre de una
+  // jornada corta tanto como la entrada de una que empezó tarde.
+  return { falta: hh <= 13 ? "cierre" : "apertura", seguro: false };
 }
 
 export type PropuestaKm = { km: number; origen: string; contiguo: boolean };
@@ -794,8 +802,11 @@ export default function OdometroTab() {
                     const sev = peorSeveridad(j.anomalias);
                     // En una jornada a medias, la única lectura va en SU columna: si es la de
                     // salida, ponerla bajo "Primera" haría creer que el día empezó con ese km.
-                    const faltaEn = j.pendiente && !j.reinicio ? extremoQueFalta(j).falta : null;
-                    const soloCierre = faltaEn === "apertura";
+                    // Solo se recoloca cuando se sabe con certeza; si es una suposición se deja
+                    // donde está y el modal se encarga de preguntar.
+                    const det = j.pendiente && !j.reinicio ? extremoQueFalta(j) : null;
+                    const faltaEn = det?.falta ?? null;
+                    const soloCierre = faltaEn === "apertura" && det!.seguro;
                     return (
                       <tr key={`${j.key}-${j.fecha}`} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
                         <td className="p-3 font-mono font-bold text-[#0b315f] text-xs">{j.placa}</td>
@@ -842,13 +853,17 @@ export default function OdometroTab() {
                         <td className="p-3 text-right whitespace-nowrap">
                           {faltaEn && j.fecha < hoy && (() => {
                             // Ámbar = falta el cierre; índigo = falta la apertura. El color separa
-                            // los dos casos de un vistazo, sin tener que leer cada fila.
+                            // los dos casos de un vistazo. Cuando la hora no basta para saberlo, el
+                            // botón NO afirma cuál es: va neutro y se decide dentro del modal.
                             const cfg = EXTREMO_CFG[faltaEn];
+                            const seguro = det!.seguro;
                             return (
                               <button onClick={() => abrirCompletar(j, faltaEn)}
-                                className={`text-xs font-bold border rounded-lg px-2.5 py-1.5 mr-2 ${cfg.boton}`}
-                                title={`Ingresar manualmente el ${cfg.etiqueta.toLowerCase()} de esta jornada`}>
-                                ➕ {cfg.etiqueta}
+                                className={`text-xs font-bold border rounded-lg px-2.5 py-1.5 mr-2 ${seguro ? cfg.boton : "text-gray-600 border-gray-200 bg-gray-50 hover:bg-gray-100"}`}
+                                title={seguro
+                                  ? `Ingresar manualmente el ${cfg.etiqueta.toLowerCase()} de esta jornada`
+                                  : "Falta un extremo de la jornada; la hora no aclara cuál — se elige al abrir"}>
+                                ➕ {seguro ? cfg.etiqueta : "Completar jornada"}
                               </button>
                             );
                           })()}
@@ -968,18 +983,19 @@ export default function OdometroTab() {
                   : "Esta jornada solo tiene la lectura de salida: falta con cuánto empezó el día. Ingresa el kilometraje de apertura."}
               </div>
 
-              {/* La lectura de mediodía no dice por sí sola si es entrada o salida: se deja cambiar. */}
-              {!completar.seguro && (
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-gray-500">La hora no aclara qué falta. Completar:</span>
-                  {(["cierre", "apertura"] as const).map((e) => (
-                    <button key={e} onClick={() => cambiarExtremo(e)}
-                      className={`px-2.5 py-1 rounded-lg font-bold border ${completar.falta === e ? EXTREMO_CFG[e].boton : "text-gray-500 border-gray-200 hover:bg-gray-50"}`}>
-                      {EXTREMO_CFG[e].etiqueta}
-                    </button>
-                  ))}
-                </div>
-              )}
+              {/* SIEMPRE se puede cambiar de extremo: la hora sugiere, pero quien sabe si esa
+                  lectura fue la de entrada o la de salida es el operador. */}
+              <div className="flex items-center gap-2 text-xs flex-wrap">
+                <span className="text-gray-500">
+                  {completar.seguro ? "¿Qué falta en esta jornada?" : "La hora no lo aclara — elige qué falta:"}
+                </span>
+                {(["cierre", "apertura"] as const).map((e) => (
+                  <button key={e} onClick={() => cambiarExtremo(e)}
+                    className={`px-2.5 py-1 rounded-lg font-bold border ${completar.falta === e ? EXTREMO_CFG[e].boton : "text-gray-500 border-gray-200 hover:bg-gray-50"}`}>
+                    {EXTREMO_CFG[e].etiqueta}
+                  </button>
+                ))}
+              </div>
 
               <div className="grid grid-cols-2 gap-3">
                 {/* El extremo conocido va SIEMPRE en su columna real, para no leer al revés la jornada. */}
