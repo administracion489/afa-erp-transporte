@@ -553,6 +553,62 @@ async function handler(req: NextRequest) {
       }
     }
 
+    // ── BLOQUE 7: cerrar servicios ABANDONADOS ─────────────────────────────────
+    // Una reserva pasa a "en_curso" cuando el conductor inicia, y solo vuelve a
+    // "finalizada" cuando él la cierra. Si no la cierra (batería, app cerrada,
+    // olvido) queda "en_curso" para siempre y NADIE se entera: los bloques de
+    // arriba solo miran hoy/mañana, así que al día siguiente se vuelve invisible.
+    // La app del pasajero sí la seguía viendo: elegía el servicio vigente más
+    // antiguo y se quedaba anclada ahí, mostrando la posición GPS de aquel día
+    // ("GPS sin señal, hace 9441 min") mientras el operador veía el bus real.
+    // Este bloque corre SIEMPRE (no depende de una fila de config): es una
+    // salvaguarda de integridad, no una alerta.
+    {
+      const horasMax = activa("servicio_abandonado")?.umbral ?? 30; // 30 h: cubre full day de 24 h y nocturnos
+      const { data: colgadas } = await admin
+        .from("reservas")
+        .select("id, fecha_servicio, hora_servicio, conductor_id, origen, destino")
+        .eq("estado", "en_curso")
+        .lt("fecha_servicio", hoy);
+
+      const abandonadas = (colgadas ?? []).filter((r: any) => {
+        const inicioMs = limaAUtcMs(r.fecha_servicio, horaCorta(r.hora_servicio));
+        // Sin hora utilizable: la fecha ya es anterior a hoy → se cierra igual.
+        if (!inicioMs) return true;
+        return (Date.now() - inicioMs) / 3600000 > horasMax;
+      });
+
+      let nAb = 0;
+      if (abandonadas.length) {
+        const { error: errCierre } = await admin
+          .from("reservas")
+          .update({ estado: "finalizada" })
+          .in("id", abandonadas.map((r: any) => r.id))
+          .eq("estado", "en_curso"); // no pisar un cambio hecho entre el SELECT y el UPDATE
+        if (!errCierre) {
+          nAb = abandonadas.length;
+          // Avisar al operador SOLO si la alerta está configurada; el cierre ya ocurrió.
+          const cfgAb = activa("servicio_abandonado");
+          if (cfgAb) {
+            for (const r of abandonadas) {
+              if (!(await reclamarEnvio("servicio_abandonado", r.id))) continue;
+              const nombre = r.conductor_id ? nombreCorto(condMap.get(r.conductor_id)?.nombre) : "Conductor";
+              const rd = await aDirectorio(cfgAb, [
+                "Servicio sin cerrar",
+                nombre,
+                rutaDe(r),
+                `Quedó "en curso" desde el ${r.fecha_servicio}. Se cerró automáticamente.`,
+              ]);
+              if (rd.enviados === 0 && rd.fallos > 0) await liberarEnvio("servicio_abandonado", r.id);
+            }
+          }
+        } else {
+          console.error("[alertas-flota/tick] no se pudieron cerrar servicios abandonados:", errCierre.message);
+        }
+      }
+      res.servicios_abandonados_cerrados = nAb;
+    }
+
     return NextResponse.json({ ok: true, hoy, ahora, force, resultados: res });
   } catch (error: any) {
     console.error("[alertas-flota/tick]", error);

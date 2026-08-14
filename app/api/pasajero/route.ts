@@ -23,6 +23,25 @@ const admin = createClient(
 // calcular antigüedad ("sin señal") y la heurística B2. Mismo patrón que /api/cliente/gps.
 const norm = (g: any) => (g ? { ...g, timestamp: g.timestamp ?? g.created_at ?? null } : g);
 
+// Un servicio "en_curso" NO es vigente para siempre. La reserva solo vuelve a
+// "finalizada" cuando el conductor cierra el servicio; si no lo cierra (batería,
+// app cerrada, olvido) queda "en_curso" indefinidamente. Como la app del pasajero
+// elegía el servicio vigente MÁS ANTIGUO, esa reserva abandonada secuestraba la
+// pantalla para siempre: el pasajero veía la posición GPS de aquel día viejo
+// ("sin señal, hace 9441 min") mientras el operador sí veía el bus real.
+// Ventana: hoy y ayer — cubre nocturnos que cruzan medianoche y full day de hasta
+// 24 h, sin dejar que un servicio abandonado se quede pegado.
+const ayerDe = (hoy: string) => {
+  const [a, m, d] = String(hoy).split("-").map(Number);
+  return new Date(Date.UTC(a, m - 1, d - 1)).toISOString().slice(0, 10);
+};
+// `hoy` llega del cliente: validar formato antes de usarlo en fechas o en filtros.
+const fechaValida = (v: any) => /^\d{4}-\d{2}-\d{2}$/.test(String(v));
+/** Fecha local de Lima (UTC-5), para las acciones que no reciben `hoy` del cliente. */
+const hoyLima = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
+const enCursoVigente = (r: any, hoy: string) =>
+  r?.estado === "en_curso" && String(r?.fecha_servicio ?? "") >= ayerDe(hoy);
+
 export async function POST(req: NextRequest) {
   try {
     // Mismo gate que /api/conductor: exige x-afa-key si NEXT_PUBLIC_AFA_CONDUCTOR_KEY está
@@ -88,6 +107,7 @@ export async function POST(req: NextRequest) {
         const { hoy } = body;
         if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
         if (!hoy) return NextResponse.json({ error: "hoy requerido" }, { status: 400 });
+        if (!fechaValida(hoy)) return NextResponse.json({ error: "hoy inválido" }, { status: 400 });
 
         const { data: pp, error: ppErr } = await admin
           .from("pasajeros_parada")
@@ -96,12 +116,12 @@ export async function POST(req: NextRequest) {
         if (ppErr) return NextResponse.json({ error: ppErr.message }, { status: 500 });
         if (!pp?.length) return NextResponse.json({ ruta: null });
 
-        // Solo servicios vigentes: en curso (sin importar fecha) o futuros con estado activo.
-        // Nunca retroceder a un servicio viejo como fallback.
+        // Solo servicios vigentes: en curso RECIENTE (ver enCursoVigente) o futuros con
+        // estado activo. Nunca retroceder a un servicio viejo como fallback.
         const vigentes = pp.filter((x: any) => {
           const r = x.parada?.reserva;
           if (!r) return false;
-          if (r.estado === "en_curso") return true;
+          if (r.estado === "en_curso") return enCursoVigente(r, hoy);
           return r.fecha_servicio >= hoy && ["pendiente", "programada", "confirmada"].includes(r.estado);
         }).sort((a: any, b: any) => {
           const rA = a.parada?.reserva;
@@ -340,6 +360,7 @@ export async function POST(req: NextRequest) {
         const { nombreParada, hoy } = body;
         if (!pid) return NextResponse.json({ error: "Sesión inválida" }, { status: 401 });
         if (!nombreParada || !hoy) return NextResponse.json({ error: "nombreParada y hoy requeridos" }, { status: 400 });
+        if (!fechaValida(hoy)) return NextResponse.json({ error: "hoy inválido" }, { status: 400 });
 
         const { data: pp, error: ppErr } = await admin
           .from("pasajeros_parada")
@@ -350,7 +371,7 @@ export async function POST(req: NextRequest) {
         const vigentes = (pp || []).filter((x: any) => {
           const r = x.parada?.reserva;
           if (!r) return false;
-          if (r.estado === "en_curso") return true;
+          if (r.estado === "en_curso") return enCursoVigente(r, hoy);
           return r.fecha_servicio >= hoy && ["pendiente", "programada", "confirmada"].includes(r.estado);
         });
 
@@ -405,10 +426,11 @@ export async function POST(req: NextRequest) {
           .select("id, estado, ruta_nombre, origen, destino, fecha_servicio, hora_servicio, vehiculo_id, vehiculo_tercero_id, paradas(*)")
           .eq("cliente_id", pax.cliente_id)
           .eq("permite_autoseleccion", true)
-          // Elegibles: servicios de hoy aún no iniciados, O cualquier servicio EN CURSO
+          // Elegibles: servicios de hoy aún no iniciados, O servicios EN CURSO recientes
           // (incluye nocturnos que cruzan medianoche; mismo criterio que la acción "ruta").
-          // Así el pasajero que aún no eligió no queda bloqueado cuando el bus arranca.
-          .or(`and(fecha_servicio.eq.${hoy},estado.in.(pendiente,programada,confirmada)),estado.eq.en_curso`);
+          // El en_curso va acotado a hoy/ayer: si no, un servicio que el conductor nunca
+          // cerró seguiría ofreciéndose como elegible para siempre.
+          .or(`and(fecha_servicio.eq.${hoy},estado.in.(pendiente,programada,confirmada)),and(estado.eq.en_curso,fecha_servicio.gte.${ayerDe(hoy)})`);
         if (rErr) return NextResponse.json({ error: rErr.message }, { status: 500 });
         if (!reservasRaw?.length) return NextResponse.json({ reservas: [] });
 
@@ -534,7 +556,7 @@ export async function POST(req: NextRequest) {
         // Verificar que la parada pertenece a una reserva de la empresa con autoselección activa
         const { data: parada } = await admin
           .from("paradas")
-          .select("id, reserva_id, estado, reserva:reservas(id, cliente_id, permite_autoseleccion, estado, vehiculo_id, vehiculo_tercero_id)")
+          .select("id, reserva_id, estado, reserva:reservas(id, cliente_id, permite_autoseleccion, estado, fecha_servicio, vehiculo_id, vehiculo_tercero_id)")
           .eq("id", parada_id)
           .maybeSingle();
         const reserva = (parada as any)?.reserva;
@@ -544,6 +566,11 @@ export async function POST(req: NextRequest) {
         if (!reserva.permite_autoseleccion)
           return NextResponse.json({ error: "No autorizado" }, { status: 403 });
         if (!["pendiente", "programada", "confirmada", "en_curso"].includes(reserva.estado))
+          return NextResponse.json({ error: "Servicio no disponible" }, { status: 400 });
+        // Defensa en profundidad: esta acción no recibe `hoy`, así que usamos la fecha
+        // Lima del servidor. Evita que un cliente con la lista cacheada se inscriba en
+        // un servicio que quedó "en_curso" y nunca se cerró.
+        if (!enCursoVigente(reserva, hoyLima()) && reserva.estado === "en_curso")
           return NextResponse.json({ error: "Servicio no disponible" }, { status: 400 });
         // Servicio en curso: no permitir subirse a un paradero que el bus ya pasó.
         if (reserva.estado === "en_curso" && (parada as any).estado === "completada")
