@@ -218,6 +218,26 @@ let _bgActivo = false;
 /** true sólo si el plugin nativo de background está corriendo (APK recompilado). */
 export function backgroundGpsActivo(): boolean { return _bgActivo; }
 
+// Sello del último fix ENTREGADO por el servicio nativo. `_bgActivo` solo recuerda que
+// start() resolvió alguna vez: si Android mata el servicio después, esa variable se queda
+// en true para siempre y el semáforo "Rastreo protegido" sigue verde con el rastreo muerto
+// (medido: conductores con el 35-41% del viaje sin un solo punto y el chip en verde).
+// El plugin no expone isRunning(), así que la única evidencia disponible sin tocar el APK
+// es si SIGUEN LLEGANDO fixes.
+let _bgUltimoFixMs = 0;
+
+/**
+ * Milisegundos desde el último fix entregado por el servicio de fondo, o null si aún no
+ * llegó ninguno (recién arrancado) o si el background no está en uso.
+ * OJO: un bus detenido también deja de generar fixes, así que un valor alto NO prueba que
+ * el servicio esté muerto — por eso quien lo consume usa un umbral holgado. La verdad
+ * definitiva la tiene el servidor, que sabe si le llegan puntos (ver /api/gps-salud).
+ */
+export function backgroundGpsSinFixMs(): number | null {
+  if (!_bgActivo || !_bgUltimoFixMs) return null;
+  return Date.now() - _bgUltimoFixMs;
+}
+
 export async function observarUbicacionBackground(
   onPos: (pos: GeoPos) => void,
   onError?: (err: { code?: number; message: string }) => void,
@@ -251,6 +271,7 @@ export async function observarUbicacionBackground(
   const onUpdate = (location: any, error: any) => {
     if (error) { onError?.({ message: error.message || "Error de GPS en segundo plano", code: error.code }); return; }
     if (!location) return;
+    _bgUltimoFixMs = Date.now();   // prueba de vida del servicio nativo (ver backgroundGpsSinFixMs)
     onPos({
       coords: {
         latitude: location.latitude,
@@ -290,7 +311,8 @@ export async function observarUbicacionBackground(
     }
   }
   _bgActivo = true;
-  return { clear: () => { _bgActivo = false; void BackgroundGeolocation.stop().catch(() => {}); } };
+  _bgUltimoFixMs = 0;   // arranque limpio: aún no hay prueba de vida de ESTA sesión
+  return { clear: () => { _bgActivo = false; _bgUltimoFixMs = 0; void BackgroundGeolocation.stop().catch(() => {}); } };
 }
 
 /** Abre los ajustes de la app para conceder "Permitir todo el tiempo" (Android 11+). */

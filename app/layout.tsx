@@ -314,6 +314,9 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
       { href: "/programacion", label: "Programación", sub: "Core del sistema",      icon: Ic.CalendarRange, modulo: "programacion" },
       { href: "/seguimiento",  label: "Seguimiento",  sub: "Estado en tiempo real", icon: Ic.Search,        modulo: "seguimiento"  },
       { href: "/monitoreo",    label: "Monitoreo",    sub: "Mapa y unidades",       icon: Ic.Radio,         modulo: "monitoreo"    },
+      // Reusa el módulo "monitoreo" a propósito: quien vigila la flota es quien debe ver si a
+      // un conductor se le corta el rastreo. Así no hay que dar un permiso nuevo a nadie.
+      { href: "/gps-salud",    label: "Salud del GPS", sub: "Rastreo por conductor", icon: Ic.Radio,        modulo: "monitoreo"    },
       { href: "/pasajeros",    label: "Pasajeros",    sub: "Base de pasajeros",     icon: Ic.Users,         modulo: "pasajeros"    },
       { href: "/comunicados",  label: "Comunicados",  sub: "Envíos masivos WhatsApp/Correo", icon: Ic.MessageSquare, modulo: "comunicados" },
       { href: "/multas",       label: "Multas",       sub: "Infracciones",          icon: Ic.Fine,          modulo: "multas"       },

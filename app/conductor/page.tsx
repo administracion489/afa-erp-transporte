@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
 import { supabase } from "@/lib/supabase";
-import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, ubicacionTodoElTiempo, pedirUbicacionTodoElTiempo, esAppNativa, backgroundGpsActivo, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision } from "@/lib/geo";
+import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, ubicacionTodoElTiempo, pedirUbicacionTodoElTiempo, esAppNativa, backgroundGpsActivo, backgroundGpsSinFixMs, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision } from "@/lib/geo";
 import { attachHidScanner } from "@/lib/hid-scanner";
 import { detectarSoportePush, permisoBloqueado, activarPushWeb, activarPushNativo, resincronizarSuscripcion } from "@/lib/push-cliente";
 import {
@@ -972,14 +972,39 @@ export default function ConductorApp() {
       return r;
     };
 
+    // ── Restaurar servicio activo si la sesión fue interrumpida ───────────
+    // `confiable` = la lista viene del SERVIDOR. Si viene de la caché (porque no hubo red),
+    // NO se borra la sesión cuando la reserva no aparece: un bache de señal no es prueba de
+    // que el servicio ya no exista, y borrarla dejaba al conductor sin rastreo el resto del
+    // viaje.
+    const restaurarServicio = async (lista: any[], confiable: boolean) => {
+      const srv = loadServicio();
+      if (!srv) return;
+      const reserva = lista.find(r => r.id === srv.reservaId);
+      if (!reserva) { if (confiable) clearServicio(); return; }
+      setVehiculoId(srv.vehiculoId);
+      setReservaActiva(reserva);
+      setInicioViaje(new Date(srv.inicioViaje));
+      setParadaIdx(srv.paradaIdx);
+      setEnRuta(true);
+      setRestaurandoServicio(true);   // dispara el effect de GPS
+      setTab("paradas");
+      // Las paradas van DESPUÉS de reactivar el rastreo y con red de seguridad: cargarParadas()
+      // hace fetch sin protección, así que sin señal lanza — y antes eso abortaba la
+      // restauración entera dejando el GPS apagado, justo en el caso que hay que cubrir.
+      // Se recargarán solas en cuanto vuelva la conexión; lo que no puede faltar es el rastreo.
+      try { await cargarParadas(reserva.id); } catch { /* sin red: el rastreo ya está activo */ }
+    };
+
     // 1) Stale-while-revalidate: mostrar la caché de HOY al instante (Uber-style).
     const cacheKey = `afa_cond_inicio_${cid}`;
     let teniaCache = false;
+    let resCache: any[] | null = null;
     try {
       const raw = localStorage.getItem(cacheKey);
       if (raw) {
         const c = JSON.parse(raw);
-        if (c?.hoy === hoy && c?.data) { aplicarInicio(c.data); teniaCache = true; }
+        if (c?.hoy === hoy && c?.data) { resCache = aplicarInicio(c.data); teniaCache = true; }
       }
     } catch {}
     setCargando(!teniaCache); // con caché no mostramos spinner
@@ -993,26 +1018,15 @@ export default function ConductorApp() {
     } catch (e: any) {
       setCargando(false);
       if (!teniaCache) setDebugInfo(`Error al cargar servicios: ${e?.message ?? "desconocido"}`);
-      return; // si había caché, se queda mostrada
+      // Sin red PERO con caché: hay que reanudar el rastreo igual. Antes se salía aquí y el
+      // conductor veía su servicio en pantalla mientras el GPS seguía apagado, sin reintento.
+      else if (resCache) await restaurarServicio(resCache, false);
+      return;
     }
 
     const res = aplicarInicio(data);
     setCargando(false);
-
-    // ── Restaurar servicio activo si la sesión fue interrumpida ───────────
-    const srv = loadServicio();
-    if (srv) {
-      const reserva = res.find(r => r.id === srv.reservaId);
-      if (!reserva) { clearServicio(); return; }
-      setVehiculoId(srv.vehiculoId);
-      setReservaActiva(reserva);
-      setInicioViaje(new Date(srv.inicioViaje));
-      await cargarParadas(reserva.id);
-      setParadaIdx(srv.paradaIdx);
-      setEnRuta(true);
-      setRestaurandoServicio(true);   // dispara el effect de GPS
-      setTab("paradas");
-    }
+    await restaurarServicio(res, true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1557,9 +1571,17 @@ export default function ConductorApp() {
     setBgServicioActivo(true); // optimista mientras el servicio arranca
     const desde = Date.now();
     let fallosSeguidos = 0;
+    // Además de `backgroundGpsActivo()` (que solo recuerda que start() resolvió), exigimos
+    // PRUEBA DE VIDA: si el servicio nativo lleva SIN_FIX_MAX_MS sin entregar un fix, damos el
+    // rastreo por caído aunque la bandera siga en true — es el caso que dejaba el semáforo en
+    // verde con el GPS muerto. Umbral holgado a propósito: un bus detenido en un paradero
+    // también deja de generar fixes y no queremos alarmar por eso.
+    const SIN_FIX_MAX_MS = 5 * 60 * 1000;
     const iv = setInterval(() => {
       if (Date.now() - desde < 8000) return; // gracia: no juzgar antes de que arranque
-      if (backgroundGpsActivo()) { fallosSeguidos = 0; setBgServicioActivo(true); }
+      const sinFix = backgroundGpsSinFixMs();
+      const vivo = backgroundGpsActivo() && !(sinFix !== null && sinFix > SIN_FIX_MAX_MS);
+      if (vivo) { fallosSeguidos = 0; setBgServicioActivo(true); }
       else { fallosSeguidos += 1; if (fallosSeguidos >= 2) setBgServicioActivo(false); }
     }, 4000);
     return () => clearInterval(iv);
