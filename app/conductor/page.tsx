@@ -270,6 +270,13 @@ function intervaloEnvioMs(kmh: number, cercaParadero: boolean, emergencia: boole
   return 3000;                      // carretera
 }
 
+// Umbral "esto NO es satélite, es ubicación de red". Medido sobre la flota (4 días, conductores con
+// ≥100 fixes): los equipos que entregan GNSS real dan mediana 1.8-7.7 m; los que salen por antena/
+// WiFi, 15.9-200 m. El hueco entre 7.7 y 15.9 es limpio → 12 m separa sin falsos positivos. ANTES
+// estaba en 60 m: por eso el semáforo estuvo VERDE toda la noche del servicio #24738, que corrió a
+// 22 m de mediana (ubicación de red pura) con huecos de hasta 11,7 min y el bus en movimiento.
+const ACC_RED_M = 12;
+
 // true si la posición está a < UMBRAL_PARADERO_M de alguna parada con coordenadas.
 const UMBRAL_PARADERO_M = 150;
 function cercaDeAlgunParadero(pos: GeoPos, paradas: { lat: number | null; lng: number | null }[]): boolean {
@@ -842,8 +849,8 @@ export default function ConductorApp() {
   // effect de GPS: limpia (stop) y vuelve a arrancar (start). Recupera el rastreo cuando el
   // listener nativo se quedó mudo (Doze / app en 2º plano largo rato) sin tener que reiniciar.
   const [gpsNonce, setGpsNonce] = useState(0);
-  // GPS DÉBIL MEDIDO: mediana de precisión de los fixes REALES recibidos (≥60 m = ubicación por
-  // red, sin satélite). Distinto de `precUbic`, que solo mira el PERMISO: un equipo puede tener
+  // GPS DÉBIL MEDIDO: mediana de precisión de los fixes REALES recibidos (≥ACC_RED_M = ubicación
+  // por red, sin satélite). Distinto de `precUbic`, que solo mira el PERMISO: un equipo puede tener
   // "Ubicación precisa" concedida (permiso OK) y aun así entregar ±100 m porque el teléfono no
   // ve satélites (guantera / parabrisas polarizado / ahorro de batería). Caso real: BVI124 dio
   // ±1.8 m el 17-jun y ±100 m desde el 19-jun con el MISMO permiso. Esto mide lo que LLEGA.
@@ -1477,8 +1484,10 @@ export default function ConductorApp() {
     const CONGELADO_MS = 180_000;
     // Variante #951: timestamps FRESCOS pero POSICIÓN byte-idéntica — solo cuenta EN SERVICIO
     // (en ruta se espera movimiento; conectado-libre parado en cochera es normal) y con precisión
-    // de RED (≥60 m): un chip GPS sano jitterea SIEMPRE (coords nunca idénticas 8 min), así que
-    // no dispara en un bus legítimamente parado con buen GPS. 8 min > embarque típico.
+    // de RED (≥ACC_RED_M): un chip GPS sano jitterea SIEMPRE (coords nunca idénticas 8 min), así
+    // que no dispara en un bus legítimamente parado con buen GPS. 8 min > embarque típico.
+    // El umbral era 60 m — demasiado alto: la ubicación de red del servicio #24738 salía a 22 m y
+    // esta detección quedó ciega justo en el caso que existe para cazar.
     const POS_CLAVADA_MS = 480_000;
     const chequearCongelado = () => {
       const ahora = Date.now();
@@ -1488,7 +1497,7 @@ export default function ConductorApp() {
       const posClavada = !!reservaActivaRef.current
         && ultimoCambioPosRef.current > 0
         && ahora - ultimoCambioPosRef.current > POS_CLAVADA_MS
-        && accMed >= 60;
+        && accMed >= ACC_RED_M;
       if (!tsClavado && !posClavada) return;
       if (reArmsCongeladoRef.current >= 2) { setGpsAtascado(true); return; }
       reArmsCongeladoRef.current += 1;
@@ -1539,7 +1548,7 @@ export default function ConductorApp() {
       const a = [...accsRecRef.current].sort((x, y) => x - y);
       if (a.length < 5) { setGpsDebilM(0); return; }   // muestras insuficientes: no acusar
       const med = a[Math.floor(a.length / 2)];
-      setGpsDebilM(med >= 60 ? Math.round(med) : 0);
+      setGpsDebilM(med >= ACC_RED_M ? Math.round(med) : 0);
     };
     const iv = setInterval(evaluar, 20_000);
     return () => clearInterval(iv);
@@ -1952,7 +1961,11 @@ export default function ConductorApp() {
       qrRef.current = scanner;
       scanner.start(
         { facingMode: "environment" },
-        { fps: 12 },  // sin qrbox → detecta en toda la pantalla
+        // fps 12 → 6: html5-qrcode decodifica cada cuadro en el MISMO hilo JS que recibe los fixes
+        // del plugin nativo y drena la cola de GPS. A 12 fps ese hilo queda saturado mientras la
+        // cámara está abierta (servicio #24738: dos huecos de ~2 min caen justo entre escaneos).
+        // 6 fps sigue siendo el doble de rápido que un escaneo humano y libera la mitad del hilo.
+        { fps: 6 },   // sin qrbox → detecta en toda la pantalla
         async (text: string) => {
           scanner.stop().catch(() => {}); qrRef.current = null; setEscanear(false);
           await procesarQR(text);
@@ -3042,10 +3055,10 @@ export default function ConductorApp() {
                   </span>
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ display: "block", fontSize: 13.5, fontWeight: 800, color: atencion ? "var(--c-warn)" : "var(--c-ink)" }}>
-                      {!atencion ? "Ajustes de rastreo" : bgInactivo ? "Rastreo en segundo plano inactivo" : precMala ? "Activa la ubicación precisa" : gpsDebil ? `GPS débil: sale a ±${gpsDebilM} m` : "Revisa los ajustes de rastreo"}
+                      {!atencion ? "Ajustes de rastreo" : bgInactivo ? "Rastreo en segundo plano inactivo" : precMala ? "Activa la ubicación precisa" : gpsDebil ? `Sin satélite: ubicación a ±${gpsDebilM} m` : "Revisa los ajustes de rastreo"}
                     </span>
                     <span style={{ display: "block", marginTop: 1, fontSize: 11.5, color: atencion ? "var(--c-warn-ink)" : "var(--c-mute)" }}>
-                      {!atencion ? "Ubicación · batería · autostart" : bgInactivo ? "Solo rastrea con la app abierta · revísalo" : precMala ? "Tu GPS sale a ±150 m" : gpsDebil ? "Pon el teléfono con vista al cielo · sin ahorro de batería" : "El equipo puede cortar el GPS"}
+                      {!atencion ? "Ubicación · batería · autostart" : bgInactivo ? "Solo rastrea con la app abierta · revísalo" : precMala ? "Tu GPS sale a ±150 m" : gpsDebil ? "El teléfono te ubica por antenas: se pierden tramos. Ponlo con vista al cielo y quita el ahorro de batería" : "El equipo puede cortar el GPS"}
                     </span>
                   </span>
                   <IconChevronRight size={18} color={atencion ? "var(--c-warn)" : "var(--c-mute)"} />
