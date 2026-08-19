@@ -17,17 +17,17 @@ type Conductor = {
   clave: string; nombre: string; telefono: string | null; tercero: boolean;
   servicios: number; sinTraza: number; medidos: number;
   cobertura: number | null; peor: number | null; cortes: number; kmACiegas: number;
-  pctAntena: number;
+  pctAntena: number; simulados: number;
 };
 type Servicio = {
   clave: string; nombre: string; tercero: boolean; reservaId: number;
   fecha: string; hora: string | null; puntos: number; puntosCrudos: number; pctAntena: number; durMin: number;
   cobertura: number | null; cortes: number; peorHuecoMin: number; kmACiegas: number;
-  origen: string | null; destino: string | null;
+  simulados: number; origen: string | null; destino: string | null;
 };
 type Respuesta = {
   desde: string; hasta: string; recortado: boolean; limite: number; aviso: string | null;
-  totales: { servicios: number; sinTraza: number; sinConductor: number; conductores: number; malos: number; kmACiegas: number };
+  totales: { servicios: number; sinTraza: number; sinConductor: number; conductores: number; malos: number; kmACiegas: number; conSimulado: number };
   conductores: Conductor[]; servicios: Servicio[];
 };
 
@@ -118,6 +118,14 @@ export default function GpsSaludPage() {
         </div>
       </div>
 
+      {!!t?.conSimulado && (
+        <div style={{ marginTop: 16, padding: "12px 14px", borderRadius: 10, background: "#fee2e2", border: "1px solid #fecaca", color: "#991b1b", fontSize: 14 }}>
+          <strong>Ubicación simulada detectada.</strong> {t.conSimulado} conductor{t.conSimulado > 1 ? "es" : ""} con
+          puntos generados por una app de <em>GPS falso</em>, no por el teléfono. Aparece marcado en su fila.
+          Conviene verificarlo antes de sacar conclusiones: revisa si el equipo tiene el modo desarrollador activo.
+        </div>
+      )}
+
       {data?.aviso && <div style={{ marginTop: 16, padding: 12, borderRadius: 8, background: "#fef3c7", color: "#92400e", fontSize: 14 }}>{data.aviso}</div>}
 
       {error && <div style={{ marginTop: 16, padding: 12, borderRadius: 8, background: "#fee2e2", color: "#991b1b", fontSize: 14 }}>{error}</div>}
@@ -169,6 +177,11 @@ export default function GpsSaludPage() {
                           <div style={{ fontSize: 12, color: "#9ca3af" }}>
                             {c.tercero ? "Tercerizado" : "Flota propia"}{c.telefono ? ` · ${c.telefono}` : ""}
                           </div>
+                          {c.simulados > 0 && (
+                            <div style={{ marginTop: 3, fontSize: 12, fontWeight: 700, color: "#991b1b" }}>
+                              ⚠ {c.simulados} punto{c.simulados > 1 ? "s" : ""} de GPS falso
+                            </div>
+                          )}
                         </td>
                         <td style={{ padding: "11px 12px" }}>
                           <span style={{ display: "inline-block", padding: "3px 10px", borderRadius: 999, background: b.bg, color: b.color, fontWeight: 700, fontSize: 13 }}>

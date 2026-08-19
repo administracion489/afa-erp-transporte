@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, type ReactElement } from "react";
 import { supabase } from "@/lib/supabase";
-import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, ubicacionTodoElTiempo, pedirUbicacionTodoElTiempo, esAppNativa, backgroundGpsActivo, backgroundGpsSinFixMs, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision } from "@/lib/geo";
+import { pedirPermisoUbicacion, obtenerUbicacion, observarUbicacion, observarUbicacionBackground, abrirAjustesUbicacion, solicitarExencionBateria, bateriaExenta, precisionUbicacion, pedirPrecisionAlta, ubicacionTodoElTiempo, pedirUbicacionTodoElTiempo, ajustesUbicacion, pedirAjustesUbicacion, esAppNativa, backgroundGpsActivo, backgroundGpsSinFixMs, geoDisponible, type GeoPos, type GeoWatch, type GeoPrecision } from "@/lib/geo";
 import { attachHidScanner } from "@/lib/hid-scanner";
 import { detectarSoportePush, permisoBloqueado, activarPushWeb, activarPushNativo, resincronizarSuscripcion } from "@/lib/push-cliente";
 import {
@@ -1104,6 +1104,35 @@ export default function ConductorApp() {
     setReservasOtraFecha(null);
   }
 
+  /**
+   * Deja la ubicación lista para rastrear de verdad. Son DOS puertas independientes:
+   *   1. El PERMISO de la app: "Preciso" vs "Aproximado" (Android 12+).
+   *   2. Los AJUSTES DEL SISTEMA: interruptor de Ubicación encendido y NO en modo "Ahorro de
+   *      batería" — en ahorro el teléfono resuelve por antena (±50-1350 m) por mucho que el
+   *      permiso sea perfecto y el código pida alta calidad. Esa puerta era invisible hasta
+   *      ahora y es la que explica los conductores que salen "por antena" en /gps-salud.
+   * El diálogo de la puerta 2 es nativo de Google y se resuelve con un toque, sin sacar al
+   * conductor de la app; solo si no se puede mostrar caemos a la pantalla de Ajustes.
+   */
+  async function asegurarUbicacionOptima(): Promise<{ ok: boolean; precision: GeoPrecision; pendiente: boolean }> {
+    const precision = await pedirPrecisionAlta();
+    setPrecUbic(precision);
+    if (precision !== "precisa") return { ok: false, precision, pendiente: false };
+    // Permiso correcto: ahora el sistema.
+    const est = await ajustesUbicacion();
+    // Sin Play Services (o APK viejo sin el método) NO se bloquea al conductor: se le deja
+    // arrancar igual, que es como funcionaba antes de existir esta puerta.
+    if (!est.disponible || est.satisfecho) return { ok: true, precision, pendiente: false };
+    const r = await pedirAjustesUbicacion();
+    if (r.satisfecho) return { ok: true, precision, pendiente: false };
+    // `pendiente` = el diálogo de Google está EN PANTALLA ahora mismo. Su resultado no vuelve
+    // por aquí (se lanza con startResolutionForResult y no se espera), así que el caller NO
+    // debe abrir la pantalla de Ajustes: la apilaría encima y lo cancelaría, dejando al
+    // conductor en "Información de la app", donde ni siquiera se puede cambiar el modo de
+    // ubicación. Lo que resuelve el caso es el re-chequeo al volver a primer plano (abajo).
+    return { ok: false, precision, pendiente: r.mostrado };
+  }
+
   async function cargarParadas(reservaId: number) {
     // Usa el API endpoint que auto-crea paradas desde origen/destino si no existen
     const res = await fetch(`/api/conductor-paradas?reservaId=${reservaId}`, { headers: { "x-afa-key": AFA_KEY } });
@@ -1242,6 +1271,10 @@ export default function ConductorApp() {
       velocidad:    vel,
       rumbo:        pos.coords.heading || 0,
       precision_m:  pos.coords.accuracy,
+      // GPS falso: lo entrega el plugin de fondo (isFromMockProvider). undefined = "no se
+      // sabe" (primer plano no lo expone) y se guarda como null, NO como false: afirmar que
+      // un punto es legítimo sin haberlo comprobado sería peor que no decir nada.
+      simulado:     typeof pos.simulated === "boolean" ? pos.simulated : null,
       estado:       estadoFinal,
       created_at:   new Date().toISOString(),
       // Hora del ÚLTIMO fix REAL: timestamp del PROVEEDOR (registrarFix), que solo avanza
@@ -1744,11 +1777,15 @@ export default function ConductorApp() {
       if (typeof document === "undefined" || document.visibilityState !== "visible") return;
       const r = await precisionUbicacion();
       setPrecUbic(r);
-      if (r === "precisa") {
-        const reserva = gatePrecision;
-        setGatePrecision(null);
-        iniciarRecorrido(reserva, true);
-      }
+      if (r !== "precisa") return;
+      // El permiso ya está fino; falta saber si el conductor aceptó el diálogo de ajustes del
+      // sistema (su resultado no vuelve por el plugin, se comprueba aquí). Si la ROM no
+      // ofrece esa comprobación, no se le bloquea el arranque.
+      const est = await ajustesUbicacion();
+      if (est.disponible && !est.satisfecho) return;   // sigue en ahorro de batería: no arrancar aún
+      const reserva = gatePrecision;
+      setGatePrecision(null);
+      iniciarRecorrido(reserva, true);
     };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
@@ -4603,10 +4640,11 @@ export default function ConductorApp() {
               onClick={async () => {
                 const reserva = gatePrecision;
                 if (!reserva) return;
-                const r = await pedirPrecisionAlta();
-                setPrecUbic(r);
-                if (r === "precisa") { setGatePrecision(null); iniciarRecorrido(reserva, true); }
-                else { abrirAjustesUbicacion(); }
+                const { ok, pendiente } = await asegurarUbicacionOptima();
+                if (ok) { setGatePrecision(null); iniciarRecorrido(reserva, true); }
+                // Si el diálogo del sistema quedó abierto, NO abrir Ajustes encima: al volver
+                // a la app el efecto de visibilitychange comprueba el resultado y arranca.
+                else if (!pendiente) abrirAjustesUbicacion();
               }}
               style={{
                 width: "100%", padding: "14px 0", borderRadius: 14, border: "none",
@@ -4750,9 +4788,8 @@ export default function ConductorApp() {
                   {precUbic === "aproximada" && (
                     <button
                       onClick={async () => {
-                        const r = await pedirPrecisionAlta();
-                        setPrecUbic(r);
-                        if (r !== "precisa") abrirAjustesUbicacion();
+                        const { ok, pendiente } = await asegurarUbicacionOptima();
+                        if (!ok && !pendiente) abrirAjustesUbicacion();
                       }}
                       style={{
                         width: "100%", padding: "11px 14px", borderRadius: 10, border: "none",

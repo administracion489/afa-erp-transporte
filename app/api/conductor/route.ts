@@ -416,6 +416,7 @@ export async function POST(req: NextRequest) {
           "conductor_id", "vehiculo_id", "conductor_tercero_id", "vehiculo_tercero_id",
           "reserva_id", "lat", "lng", "velocidad", "rumbo", "precision_m", "estado", "created_at",
           "fix_ts", // hora del último fix real (detección robusta de "congelado") — null en APK viejos
+          "simulado", // GPS falso (isFromMockProvider): null = no se pudo comprobar, ver más abajo
         ];
         const sanitizar = (p: any) => {
           const o: Record<string, any> = {};
@@ -425,7 +426,14 @@ export async function POST(req: NextRequest) {
         const filasRaw = Array.isArray(payload) ? payload : [payload];
         const filas = filasRaw.filter((p) => p && p.lat != null && p.lng != null).map(sanitizar);
         if (filas.length === 0) return NextResponse.json({ error: "payload inválido" }, { status: 400 });
-        const { error } = await admin.from("ubicaciones_gps").insert(filas);
+        let { error } = await admin.from("ubicaciones_gps").insert(filas);
+        // `simulado` es opcional (SQL ubicaciones-gps-simulado.sql). Si el build de la BD aún
+        // no la tiene, se reintenta sin ella: un rastreo que se cae por una columna pendiente
+        // sería mucho peor que perder el dato antifraude.
+        if (error && esColumnaInexistente(error)) {
+          ({ error } = await admin.from("ubicaciones_gps")
+            .insert(filas.map(({ simulado, ...resto }: any) => resto)));
+        }
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         // Motor de proximidad del push del pasajero ("llega en ~5 min" / "ya llegó").
         // Corre POST-respuesta (after) → la latencia del heartbeat no cambia. El

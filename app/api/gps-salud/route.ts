@@ -45,7 +45,7 @@ function metros(aLat: number, aLng: number, bLat: number, bLng: number): number 
 }
 
 type Punto = { ts: number; lat: number; lng: number };
-type Traza = { pts: Punto[]; totalCrudo: number; porAntena: number };
+type Traza = { pts: Punto[]; totalCrudo: number; porAntena: number; simulados: number };
 
 /**
  * Trae la traza de una reserva, YA SANEADA. PostgREST corta en 1000 → hay que paginar, con
@@ -55,16 +55,22 @@ type Traza = { pts: Punto[]; totalCrudo: number; porAntena: number };
  */
 async function trazaDe(reservaId: number): Promise<Traza> {
   const pts: Punto[] = [];
-  let totalCrudo = 0, porAntena = 0;
+  let totalCrudo = 0, porAntena = 0, simulados = 0;
+  let sinColumnaSimulado = false;
   for (let off = 0; off < 20000; off += 1000) {
     const { data, error } = await admin
       .from("ubicaciones_gps")
-      .select("created_at, lat, lng, precision_m")
+      .select("created_at, lat, lng, precision_m, simulado")
       .eq("reserva_id", reservaId)
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
       .range(off, off + 999);
-    if (error) throw new Error(`traza ${reservaId}: ${error.message}`);
+    if (error) {
+      // La columna `simulado` es opcional (supabase/ubicaciones-gps-simulado.sql). Sin ella el
+      // panel debe seguir midiendo cobertura: el antifraude es un extra, no un requisito.
+      if (/simulado/i.test(error.message || "")) { sinColumnaSimulado = true; break; }
+      throw new Error(`traza ${reservaId}: ${error.message}`);
+    }
     if (!data?.length) break;
     for (const f of data) {
       const ts = Date.parse(f.created_at as any);
@@ -73,6 +79,7 @@ async function trazaDe(reservaId: number): Promise<Traza> {
       if (!Number.isFinite(ts) || ts <= 0) continue;
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
       totalCrudo++;
+      if (f.simulado === true) simulados++;   // fix inyectado por una app de GPS falso
       // Un fix con precisión peor que el umbral es de ANTENA/red, no de satélite: no sirve
       // para dibujar (pondría el bus dentro de las casas) pero sí como diagnóstico — es la
       // firma del teléfono que no está encendiendo el GNSS (bug del APK viejo, fix 6ec35db).
@@ -81,7 +88,33 @@ async function trazaDe(reservaId: number): Promise<Traza> {
     }
     if (data.length < 1000) break;
   }
-  return { pts: pts.sort((a, b) => a.ts - b.ts), totalCrudo, porAntena };
+  // Reintento sin la columna nueva si la BD aún no la tiene.
+  if (sinColumnaSimulado) {
+    pts.length = 0; totalCrudo = 0; porAntena = 0;
+    for (let off = 0; off < 20000; off += 1000) {
+      const { data, error } = await admin
+        .from("ubicaciones_gps")
+        .select("created_at, lat, lng, precision_m")
+        .eq("reserva_id", reservaId)
+        .order("created_at", { ascending: true })
+        .order("id", { ascending: true })
+        .range(off, off + 999);
+      if (error) throw new Error(`traza ${reservaId}: ${error.message}`);
+      if (!data?.length) break;
+      for (const f of data) {
+        const ts = Date.parse(f.created_at as any);
+        const lat = Number(f.lat), lng = Number(f.lng);
+        const prec = f.precision_m == null ? null : Number(f.precision_m);
+        if (!Number.isFinite(ts) || ts <= 0) continue;
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+        totalCrudo++;
+        if (prec !== null && Number.isFinite(prec) && prec > PRECISION_MAX_M) { porAntena++; continue; }
+        pts.push({ ts, lat, lng });
+      }
+      if (data.length < 1000) break;
+    }
+  }
+  return { pts: pts.sort((a, b) => a.ts - b.ts), totalCrudo, porAntena, simulados };
 }
 
 /** "HH:MM[:SS]" del día `fecha` (Lima, UTC-5) en ms epoch. */
@@ -185,9 +218,9 @@ export async function GET(req: NextRequest) {
     // ── Medición, en lotes paralelos (secuencial tardaba ~30 s con 120 reservas) ──
     const medir = async (r: any) => {
       let t: Punto[] = [];
-      let totalCrudo = 0, porAntena = 0;
+      let totalCrudo = 0, porAntena = 0, simulados = 0;
       let fallo: string | null = null;
-      try { const tz = await trazaDe(r.id); t = tz.pts; totalCrudo = tz.totalCrudo; porAntena = tz.porAntena; } catch (e: any) { fallo = e?.message ?? "error al leer la traza"; }
+      try { const tz = await trazaDe(r.id); t = tz.pts; totalCrudo = tz.totalCrudo; porAntena = tz.porAntena; simulados = tz.simulados; } catch (e: any) { fallo = e?.message ?? "error al leer la traza"; }
       const base = { ...quien(r), reservaId: r.id, fecha: r.fecha_servicio, hora: r.hora_servicio, origen: r.origen, destino: r.destino };
 
       // Ventana del servicio: del primer punto hasta la hora prevista de llegada (o el último
@@ -196,7 +229,7 @@ export async function GET(req: NextRequest) {
       if (fallo || t.length < 2) {
         // OJO: "sin traza utilizable" puede ser un teléfono 100% por antena — totalCrudo > 0
         // con todos los puntos descartados. Distinto de "no emitió nada".
-        return { ...base, puntos: t.length, puntosCrudos: totalCrudo, pctAntena, durMin: 0, cobertura: totalCrudo ? 0 : null, cortes: 0, peorHuecoMin: 0, kmACiegas: 0, fallo };
+        return { ...base, puntos: t.length, puntosCrudos: totalCrudo, pctAntena, simulados, durMin: 0, cobertura: totalCrudo ? 0 : null, cortes: 0, peorHuecoMin: 0, kmACiegas: 0, fallo };
       }
       const ini = t[0].ts;
       const ultimo = t[t.length - 1];
@@ -227,6 +260,7 @@ export async function GET(req: NextRequest) {
         puntos: t.length,
         puntosCrudos: totalCrudo,
         pctAntena,
+        simulados,
         durMin: Math.round(ventanaS / 60),
         cobertura: Math.max(0, Math.min(100, Math.round((cubiertoS / ventanaS) * 100))),
         cortes,
@@ -247,10 +281,11 @@ export async function GET(req: NextRequest) {
     const porConductor = new Map<string, any>();
     for (const s of servicios) {
       if (s.clave === "SIN") continue;                 // sin conductor no hay a quién avisar
-      if (!porConductor.has(s.clave)) porConductor.set(s.clave, { clave: s.clave, nombre: s.nombre, telefono: s.telefono, tercero: s.tercero, servicios: 0, sinTraza: 0, suma: 0, medidos: 0, cortes: 0, kmACiegas: 0, peor: 100, crudos: 0, antena: 0 });
+      if (!porConductor.has(s.clave)) porConductor.set(s.clave, { clave: s.clave, nombre: s.nombre, telefono: s.telefono, tercero: s.tercero, servicios: 0, sinTraza: 0, suma: 0, medidos: 0, cortes: 0, kmACiegas: 0, peor: 100, crudos: 0, antena: 0, simulados: 0 });
       const c = porConductor.get(s.clave);
       c.servicios++;
       c.crudos += s.puntosCrudos ?? 0;
+      c.simulados += s.simulados ?? 0;
       c.antena += s.puntosCrudos ? Math.round((s.pctAntena ?? 0) * s.puntosCrudos / 100) : 0;
       if (s.cobertura === null) { c.sinTraza++; continue; }
       c.medidos++; c.suma += s.cobertura; c.cortes += s.cortes; c.kmACiegas += s.kmACiegas;
@@ -269,6 +304,7 @@ export async function GET(req: NextRequest) {
         sinConductor: servicios.filter(s => s.clave === "SIN").length,
         conductores: conductores.length,
         malos: conductores.filter(c => c.cobertura !== null && c.cobertura < 90).length,
+        conSimulado: conductores.filter(c => c.simulados > 0).length,
         kmACiegas: Math.round(conductores.reduce((a, c) => a + c.kmACiegas, 0) * 10) / 10,
       },
       conductores,

@@ -23,6 +23,13 @@ export type GeoPos = {
     heading?: number | null;
   };
   timestamp?: number;
+  /**
+   * true si el fix lo inyectó una app de "GPS falso" en vez de venir de los sensores.
+   * Lo entrega el plugin de fondo (`isFromMockProvider()`); en primer plano el plugin de
+   * Capacitor no lo expone, así que ahí llega `undefined` — undefined es "no se sabe",
+   * NO "es legítimo", y por eso se guarda como null en vez de false.
+   */
+  simulated?: boolean;
 };
 
 export type GeoPermiso = "granted" | "denied" | "prompt" | "unavailable";
@@ -281,6 +288,7 @@ export async function observarUbicacionBackground(
         heading: location.bearing ?? null,
       },
       timestamp: location.time ?? undefined,
+      simulated: typeof location.simulated === "boolean" ? location.simulated : undefined,
     });
   };
   const esYaIniciado = (e: any) =>
@@ -316,6 +324,58 @@ export async function observarUbicacionBackground(
 }
 
 /** Abre los ajustes de la app para conceder "Permitir todo el tiempo" (Android 11+). */
+export type AjustesUbicacion = {
+  /** false = sin Google Play Services: no hay diálogo, solo queda la guía manual. */
+  disponible: boolean;
+  /** true = el sistema ya puede dar alta precisión; no hay nada que pedir. */
+  satisfecho: boolean;
+  /** true = se puede arreglar con el diálogo del sistema (pedirAjustesUbicacion). */
+  resoluble: boolean;
+};
+
+/**
+ * SOLO LECTURA: ¿los AJUSTES DEL SISTEMA permiten alta precisión ahora mismo?
+ *
+ * Es una dimensión distinta del permiso: `precisionUbicacion()` dice si el conductor nos
+ * concedió ubicación fina; esto dice si el TELÉFONO va a encender el satélite. Con el modo
+ * "Ahorro de batería" el sistema resuelve por antena (±50-1350 m) por mucho que el permiso
+ * sea perfecto y el código pida alta calidad — y ese caso era invisible hasta ahora.
+ */
+export async function ajustesUbicacion(): Promise<AjustesUbicacion> {
+  const NO_SE_SABE: AjustesUbicacion = { disponible: false, satisfecho: false, resoluble: false };
+  if (!esNativo()) return NO_SE_SABE;
+  try {
+    const { registerPlugin } = await import("@capacitor/core");
+    const AfaNative = registerPlugin<{ checkLocationSettings: () => Promise<any> }>("AfaNative");
+    const r: any = await conTimeout(AfaNative.checkLocationSettings(), 6000);
+    return {
+      disponible: !!r?.disponible,
+      satisfecho: !!r?.satisfecho,
+      resoluble: !!r?.resoluble,
+    };
+  } catch {
+    return NO_SE_SABE;   // APK viejo sin el método → nunca romper el flujo del conductor
+  }
+}
+
+/**
+ * Muestra el diálogo NATIVO de Google para encender el GPS y subirlo a alta precisión con un
+ * toque, sin sacar al conductor de la app. Devuelve el estado RESULTANTE (se re-consulta tras
+ * el diálogo). Si no se pudo mostrar, el caller debe caer a abrirAjustesUbicacion().
+ * DEBE invocarse en respuesta a una ACCIÓN del conductor.
+ */
+export async function pedirAjustesUbicacion(): Promise<{ mostrado: boolean; satisfecho: boolean }> {
+  if (!esNativo()) return { mostrado: false, satisfecho: false };
+  try {
+    const { registerPlugin } = await import("@capacitor/core");
+    const AfaNative = registerPlugin<{ requestLocationSettings: () => Promise<any> }>("AfaNative");
+    const r: any = await conTimeout(AfaNative.requestLocationSettings(), 60000);
+    return { mostrado: !!r?.mostrado, satisfecho: !!r?.satisfecho };
+  } catch {
+    return { mostrado: false, satisfecho: false };
+  }
+}
+
 export async function abrirAjustesUbicacion(): Promise<void> {
   if (!esNativo()) return;
   try {
