@@ -1501,6 +1501,28 @@ export default function ModalGps({
   const etaKmVis   = etaVigente ? etaKm : null;
   const etaLlegVis = etaVigente ? etaLlegadaTs : null;
 
+  // Hora de llegada por TRAMO del panel "Ruta · Google Maps" — antes solo mostraba el minutaje
+  // entre paraderos y el operador tenía que sumarlos a mano contra el reloj para saber a qué hora
+  // pasaría el bus por cada uno. Ancla en `etaLlegVis` (la hora YA calculada por GPS+tráfico real
+  // para la PRÓXIMA parada) cuando está vigente, y encadena hacia adelante sumando la duración de
+  // cada tramo siguiente — así el primer tramo restante no arranca "de cero" sino desde donde el
+  // bus de verdad va a llegar. Sin ETA real vigente (servicio no iniciado o sin GPS) se ancla en
+  // "ahora": es una estimación desde el trazo planificado, igual que el total de la caja de arriba.
+  // Los tramos YA RECORRIDOS (antes de la próxima parada) no llevan hora: pintarla inventaría una
+  // llegada para un tramo que ya pasó.
+  const horasLlegadaTramos = useMemo(() => {
+    if (!ruta?.tramos?.length || !proximaParada) return [];
+    const idxAncla = ruta.tramos.findIndex(t => t.hasta === proximaParada.nombre);
+    if (idxAncla < 0) return []; // nombre no calza entre paradas y tramos (parada sin geocodificar, etc.)
+    let acum = (etaVigente && etaLlegVis != null) ? etaLlegVis : Date.now();
+    return ruta.tramos.map((t, i) => {
+      if (i < idxAncla) return null;
+      if (i === idxAncla) return acum;
+      acum += t.duracion_trafico_min * 60_000;
+      return acum;
+    });
+  }, [ruta, proximaParada, etaVigente, etaLlegVis]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 md:p-4" style={{ background: "rgba(15,23,42,0.65)" }}>
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl flex flex-col overflow-hidden" style={{ height: "90vh" }}>
@@ -1832,13 +1854,19 @@ export default function ModalGps({
                       // Mismo criterio que `hayTrafico`: sin recálculo con tráfico la resta es 0 por
                       // construcción, así que el tramo no se pinta de naranja por una comparación vacía.
                       const conTrafico = rutaConTrafico && t.duracion_trafico_min > t.duracion_min + 2;
+                      const horaLlegada = horasLlegadaTramos[i] ?? null;
                       return (
                         <div key={i} className="border-t pt-2 first:border-t-0 first:pt-0">
                           <div className="flex justify-between items-start gap-1 mb-0.5">
                             <p className="text-[10px] text-gray-600 font-medium leading-tight flex-1 truncate">{t.desde} → {t.hasta}</p>
-                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ml-1 ${conTrafico ? "bg-orange-100 text-orange-600" : "bg-green-100 text-green-600"}`}>
-                              {t.duracion_texto}
-                            </span>
+                            <div className="flex flex-col items-end flex-shrink-0 ml-1">
+                              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${conTrafico ? "bg-orange-100 text-orange-600" : "bg-green-100 text-green-600"}`}>
+                                {t.duracion_texto}
+                              </span>
+                              {horaLlegada != null && (
+                                <span className="text-[9px] text-gray-400 font-bold mt-0.5">llega {fmtHoraLlegada(horaLlegada)}</span>
+                              )}
+                            </div>
                           </div>
                           <p className="text-[9px] text-gray-400">{t.distancia_km} km</p>
                         </div>
