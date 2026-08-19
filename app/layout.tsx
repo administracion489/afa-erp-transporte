@@ -5,6 +5,8 @@ import { useEffect, useState, type ReactElement } from "react";
 import { Manrope, JetBrains_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabase";
 import EliaPanel from "./_components/elia";
+import NotificadorMensajesPasajeros from "@/components/NotificadorMensajesPasajeros";
+import { useMensajesNoLeidosPasajero } from "@/lib/useMensajesNoLeidos";
 import "./globals.css";
 
 const manrope = Manrope({
@@ -420,12 +422,14 @@ function GrupoMenu({
   pathname,
   permisos,
   collapsed,
+  badges,
 }: {
   grupo: string;
   items: MenuItem[];
   pathname: string;
   permisos: string[];
   collapsed: boolean;
+  badges?: Record<string, number>;
 }) {
   const itemsVisibles = items.filter((item) => permisos.includes(item.modulo));
   if (itemsVisibles.length === 0) return null;
@@ -448,6 +452,7 @@ function GrupoMenu({
         {itemsVisibles.map((item) => {
           const activo = pathname === item.href || pathname.startsWith(`${item.href}/`);
           const Icon = item.icon;
+          const badge = badges?.[item.href] || 0;
           return (
             <Link
               key={item.href}
@@ -466,6 +471,14 @@ function GrupoMenu({
                 strokeWidth={activo ? 2.5 : 1.8}
                 className={activo ? "text-white" : "text-white/50 group-hover:text-white transition-colors"}
               />
+              {badge > 0 && (
+                <span
+                  className="absolute -top-1 -right-1 flex items-center justify-center rounded-full bg-red-500 text-white font-black"
+                  style={{ minWidth: 16, height: 16, padding: "0 3px", fontSize: 9 }}
+                >
+                  {badge > 9 ? "9+" : badge}
+                </span>
+              )}
               <span className="
                 pointer-events-none absolute left-full ml-3 z-50
                 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap
@@ -511,6 +524,7 @@ function GrupoMenu({
           {itemsVisibles.map((item) => {
             const activo = pathname === item.href || pathname.startsWith(`${item.href}/`);
             const Icon = item.icon;
+            const badge = badges?.[item.href] || 0;
             return (
               <Link
                 key={item.href}
@@ -524,7 +538,7 @@ function GrupoMenu({
                 `}
               >
                 <div className={`
-                  w-7 h-7 flex items-center justify-center rounded-lg flex-shrink-0 transition-all
+                  relative w-7 h-7 flex items-center justify-center rounded-lg flex-shrink-0 transition-all
                   ${activo ? "bg-white/15" : "bg-white/5 group-hover:bg-white/10"}
                 `}>
                   <Icon
@@ -532,6 +546,14 @@ function GrupoMenu({
                     strokeWidth={activo ? 2.5 : 1.8}
                     className={activo ? "text-white" : "text-white/50 group-hover:text-white/90"}
                   />
+                  {badge > 0 && (
+                    <span
+                      className="absolute -top-1.5 -right-1.5 flex items-center justify-center rounded-full bg-red-500 text-white font-black"
+                      style={{ minWidth: 16, height: 16, padding: "0 3px", fontSize: 9 }}
+                    >
+                      {badge > 9 ? "9+" : badge}
+                    </span>
+                  )}
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className={`text-[12px] font-semibold leading-tight truncate transition-colors
@@ -543,7 +565,12 @@ function GrupoMenu({
                     {item.sub}
                   </p>
                 </div>
-                {activo && (
+                {badge > 0 ? (
+                  <span className="flex-shrink-0 rounded-full bg-red-500 text-white font-black flex items-center justify-center"
+                    style={{ minWidth: 18, height: 18, padding: "0 5px", fontSize: 10 }}>
+                    {badge > 9 ? "9+" : badge}
+                  </span>
+                ) : activo && (
                   <div className="w-1 h-1 rounded-full bg-white/80 flex-shrink-0" />
                 )}
               </Link>
@@ -582,6 +609,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const [permisos, setPermisos]           = useState<string[]>([]);
   const [cargando, setCargando]           = useState(true);
   const [collapsed, setCollapsed]         = useState(false);
+
+  // Mensajes de pasajeros sin atender — global, para el badge del menú y el
+  // notificador (toast/sonido/aviso), sin importar en qué módulo esté el operador.
+  const { noLeidos: mensajesNoLeidos, ultimo: ultimoMensaje } =
+    useMensajesNoLeidosPasajero(!esLogin && !esPublica && !cargando && permisos.includes("seguimiento"));
+  const badgesMenu = { "/seguimiento": mensajesNoLeidos };
 
   useEffect(() => {
     async function cargarSesionPermisos() {
@@ -720,6 +753,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                     pathname={pathname}
                     permisos={permisos}
                     collapsed={collapsed}
+                    badges={badgesMenu}
                   />
                 ))}
               </nav>
@@ -771,6 +805,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
             {/* ELIA — asistente de operaciones (solo usuarios internos autenticados) */}
             <EliaPanel nombre={nombreUsuario} rol={rolUsuario} permisos={permisos} />
+
+            {/* Aviso global de mensajes de pasajeros — toast/sonido/notificación, en cualquier página */}
+            {permisos.includes("seguimiento") && (
+              <NotificadorMensajesPasajeros noLeidos={mensajesNoLeidos} ultimo={ultimoMensaje} />
+            )}
           </div>
         )}
       </body>

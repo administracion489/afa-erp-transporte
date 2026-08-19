@@ -135,6 +135,16 @@ export default function PanelMensajesPasajeros({ onIrAServicio }: Props = {}) {
 
   useEffect(() => { cargar(); }, [cargar]);
 
+  // Deep-link desde el toast/notificación global: /seguimiento?mensajes=1 abre el panel.
+  // Se lee de window.location (cliente) para no requerir <Suspense> de useSearchParams.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (new URLSearchParams(window.location.search).get("mensajes") === "1") {
+      setAbierto(true);
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }, []);
+
   // Realtime — nuevo mensaje o cambio de estado
   useEffect(() => {
     const ch = supabase
