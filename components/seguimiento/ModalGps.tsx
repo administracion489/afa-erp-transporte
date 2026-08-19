@@ -1504,20 +1504,23 @@ export default function ModalGps({
   // Hora de llegada por TRAMO del panel "Ruta · Google Maps" — antes solo mostraba el minutaje
   // entre paraderos y el operador tenía que sumarlos a mano contra el reloj para saber a qué hora
   // pasaría el bus por cada uno. Ancla en `etaLlegVis` (la hora YA calculada por GPS+tráfico real
-  // para la PRÓXIMA parada) cuando está vigente, y encadena hacia adelante sumando la duración de
-  // cada tramo siguiente — así el primer tramo restante no arranca "de cero" sino desde donde el
-  // bus de verdad va a llegar. Sin ETA real vigente (servicio no iniciado o sin GPS) se ancla en
-  // "ahora": es una estimación desde el trazo planificado, igual que el total de la caja de arriba.
-  // Los tramos YA RECORRIDOS (antes de la próxima parada) no llevan hora: pintarla inventaría una
-  // llegada para un tramo que ya pasó.
+  // para la PRÓXIMA parada) cuando está vigente — ahí SÍ es la llegada, no se le suma nada más.
+  // Sin ETA real vigente (servicio no iniciado, sin GPS, o el cálculo todavía no resuelve) se ancla
+  // en "ahora": ese instante es el INICIO del tramo activo, no su llegada, así que también hay que
+  // sumarle su propia duración — de lo contrario el tramo activo se pintaba con la hora de "ahora"
+  // mismo (p. ej. "llega 11:27 p.m." siendo ya las 11:28), contradiciendo su propio badge de "7 min".
+  // De ahí en adelante se encadena sumando la duración de cada tramo siguiente. Los tramos YA
+  // RECORRIDOS (antes de la próxima parada) no llevan hora: pintarla inventaría una llegada para un
+  // tramo que ya pasó.
   const horasLlegadaTramos = useMemo(() => {
     if (!ruta?.tramos?.length || !proximaParada) return [];
     const idxAncla = ruta.tramos.findIndex(t => t.hasta === proximaParada.nombre);
     if (idxAncla < 0) return []; // nombre no calza entre paradas y tramos (parada sin geocodificar, etc.)
-    let acum = (etaVigente && etaLlegVis != null) ? etaLlegVis : Date.now();
+    const anclaEsLlegadaReal = etaVigente && etaLlegVis != null;
+    let acum = anclaEsLlegadaReal ? etaLlegVis : Date.now();
     return ruta.tramos.map((t, i) => {
       if (i < idxAncla) return null;
-      if (i === idxAncla) return acum;
+      if (i === idxAncla && anclaEsLlegadaReal) return acum; // ya es la llegada — no sumar de nuevo
       acum += t.duracion_trafico_min * 60_000;
       return acum;
     });
