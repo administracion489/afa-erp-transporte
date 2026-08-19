@@ -9,7 +9,11 @@
 --   false → comprobado y legítimo.
 --   NULL  → NO SE PUDO COMPROBAR (primer plano, APK viejo, o punto anterior a esta columna).
 -- Un DEFAULT false convertiría "no lo sé" en "está limpio", que es justo la afirmación que no
--- se puede hacer: dejaría filas viejas certificadas como legítimas sin que nadie las mirara.
+-- se puede hacer: dejaría 666.000 filas viejas certificadas como legítimas sin que nadie las
+-- mirara.
+--
+-- SEGURO EN PRODUCCIÓN: añadir una columna NULLABLE sin default es una operación de metadatos
+-- en PostgreSQL 11+, no reescribe la tabla ni bloquea las escrituras de GPS.
 --
 -- Idempotente: se puede correr varias veces sin efecto.
 
@@ -19,19 +23,13 @@ alter table ubicaciones_gps
 comment on column ubicaciones_gps.simulado is
   'true = fix de app de GPS falso (isFromMockProvider). false = comprobado legítimo. NULL = no se pudo comprobar.';
 
--- Índice parcial: solo indexa las filas sospechosas, que son (deberían ser) poquísimas.
--- Un índice completo sobre una tabla de 666.000+ puntos no se justifica para responder
--- "¿hubo GPS falso?".
---
--- CONCURRENTLY es OBLIGATORIO aquí: esta tabla recibe un punto cada ~4 segundos por cada bus
--- en ruta, y un CREATE INDEX normal toma un lock que BLOQUEA esas escrituras mientras dura —
--- es decir, cortaría el rastreo de toda la flota. Con CONCURRENTLY tarda más pero no bloquea.
---
--- OJO AL CORRERLO: CREATE INDEX CONCURRENTLY no puede ejecutarse dentro de una transacción.
--- En el SQL Editor de Supabase hay que lanzarlo SOLO, en su propia ejecución, separado del
--- ALTER de arriba. Si falla a medias deja un índice INVALID: se borra con
---   drop index if exists idx_ubicaciones_gps_simulado;
--- y se vuelve a lanzar.
-create index concurrently if not exists idx_ubicaciones_gps_simulado
-  on ubicaciones_gps (reserva_id, created_at)
-  where simulado is true;
+-- SIN ÍNDICE, A PROPÓSITO.
+-- Una versión anterior creaba un índice parcial aquí. Se quitó por dos razones:
+--   1. Nadie lo usa. El panel /gps-salud lee la traza por reserva_id (que YA tiene índice) y
+--      cuenta los simulados en memoria; no hay ninguna consulta que filtre por esta columna.
+--   2. No se puede crear sin riesgo desde el SQL Editor de Supabase: envuelve cada ejecución
+--      en una transacción, y CREATE INDEX CONCURRENTLY no admite correr dentro de una
+--      (ERROR 25001). Sin CONCURRENTLY, el índice toma un lock que bloquea los INSERT de
+--      ubicaciones_gps — o sea, corta el rastreo de toda la flota mientras se construye.
+-- Si algún día hace falta consultar "todos los puntos simulados de la flota", el índice se
+-- añade entonces, y desde una conexión directa (psql) donde CONCURRENTLY sí funciona.
