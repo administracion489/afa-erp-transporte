@@ -17,10 +17,11 @@ type Conductor = {
   clave: string; nombre: string; telefono: string | null; tercero: boolean;
   servicios: number; sinTraza: number; medidos: number;
   cobertura: number | null; peor: number | null; cortes: number; kmACiegas: number;
+  pctAntena: number;
 };
 type Servicio = {
   clave: string; nombre: string; tercero: boolean; reservaId: number;
-  fecha: string; hora: string | null; puntos: number; durMin: number;
+  fecha: string; hora: string | null; puntos: number; puntosCrudos: number; pctAntena: number; durMin: number;
   cobertura: number | null; cortes: number; peorHuecoMin: number; kmACiegas: number;
   origen: string | null; destino: string | null;
 };
@@ -151,7 +152,7 @@ export default function GpsSaludPage() {
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
               <thead>
                 <tr style={{ background: "#f9fafb", textAlign: "left" }}>
-                  {["Conductor", "Cobertura", "Peor servicio", "Servicios", "Cortes", "Km a ciegas", ""].map((h, i) => (
+                  {["Conductor", "Cobertura", "Por antena", "Peor servicio", "Servicios", "Cortes", "Km a ciegas", ""].map((h, i) => (
                     <th key={h + i} style={{ padding: "10px 12px", fontSize: 12, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: .3, borderBottom: "1px solid #e5e7eb" }}>{h}</th>
                   ))}
                 </tr>
@@ -174,6 +175,15 @@ export default function GpsSaludPage() {
                             {c.cobertura === null ? "sin traza" : `${c.cobertura}% · ${b.label}`}
                           </span>
                         </td>
+                        <td style={{ padding: "11px 12px" }}>
+                          {/* % de puntos con precisión peor a 150 m: el teléfono ubica por
+                              antena/red, no por satélite. Es la firma del APK viejo (fix
+                              6ec35db) o de la "Ubicación precisa" apagada: el mapa descarta
+                              esos puntos y el pasajero ve tramos "estimados". */}
+                          <span style={{ fontWeight: 700, color: c.pctAntena > 30 ? "#991b1b" : c.pctAntena > 10 ? "#92400e" : "#166534" }}>
+                            {c.pctAntena}%
+                          </span>
+                        </td>
                         <td style={{ padding: "11px 12px", color: c.peor !== null && c.peor < 70 ? "#991b1b" : "#374151" }}>{c.peor === null ? "—" : `${c.peor}%`}</td>
                         <td style={{ padding: "11px 12px", color: "#374151" }}>
                           {c.servicios}
@@ -192,7 +202,7 @@ export default function GpsSaludPage() {
                       </tr>
                       {abierto && (
                         <tr>
-                          <td colSpan={7} style={{ padding: 0, background: "#fafafa" }}>
+                          <td colSpan={8} style={{ padding: 0, background: "#fafafa" }}>
                             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                               <tbody>
                                 {data!.servicios.filter(s => s.clave === c.clave).map(s => {
@@ -210,7 +220,7 @@ export default function GpsSaludPage() {
                                         <span style={{ color: sb.color, fontWeight: 700 }}>{s.cobertura === null ? "sin traza" : `${s.cobertura}%`}</span>
                                       </td>
                                       <td style={{ padding: "8px 12px", color: "#6b7280", whiteSpace: "nowrap" }}>
-                                        {s.durMin} min · {s.puntos} pts
+                                        {s.durMin} min · {s.puntos} pts{s.pctAntena > 10 ? <span style={{ color: "#92400e" }}> · {s.pctAntena}% antena</span> : null}
                                       </td>
                                       <td style={{ padding: "8px 12px", color: s.kmACiegas > 0 ? "#991b1b" : "#9ca3af", whiteSpace: "nowrap" }}>
                                         {s.cortes > 0 ? `${s.cortes} cortes · ${s.kmACiegas} km sin rastrear · peor ${s.peorHuecoMin} min` : "sin cortes"}
@@ -227,7 +237,7 @@ export default function GpsSaludPage() {
                   );
                 })}
                 {!data!.conductores.length && (
-                  <tr><td colSpan={7} style={{ padding: 20, color: "#6b7280", textAlign: "center" }}>No hay servicios finalizados con traza en este rango.</td></tr>
+                  <tr><td colSpan={8} style={{ padding: 20, color: "#6b7280", textAlign: "center" }}>No hay servicios finalizados con traza en este rango.</td></tr>
                 )}
               </tbody>
             </table>
@@ -238,7 +248,11 @@ export default function GpsSaludPage() {
             <em>Cobertura</em> es el porcentaje del viaje con GPS llegando.{" "}
             <em>Cortes</em> son los tramos en que dejó de llegar ubicación <strong>mientras el bus seguía avanzando</strong> —
             esos son fallos de verdad, no paradas: durante ellos el pasajero ve el bus congelado.{" "}
-            <em>Km a ciegas</em> es lo que recorrió sin registrarse.
+            <em>Km a ciegas</em> es lo que recorrió sin registrarse.{" "}
+            <em>Por antena</em> es el porcentaje de puntos con precisión peor a 150 m: el teléfono está
+            ubicando por antena de celular en vez de satélite — esos puntos existen pero el mapa no puede
+            dibujarlos y el viaje sale como "estimado". Se corrige con el APK 2.4 (obliga al satélite) y
+            revisando que "Ubicación precisa" esté activada en el teléfono.
             <br />
             <strong style={{ color: "#111827" }}>Qué hacer con un conductor en rojo:</strong> en su teléfono, Ajustes → Aplicaciones → AFA →
             Permisos → Ubicación → <strong>“Permitir siempre”</strong>, y quitarle la optimización de batería a la app.

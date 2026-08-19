@@ -45,6 +45,7 @@ function metros(aLat: number, aLng: number, bLat: number, bLng: number): number 
 }
 
 type Punto = { ts: number; lat: number; lng: number };
+type Traza = { pts: Punto[]; totalCrudo: number; porAntena: number };
 
 /**
  * Trae la traza de una reserva, YA SANEADA. PostgREST corta en 1000 → hay que paginar, con
@@ -52,8 +53,9 @@ type Punto = { ts: number; lat: number; lng: number };
  * Descarta lo que envenenaría la medición: coordenadas o fechas no finitas (un lat null se
  * convertiría en 0 y mediría ~10.000 km hasta la isla nula) y los fixes de red imprecisos.
  */
-async function trazaDe(reservaId: number): Promise<Punto[]> {
+async function trazaDe(reservaId: number): Promise<Traza> {
   const pts: Punto[] = [];
+  let totalCrudo = 0, porAntena = 0;
   for (let off = 0; off < 20000; off += 1000) {
     const { data, error } = await admin
       .from("ubicaciones_gps")
@@ -70,12 +72,16 @@ async function trazaDe(reservaId: number): Promise<Punto[]> {
       const prec = f.precision_m == null ? null : Number(f.precision_m);
       if (!Number.isFinite(ts) || ts <= 0) continue;
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
-      if (prec !== null && Number.isFinite(prec) && prec > PRECISION_MAX_M) continue;
+      totalCrudo++;
+      // Un fix con precisión peor que el umbral es de ANTENA/red, no de satélite: no sirve
+      // para dibujar (pondría el bus dentro de las casas) pero sí como diagnóstico — es la
+      // firma del teléfono que no está encendiendo el GNSS (bug del APK viejo, fix 6ec35db).
+      if (prec !== null && Number.isFinite(prec) && prec > PRECISION_MAX_M) { porAntena++; continue; }
       pts.push({ ts, lat, lng });
     }
     if (data.length < 1000) break;
   }
-  return pts.sort((a, b) => a.ts - b.ts);
+  return { pts: pts.sort((a, b) => a.ts - b.ts), totalCrudo, porAntena };
 }
 
 /** "HH:MM[:SS]" del día `fecha` (Lima, UTC-5) en ms epoch. */
@@ -179,14 +185,18 @@ export async function GET(req: NextRequest) {
     // ── Medición, en lotes paralelos (secuencial tardaba ~30 s con 120 reservas) ──
     const medir = async (r: any) => {
       let t: Punto[] = [];
+      let totalCrudo = 0, porAntena = 0;
       let fallo: string | null = null;
-      try { t = await trazaDe(r.id); } catch (e: any) { fallo = e?.message ?? "error al leer la traza"; }
+      try { const tz = await trazaDe(r.id); t = tz.pts; totalCrudo = tz.totalCrudo; porAntena = tz.porAntena; } catch (e: any) { fallo = e?.message ?? "error al leer la traza"; }
       const base = { ...quien(r), reservaId: r.id, fecha: r.fecha_servicio, hora: r.hora_servicio, origen: r.origen, destino: r.destino };
 
       // Ventana del servicio: del primer punto hasta la hora prevista de llegada (o el último
       // punto, si el servicio se alargó). Sin puntos no hay arranque conocido → no medible.
+      const pctAntena = totalCrudo ? Math.round((porAntena / totalCrudo) * 100) : 0;
       if (fallo || t.length < 2) {
-        return { ...base, puntos: t.length, durMin: 0, cobertura: t.length ? 0 : null, cortes: 0, peorHuecoMin: 0, kmACiegas: 0, fallo };
+        // OJO: "sin traza utilizable" puede ser un teléfono 100% por antena — totalCrudo > 0
+        // con todos los puntos descartados. Distinto de "no emitió nada".
+        return { ...base, puntos: t.length, puntosCrudos: totalCrudo, pctAntena, durMin: 0, cobertura: totalCrudo ? 0 : null, cortes: 0, peorHuecoMin: 0, kmACiegas: 0, fallo };
       }
       const ini = t[0].ts;
       const ultimo = t[t.length - 1];
@@ -215,6 +225,8 @@ export async function GET(req: NextRequest) {
       return {
         ...base,
         puntos: t.length,
+        puntosCrudos: totalCrudo,
+        pctAntena,
         durMin: Math.round(ventanaS / 60),
         cobertura: Math.max(0, Math.min(100, Math.round((cubiertoS / ventanaS) * 100))),
         cortes,
@@ -235,15 +247,17 @@ export async function GET(req: NextRequest) {
     const porConductor = new Map<string, any>();
     for (const s of servicios) {
       if (s.clave === "SIN") continue;                 // sin conductor no hay a quién avisar
-      if (!porConductor.has(s.clave)) porConductor.set(s.clave, { clave: s.clave, nombre: s.nombre, telefono: s.telefono, tercero: s.tercero, servicios: 0, sinTraza: 0, suma: 0, medidos: 0, cortes: 0, kmACiegas: 0, peor: 100 });
+      if (!porConductor.has(s.clave)) porConductor.set(s.clave, { clave: s.clave, nombre: s.nombre, telefono: s.telefono, tercero: s.tercero, servicios: 0, sinTraza: 0, suma: 0, medidos: 0, cortes: 0, kmACiegas: 0, peor: 100, crudos: 0, antena: 0 });
       const c = porConductor.get(s.clave);
       c.servicios++;
+      c.crudos += s.puntosCrudos ?? 0;
+      c.antena += s.puntosCrudos ? Math.round((s.pctAntena ?? 0) * s.puntosCrudos / 100) : 0;
       if (s.cobertura === null) { c.sinTraza++; continue; }
       c.medidos++; c.suma += s.cobertura; c.cortes += s.cortes; c.kmACiegas += s.kmACiegas;
       if (s.cobertura < c.peor) c.peor = s.cobertura;
     }
     const conductores = [...porConductor.values()]
-      .map(c => ({ ...c, cobertura: c.medidos ? Math.round(c.suma / c.medidos) : null, peor: c.medidos ? c.peor : null, kmACiegas: Math.round(c.kmACiegas * 10) / 10 }))
+      .map(c => ({ ...c, cobertura: c.medidos ? Math.round(c.suma / c.medidos) : null, peor: c.medidos ? c.peor : null, kmACiegas: Math.round(c.kmACiegas * 10) / 10, pctAntena: c.crudos ? Math.round(c.antena / c.crudos * 100) : 0 }))
       .sort((a, b) => (a.cobertura ?? -1) - (b.cobertura ?? -1));
 
     const medidos = servicios.filter(s => s.cobertura !== null);
