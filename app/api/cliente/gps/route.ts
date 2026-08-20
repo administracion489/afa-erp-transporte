@@ -189,14 +189,22 @@ export async function POST(req: NextRequest) {
     // ── Modo lote: última posición conocida por cada vehículo ──────────────────
     if (vehiculoIds.length > 0 || vehiculoTerceroIds.length > 0) {
       const lim = (vehiculoIds.length + vehiculoTerceroIds.length) * 25;
+      // Cota temporal: sin ella, la lista IN + ORDER BY created_at DESC obliga a Postgres
+      // a ordenar la tabla entera de GPS (cientos de miles de filas) para devolver 25 por
+      // vehículo, y esto corre cada 15 s mientras el portal está abierto. Son las MISMAS
+      // 6 h que el navegador ya descarta al mezclar (MAX_EDAD_MS en app/cliente/page.tsx):
+      // no se pierde ni un marcador, solo se deja de leer lo que igual se iba a tirar.
+      const desdeLote = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
       const [propios, terceros] = await Promise.all([
         vehiculoIds.length
           ? supabase.from("ubicaciones_gps").select(COLS)
-              .in("vehiculo_id", vehiculoIds).order("created_at", { ascending: false }).limit(lim)
+              .in("vehiculo_id", vehiculoIds).gte("created_at", desdeLote)
+              .order("created_at", { ascending: false }).limit(lim)
           : Promise.resolve({ data: [] as any[] }),
         vehiculoTerceroIds.length
           ? supabase.from("ubicaciones_gps").select(COLS)
-              .in("vehiculo_tercero_id", vehiculoTerceroIds).order("created_at", { ascending: false }).limit(lim)
+              .in("vehiculo_tercero_id", vehiculoTerceroIds).gte("created_at", desdeLote)
+              .order("created_at", { ascending: false }).limit(lim)
           : Promise.resolve({ data: [] as any[] }),
       ]);
       const filas = [...((propios as any).data || []), ...((terceros as any).data || [])];

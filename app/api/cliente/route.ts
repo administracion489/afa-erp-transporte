@@ -61,16 +61,35 @@ function verificarToken(token: unknown): { cid: number; uid: number } | null {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 // PostgREST recorta toda respuesta al max-rows del servidor (1000) aunque se pida
 // .limit() mayor — mismo patrón paginado que lib/huella.ts (paginarFilas).
+// Las páginas van en BLOQUES paralelos, no de una en una: encadenarlas hacía que el
+// tiempo total fuera la suma de todas las latencias. Con un bloque de 3, dos páginas
+// cuestan lo mismo que una. Las páginas de más que se piden al final salen vacías y
+// son baratas; el precio de una consulta vacía es menor que el de un round-trip extra.
+const BLOQUE_PAGINAS = 3;
 async function paginado(build: (from: number, to: number) => any): Promise<any[]> {
   const PAGE = 1000;
-  let from = 0;
   const all: any[] = [];
+  let base = 0;
   for (;;) {
-    const { data, error } = await build(from, from + PAGE - 1);
-    if (error || !data) break;
-    all.push(...data);
-    if (data.length < PAGE) break;
-    from += PAGE;
+    const bloque = await Promise.all(
+      Array.from({ length: BLOQUE_PAGINAS }, (_, i) => {
+        const from = base + i * PAGE;
+        return build(from, from + PAGE - 1);
+      })
+    );
+    let completo = true;
+    for (const { data, error } of bloque as any[]) {
+      // Un error NO puede devolver silencio: cortar el bucle y responder 200 con lo que
+      // hubiera (o con nada) hacía que el navegador tomara por buena una lista vacía y
+      // reintentara sin fin. Se propaga y el handler responde 500; el portal conserva
+      // entonces su estado previo en vez de creer que el cliente no tiene datos.
+      if (error) throw new Error(`consulta paginada: ${error.message}`);
+      if (!data) { completo = false; break; }
+      all.push(...data);
+      if (data.length < PAGE) { completo = false; break; }
+    }
+    if (!completo) break;
+    base += BLOQUE_PAGINAS * PAGE;
   }
   return all;
 }
@@ -82,6 +101,60 @@ function limpiarReserva<T extends Record<string, any>>(r: T): T {
   delete (r as any).token_conductor_tercero;
   return r;
 }
+
+// ─── Ventana y proyección de la lista de reservas ────────────────────────────
+// select("*") sobre TODO el histórico era el cuello de botella del portal: un cliente
+// con programa fijo tiene 8488 reservas —8222 de ellas FUTURAS, hasta 2028— y la acción
+// "datos" devolvía 27 MB en 9 páginas secuenciales (~9 s) antes de que la pantalla
+// pudiera pintar una sola fila. Mismo arreglo que ya tenía /programacion (COLS_LISTA en
+// app/programacion/page.tsx): columnas explícitas + ventana de fechas.
+//
+// paradas_json es la mitad del peso de cada fila (~1.7 KB de 3.2 KB) y solo hace falta
+// para el servicio abierto o los de HOY → se hidrata aparte (acción paradas_json_reservas).
+const COLS_PORTAL =
+  "id,codigo,origen,destino,fecha_servicio,hora_servicio,estado,precio_cliente," +
+  "vehiculo_id,conductor_id,cotizacion_id,created_at," +
+  "vehiculo_tercero_id,conductor_tercero_id,empresa_tercerizada_id";
+
+// Hacia atrás no se corta (el histórico real de un cliente son cientos de filas, no miles,
+// y de ahí salen todos sus KPIs). Hacia adelante sí: el portal solo muestra los "próximos
+// servicios" y la agenda; un servicio de 2028 no se mira desde aquí.
+const DIAS_FUTURO = 90;
+
+/** "YYYY-MM-DD" de hoy en Perú (UTC-5, sin DST). */
+function hoyLima(): string {
+  return new Date(Date.now() - 5 * 3600000).toISOString().slice(0, 10);
+}
+/** Tope de la ventana futura: hoy (Lima) + DIAS_FUTURO. */
+function topeFuturo(): string {
+  return new Date(Date.now() - 5 * 3600000 + DIAS_FUTURO * 86400000).toISOString().slice(0, 10);
+}
+
+/** Reservas del cliente dentro de la ventana del portal (sin fecha = siempre entran). */
+function reservasVentana(cid: number, cols: string) {
+  return (f: number, t: number) => admin.from("reservas").select(cols)
+    .eq("cliente_id", cid)
+    .or(`fecha_servicio.is.null,fecha_servicio.lte.${topeFuturo()}`)
+    .order("fecha_servicio", { ascending: false }).order("id", { ascending: false })
+    .range(f, t);
+}
+
+// PostgREST manda el .in() en la query string: con miles de ids la URL revienta
+// (HTTP 400 / UND_ERR_HEADERS_OVERFLOW medido a partir de ~2500 ids) y el error se
+// tragaba silencioso. Se trocea en lotes que caben siempre, ejecutados en paralelo.
+const LOTE_IN = 200;
+function lotes<T>(xs: T[], n = LOTE_IN): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < xs.length; i += n) out.push(xs.slice(i, i + n));
+  return out;
+}
+
+// Caché de la flota del cliente: el mapa "En vivo" la repide cada 15 s y la respuesta
+// (qué buses han servido a este cliente) es prácticamente estática. Vive por instancia
+// de la función; en el peor caso se recalcula, nunca devuelve datos de otro cliente
+// porque la llave es el cid del token.
+const FLOTA_TTL_MS = 5 * 60000;
+const flotaCache = new Map<number, { ts: number; datos: any }>();
 
 // ¿La reserva pertenece al cliente del token? (anti-IDOR de reserva_id del body)
 async function reservaDelCliente(reservaId: number, cid: number): Promise<boolean> {
@@ -157,20 +230,38 @@ export async function POST(req: NextRequest) {
     switch (accion) {
       // ── DATOS: reservas + facturas + documentos del cliente ────────────────
       case "datos": {
-        const [reservas, factRes, docsRes] = await Promise.all([
-          paginado((f, t) => admin.from("reservas").select("*").eq("cliente_id", cid)
-            .order("fecha_servicio", { ascending: false }).order("id", { ascending: false }).range(f, t)),
+        const [reservas, factRes, docsRes, histRes] = await Promise.all([
+          paginado(reservasVentana(cid, COLS_PORTAL)),
           admin.from("facturas")
             .select("id,reserva_id,tipo_comprobante,serie,numero,fecha_emision,fecha_vencimiento,total,estado,pdf_url")
             .eq("cliente_id", cid).order("fecha_emision", { ascending: false }),
           admin.from("documentos_cliente").select("*").eq("cliente_id", cid)
             .order("created_at", { ascending: false }),
+          // "Total histórico" del dashboard: se cuenta en Postgres, no trayendo filas.
+          // Antes salía de reservas.length, que con la programación fija incluía los
+          // servicios de 2027-2028 y hacía que el KPI —y el SLA que divide entre él—
+          // fueran falsos: 8488 en vez de 266, y por eso el cumplimiento marcaba 0%.
+          admin.from("reservas").select("id", { count: "exact", head: true })
+            .eq("cliente_id", cid).lte("fecha_servicio", hoyLima()),
         ]);
         return NextResponse.json({
           reservas: reservas.map(limpiarReserva),
           facturas: factRes.data || [],
           documentos: docsRes.data || [],
+          total_historico: histRes.count ?? null,
         });
+      }
+
+      // ── PARADAS_JSON bajo demanda ──────────────────────────────────────────
+      // La columna pesada de reservas, solo para los servicios que la pintan: los de
+      // HOY (tarjetas "En curso" y su mapa) y el que se abre en el modal GPS.
+      case "paradas_json_reservas": {
+        const ids = (Array.isArray(body.reserva_ids) ? body.reserva_ids : [])
+          .map(Number).filter((n: number) => Number.isFinite(n) && n > 0).slice(0, 40);
+        if (ids.length === 0) return NextResponse.json({ reservas: [] });
+        const { data } = await admin.from("reservas").select("id,paradas_json")
+          .eq("cliente_id", cid).in("id", ids);   // el cliente_id del token acota el acceso
+        return NextResponse.json({ reservas: data || [] });
       }
 
       // ── PARADAS de una reserva del cliente ─────────────────────────────────
@@ -193,16 +284,24 @@ export async function POST(req: NextRequest) {
       }
 
       // ── FLOTA del cliente para el mapa En vivo ─────────────────────────────
+      // El mapa la repide cada 15 s, así que NO puede volver a barrer el histórico
+      // completo: se acota a la misma ventana que "datos" y se cachea en memoria.
+      // La flota que ha servido a un cliente no cambia entre dos refrescos de 15 s.
       case "vehiculos_en_vivo": {
-        const filas = await paginado((f, t) => admin.from("reservas")
-          .select("vehiculo_id,vehiculo_tercero_id").eq("cliente_id", cid).order("id").range(f, t));
+        const cacheado = flotaCache.get(cid);
+        if (cacheado && Date.now() - cacheado.ts < FLOTA_TTL_MS) {
+          return NextResponse.json(cacheado.datos);
+        }
+        const filas = await paginado(reservasVentana(cid, "vehiculo_id,vehiculo_tercero_id"));
         const vIds = [...new Set(filas.map(r => r.vehiculo_id).filter(Boolean))];
         const vtIds = [...new Set(filas.map(r => r.vehiculo_tercero_id).filter(Boolean))];
         const [v, vt] = await Promise.all([
           vIds.length ? admin.from("vehiculos").select("id,placa").in("id", vIds) : Promise.resolve({ data: [] as any[] }),
           vtIds.length ? admin.from("vehiculos_tercero").select("id,placa").in("id", vtIds) : Promise.resolve({ data: [] as any[] }),
         ]);
-        return NextResponse.json({ vehiculos: (v as any).data || [], vehiculos_tercero: (vt as any).data || [] });
+        const datos = { vehiculos: (v as any).data || [], vehiculos_tercero: (vt as any).data || [] };
+        flotaCache.set(cid, { ts: Date.now(), datos });
+        return NextResponse.json(datos);
       }
 
       // ── MANIFIESTO de una reserva: paradas + boarding + roster ─────────────
@@ -270,22 +369,25 @@ export async function POST(req: NextRequest) {
 
       // ── STATS del historial: esperados / embarcados por reserva ────────────
       case "historial_stats": {
-        const pedidos = (Array.isArray(body.reserva_ids) ? body.reserva_ids : [])
-          .map(Number).filter((n: number) => Number.isFinite(n) && n > 0);
-        if (pedidos.length === 0) return NextResponse.json({ stats: {} });
-        // Solo reservas que de verdad son del cliente del token.
-        const propias = await paginado((f, t) => admin.from("reservas").select("id")
-          .eq("cliente_id", cid).in("id", pedidos).order("id").range(f, t));
-        const ids = propias.map(r => r.id);
+        // Los ids salen del TOKEN, no del navegador. Antes el portal mandaba el histórico
+        // entero en el body (8488 ids) y el .in() resultante —que PostgREST pone en la
+        // query string— devolvía HTTP 400; paginado() se tragaba el error y el endpoint
+        // respondía 200 con {stats:{}}, lo que dejaba al efecto del cliente reintentando
+        // en bucle. Ahora el servidor deriva la misma ventana que muestra la pantalla.
+        const propias = await paginado(reservasVentana(cid, "id"));
+        const ids = propias.map((r: any) => r.id);
         if (ids.length === 0) return NextResponse.json({ stats: {} });
 
-        const [ppData, paxAdhocData] = await Promise.all([
-          paginado((f, t) => admin.from("pasajeros_parada")
+        // Troceado en lotes: ningún .in() vuelve a acercarse al límite de URL.
+        const [ppPorLote, paxPorLote] = await Promise.all([
+          Promise.all(lotes(ids).map(lote => paginado((f, t) => admin.from("pasajeros_parada")
             .select("pasajero_id, estado, estado_abordaje, paradas!inner(reserva_id)")
-            .in("paradas.reserva_id", ids).order("id").range(f, t)),
-          paginado((f, t) => admin.from("pasajeros").select("id, reserva_id")
-            .in("reserva_id", ids).order("id").range(f, t)),
+            .in("paradas.reserva_id", lote).order("id").range(f, t)))),
+          Promise.all(lotes(ids).map(lote => paginado((f, t) => admin.from("pasajeros")
+            .select("id, reserva_id").in("reserva_id", lote).order("id").range(f, t)))),
         ]);
+        const ppData = ppPorLote.flat();
+        const paxAdhocData = paxPorLote.flat();
 
         const paxPorReserva: Record<number, Set<number>> = {};
         const abordadosPorReserva: Record<number, Set<number>> = {};

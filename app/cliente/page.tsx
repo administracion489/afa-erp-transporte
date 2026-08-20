@@ -260,6 +260,18 @@ export default function ClientePortal() {
   const [reservaStats,   setReservaStats]   = useState<Record<number, { embarcados: number; esperados: number }>>({});
   const [loadingStats,   setLoadingStats]   = useState(false);
   const [exportando,     setExportando]     = useState(false);
+  // Sello del intento de stats: se marca ANTES de pedir y en TODOS los caminos (mismo
+  // patrón que el efecto de ETA). Sin él, un intento fallido dejaba la guarda del efecto
+  // satisfecha y la pestaña Historial repetía el POST sin freno.
+  const statsPedidosRef = useRef(false);
+  // Carga en vuelo + sello de frescura, para que los refrescos automáticos no se
+  // encimen ni repongan los esqueletos sobre datos que ya están en pantalla.
+  const cargandoDatosRef = useRef(false);
+  const ultimoDatosRef   = useRef(0);
+  const cargandoFlotaRef = useRef(false);
+  // "Total histórico": lo cuenta Postgres (servicios ya realizados), no el largo del
+  // array —que ahora es una ventana, y antes incluía la programación de 2027-2028.
+  const [totalHistorico, setTotalHistorico] = useState<number | null>(null);
 
   // Modales
   const [gpsModalOpen, setGpsModalOpen] = useState(false);
@@ -336,9 +348,9 @@ export default function ClientePortal() {
     if (saved) {
       setCliente(saved.c); setPortalUsuario(saved.u);
       cargarDatos(saved.c.id);
-      // Precarga GPS en vivo desde el montaje (no solo al abrir la pestaña En vivo),
-      // para que tras un F5 los buses ya estén listos al entrar a la sección.
-      cargarVehiculosCliente(saved.c.id);
+      // La flota NO se pide aquí: el efecto de tab === "dashboard" | "activos" ya la
+      // carga en el montaje (tab arranca en "dashboard"). Pedirla también acá duplicaba
+      // en t=0 las dos llamadas más caras justo mientras se pinta el esqueleto.
     }
     setIniting(false);
   }, []);
@@ -360,7 +372,8 @@ export default function ClientePortal() {
     }
     saveSession(data.cliente, data.usuario, data.token);
     setCliente(data.cliente as Cliente); setPortalUsuario(data.usuario as PortalUsuario);
-    await cargarDatos(data.cliente.id); cargarVehiculosCliente(data.cliente.id); setLoginLoad(false);
+    // La flota la carga el efecto de la pestaña (ver Init): no se duplica aquí.
+    await cargarDatos(data.cliente.id); setLoginLoad(false);
   }
 
   // ─── Reset de contraseña — paso 1: solicitar código ──────────────────────
@@ -440,23 +453,60 @@ export default function ClientePortal() {
   // ─── Cargar datos ─────────────────────────────────────────────────────────
   // Reservas + facturas + documentos llegan juntas desde /api/cliente (service
   // role): el rol anónimo no puede leerlas por RLS.
-  const cargarDatos = useCallback(async (cid: number) => {
-    setLoading(true);
-    setLoadingFact(true);
-    const { ok, data } = await portalApi("datos");
+  // ─── paradas_json bajo demanda ────────────────────────────────────────────
+  // La columna más pesada de reservas (~1.7 KB por fila) se quedó fuera de la lista y
+  // se trae solo para los servicios que de verdad la pintan: los de hoy y el que se
+  // abre en el modal GPS o en el detalle. Se fusiona sobre la reserva ya cargada.
+  const traerParadasJson = useCallback(async (ids: number[]): Promise<Map<number, any>> => {
+    const limpios = [...new Set(ids)].filter(id => id > 0);
+    if (limpios.length === 0) return new Map();
+    const { ok, data } = await portalApi("paradas_json_reservas", { reserva_ids: limpios });
+    if (!ok || !Array.isArray(data?.reservas)) return new Map();
+    return new Map<number, any>(data.reservas.map((x: any) => [x.id, x.paradas_json]));
+  }, []);
+
+  const paradasJsonPedidasRef = useRef<Set<number>>(new Set());
+  const hidratarParadasJson = useCallback(async (ids: number[]) => {
+    const faltan = [...new Set(ids)].filter(id => id > 0 && !paradasJsonPedidasRef.current.has(id));
+    if (faltan.length === 0) return;
+    faltan.forEach(id => paradasJsonPedidasRef.current.add(id));
+    const m = await traerParadasJson(faltan);
+    if (m.size === 0) { faltan.forEach(id => paradasJsonPedidasRef.current.delete(id)); return; } // reintentable
+    setReservas(prev => prev.map(r => m.has(r.id) ? { ...r, paradas_json: m.get(r.id) } as Reserva : r));
+  }, [traerParadasJson]);
+
+  const cargarDatos = useCallback(async (cid: number, silencioso = false) => {
+    // Una sola carga a la vez. El intervalo de 30 s, el visibilitychange y el montaje
+    // podían solaparse y disparar la misma consulta pesada tres veces seguidas.
+    if (cargandoDatosRef.current) return;
+    // Un refresco silencioso que llega pisando otro reciente no aporta nada.
+    if (silencioso && Date.now() - ultimoDatosRef.current < 15000) return;
+    cargandoDatosRef.current = true;
+    // Los esqueletos son solo para la PRIMERA carga. Reponerlos en cada revalidación
+    // (cada 30 s, y en cada alt-tab) es lo que hacía que el portal pareciera estar
+    // cargando siempre, aunque los datos ya estuvieran en pantalla.
+    if (!silencioso) { setLoading(true); setLoadingFact(true); }
     // Las liquidaciones van en su propia llamada: si la tabla todavía no existe, la
-    // sección simplemente no aparece y el resto del portal no se entera.
+    // sección simplemente no aparece y el resto del portal no se entera. Se dispara
+    // ANTES del await para que Facturación no espere a la lista de servicios.
     portalApi("liquidaciones_listar").then(({ data: d }) => {
       setLiquidaciones((d?.liquidaciones ?? []) as any[]);
       const m: Record<number, string> = {};
       for (const s of ((d?.sedes ?? []) as any[])) m[s.id] = s.nombre;
       setSedesLiq(m);
     }).catch(() => {});
+    const { ok, data } = await portalApi("datos");
+    cargandoDatosRef.current = false;
     if (!ok) { setLoading(false); setLoadingFact(false); return; } // falla transitoria: conservar estado
+    ultimoDatosRef.current = Date.now();
+    if (typeof data.total_historico === "number") setTotalHistorico(data.total_historico);
     const rList = (data.reservas || []) as Reserva[];
     // No borrar reservas existentes si la consulta devuelve vacío (falla transitoria).
     setReservas(prev => rList.length > 0 ? rList : prev.length > 0 ? prev : rList);
     const hoy = getHoyPeru();
+    // paradas_json ya no viaja en la lista (era la mitad de su peso). Se pide solo para
+    // los servicios de HOY, que son los que dibujan tarjeta, mapa y ETA.
+    hidratarParadasJson(rList.filter(r => r.fecha_servicio?.startsWith(hoy)).map(r => r.id));
     const activo = rList.find(r => r.fecha_servicio?.startsWith(hoy) && !["cancelado","cancelada"].includes(r.estado));
     setReservaActivaId(activo?.id ?? null);
     if (activo) {
@@ -486,7 +536,7 @@ export default function ClientePortal() {
     setFacturas((data.facturas || []) as Factura[]);
     setLoadingFact(false);
     setDocs((data.documentos || []) as DocPortal[]);
-  }, []);
+  }, [hidratarParadasJson]);
 
   // ─── Cargar detalles (paradas + boarding + pasajeros + conductor + vehiculo)
   // force=true salta la caché (se usa al editar el manifiesto con el detalle abierto).
@@ -555,6 +605,18 @@ export default function ClientePortal() {
     setConductorInfo(null);
     setVehiculoInfo(null);
 
+    // El modal dibuja las paradas de la cotización desde paradas_json, que ya no viene
+    // en la lista: se trae para ESTE servicio (una fila) y se inyecta en la copia que
+    // el modal tiene abierta. Si la reserva ya venía hidratada, no se vuelve a pedir.
+    if (!(r as any).paradas_json) {
+      traerParadasJson([r.id]).then(m => {
+        const pj = m.get(r.id);
+        if (!pj) return;
+        setGpsModalRes(prev => (prev && prev.id === r.id ? ({ ...prev, paradas_json: pj } as Reserva) : prev));
+        setReservas(prev => prev.map(x => x.id === r.id ? ({ ...x, paradas_json: pj } as Reserva) : x));
+      });
+    }
+
     const tasks: Promise<any>[] = [];
 
     if (!paradas[r.id]) {
@@ -596,7 +658,7 @@ export default function ClientePortal() {
 
     await Promise.all(tasks);
     setGpsModalOpen(true);
-  }, [paradas]);
+  }, [paradas, traerParadasJson]);
 
   // ─── Portal Usuarios CRUD ─────────────────────────────────────────────────
   // Todo el CRUD va por /api/cliente (service role + token): así las claves de los
@@ -666,16 +728,24 @@ export default function ClientePortal() {
   // paradas, y (2) paginar con orden estable para superar el tope de 1000.
   // El cómputo (unión A ∪ B paginada + esAbordado) vive ahora en /api/cliente
   // acción historial_stats (service role): RLS bloquea estas tablas al rol anónimo.
-  const cargarHistorialStats = useCallback(async (reservaIds: number[]) => {
-    if (reservaIds.length === 0) return;
+  // Los ids ya NO viajan en el body: el servidor los deriva del cliente_id del token,
+  // con la misma ventana que la lista. Mandarlos era lo que rompía la pestaña (miles de
+  // ids en el filtro → PostgREST 400 → stats vacías → reintento infinito).
+  const cargarHistorialStats = useCallback(async () => {
+    statsPedidosRef.current = true;   // el sello va PRIMERO: un fallo no debe reintentar solo
     setLoadingStats(true);
-    const { ok, data } = await portalApi("historial_stats", { reserva_ids: reservaIds });
+    const { ok, data } = await portalApi("historial_stats");
     if (ok) setReservaStats((data.stats || {}) as Record<number, { embarcados: number; esperados: number }>);
     setLoadingStats(false);
   }, []);
 
   // ─── Vehículos del cliente para mapa En vivo ──────────────────────────────
   const cargarVehiculosCliente = useCallback(async (_cid: number) => {
+    // Una sola cadena en vuelo: son dos llamadas en serie (flota → GPS) y el tick de
+    // 15 s podía lanzar la siguiente antes de que terminara la anterior.
+    if (cargandoFlotaRef.current) return;
+    cargandoFlotaRef.current = true;
+    try {
     // La resolución reservas → placas (propios y de tercero, dedupe por separado)
     // vive en /api/cliente acción vehiculos_en_vivo (service role): RLS bloquea
     // reservas/vehiculos al rol anónimo.
@@ -724,6 +794,7 @@ export default function ClientePortal() {
       const ahora = Date.now();
       return Object.values(merged).filter((g: any) => ahora - tMs(g) <= MAX_EDAD_MS);
     });
+    } finally { cargandoFlotaRef.current = false; }
   }, []);
 
   // ─── Cargar colabs cuando se abre la sección de usuarios ──────────────────
@@ -735,10 +806,10 @@ export default function ClientePortal() {
 
   // ─── Cargar stats historial cuando se abre la pestaña ─────────────────────
   useEffect(() => {
-    if (tab === "historial" && reservas.length > 0 && Object.keys(reservaStats).length === 0 && !loadingStats) {
-      cargarHistorialStats(reservas.map(r => r.id));
+    if (tab === "historial" && reservas.length > 0 && !statsPedidosRef.current) {
+      cargarHistorialStats();
     }
-  }, [tab, reservas, reservaStats, loadingStats, cargarHistorialStats]);
+  }, [tab, reservas.length, cargarHistorialStats]);
 
   // ─── Redirección si el tab actual no está permitido ───────────────────────
   useEffect(() => {
@@ -757,19 +828,22 @@ export default function ClientePortal() {
   const puedeVerMontos = tienePermiso("facturacion");
 
   // ─── Auto-refresh reservas cada 30s cuando hay servicio hoy ───────────────
+  // Silencioso: revalida en segundo plano sin devolver la pantalla a los esqueletos.
+  // La dependencia es el BOOLEANO, no el array: con `reservas` entero el intervalo se
+  // destruía y recreaba en cada refresco, así que su cuenta volvía a empezar cada vez.
+  const hayServicioHoy = reservas.some(r => r.fecha_servicio?.startsWith(getHoyPeru()) && !["cancelado","cancelada"].includes(r.estado));
   useEffect(() => {
-    if (!cliente) return;
-    const hoy = getHoyPeru();
-    const tieneServicioHoy = reservas.some(r => r.fecha_servicio?.startsWith(hoy) && !["cancelado","cancelada"].includes(r.estado));
-    if (!tieneServicioHoy) return;
-    const iv = setInterval(() => { cargarDatos(cliente.id); }, 30000);
+    if (!cliente || !hayServicioHoy) return;
+    const iv = setInterval(() => { if (!document.hidden) cargarDatos(cliente.id, true); }, 30000);
     return () => clearInterval(iv);
-  }, [cliente, reservas, cargarDatos]);
+  }, [cliente, hayServicioHoy, cargarDatos]);
 
   // ─── Refrescar al volver a la pestaña del navegador ───────────────────────
+  // También silencioso, y con la guarda de frescura de cargarDatos: un alt-tab ya no
+  // vacía el dashboard para volver a llenarlo con lo mismo.
   useEffect(() => {
     if (!cliente) return;
-    const onVisible = () => { if (document.visibilityState === "visible") cargarDatos(cliente.id); };
+    const onVisible = () => { if (document.visibilityState === "visible") cargarDatos(cliente.id, true); };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [cliente, cargarDatos]);
@@ -1674,15 +1748,20 @@ export default function ClientePortal() {
   const hoy          = getHoyPeru();
   const esteM        = hoy.slice(0, 7);
   const serviciosMes   = reservas.filter(r => r.fecha_servicio?.startsWith(esteM)).length;
-  const serviciosTotal = reservas.length;
-  const gastosTotal    = reservas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
-  const completados    = reservas.filter(r => normalizaEstado(r.estado) === "finalizada").length;
-  const puntualidad    = serviciosTotal > 0 ? Math.round((completados / serviciosTotal) * 100) : 0;
-  const pasajerosTotal = Object.values(boarding).flat().length;
   const esCancelado    = (e: string) => normalizaEstado(e) === "cancelada";
   const esFinalizado   = (e: string) => normalizaEstado(e) === "finalizada";
   const esHoy          = (f: string | null) => !!f && f.startsWith(hoy);
   const esFuturo       = (f: string | null) => !!f && f.slice(0,10) > hoy;
+  // Los KPIs "históricos" solo cuentan servicios que YA ocurrieron. Antes se calculaban
+  // sobre el array completo, que con la programación fija incluye miles de servicios de
+  // 2027-2028: "Total histórico" contaba viajes que aún no existen y el SLA se dividía
+  // entre ellos, por eso marcaba 0%. El total lo cuenta Postgres (total_historico).
+  const reservasPasadas = reservas.filter(r => !esFuturo(r.fecha_servicio));
+  const serviciosTotal = totalHistorico ?? reservasPasadas.length;
+  const gastosTotal    = reservasPasadas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
+  const completados    = reservasPasadas.filter(r => esFinalizado(r.estado)).length;
+  const puntualidad    = reservasPasadas.length > 0 ? Math.round((completados / reservasPasadas.length) * 100) : 0;
+  const pasajerosTotal = Object.values(boarding).flat().length;
 
   // Correlativo propio del cliente (su orden interno): numera TODAS sus reservas por
   // antigüedad (id asc), estable por servicio. El identificador OFICIAL para reportar
@@ -4863,7 +4942,8 @@ export default function ClientePortal() {
           readonly={modalManifiestoData.readonly}
           onClose={() => setModalManifiestoData(null)}
           onChanged={() => {
-            if (cliente) cargarHistorialStats(reservas.map(r => r.id));
+            // Recarga forzada: el sello se limpia para que este cambio sí vuelva a pedir.
+            if (cliente) { statsPedidosRef.current = false; cargarHistorialStats(); }
             // El detalle y los PDFs leen ppList/paradas/boarding cacheados. Tras editar el
             // manifiesto hay que refrescarlos o quedarían obsoletos respecto al historial.
             const rid = modalManifiestoData.reservaId;
