@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import dynamic from "next/dynamic";
 import { supabase } from "@/lib/supabase";
-import ModalGps from "@/components/seguimiento/ModalGps";
-import ModalManifiestoPortal from "@/components/portal/ModalManifiestoPortal";
-import mapboxgl from "mapbox-gl";
-import "mapbox-gl/dist/mapbox-gl.css";
+import type { Map as MapboxMap, Marker as MapboxMarker } from "mapbox-gl"; // solo tipos: `import type` no emite JS
+import "mapbox-gl/dist/mapbox-gl.css";   // el CSS sí es estático (no arrastra el motor)
 import { animarMarcador, animarMarcadorPorCamino, tweenEnVuelo } from "@/lib/anim-marker";
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
@@ -19,7 +18,34 @@ import { estadoCliente, normalizaEstado } from "@/lib/estados";
 import { manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado } from "@/lib/documentos-servicio";
 import { saveSession, loadSession, clearSession, getPortalToken, portalApi } from "@/lib/portal-sesion";
 
-mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
+// Los dos modales se cargan al abrirlos, no al entrar al portal. Ambos se montan detrás
+// de un guard (`{gpsModalOpen && …}`, `{modalManifiestoData && …}`), así que no necesitan
+// fallback. ModalManifiestoPortal arrastra xlsx (136 KB gz) por lib/manifiesto-csv.
+const ModalGps = dynamic(() => import("@/components/seguimiento/ModalGps"), { ssr: false });
+const ModalManifiestoPortal = dynamic(() => import("@/components/portal/ModalManifiestoPortal"), { ssr: false });
+
+// ─── Mapbox bajo demanda ──────────────────────────────────────────────────
+// El motor de mapbox son 461 KB gz — el 57% del JavaScript de esta ruta — y solo lo usa
+// la pestaña "En vivo". Importarlo arriba obligaba a descargarlo, parsearlo y ejecutarlo
+// ANTES de que el portal pudiera pedir su primer dato, en las seis pestañas por igual.
+// Ahora se carga al entrar al mapa. Todos los usos de `mapboxgl` en este archivo están
+// detrás de `mapListoEnVivo`, que solo se enciende cuando el mapa ya se creó — es decir,
+// después de este cargador.
+type MapboxAPI = (typeof import("mapbox-gl"))["default"];
+let mapboxgl!: MapboxAPI;
+let cargaMapbox: Promise<MapboxAPI> | null = null;
+function cargarMapbox(): Promise<MapboxAPI> {
+  if (mapboxgl) return Promise.resolve(mapboxgl);
+  if (!cargaMapbox) {
+    cargaMapbox = import("mapbox-gl").then(mod => {
+      const gl = ((mod as any).default ?? mod) as MapboxAPI;
+      gl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
+      mapboxgl = gl;
+      return gl;
+    });
+  }
+  return cargaMapbox;
+}
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────
 type Cliente        = { id: number; nombre: string; empresa: string | null; ruc: string | null; email: string | null; telefono: string | null; created_at?: string; };
@@ -285,8 +311,8 @@ export default function ClientePortal() {
 
   // En vivo — mapa Mapbox
   const mapContainerRef = useRef<HTMLDivElement>(null);
-  const mapRef          = useRef<mapboxgl.Map | null>(null);
-  const markersEnVivo   = useRef<Record<string, mapboxgl.Marker>>({});
+  const mapRef          = useRef<MapboxMap | null>(null);
+  const markersEnVivo   = useRef<Record<string, MapboxMarker>>({});
   const [vehiculosCliente,  setVehiculosCliente]  = useState<{id:number;placa:string}[]>([]);
   // Placas de vehículos de tercero: se muestran igual que las propias para que el
   // cliente NUNCA distinga un servicio tercerizado de uno propio.
@@ -334,7 +360,7 @@ export default function ClientePortal() {
   const snapIconoCliRef = useRef<{ rid: number; lat: number; lng: number; s: number | null } | null>(null); // continuidad del snap del ícono (servicio seleccionado)
   const dibujoLayersRef  = useRef<string[]>([]);
   const dibujoSourcesRef = useRef<string[]>([]);
-  const stopMarkersRef   = useRef<mapboxgl.Marker[]>([]);
+  const stopMarkersRef   = useRef<MapboxMarker[]>([]);
   const lastFitRef           = useRef<number | null>(null);
   const serviciosHoyRef      = useRef<Reserva[]>([]);
   const autocentradoRef      = useRef(false);
@@ -922,19 +948,25 @@ export default function ClientePortal() {
       setMapListoEnVivo(false);
       return;
     }
+    // El motor de mapbox se descarga AQUÍ, la primera vez que se entra a "En vivo".
+    // `cancelado` cubre el caso de salir de la pestaña mientras el chunk viaja: sin él
+    // se crearía un mapa sobre un contenedor que React ya desmontó.
+    let cancelado = false;
     const t = setTimeout(() => {
-      if (!mapContainerRef.current || mapRef.current) return;
-      const m = new mapboxgl.Map({
-        container: mapContainerRef.current,
-        style: "mapbox://styles/mapbox/streets-v12",
-        center: [-77.0428, -12.0464],
-        zoom: 11,
-      });
-      m.addControl(new mapboxgl.NavigationControl(), "top-right");
-      m.on("load", () => setMapListoEnVivo(true));
-      mapRef.current = m;
+      cargarMapbox().then(gl => {
+        if (cancelado || !mapContainerRef.current || mapRef.current) return;
+        const m = new gl.Map({
+          container: mapContainerRef.current,
+          style: "mapbox://styles/mapbox/streets-v12",
+          center: [-77.0428, -12.0464],
+          zoom: 11,
+        });
+        m.addControl(new gl.NavigationControl(), "top-right");
+        m.on("load", () => setMapListoEnVivo(true));
+        mapRef.current = m;
+      }).catch(() => {});
     }, 80);
-    return () => clearTimeout(t);
+    return () => { cancelado = true; clearTimeout(t); };
   }, [tab]);
 
   // ─── Mapa En vivo: actualizar marcadores cuando cambian ubicaciones ────────
@@ -2809,7 +2841,11 @@ export default function ClientePortal() {
             {/* KPI cards */}
             <div style={{ display: "grid", gridTemplateColumns: `repeat(${puedeVerMontos ? 5 : 3},1fr)`, gap: 10 }}>
               {([
-                { label: `Servicios · ${new Date(esteM + "-01").toLocaleDateString("es-PE",{month:"short"}).toUpperCase()}`, val: String(serviciosMes), delta: deltaServicios },
+                // "T12:00:00" y no la fecha pelada: `new Date("2026-08-01")` se interpreta
+                // como medianoche UTC y, al formatearse en hora de Lima (UTC-5), retrocede
+                // al 31 de julio — la tarjeta decía "SERVICIOS · JUL." estando en agosto.
+                // Mismo patrón que ya usa agendaGrupos.
+                { label: `Servicios · ${new Date(esteM + "-01T12:00:00").toLocaleDateString("es-PE",{month:"short"}).toUpperCase()}`, val: String(serviciosMes), delta: deltaServicios },
                 { label: "Total histórico",  val: String(serviciosTotal), delta: null },
                 ...(puedeVerMontos ? [{ label: "Gasto del mes", val: fmtSoles(gastoMes), delta: null }] : []),
                 { label: "Cumplimiento SLA", val: `${puntualidad}%`,      delta: null },
@@ -4514,7 +4550,9 @@ export default function ClientePortal() {
                 <div>
                   <p style={{ color: C.gray800, fontWeight: 900, fontSize: 22, margin: 0 }}>{cliente.empresa || cliente.nombre}</p>
                   <p style={{ color: C.gray400, fontSize: 13, margin: "4px 0 0" }}>
-                    RUC {cliente.ruc || "–"} &nbsp;·&nbsp; cliente desde {cliente.created_at ? new Date(cliente.created_at).toLocaleDateString("es-PE",{month:"short",year:"numeric"}) : "–"} &nbsp;·&nbsp; {reservas.length} servicios contratados
+                    {/* serviciosTotal, no reservas.length: la lista es una ventana de fechas
+                        y aquí se anuncia el histórico completo del cliente. */}
+                    RUC {cliente.ruc || "–"} &nbsp;·&nbsp; cliente desde {cliente.created_at ? new Date(cliente.created_at).toLocaleDateString("es-PE",{month:"short",year:"numeric"}) : "–"} &nbsp;·&nbsp; {serviciosTotal} servicios contratados
                   </p>
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
