@@ -828,6 +828,57 @@ export function pegarIconoAVia(
   return { lat: win.lat, lng: win.lng, snapped: true, s: win.s ?? opts.prevS ?? null, dist: win.dist };
 }
 
+// ── CAMINO DE VÍA ENTRE DOS SNAPS DEL ÍCONO (tween por la pista) ─────────────
+// El marcador se ANIMA entre fix y fix, y una recta entre dos snaps corta la esquina y cruza la
+// manzana aunque AMBOS extremos estén sobre la pista (cadencia 3-15 s = 30-200 m por tween: en
+// cualquier giro el bus se veía "volar" en diagonal sobre las casas — reclamo del usuario,
+// ago-2026: el ícono debe seguir la vía igual que la huella). Devuelve la polilínea DE VÍA entre
+// el snap anterior (A) y el nuevo (B) para deslizar el bus por la calle, reutilizando
+// puentePorRuta (proyección perpendicular sobre la ruta prevista + candado de avance hacia
+// adelante). Candados de honestidad (nunca fabricar recorrido):
+//   • Solo si ambos snaps están pegados a la ruta (desvío perpendicular ≤ CONECTOR_MAX_M = 25 m,
+//     el MISMO umbral con el que puentePorRuta empalma los extremos reales: así el camino
+//     SIEMPRE arranca y termina EXACTO en los snaps. Con 40 m —el primer intento— el camino
+//     terminaba en el pie sobre la ruta, hasta 40 m lejos del bus: ícono despegado de la cola
+//     viva, o deslizándose por la calzada central cuando el bus va por la auxiliar. Review
+//     ago-2026). El cinturón de abajo lo garantiza aunque cambien los umbrales internos.
+//   • El camino no puede ser un rodeo: largo ≤ max(2.5·recta, recta+150 m). Si la proyección
+//     tomó un lazo o el pase opuesto de una ida-vuelta, se descarta.
+// null = sin camino fiable → el consumidor conserva el tween recto de siempre (jamás peor que
+// el comportamiento actual). Pura; `ruta` en [lng, lat].
+export function caminoEntreSnaps(
+  A: { lat: number; lng: number }, B: { lat: number; lng: number },
+  ruta?: [number, number][],
+): [number, number][] | null {
+  if (!ruta || ruta.length < 2) return null;
+  const dRecta = distM(A.lat, A.lng, B.lat, B.lng);
+  if (!(dRecta > 0)) return null;
+  const cam = puentePorRuta(A, B, ruta, CONECTOR_MAX_M);
+  if (!cam || cam.length < 2) return null;
+  // Cinturón: el tween DEBE aterrizar donde está el bus (el snap), no "cerca". Si el camino no
+  // empieza/termina exacto en A/B (p. ej. dedup interno), recta de siempre.
+  if (distM(cam[0][1], cam[0][0], A.lat, A.lng) > 1) return null;
+  if (distM(cam[cam.length - 1][1], cam[cam.length - 1][0], B.lat, B.lng) > 1) return null;
+  let m = 0;
+  for (let i = 1; i < cam.length; i++) m += distM(cam[i - 1][1], cam[i - 1][0], cam[i][1], cam[i][0]);
+  if (m > Math.max(2.5 * dRecta, dRecta + 150)) return null;   // lazo/pase opuesto → recta de siempre
+  return cam;
+}
+
+// Ejecuta tareas asíncronas con TOPE de concurrencia (pool). Para los fetch de puentes: 30
+// huecos con caché fría tardaban hasta ~30 s en despacharse UNO POR UNO en la primera apertura
+// del modal ("la huella tarda en crearse"); en paralelo acotado bajan a unos pocos segundos sin
+// ametrallar la API. El ORDEN de los resultados lo maneja el llamador (cada tarea escribe en su
+// propio slot por índice) — esta función solo limita cuántas corren a la vez. El patrón
+// `i++` compartido es seguro: JS es mono-hilo y solo intercala en los await.
+export async function enParalelo<T>(items: T[], limite: number, fn: (item: T, idx: number) => Promise<void>): Promise<void> {
+  let i = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limite, items.length)) }, async () => {
+    while (i < items.length) { const k = i++; await fn(items[k], k); }
+  });
+  await Promise.all(workers);
+}
+
 // PUNTOS de vía VEHICULAR cercanos a una posición (Mapbox Tilequery, tileset mapbox-streets-v8,
 // capa `road`). La API devuelve, por cada feature del entorno, un Point = el punto de ESA vía más
 // cercano al consultado (verificado con datos reales — no devuelve la polilínea). Es el fallback
@@ -898,11 +949,21 @@ export async function mapMatchTrail(
   const coords = sample.map(p => `${p.lng},${p.lat}`).join(";");
   const radii  = sample.map(p => String(Math.min(50, Math.max(5, Math.ceil((p.acc || 25) * 1.5))))).join(";");
   try {
-    const res = await fetch(
+    const url =
       `https://api.mapbox.com/matching/v5/mapbox/driving/${coords}` +
-      `?geometries=geojson&overview=full&tidy=true&radiuses=${radii}&access_token=${token}`
-    );
-    if (!res.ok) return null;
+      `?geometries=geojson&overview=full&tidy=true&radiuses=${radii}&access_token=${token}`;
+    // 429 (cuota por ráfaga — alcanzable con el lote paralelo del ajustador en backlogs de
+    // full-day o varios visores a la vez): REINTENTAR con backoff en vez de devolver null.
+    // Un null aquí se vuelve "no pegó" → la ventana se congela CRUDA para TODA la sesión del
+    // modal (el congelado es inmutable por diseño) — un rate-limit transitorio no debe hornear
+    // geometría degradada permanente (review ago-2026).
+    let res: Response | null = null;
+    for (let intento = 0; intento < 3; intento++) {
+      res = await fetch(url);
+      if (res.status !== 429) break;
+      await new Promise((r) => setTimeout(r, 1200 * (intento + 1)));
+    }
+    if (!res || !res.ok) return null;
     const json = await res.json();
     const m = json?.matchings;
     if (!Array.isArray(m) || m.length === 0) return null;
@@ -1263,6 +1324,10 @@ export function crearAjustadorHuella() {
   const MAX = 100;             // máximo de coords por llamada de Map Matching (cap de la API)
   const SOLAPE = 1;            // punto(s) compartido(s) entre ventanas contiguas para unirlas
   const NUEVOS = MAX - SOLAPE; // puntos NUEVOS que congela cada ventana (deja sitio al solape)
+  // Ventanas COMPLETAS matcheadas EN PARALELO al abrir con backlog (viaje largo ya andado). 4 es
+  // seguro para la cuota de Map Matching (300 req/min): un backlog de 30 ventanas son 30 llamadas
+  // en ~5-8 s, muy por debajo del tope, y recorta la primera huella de ~20-25 s a ~5-6 s.
+  const PARALELO_VENTANAS = 4;
   // Umbrales ABSOLUTOS del gate de contenido-crudo (stickiness monótona). Una cola nueva solo puede
   // desplazar a "conservar la limpia" si supera este piso de suciedad. Para GPS bueno (#1138) el match
   // no tiene fixes crudos → crudeFrac=0 y maxCrudoChordM=0 → nunca "sucio" → el gate colapsa EXACTO al
@@ -1317,36 +1382,63 @@ export function crearAjustadorHuella() {
       // exacto en 99 la ventana congelada incluiría un punto aún mutable → al eliminarse después,
       // los índices del prefijo se correrían y el pico quedaría horneado en la geometría congelada.
       const congeladoAntes = congeladoHasta;
+      let loteMax = PARALELO_VENTANAS;   // adaptativo: 1 tras ventana sucia, 4 tras limpia (ver abajo)
       while (limpio.length - congeladoHasta >= NUEVOS + 2) {
-        const ini = Math.max(0, congeladoHasta - SOLAPE);
-        const ventana = limpio.slice(ini, ini + MAX);   // ≤ MAX SIEMPRE → no se diezma
-        const rw = await matchVentana(ventana, token);
-        if (cancelado?.()) return null;
-        if (rw.snapped) {
-          // Ventana LIMPIA → congelar completa (caso común; GPS bueno #1138 IDÉNTICO al legacy).
-          congeladas.push(rw.coords);
-          congeladasSnapped.push(true);
-          congeladasEsCrudo.push(rw.esCrudo);
-          congeladoHasta += NUEVOS;
-        } else {
-          // Ventana CRUDA: el re-match completo ARRUINA los puntos viejos-buenos que trae la ventana (bug
-          // #795: [0,60] pega limpio solo, pero [0,100] con la cola degradada sale crudo y RE-DIBUJA crudos
-          // esos 60 buenos = "edita 20 puntos antes"). En vez de hornear crudo sobre lo bueno, se congela
-          // SOLO el PREFIJO LIMPIO más largo (INMUTABLE); el resto degradado queda para el siguiente ciclo
-          // (lo cubre puentesCrudos por la ruta). Así lo ya dibujado NO se re-edita.
-          const pref = await congelarPrefijoLimpio(ventana, token, cancelado);
+        // LOTE PARALELO (fix ago-2026 "la huella tarda en crearse"): al abrir el modal a mitad de
+        // un viaje largo hay 10-30 ventanas completas pendientes y matchearlas UNA POR UNA (un
+        // await por llamada a Mapbox) tardaba 10-25 s. Aquí se PRE-LANZAN hasta PARALELO ventanas
+        // con límites OPTIMISTAS (cada una asume que la anterior avanza NUEVOS — el caso común:
+        // ventana limpia congelada completa) y los resultados se procesan EN ORDEN con la MISMA
+        // lógica que el camino secuencial. Si una ventana avanza distinto de NUEVOS (prefijo
+        // limpio), los límites de las siguientes ya no valen → se DESCARTAN esos resultados (solo
+        // se pierde la llamada; jamás se hornea geometría con límites corridos) y el while
+        // exterior re-arma el lote desde el límite correcto. Con GPS bueno (todas snapped) la
+        // geometría es BYTE-IDÉNTICA a la secuencial: mismas ventanas, mismos límites, mismo orden.
+        // LOTE ADAPTATIVO (review ago-2026): en régimen DEGRADADO sostenido (cada ventana sale
+        // mixta → avanza por prefijo limpio ≠ NUEVOS) el lote de 4 tiraba 3 resultados por vuelta
+        // (~40% más llamadas que el secuencial, en ráfagas 4× más densas). Tras una ventana sucia
+        // el lote baja a 1 (= secuencial, cero desperdicio) y vuelve a PARALELO_VENTANAS cuando
+        // congela una limpia completa (loteMax se ajusta al procesar, abajo).
+        const lote: { ini: number; ventana: MatchPt[]; res: ReturnType<typeof matchVentana> }[] = [];
+        let H = congeladoHasta;
+        while (lote.length < loteMax && limpio.length - H >= NUEVOS + 2) {
+          const ini = Math.max(0, H - SOLAPE);
+          const ventana = limpio.slice(ini, ini + MAX);   // ≤ MAX SIEMPRE → no se diezma
+          lote.push({ ini: H, ventana, res: matchVentana(ventana, token) });
+          H += NUEVOS;
+        }
+        for (const w of lote) {
+          const rw = await w.res;
           if (cancelado?.()) return null;
-          if (pref) {
-            congeladas.push(pref.coords);
-            congeladasSnapped.push(true);
-            congeladasEsCrudo.push(pref.esCrudo);
-            congeladoHasta += Math.max(1, pref.len - SOLAPE);
-          } else {
-            // Ni el prefijo pega (degradación temprana) → congelar crudo y avanzar normal (genuino).
+          if (w.ini !== congeladoHasta) break;   // una previa avanzó ≠ NUEVOS → límites corridos → descartar el resto
+          if (rw.snapped) {
+            // Ventana LIMPIA → congelar completa (caso común; GPS bueno #1138 IDÉNTICO al legacy).
             congeladas.push(rw.coords);
-            congeladasSnapped.push(false);
+            congeladasSnapped.push(true);
             congeladasEsCrudo.push(rw.esCrudo);
             congeladoHasta += NUEVOS;
+            loteMax = PARALELO_VENTANAS;   // régimen limpio → vale la pena pre-lanzar
+          } else {
+            loteMax = 1;                   // régimen degradado → secuencial (no desperdiciar lote)
+            // Ventana CRUDA: el re-match completo ARRUINA los puntos viejos-buenos que trae la ventana (bug
+            // #795: [0,60] pega limpio solo, pero [0,100] con la cola degradada sale crudo y RE-DIBUJA crudos
+            // esos 60 buenos = "edita 20 puntos antes"). En vez de hornear crudo sobre lo bueno, se congela
+            // SOLO el PREFIJO LIMPIO más largo (INMUTABLE); el resto degradado queda para el siguiente ciclo
+            // (lo cubre puentesCrudos por la ruta). Así lo ya dibujado NO se re-edita.
+            const pref = await congelarPrefijoLimpio(w.ventana, token, cancelado);
+            if (cancelado?.()) return null;
+            if (pref) {
+              congeladas.push(pref.coords);
+              congeladasSnapped.push(true);
+              congeladasEsCrudo.push(pref.esCrudo);
+              congeladoHasta += Math.max(1, pref.len - SOLAPE);
+            } else {
+              // Ni el prefijo pega (degradación temprana) → congelar crudo y avanzar normal (genuino).
+              congeladas.push(rw.coords);
+              congeladasSnapped.push(false);
+              congeladasEsCrudo.push(rw.esCrudo);
+              congeladoHasta += NUEVOS;
+            }
           }
         }
       }

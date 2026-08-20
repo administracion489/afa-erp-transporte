@@ -4,8 +4,8 @@ import { useParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { idAfa } from "@/lib/folio";
 import "mapbox-gl/dist/mapbox-gl.css";
-import { animarMarcador } from "@/lib/anim-marker";
-import { pegarIconoAVia } from "@/lib/huella";
+import { animarMarcador, animarMarcadorPorCamino } from "@/lib/anim-marker";
+import { pegarIconoAVia, caminoEntreSnaps, distM } from "@/lib/huella";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 type Parada = {
@@ -272,9 +272,22 @@ export default function SeguimientoPage() {
     const lngLat: [number, number] = [rs.lng, rs.lat];
 
     if (busMarkerRef.current) {
-      animarMarcador(busMarkerRef.current, lngLat); // deslizar suave entre puntos
-      if (ubicacion.rumbo != null && !isNaN(Number(ubicacion.rumbo))) {
-        busMarkerRef.current.setRotation(Number(ubicacion.rumbo));
+      // Tween POR LA VÍA cuando hay camino fiable entre el snap anterior y el nuevo (mismo fix
+      // que ModalGps, ago-2026): la recta entre snaps cortaba la esquina y el bus cruzaba la
+      // manzana en diagonal. Sin camino → tween recto de siempre.
+      const dSnap = prevSnap ? distM(prevSnap.lat, prevSnap.lng, rs.lat, rs.lng) : 0;
+      const camino = (prevSnap && dSnap > 12 && dSnap < 1200)
+        ? caminoEntreSnaps(prevSnap, rs, ruta?.coordenadas)
+        : null;
+      if (camino) {
+        animarMarcadorPorCamino(busMarkerRef.current, camino, {
+          rumboFinal: ubicacion.rumbo != null && !isNaN(Number(ubicacion.rumbo)) && Number(ubicacion.rumbo) > 0 ? Number(ubicacion.rumbo) : undefined,
+        });
+      } else {
+        animarMarcador(busMarkerRef.current, lngLat); // deslizar suave entre puntos
+        if (ubicacion.rumbo != null && !isNaN(Number(ubicacion.rumbo))) {
+          busMarkerRef.current.setRotation(Number(ubicacion.rumbo));
+        }
       }
       if (!mapDescentradoRef.current) map.easeTo({ center: lngLat, duration: 1500 });
     } else {

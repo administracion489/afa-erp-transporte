@@ -6,12 +6,12 @@ import ModalGps from "@/components/seguimiento/ModalGps";
 import ModalManifiestoPortal from "@/components/portal/ModalManifiestoPortal";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
-import { animarMarcador } from "@/lib/anim-marker";
+import { animarMarcador, animarMarcadorPorCamino, tweenEnVuelo } from "@/lib/anim-marker";
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, distM, paginarFilas,
-  pegarIconoAVia,
+  pegarIconoAVia, caminoEntreSnaps, enParalelo,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
 import { fmtCoord } from "@/lib/coordenadas";
@@ -903,6 +903,8 @@ export default function ClientePortal() {
       // de red el bus no camina sobre techos. Corrección acotada por la imprecisión del fix
       // (pegarIconoAVia); los demás buses (sin contexto de ruta) quedan en su fix crudo.
       let pos: [number, number] = [u.lng, u.lat];
+      let caminoSel: [number, number][] | null = null;   // camino de VÍA entre el snap anterior y el nuevo (tween por la calle)
+      let dSnapSel: number | null = null;                // desplazamiento del snap del bus SELECCIONADO (null = no es el seleccionado)
       if (uSel != null && u === uSel && saSel) {
         const prev = snapIconoCliRef.current?.rid === saSel.id ? snapIconoCliRef.current : null;
         const r = pegarIconoAVia(Number(u.lat), Number(u.lng), Number((u as any).precision_m) || 25, {
@@ -913,13 +915,34 @@ export default function ClientePortal() {
         });
         snapIconoCliRef.current = { rid: saSel.id, lat: r.lat, lng: r.lng, s: r.s };
         pos = [r.lng, r.lat];
+        // Tween POR LA VÍA (mismo fix que ModalGps, ago-2026): la recta entre dos snaps cortaba la
+        // esquina y el bus "volaba" sobre la manzana. Solo con camino fiable; si no, recta de siempre.
+        if (prev) {
+          dSnapSel = distM(prev.lat, prev.lng, r.lat, r.lng);
+          if (dSnapSel > 12 && dSnapSel < 1200) caminoSel = caminoEntreSnaps(prev, r, rutasEnVivoRef.current[saSel.id]);
+        }
       }
 
       // Si el marcador ya existe: deslizarlo suave (tween) y refrescar rumbo, color y popup.
       const existente = markersEnVivo.current[key];
       if (existente) {
-        animarMarcador(existente, pos);
-        existente.setRotation(Number(u.rumbo) || 0);
+        const rumboNum = Number(u.rumbo);
+        if (caminoSel) {
+          // Desliza por la calle rotando con cada segmento; al final asienta el rumbo real del
+          // equipo si lo hay (>0). Sin rumbo real, se queda mirando el último segmento de vía.
+          animarMarcadorPorCamino(existente, caminoSel, { rumboFinal: rumboNum > 0 ? rumboNum : undefined });
+        } else if (dSnapSel != null && dSnapSel < 1 && tweenEnVuelo(existente)) {
+          // Re-render SIN fix nuevo (el poll rearma los arrays cada 15 s / botón Actualizar): NO
+          // cancelar el tween por camino en vuelo con una recta ni pisar el rumbo de la calle —
+          // solo se refrescan color del pulso y popup, abajo (review ago-2026).
+        } else {
+          animarMarcador(existente, pos);
+          // Bus SELECCIONADO sin rumbo real del equipo: conservar la rotación actual (el tween
+          // por camino la dejó alineada a la calle) en vez de resetear a 0/norte en cada parada.
+          // Los demás buses (sin contexto de ruta) quedan idénticos a antes.
+          if (dSnapSel != null && !(rumboNum > 0)) existente.setRotation(existente.getRotation?.() ?? 0);
+          else existente.setRotation(rumboNum || 0);
+        }
         existente.getElement().querySelectorAll<HTMLElement>(".afa-pulse1, .afa-pulse2").forEach(d => { d.style.background = color; });
         existente.getPopup()?.setHTML(popupHtml);
         return;
@@ -1331,57 +1354,79 @@ export default function ClientePortal() {
         if (!(tB > tA)) return [];
         return crudos.filter((x) => x.ts > tA && x.ts < tB).map((x) => ({ lat: x.lat, lng: x.lng }));
       };
-      for (const c of candidatos.slice(0, MAX_PUENTES)) {
-        if (cancel) return;
+      // Puentes en DOS FASES (mismo fix que ModalGps, ago-2026 "la huella tarda"): FASE 1 síncrona
+      // por la ruta planificada; FASE 2 con los fetch de Google EN PARALELO acotado (6). Slots por
+      // índice → mismo orden de features y misma geometría que el camino secuencial.
+      const cands = candidatos.slice(0, MAX_PUENTES);
+      const slots: any[] = new Array(cands.length).fill(null);
+      const fixesCand: { lat: number; lng: number }[][] = cands.map(fixesDelTramo);   // evidencia real por candidato
+      const porGoogle: number[] = [];
+      for (let ci = 0; ci < cands.length; ci++) {
+        const c = cands[ci];
         const A = { lat: c.aLat, lng: c.aLng }, B = { lat: c.bLat, lng: c.bLng };
-        const fixes = fixesDelTramo(c);   // evidencia de por dónde fue REALMENTE el bus en este tramo
         // 1) Seguir la ruta planificada — SOLO si es coherente con la evidencia GPS (no un lazo del itinerario).
-        //    Si falla la validación NO se hace `continue` → cae al fallback de Google directo A→B.
+        //    Si falla la validación NO se descarta → cae al fallback de Google directo A→B.
         const porRuta = puentePorRuta(A, B, rutaPlan);
-        if (porRuta && porRuta.length >= 2 && validarPuente(porRuta, A, B, fixes, c.dt, c.dRecta)) {
+        if (porRuta && porRuta.length >= 2 && validarPuente(porRuta, A, B, fixesCand[ci], c.dt, c.dRecta)) {
           let mts = 0;
           for (let k = 1; k < porRuta.length; k++) mts += distM(porRuta[k - 1][1], porRuta[k - 1][0], porRuta[k][1], porRuta[k][0]);
-          feats.push({ type: "Feature", geometry: { type: "LineString", coordinates: porRuta }, properties: { nivel: "puente", km: Math.round(mts / 100) / 10, min: Math.round(c.dt / 60) } });
-          if (c.origen === "crudo") suprimir.push([c.iA + 1, c.iB - 1]);
-          continue;
-        }
-        // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco).
+          slots[ci] = { type: "Feature", geometry: { type: "LineString", coordinates: porRuta }, properties: { nivel: "puente", km: Math.round(mts / 100) / 10, min: Math.round(c.dt / 60) } };
+        } else porGoogle.push(ci);
+      }
+      // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco), con tope de
+      //    concurrencia. Un `key` repetido dentro del mismo lote comparte UNA sola llamada.
+      const enVuelo = new Map<string, Promise<void>>();
+      await enParalelo(porGoogle, 6, async (ci) => {
+        if (cancel) return;
+        const c = cands[ci];
+        const A = { lat: c.aLat, lng: c.aLng }, B = { lat: c.bLat, lng: c.bLng };
         const key = `${c.aLat.toFixed(5)},${c.aLng.toFixed(5)}->${c.bLat.toFixed(5)},${c.bLng.toFixed(5)}`;
         let r = cache.get(key);
         if (r?.expira && Date.now() > r.expira) r = undefined;   // fallo transitorio vencido → reintentar
         if (!r) {
-          try {
-            const resp = await fetch("/api/ruta-puente", {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ aLat: c.aLat, aLng: c.aLng, bLat: c.bLat, bLng: c.bLng }),
-            });
-            const j = await resp.json();
-            if (j?.ocultar || j?.status !== "OK") {
-              r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt };
-              // Solo el "sin camino" GEOMÉTRICO es permanente; 429/5xx/cuota vencen en 60 s.
-              if (!["ZERO_RESULTS", "NOT_FOUND", "SIN_GEOMETRIA"].includes(j?.status)) r.expira = Date.now() + 60000;
-            } else {
-              const nivel = decidirPuente(j.roadM, c.dRecta);   // unir todo por carretera (corte solo si sin ruta o rodeo absurdo >8×)
-              // Geometría de VÍA de Google TAL CUAL (nunca cruza casas); los extremos crudos A/B se añaden
-              // solo si están pegados a la vía (≤25 m) para cerrar la costura, si no se OMITE la recta
-              // (antes esa recta A→vía cruzaba manzanas/ríos = reclamo del usuario, jul-2026).
-              const gc: [number, number][] = (j.coords || []) as [number, number][];
-              const headOk = gc.length > 0 && distM(c.aLat, c.aLng, gc[0][1], gc[0][0]) <= 25;
-              const tailOk = gc.length > 0 && distM(c.bLat, c.bLng, gc[gc.length - 1][1], gc[gc.length - 1][0]) <= 25;
-              const coords: [number, number][] = nivel === "puente"
-                ? [...(headOk ? [[c.aLng, c.aLat] as [number, number]] : []), ...gc, ...(tailOk ? [[c.bLng, c.bLat] as [number, number]] : [])]
-                : [];
-              r = { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt };
-            }
-            cache.set(key, r);
-          // Fallo de RED: cachear "ocultar" CON vencimiento (reintenta al vencer, sin tormenta en cada tick).
-          } catch { r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt, expira: Date.now() + 60000 }; cache.set(key, r); }
+          if (!enVuelo.has(key)) enVuelo.set(key, (async () => {
+            try {
+              const resp = await fetch("/api/ruta-puente", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ aLat: c.aLat, aLng: c.aLng, bLat: c.bLat, bLng: c.bLng }),
+              });
+              const j = await resp.json();
+              let rr: any;
+              if (j?.ocultar || j?.status !== "OK") {
+                rr = { nivel: "ocultar", coords: [], km: 0, dt: c.dt };
+                // Solo el "sin camino" GEOMÉTRICO es permanente; 429/5xx/cuota vencen en 60 s.
+                if (!["ZERO_RESULTS", "NOT_FOUND", "SIN_GEOMETRIA"].includes(j?.status)) rr.expira = Date.now() + 60000;
+              } else {
+                const nivel = decidirPuente(j.roadM, c.dRecta);   // unir todo por carretera (corte solo si sin ruta o rodeo absurdo >8×)
+                // Geometría de VÍA de Google TAL CUAL (nunca cruza casas); los extremos crudos A/B se añaden
+                // solo si están pegados a la vía (≤25 m) para cerrar la costura, si no se OMITE la recta
+                // (antes esa recta A→vía cruzaba manzanas/ríos = reclamo del usuario, jul-2026).
+                const gc: [number, number][] = (j.coords || []) as [number, number][];
+                const headOk = gc.length > 0 && distM(c.aLat, c.aLng, gc[0][1], gc[0][0]) <= 25;
+                const tailOk = gc.length > 0 && distM(c.bLat, c.bLng, gc[gc.length - 1][1], gc[gc.length - 1][0]) <= 25;
+                const coords: [number, number][] = nivel === "puente"
+                  ? [...(headOk ? [[c.aLng, c.aLat] as [number, number]] : []), ...gc, ...(tailOk ? [[c.bLng, c.bLat] as [number, number]] : [])]
+                  : [];
+                rr = { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt };
+              }
+              cache.set(key, rr);
+            // Fallo de RED: cachear "ocultar" CON vencimiento (reintenta al vencer, sin tormenta en cada tick).
+            } catch { cache.set(key, { nivel: "ocultar", coords: [], km: 0, dt: c.dt, expira: Date.now() + 60000 }); }
+          })());
+          await enVuelo.get(key)!;
+          r = cache.get(key);
         }
         // Dibujar el estimado de Google SOLO si su geometría A→B directa es coherente con la evidencia GPS.
-        if (r.nivel !== "ocultar" && r.coords.length >= 2 && validarPuente(r.coords, A, B, fixes, c.dt, c.dRecta)) {
-          feats.push({ type: "Feature", geometry: { type: "LineString", coordinates: r.coords }, properties: { nivel: r.nivel, km: Math.round(r.km * 10) / 10, min: Math.round(c.dt / 60) } });
-          if (c.origen === "crudo") suprimir.push([c.iA + 1, c.iB - 1]);
+        if (r && r.nivel !== "ocultar" && r.coords.length >= 2 && validarPuente(r.coords, A, B, fixesCand[ci], c.dt, c.dRecta)) {
+          slots[ci] = { type: "Feature", geometry: { type: "LineString", coordinates: r.coords }, properties: { nivel: r.nivel, km: Math.round(r.km * 10) / 10, min: Math.round(c.dt / 60) } };
         }
+      });
+      if (cancel) return;
+      // Ensamblado EN ORDEN de candidatos (idéntico al secuencial): features + supresión del crudo ruteado.
+      for (let ci = 0; ci < cands.length; ci++) {
+        if (!slots[ci]) continue;
+        feats.push(slots[ci]);
+        if (cands[ci].origen === "crudo") suprimir.push([cands[ci].iA + 1, cands[ci].iB - 1]);
       }
       // La punta viva CRUDA (después del último vértice limpio) la cubre colaViva por la ruta → NO se dibuja medido.
       const mLenC = matchedEnVivoRefMap.current[rid]?.length || 0;

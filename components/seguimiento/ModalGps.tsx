@@ -10,9 +10,9 @@ import {
   crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, velocidadPorVentana, conVelocidadColor,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, puentesCrudos,
-  pegarIconoAVia, viasCercanasTilequery, esAccCruda, MAX_SEG_M,
+  pegarIconoAVia, viasCercanasTilequery, esAccCruda, MAX_SEG_M, caminoEntreSnaps, enParalelo,
 } from "@/lib/huella";
-import { animarMarcador } from "@/lib/anim-marker";
+import { animarMarcador, animarMarcadorPorCamino } from "@/lib/anim-marker";
 import { fmtCoord } from "@/lib/coordenadas";
 import { useAvanceParadas } from "@/lib/useAvanceParadas";
 import { prepararRuta, type FixAvance, type MotivoPaso, type ParadaAvance } from "@/lib/avance-paradas";
@@ -631,66 +631,91 @@ export default function ModalGps({
           if (!(tB > tA)) return [];
           return crudos.filter((x) => x.ts > tA && x.ts < tB).map((x) => ({ lat: x.lat, lng: x.lng }));
         };
-        for (const c of candidatos.slice(0, MAX_PUENTES)) {
-          if (cancel) return;
+        // Puentes en DOS FASES (fix ago-2026 "la huella tarda en crearse"): FASE 1 (síncrona, sin
+        // red) resuelve cada candidato por la RUTA PLANIFICADA; los que necesitan Google se piden
+        // en FASE 2 EN PARALELO acotado (enParalelo, 6 a la vez) — antes eran hasta 30 awaits
+        // secuenciales (~0.3-1 s c/u con caché fría) y el estimado tardaba medio minuto en
+        // aparecer. Cada resultado cae en su SLOT por índice → mismo orden de features y misma
+        // geometría que el camino secuencial; la caché y sus reglas de vencimiento no cambian.
+        const cands = candidatos.slice(0, MAX_PUENTES);
+        const slots: any[] = new Array(cands.length).fill(null);
+        const fixesCand: { lat: number; lng: number }[][] = cands.map(fixesDelTramo);   // evidencia real por candidato
+        const porGoogle: number[] = [];
+        for (let ci = 0; ci < cands.length; ci++) {
+          const c = cands[ci];
           const A = { lat: c.aLat, lng: c.aLng }, B = { lat: c.bLat, lng: c.bLng };
-          const fixes = fixesDelTramo(c);   // evidencia de por dónde fue REALMENTE el bus en este tramo
           // 1) Seguir la ruta planificada — SOLO si es coherente con la evidencia GPS (no un lazo del itinerario
-          //    por donde el bus no pasó). Si falla la validación NO se hace `continue` → cae al fallback de Google.
+          //    por donde el bus no pasó). Si falla la validación NO se descarta → cae al fallback de Google.
           const porRuta = puentePorRuta(A, B, rutaRef.current?.coordenadas || []);
-          if (porRuta && porRuta.length >= 2 && validarPuente(porRuta, A, B, fixes, c.dt, c.dRecta)) {
+          if (porRuta && porRuta.length >= 2 && validarPuente(porRuta, A, B, fixesCand[ci], c.dt, c.dRecta)) {
             let mts = 0;
             for (let k = 1; k < porRuta.length; k++) mts += distM(porRuta[k - 1][1], porRuta[k - 1][0], porRuta[k][1], porRuta[k][0]);
-            feats.push({ type: "Feature", geometry: { type: "LineString", coordinates: porRuta }, properties: { nivel: "puente", km: Math.round(mts / 100) / 10, min: Math.round(c.dt / 60) } });
-            if (c.origen === "crudo") suprimir.push([c.iA + 1, c.iB - 1]);
-            continue;
-          }
-          // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco).
+            slots[ci] = { type: "Feature", geometry: { type: "LineString", coordinates: porRuta }, properties: { nivel: "puente", km: Math.round(mts / 100) / 10, min: Math.round(c.dt / 60) } };
+          } else porGoogle.push(ci);
+        }
+        // 2) FALLBACK: camino fresco de Directions (cacheado por coords del hueco), con tope de
+        //    concurrencia. Un `key` repetido dentro del mismo lote comparte UNA sola llamada.
+        const enVuelo = new Map<string, Promise<void>>();
+        await enParalelo(porGoogle, 6, async (ci) => {
+          if (cancel) return;
+          const c = cands[ci];
+          const A = { lat: c.aLat, lng: c.aLng }, B = { lat: c.bLat, lng: c.bLng };
           const key = `${c.aLat.toFixed(5)},${c.aLng.toFixed(5)}->${c.bLat.toFixed(5)},${c.bLng.toFixed(5)}`;
           let r = cache.get(key);
           if (r?.expira && Date.now() > r.expira) r = undefined;   // fallo transitorio vencido → reintentar
           if (!r) {
-            try {
-              const resp = await fetch("/api/ruta-puente", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ aLat: c.aLat, aLng: c.aLng, bLat: c.bLat, bLng: c.bLng }),
-              });
-              const j = await resp.json();
-              if (j?.ocultar || j?.status !== "OK") {
-                r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt };
-                // "Sin camino" GEOMÉTRICO (ZERO_RESULTS/NOT_FOUND/SIN_GEOMETRIA) es permanente: se
-                // cachea sin vencimiento. Cualquier otro status (HTTP 429/5xx, OVER_QUERY_LIMIT,
-                // cuota) es transitorio → vence en 60 s para no envenenar el rango de por vida.
-                if (!["ZERO_RESULTS", "NOT_FOUND", "SIN_GEOMETRIA"].includes(j?.status)) r.expira = Date.now() + 60000;
-              } else {
-                const nivel = decidirPuente(j.roadM, c.dRecta);   // unir todo por carretera (corte solo si sin ruta o rodeo absurdo >8×)
-                // El estimado usa la geometría de VÍA de Google TAL CUAL (nunca cruza casas). Los extremos
-                // crudos A/B se añaden solo si están pegados a la vía (≤25 m) para cerrar la costura; si el
-                // fix está más lejos, se OMITE la recta (antes esa recta A→vía de hasta 190 m cruzaba
-                // manzanas/ríos = el reclamo del usuario, jul-2026). El estimado arranca sobre la calzada.
-                const gc: [number, number][] = (j.coords || []) as [number, number][];
-                const headOk = gc.length > 0 && distM(c.aLat, c.aLng, gc[0][1], gc[0][0]) <= 25;
-                const tailOk = gc.length > 0 && distM(c.bLat, c.bLng, gc[gc.length - 1][1], gc[gc.length - 1][0]) <= 25;
-                const coords: [number, number][] = nivel === "puente"
-                  ? [...(headOk ? [[c.aLng, c.aLat] as [number, number]] : []), ...gc, ...(tailOk ? [[c.bLng, c.bLat] as [number, number]] : [])]
-                  : [];
-                r = { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt };
-              }
-              cache.set(key, r);
-            // Fallo de RED (fetch lanzó): cachear "ocultar" CON vencimiento de 60 s — reintenta al
-            // vencer (no queda sin puente para siempre) pero sin tormenta de 30 fetch cada 15 s.
-            } catch { r = { nivel: "ocultar", coords: [], km: 0, dt: c.dt, expira: Date.now() + 60000 }; cache.set(key, r); }
+            if (!enVuelo.has(key)) enVuelo.set(key, (async () => {
+              try {
+                const resp = await fetch("/api/ruta-puente", {
+                  method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ aLat: c.aLat, aLng: c.aLng, bLat: c.bLat, bLng: c.bLng }),
+                });
+                const j = await resp.json();
+                let rr: any;
+                if (j?.ocultar || j?.status !== "OK") {
+                  rr = { nivel: "ocultar", coords: [], km: 0, dt: c.dt };
+                  // "Sin camino" GEOMÉTRICO (ZERO_RESULTS/NOT_FOUND/SIN_GEOMETRIA) es permanente: se
+                  // cachea sin vencimiento. Cualquier otro status (HTTP 429/5xx, OVER_QUERY_LIMIT,
+                  // cuota) es transitorio → vence en 60 s para no envenenar el rango de por vida.
+                  if (!["ZERO_RESULTS", "NOT_FOUND", "SIN_GEOMETRIA"].includes(j?.status)) rr.expira = Date.now() + 60000;
+                } else {
+                  const nivel = decidirPuente(j.roadM, c.dRecta);   // unir todo por carretera (corte solo si sin ruta o rodeo absurdo >8×)
+                  // El estimado usa la geometría de VÍA de Google TAL CUAL (nunca cruza casas). Los extremos
+                  // crudos A/B se añaden solo si están pegados a la vía (≤25 m) para cerrar la costura; si el
+                  // fix está más lejos, se OMITE la recta (antes esa recta A→vía de hasta 190 m cruzaba
+                  // manzanas/ríos = el reclamo del usuario, jul-2026). El estimado arranca sobre la calzada.
+                  const gc: [number, number][] = (j.coords || []) as [number, number][];
+                  const headOk = gc.length > 0 && distM(c.aLat, c.aLng, gc[0][1], gc[0][0]) <= 25;
+                  const tailOk = gc.length > 0 && distM(c.bLat, c.bLng, gc[gc.length - 1][1], gc[gc.length - 1][0]) <= 25;
+                  const coords: [number, number][] = nivel === "puente"
+                    ? [...(headOk ? [[c.aLng, c.aLat] as [number, number]] : []), ...gc, ...(tailOk ? [[c.bLng, c.bLat] as [number, number]] : [])]
+                    : [];
+                  rr = { nivel, coords, km: (j.roadM || c.dRecta) / 1000, dt: c.dt };
+                }
+                cache.set(key, rr);
+              // Fallo de RED (fetch lanzó): cachear "ocultar" CON vencimiento de 60 s — reintenta al
+              // vencer (no queda sin puente para siempre) pero sin tormenta de 30 fetch cada 15 s.
+              } catch { cache.set(key, { nivel: "ocultar", coords: [], km: 0, dt: c.dt, expira: Date.now() + 60000 }); }
+            })());
+            await enVuelo.get(key)!;
+            r = cache.get(key);
           }
           // Dibujar el estimado de Google SOLO si su geometría A→B directa es coherente con la evidencia GPS.
           // (Si es incoherente, no se dibuja; validarPuente es barata y determinista → se re-evalúa sin re-fetch.)
-          if (r.nivel !== "ocultar" && r.coords.length >= 2 && validarPuente(r.coords, A, B, fixes, c.dt, c.dRecta)) {
-            feats.push({
+          if (r && r.nivel !== "ocultar" && r.coords.length >= 2 && validarPuente(r.coords, A, B, fixesCand[ci], c.dt, c.dRecta)) {
+            slots[ci] = {
               type: "Feature",
               geometry: { type: "LineString", coordinates: r.coords },
               properties: { nivel: r.nivel, km: Math.round(r.km * 10) / 10, min: Math.round(c.dt / 60) },
-            });
-            if (c.origen === "crudo") suprimir.push([c.iA + 1, c.iB - 1]);
+            };
           }
+        });
+        if (cancel) return;
+        // Ensamblado EN ORDEN de candidatos (idéntico al secuencial): features + supresión del crudo ruteado.
+        for (let ci = 0; ci < cands.length; ci++) {
+          if (!slots[ci]) continue;
+          feats.push(slots[ci]);
+          if (cands[ci].origen === "crudo") suprimir.push([cands[ci].iA + 1, cands[ci].iB - 1]);
         }
         // La punta viva CRUDA (después del último vértice limpio) la cubre colaViva por la ruta → NO se
         // dibuja como medido (evita la recta cruda de la punta). El medido termina en colaClean; colaViva sigue.
@@ -1271,10 +1296,25 @@ export default function ModalGps({
     const color = edadS <= 60 ? "#16a34a" : edadS <= 600 ? "#d97706" : "#dc2626";
 
     if (markerRef.current) {
-      // Deslizar el marcador entre puntos (tween estilo Uber) en vez de saltar seco: paridad
-      // con /monitoreo (animarMarcador) — el salto seco se percibía como "desfase" del modal.
-      animarMarcador(markerRef.current, lngLat);
-      markerRef.current.setRotation(rot);
+      // Deslizar el marcador entre puntos (tween estilo Uber). SI hay camino de VÍA fiable entre
+      // el snap anterior y el nuevo (caminoEntreSnaps: ambos pegados a la ruta prevista, sin
+      // rodeo), el bus se desliza POR LA CALLE y dobla la esquina rotando con el segmento — antes
+      // el tween recto cortaba la manzana en diagonal (el ícono "cruzaba casas" aunque ambos
+      // extremos estuvieran sobre la pista). Sin camino (sin ruta cerca / desvío / salto raro) →
+      // tween recto de siempre, idéntico al comportamiento anterior.
+      const dSnap = prevSnap ? distM(prevSnap.lat, prevSnap.lng, pos.lat, pos.lng) : 0;
+      const camino = (prevSnap && dSnap > 12 && dSnap < 1200)
+        ? caminoEntreSnaps(prevSnap, pos, rutaRef.current?.coordenadas)
+        : null;
+      if (camino) {
+        // rumboFinal SOLO con rumbo REAL del equipo (>0). Sin él, `rot` es el bearing de la
+        // CUERDA prevSnap→pos (la diagonal): asentarlo al final torcía el bus ~45° sobre las
+        // casas en cada esquina — mejor dejarlo mirando el último segmento de vía (review ago-2026).
+        animarMarcadorPorCamino(markerRef.current, camino, { rumboFinal: rawRumbo > 0 ? rawRumbo : undefined });
+      } else {
+        animarMarcador(markerRef.current, lngLat);
+        markerRef.current.setRotation(rot);
+      }
       // Mantener el color del pulso en sync con el estado de señal.
       const elc = markerRef.current.getElement();
       const p1 = elc?.querySelector(".afa-pulse1") as HTMLElement | null;
