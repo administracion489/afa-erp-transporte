@@ -44,20 +44,47 @@ const keyDe = (g: any) =>
 // del portal calculan antigüedad con `timestamp`; si viniera null marcarían "sin señal".
 const norm = (g: any) => (g ? { ...g, timestamp: g.timestamp ?? g.created_at ?? null } : g);
 
-// Mantiene solo el ÚLTIMO tramo contiguo: corta donde haya un hueco temporal > gapMs.
-// La rama por-vehículo (terceros, sin reserva_id) trae las últimas 12 h, que pueden incluir
-// DOS servicios del mismo bus → sin esto, la huella dibuja una recta larga uniendo el fin del
-// viaje A con el inicio del viaje B. Dentro de un servicio el conductor late cada ~25 s aun
-// detenido, así que un hueco > gapMs = la app dejó de transmitir = otro servicio (o fin).
-// filas viene ordenado por created_at asc.
+// Corte por tramos contiguos: un hueco > gapMs = la app dejó de transmitir = otro viaje (dentro
+// de un servicio el conductor late cada ~25 s aun detenido). Sin él, la huella dibuja una recta
+// larga uniendo el fin del viaje A con el inicio del viaje B. Ver tramoDelServicio, abajo.
 const HUECO_VIAJE_MS = 30 * 60 * 1000; // 30 min: separa servicios sin cortar paradas/cortes de señal
-function ultimoTramo(filas: any[], gapMs: number): any[] {
+
+// Cuánto ANTES de la hora programada puede empezar a contar el GPS, y solo con el inicio ya
+// confirmado: es el traslado cochera → primer paradero, que sí pertenece al servicio.
+const MARGEN_PREVIO_MS = 45 * 60 * 1000;
+// Techo de duración de la ventana. 26 h y no 12: hay tours full day de hasta 24 h y una ventana
+// más corta que el propio servicio le cortaría la huella por la mitad al final del viaje.
+const DURACION_MAX_MS = 26 * 60 * 60 * 1000;
+
+/** "HH:MM[:SS]" del día `fecha` (Lima, UTC-5 sin DST) en ms epoch. Igual que api/gps-salud. */
+function limaMs(fecha: string | null | undefined, hora: string | null | undefined): number | null {
+  if (!fecha) return null;
+  const h = hora ? String(hora).slice(0, 8).padEnd(8, ":00").slice(0, 8) : "00:00:00";
+  const t = Date.parse(`${fecha}T${h}-05:00`);
+  return Number.isFinite(t) ? t : null;
+}
+/**
+ * Parte la huella en tramos contiguos y devuelve EL DEL SERVICIO: el primer tramo que seguía
+ * vivo a la hora de salida programada (`refTs`). La rama por-vehículo puede traer varios viajes
+ * del mismo bus dentro de la ventana, y "quedarse con el último" —lo que hacía antes— solo
+ * acierta cuando el servicio consultado es el que está ocurriendo AHORA: al abrir uno de ayer
+ * devolvía el viaje de hoy.
+ * LÍMITE CONOCIDO: si el bus hizo un traslado con hueco propio después de la hora de salida y el
+ * servicio arrancó aún más tarde, gana el traslado. No se adivina más — el caso lo resuelve la
+ * evidencia dura (puntos con reserva_id) y esta rama es el fallback.
+ * `filas` viene ordenado por created_at asc.
+ */
+function tramoDelServicio(filas: any[], gapMs: number, refTs: number | null): any[] {
   if (filas.length < 2) return filas;
+  const tramos: any[][] = [];
   let inicio = 0;
   for (let i = 1; i < filas.length; i++) {
-    if (tMs(filas[i]) - tMs(filas[i - 1]) > gapMs) inicio = i;
+    if (tMs(filas[i]) - tMs(filas[i - 1]) > gapMs) { tramos.push(filas.slice(inicio, i)); inicio = i; }
   }
-  return inicio === 0 ? filas : filas.slice(inicio);
+  tramos.push(filas.slice(inicio));
+  const ultimo = tramos[tramos.length - 1];
+  if (refTs == null) return ultimo;   // sin hora programada no hay con qué anclar → el más reciente
+  return tramos.find(t => tMs(t[t.length - 1]) >= refTs) ?? ultimo;
 }
 
 export async function POST(req: NextRequest) {
@@ -82,21 +109,49 @@ export async function POST(req: NextRequest) {
             .eq("reserva_id", reservaId)
             .order("created_at", { ascending: true }).order("id", { ascending: true }));
       }
-      if (filas.length === 0 && (vehiculoTerceroId != null || vehiculoId != null)) {
-        // Tercero: los puntos no llevan reserva_id. Acotar a las últimas 12 h (viaje de hoy).
-        const desde = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
+      // ── VENTANA DEL SERVICIO ─────────────────────────────────────────────────
+      // Un punto GPS solo puede hablar de ESTE servicio si cae dentro de su ventana. La rama
+      // por-vehículo no tiene reserva_id y sin esta cota traía "las últimas 12 h del bus": el
+      // traslado desde cochera, el modo conectado-libre (enviarUbicacion manda reserva_id null
+      // mientras no hay recorrido iniciado — app/conductor/page.tsx:1268) y hasta el servicio
+      // anterior si la separación fue <30 min. Esa huella ajena SEMBRABA el motor de avance
+      // (lib/avance-paradas.ts) y un servicio que aún no arrancaba aparecía con paraderos
+      // "detectados por GPS", el itinerario al 33 % y un ETA calculado desde una parada por la
+      // que el bus nunca pasó.
+      const rsv = reservaId != null
+        ? (await supabase.from("reservas").select("fecha_servicio,hora_servicio,estado")
+            .eq("id", reservaId).maybeSingle()).data
+        : null;
+      const progMs = limaMs(rsv?.fecha_servicio, rsv?.hora_servicio);
+      // EVIDENCIA DURA DE INICIO, en este orden: puntos atados a la reserva (la app del conductor
+      // ata cada fix al servicio al iniciar el recorrido) → estado puesto por una persona.
+      const iniciado = filas.length > 0 || rsv?.estado === "en_curso" || rsv?.estado === "finalizada";
+      // Con el inicio confirmado la ventana se abre antes: ese traslado al primer paradero SÍ es
+      // parte del servicio. Sin confirmar, abre en la hora programada EXACTA — antes de esa hora
+      // nadie puede afirmar que el bus se mueve por este servicio, y en una ruta de retorno pasa
+      // cerca de paraderos posteriores camino al origen: justo el movimiento que producía los
+      // falsos "ya pasó".
+      const T0 = progMs != null ? progMs - (iniciado ? MARGEN_PREVIO_MS : 0) : null;
+      const T1 = T0 != null ? T0 + DURACION_MAX_MS : null;
+      const antesDeLaVentana = T0 != null && Date.now() < T0;
+      if (filas.length === 0 && (vehiculoTerceroId != null || vehiculoId != null) && !antesDeLaVentana) {
+        // Tercero: los puntos no llevan reserva_id. Ventana del servicio; sin fecha/hora
+        // programada (dato incompleto) se cae al comportamiento histórico de las últimas 12 h.
+        const desde = new Date(T0 ?? Date.now() - 12 * 60 * 60 * 1000).toISOString();
+        const hasta = T1 != null ? new Date(Math.min(T1, Date.now())).toISOString() : null;
         filas = await paginarFilas(() => {
-          const q = supabase.from("ubicaciones_gps").select(HCOLS)
+          let q = supabase.from("ubicaciones_gps").select(HCOLS)
             .gte("created_at", desde)
             .order("created_at", { ascending: true }).order("id", { ascending: true });
+          if (hasta) q = q.lte("created_at", hasta);
           return vehiculoTerceroId != null ? q.eq("vehiculo_tercero_id", vehiculoTerceroId) : q.eq("vehiculo_id", vehiculoId);
         });
         viaVehiculo = true;
       }
-      // Rama por-vehículo: la ventana de 12 h puede traer 2 servicios del mismo bus → quedarnos
-      // solo con el viaje más reciente (cortar por hueco temporal). La rama por reserva_id ya
-      // está acotada a un único servicio, no se toca.
-      const base = viaVehiculo ? ultimoTramo(filas, HUECO_VIAJE_MS) : filas;
+      // Rama por-vehículo: la ventana del servicio todavía puede contener dos viajes del mismo
+      // bus (un full day de 24 h con relevo a media tarde) → quedarnos solo con el más reciente.
+      // La rama por reserva_id ya está acotada a un único servicio, no se toca.
+      const base = viaVehiculo ? tramoDelServicio(filas, HUECO_VIAJE_MS, progMs) : filas;
       // Coherencia escritura↔lectura: el conductor (enviarUbicacion) acepta fixes hasta
       // 1500 m a propósito (tablets/FUSED por red sin chip GPS) y DELEGA el suavizado a la
       // lectura. Si aquí cortáramos a 80 m, esos puntos (80–1500 m) se perderían → huella
@@ -104,7 +159,24 @@ export async function POST(req: NextRequest) {
       // ya la absorben limpiarHuella + los radii de Map Matching (acc·1.5), así que basta
       // descartar solo la basura de torre celular (el MISMO techo que la escritura).
       const filasOk = base.filter((p: any) => p.precision_m == null || p.precision_m <= 1500);
-      return NextResponse.json({ huella: filasOk.map(norm) });
+      // `servicio` viaja con la huella para que el modal aplique la MISMA cota al fix EN VIVO
+      // (que no pasa por aquí: llega por el modo individual) y no vuelva a envenenar el motor
+      // por la puerta de atrás. `desdeTs` nunca recorta evidencia dura: si hay puntos atados a
+      // la reserva manda el primero de ellos cuando es anterior a T0 — el bus pudo salir antes
+      // de lo programado y ese tramo es del servicio, lo dice su propio reserva_id.
+      const primeroReservaTs = !viaVehiculo && filasOk.length ? tMs(filasOk[0]) : null;
+      const desdeTs = T0 == null ? null : primeroReservaTs ? Math.min(T0, primeroReservaTs) : T0;
+      return NextResponse.json({
+        huella: filasOk.map(norm),
+        servicio: {
+          iniciado, desdeTs, programadoTs: progMs,
+          // El veredicto lo emite el SERVIDOR — es el mismo que acaba de dejar la huella vacía.
+          // Recalcularlo en el cliente con su propio reloj abre la puerta a que discrepen.
+          esperando: antesDeLaVentana && !iniciado,
+          estado: rsv?.estado ?? null,
+          via: viaVehiculo ? "vehiculo" : filasOk.length ? "reserva" : "ninguna",
+        },
+      });
     }
 
     const vehiculoIds = Array.isArray(body.vehiculoIds)

@@ -47,7 +47,10 @@ export function useAvanceParadas(args: {
   const { paradas, firmaParadas, leerHuella, huellaVersion = 0, fixVivo, opts } = args;
 
   // `ruta.total` es una firma primitiva suficiente: cambia cuando se recarga la geometría.
-  const claveBase = `${firmaParadas}|${huellaVersion}|${opts?.foco ?? ""}|${opts?.ruta?.total ?? 0}`;
+  // `desdeTs` va en la clave: cambia cuando el servicio pasa a iniciado (la ventana se abre
+  // 45 min antes) y la siembra tiene que rehacerse con la cota nueva, aunque la huella no haya
+  // crecido en ese ciclo. Sin él, el memo seguiría devolviendo el estado de la cota vieja.
+  const claveBase = `${firmaParadas}|${huellaVersion}|${opts?.foco ?? ""}|${opts?.ruta?.total ?? 0}|${opts?.desdeTs ?? 0}`;
   const fixTs = fixVivo?.ts ?? 0;
 
   // SIEMBRA. Parte SIEMPRE de cero sobre la huella completa: es un reduce puro, así que

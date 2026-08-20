@@ -182,6 +182,15 @@ export default function ModalGps({
   // El contador de versión es la señal de "hay huella nueva" para el hook.
   const puntosRef = useRef<FixAvance[]>([]);
   const [huellaVer, setHuellaVer] = useState(0);
+  // VENTANA DEL SERVICIO — la calcula /api/cliente/gps cruzando la huella con la reserva. Sin
+  // ella el modal no podía distinguir "el bus todavía no sale" de "el bus va a mitad de ruta":
+  // el GPS de un servicio que aún no arranca (traslado de cochera, modo conectado-libre, viaje
+  // anterior del mismo bus) sembraba el motor de avance y el itinerario se pintaba con paraderos
+  // "detectados por GPS" antes de la hora de salida.
+  const [servicioGps, setServicioGps] = useState<{
+    iniciado: boolean; desdeTs: number | null; programadoTs: number | null;
+    esperando: boolean; estado: string | null; via: string;
+  } | null>(null);
   // Control de cámara: si el usuario arrastra el mapa, dejamos de recentrar al vehículo
   const [mapDescentrado, setMapDescentrado] = useState(false);
   const mapDescentradoRef = useRef(false);
@@ -479,6 +488,9 @@ export default function ModalGps({
         });
         const json = await res.json();
         const arr = Array.isArray(json?.huella) ? json.huella : [];
+        // ANTES del early-return: el caso "servicio no iniciado" devuelve huella VACÍA a
+        // propósito, y es justo cuando el modal más necesita saber por qué está vacía.
+        if (!cancel && json?.servicio) setServicioGps(json.servicio);
         if (cancel || arr.length === 0) return;
 
         // GPS CONGELADO vs. BUS PARADO — dos métodos, el ROBUSTO primero.
@@ -1016,7 +1028,12 @@ export default function ModalGps({
     // MOV_MIN_M — un fix re-enviado no se desplaza, así que no aporta dirección). Pasarlo como
     // bandera cortaba también la SIEMBRA histórica y el avance ya inferido se desplomaba a cero
     // en pantalla justo cuando el equipo del conductor falla.
-    opts: useMemo(() => ({ ruta: rutaProy }), [rutaProy]),
+    // `desdeTs`: fixes anteriores a la ventana del servicio no cuentan como avance. La huella
+    // ya llega recortada del endpoint, pero el fix EN VIVO no pasa por ahí (viene del modo
+    // individual) y entraría por la puerta de atrás: con el servicio aún sin salir, ese único
+    // punto basta para que el motor empiece a declarar paraderos pasados.
+    opts: useMemo(() => ({ ruta: rutaProy, desdeTs: servicioGps?.desdeTs ?? undefined }),
+                  [rutaProy, servicioGps?.desdeTs]),
   });
 
   const proximaIdx    = avance.proximaIdx;
@@ -1064,6 +1081,17 @@ export default function ModalGps({
   const compGps       = avance.motivo.filter(m => m === "gps").length;
   const compArrastre  = avance.motivo.filter(m => m === "arrastre").length;
   const pct           = paradasDisplay.length > 0 ? Math.round((paradasComp / paradasDisplay.length) * 100) : 0;
+
+  // NI iniciado en la app NI llegada su hora de salida. Con la reserva en este estado el GPS del
+  // vehículo describe cualquier cosa MENOS este servicio, así que el modal no puede presentar
+  // avance, ni ETA, ni alarmar con "sin señal": no hay señal que esperar todavía. Lo dictamina el
+  // endpoint (mismo veredicto que vació la huella) y se refresca con cada ciclo de huella.
+  const esperandoInicio = !!servicioGps?.esperando;
+  const horaSalidaTxt = servicioGps?.programadoTs != null ? fmtHoraLlegada(servicioGps.programadoTs) : null;
+  // Piso para encadenar las horas por tramo (ver horasLlegadaTramos). Se deriva AQUÍ y no dentro
+  // del useMemo: leer una propiedad de `servicioGps` allí hace que el React Compiler infiera el
+  // objeto entero como dependencia y abandone la memoización del componente.
+  const anclaMinimaTs = esperandoInicio ? servicioGps?.programadoTs ?? 0 : 0;
 
   // ── Marcadores numerados con etiqueta de texto ────────────────────────────
 
@@ -1517,14 +1545,18 @@ export default function ModalGps({
     const idxAncla = ruta.tramos.findIndex(t => t.hasta === proximaParada.nombre);
     if (idxAncla < 0) return []; // nombre no calza entre paradas y tramos (parada sin geocodificar, etc.)
     const anclaEsLlegadaReal = etaVigente && etaLlegVis != null;
-    let acum = anclaEsLlegadaReal ? etaLlegVis : Date.now();
+    // Sin ETA real, el ancla es "ahora" salvo que el servicio NO haya salido: encadenar desde
+    // ahora un servicio de las 21:00 abierto a las 19:51 pintaba "llega 8:19 p.m." en paraderos
+    // por los que el bus todavía no había pasado. Con la salida programada por delante, ese
+    // instante —y no el reloj— es el inicio del primer tramo.
+    let acum = anclaEsLlegadaReal ? etaLlegVis : Math.max(Date.now(), anclaMinimaTs);
     return ruta.tramos.map((t, i) => {
       if (i < idxAncla) return null;
       if (i === idxAncla && anclaEsLlegadaReal) return acum; // ya es la llegada — no sumar de nuevo
       acum += t.duracion_trafico_min * 60_000;
       return acum;
     });
-  }, [ruta, proximaParada, etaVigente, etaLlegVis]);
+  }, [ruta, proximaParada, etaVigente, etaLlegVis, anclaMinimaTs]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 md:p-4" style={{ background: "rgba(15,23,42,0.65)" }}>
@@ -1548,8 +1580,10 @@ export default function ModalGps({
                   className={`text-[11px] flex items-center gap-2 ${alerta ? "text-amber-300 font-bold" : "text-blue-200"}`}
                   title={quieto ? "La unidad no se desplaza con el servicio en curso. Causas: GPS del teléfono PEGADO (pídele apagar/encender la Ubicación; si sigue, reiniciar el celular — caso #951), teléfono fuera del vehículo, o unidad varada. El conductor ya ve esta alerta en su pantalla." : debilM > 0 ? "GPS de baja precisión del equipo del conductor: pídele activar Alta precisión (GPS satelital) o usar la app nativa." : undefined}
                 >
-                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${sinSenal ? "bg-red-400" : alerta ? "bg-amber-400 animate-pulse" : "bg-green-400 animate-pulse"}`} />
-                  {sinSenal
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${esperandoInicio ? "bg-blue-300" : sinSenal ? "bg-red-400" : alerta ? "bg-amber-400 animate-pulse" : "bg-green-400 animate-pulse"}`} />
+                  {esperandoInicio
+                    ? `Aún no inicia${horaSalidaTxt ? ` · sale ${horaSalidaTxt}` : ""}`
+                    : sinSenal
                     ? "Sin señal GPS"
                     : congeladoMin > 0
                       ? `⚠ GPS del conductor congelado · hace ${congeladoMin} min`
@@ -1628,7 +1662,18 @@ export default function ModalGps({
               </div>
             )}
 
-            {sinSenal && !errorMapa && !errorRuta && (
+            {/* "Sin señal" es una FALTA del conductor; antes de la hora de salida no hay ninguna
+                falta que reportar. Ese rojo mandaba al operador a llamar por un GPS que todavía
+                no tenía por qué estar encendido. */}
+            {esperandoInicio && !errorMapa && !errorRuta && (
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-slate-700/90 backdrop-blur-sm rounded-xl px-3 py-2 shadow-lg pointer-events-none">
+                <p className="text-white text-xs font-bold">
+                  ⏳ El servicio aún no inicia{horaSalidaTxt ? ` · sale ${horaSalidaTxt}` : ""}
+                </p>
+              </div>
+            )}
+
+            {sinSenal && !esperandoInicio && !errorMapa && !errorRuta && (
               <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-red-600/90 backdrop-blur-sm rounded-xl px-3 py-2 shadow-lg pointer-events-none">
                 <p className="text-white text-xs font-bold">📡 Sin señal GPS del conductor</p>
               </div>
@@ -1746,7 +1791,8 @@ export default function ModalGps({
                     </>
                   ) : (
                     <p className="text-sm opacity-80">
-                      {sinSenal ? "Sin señal GPS — no se puede estimar"
+                      {esperandoInicio ? `El servicio aún no inicia${horaSalidaTxt ? ` — sale ${horaSalidaTxt}` : ""}`
+                        : sinSenal ? "Sin señal GPS — no se puede estimar"
                         : ubic?.estado === "finalizado" ? "Servicio finalizado"
                         : etaSinRuta ? "Sin ruta directa: el destino quedó detrás del vehículo"
                         : "Calculando tiempo estimado…"}
@@ -1895,7 +1941,13 @@ export default function ModalGps({
               <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden mb-3">
                 <div className="h-full rounded-full bg-[#0b315f] transition-all" style={{ width: `${pct}%` }} />
               </div>
-              {(compGps > 0 || compArrastre > 0) && (
+              {esperandoInicio && (
+                <p className="text-[9px] text-slate-500 font-bold mb-2 -mt-1">
+                  ⏳ Servicio no iniciado{horaSalidaTxt ? ` · sale ${horaSalidaTxt}` : ""} — el itinerario avanza
+                  cuando el conductor inicia el recorrido o llega la hora de salida.
+                </p>
+              )}
+              {!esperandoInicio && (compGps > 0 || compArrastre > 0) && (
                 <p className="text-[9px] text-amber-600 font-bold mb-2 -mt-1">
                   {compConductor} confirmada(s) por el conductor
                   {compGps > 0 && ` · ${compGps} detectada(s) por GPS`}
