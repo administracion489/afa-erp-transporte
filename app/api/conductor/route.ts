@@ -12,6 +12,7 @@ import { createClient } from "@supabase/supabase-js";
 import { registrarLectura, corregirCapturaPorReloj, hashDeFoto } from "@/lib/odometro";
 import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm, enviarPushAPasajeros, payloadRespuestaChat } from "@/lib/push";
 import { evaluarProximidad, emitirLlego } from "@/lib/proximidad";
+import { cerrarServiciosAnterioresDelVehiculo } from "@/lib/cerrar-servicio-anterior";
 import {
   firmarTokenConductor, sesionDeToken,
   loginBloqueado, registrarIntentoFallido, limpiarIntentos,
@@ -892,6 +893,19 @@ export async function POST(req: NextRequest) {
         // del throttle del motor de proximidad.
         if (estado === "en_curso") {
           const rid = Number(reservaId);
+          after(async () => {
+            // Un bus no puede estar en dos rutas a la vez: si este vehículo dejó otro servicio
+            // abierto, arrancar este demuestra que aquel terminó. Cerrarlo aquí evita que siga
+            // secuestrando la app del pasajero con una posición congelada.
+            try {
+              const { data: rv } = await admin.from("reservas")
+                .select("vehiculo_id, vehiculo_tercero_id").eq("id", rid).maybeSingle();
+              if (rv) await cerrarServiciosAnterioresDelVehiculo(admin, {
+                reservaIdNueva: rid,
+                vehiculoId: rv.vehiculo_id, vehiculoTerceroId: rv.vehiculo_tercero_id,
+              });
+            } catch (e: any) { console.warn("[cerrar anterior]", e?.message); }
+          });
           after(async () => {
             try {
               await admin.from("push_eval_estado").insert({ reserva_id: rid }); // 23505 = ya sembrada

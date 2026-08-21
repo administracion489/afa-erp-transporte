@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { cerrarServiciosAnterioresDelVehiculo } from "@/lib/cerrar-servicio-anterior";
 
 const adminClient = () =>
   createClient(
@@ -36,6 +37,15 @@ export async function POST(req: NextRequest) {
 
   // Marcar como en_curso
   await supabase.from("reservas").update({ estado: "en_curso" }).eq("id", reserva.id);
+
+  // Un bus no puede estar en dos rutas a la vez: si este vehículo dejó otro servicio abierto,
+  // arrancar este prueba que aquel terminó. Cerrarlo evita que siga secuestrando la app del
+  // pasajero con la posición congelada del viaje anterior.
+  await cerrarServiciosAnterioresDelVehiculo(supabase, {
+    reservaIdNueva: reserva.id,
+    vehiculoId: reserva.vehiculo_id ?? null,
+    vehiculoTerceroId: reserva.vehiculo_tercero_id ?? null,
+  });
 
   // Registrar ubicación inicial (vehiculo_id puede ser null si no hay vehículo asignado aún)
   const vehiculoId = reserva.vehiculo_tercero_id ?? reserva.vehiculo_id ?? null;
