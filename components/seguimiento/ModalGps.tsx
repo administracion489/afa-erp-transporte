@@ -481,10 +481,11 @@ export default function ModalGps({
       if (cargandoHuellaRef.current) return;   // ciclo anterior aún en vuelo (p. ej. 30 puentes lentos) → saltar este tick
       cargandoHuellaRef.current = true;
       try {
+        const cred = await credencialesGps();
         const res = await fetch("/api/cliente/gps", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ huella: true, reservaId, vehiculoId, vehiculoTerceroId }),
+          headers: cred.headers,
+          body: JSON.stringify({ huella: true, reservaId, vehiculoId, vehiculoTerceroId, token: cred.token }),
         });
         const json = await res.json();
         const arr = Array.isArray(json?.huella) ? json.huella : [];
@@ -1190,14 +1191,33 @@ export default function ModalGps({
 
   // ── GPS: última posición ──────────────────────────────────────────────────
 
+  // El endpoint /api/cliente/gps acepta las DOS credenciales porque este modal tiene dos
+  // públicos: el operador entra con la sesión del ERP (ve toda la flota) y el cliente con la
+  // de su portal (ve solo lo suyo). Se manda la que corresponda según cómo se abrió el modal.
+  const credencialesGps = useCallback(async (): Promise<{ headers: Record<string, string>; token?: string }> => {
+    if (modoCliente) {
+      const { getPortalToken } = await import("@/lib/portal-sesion");
+      return { headers: { "Content-Type": "application/json" }, token: getPortalToken() ?? undefined };
+    }
+    try {
+      const { supabase } = await import("@/lib/supabase");
+      const { data } = await supabase.auth.getSession();
+      const jwt = data?.session?.access_token;
+      return { headers: { "Content-Type": "application/json", ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) } };
+    } catch {
+      return { headers: { "Content-Type": "application/json" } };
+    }
+  }, [modoCliente]);
+
   // Lee la última posición vía endpoint service_role (sin RLS) — igual que /seguimiento.
   // Así el GPS aparece al instante al abrir el modal, sin esperar el primer realtime.
   const cargarUbicacion = useCallback(async () => {
     try {
+      const cred = await credencialesGps();
       const res = await fetch("/api/cliente/gps", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reservaId, vehiculoId, vehiculoTerceroId }),
+        headers: cred.headers,
+        body: JSON.stringify({ reservaId, vehiculoId, vehiculoTerceroId, token: cred.token }),
       });
       const json = await res.json();
       const d = (json?.ubicacion ?? null) as UbicGps | null;

@@ -14,6 +14,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { paginarFilas } from "@/lib/huella";
+import { verificarTokenPortal, reservaEsDelCliente, filtrarVehiculosDelCliente } from "@/lib/portal-auth";
 
 const adminClient = () =>
   createClient(
@@ -91,6 +92,49 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const supabase = adminClient();
+
+    // ── Autorización ────────────────────────────────────────────────────────────
+    // Corre con service_role (sin RLS) y devuelve la traza GPS completa de un servicio.
+    // Antes no pedía NADA: bastaba con conocer o adivinar un reservaId para seguir a un bus
+    // ajeno, sin ser cliente ni operador.
+    //
+    // DOS PÚBLICOS, y por eso la autorización es doble: este endpoint lo consume el mismo
+    // ModalGps que usan el OPERADOR en /seguimiento (sesión del ERP, ve toda la flota) y el
+    // CLIENTE en su portal (sesión propia de portal_usuarios, ve solo lo suyo). Exigir solo
+    // una de las dos credenciales dejaría ciego al otro.
+    let cid: number | null = null;   // null = operador del ERP (sin acotar por cliente)
+
+    const bearer = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+    let esOperador = false;
+    if (bearer) {
+      try {
+        const anon = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
+        const { data } = await anon.auth.getUser(bearer);
+        esOperador = !!data?.user;
+      } catch { esOperador = false; }
+    }
+
+    if (!esOperador) {
+      const sesion = verificarTokenPortal(body?.token);
+      if (!sesion) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
+      cid = sesion.cid;
+
+      // El cid sale del TOKEN, nunca del body → un cliente no puede pedir lo de otro.
+      const reservaPedida = Number(body?.reservaId ?? 0);
+      if (Number.isFinite(reservaPedida) && reservaPedida > 0) {
+        if (!(await reservaEsDelCliente(supabase, reservaPedida, cid))) {
+          return NextResponse.json({ error: "No autorizado" }, { status: 403 });
+        }
+      }
+      // Modo lote (mapa "En vivo"): se queda solo con los vehículos que el cliente puede ver.
+      if (Array.isArray(body?.vehiculoIds) || Array.isArray(body?.vehiculoTerceroIds)) {
+        const permitido = await filtrarVehiculosDelCliente(
+          supabase, cid, body.vehiculoIds ?? [], body.vehiculoTerceroIds ?? [],
+        );
+        body.vehiculoIds = permitido.vehiculoIds;
+        body.vehiculoTerceroIds = permitido.vehiculoTerceroIds;
+      }
+    }
 
     // ── Modo huella (estela del modal): todos los puntos del viaje ─────────────
     if (body.huella) {

@@ -635,7 +635,7 @@ export default function ClientePortal() {
       // consulta directa por reserva_id fallaba. El endpoint resuelve la cascada.
       fetch("/api/cliente/gps", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reservaId: activo.id, vehiculoId: av.vehiculo_id ?? null, vehiculoTerceroId: av.vehiculo_tercero_id ?? null }),
+        body: JSON.stringify({ token: getPortalToken(), reservaId: activo.id, vehiculoId: av.vehiculo_id ?? null, vehiculoTerceroId: av.vehiculo_tercero_id ?? null }),
       }).then(r => r.json()).then(j => { if (j?.ubicacion) setGpsActual(j.ubicacion as GPS); }).catch(() => {});
     }
     if (activo?.conductor_id) {
@@ -879,7 +879,7 @@ export default function ClientePortal() {
     const gpsJson = await fetch("/api/cliente/gps", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ vehiculoIds: vList.map(v => v.id), vehiculoTerceroIds: vtList.map(v => v.id) }),
+      body: JSON.stringify({ token: getPortalToken(), vehiculoIds: vList.map(v => v.id), vehiculoTerceroIds: vtList.map(v => v.id) }),
     }).then(r => r.json()).catch(() => ({}));
     setVehiculosCliente(vList);
     setVehiculosTerceroCliente(vtList);
