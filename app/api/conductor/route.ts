@@ -463,6 +463,28 @@ export async function POST(req: NextRequest) {
           ({ error } = await admin.from("paradas").update({ estado: "completada" }).eq("id", paradaId));
         }
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+        // Cerrar el servicio AQUÍ MISMO si esta era la última parada pendiente, en vez de
+        // depender de una segunda llamada aparte (finalizarUltimaParada -> actualizar_estado).
+        // Esa segunda llamada es fire-and-forget: si la red falla justo entonces —que es
+        // frecuente, porque el último paradero suele ser donde peor pega la señal— el
+        // conductor ve la pantalla de éxito local y el servidor nunca se entera. La reserva
+        // quedaba "en_curso" con las 7 de 7 paradas completadas, a veces por horas, hasta que
+        // algo externo la cerraba (o nada la cerraba). Caso real: reserva 11165, cerrada 40 min
+        // tarde solo porque el mismo bus arrancó otro servicio después.
+        try {
+          const { data: pMarcada } = await admin.from("paradas").select("reserva_id").eq("id", paradaId).maybeSingle();
+          const rid = Number(pMarcada?.reserva_id);
+          if (Number.isFinite(rid) && rid > 0) {
+            const { data: todas } = await admin.from("paradas").select("estado").eq("reserva_id", rid);
+            const completas = (todas ?? []).length > 0 && (todas ?? []).every((p: any) => p.estado === "completada");
+            if (completas) {
+              await admin.from("reservas").update({ estado: "finalizada" })
+                .eq("id", rid).eq("estado", "en_curso"); // no pisar un estado distinto
+            }
+          }
+        } catch (e: any) { console.warn("[marcar_parada] no se pudo auto-cerrar:", e?.message); }
+
         // Push "quedan 2 paradas": tras completar una parada, avisar a la parada
         // pendiente que quedó con EXACTAMENTE 2 pendientes por delante. Solo N=2
         // (anti-spam) y dedupe por parada en push_eventos_viaje.

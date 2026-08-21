@@ -34,5 +34,20 @@ export async function POST(req: NextRequest) {
 
   await supabase.from("paradas").update({ estado: "completada" }).eq("id", paradaId);
 
+  // Cerrar el servicio AQUÍ MISMO si ya no quedan paradas pendientes, en vez de depender de
+  // que el conductor pulse "Finalizar" (POST /conductor-tercero/finalizar) por separado. Ese
+  // segundo paso es una acción aparte del conductor: si no la hace —red caída, cerró el link,
+  // se le acabó la batería justo al llegar— la reserva queda "en_curso" con todas las paradas
+  // completadas, a veces indefinidamente. Ver el mismo patrón en app/api/conductor/route.ts
+  // (marcar_parada), caso real: reserva 11165.
+  try {
+    const { data: todas } = await supabase.from("paradas").select("estado").eq("reserva_id", reserva.id);
+    const completas = (todas ?? []).length > 0 && (todas ?? []).every((p: any) => p.estado === "completada");
+    if (completas) {
+      await supabase.from("reservas").update({ estado: "finalizada" })
+        .eq("id", reserva.id).eq("estado", "en_curso");
+    }
+  } catch (e: any) { console.warn("[conductor-tercero/parada] no se pudo auto-cerrar:", e?.message); }
+
   return NextResponse.json({ ok: true });
 }
