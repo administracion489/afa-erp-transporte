@@ -29,8 +29,15 @@ const norm = (g: any) => (g ? { ...g, timestamp: g.timestamp ?? g.created_at ?? 
 // elegía el servicio vigente MÁS ANTIGUO, esa reserva abandonada secuestraba la
 // pantalla para siempre: el pasajero veía la posición GPS de aquel día viejo
 // ("sin señal, hace 9441 min") mientras el operador sí veía el bus real.
-// Ventana: hoy y ayer — cubre nocturnos que cruzan medianoche y full day de hasta
-// 24 h, sin dejar que un servicio abandonado se quede pegado.
+//
+// La primera versión acotó a "hoy y ayer", y NO BASTÓ: un servicio abandonado ayer a
+// las 17:00 seguía secuestrando la pantalla a las 07:00 del día siguiente (caso real,
+// 21-ago: "hace 687 min"). Ser de ayer no lo hace plausible; lo que lo hace plausible
+// es que TODAVÍA PUEDA estar en ruta. Por eso ahora un en_curso de ayer exige una de dos:
+//   • llevar menos de HORAS_MAX desde su hora de inicio (cubre los nocturnos que cruzan
+//     medianoche), o
+//   • seguir emitiendo GPS (prueba dura de que el bus sigue rodando, y lo que permite que
+//     un full day de 24 h sea vigente sin abrir la puerta a los abandonados).
 const ayerDe = (hoy: string) => {
   const [a, m, d] = String(hoy).split("-").map(Number);
   return new Date(Date.UTC(a, m - 1, d - 1)).toISOString().slice(0, 10);
@@ -39,8 +46,38 @@ const ayerDe = (hoy: string) => {
 const fechaValida = (v: any) => /^\d{4}-\d{2}-\d{2}$/.test(String(v));
 /** Fecha local de Lima (UTC-5), para las acciones que no reciben `hoy` del cliente. */
 const hoyLima = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
+
+const HORAS_MAX_EN_CURSO = 12;   // un servicio de ayer más viejo que esto exige prueba de vida
+const GPS_VIVO_MIN = 20;         // ...y esa prueba es GPS de los últimos 20 minutos
+
+/** Filtro BARATO (sin consultar GPS): descarta lo que ni siquiera es de hoy/ayer. */
 const enCursoVigente = (r: any, hoy: string) =>
   r?.estado === "en_curso" && String(r?.fecha_servicio ?? "") >= ayerDe(hoy);
+
+/** Horas transcurridas desde la hora de inicio del servicio (Lima, UTC-5). */
+function horasDesdeInicio(r: any): number | null {
+  const f = String(r?.fecha_servicio ?? ""), h = String(r?.hora_servicio ?? "");
+  if (!fechaValida(f) || !h) return null;
+  const t = Date.parse(`${f}T${h.slice(0, 8).padEnd(8, ":00").slice(0, 8)}-05:00`);
+  return Number.isFinite(t) ? (Date.now() - t) / 3600e3 : null;
+}
+
+/**
+ * ¿Este en_curso sigue vivo de verdad? Solo se consulta el GPS para los casos dudosos
+ * (los de ayer que ya superaron HORAS_MAX_EN_CURSO), que son uno o ninguno en la práctica:
+ * los de hoy y los recientes se resuelven sin tocar la base.
+ */
+async function enCursoVivo(admin: any, r: any, hoy: string): Promise<boolean> {
+  if (!enCursoVigente(r, hoy)) return false;
+  if (String(r.fecha_servicio) >= hoy) return true;            // de hoy: siempre plausible
+  const horas = horasDesdeInicio(r);
+  if (horas !== null && horas < HORAS_MAX_EN_CURSO) return true;  // nocturno que cruzó medianoche
+  const desde = new Date(Date.now() - GPS_VIVO_MIN * 60_000).toISOString();
+  const { data } = await admin
+    .from("ubicaciones_gps").select("id")
+    .eq("reserva_id", r.id).gte("created_at", desde).limit(1);
+  return !!data?.length;                                        // sigue emitiendo → sigue vivo
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -116,14 +153,21 @@ export async function POST(req: NextRequest) {
         if (ppErr) return NextResponse.json({ error: ppErr.message }, { status: 500 });
         if (!pp?.length) return NextResponse.json({ ruta: null });
 
-        // Solo servicios vigentes: en curso RECIENTE (ver enCursoVigente) o futuros con
-        // estado activo. Nunca retroceder a un servicio viejo como fallback.
-        const vigentes = pp.filter((x: any) => {
+        // Solo servicios vigentes: en curso que TODAVÍA PUEDE estarlo (ver enCursoVivo) o
+        // futuros con estado activo. Nunca retroceder a un servicio viejo como fallback.
+        const candidatos = pp.filter((x: any) => {
           const r = x.parada?.reserva;
           if (!r) return false;
           if (r.estado === "en_curso") return enCursoVigente(r, hoy);
           return r.fecha_servicio >= hoy && ["pendiente", "programada", "confirmada"].includes(r.estado);
-        }).sort((a: any, b: any) => {
+        });
+        // Segunda pasada, solo sobre los candidatos: descarta los en_curso abandonados. Va
+        // aparte porque necesita consultar el GPS y el filtro de arriba es síncrono.
+        const vivos = await Promise.all(candidatos.map(async (x: any) => {
+          const r = x.parada?.reserva;
+          return r?.estado === "en_curso" ? ((await enCursoVivo(admin, r, hoy)) ? x : null) : x;
+        }));
+        const vigentes = vivos.filter(Boolean).sort((a: any, b: any) => {
           const rA = a.parada?.reserva;
           const rB = b.parada?.reserva;
           const dA = `${rA?.fecha_servicio ?? ""}T${rA?.hora_servicio ?? ""}`;
@@ -368,12 +412,19 @@ export async function POST(req: NextRequest) {
           .eq("pasajero_id", pid);
         if (ppErr) return NextResponse.json({ error: ppErr.message }, { status: 500 });
 
-        const vigentes = (pp || []).filter((x: any) => {
+        const candidatos = (pp || []).filter((x: any) => {
           const r = x.parada?.reserva;
           if (!r) return false;
           if (r.estado === "en_curso") return enCursoVigente(r, hoy);
           return r.fecha_servicio >= hoy && ["pendiente", "programada", "confirmada"].includes(r.estado);
         });
+        // Igual que en "ruta": un en_curso de ayer solo cuenta si sigue vivo de verdad. Sin
+        // esto, cambiar de paradero podía escribir sobre un servicio abandonado de días atrás.
+        const vigentesRaw = await Promise.all(candidatos.map(async (x: any) => {
+          const r = x.parada?.reserva;
+          return r?.estado === "en_curso" ? ((await enCursoVivo(admin, r, hoy)) ? x : null) : x;
+        }));
+        const vigentes = vigentesRaw.filter(Boolean) as any[];
 
         let actualizados = 0;
         for (const ppRow of vigentes) {
@@ -570,7 +621,7 @@ export async function POST(req: NextRequest) {
         // Defensa en profundidad: esta acción no recibe `hoy`, así que usamos la fecha
         // Lima del servidor. Evita que un cliente con la lista cacheada se inscriba en
         // un servicio que quedó "en_curso" y nunca se cerró.
-        if (!enCursoVigente(reserva, hoyLima()) && reserva.estado === "en_curso")
+        if (reserva.estado === "en_curso" && !(await enCursoVivo(admin, reserva, hoyLima())))
           return NextResponse.json({ error: "Servicio no disponible" }, { status: 400 });
         // Servicio en curso: no permitir subirse a un paradero que el bus ya pasó.
         if (reserva.estado === "en_curso" && (parada as any).estado === "completada")
