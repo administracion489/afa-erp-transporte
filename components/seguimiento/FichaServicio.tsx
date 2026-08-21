@@ -1193,13 +1193,18 @@ export default function FichaServicio({
                   </p>
                 </div>
 
-                <div className="mt-2.5 pt-2.5 border-t border-gray-100">
-                  <p className="text-[10.5px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 leading-snug">
-                    <b>Límite conocido:</b> el tercero opera con un link, no con la app del conductor, así que no marca
-                    paraderos: este servicio no tendrá hora por paradero. Lo que haya en la línea de tiempo sale del GPS
-                    o del cierre, y el Manifiesto MTC se imprime con “–” en conductor y licencia si no están cargados.
-                  </p>
-                </div>
+                {/* AQUÍ NO VA UN AVISO DE "el tercero no marca paraderos". Se puso una vez y era
+                    falso: los conductores tercerizados usan la MISMA app AFA Conductor que los
+                    propios — el login la busca en las dos tablas (app/conductor/page.tsx:155,
+                    `for (const tabla of ["conductores", "conductores_tercero"])`) y toda la app
+                    enruta por `_tabla`. Marcan paraderos igual, así que su línea de tiempo se
+                    llena igual. El link con token (app/api/conductor-tercero/*) es una vía
+                    ADICIONAL para quien no tenga la app instalada, no la única.
+                    Y el Manifiesto MTC tampoco sale con "–": `datos.conductor` se llena desde
+                    conductores_tercero (nombre + licencia) y se le pasa al documento.
+                    Si un servicio concreto no tiene horas, la línea de tiempo lo dice parada por
+                    parada ("sin marcar"), que es OBSERVACIÓN. Anticiparlo por ser tercerizado
+                    era una suposición, y encima equivocada. */}
               </div>
             </Seccion>
           )}
