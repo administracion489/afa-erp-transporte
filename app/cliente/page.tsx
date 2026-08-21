@@ -2041,9 +2041,13 @@ export default function ClientePortal() {
     || serviciosHoy[0] || null;
   // Cards EN RUTA: TODOS los que están en ruta ahora (varios turnos a la vez). Si ninguno
   // transmite todavía, se muestra el turno del servicio activo como vista previa (pre-inicio).
-  const serviciosDestacados = serviciosEnRuta.length > 0
+  const serviciosDestacadosCrudo = serviciosEnRuta.length > 0
     ? serviciosEnRuta
     : (servicioActivo ? serviciosHoy.filter(r => r.hora_servicio === servicioActivo.hora_servicio) : []);
+  // Candado duro contra `reservas.estado` CRUDO (no la heurística `efectivoEstado`, que puede
+  // estar mirando un GPS viejo o un estado en caché): una reserva finalizada o cancelada de
+  // verdad JAMÁS se pinta como "En curso", sin importar cómo haya llegado hasta aquí.
+  const serviciosDestacados = serviciosDestacadosCrudo.filter(r => !esFinalizado(r.estado) && !esCancelado(r.estado));
   // Ref siempre actualizado (para efectos que no pueden incluir serviciosHoy en deps)
   serviciosHoyRef.current = serviciosHoy;
   const COLORES_RUTA = ["#0b315f", "#ea580c", "#16a34a", "#7c3aed"];
