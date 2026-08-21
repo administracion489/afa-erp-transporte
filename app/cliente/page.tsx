@@ -1316,16 +1316,16 @@ export default function ClientePortal() {
   useEffect(() => {
     if (tab !== "activos" && tab !== "dashboard") return;
     let cancel = false;
-    const pedir = async () => {
-      const ids = serviciosEnRutaRef.current.map(r => r.id);
-      if (!ids.length) return;
+    let firmaPedida = "";   // qué conjunto de servicios se pidió
+    let msPedida    = 0;    // y cuándo
+    const pedir = async (ids: number[]) => {
       try {
         const r = await fetch("/api/cliente/gps", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ token: getPortalToken(), avance: true, reservaIds: ids }),
         });
         const j = await r.json();
-        if (cancel || !j?.avances) return;
+        if (cancel || !j?.avances) throw new Error("sin avances");
         setAvanceGps(prev => {
           const next = { ...prev };
           for (const [id, av] of Object.entries(j.avances as Record<string, any>)) {
@@ -1333,12 +1333,30 @@ export default function ClientePortal() {
           }
           return next;
         });
-      } catch { /* falla transitoria: lo reintenta el siguiente ciclo */ }
+      } catch {
+        // Falla transitoria: soltar la marca para que el próximo tick (5 s) reintente,
+        // en vez de quedarse callado los 45 s del ciclo largo.
+        if (!cancel) { firmaPedida = ""; msPedida = 0; }
+      }
     };
-    void pedir();
-    // 45 s: el veredicto cambia lento (una parada cada varios minutos) y cada consulta relee
-    // la huella entera en el servidor. Más frecuencia no daría más verdad, solo más carga.
-    const iv = setInterval(() => { if (!document.hidden) void pedir(); }, 45000);
+    // Se vigila cada 5 s, pero solo se CONSULTA cuando hace falta:
+    //  · lista nueva (o primera vez) → al instante. "En ruta" se deduce del GPS, que llega
+    //    asíncrono: al montar la lista está VACÍA. Pedir una sola vez ahí no traía nada y el
+    //    timeline se quedaba en "Parada 1" con el bus dos paraderos más allá hasta el
+    //    siguiente ciclo largo — y ese ciclo se salta con la pestaña en segundo plano.
+    //  · misma lista → cada 45 s: el veredicto cambia lento (una parada cada varios minutos)
+    //    y cada consulta relee la huella entera en el servidor.
+    const tick = () => {
+      if (cancel || document.hidden) return;
+      const ids = serviciosEnRutaRef.current.map(r => r.id);
+      if (!ids.length) return;
+      const firma = ids.join(",");
+      if (firma === firmaPedida && Date.now() - msPedida < 45000) return;
+      firmaPedida = firma; msPedida = Date.now();
+      void pedir(ids);
+    };
+    tick();
+    const iv = setInterval(tick, 5000);
     return () => { cancel = true; clearInterval(iv); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, reservas.length]);
