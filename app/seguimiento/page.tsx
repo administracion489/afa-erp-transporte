@@ -5,6 +5,7 @@ import Link from "next/link";
 import ModalGps from "@/components/seguimiento/ModalGps";
 import PanelMensajesPasajeros from "@/components/seguimiento/PanelMensajesPasajeros";
 import DescargaMasivaModal from "@/components/seguimiento/DescargaMasivaModal";
+import FichaServicioNueva from "@/components/seguimiento/FichaServicio";
 import { supabase } from "@/lib/supabase";
 import { ESTADOS_RESERVA, ESTADO_ADMIN_INICIAL } from "@/lib/estados";
 import { idAfa } from "@/lib/folio";
@@ -1542,7 +1543,16 @@ export default function SeguimientoPage() {
 
       {/* ── DRAWER: FICHA DEL SERVICIO ── */}
       {drawer && (
-        <FichaServicio s={drawer} onClose={() => setDrawer(null)} onRefresh={cargar} onGps={setGpsModal} empresaPerfil={empresaPerfil} />
+        // La ficha nueva deriva el horario real y el estado documental (lib/servicio-tiempos.ts,
+        // lib/documentos-estado.ts) en vez de pedirlos tecleados. La tarjeta clasica viaja como
+        // `children`: vive dentro de un acordeon cerrado y conserva gastos, checklist, reemplazo y
+        // telefono, que siguen definidos en este archivo. Deuda consciente: cuando esos modales se
+        // muevan a su propio componente, el acordeon desaparece y con el los ultimos duplicados.
+        <FichaServicioNueva s={drawer} onClose={() => setDrawer(null)} onRefresh={cargar} onGps={setGpsModal} empresaPerfil={empresaPerfil}>
+          {drawer.es_eventual
+            ? <TarjetaEventual s={drawer} onRefresh={cargar} onGps={setGpsModal} enFicha />
+            : <TarjetaFija     s={drawer} onRefresh={cargar} onGps={setGpsModal} enFicha />}
+        </FichaServicioNueva>
       )}
 
       {/* ── MODAL: DESCARGA MASIVA POR RUTA ── */}

@@ -74,12 +74,34 @@
 //
 // ── CALIBRACIÓN CITADA, NO INVENTADA ──────────────────────────────────────────────────
 // La gracia para declarar "no arrancó" es la MISMA que ya rige en el repo: `no_inicio` de
-// alerta_config = 10 min, replicado en app/seguimiento/page.tsx:134 (GRACIA_FALLBACK_MIN) y en
-// lib/retrasos.ts:125 (toleranciaMin). Se IMPORTA de ./retrasos en vez de re-escribirse: si
-// mañana el operador la mueve, se mueve en un solo sitio. hhmmMin/minHhmm también vienen de ahí.
+// alerta_config = 10 min, replicado en app/seguimiento/page.tsx (GRACIA_FALLBACK_MIN) y en
+// lib/retrasos.ts (CONFIG_RETRASO_DEFAULT.toleranciaMin). Y el llamador puede pasar la suya
+// (`graciaMin`), que es como se inyecta el valor real de alerta_config.
+//
+// POR QUÉ ESTE MÓDULO NO IMPORTA lib/retrasos.ts, aunque sea su vecino natural: cuando esto se
+// escribió, `retrasos.ts` todavía no estaba en el repositorio (otra sesión lo tenía en curso sin
+// commitear). Importarlo hacía que el build de producción fallara en cuanto ALGUIEN importase
+// este módulo — y el fallo no se veía antes, porque un módulo que nadie importa ni siquiera entra
+// al grafo del bundler. Estas tres piezas son triviales y aquí van con la MISMA semántica.
+// Cuando retrasos.ts esté commiteado, unificarlas en un módulo común es un cambio de dos líneas.
 
-import { CONFIG_RETRASO_DEFAULT, hhmmMin, minHhmm } from "./retrasos";
 import { normalizaEstado, type EstadoReserva } from "./estados";
+
+/** Gracia por defecto para declarar "no arrancó". Espejo de `toleranciaMin` en lib/retrasos.ts. */
+const GRACIA_NO_INICIO_MIN = 10;
+
+/** "HH:MM[:SS]" → minutos del día. null si no parsea. Espejo de `hhmmMin` en lib/retrasos.ts. */
+function hhmmMin(hhmm?: string | null): number | null {
+  if (!hhmm) return null;
+  const [h, m] = String(hhmm).split(":").map(Number);
+  return Number.isFinite(h) ? h * 60 + (Number.isFinite(m) ? m : 0) : null;
+}
+
+/** Minutos del día → "HH:MM", con vuelta de reloj. Espejo de `minHhmm` en lib/retrasos.ts. */
+function minHhmm(min: number): string {
+  const m = ((Math.round(min) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+}
 
 // ══════════════════════════════════════════════════════════════════════════════════════
 // TIPOS
@@ -411,7 +433,11 @@ function normalizarParadas(paradas: ParadaTiempos[] | null | undefined, v: Venta
       const ts = tsIso(p.hora_llegada);
       return {
         ...p,
-        ordenN: Number.isFinite(Number(p.orden)) ? Number(p.orden) : i,
+        // 1-based en las dos ramas: `paradas.orden` lo es en la BD (app/programacion/page.tsx:740 y
+        // app/api/conductor-paradas/route.ts:81 insertan `orden: i + 1`), así que el respaldo por
+        // índice también suma 1. Ordenar no cambia (i+1 es monótona en i) y el nombre de respaldo
+        // "Paradero N" deja de estar corrido: la primera parada sin nombre salía "Paradero 2".
+        ordenN: Number.isFinite(Number(p.orden)) ? Number(p.orden) : i + 1,
         completada: p.estado === "completada",
         // Una hora_llegada fuera de la ventana no se "corrige": se descarta y la parada queda
         // como completada SIN hora. Preferible un hueco honesto a una hora falsa en el reporte.
@@ -454,7 +480,7 @@ export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
   const hoy = e.hoy || fechaLima(ahoraMs);
   const gracia = Number.isFinite(Number(e.graciaMin))
     ? Number(e.graciaMin)
-    : CONFIG_RETRASO_DEFAULT.toleranciaMin;   // = `no_inicio` de alerta_config (10 min)
+    : GRACIA_NO_INICIO_MIN;   // = `no_inicio` de alerta_config (10 min)
   const brechaFines = Number.isFinite(Number(e.brechaFinesMin)) ? Number(e.brechaFinesMin) : BRECHA_FINES_MIN;
 
   const v = ventanaDelDia(r.fecha_servicio, ahoraMs);
@@ -652,15 +678,27 @@ export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
   // ────────────────────────────────────────────────────────────────────────────────────
   const linea: FilaLinea[] = [];
 
-  linea.push(filaDe({
-    clave: "inicio",
-    etiqueta: "Inicio del servicio",
-    instante: inicio,
-    previstaHhmm: servicioMin !== null ? minHhmm(servicioMin) : null,
-    notaVacia: veredicto.nivel === "operado_sin_hora"
-      ? "operó, pero nadie dejó la hora"
-      : "sin hora registrada",
-  }));
+  // ¿El inicio ES la llegada al primer paradero? En el caso normal sí, y entonces una fila
+  // "Inicio del servicio" seguida de la parada con LA MISMA HORA es ruido puro: se leía
+  //     05:02  Inicio del servicio
+  //     05:02  Óvalo Naranjal
+  // Cuando coinciden no se pinta la fila suelta; la parada se rotula como el arranque y la
+  // línea empieza donde de verdad empezó el servicio.
+  const paradaInicio = inicio && inicio.fuente === "parada"
+    ? paradas.find((p) => p.completada && p.llegadaTs === inicio.ts) ?? null
+    : null;
+
+  if (!paradaInicio) {
+    linea.push(filaDe({
+      clave: "inicio",
+      etiqueta: "Inicio del servicio",
+      instante: inicio,
+      previstaHhmm: servicioMin !== null ? minHhmm(servicioMin) : null,
+      notaVacia: veredicto.nivel === "operado_sin_hora"
+        ? "operó, pero nadie dejó la hora"
+        : "sin hora registrada",
+    }));
+  }
 
   // Rastro del inicio tecleado que NO ganó: un valor humano nunca desaparece de la línea.
   if (inicioOperador && inicio !== inicioOperador) {
@@ -683,7 +721,7 @@ export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
     const inst = p.completada && p.llegadaTs !== null ? crearInstante(p.llegadaTs, "parada") : null;
     linea.push(filaDe({
       clave: `parada:${p.id}`,
-      etiqueta: p.nombre || `Paradero ${p.ordenN + 1}`,
+      etiqueta: (p === paradaInicio ? "1er paradero · " : "") + (p.nombre || `Paradero ${p.ordenN}`),
       instante: inst,
       previstaHhmm: p.hora_estimada ? String(p.hora_estimada).slice(0, 5) : null,
       notaVacia: p.completada
