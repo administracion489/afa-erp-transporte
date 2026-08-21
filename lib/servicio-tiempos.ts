@@ -579,7 +579,7 @@ export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
 
   // A. Llegada al ÚLTIMO paradero marcado. La que factura.
   const ultimaMarcada = completadasConHora.length ? completadasConHora[completadasConHora.length - 1] : null;
-  let finParadero: Instante | null =
+  const finParadero: Instante | null =
     ultimaMarcada ? crearInstante(ultimaMarcada.llegadaTs as number, "parada", ultimaMarcada.nombre || null) : null;
 
   // B. Cierre operativo. El punto con estado='finalizado' NO es un fix más: la app lo FUERZA al
