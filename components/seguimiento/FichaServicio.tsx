@@ -491,12 +491,21 @@ export default function FichaServicio({
   const guardarHoraManual = useCallback(async () => {
     if (!rid || !/^\d{2}:\d{2}$/.test(horaManual)) return;
     setGuardando(true);
+    // Registrar la salida también pone el servicio EN RUTA. Antes esa transición la hacía el
+    // botón "Hacer Check-in" del tablero, que se eliminó por escribir la hora del clic en vez
+    // de la de salida; si nadie la heredaba, un servicio registrado a mano se quedaba clavado
+    // en "programada" para siempre y el Reporte de Servicio (que exige en_curso o finalizada)
+    // no se habilitaba nunca. Solo aplica a un servicio que aún no arrancó: jamás retrocede uno
+    // finalizado ni resucita uno cancelado.
+    const estadoAhora = normalizaEstado(r?.estado);
+    const arrancar = estadoAhora === "pendiente" || estadoAhora === "programada" || estadoAhora === "confirmada";
     const { error } = await supabase.from("reservas")
-      .update({ hora_real_inicio: `${horaManual}:00` }).eq("id", rid);
+      .update({ hora_real_inicio: `${horaManual}:00`, ...(arrancar ? { estado: "en_curso" } : {}) })
+      .eq("id", rid);
     setGuardando(false);
     if (error) { alert("No se pudo guardar: " + error.message); return; }
     onRefresh();
-  }, [rid, horaManual, onRefresh]);
+  }, [rid, horaManual, onRefresh, r?.estado]);
 
   /** Viáticos: el ÚNICO flag manual que sobrevive al rediseño. Describe un hecho físico
    *  (se entregó efectivo en mano) que el ERP no puede observar por ningún otro medio. */

@@ -11,6 +11,7 @@ import { ESTADOS_RESERVA, ESTADO_ADMIN_INICIAL } from "@/lib/estados";
 import { idAfa } from "@/lib/folio";
 import { manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado, type DocPasajero } from "@/lib/documentos-servicio";
 import { NIVEL_RETRASO, type NivelRetraso } from "@/lib/retrasos";
+import { derivarTiempos, procedencia, type Instante } from "@/lib/servicio-tiempos";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TIPOS
@@ -38,7 +39,10 @@ type Vehiculo  = { id: number; placa: string; capacidad_pasajeros?: number|null 
 type Conductor = { id: number; nombre: string; telefono?: string|null };
 type EmpTer    = { id: number; razon_social: string; telefono?: string|null };
 type VehTer    = { id: number; placa: string };
-type Parada    = { id: number; reserva_id: number; orden: number; nombre: string; estado: string; hora_estimada?: string|null; lat?: number|null; lng?: number|null };
+// `hora_llegada` (timestamptz) la escribe el conductor al entrar al geocerco del paradero
+// (app/api/conductor/route.ts, case "marcar_parada"). Ya venía en el `select("*")` de abajo;
+// lo que faltaba era declararla para poder usarla: es la fuente nº 1 de la hora real de salida.
+type Parada    = { id: number; reserva_id: number; orden: number; nombre: string; estado: string; hora_estimada?: string|null; hora_llegada?: string|null; lat?: number|null; lng?: number|null };
 type DocTer    = { id: number; empresa_id: number; tipo: string; fecha_vencimiento?: string|null };
 type DocVeh    = { id: number; vehiculo_id: number; tipo: string; fecha_vencimiento?: string|null };
 type ChecklistRow = { id: number; reserva_id: number; item_id: string; completado: boolean };
@@ -54,6 +58,9 @@ type ServicioView = {
   conflicto_vehiculo?: boolean; conflicto_conductor?: boolean; jornada_extensa?: boolean;
   // Semáforo de puntualidad (lo calcula el servidor: /api/seguimiento/retrasos):
   puntualidad?: Puntualidad;
+  /** Hora real de salida DERIVADA de la evidencia del conductor, con su procedencia.
+   *  null = no hay hora, que no es lo mismo que "no salió" (ver el memo que la calcula). */
+  salida?: Instante | null;
 };
 
 /** Veredicto de puntualidad tal como llega del endpoint (espejo de lib/retrasos.ts). */
@@ -143,9 +150,12 @@ const SIN_PUNTUALIDAD: Record<number, Puntualidad> = {};
  * decide el semáforo de puntualidad del servidor (lib/retrasos.ts), que sí mira dónde
  * está el bus. Solo `retraso` y `no_realizado` pintan la fila en rojo — "riesgo",
  * "en el punto sin iniciar" y "sin rastreo" son chips propios, no un servicio en alerta.
- * Sin veredicto (endpoint caído o SQL sin correr) se cae al criterio de antes.
+ * Sin veredicto (endpoint caído o SQL sin correr) se cae a un respaldo, que ahora mira la
+ * EVIDENCIA en vez del botón: `haySalida` es la hora real derivada de lo que el conductor
+ * marcó. El criterio anterior era `!checkin_realizado`, un campo puesto en 1 de 784 servicios,
+ * así que el respaldo pintaba en alerta a toda la flota pasados los minutos de gracia.
  */
-function calcularEstadoVisual(r: Reserva, v?: Puntualidad): EstadoVisual {
+function calcularEstadoVisual(r: Reserva, v?: Puntualidad, haySalida = false): EstadoVisual {
   if (r.estado === "cancelada")  return "cancelado";
   if (r.estado === "finalizada") return "finalizado";
   if (r.estado === "en_curso")   return "en_ruta";
@@ -153,7 +163,7 @@ function calcularEstadoVisual(r: Reserva, v?: Puntualidad): EstadoVisual {
   if (r.fecha_servicio === hoyISO() && r.hora_servicio) {
     const [hh, mm] = r.hora_servicio.split(":").map(Number);
     const plan = hh * 60 + (mm || 0);
-    if (ahoraLimaMin() - plan > GRACIA_FALLBACK_MIN && !r.checkin_realizado) return "alerta";
+    if (ahoraLimaMin() - plan > GRACIA_FALLBACK_MIN && !haySalida) return "alerta";
   }
   return "programado";
 }
@@ -174,14 +184,6 @@ function seguroVehiculoVenceHoy(docs: DocVeh[], vehiculoId: number|null): boolea
   return docs.some(d => d.vehiculo_id === vehiculoId && d.tipo.toLowerCase().includes("soat") && d.fecha_vencimiento === hoyISO());
 }
 
-// Hora local de Perú (UTC-5, sin DST). No usar new Date().toTimeString() para registrar
-// horas operativas: depende del reloj del dispositivo, no de la hora de Lima.
-function horaPeru(): string {
-  const utc  = Date.now() + new Date().getTimezoneOffset() * 60000;
-  const lima = new Date(utc - 5 * 3600000);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(lima.getHours())}:${p(lima.getMinutes())}:${p(lima.getSeconds())}`;
-}
 
 // Fuente de verdad del abordaje (pasajeros_parada, estado + estado_abordaje) → esAbordado()
 // vive en lib/documentos-servicio.ts (compartido con el portal cliente y los documentos).
@@ -518,7 +520,6 @@ function TarjetaFija({ s, onRefresh, onGps, enFicha = false }: { s: ServicioView
   const [modalReemplazo,   setModalReemplazo]   = useState(false);
   const [modalGastos,      setModalGastos]      = useState(false);
   const [modalChecklist,   setModalChecklist]   = useState(false);
-  const [guardandoCheckin, setGuardandoCheckin] = useState(false);
   const [horaInicio,       setHoraInicio]       = useState(s.reserva.hora_real_inicio || "");
   const [horaFin,          setHoraFin]          = useState(s.reserva.hora_real_fin || "");
   const r           = s.reserva;
@@ -528,15 +529,6 @@ function TarjetaFija({ s, onRefresh, onGps, enFicha = false }: { s: ServicioView
   const progreso    = s.paradas_total > 0 ? Math.round((s.paradas_completadas/s.paradas_total)*100) : 0;
   const asistencia  = s.pasajeros_total_real > 0 ? Math.round((s.pasajeros_abordados/s.pasajeros_total_real)*100) : 0;
   const cap         = s.pasajeros_total_real || (r as any).pasajeros_total || 0;
-
-  const hacerCheckin = async () => {
-    setGuardandoCheckin(true);
-    const ahora = horaPeru();
-    const { error } = await supabase.from("reservas").update({ checkin_realizado: true, hora_real_inicio: ahora, estado: "en_curso" as EstadoReserva }).eq("id", r.id);
-    setGuardandoCheckin(false);
-    if (error) { alert("Error: " + error.message); return; }
-    onRefresh();
-  };
 
   const guardarHoras = async () => {
     const { error } = await supabase.from("reservas").update({
@@ -596,11 +588,14 @@ function TarjetaFija({ s, onRefresh, onGps, enFicha = false }: { s: ServicioView
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-2 mb-3">
-            <div className={`rounded-xl p-2.5 text-center ${r.checkin_realizado ? "bg-green-50" : s.estado_visual === "alerta" ? "bg-red-50" : "bg-gray-50"}`}>
-              <div className={`text-[10px] font-bold uppercase tracking-wide mb-1 ${r.checkin_realizado ? "text-green-600" : "text-red-500"}`}>CHECK-IN</div>
-              <div className={`font-black text-sm ${r.checkin_realizado ? "text-green-700" : "text-red-600"}`}>{r.checkin_realizado ? (r.hora_real_inicio?.slice(0,5) || "✓") : "No iniciado"}</div>
-            </div>
+          {/* AQUÍ NO VA LA HORA DE SALIDA. Esta tarjeta se renderiza SIEMPRE dentro de la ficha
+              (`enFicha`, page.tsx:1773), y la ficha deriva esa hora mirando ADEMÁS el GPS y los
+              avisos de salida, que aquí no se consultan. Cuando las dos la pintaban, la misma
+              pantalla llegaba a decir "Salió ~04:20 · estimado por GPS" arriba y "Sin hora"
+              abajo, sin nada que lo explicara. Manda la superficie que más sabe: la ficha.
+              Antes de eso, esta era la métrica que gritaba "CHECK-IN · No iniciado" en rojo
+              sobre servicios finalizados al 100 %. */}
+          <div className="grid grid-cols-2 gap-2 mb-3">
             <div className="bg-gray-50 rounded-xl p-2.5 text-center">
               <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">Pasajeros</div>
               <div className="font-black text-sm text-[#0b315f]">{s.pasajeros_abordados}<span className="text-gray-300 font-normal">/{cap || "?"}</span></div>
@@ -630,7 +625,10 @@ function TarjetaFija({ s, onRefresh, onGps, enFicha = false }: { s: ServicioView
                 {p.evidencia && <p className="text-[11px] text-gray-500 mt-1 leading-snug">{p.evidencia}</p>}
                 {p.nivel === "en_punto_sin_iniciar" && (
                   <p className="text-[11px] mt-1.5 font-semibold" style={{ color: meta.color }}>
-                    No hace falta despachar nada: el bus ya está en el paradero. Falta que el conductor pulse Iniciar — o hazlo tú con Check-in.
+                    {/* Ya no invita a "hacerlo tú con Check-in": ese botón escribía la hora del
+                        clic, y justo en este nivel el servidor YA sabe por GPS desde cuándo el
+                        bus está en el paradero. Registrarlo a mano ahora sería empeorar el dato. */}
+                    No hace falta despachar nada: el bus ya está en el paradero. Falta que el conductor pulse Iniciar en su app.
                   </p>
                 )}
                 {p.nivel === "sin_rastreo" && (
@@ -681,13 +679,13 @@ function TarjetaFija({ s, onRefresh, onGps, enFicha = false }: { s: ServicioView
           </div>
 
           <div className="flex gap-2 flex-wrap">
-            {!r.checkin_realizado && r.estado !== "finalizada" && r.estado !== "cancelada" && (
-              <button onClick={hacerCheckin} disabled={guardandoCheckin || bloqueado}
-                title={bloqueado ? "No se puede despachar: documentos vencidos" : undefined}
-                className="flex-1 flex items-center justify-center gap-1.5 bg-green-600 hover:bg-green-700 text-white text-xs font-bold py-2 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                <Ic.Check size={13} color="white" />{guardandoCheckin ? "..." : bloqueado ? "Salida bloqueada" : "Hacer Check-in"}
-              </button>
-            )}
+            {/* EL BOTÓN DE CHECK-IN MANUAL SE ELIMINÓ DE AQUÍ, y no por limpieza: escribía
+                `hora_real_inicio: horaPeru()`, o sea la hora del CLIC. Sobre un servicio de las
+                05:00 revisado a las 11:00, eso persistía "salió 11:00" — seis horas de mentira
+                firmadas por operación, y encima con la etiqueta "registrado por operación" que
+                el motor trata como dato humano fiable. El registro manual vive ahora en la
+                ficha, que PIDE la hora en un campo (guardarHoraManual) en vez de inventarla,
+                y solo lo ofrece cuando de verdad no hay ninguna evidencia de la que derivarla. */}
             {/* GPS */}
             <button onClick={() => onGps(s)}
               className="flex items-center gap-1.5 bg-[#EFF6FF] hover:bg-[#DBEAFE] text-[#1d4ed8] text-xs font-bold px-3 py-2 rounded-xl transition-colors">
@@ -991,9 +989,13 @@ function FilaServicio({ s, onOpen, onGps }: { s: ServicioView; onOpen: () => voi
         </div>
       </div>
       <div className="hidden sm:flex items-center gap-4 flex-shrink-0">
-        <div className="text-center w-14">
-          <div className="text-[9px] font-bold uppercase text-gray-400">Check-in</div>
-          <div className={`text-xs font-black ${s.reserva.checkin_realizado ? "text-green-600" : "text-gray-300"}`}>{s.reserva.checkin_realizado ? (s.reserva.hora_real_inicio?.slice(0, 5) || "✓") : "—"}</div>
+        {/* SALIÓ, no "Check-in": la hora sale de lo que marcó el conductor, no de un botón que
+            nadie pulsa. El guion gris significa "sin hora registrada", nunca "no salió". */}
+        <div className="text-center w-14" title={s.salida ? procedencia(s.salida) : "Sin hora de salida registrada todavía"}>
+          <div className="text-[9px] font-bold uppercase text-gray-400">Salió</div>
+          <div className={`text-xs font-black ${s.salida ? (s.salida.estimado ? "text-gray-500 italic" : "text-green-600") : "text-gray-300"}`}>
+            {s.salida ? s.salida.hhmm : "—"}
+          </div>
         </div>
         <div className="text-center w-14">
           <div className="text-[9px] font-bold uppercase text-gray-400">Pasaj.</div>
@@ -1287,7 +1289,7 @@ export default function SeguimientoPage() {
   const [empresas,    setEmpresas]    = useState<EmpTer[]>([]);
   const [vehsTer,     setVehsTer]     = useState<VehTer[]>([]);
   const [paradas,     setParadas]     = useState<Parada[]>([]);
-  const [pasajPar,    setPasajPar]    = useState<{parada_id:number; pasajero_id:number; estado?:string|null; estado_abordaje?:string|null}[]>([]);
+  const [pasajPar,    setPasajPar]    = useState<{parada_id:number; pasajero_id:number; estado?:string|null; estado_abordaje?:string|null; hora_abordaje?:string|null}[]>([]);
   const [paxAdhoc,    setPaxAdhoc]    = useState<{id:number; reserva_id:number}[]>([]);
   const [gastosRows,  setGastosRows]  = useState<{reserva_id:number; monto:number}[]>([]);
   const [docsTer,     setDocsTer]     = useState<DocTer[]>([]);
@@ -1371,7 +1373,9 @@ export default function SeguimientoPage() {
       // Abordaje real (estado + estado_abordaje), roster ad-hoc y gastos: todo en lote (sin N+1 por tarjeta).
       const [ppRes, paxRes, gastosRes] = await Promise.all([
         paradaIds.length
-          ? supabase.from("pasajeros_parada").select("parada_id,pasajero_id,estado,estado_abordaje").in("parada_id",paradaIds)
+          // `hora_abordaje` la pone el SERVIDOR al escanear el QR (app/api/conductor/route.ts).
+          // Es la 2ª fuente de la hora real de salida cuando el conductor no marcó el paradero.
+          ? supabase.from("pasajeros_parada").select("parada_id,pasajero_id,estado,estado_abordaje,hora_abordaje").in("parada_id",paradaIds)
           : Promise.resolve({ data: [] as any[] }),
         supabase.from("pasajeros").select("id,reserva_id").in("reserva_id",reservaIds),
         supabase.from("gastos").select("reserva_id,monto").in("reserva_id",reservaIds),
@@ -1398,6 +1402,9 @@ export default function SeguimientoPage() {
   },[cargar]);
 
   const serviciosBase: ServicioView[] = useMemo(()=>{
+    // Reloj tomado UNA vez por recálculo: si cada servicio leyera el suyo, dos filas del mismo
+    // tablero podrían discrepar sobre qué hora es.
+    const ahoraMs = Date.now();
     // Roster y abordaje (unión A∪B, deduped por pasajero_id) calculado una vez para todos los servicios.
     const paradaToReserva = new Map<number, number>();
     paradas.forEach(p => paradaToReserva.set(p.id, p.reserva_id));
@@ -1423,13 +1430,30 @@ export default function SeguimientoPage() {
       const conductor_nombre = esTer?(empresa?.razon_social||"Tercero"):(conductor?.nombre||"—");
       const conductor_tel    = esTer?(empresa?.telefono||""):(conductor?.telefono||"");
       const paradasR         = paradas.filter(p=>p.reserva_id===r.id);
+      const idsParadaR       = new Set(paradasR.map(p=>p.id));
       const esperadosN       = esperados[r.id]?.size || 0;
       const seguro_vence_hoy = esTer ? riesgoEmpresaDocs(docsTer,r.empresa_tercerizada_id) : seguroVehiculoVenceHoy(docsVeh,r.vehiculo_id);
       const docs_vencidos    = esTer ? docsVencidosEmpresa(docsTer,r.empresa_tercerizada_id) : docsVencidosVehiculo(docsVeh,r.vehiculo_id);
       const punt = puntActiva[r.id];
+      // ── HORA REAL DE SALIDA, DERIVADA ───────────────────────────────────────────────
+      // El tablero leía `checkin_realizado`, un booleano que en producción está puesto en
+      // 1 de 784 servicios: la columna salía "—" y el contador acusaba a media flota. La hora
+      // ya existe en la evidencia que el conductor deja al operar, y aquí se deriva con lo que
+      // el lote YA trajo: paradas.hora_llegada y pasajeros_parada.hora_abordaje.
+      // Sin GPS ni eventos a propósito: son una consulta por servicio y el tablero pinta
+      // decenas. Por eso aquí se usa SOLO la hora (`inicio`) y NUNCA el veredicto rojo del
+      // motor — sin GPS, "no hay evidencia" y "no la miré" son indistinguibles, y acusar con
+      // eso sería repetir el bug con otro campo. El rojo lo decide el semáforo de puntualidad
+      // del servidor (/api/seguimiento/retrasos), que sí mira dónde está el bus.
+      const salida = derivarTiempos({
+        reserva: r,
+        paradas: paradasR,
+        abordajes: pasajPar.filter(pp => idsParadaR.has(pp.parada_id)),
+        ahoraMs,
+      }).inicio;
       return {
-        reserva: r, cliente_nombre, vehiculo_placa, conductor_nombre, conductor_tel, puntualidad: punt,
-        es_eventual: esEventual(r), estado_visual: calcularEstadoVisual(r, punt),
+        reserva: r, cliente_nombre, vehiculo_placa, conductor_nombre, conductor_tel, puntualidad: punt, salida,
+        es_eventual: esEventual(r), estado_visual: calcularEstadoVisual(r, punt, !!salida),
         paradas: paradasR, paradas_total: paradasR.length,
         paradas_completadas: paradasR.filter(p=>p.estado==="completada").length,
         pasajeros_total: esperadosN||(vehiculos.find(v=>v.id===r.vehiculo_id)?.capacidad_pasajeros||0),
@@ -1488,7 +1512,17 @@ export default function SeguimientoPage() {
   // contador en rojo hasta medianoche: eso es lo que hacía ilegible el tablero.
   const retrasoAhora = resumenActivo ? resumenActivo.retraso
                                    : servicios.filter(s=>s.estado_visual==="alerta").length;
-  const sinCheckin      = servicios.filter(s=>!s.reserva.checkin_realizado&&s.estado_visual!=="finalizado"&&s.estado_visual!=="cancelado").length;
+  // Contaba `!checkin_realizado`, o sea 783 de 784 servicios: un KPI que siempre gritaba dejó
+  // de significar nada. Ahora cuenta los que de verdad no tienen hora de salida derivable —
+  // y solo los que YA DEBERÍAN haber salido: sin la guarda de fecha y hora volvía a ser un
+  // número que grita, porque al mirar la parrilla de mañana contaba los 40 servicios del día
+  // entero, y hoy a las 09:00 contaba también los de las 22:00. Un servicio que aún no sale no
+  // tiene por qué tener hora de salida.
+  const sinHoraSalida   = !esHoy ? 0 : servicios.filter(s =>
+    !s.salida && s.estado_visual !== "finalizado" && s.estado_visual !== "cancelado"
+    && s.reserva.fecha_servicio === hoyISO()
+    && (aMin(s.reserva.hora_servicio) ?? Infinity) <= ahoraLimaMin()
+  ).length;
   const seguroHoy       = servicios.filter(s=>s.seguro_vence_hoy).length;
   const docsVenc        = servicios.filter(s=>s.docs_vencidos.length>0).length;
   const conflictos      = servicios.filter(s=>s.conflicto_vehiculo||s.conflicto_conductor).length;
@@ -1563,7 +1597,7 @@ export default function SeguimientoPage() {
             // retraso es un dato histórico. Antes el contador quedaba en rojo hasta
             // medianoche y el tablero dejaba de leerse.
             { label:"Retraso ahora",      value:retrasoAhora,    color:"#dc2626",bg:"#FEF2F2",icon:<Ic.Alert size={16} color="#dc2626"/>  },
-            { label:"Sin check-in",       value:sinCheckin,      color:"#d97706",bg:"#FEF3C7",icon:<Ic.Clock size={16} color="#d97706"/>  },
+            { label:"Sin hora de salida", value:sinHoraSalida,   color:"#d97706",bg:"#FEF3C7",icon:<Ic.Clock size={16} color="#d97706"/>  },
             { label:"Seguros vencen hoy", value:seguroHoy,       color:"#dc2626",bg:"#FEF2F2",icon:<Ic.Shield size={16} color="#dc2626"/>},
           ].map(kpi=>(
             <div key={kpi.label} className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
