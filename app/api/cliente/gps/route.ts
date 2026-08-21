@@ -255,6 +255,48 @@ export async function POST(req: NextRequest) {
     // falta para obtenerlo son miles de puntos. Mandarla al navegador del cliente cada 15 s,
     // por varios servicios a la vez, es justo lo que ya hizo pesado a este portal una vez.
     if (body.avance) {
+      // Lote: el dashboard puede tener varias tarjetas en ruta a la vez. Pedirlas de una en
+      // una multiplicaba los viajes por un dato que cambia lento (una parada cada varios
+      // minutos). Se conserva `reservaId` suelto por compatibilidad.
+      if (Array.isArray(body.reservaIds)) {
+        const ids = body.reservaIds.map(Number).filter((n: number) => Number.isFinite(n) && n > 0).slice(0, 6);
+        if (!ids.length) return NextResponse.json({ avances: {} });
+        // Cada una tiene que ser suya: el cid sale del token (el operador ya pasó el gate).
+        const permitidas: number[] = [];
+        for (const id of ids) {
+          if (cid === null || await reservaEsDelCliente(supabase, id, cid)) permitidas.push(id);
+        }
+        const avances: Record<number, any> = {};
+        await Promise.all(permitidas.map(async (id) => {
+          try {
+            const { data: pbd } = await supabase.from("paradas")
+              .select("id,orden,lat,lng,estado").eq("reserva_id", id).order("orden", { ascending: true });
+            const pl = (pbd ?? []) as any[];
+            if (!pl.length) return;
+            const filas = await paginarFilas(() =>
+              supabase.from("ubicaciones_gps").select("lat,lng,created_at,precision_m")
+                .eq("reserva_id", id)
+                .order("created_at", { ascending: true }).order("id", { ascending: true }));
+            const huella: FixAvance[] = (filas ?? []).map((f: any) => {
+              const lat = Number(f.lat), lng = Number(f.lng), ts = Date.parse(f.created_at), acc = Number(f.precision_m);
+              return { lat, lng, ts, acc: Number.isFinite(acc) ? acc : 25 };
+            }).filter((q: FixAvance) => Number.isFinite(q.lat) && Number.isFinite(q.lng) && Number.isFinite(q.ts));
+            const pa: ParadaAvance[] = pl.map((q) => ({
+              lat: q.lat == null ? null : Number(q.lat),
+              lng: q.lng == null ? null : Number(q.lng),
+              completada: q.estado === "completada",
+            }));
+            const a = leerAvance(sembrarAvance(pa, huella), pa);
+            avances[id] = {
+              proximaIdx: a.proximaIdx, pasadas: a.pasadas, motivo: a.motivo,
+              confianza: a.confianza, muestras: a.muestras,
+              paradaIds: pl.map((q) => q.id),
+            };
+          } catch { /* una reserva que falle no debe tumbar el resto del lote */ }
+        }));
+        return NextResponse.json({ avances });
+      }
+
       const reservaId = Number(body.reservaId ?? 0);
       if (!Number.isFinite(reservaId) || reservaId <= 0) {
         return NextResponse.json({ error: "reservaId requerido" }, { status: 400 });

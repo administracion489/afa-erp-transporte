@@ -480,6 +480,7 @@ export default function ClientePortal() {
   const stopMarkersRef   = useRef<MapboxMarker[]>([]);
   const lastFitRef           = useRef<number | null>(null);
   const serviciosHoyRef      = useRef<Reserva[]>([]);
+  const serviciosEnRutaRef   = useRef<Reserva[]>([]);
   const autocentradoRef      = useRef(false);
   const ubicacionesEnVivoRef = useRef<typeof ubicacionesEnVivo>([]);
 
@@ -663,16 +664,6 @@ export default function ClientePortal() {
         body: JSON.stringify({ token: getPortalToken(), reservaId: activo.id, vehiculoId: av.vehiculo_id ?? null, vehiculoTerceroId: av.vehiculo_tercero_id ?? null }),
       }).then(r => r.json()).then(j => { if (j?.ubicacion) setGpsActual(j.ubicacion as GPS); }).catch(() => {});
 
-      // Avance REAL por GPS: el progreso no puede depender solo de que el conductor pulse el
-      // botón. Se calcula en el servidor (el veredicto son bytes; la huella, miles de puntos).
-      fetch("/api/cliente/gps", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: getPortalToken(), avance: true, reservaId: activo.id }),
-      }).then(r => r.json()).then(j => {
-        if (j?.avance && Array.isArray(j.paradaIds)) {
-          setAvanceGps(prev => ({ ...prev, [activo.id]: { ...j.avance, paradaIds: j.paradaIds } }));
-        }
-      }).catch(() => {});
     }
     if (activo?.conductor_id) {
       supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", activo.conductor_id).maybeSingle()
@@ -1316,6 +1307,41 @@ export default function ClientePortal() {
     setRutaSelId(prev => (prev != null && !serviciosHoyRef.current.some(r => r.id === prev) ? null : prev));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reservas.length]);
+
+  // ─── Avance por GPS de los servicios en ruta ──────────────────────────────
+  // El progreso del timeline no puede depender solo de que el conductor pulse el botón: el
+  // modal ya sabe, por la traza, que el bus pasó por un paradero aunque nadie lo marcara, y
+  // la tarjeta se quedaba diciendo "Parada 1 de 10" con el bus dos paraderos más allá.
+  // Se pide para TODOS los que ruedan en UNA sola llamada, y se refresca: el bus avanza.
+  useEffect(() => {
+    if (tab !== "activos" && tab !== "dashboard") return;
+    let cancel = false;
+    const pedir = async () => {
+      const ids = serviciosEnRutaRef.current.map(r => r.id);
+      if (!ids.length) return;
+      try {
+        const r = await fetch("/api/cliente/gps", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: getPortalToken(), avance: true, reservaIds: ids }),
+        });
+        const j = await r.json();
+        if (cancel || !j?.avances) return;
+        setAvanceGps(prev => {
+          const next = { ...prev };
+          for (const [id, av] of Object.entries(j.avances as Record<string, any>)) {
+            if (av && Array.isArray(av.paradaIds)) next[Number(id)] = av as AvanceGps;
+          }
+          return next;
+        });
+      } catch { /* falla transitoria: lo reintenta el siguiente ciclo */ }
+    };
+    void pedir();
+    // 45 s: el veredicto cambia lento (una parada cada varios minutos) y cada consulta relee
+    // la huella entera en el servidor. Más frecuencia no daría más verdad, solo más carga.
+    const iv = setInterval(() => { if (!document.hidden) void pedir(); }, 45000);
+    return () => { cancel = true; clearInterval(iv); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, reservas.length]);
 
   // ─── Dashboard + En vivo: cargar paradas de servicios de hoy ─────────────
   useEffect(() => {
@@ -2073,6 +2099,7 @@ export default function ClientePortal() {
   const servicioActivo = serviciosEnRuta[0] || proximos[0] || null;
   // Ref siempre actualizado (para efectos que no pueden incluir serviciosHoy en deps)
   serviciosHoyRef.current = serviciosHoy;
+  serviciosEnRutaRef.current = serviciosEnRuta;
   const COLORES_RUTA = ["#0b315f", "#ea580c", "#16a34a", "#7c3aed"];
   // Servicio cuya ruta está seleccionada (null = solo buses en vivo)
   const servicioSel = rutaSelId != null ? serviciosHoy.find(r => r.id === rutaSelId) ?? null : null;
