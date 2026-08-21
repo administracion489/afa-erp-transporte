@@ -2035,19 +2035,42 @@ export default function ClientePortal() {
     return m != null && m <= LIVE_MAX_MIN;
   };
   const serviciosEnRuta = serviciosHoy.filter(enRutaAhora);
-  // Card principal: el primero en ruta; si ninguno transmite aún, el en_curso por BD o el primer turno.
-  const servicioActivo = serviciosEnRuta[0]
-    || serviciosHoy.find(r => efectivoEstado(r) === "en_curso")
-    || serviciosHoy[0] || null;
-  // Cards EN RUTA: TODOS los que están en ruta ahora (varios turnos a la vez). Si ninguno
-  // transmite todavía, se muestra el turno del servicio activo como vista previa (pre-inicio).
-  const serviciosDestacadosCrudo = serviciosEnRuta.length > 0
-    ? serviciosEnRuta
-    : (servicioActivo ? serviciosHoy.filter(r => r.hora_servicio === servicioActivo.hora_servicio) : []);
+
+  // ─── Qué merece tarjeta grande ──────────────────────────────────────────────
+  // Solo dos cosas: lo que está rodando AHORA y lo que está por salir. Los turnos que ya
+  // terminaron se quedan en la lista compacta de abajo (decisión del dueño).
+  //
+  // El respaldo anterior elegía `serviciosHoy[0]` — el turno MÁS TEMPRANO del día — y lo
+  // rotulaba "En curso" sin comprobar nada. A las 16:48 eso mostraba como en curso un turno
+  // de las 06:00 que nunca salió (caso real: reserva 4354, cero GPS, cero paradas hechas).
+  // Ahora el respaldo mira hacia ADELANTE, no hacia atrás.
+  const minutosAhora = (() => { const d = new Date(Date.now() - 5 * 3600 * 1000); return d.getUTCHours() * 60 + d.getUTCMinutes(); })();
+  const hhmmAMin = (h?: string | null) => {
+    const m = /^(\d{1,2}):(\d{2})/.exec(String(h ?? ""));
+    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+  };
+  /** Aún no le llega la hora (o le llegó hace poco) y no ha terminado: está por salir. */
+  const esProximo = (r: Reserva): boolean => {
+    if (esFinalizado(r.estado) || esCancelado(r.estado)) return false;
+    if (serviciosEnRuta.some(x => x.id === r.id)) return false;   // ya está rodando
+    const min = hhmmAMin(r.hora_servicio);
+    return min == null || min >= minutosAhora;
+  };
+  const proximos = serviciosHoy.filter(esProximo)
+    .sort((a, b) => (hhmmAMin(a.hora_servicio) ?? 0) - (hhmmAMin(b.hora_servicio) ?? 0));
+  // Presupuesto fijo de tarjetas: la pantalla mide lo mismo con 2 turnos al día que con 12.
+  // Prioridad: lo que rueda ahora; el hueco que sobre, para lo que está por salir.
+  const MAX_TARJETAS = 3;
+  const serviciosDestacadosCrudo = [
+    ...serviciosEnRuta,
+    ...proximos.slice(0, Math.max(0, MAX_TARJETAS - serviciosEnRuta.length)),
+  ];
   // Candado duro contra `reservas.estado` CRUDO (no la heurística `efectivoEstado`, que puede
   // estar mirando un GPS viejo o un estado en caché): una reserva finalizada o cancelada de
-  // verdad JAMÁS se pinta como "En curso", sin importar cómo haya llegado hasta aquí.
+  // verdad JAMÁS se pinta aquí arriba, sin importar cómo haya llegado hasta este punto.
   const serviciosDestacados = serviciosDestacadosCrudo.filter(r => !esFinalizado(r.estado) && !esCancelado(r.estado));
+  // Card principal (mapa, ETA, etc.): el primero en ruta; si ninguno rueda, el próximo.
+  const servicioActivo = serviciosEnRuta[0] || proximos[0] || null;
   // Ref siempre actualizado (para efectos que no pueden incluir serviciosHoy en deps)
   serviciosHoyRef.current = serviciosHoy;
   const COLORES_RUTA = ["#0b315f", "#ea580c", "#16a34a", "#7c3aed"];
@@ -3100,6 +3123,22 @@ export default function ClientePortal() {
               // pintada en verde", que era lo que veía el cliente.
               const etaViejoMin = etaCard?.ts ? Math.floor((Date.now() - etaCard.ts) / 60000) : 0;
               const destinoDisplay = psDisplay[psDisplay.length - 1];
+              // ── Rótulo derivado, nunca fijo ──────────────────────────────────────────
+              // Sale del mismo predicado que decidió mostrar esta tarjeta. Cuando el texto
+              // estaba escrito a mano ("En curso · HOY"), bastaba con que la lista quedara
+              // desactualizada para que el portal afirmara algo falso.
+              const rodando = serviciosEnRuta.some(x => x.id === r.id);
+              const minSalida = hhmmAMin(r.hora_servicio);
+              const faltanMin = minSalida == null ? null : minSalida - minutosAhora;
+              const enCuanto = faltanMin == null ? null
+                : faltanMin <= 0 ? "a esta hora"
+                : faltanMin < 60 ? `en ${faltanMin} min`
+                : `en ${Math.floor(faltanMin / 60)} h ${String(faltanMin % 60).padStart(2, "0")} min`;
+              const rotulo = rodando
+                ? { texto: "En ruta ahora", color: C.success, pulso: true,
+                    detalle: gpsCard?.ts ? `Última señal hace ${Math.max(0, Math.floor((Date.now() - gpsCard.ts) / 60000))} min` : null }
+                : { texto: `Próximo · sale ${r.hora_servicio?.slice(0, 5) || "–"}`, color: C.navy, pulso: false,
+                    detalle: enCuanto };
               return (
                 <div key={r.id} style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
                   {/* Cabecera: info servicio + panel conductor/ETA */}
@@ -3107,8 +3146,9 @@ export default function ClientePortal() {
                     {/* Panel izquierdo */}
                     <div style={{ padding: "18px 20px" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                        <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.success, animation: "pcPulse 1.6s ease-out infinite", display: "inline-block" }} />
-                        <p style={{ color: C.success, fontWeight: 800, fontSize: 11, margin: 0, letterSpacing: "1.2px", textTransform: "uppercase" as const }}>En curso · HOY</p>
+                        <span style={{ width: 7, height: 7, borderRadius: "50%", background: rotulo.color, ...(rotulo.pulso ? { animation: "pcPulse 1.6s ease-out infinite" } : {}), display: "inline-block" }} />
+                        <p style={{ color: rotulo.color, fontWeight: 800, fontSize: 11, margin: 0, letterSpacing: "1.2px", textTransform: "uppercase" as const }}>{rotulo.texto}</p>
+                        {rotulo.detalle && <span style={{ color: C.mute, fontSize: 10.5, fontWeight: 600, textTransform: "none" as const, letterSpacing: 0 }}>· {rotulo.detalle}</span>}
                         <span style={{ fontFamily: C.fontMono, fontSize: 10.5, color: C.mute, marginLeft: "auto" }}>{idAfa(r)}</span>
                       </div>
                       <p style={{ fontFamily: C.fontSans, fontWeight: 800, fontSize: 17, letterSpacing: -0.4, margin: "0 0 4px", color: C.ink }}>
@@ -3119,10 +3159,17 @@ export default function ClientePortal() {
                         {gpsCard && <span> &nbsp;·&nbsp; <span style={{ fontFamily: C.fontMono, fontWeight: 700, color: C.ink2 }}>{gpsCard.velocidad} km/h</span></span>}
                       </p>
                       <div style={{ display: "flex", gap: 8 }}>
-                        <button onClick={() => abrirGps(r)} style={{ padding: "7px 14px", borderRadius: 7, border: "none", background: C.navy, color: "white", fontWeight: 700, fontSize: 12, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, fontFamily: "inherit" }}>
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                        <button onClick={() => rodando && abrirGps(r)} disabled={!rodando}
+                          title={rodando ? "" : "El recorrido se puede seguir cuando el bus arranca"}
+                          style={{ padding: "7px 14px", borderRadius: 7, border: "none", background: rodando ? C.navy : C.line2, color: rodando ? "white" : C.mute, fontWeight: 700, fontSize: 12, cursor: rodando ? "pointer" : "default", display: "inline-flex", alignItems: "center", gap: 5, fontFamily: "inherit" }}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={rodando ? "white" : C.mute} strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
                           Ver GPS
                         </button>
+                        {!rodando && (
+                          <span style={{ fontSize: 11, color: C.mute, alignSelf: "center" }}>
+                            Se activa cuando el bus arranca
+                          </span>
+                        )}
                         {condCard?.tel && (
                           <a href={`tel:${condCard.tel}`} style={{ padding: "7px 14px", borderRadius: 7, border: `1px solid ${C.line2}`, background: "transparent", color: C.navy, fontWeight: 700, fontSize: 12, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, textDecoration: "none", fontFamily: "inherit" }}>
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13.6a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.59 3h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 10.09a16 16 0 0 0 6 6l1.27-.97a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 17.19z"/></svg>
@@ -3148,9 +3195,11 @@ export default function ClientePortal() {
                       {/* Avance */}
                       {psDisplay.length > 0 && (
                         <div>
-                          <p style={{ fontSize: 8.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: "0 0 2px" }}>Avance</p>
+                          <p style={{ fontSize: 8.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: "0 0 2px" }}>{rodando ? "Avance" : "Salida"}</p>
                           <p style={{ fontSize: 12, color: C.ink2, margin: 0 }}>
-                            Parada&nbsp;<span style={{ fontWeight: 800, color: C.navy }}>{hayCompletadas ? ultimaCompletadaIdx + 1 : 0}</span>&nbsp;de&nbsp;{psDisplay.length}
+                            {rodando
+                              ? <>Parada&nbsp;<span style={{ fontWeight: 800, color: C.navy }}>{hayCompletadas ? ultimaCompletadaIdx + 1 : 0}</span>&nbsp;de&nbsp;{psDisplay.length}</>
+                              : <><span style={{ fontWeight: 800, color: C.navy }}>{r.hora_servicio?.slice(0, 5) || "–"}</span>{enCuanto ? <> &nbsp;·&nbsp; {enCuanto}</> : null}</>}
                           </p>
                         </div>
                       )}
@@ -3192,7 +3241,7 @@ export default function ClientePortal() {
                     <div style={{ borderTop: `1px solid ${C.line}`, padding: "14px 20px", overflowX: "auto" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
                         <p style={{ fontSize: 9.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: 0 }}>
-                          Progreso del recorrido · {psDisplay.length} paradas
+                          {rodando ? "Progreso del recorrido" : "Recorrido previsto"} · {psDisplay.length} paradas
                           {nGps > 0 && <span style={{ textTransform: "none" as const, letterSpacing: 0, fontWeight: 400 }}>
                             {" "}· {nConductor} confirmada{nConductor === 1 ? "" : "s"} · {nGps} según GPS
                           </span>}
@@ -3207,7 +3256,7 @@ export default function ClientePortal() {
                           const motivo = motivoDe(p);
                           const isCompleted = motivo === "conductor" || motivo === "gps";
                           const porConductor = motivo === "conductor";
-                          const isCurrent   = !isCompleted && i === currentStopIdx && (hayCompletadas || i === 0);
+                          const isCurrent   = rodando && !isCompleted && i === currentStopIdx && (hayCompletadas || i === 0);
                           const isDestino   = i === arr.length - 1;
                           const AMBAR = "#b45309";
                           const dotBg      = porConductor ? C.success : isCompleted ? "transparent" : isCurrent ? C.navy : C.navyTint;
