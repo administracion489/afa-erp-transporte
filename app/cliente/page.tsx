@@ -67,6 +67,16 @@ function horaHHMM(v: string | null | undefined): string | null {
 
 type Boarding       = { id: number; pasajero_id: number; parada_id: number; timestamp: string; metodo: string; pasajero?: { nombre: string; dni: string | null; empresa: string | null; }; };
 type PasajeroParada = { id: number; parada_id: number | null; pasajero_id: number; estado: string; estado_abordaje?: string | null; hora_abordaje?: string | null; pasajero?: { nombre: string; dni: string | null; edad?: number | null; }; };
+/** Veredicto del motor de avance (lib/avance-paradas, calculado en /api/cliente/gps). Los
+ *  arrays van en el MISMO orden que `paradaIds`: el motor indexa por posición, no por id. */
+type AvanceGps = {
+  proximaIdx: number | null;
+  pasadas: boolean[];
+  motivo: ("conductor" | "gps" | "arrastre" | null)[];
+  confianza: "sin_evidencia" | "conductor" | "gps" | "degradada";
+  muestras: number;
+  paradaIds: number[];
+};
 type GPS            = { lat: number; lng: number; velocidad: number; timestamp: string; estado?: string; };
 type EmpresaPerfil  = { nombre: string | null; logo_url: string | null; color_primario: string | null; telefono: string | null; email: string | null; slogan: string | null; };
 type ConductorInfo  = { nombre: string; numero_licencia: string | null; telefono: string | null; };
@@ -312,6 +322,7 @@ export default function ClientePortal() {
   const [paradas,        setParadas]        = useState<Record<number, Parada[]>>({});
   const [boarding,       setBoarding]       = useState<Record<number, Boarding[]>>({});
   const [ppList,         setPPList]         = useState<Record<number, PasajeroParada[]>>({});
+  const [avanceGps,      setAvanceGps]      = useState<Record<number, AvanceGps>>({});
   const [gpsActual,      setGpsActual]      = useState<GPS | null>(null);
   const [vehiculoActivo, setVehiculoActivo] = useState<number | null>(null);
   const [reservaActivaId, setReservaActivaId] = useState<number | null>(null);
@@ -651,6 +662,17 @@ export default function ClientePortal() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: getPortalToken(), reservaId: activo.id, vehiculoId: av.vehiculo_id ?? null, vehiculoTerceroId: av.vehiculo_tercero_id ?? null }),
       }).then(r => r.json()).then(j => { if (j?.ubicacion) setGpsActual(j.ubicacion as GPS); }).catch(() => {});
+
+      // Avance REAL por GPS: el progreso no puede depender solo de que el conductor pulse el
+      // botón. Se calcula en el servidor (el veredicto son bytes; la huella, miles de puntos).
+      fetch("/api/cliente/gps", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: getPortalToken(), avance: true, reservaId: activo.id }),
+      }).then(r => r.json()).then(j => {
+        if (j?.avance && Array.isArray(j.paradaIds)) {
+          setAvanceGps(prev => ({ ...prev, [activo.id]: { ...j.avance, paradaIds: j.paradaIds } }));
+        }
+      }).catch(() => {});
     }
     if (activo?.conductor_id) {
       supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", activo.conductor_id).maybeSingle()
@@ -3038,10 +3060,32 @@ export default function ClientePortal() {
                     lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
                     hora_estimada: p.hora || null, estado: "pendiente",
                   } as Parada));
-              // Detectar parada actual: primera no-completada después de las completadas
-              const ultimaCompletadaIdx = psDisplay.reduce((acc: number, p: Parada, i: number) => p.estado === "completada" ? i : acc, -1);
+              // El progreso sale de DOS fuentes: lo que marcó el conductor y lo que demuestra
+              // el GPS. Antes solo contaba el botón, y por eso la tarjeta podía decir
+              // "Parada 0 de 9" con el bus llevando dos paraderos hechos y 42 km/h.
+              const av = avanceGps[r.id];
+              // El motor indexa por POSICIÓN: emparejar por paradaIds, nunca asumir el orden.
+              const idxDe = (p: Parada) => av ? av.paradaIds.indexOf(p.id) : -1;
+              const motivoDe = (p: Parada): "conductor" | "gps" | "arrastre" | null => {
+                if (p.estado === "completada") return "conductor";   // el humano manda
+                const k = idxDe(p);
+                return k >= 0 ? (av!.motivo[k] ?? null) : null;
+              };
+              // MÁS CONSERVADOR QUE EL MODAL DEL OPERADOR, a propósito. El modal alimenta al
+              // motor con `opts.ruta` (veto geométrico: descarta el paso cuando el bus estuvo
+              // cerca pero por otra vía) y aquí no hay esa geometría. Para no acabar afirmándole
+              // al CLIENTE más de lo que ve el operador, el "arrastre" —la inferencia más débil,
+              // que solo dice "el bus ya está más adelante"— no cuenta como paso: se queda en
+              // "sin confirmar". Solo suman la marca del conductor y el paso directo por GPS.
+              const pasoPorAqui = (p: Parada) => {
+                const m = motivoDe(p);
+                return m === "conductor" || m === "gps";
+              };
+              const ultimaCompletadaIdx = psDisplay.reduce((acc: number, p: Parada, i: number) => pasoPorAqui(p) ? i : acc, -1);
               const currentStopIdx = ultimaCompletadaIdx < psDisplay.length - 1 ? ultimaCompletadaIdx + 1 : 0;
               const hayCompletadas = ultimaCompletadaIdx >= 0;
+              const nConductor = psDisplay.filter(p => motivoDe(p) === "conductor").length;
+              const nGps       = psDisplay.filter(p => motivoDe(p) === "gps").length;
               const gpsCard = gpsCardMap[r.id];
               const condCard = condInfoMap[r.id];
               const placaCard = vehPlacaMap[r.id];
@@ -3145,17 +3189,26 @@ export default function ClientePortal() {
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
                         <p style={{ fontSize: 9.5, fontWeight: 700, color: C.mute, textTransform: "uppercase" as const, letterSpacing: "1px", margin: 0 }}>
                           Progreso del recorrido · {psDisplay.length} paradas
+                          {nGps > 0 && <span style={{ textTransform: "none" as const, letterSpacing: 0, fontWeight: 400 }}>
+                            {" "}· {nConductor} confirmada{nConductor === 1 ? "" : "s"} · {nGps} según GPS
+                          </span>}
                         </p>
                         {etaHora && !etaAlejando && etaViejoMin < 5 && <span style={{ fontSize: 9, background: "rgba(21,128,61,0.1)", color: C.success, fontWeight: 700, padding: "1px 7px", borderRadius: 4 }}>ETA con tráfico real</span>}
                       </div>
                       <div style={{ display: "flex", alignItems: "flex-start", minWidth: "max-content" }}>
                         {psDisplay.map((p, i, arr) => {
-                          const isCompleted = p.estado === "completada";
+                          // Verde sólido = lo confirmó una persona. Ámbar = lo deduce el GPS.
+                          // Presentar una inferencia como confirmación humana sería darle al
+                          // cliente una certeza que nadie firmó.
+                          const motivo = motivoDe(p);
+                          const isCompleted = motivo === "conductor" || motivo === "gps";
+                          const porConductor = motivo === "conductor";
                           const isCurrent   = !isCompleted && i === currentStopIdx && (hayCompletadas || i === 0);
                           const isDestino   = i === arr.length - 1;
-                          const dotBg      = isCompleted ? C.success : isCurrent ? C.navy : C.navyTint;
-                          const dotBorder  = isCompleted ? C.success : isCurrent ? C.navy : C.line2;
-                          const lineColor  = isCompleted ? C.success : C.line2;
+                          const AMBAR = "#b45309";
+                          const dotBg      = porConductor ? C.success : isCompleted ? "transparent" : isCurrent ? C.navy : C.navyTint;
+                          const dotBorder  = porConductor ? C.success : isCompleted ? AMBAR : isCurrent ? C.navy : C.line2;
+                          const lineColor  = isCompleted ? (porConductor ? C.success : AMBAR) : C.line2;
                           return (
                             <div key={p.id} style={{ display: "flex", alignItems: "flex-start" }}>
                               <div style={{ display: "flex", flexDirection: "column" as const, alignItems: "center", gap: 3 }}>
@@ -3163,7 +3216,7 @@ export default function ClientePortal() {
                                 <div style={{ position: "relative" as const, width: 22, height: 22, flexShrink: 0 }}>
                                   <div style={{ width: 22, height: 22, borderRadius: "50%", background: dotBg, border: `2px solid ${dotBorder}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
                                     {isCompleted
-                                      ? <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                      ? <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={porConductor ? "white" : AMBAR} strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
                                       : isCurrent
                                         ? <div style={{ width: 7, height: 7, borderRadius: "50%", background: "white" }} />
                                         : <span style={{ fontSize: 7.5, color: isDestino ? C.navy : C.mute, fontWeight: 700 }}>{i + 1}</span>
@@ -3172,14 +3225,21 @@ export default function ClientePortal() {
                                   {isCurrent && <span style={{ position: "absolute" as const, inset: -4, borderRadius: "50%", border: `2px solid ${C.navy}`, opacity: 0.25, animation: "pcPulse 1.6s ease-out infinite", pointerEvents: "none" as const }} />}
                                 </div>
                                 {/* Nombre parada */}
-                                <p style={{ fontSize: 8.5, color: isCompleted ? C.success : isCurrent ? C.navy : C.mute, maxWidth: 70, textAlign: "center" as const, margin: 0, lineHeight: 1.3, fontWeight: isCurrent ? 700 : 400 }}>
+                                <p style={{ fontSize: 8.5, color: porConductor ? C.success : isCompleted ? AMBAR : isCurrent ? C.navy : C.mute, maxWidth: 70, textAlign: "center" as const, margin: 0, lineHeight: 1.3, fontWeight: isCurrent ? 700 : 400 }}>
                                   {p.nombre}
                                 </p>
+                                {/* Procedencia. Nunca dice "no pasó": la ausencia de datos no
+                                    prueba incumplimiento (hay conductores con 36% de cobertura). */}
+                                {isCompleted && !porConductor && (
+                                  <p style={{ fontSize: 7, color: AMBAR, margin: 0, textAlign: "center" as const, maxWidth: 70, lineHeight: 1.2 }}>
+                                    según GPS
+                                  </p>
+                                )}
                                 {/* Hora: la REAL de llegada si se registró; si no, la prevista.
                                     Nunca marcar la prevista con ✓ — eso le decía al cliente que el
                                     bus llegó a una hora que en realidad solo estaba planificada. */}
                                 {(() => {
-                                  const real = isCompleted ? horaHHMM(p.hora_llegada) : null;
+                                  const real = porConductor ? horaHHMM(p.hora_llegada) : null;
                                   if (real) return (
                                     <p style={{ fontFamily: C.fontMono, fontSize: 8, color: C.success, margin: 0, fontWeight: 700 }}>
                                       ✓ {real}

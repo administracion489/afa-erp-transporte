@@ -15,6 +15,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { paginarFilas } from "@/lib/huella";
 import { verificarTokenPortal, reservaEsDelCliente, filtrarVehiculosDelCliente } from "@/lib/portal-auth";
+import { verificarUsuarioApi } from "@/lib/api-auth";
+import { sembrarAvance, leerAvance, type ParadaAvance, type FixAvance } from "@/lib/avance-paradas";
 
 const adminClient = () =>
   createClient(
@@ -104,14 +106,17 @@ export async function POST(req: NextRequest) {
     // una de las dos credenciales dejaría ciego al otro.
     let cid: number | null = null;   // null = operador del ERP (sin acotar por cliente)
 
-    const bearer = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+    // Operador del ERP: NO basta con existir en auth. Se exige usuario activo y permiso del
+    // módulo, que es el patrón canónico del repo (lib/api-auth.ts) — sin esto, un operador
+    // dado de baja conserva su refresh token y seguiría bajando el GPS de toda la flota
+    // llamando la API directamente, porque el gate de la UI se evade con un curl.
     let esOperador = false;
-    if (bearer) {
-      try {
-        const anon = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
-        const { data } = await anon.auth.getUser(bearer);
-        esOperador = !!data?.user;
-      } catch { esOperador = false; }
+    if (req.headers.get("authorization")) {
+      const auth = await verificarUsuarioApi(req, "seguimiento");
+      esOperador = auth.ok;
+      // Bearer presente pero inválido/sin permiso: no se cae al token del portal (sería una
+      // vía para colarse), se rechaza aquí.
+      if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
     }
 
     if (!esOperador) {
@@ -121,11 +126,27 @@ export async function POST(req: NextRequest) {
 
       // El cid sale del TOKEN, nunca del body → un cliente no puede pedir lo de otro.
       const reservaPedida = Number(body?.reservaId ?? 0);
-      if (Number.isFinite(reservaPedida) && reservaPedida > 0) {
-        if (!(await reservaEsDelCliente(supabase, reservaPedida, cid))) {
-          return NextResponse.json({ error: "No autorizado" }, { status: 403 });
-        }
+      const pideReserva = Number.isFinite(reservaPedida) && reservaPedida > 0;
+      if (pideReserva && !(await reservaEsDelCliente(supabase, reservaPedida, cid))) {
+        return NextResponse.json({ error: "No autorizado" }, { status: 403 });
       }
+
+      // Los vehículos SINGULARES no se aceptan del body: se DERIVAN de la reserva ya
+      // autorizada. Aceptarlos dejaba el IDOR abierto de par en par — bastaba pedir
+      // { token, huella:true, vehiculoTerceroId:N } sin reservaId para bajar la traza
+      // completa de cualquier bus de cualquier cliente (comprobado: 1.054 puntos de un
+      // vehículo ajeno). Los ids son enteros pequeños y correlativos: se enumeran solos.
+      if (pideReserva) {
+        const { data: rsvAuth } = await supabase.from("reservas")
+          .select("vehiculo_id, vehiculo_tercero_id").eq("id", reservaPedida).maybeSingle();
+        body.vehiculoId        = rsvAuth?.vehiculo_id ?? null;
+        body.vehiculoTerceroId = rsvAuth?.vehiculo_tercero_id ?? null;
+      } else {
+        // Sin reserva no hay nada que autorizar contra: se anulan.
+        body.vehiculoId = null;
+        body.vehiculoTerceroId = null;
+      }
+
       // Modo lote (mapa "En vivo"): se queda solo con los vehículos que el cliente puede ver.
       if (Array.isArray(body?.vehiculoIds) || Array.isArray(body?.vehiculoTerceroIds)) {
         const permitido = await filtrarVehiculosDelCliente(
@@ -220,6 +241,66 @@ export async function POST(req: NextRequest) {
           estado: rsv?.estado ?? null,
           via: viaVehiculo ? "vehiculo" : filasOk.length ? "reserva" : "ninguna",
         },
+      });
+    }
+
+    // ── Modo avance: por qué paradas pasó el bus, según el GPS ────────────────
+    // El portal decidía el progreso SOLO por el botón del conductor, que es poco fiable
+    // (se marca en bloque, y a veces se marcan paradas por las que el GPS demuestra que no
+    // se pasó). El modal del operador ya resuelve esto con lib/avance-paradas; aquí se reusa
+    // ese mismo motor —es puro, sin DOM— para que la línea de tiempo del cliente diga lo
+    // mismo que el mapa. Antes podían contradecirse en la misma pantalla.
+    //
+    // SE CALCULA EN EL SERVIDOR a propósito: el veredicto son ~200 bytes, la huella que hace
+    // falta para obtenerlo son miles de puntos. Mandarla al navegador del cliente cada 15 s,
+    // por varios servicios a la vez, es justo lo que ya hizo pesado a este portal una vez.
+    if (body.avance) {
+      const reservaId = Number(body.reservaId ?? 0);
+      if (!Number.isFinite(reservaId) || reservaId <= 0) {
+        return NextResponse.json({ error: "reservaId requerido" }, { status: 400 });
+      }
+      const [{ data: paradasBd }, { data: filasBd }] = await Promise.all([
+        supabase.from("paradas").select("id,orden,lat,lng,estado,hora_llegada")
+          .eq("reserva_id", reservaId).order("orden", { ascending: true }),
+        Promise.resolve({ data: null }),
+      ]);
+      const paradas = (paradasBd ?? []) as any[];
+      if (!paradas.length) return NextResponse.json({ avance: null, motivo: [], sinParadas: true });
+
+      // Huella CRUDA (ver la cabecera de sembrarAvance): NADA de anclarImprecisos ni
+      // limpiarHuella. La primera mueve puntos ya consumidos y hace parpadear el veredicto;
+      // la segunda colapsa las detenciones y destruye la cadencia sobre la que están
+      // calibradas las rachas del motor.
+      const filas = await paginarFilas(() =>
+        supabase.from("ubicaciones_gps").select("lat,lng,created_at,precision_m")
+          .eq("reserva_id", reservaId)
+          .order("created_at", { ascending: true }).order("id", { ascending: true }));
+
+      const huella: FixAvance[] = (filas ?? []).map((f: any) => {
+        const lat = Number(f.lat), lng = Number(f.lng);
+        const ts = Date.parse(f.created_at);
+        const acc = Number(f.precision_m);
+        return { lat, lng, ts, acc: Number.isFinite(acc) ? acc : 25 };
+      }).filter((p: FixAvance) => Number.isFinite(p.lat) && Number.isFinite(p.lng) && Number.isFinite(p.ts));
+
+      const pAvance: ParadaAvance[] = paradas.map((p) => ({
+        lat: p.lat == null ? null : Number(p.lat),
+        lng: p.lng == null ? null : Number(p.lng),
+        completada: p.estado === "completada",
+      }));
+
+      const av = leerAvance(sembrarAvance(pAvance, huella), pAvance);
+      return NextResponse.json({
+        avance: {
+          proximaIdx: av.proximaIdx,
+          pasadas: av.pasadas,
+          motivo: av.motivo,          // "conductor" | "gps" | "arrastre" | null
+          confianza: av.confianza,    // sin_evidencia | conductor | gps | degradada
+          muestras: av.muestras,
+        },
+        // Ids en el MISMO orden que los arrays, para que el front no tenga que adivinar
+        // el emparejamiento: el motor indexa por posición, nunca por id.
+        paradaIds: paradas.map((p) => p.id),
       });
     }
 
