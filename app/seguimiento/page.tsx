@@ -10,6 +10,7 @@ import { supabase } from "@/lib/supabase";
 import { ESTADOS_RESERVA, ESTADO_ADMIN_INICIAL } from "@/lib/estados";
 import { idAfa } from "@/lib/folio";
 import { manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado, type DocPasajero } from "@/lib/documentos-servicio";
+import { NIVEL_RETRASO, type NivelRetraso } from "@/lib/retrasos";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TIPOS
@@ -51,6 +52,28 @@ type ServicioView = {
   gastos_total: number; docs_vencidos: string[];
   // Alertas de flota cruzadas (se rellenan en un segundo memo sobre todos los servicios):
   conflicto_vehiculo?: boolean; conflicto_conductor?: boolean; jornada_extensa?: boolean;
+  // Semáforo de puntualidad (lo calcula el servidor: /api/seguimiento/retrasos):
+  puntualidad?: Puntualidad;
+};
+
+/** Veredicto de puntualidad tal como llega del endpoint (espejo de lib/retrasos.ts). */
+type Puntualidad = {
+  nivel: NivelRetraso;
+  minutos: number | null;
+  causa: string;
+  evidencia: string;
+  escala: boolean;
+  posicion: "en_punto" | "lejos" | "desconocida";
+  distancia_m: number | null;
+  gps_hace_min: number | null;
+  confianza: "alta" | "baja" | "nula";
+};
+
+/** Conteo por nivel que devuelve el endpoint (`vivas` = las que sí exigen actuar YA). */
+type ResumenPuntualidad = {
+  retraso: number; riesgo: number; en_punto_sin_iniciar: number;
+  retraso_en_ruta: number; sin_rastreo: number; no_realizado: number;
+  inicio_tarde: number; vivas: number;
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -99,14 +122,38 @@ function diasPara(fecha: string|null|undefined): number|null {
   if (!fecha) return null;
   return Math.ceil((new Date(fecha+"T00:00:00").getTime() - Date.now()) / 86400000);
 }
-function calcularEstadoVisual(r: Reserva): EstadoVisual {
+/** Minutos transcurridos del día en LIMA (UTC-5). No usar el reloj del equipo: una laptop
+ *  con otra zona horaria pintaba retrasos inexistentes (o los ocultaba). */
+function ahoraLimaMin(): number {
+  const d = new Date();
+  d.setUTCHours(d.getUTCHours() - 5);
+  return d.getUTCHours() * 60 + d.getUTCMinutes();
+}
+
+// Gracia de respaldo cuando el semáforo del servidor no ha respondido todavía. Es el
+// MISMO número que `no_inicio` en alerta_config (antes aquí eran 15 y en el cron 10: la
+// pantalla y el WhatsApp se contradecían).
+const GRACIA_FALLBACK_MIN = 10;
+
+/** Identidad estable para "no hay veredictos" (no recrear el objeto en cada render). */
+const SIN_PUNTUALIDAD: Record<number, Puntualidad> = {};
+
+/**
+ * Estado visual de la fila. El retraso ya NO se decide aquí mirando un booleano: lo
+ * decide el semáforo de puntualidad del servidor (lib/retrasos.ts), que sí mira dónde
+ * está el bus. Solo `retraso` y `no_realizado` pintan la fila en rojo — "riesgo",
+ * "en el punto sin iniciar" y "sin rastreo" son chips propios, no un servicio en alerta.
+ * Sin veredicto (endpoint caído o SQL sin correr) se cae al criterio de antes.
+ */
+function calcularEstadoVisual(r: Reserva, v?: Puntualidad): EstadoVisual {
   if (r.estado === "cancelada")  return "cancelado";
   if (r.estado === "finalizada") return "finalizado";
   if (r.estado === "en_curso")   return "en_ruta";
+  if (v) return v.nivel === "retraso" || v.nivel === "no_realizado" ? "alerta" : "programado";
   if (r.fecha_servicio === hoyISO() && r.hora_servicio) {
     const [hh, mm] = r.hora_servicio.split(":").map(Number);
-    const horaPlan = new Date(); horaPlan.setHours(hh, mm, 0, 0);
-    if ((new Date().getTime() - horaPlan.getTime()) / 60000 > 15 && !r.checkin_realizado) return "alerta";
+    const plan = hh * 60 + (mm || 0);
+    if (ahoraLimaMin() - plan > GRACIA_FALLBACK_MIN && !r.checkin_realizado) return "alerta";
   }
   return "programado";
 }
@@ -564,6 +611,37 @@ function TarjetaFija({ s, onRefresh, onGps, enFicha = false }: { s: ServicioView
             </div>
           </div>
 
+          {/* ── EVIDENCIA DE PUNTUALIDAD ──
+              El chip de la lista dice QUÉ pasa; aquí se dice POR QUÉ lo sabemos. Sin la
+              evidencia (distancia, antigüedad del fix, ETA contra la hora objetivo) el
+              operador no puede verificar el veredicto, y un aviso que no se puede
+              verificar se ignora en una semana. */}
+          {s.puntualidad && s.puntualidad.nivel !== "na" && s.puntualidad.nivel !== "en_hora" && (() => {
+            const p = s.puntualidad!;
+            const meta = NIVEL_RETRASO[p.nivel];
+            return (
+              <div className="mb-3 rounded-xl px-3 py-2.5 border" style={{ background: meta.bg, borderColor: `${meta.color}33` }}>
+                <div className="flex items-baseline gap-2 flex-wrap">
+                  <span className="font-black text-xs" style={{ color: meta.color }}>
+                    {meta.label}{p.minutos !== null && p.minutos !== 0 ? ` · ${p.minutos > 0 ? "+" : ""}${p.minutos} min` : ""}
+                  </span>
+                  {p.causa && <span className="text-[11px] text-gray-600 font-semibold">{p.causa}</span>}
+                </div>
+                {p.evidencia && <p className="text-[11px] text-gray-500 mt-1 leading-snug">{p.evidencia}</p>}
+                {p.nivel === "en_punto_sin_iniciar" && (
+                  <p className="text-[11px] mt-1.5 font-semibold" style={{ color: meta.color }}>
+                    No hace falta despachar nada: el bus ya está en el paradero. Falta que el conductor pulse Iniciar — o hazlo tú con Check-in.
+                  </p>
+                )}
+                {p.nivel === "sin_rastreo" && (
+                  <p className="text-[11px] mt-1.5 text-gray-500">
+                    Esto NO afirma que el bus no esté: afirma que no hay señal para saberlo. Confírmalo por teléfono.
+                  </p>
+                )}
+              </div>
+            );
+          })()}
+
           {s.paradas_total > 0 && (
             <div className="mb-3">
               <div className="flex items-center justify-between mb-1">
@@ -866,7 +944,20 @@ function TarjetaEventual({ s, onRefresh, onGps, enFicha = false }: { s: Servicio
 function chipsAlerta(s: ServicioView): { label: string; color: string; bg: string; title: string }[] {
   const out: { label: string; color: string; bg: string; title: string }[] = [];
   if (s.docs_vencidos.length)     out.push({ label: "DOC",      color: "#b91c1c", bg: "#fee2e2", title: `Documentos vencidos: ${s.docs_vencidos.join(", ")}` });
-  if (s.estado_visual === "alerta") out.push({ label: "RETRASO",  color: "#dc2626", bg: "#fef2f2", title: "No inició a la hora pactada" });
+  // Puntualidad: un chip por NIVEL, con la evidencia en el tooltip. Sin la evidencia el
+  // operador no puede decidir si creerle al sistema — y un chip que no se puede verificar
+  // se ignora a la semana.
+  const p = s.puntualidad;
+  if (p && p.nivel !== "na" && p.nivel !== "en_hora") {
+    const meta = NIVEL_RETRASO[p.nivel];
+    const mins = p.minutos !== null && p.minutos !== 0 ? ` ${p.minutos > 0 ? "+" : ""}${p.minutos}′` : "";
+    out.push({
+      label: meta.corto + mins, color: meta.color, bg: meta.bg,
+      title: `${meta.label}${p.causa ? ` — ${p.causa}` : ""}${p.evidencia ? `\n${p.evidencia}` : ""}`,
+    });
+  } else if (!p && s.estado_visual === "alerta") {
+    out.push({ label: "RETRASO", color: "#dc2626", bg: "#fef2f2", title: "No inició a la hora pactada" });
+  }
   if (s.conflicto_vehiculo)       out.push({ label: "UNIDAD×2", color: "#b45309", bg: "#fef3c7", title: "Posible solape: el vehículo está en otro servicio a la misma hora" });
   if (s.conflicto_conductor)      out.push({ label: "CHOFER×2", color: "#b45309", bg: "#fef3c7", title: "Posible solape: el conductor está en otro servicio a la misma hora" });
   if (s.jornada_extensa)          out.push({ label: "JORNADA",  color: "#9a3412", bg: "#ffedd5", title: "Jornada del conductor extensa o demasiados servicios — riesgo de fatiga" });
@@ -1210,6 +1301,44 @@ export default function SeguimientoPage() {
   const [drawer,      setDrawer]      = useState<ServicioView | null>(null);
   const [descargaMasiva, setDescargaMasiva] = useState(false);
   const [empresaPerfil, setEmpresaPerfil] = useState<EmpresaPerfil | null>(null);
+  const [puntualidad, setPuntualidad] = useState<Record<number, Puntualidad>>({});
+  const [resumenPunt, setResumenPunt] = useState<ResumenPuntualidad | null>(null);
+  const [filtroNivel, setFiltroNivel] = useState<NivelRetraso | "todos">("todos");
+
+  // ── Semáforo de puntualidad ───────────────────────────────────────────────────
+  // Lo calcula el servidor (/api/seguimiento/retrasos): la posición previa al inicio
+  // vive en fixes SIN reserva_id y hay que buscarla por conductor/vehículo — una
+  // consulta por servicio que no puede multiplicarse por cada pestaña abierta. Además
+  // el ETA con tráfico se paga, y así hay UN solo pagador (el cron) para todos.
+  // Solo tiene sentido para HOY: la puntualidad es una pregunta del presente.
+  const esHoy = fechaFiltro === hoyISO();
+  useEffect(() => {
+    if (!esHoy) return;   // el estado NO se limpia aquí: se ignora al leerlo (ver puntActiva)
+    let vivo = true;
+    const traer = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session?.access_token) return;
+        const r = await fetch(`/api/seguimiento/retrasos?fecha=${fechaFiltro}`, {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (!vivo) return;
+        setPuntualidad(j.veredictos || {});
+        setResumenPunt(j.resumen || null);
+      } catch { /* la torre nunca se cae por este módulo: sin veredicto se pinta como antes */ }
+    };
+    traer();
+    const t = setInterval(traer, 45_000);   // > TTL de caché del endpoint (20 s)
+    return () => { vivo = false; clearInterval(t); };
+  }, [fechaFiltro, esHoy]);
+
+  // Los veredictos solo aplican a HOY. Se filtra al LEER en vez de limpiar el estado
+  // dentro del efecto (eso disparaba un render en cascada), con identidad estable para
+  // no invalidar el useMemo de serviciosBase en cada render.
+  const puntActiva  = esHoy ? puntualidad : SIN_PUNTUALIDAD;
+  const resumenActivo = esHoy ? resumenPunt : null;
 
   // Cabecera de los documentos (logo/nombre/contacto AFA). Una sola vez por página.
   useEffect(() => {
@@ -1297,9 +1426,10 @@ export default function SeguimientoPage() {
       const esperadosN       = esperados[r.id]?.size || 0;
       const seguro_vence_hoy = esTer ? riesgoEmpresaDocs(docsTer,r.empresa_tercerizada_id) : seguroVehiculoVenceHoy(docsVeh,r.vehiculo_id);
       const docs_vencidos    = esTer ? docsVencidosEmpresa(docsTer,r.empresa_tercerizada_id) : docsVencidosVehiculo(docsVeh,r.vehiculo_id);
+      const punt = puntActiva[r.id];
       return {
-        reserva: r, cliente_nombre, vehiculo_placa, conductor_nombre, conductor_tel,
-        es_eventual: esEventual(r), estado_visual: calcularEstadoVisual(r),
+        reserva: r, cliente_nombre, vehiculo_placa, conductor_nombre, conductor_tel, puntualidad: punt,
+        es_eventual: esEventual(r), estado_visual: calcularEstadoVisual(r, punt),
         paradas: paradasR, paradas_total: paradasR.length,
         paradas_completadas: paradasR.filter(p=>p.estado==="completada").length,
         pasajeros_total: esperadosN||(vehiculos.find(v=>v.id===r.vehiculo_id)?.capacidad_pasajeros||0),
@@ -1308,7 +1438,7 @@ export default function SeguimientoPage() {
         gastos_total: gastosPorReserva[r.id]||0, docs_vencidos,
       };
     });
-  },[reservas,clientes,vehiculos,conductores,empresas,vehsTer,paradas,pasajPar,paxAdhoc,gastosRows,docsTer,docsVeh]);
+  },[reservas,clientes,vehiculos,conductores,empresas,vehsTer,paradas,pasajPar,paxAdhoc,gastosRows,docsTer,docsVeh,puntActiva]);
 
   // Segundo paso: alertas que dependen de TODOS los servicios del día (solape de recurso, jornada).
   const servicios: ServicioView[] = useMemo(()=>{
@@ -1346,7 +1476,18 @@ export default function SeguimientoPage() {
   const totalFijos      = servicios.filter(s=>!s.es_eventual).length;
   const totalEventuales = servicios.filter(s=>s.es_eventual).length;
   const enRuta          = servicios.filter(s=>s.estado_visual==="en_ruta").length;
-  const alertas         = servicios.filter(s=>s.estado_visual==="alerta").length;
+  // Conteo por nivel del semáforo. Se prefiere el del servidor (mismo cálculo que los
+  // avisos); si aún no llegó, se deriva de lo que ya está pintado.
+  const contarNivel = (n: NivelRetraso) =>
+    resumenActivo && n in resumenActivo ? (resumenActivo as any)[n] as number
+                                    : servicios.filter(s=>s.puntualidad?.nivel===n).length;
+  const NIVELES_PANEL: NivelRetraso[] = ["retraso","no_realizado","riesgo","retraso_en_ruta","en_punto_sin_iniciar","sin_rastreo","inicio_tarde"];
+  const panelNiveles = NIVELES_PANEL.map(n=>({ nivel:n, n:contarNivel(n) })).filter(x=>x.n>0);
+  // El KPI rojo cuenta SOLO lo accionable ahora. Un servicio que ya no se hizo ("no
+  // realizado") sigue visible en el semáforo y en la lista, pero no puede tener el
+  // contador en rojo hasta medianoche: eso es lo que hacía ilegible el tablero.
+  const retrasoAhora = resumenActivo ? resumenActivo.retraso
+                                   : servicios.filter(s=>s.estado_visual==="alerta").length;
   const sinCheckin      = servicios.filter(s=>!s.reserva.checkin_realizado&&s.estado_visual!=="finalizado"&&s.estado_visual!=="cancelado").length;
   const seguroHoy       = servicios.filter(s=>s.seguro_vence_hoy).length;
   const docsVenc        = servicios.filter(s=>s.docs_vencidos.length>0).length;
@@ -1371,6 +1512,7 @@ export default function SeguimientoPage() {
     if (filtroTipo==="fijo"&&s.es_eventual) return false;
     if (filtroTipo==="eventual"&&!s.es_eventual) return false;
     if (filtroEstado!=="todos"&&s.estado_visual!==filtroEstado) return false;
+    if (filtroNivel!=="todos"&&s.puntualidad?.nivel!==filtroNivel) return false;
     if (busqueda) {
       const q=busqueda.toLowerCase();
       return s.vehiculo_placa.toLowerCase().includes(q)||s.conductor_nombre.toLowerCase().includes(q)||s.cliente_nombre.toLowerCase().includes(q);
@@ -1417,7 +1559,10 @@ export default function SeguimientoPage() {
             { label:"Fijos del día",      value:totalFijos,      color:"#0b315f",bg:"#EFF6FF",icon:<Ic.Bus size={16} color="#0b315f"/>    },
             { label:"Eventuales",         value:totalEventuales, color:"#6366f1",bg:"#EEF2FF",icon:<Ic.List size={16} color="#6366f1"/>   },
             { label:"En ruta ahora",      value:enRuta,          color:"#16a34a",bg:"#DCFCE7",icon:<Ic.Check size={16} color="#16a34a"/>  },
-            { label:"Alertas retraso",    value:alertas,         color:"#dc2626",bg:"#FEF2F2",icon:<Ic.Alert size={16} color="#dc2626"/>  },
+            // Solo alertas VIVAS: un servicio finalizado ya no "está en retraso", su
+            // retraso es un dato histórico. Antes el contador quedaba en rojo hasta
+            // medianoche y el tablero dejaba de leerse.
+            { label:"Retraso ahora",      value:retrasoAhora,    color:"#dc2626",bg:"#FEF2F2",icon:<Ic.Alert size={16} color="#dc2626"/>  },
             { label:"Sin check-in",       value:sinCheckin,      color:"#d97706",bg:"#FEF3C7",icon:<Ic.Clock size={16} color="#d97706"/>  },
             { label:"Seguros vencen hoy", value:seguroHoy,       color:"#dc2626",bg:"#FEF2F2",icon:<Ic.Shield size={16} color="#dc2626"/>},
           ].map(kpi=>(
@@ -1431,13 +1576,39 @@ export default function SeguimientoPage() {
           ))}
         </div>
 
-        {alertas > 0 && (
-          <div className="bg-red-50 border border-red-200 rounded-2xl px-5 py-3.5 flex items-center gap-3">
-            <div className="w-8 h-8 rounded-xl bg-red-100 flex items-center justify-center flex-shrink-0"><Ic.Alert size={16} color="#dc2626"/></div>
-            <div>
-              <p className="font-black text-red-700 text-sm">{alertas} servicio(s) en alerta — no iniciaron a la hora pactada</p>
-              <p className="text-red-500 text-xs mt-0.5">Contactar al conductor o despachar unidad de reemplazo inmediatamente</p>
+        {/* ── SEMÁFORO DE PUNTUALIDAD ──
+            Sustituye al banner rojo binario ("X no iniciaron a la hora"), que mezclaba
+            en un solo número al bus atrapado en la Panamericana y al que ya está en el
+            paradero con el conductor embarcando. Cada nivel es un botón: filtra la lista.
+            Ver lib/retrasos.ts para el criterio de cada uno. */}
+        {esHoy && panelNiveles.length > 0 && (
+          <div className="bg-white border border-gray-200 rounded-2xl px-5 py-4 shadow-sm">
+            <div className="flex items-center gap-2 mb-3">
+              <div className="w-7 h-7 rounded-lg bg-[#EFF6FF] flex items-center justify-center"><Ic.Clock size={15} color="#0b315f"/></div>
+              <p className="font-black text-[#0b315f] text-sm">Puntualidad</p>
+              {filtroNivel !== "todos" && (
+                <button onClick={()=>setFiltroNivel("todos")} className="text-[10px] font-bold text-gray-400 hover:text-[#0b315f] underline">quitar filtro</button>
+              )}
             </div>
+            <div className="flex flex-wrap gap-2">
+              {panelNiveles.map(({nivel,n})=>{
+                const meta = NIVEL_RETRASO[nivel];
+                const activo = filtroNivel === nivel;
+                return (
+                  <button key={nivel} onClick={()=>setFiltroNivel(activo?"todos":nivel)}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-xl border transition-all ${activo?"ring-2 ring-offset-1":""}`}
+                    style={{ background: meta.bg, borderColor: `${meta.color}33`, ...(activo?{ boxShadow:`0 0 0 2px ${meta.color}` }:{}) }}>
+                    <span className="font-black text-lg leading-none" style={{color:meta.color}}>{n}</span>
+                    <span className="text-[11px] font-bold" style={{color:meta.color}}>{meta.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-gray-400 mt-3 leading-snug">
+              <b className="text-[#1d4ed8]">En el punto</b> = el GPS ubica el bus en el paradero: no es un retraso, falta que el conductor pulse Iniciar.
+              {" "}<b className="text-slate-600">Sin rastreo</b> = no hay señal para opinar — nunca se afirma un retraso por falta de GPS.
+              {" "}<b className="text-amber-700">Riesgo</b> es una previsión con el tráfico de ahora, todavía se puede reaccionar.
+            </p>
           </div>
         )}
 

@@ -18,6 +18,7 @@ import {
   hoyLima, ahoraLimaMin, hhmmAMin, telefonoContingencia, canalesConductor, type AlertaConfig,
 } from "@/lib/alertas";
 import { detectarSolapesJornada, type ReservaFlota } from "@/lib/alertas-flota";
+import { veredictosDelDia, guardarVeredictos, type VeredictoCtx } from "@/lib/retrasos-datos";
 
 export const maxDuration = 60;
 
@@ -72,7 +73,7 @@ async function handler(req: NextRequest) {
 
     const { data: reservas } = await admin
       .from("reservas")
-      .select("id, fecha_servicio, hora_servicio, hora_real_fin, estado, conductor_id, conductor_tercero_id, vehiculo_id, vehiculo_tercero_id, tipo_asignacion, origen, destino")
+      .select("id, fecha_servicio, hora_servicio, hora_real_fin, estado, conductor_id, conductor_tercero_id, vehiculo_id, vehiculo_tercero_id, empresa_tercerizada_id, tipo_asignacion, origen, destino")
       .in("fecha_servicio", [hoy, manana]);
     const todas = (reservas ?? []) as any[];
 
@@ -367,6 +368,31 @@ async function handler(req: NextRequest) {
       }
     }
 
+    // ── SEMÁFORO DE PUNTUALIDAD (lib/retrasos.ts) ──────────────────────────────
+    // Un solo cálculo por tick, compartido por los bloques 4 y 4b-4e. Este es el ÚNICO
+    // punto del sistema que PAGA ETA con tráfico, y solo para los servicios en "franja
+    // de duda" (lib/eta-trafico.ts); la torre reutiliza esa caché sin gastar nada.
+    //
+    // Se calcula SIEMPRE (aunque los avisos nuevos estén apagados) porque alimenta la
+    // pantalla y la supresión del falso "no inició"; lo que se condiciona es el PAGO.
+    const cfgRiesgo   = activa("riesgo_retraso");
+    const cfgEnPunto  = activa("en_punto_sin_iniciar");
+    const cfgEnRuta   = activa("retraso_en_ruta");
+    const cfgSinRastreo = activa("sin_rastreo_previo");
+    let puntualidad = new Map<number, VeredictoCtx>();
+    try {
+      const rp = await veredictosDelDia({
+        fecha: hoy,
+        permitirPago: !!(cfgRiesgo || cfgEnRuta),   // sin avisos de previsión, nada que pagar
+      });
+      puntualidad = rp.veredictos;
+      await guardarVeredictos(puntualidad.values(), rp.previos);
+    } catch (e: any) {
+      // El semáforo es un extra: si falla, el motor sigue con sus bloques de siempre.
+      console.warn("[tick] puntualidad:", e?.message);
+    }
+    const vere = (id: number) => puntualidad.get(id);
+
     // ── BLOQUE 4: no inició a tiempo ────────────────────────────────────────────
     {
       const cfg = activa("no_inicio");
@@ -378,6 +404,12 @@ async function handler(req: NextRequest) {
           if (!["programada", "confirmada"].includes(r.estado)) continue; // aún no inició
           const ini = hhmmAMin(r.hora_servicio);
           if (ini == null || ahora < ini + gracia) continue;
+          // El bus ESTÁ en el paradero y el conductor solo olvidó pulsar Iniciar: eso no
+          // es "no inició a tiempo", y mandarle ese texto (y despertar al coordinador) es
+          // el falso positivo que este módulo viene a eliminar. Lo atiende el bloque 4b.
+          // Solo se suprime si ese tipo de aviso está ENCENDIDO: con él apagado, el
+          // comportamiento es exactamente el de antes (un deploy no debe silenciar nada).
+          if (cfgEnPunto && vere(r.id)?.nivel === "en_punto_sin_iniciar") continue;
           if (!(await reclamarEnvio("no_inicio", r.id))) continue;
           const ruta = rutaDe(r); const hora = horaCorta(r.hora_servicio);
           const nombre = r.conductor_id ? nombreCorto(condMap.get(r.conductor_id)?.nombre) : "Conductor";
@@ -393,6 +425,148 @@ async function handler(req: NextRequest) {
         }
         res.no_inicio = n;
       }
+    }
+
+    // ── BLOQUE 4b: EN EL PUNTO, SIN INICIAR ────────────────────────────────────
+    // El GPS confirma el bus dentro del geocerco del primer paradero, quieto y con
+    // permanencia. Eso NO es un retraso: el bus está donde debe estar y lo único que
+    // falta es el toque de "Iniciar". Dos avisos muy distintos, en este orden:
+    //   1) al CONDUCTOR, un empujón — que resuelve el 100 % de los casos normales;
+    //   2) al COORDINADOR, SOLO si persiste pasada la hora (v.escala): ahí ya no es un
+    //      olvido, es un conductor dormido, sin batería o con la app rota.
+    // Lo que NO se hace nunca: marcar el servicio como iniciado. lib/avance-paradas.ts:30
+    // ya fijó que inferir para PINTAR no autoriza a inferir para ESCRIBIR.
+    if (cfgEnPunto) {
+      let n = 0;
+      for (const r of todas) {
+        if (r.fecha_servicio !== hoy) continue;
+        const v = vere(r.id);
+        if (v?.nivel !== "en_punto_sin_iniciar") continue;
+        const ref = condDe(r);
+        const hora = horaCorta(r.hora_servicio);
+        const nombre = ref ? nombreCorto(datosCond(ref)?.nombre) : "Conductor";
+
+        // 1) Empujón al conductor (una vez por servicio y día).
+        if (cfgEnPunto.notifica_conductor && ref && await reclamarEnvio("en_punto_sin_iniciar", r.id)) {
+          const rc = await aConductor(cfgEnPunto, ref, [nombre, hora, r.origen || rutaDe(r)]);
+          if (rc === "enviado") n++;
+          else if (rc === "fallo") await liberarEnvio("en_punto_sin_iniciar", r.id); // transitorio
+        }
+
+        // 2) Escalada al coordinador solo si PERSISTE (clave de dedupe propia).
+        if (v.escala && await reclamarEnvio("en_punto_escala", r.id)) {
+          const rd = await aDirectorio(cfgEnPunto, [
+            "En el punto y sin iniciar", nombre, `${rutaDe(r)} ${hora}`,
+            `El GPS lo ubica en el paradero pero no marca inicio. ${v.evidencia}`,
+          ]);
+          if (rd.enviados > 0) n++;
+          else if (rd.fallos > 0) await liberarEnvio("en_punto_escala", r.id);
+        }
+      }
+      res.en_punto_sin_iniciar = n;
+    }
+
+    // ── BLOQUE 4c: RIESGO DE RETRASO (previsión, ANTES de la hora) ─────────────
+    // La razón de ser del módulo: avisar cuando todavía se puede hacer algo. El bus está
+    // lejos del primer paradero y, con el tráfico de AHORA, no llega al objetivo
+    // (hora pactada menos la anticipación de embarque). El veredicto ya trae la
+    // evidencia; aquí solo se reparte.
+    if (cfgRiesgo) {
+      let n = 0;
+      for (const r of todas) {
+        if (r.fecha_servicio !== hoy) continue;
+        const v = vere(r.id);
+        if (v?.nivel !== "riesgo" || !v.escala) continue;
+        if ((v.minutos ?? 0) < (cfgRiesgo.umbral ?? 8)) continue;
+        if (!(await reclamarEnvio("riesgo_retraso", r.id))) continue;
+        const ref = condDe(r);
+        const nombre = ref ? nombreCorto(datosCond(ref)?.nombre) : "Conductor";
+        const rd = await aDirectorio(cfgRiesgo, [
+          `Riesgo de retraso (~${v.minutos} min)`, nombre,
+          `${rutaDe(r)} ${horaCorta(r.hora_servicio)}`,
+          `Aún se puede reaccionar. ${v.evidencia}`,
+        ]);
+        if (rd.enviados > 0) n++;
+        else if (rd.fallos > 0) await liberarEnvio("riesgo_retraso", r.id);
+      }
+      res.riesgo_retraso = n;
+    }
+
+    // ── BLOQUE 4d: RETRASO EN RUTA (servicio ya iniciado) ─────────────────────
+    // El hueco más grande del sistema anterior: una vez en curso, el servicio era verde
+    // para siempre aunque llegara 50 min tarde. Se compara el ETA contra la
+    // `hora_estimada` del SIGUIENTE paradero — nunca contra "la hora de ahora" (bug b03caba).
+    if (cfgEnRuta) {
+      let n = 0;
+      for (const r of todas) {
+        if (r.fecha_servicio !== hoy || r.estado !== "en_curso") continue;
+        const v = vere(r.id);
+        if (v?.nivel !== "retraso_en_ruta") continue;
+        if ((v.minutos ?? 0) < (cfgEnRuta.umbral ?? 10)) continue;
+        if (!(await reclamarEnvio("retraso_en_ruta", r.id))) continue;
+        const ref = condDe(r);
+        const nombre = ref ? nombreCorto(datosCond(ref)?.nombre) : "Conductor";
+        const rd = await aDirectorio(cfgEnRuta, [
+          `Retraso en ruta (~${v.minutos} min)`, nombre,
+          `${rutaDe(r)} ${horaCorta(r.hora_servicio)}`,
+          v.evidencia || v.causa,
+        ]);
+        if (rd.enviados > 0) n++;
+        else if (rd.fallos > 0) await liberarEnvio("retraso_en_ruta", r.id);
+      }
+      res.retraso_en_ruta = n;
+    }
+
+    // ── BLOQUE 4e: SIN RASTREO antes del servicio ─────────────────────────────
+    // NO dice "retraso": dice "no puedo saberlo". La cobertura de GPS en segundo plano
+    // va de 36 % a 100 % según el conductor, así que la ausencia de señal jamás se lee
+    // como ausencia de bus. Para un TERCERO el significado es otro y sí es exigible: no
+    // abrió el link del token, que es su obligación de rastreo — por eso el aviso va
+    // también a la empresa proveedora (decisión del operador, 2026-08-20) y queda en
+    // retraso_evento para el reporte mensual de cumplimiento.
+    if (cfgSinRastreo) {
+      const antelacion = cfgSinRastreo.umbral ?? 30;
+      const candidatos = todas.filter((r) => {
+        if (r.fecha_servicio !== hoy) return false;
+        if (vere(r.id)?.nivel !== "sin_rastreo") return false;
+        const ini = hhmmAMin(r.hora_servicio);
+        return ini != null && ahora >= ini - antelacion && ahora <= ini;
+      });
+      let n = 0;
+      if (candidatos.length) {
+        const empIds = [...new Set(candidatos.map((r) => r.empresa_tercerizada_id).filter(Boolean))];
+        const empMap = new Map<number, { razon_social: string; telefono: string | null }>();
+        if (empIds.length) {
+          const { data } = await admin
+            .from("empresas_tercerizadas").select("id, razon_social, telefono").in("id", empIds);
+          for (const e of data ?? []) empMap.set(e.id, { razon_social: e.razon_social, telefono: e.telefono });
+        }
+        for (const r of candidatos) {
+          if (!(await reclamarEnvio("sin_rastreo_previo", r.id))) continue;
+          const emp = r.empresa_tercerizada_id ? empMap.get(r.empresa_tercerizada_id) : null;
+          const quien = emp?.razon_social || (condDe(r) ? nombreCorto(datosCond(condDe(r)!)?.nombre) : "Unidad");
+          const detalle = emp
+            ? "La unidad no está enviando ubicación: el conductor aún no abrió el link de seguimiento."
+            : "La unidad no está enviando ubicación. No se puede confirmar si llegará a tiempo.";
+          const rd = await aDirectorio(cfgSinRastreo, [
+            "Sin rastreo antes del servicio", quien,
+            `${rutaDe(r)} ${horaCorta(r.hora_servicio)}`, detalle,
+          ]);
+          let exitos = rd.enviados;
+          // Al PROVEEDOR: mismo texto, a su número. Es su incumplimiento, no el nuestro.
+          if (emp?.telefono) {
+            const re = await enviarAvisoWhatsApp(
+              emp.telefono, cfgSinRastreo.plantilla_directorio || "coordinador_alerta",
+              ["Sin rastreo antes del servicio", emp.razon_social,
+               `${rutaDe(r)} ${horaCorta(r.hora_servicio)}`, detalle],
+            );
+            if (re.ok) exitos++;
+          }
+          if (exitos > 0) n++;
+          else if (rd.fallos > 0) await liberarEnvio("sin_rastreo_previo", r.id);
+        }
+      }
+      res.sin_rastreo_previo = n;
     }
 
     // ── BLOQUE 5: GPS sin señal (reservas en curso) ─────────────────────────────
