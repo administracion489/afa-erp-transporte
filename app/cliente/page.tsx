@@ -50,7 +50,21 @@ function cargarMapbox(): Promise<MapboxAPI> {
 // ─── TIPOS ────────────────────────────────────────────────────────────────
 type Cliente        = { id: number; nombre: string; empresa: string | null; ruc: string | null; email: string | null; telefono: string | null; created_at?: string; };
 type Reserva        = { id: number; codigo?: string | null; origen: string; destino: string; fecha_servicio: string | null; hora_servicio: string | null; estado: string; precio_cliente: number; vehiculo_id: number | null; conductor_id: number | null; cotizacion_id: number | null; created_at: string; };
-type Parada         = { id: number; reserva_id: number; orden: number; nombre: string; direccion: string | null; lat: number | null; lng: number | null; hora_estimada: string | null; estado: string; };
+// `hora_llegada` = hora REAL de arribo; `hora_estimada` = la planificada. Son cosas distintas
+// y el portal las confundía: pintaba "✓ 07:30" con la PLANIFICADA, que se lee como "llegó a
+// las 7:30" cuando solo significa "debía llegar a las 7:30". Los servicios tercerizados no
+// escriben hora_llegada, así que cuando falte hay que callar, no inventar.
+type Parada         = { id: number; reserva_id: number; orden: number; nombre: string; direccion: string | null; lat: number | null; lng: number | null; hora_estimada: string | null; hora_llegada?: string | null; estado: string; };
+/** "HH:MM" en hora de Lima a partir del registro real de llegada. null si no se registró. */
+function horaHHMM(v: string | null | undefined): string | null {
+  if (!v) return null;
+  // Puede venir ya como "HH:MM[:SS]" o como ISO completo, según quién la escribió.
+  if (/^\d{2}:\d{2}/.test(v)) return v.slice(0, 5);
+  const t = Date.parse(v);
+  if (!Number.isFinite(t)) return null;
+  return new Date(t - 5 * 3600 * 1000).toISOString().slice(11, 16);
+}
+
 type Boarding       = { id: number; pasajero_id: number; parada_id: number; timestamp: string; metodo: string; pasajero?: { nombre: string; dni: string | null; empresa: string | null; }; };
 type PasajeroParada = { id: number; parada_id: number | null; pasajero_id: number; estado: string; estado_abordaje?: string | null; hora_abordaje?: string | null; pasajero?: { nombre: string; dni: string | null; edad?: number | null; }; };
 type GPS            = { lat: number; lng: number; velocidad: number; timestamp: string; estado?: string; };
@@ -3161,12 +3175,24 @@ export default function ClientePortal() {
                                 <p style={{ fontSize: 8.5, color: isCompleted ? C.success : isCurrent ? C.navy : C.mute, maxWidth: 70, textAlign: "center" as const, margin: 0, lineHeight: 1.3, fontWeight: isCurrent ? 700 : 400 }}>
                                   {p.nombre}
                                 </p>
-                                {/* Hora planificada */}
-                                {p.hora_estimada && (
-                                  <p style={{ fontFamily: C.fontMono, fontSize: 8, color: isCompleted ? C.success : C.mute, margin: 0, fontWeight: isCompleted ? 700 : 400 }}>
-                                    {isCompleted && "✓ "}{p.hora_estimada.slice(0, 5)}
-                                  </p>
-                                )}
+                                {/* Hora: la REAL de llegada si se registró; si no, la prevista.
+                                    Nunca marcar la prevista con ✓ — eso le decía al cliente que el
+                                    bus llegó a una hora que en realidad solo estaba planificada. */}
+                                {(() => {
+                                  const real = isCompleted ? horaHHMM(p.hora_llegada) : null;
+                                  if (real) return (
+                                    <p style={{ fontFamily: C.fontMono, fontSize: 8, color: C.success, margin: 0, fontWeight: 700 }}>
+                                      ✓ {real}
+                                    </p>
+                                  );
+                                  if (!p.hora_estimada) return null;
+                                  return (
+                                    <p style={{ fontFamily: C.fontMono, fontSize: 8, color: isCompleted ? C.success : C.mute, margin: 0, fontWeight: isCompleted ? 700 : 400 }}>
+                                      {p.hora_estimada.slice(0, 5)}
+                                      <span style={{ fontWeight: 400, opacity: .75 }}> prev.</span>
+                                    </p>
+                                  );
+                                })()}
                                 {/* ETA con tráfico — solo en destino */}
                                 {isDestino && etaHora && !etaAlejando && (
                                   <p style={{ fontFamily: C.fontMono, fontSize: 9, color: C.success, margin: "1px 0 0", fontWeight: 800 }}>
