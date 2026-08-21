@@ -77,6 +77,48 @@ type AvanceGps = {
   muestras: number;
   paradaIds: number[];
 };
+/** Índice de la última parada por la que consta que pasó el bus, o -1 si ninguna.
+ *
+ *  FUENTE ÚNICA a propósito: la usan el render del timeline y el efecto que pide el ETA a
+ *  Google. Si cada uno decidiera por su cuenta cuál es la próxima parada, las horas saldrían
+ *  corridas un paradero — el ETA del 3.º pintado sobre el 2.º.
+ *
+ *  MÁS CONSERVADOR QUE EL MODAL DEL OPERADOR, a propósito: el modal alimenta al motor con
+ *  `opts.ruta` (veto geométrico: descarta el paso cuando el bus estuvo cerca pero por otra vía)
+ *  y aquí no hay esa geometría. Para no afirmarle al CLIENTE más de lo que ve el operador, el
+ *  "arrastre" —la inferencia más débil, que solo dice "el bus ya está más adelante"— NO cuenta
+ *  como paso. Solo suman la marca del conductor y el paso directo por GPS. */
+function ultimaPasadaIdx(ps: Parada[], av?: AvanceGps | null): number {
+  return ps.reduce((acc, p, i) => {
+    if (p.estado === "completada") return i;                    // el humano manda
+    const k = av ? av.paradaIds.indexOf(p.id) : -1;
+    const motivo = k >= 0 ? (av!.motivo[k] ?? null) : null;
+    return motivo === "gps" ? i : acc;
+  }, -1);
+}
+
+/** Paradas de una reserva: las reales si ya cargaron; si no, las del contrato (`paradas_json`),
+ *  con ids NEGATIVOS sintéticos para que nunca choquen con los de la tabla.
+ *
+ *  FUENTE ÚNICA, igual que `ultimaPasadaIdx`: el efecto que pide el ETA y el render del timeline
+ *  tienen que construir EXACTAMENTE la misma lista. Estaba duplicada en los dos sitios y casaba
+ *  por accidente; en cuanto una de las copias cambiara, el ETA del paradero N se habría pintado
+ *  sobre el N±1 sin que nada lo delatara. */
+function paradasDeReserva(rid: number, reales: Parada[] | undefined, pjson: any[] | null): Parada[] {
+  if (reales && reales.length > 0) return reales;
+  return (pjson || []).filter((p: any) => p.nombre).map((p: any, i: number) => ({
+    id: -(i + 1), reserva_id: rid, orden: i + 1, nombre: p.nombre, direccion: null,
+    lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
+    hora_estimada: p.hora || null, estado: "pendiente",
+  } as Parada));
+}
+
+/** Timestamp → "HH:MM" en hora de Lima (UTC-5). */
+function hhmmLima(ms: number): string {
+  const d = new Date(ms - 5 * 60 * 60 * 1000);
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+}
+
 type GPS            = { lat: number; lng: number; velocidad: number; timestamp: string; estado?: string; };
 type EmpresaPerfil  = { nombre: string | null; logo_url: string | null; color_primario: string | null; telefono: string | null; email: string | null; slogan: string | null; };
 type ConductorInfo  = { nombre: string; numero_licencia: string | null; telefono: string | null; };
@@ -464,11 +506,18 @@ export default function ClientePortal() {
   // `alejando` = Google devolvió un rodeo absurdo hacia el destino → el bus ya lo pasó o va en
   // sentido contrario. En ese caso NO se pinta hora: una cuenta regresiva que la dirección
   // contradice es exactamente el bug que se está corrigiendo en el modal.
-  const [etaDestinoMap, setEtaDestinoMap] = useState<Record<number, { hora: string | null; ts: number; alejando: boolean }>>({});
+  // `porParada`: hora estimada de llegada a CADA paradero pendiente, indexada por `parada.id`.
+  // Se indexa por id y no por posición a propósito — el modal del operador empareja tramos por
+  // NOMBRE (ModalGps.tsx: `t.hasta === proximaParada.nombre`) y dos paraderos parecidos le
+  // desalinean la cadena entera.
+  const [etaDestinoMap, setEtaDestinoMap] = useState<Record<number, { hora: string | null; ts: number; alejando: boolean; porParada?: Record<number, string> }>>({});
   // Control de gasto del ETA de las tarjetas (SKU Directions Advanced, sin caché — ver la
   // auditoría de costos de Google del 1-ago-2026). Los tres candados: cadencia por reserva,
   // piso global entre dos llamadas cualesquiera y tope duro por sesión de pestaña.
   const etaCalcRef  = useRef<Record<number, number>>({});
+  // reserva → `idxUlt` con el que Google rechazó la ruta multiparada. Mientras el bus siga en ese
+  // mismo paradero se pide en modo simple (solo el destino); al avanzar, se reintenta el desglose.
+  const etaSimpleRef = useRef<Record<number, number>>({});
   const etaUltimaRef = useRef(0);
   const etaGastoRef  = useRef(0);
   const ajustadoresRef   = useRef<Record<number, ReturnType<typeof crearAjustadorHuella>>>({}); // 1 ajustador de Map Matching por servicio
@@ -483,6 +532,10 @@ export default function ClientePortal() {
   const serviciosEnRutaRef   = useRef<Reserva[]>([]);
   const autocentradoRef      = useRef(false);
   const ubicacionesEnVivoRef = useRef<typeof ubicacionesEnVivo>([]);
+  // El efecto del ETA depende de [tab, gpsCardMap]: sin refs leería `paradas` y `avanceGps`
+  // del closure de un render viejo y podría pedirle a Google paraderos que el bus YA pasó.
+  const paradasRef           = useRef<Record<number, Parada[]>>({});
+  const avanceGpsRef         = useRef<Record<number, AvanceGps>>({});
 
   // ─── Init ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1455,53 +1508,97 @@ export default function ClientePortal() {
       etaCalcRef.current[rid] = Date.now();
       const r = serviciosHoyRef.current.find(x => x.id === rid);
       if (!r) return;
-      const pjson = (r as any).paradas_json as any[] | null;
-      const ps = paradas[rid] || [];
-      const psAll: Parada[] = ps.length > 0 ? ps
-        : (pjson || []).filter((p: any) => p.nombre).map((p: any, i: number) => ({
-            id: -(i+1), reserva_id: rid, orden: i+1, nombre: p.nombre, direccion: null,
-            lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
-            hora_estimada: p.hora || null, estado: "pendiente",
-          } as Parada));
+      const psAll = paradasDeReserva(rid, paradasRef.current[rid], (r as any).paradas_json);
       const destino = psAll[psAll.length - 1];
-      const marcar = (v: { hora: string | null; alejando: boolean }) =>
+      const marcar = (v: { hora: string | null; alejando: boolean; porParada?: Record<number, string> }) =>
         setEtaDestinoMap(prev => ({ ...prev, [rid]: { ...v, ts: Date.now() } }));
       if (!destino?.lat || !destino?.lng) { marcar({ hora: null, alejando: false }); return; }
 
+      // Los paraderos que el bus TODAVÍA no ha pasado, en orden. Van como waypoints en la misma
+      // llamada: Google factura POR PETICIÓN, no por punto, y esta ya está en el SKU caro por
+      // pedir tráfico → el desglose por tramo sale a coste CERO.
+      // Antes se mandaba solo [posición, destino final], así que Google calculaba ir DIRECTO sin
+      // desviarse a recoger a nadie: en el cuartil superior de servicios los paraderos alargan el
+      // recorrido un 46%, y esa hora salía sistemáticamente corta.
+      const idxUlt = ultimaPasadaIdx(psAll, avanceGpsRef.current[rid]);
+      const pendientes = psAll.slice(idxUlt + 1).filter(p => p.lat && p.lng);
+      // Tope defensivo: Google admite 25 waypoints. Hoy el servicio más largo tiene 13 paradas,
+      // pero si algún día crece hay que recortar por el MEDIO y conservar el destino — perder el
+      // destino sería perder la única hora que ya se mostraba bien.
+      const MAX_PUNTOS = 24;
+      const completa = pendientes.length > MAX_PUNTOS
+        ? [...pendientes.slice(0, MAX_PUNTOS - 1), pendientes[pendientes.length - 1]]
+        : pendientes;
+      if (!completa.length) { marcar({ hora: null, alejando: false }); return; }
+      // DEGRADADO. Un solo paradero mal geocodificado hace que Google rechace la ruta ENTERA
+      // (ZERO_RESULTS / NOT_FOUND), y con ella se perdería también la hora del destino, que hoy
+      // ya se muestra bien. Tras un rechazo se vuelve al modo de dos puntos para esta reserva:
+      // menos detalle, pero la hora principal sobrevive. No cuesta una llamada extra — el modo
+      // simple entra en la SIGUIENTE ronda, no ahora.
+      const degradado = etaSimpleRef.current[rid] === idxUlt;
+      const ruta = degradado ? [destino] : completa;
+
       etaUltimaRef.current = Date.now();
       etaGastoRef.current++;
-      // Distancia en línea recta: es gratis y es la referencia para detectar la vuelta en U.
-      const dRectaM = distM(gps.lat, gps.lng, Number(destino.lat), Number(destino.lng));
+      // Distancia en línea recta al PRIMER paradero pendiente: es gratis y es la referencia para
+      // detectar la vuelta en U. Ya no se mide contra el destino final — con los paraderos dentro,
+      // el recorrido total crece de forma legítima y compararlo con la recta al final acusaría de
+      // rodeo a una ruta correcta.
+      const dRecta0 = distM(gps.lat, gps.lng, Number(ruta[0].lat), Number(ruta[0].lng));
       try {
-        // conTrafico: aquí SÍ hace falta (ETA en vivo bus → destino). Es el único punto de
-        // esta pantalla que usa el SKU caro de Google y no se cachea — de ahí los candados.
+        // conTrafico: aquí SÍ hace falta (ETA en vivo). Es el único punto de esta pantalla que
+        // usa el SKU caro de Google y no se cachea — de ahí los candados.
         const res = await fetch("/api/ruta", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ conTrafico: true, paradas: [
             { lat: gps.lat, lng: gps.lng, nombre: "Posición actual" },
-            { lat: destino.lat, lng: destino.lng, nombre: destino.nombre },
+            ...ruta.map(p => ({ lat: Number(p.lat), lng: Number(p.lng), nombre: p.nombre })),
           ]}),
         });
         const data = await res.json();
-        // PRUEBA DE CORDURA: un trayecto desproporcionado respecto de la recta no es un
-        // trayecto, es una vuelta en U — el destino quedó detrás del vehículo.
-        // El umbral NO se aplica cerca del destino: a 120 m en línea recta, un retorno normal
-        // por el puente siguiente da 3 km y el cociente se dispara con el bus ENTRANDO. Por
-        // debajo de 1 km la razón rodeo/recta no distingue nada, así que no se afirma.
-        const rodeoAbsurdo = typeof data.total_km === "number" &&
-          dRectaM > 1000 && data.total_km * 1000 > dRectaM * 3 + 2000;
+        const tramos: any[] = Array.isArray(data.tramos) ? data.tramos : [];
+        // Google rechazó la ruta con paraderos: anotar para que la PRÓXIMA ronda de esta reserva
+        // vaya en modo simple. Se anota `idxUlt`, no `true`: cuando el bus pase de paradero la
+        // clave cambia sola y se vuelve a intentar el desglose completo, por si el paradero
+        // problemático era justo el que quedó atrás.
+        if (!degradado && (!res.ok || !tramos.length)) etaSimpleRef.current[rid] = idxUlt;
+        // PRUEBA DE CORDURA sobre el PRIMER TRAMO: un trayecto desproporcionado respecto de la
+        // recta no es un trayecto, es una vuelta en U — la próxima parada quedó detrás del bus.
+        // El umbral NO se aplica de cerca: a 120 m en línea recta, un retorno normal por el
+        // puente siguiente da 3 km y el cociente se dispara con el bus ENTRANDO. Por debajo de
+        // 1 km la razón rodeo/recta no distingue nada, así que no se afirma.
+        const km0 = tramos[0]?.distancia_km;
+        const rodeoAbsurdo = typeof km0 === "number" &&
+          dRecta0 > 1000 && km0 * 1000 > dRecta0 * 3 + 2000;
         if (rodeoAbsurdo) {
           marcar({ hora: null, alejando: true });
           return;
         }
-        if (typeof data.total_min === "number") {
-          const llegada = new Date(Date.now() + data.total_min * 60 * 1000);
-          // Ajustar a hora Lima (UTC-5)
-          const limaMs = llegada.getTime() - 5 * 60 * 60 * 1000;
-          const limaDate = new Date(limaMs);
-          const h = String(limaDate.getUTCHours()).padStart(2, "0");
-          const m = String(limaDate.getUTCMinutes()).padStart(2, "0");
-          marcar({ hora: `${h}:${m}`, alejando: false });
+        // Encadenar: el tramo i va del punto i al i+1, y el punto 0 es el bus. Así `tramos[i]`
+        // aterriza exactamente en `ruta[i]`.
+        // GUARD DE ALINEACIÓN: si Google devuelve un número de tramos distinto del de puntos
+        // pedidos (dos paraderos que resuelven al mismo punto de la vía y colapsan), `tramos[i]`
+        // deja de corresponder a `ruta[i]` y CADA hora se pinta sobre el paradero equivocado —
+        // el mismo defecto que este cambio viene a corregir, con otra cara. Ante la duda no se
+        // reparte: se conserva solo el total, que no depende del emparejamiento.
+        if (tramos.length && tramos.length !== ruta.length) {
+          marcar({ hora: typeof data.total_min === "number" ? hhmmLima(Date.now() + data.total_min * 60_000) : null, alejando: false });
+          return;
+        }
+        if (tramos.length) {
+          let acum = Date.now();
+          const porParada: Record<number, string> = {};
+          tramos.forEach((t, i) => {
+            acum += (Number(t?.duracion_trafico_min) || 0) * 60_000;
+            const p = ruta[i];
+            if (p) porParada[p.id] = hhmmLima(acum);
+          });
+          // La hora del destino sigue saliendo del mismo sitio que antes para el resto de la UI,
+          // pero ahora es la del recorrido REAL (con paraderos), no la del atajo directo.
+          const horaDestino = porParada[destino.id] ?? hhmmLima(acum);
+          marcar({ hora: horaDestino, alejando: false, porParada });
+        } else if (typeof data.total_min === "number") {
+          marcar({ hora: hhmmLima(Date.now() + data.total_min * 60_000), alejando: false });
         } else {
           marcar({ hora: null, alejando: false });
         }
@@ -2118,6 +2215,8 @@ export default function ClientePortal() {
   // Ref siempre actualizado (para efectos que no pueden incluir serviciosHoy en deps)
   serviciosHoyRef.current = serviciosHoy;
   serviciosEnRutaRef.current = serviciosEnRuta;
+  paradasRef.current = paradas;
+  avanceGpsRef.current = avanceGps;
   const COLORES_RUTA = ["#0b315f", "#ea580c", "#16a34a", "#7c3aed"];
   // Servicio cuya ruta está seleccionada (null = solo buses en vivo)
   const servicioSel = rutaSelId != null ? serviciosHoy.find(r => r.id === rutaSelId) ?? null : null;
@@ -3122,16 +3221,9 @@ export default function ClientePortal() {
 
             {/* EN RUTA cards — todos los servicios activos (o el primero si ninguno en_curso) */}
             {serviciosDestacados.map(r => {
-              const ps = paradas[r.id] || [];
-              const pjson = (r as any).paradas_json as any[] | null;
-              const psDisplay: Parada[] = ps.length > 0
-                ? ps
-                : (pjson || []).filter((p: any) => p.nombre).map((p: any, i: number) => ({
-                    id: -(i + 1), reserva_id: r.id, orden: i + 1,
-                    nombre: p.nombre, direccion: null,
-                    lat: p.lat ? Number(p.lat) : null, lng: p.lng ? Number(p.lng) : null,
-                    hora_estimada: p.hora || null, estado: "pendiente",
-                  } as Parada));
+              // MISMA función que usa el efecto del ETA: las dos listas tienen que ser idénticas
+              // o las horas de Google acabarían pintadas sobre el paradero de al lado.
+              const psDisplay = paradasDeReserva(r.id, paradas[r.id], (r as any).paradas_json);
               // El progreso sale de DOS fuentes: lo que marcó el conductor y lo que demuestra
               // el GPS. Antes solo contaba el botón, y por eso la tarjeta podía decir
               // "Parada 0 de 9" con el bus llevando dos paraderos hechos y 42 km/h.
@@ -3143,17 +3235,9 @@ export default function ClientePortal() {
                 const k = idxDe(p);
                 return k >= 0 ? (av!.motivo[k] ?? null) : null;
               };
-              // MÁS CONSERVADOR QUE EL MODAL DEL OPERADOR, a propósito. El modal alimenta al
-              // motor con `opts.ruta` (veto geométrico: descarta el paso cuando el bus estuvo
-              // cerca pero por otra vía) y aquí no hay esa geometría. Para no acabar afirmándole
-              // al CLIENTE más de lo que ve el operador, el "arrastre" —la inferencia más débil,
-              // que solo dice "el bus ya está más adelante"— no cuenta como paso: se queda en
-              // "sin confirmar". Solo suman la marca del conductor y el paso directo por GPS.
-              const pasoPorAqui = (p: Parada) => {
-                const m = motivoDe(p);
-                return m === "conductor" || m === "gps";
-              };
-              const ultimaCompletadaIdx = psDisplay.reduce((acc: number, p: Parada, i: number) => pasoPorAqui(p) ? i : acc, -1);
+              // Mismo helper que usa el efecto del ETA: si cada uno decidiera por su cuenta cuál
+              // es la próxima parada, las horas de Google saldrían corridas un paradero.
+              const ultimaCompletadaIdx = ultimaPasadaIdx(psDisplay, av);
               const currentStopIdx = ultimaCompletadaIdx < psDisplay.length - 1 ? ultimaCompletadaIdx + 1 : 0;
               const hayCompletadas = ultimaCompletadaIdx >= 0;
               const nConductor = psDisplay.filter(p => motivoDe(p) === "conductor").length;
@@ -3162,6 +3246,7 @@ export default function ClientePortal() {
               const condCard = condInfoMap[r.id];
               const placaCard = vehPlacaMap[r.id];
               const etaCard    = etaDestinoMap[r.id];
+              const etaPorParada = etaCard?.porParada ?? {};
               const etaAlejando = !!etaCard?.alejando;
               const etaHora     = etaCard?.hora || null;
               // Antigüedad del cálculo: es lo que separa "en vivo" de "una hora de hace 3 horas
@@ -3343,6 +3428,16 @@ export default function ClientePortal() {
                                       ✓ {real}
                                     </p>
                                   );
+                                  // ETA de Google CON TRÁFICO para lo que aún falta. Va ANTES que
+                                  // la del contrato: el chip de arriba promete "ETA con tráfico
+                                  // real" y hasta ahora enseñaba debajo la hora planificada, que
+                                  // en el 21% de las paradas se desvía más de 15 min de la real.
+                                  const est = !isCompleted && !etaAlejando ? etaPorParada[p.id] : undefined;
+                                  if (est) return (
+                                    <p style={{ fontFamily: C.fontMono, fontSize: isDestino ? 9 : 8, color: C.success, margin: 0, fontWeight: isDestino ? 800 : 700 }}>
+                                      ~{est}
+                                    </p>
+                                  );
                                   if (!p.hora_estimada) return null;
                                   return (
                                     <p style={{ fontFamily: C.fontMono, fontSize: 8, color: isCompleted ? C.success : C.mute, margin: 0, fontWeight: isCompleted ? 700 : 400 }}>
@@ -3351,8 +3446,9 @@ export default function ClientePortal() {
                                     </p>
                                   );
                                 })()}
-                                {/* ETA con tráfico — solo en destino */}
-                                {isDestino && etaHora && !etaAlejando && (
+                                {/* Respaldo del destino: cuando Google rechazó la ruta multiparada
+                                    y solo se pudo estimar la llegada final (ver `etaSimpleRef`). */}
+                                {isDestino && !etaPorParada[p.id] && etaHora && !etaAlejando && (
                                   <p style={{ fontFamily: C.fontMono, fontSize: 9, color: C.success, margin: "1px 0 0", fontWeight: 800 }}>
                                     ~{etaHora}
                                   </p>
