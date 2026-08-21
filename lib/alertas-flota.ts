@@ -3,6 +3,12 @@
 // para poder reutilizarla server-side en el motor de alertas (/api/alertas-flota/tick).
 // Son heurísticas de ADVERTENCIA, no certezas (no hay campo de duración en reservas;
 // el fin se estima con un bloque por defecto cuando no hay hora_real_fin).
+//
+// OJO con `hora_real_fin`: llevaba un año VACÍA (0 de 575 servicios en 30 días), así que este
+// módulo caía SIEMPRE al bloque estimado. Desde que los endpoints del conductor la sellan, el
+// valor entra de verdad — y es "HH:MM:SS" sin fecha, con dos formas de mentir (cruce de
+// medianoche y cierre anticipado). Ver `duracionMin`: que el dato mejore no puede empeorar la
+// alerta.
 
 export type ReservaFlota = {
   id: number;
@@ -16,10 +22,42 @@ export type ReservaFlota = {
 
 const DUR_ESTIMADA_MIN = 240; // 4 h: bloque por defecto para estimar el fin de un servicio
 
+const DIA_MIN = 24 * 60;
+
+// Techo de duración. 26 h y no 12: hay tours full day de hasta 24 h — mismo techo que
+// app/api/cliente/gps/route.ts:60 (DURACION_MAX_MS) y lib/servicio-tiempos.ts:308.
+const DURACION_MAX_MIN = 26 * 60;
+
+// Por debajo de esto NO se cree la hora de fin y se vuelve al bloque estimado. `hora_real_fin`
+// se sella con MAX(paradas.hora_llegada) de las paradas COMPLETADAS: si el conductor solo marcó
+// el primer paradero, el valor queda pegado a la hora de salida y la ventana colapsaría a unos
+// minutos, dejando CIEGO al detector (que es peor que estimar de más). El bloque estimado es
+// exactamente lo que este módulo hacía hasta ahora, así que caer a él nunca es una regresión.
+const DUR_MIN_FIABLE_MIN = 30;
+
 function aMin(hhmm?: string | null): number | null {
   if (!hhmm) return null;
   const [h, m] = hhmm.split(":").map(Number);
   return Number.isNaN(h) ? null : h * 60 + (m || 0);
+}
+
+/**
+ * Minutos que dura el bloque a reservar para una reserva, a partir de su inicio pactado.
+ *
+ * `hora_real_fin` es "HH:MM:SS" DEL DÍA, SIN fecha (misma trampa que documenta
+ * lib/servicio-tiempos.ts:67). Un nocturno que sale 22:00 y cierra 01:30 da fin=90 < ini=1320:
+ * antes `Math.max(fin, ini + 1)` lo colapsaba a UN minuto y el detector se quedaba ciego justo
+ * en ese servicio. Aquí un fin ANTERIOR al inicio se lee como cruce de medianoche (+24 h) y solo
+ * se acepta si la duración cabe en el techo de 26 h; si no cabe —o si es implausiblemente corta—
+ * se cae al bloque estimado, que es el comportamiento previo.
+ */
+function duracionMin(r: ReservaFlota, ini: number): number {
+  const finCrudo = aMin(r.hora_real_fin);
+  if (finCrudo == null) return DUR_ESTIMADA_MIN;
+  const fin = finCrudo < ini ? finCrudo + DIA_MIN : finCrudo;
+  const dur = fin - ini;
+  if (dur > DURACION_MAX_MIN || dur < DUR_MIN_FIABLE_MIN) return DUR_ESTIMADA_MIN;
+  return dur;
 }
 
 /**
@@ -37,8 +75,9 @@ export function detectarSolapesJornada(
   const intervalo = (r: ReservaFlota): [number, number] | null => {
     const ini = aMin(r.hora_servicio);
     if (ini == null) return null;
-    const fin = aMin(r.hora_real_fin) ?? ini + DUR_ESTIMADA_MIN;
-    return [ini, Math.max(fin, ini + 1)];
+    // El fin puede pasar de 1440 (nocturno que cierra al día siguiente): las comparaciones de
+    // solape y el span de jornada son restas, así que aguantan valores > 24 h sin más.
+    return [ini, ini + duracionMin(r, ini)];
   };
 
   // Agrupar por conductor (solo propios con conductor asignado, no cancelados).

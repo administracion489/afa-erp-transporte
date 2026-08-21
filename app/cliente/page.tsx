@@ -675,7 +675,7 @@ export default function ClientePortal() {
       }).catch(() => {});
     }
     if (activo?.conductor_id) {
-      supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", activo.conductor_id).maybeSingle()
+      supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", activo.conductor_id).maybeSingle()
         .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); });
     }
     if (activo?.vehiculo_id) {
@@ -724,7 +724,7 @@ export default function ClientePortal() {
     const ra = r as any;
     if (r.conductor_id) {
       tasks.push(
-        supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", r.conductor_id).maybeSingle()
+        supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", r.conductor_id).maybeSingle()
           .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); })
       );
     } else if (ra.conductor_tercero_id) {
@@ -784,7 +784,7 @@ export default function ClientePortal() {
     if (r.conductor_id) {
       // Propio: conductor desde tabla conductores
       tasks.push(
-        supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", r.conductor_id).maybeSingle()
+        supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", r.conductor_id).maybeSingle()
           .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); })
       );
     } else if (ra.conductor_tercero_id) {
@@ -1081,7 +1081,7 @@ export default function ClientePortal() {
             // reserva_id es la llave no ambigua para el GPS en vivo (también terceros)
             setReservaActivaId(updated.id);
             if (updated.conductor_id) {
-              supabase.from("conductores").select("nombre,numero_licencia,telefono").eq("id", updated.conductor_id).maybeSingle()
+              supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", updated.conductor_id).maybeSingle()
                 .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); });
             }
             if (updated.vehiculo_id) {

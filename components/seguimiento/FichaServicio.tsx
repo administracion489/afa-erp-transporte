@@ -51,12 +51,51 @@
 //     (el "qr_conductor" vive en `boarding_log`, tabla sin backfill), así que se muestra
 //     "06:03 · Paradero 3" y NUNCA "· QR": un dato decorativo que no se puede verificar es
 //     exactamente lo que hizo inservible al check-in.
-//   · No mueve los modales de gastos / checklist / reemplazo: viven en page.tsx y llegan
-//     por `children`. Ver la sección 8.
+//   · No duplica la lógica de los modales operativos (gastos, checklist de salida, reemplazo
+//     de unidad): vive en components/seguimiento/ModalesServicio.tsx, se importa tal cual y
+//     escribe en las mismas tablas de siempre. Aquí solo se decide CUÁNDO ofrecerlos.
+//
+// ══════════════════════════════════════════════════════════════════════════════
+// ACCIONES CONDICIONADAS POR FASE — y la distinción que costó un defecto
+//   El drawer anterior enseñaba los mismos botones a un servicio de mañana y a uno de hace
+//   tres semanas. Pero "cuándo OCURRIÓ el hecho" y "cuándo se TECLEA" no son lo mismo, y
+//   confundirlos apaga botones que sí hacen falta:
+//     · CHECKLIST DE SALIDA — es una COMPROBACIÓN previa al despacho. Firmarlo sobre un
+//       servicio ya terminado no verifica nada: no queda nada que impedir. Se deshabilita
+//       en estado terminal (`esEstadoTerminal`).
+//     · REEMPLAZO DE UNIDAD — es un REGISTRO de lo que de verdad salió a la calle. Casi
+//       siempre se entera operación tarde ("salió la B-2, no la CNQ396"), y documentarlo a
+//       posteriori es justo lo que este rediseño persigue: sin él, `unidad_reemplazo_placa`
+//       queda vacío y se factura la unidad equivocada. Solo se cierra en CANCELADA, donde no
+//       hubo unidad que reemplazar.
+//   El que no aplica se pinta DESHABILITADO con el motivo escrito — no oculto —, mismo
+//   criterio que la sección 6: un botón que desaparece se lee como un bug; uno apagado que
+//   dice por qué, se entiende.
+//   Los gastos NO se condicionan: un peaje o un viático se registran cuando aparece la
+//   boleta, y eso pasa casi siempre DESPUÉS del servicio.
+//
+// ══════════════════════════════════════════════════════════════════════════════
+// LO QUE ESTA FICHA HEREDA DE LA TARJETA CLÁSICA (y por qué NO se perdió)
+//   · EVIDENCIA DE PUNTUALIDAD (sección 2): el veredicto del semáforo del servidor con su
+//     causa y su evidencia. El chip de la lista dice QUÉ pasa; aquí se dice POR QUÉ lo
+//     sabemos. Un aviso que no se puede verificar se ignora en una semana — y el chip de la
+//     fila encima vive en un contenedor `hidden md:flex`, o sea que en tablet no existe.
+//   · REGISTRO MANUAL DEL FIN (sección 2): `reservas.hora_real_fin` se quedó sin ningún
+//     escritor humano en todo el ERP cuando desapareció la tarjeta, y lib/liquidacion-datos.ts
+//     lo imprime como "llegada". Se pide igual que el inicio: en un campo, nunca `now()`.
+//   · CONFORMIDAD FIRMADA (sección 5): el toggle de la tarjeta eventual era el único
+//     escritor Y lector de `conformidad_firmada` en el repo. Vive ahora donde le toca, con
+//     el resto del cierre administrativo.
+//   · RESPALDO DOCUMENTAL (arriba del todo): `s.docs_vencidos` / `s.seguro_vence_hoy` los
+//     tiene la PÁGINA sin depender de la carga perezosa de esta ficha. No se duplican en el
+//     camino feliz; solo se usan cuando `evaluarAptitud` no ha podido pronunciarse.
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { ESTADOS_RESERVA, ESTADOS_ADMIN, ESTADO_ADMIN_INICIAL, normalizaEstado } from "@/lib/estados";
+import {
+  ESTADOS_RESERVA, ESTADOS_ADMIN, ESTADO_ADMIN_INICIAL, normalizaEstado, esEstadoTerminal,
+} from "@/lib/estados";
+import { ModalGastos, ModalChecklist, ModalReemplazo } from "./ModalesServicio";
 import { idAfa } from "@/lib/folio";
 import {
   manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado,
@@ -70,6 +109,10 @@ import {
 import {
   evaluarAptitud, VEREDICTO_DOC_CFG, type AptitudServicio, type HallazgoDoc,
 } from "@/lib/documentos-estado";
+// El semáforo de puntualidad NO se calcula aquí: llega ya dictaminado en `s.puntualidad`
+// (lo produce /api/seguimiento/retrasos con lib/retrasos.ts). De ese módulo solo se importa
+// la PALETA, para que el mismo nivel no tenga un color en la lista y otro en la ficha.
+import { NIVEL_RETRASO, type NivelRetraso } from "@/lib/retrasos";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ICONOS
@@ -295,6 +338,62 @@ function DatosIlegibles({ titulo = "No se pudieron leer los datos del servicio",
   );
 }
 
+/**
+ * VEREDICTO DE PUNTUALIDAD tal como llega del endpoint (espejo aplanado de `Veredicto` de
+ * lib/retrasos.ts). El tipo vive en app/seguimiento/page.tsx y NO está exportado — se
+ * redeclara aquí en vez de acoplar este componente a un archivo que otra sesión edita.
+ */
+type Puntualidad = {
+  nivel: NivelRetraso;
+  minutos: number | null;
+  causa: string;
+  evidencia: string;
+};
+
+/**
+ * ── EVIDENCIA DE PUNTUALIDAD ──
+ * El chip de la lista dice QUÉ pasa; aquí se dice POR QUÉ lo sabemos. Sin la evidencia
+ * (distancia al punto, antigüedad del último fix, ETA contra la hora objetivo) el operador no
+ * puede verificar el veredicto, y un aviso que no se puede verificar se ignora en una semana.
+ *
+ * ESTE COMPONENTE NO OPINA: el nivel, los minutos, la causa y la evidencia los dictamina el
+ * servidor (lib/retrasos.ts vía /api/seguimiento/retrasos) y aquí solo se pintan, con SU
+ * paleta (`NIVEL_RETRASO`). Si el veredicto está mal, se corrige en el motor.
+ *
+ * No se pinta para "en_hora" ni "na": una ficha que también grita cuando todo va bien enseña
+ * al operador a no mirarla. Y no depende de `cargarFichaDatos`: este dato lo trae la página,
+ * así que sigue en pie aunque la carga perezosa de la ficha se caiga.
+ */
+function EvidenciaPuntualidad({ p }: { p: Puntualidad }) {
+  // Un nivel desconocido (endpoint más nuevo que este bundle) caería a `undefined` y
+  // reventaría al leer `.label`. Se degrada a "na", que es gris y no afirma nada.
+  const meta = NIVEL_RETRASO[p.nivel] ?? NIVEL_RETRASO.na;
+  return (
+    <div className="mb-2.5 rounded-xl px-3 py-2.5 border" style={{ background: meta.bg, borderColor: `${meta.color}33` }}>
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <span className="font-black text-xs" style={{ color: meta.color }}>
+          {meta.label}{p.minutos !== null && p.minutos !== 0 ? ` · ${p.minutos > 0 ? "+" : ""}${p.minutos} min` : ""}
+        </span>
+        {p.causa && <span className="text-[11px] text-gray-600 font-semibold">{p.causa}</span>}
+      </div>
+      {p.evidencia && <p className="text-[11px] text-gray-500 mt-1 leading-snug">{p.evidencia}</p>}
+      {p.nivel === "en_punto_sin_iniciar" && (
+        <p className="text-[11px] mt-1.5 font-semibold" style={{ color: meta.color }}>
+          {/* NO invita a "hacerlo tú con Check-in": ese botón escribía la hora del CLIC, y
+              justo en este nivel el servidor YA sabe por GPS desde cuándo el bus está en el
+              paradero. Registrarlo a mano ahora sería empeorar el dato. */}
+          No hace falta despachar nada: el bus ya está en el paradero. Falta que el conductor pulse Iniciar en su app.
+        </p>
+      )}
+      {p.nivel === "sin_rastreo" && (
+        <p className="text-[11px] mt-1.5 text-gray-500">
+          Esto NO afirma que el bus no esté: afirma que no hay señal para saberlo. Confírmalo por teléfono.
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** Par etiqueta / valor de una línea. */
 function Dato({ k, v, mono = false }: { k: string; v: React.ReactNode; mono?: boolean }) {
   return (
@@ -347,7 +446,7 @@ function FilaTiempo({ f }: { f: FilaLinea }) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 export default function FichaServicio({
-  s, onClose, onRefresh, onGps, empresaPerfil, esAdmin, children,
+  s, onClose, onRefresh, onGps, empresaPerfil, esAdmin,
 }: {
   /** El ServicioView de app/seguimiento/page.tsx. Tipado LAXO a propósito: ese tipo no
    *  está exportado y acoplar este componente a un archivo que otra sesión está editando
@@ -358,8 +457,6 @@ export default function FichaServicio({
   onGps: (s: any) => void;
   empresaPerfil: { nombre: string | null; logo_url: string | null; telefono: string | null; email: string | null } | null;
   esAdmin?: boolean;
-  /** La tarjeta clásica (gastos, checklist, reemplazo, teléfono). Ver sección 8. */
-  children?: React.ReactNode;
 }) {
   const r = s?.reserva ?? null;
   const rid: number | undefined = r?.id;
@@ -390,19 +487,37 @@ export default function FichaServicio({
    *  cambiaría de veredicto sola mientras el operador la mira. */
   const [ahoraMs, setAhoraMs] = useState<number>(() => Date.now());
   const [horaManual, setHoraManual] = useState("");
+  /** Gemelo del anterior para la LLEGADA. Dos campos separados y no uno reutilizado: son dos
+   *  hechos distintos y pueden pedirse a la vez (servicio sin ninguna hora registrada). */
+  const [horaFinManual, setHoraFinManual] = useState("");
   const [guardando, setGuardando] = useState(false);
+  const [guardandoFin, setGuardandoFin] = useState(false);
   /** Contador de reintentos: cambiarlo relanza la carga. Es la acción que acompaña al estado
    *  neutro — si la ficha no puede afirmar nada porque una lectura falló, lo mínimo es dejar
    *  volver a pedirla sin cerrar y reabrir el drawer. */
   const [intento, setIntento] = useState(0);
   const reintentar = useCallback(() => setIntento(n => n + 1), []);
 
+  /** Modal operativo abierto, si hay alguno. UN solo estado y no tres booleanos: los tres son
+   *  mutuamente excluyentes y con booleanos sueltos se pueden abrir dos a la vez. */
+  const [modal, setModal] = useState<"gastos" | "checklist" | "reemplazo" | null>(null);
+  /** Cerrar cualquier modal refresca. ModalGastos escribe en `gastos` en cuanto se pulsa
+   *  Agregar/eliminar (no al salir), así que sin este refresco el total de la sección 5 se
+   *  quedaría con la cifra vieja hasta la siguiente recarga. */
+  const cerrarModal = useCallback(() => { setModal(null); onRefresh(); }, [onRefresh]);
+
   // ── ESC cierra (réplica del useEffect del drawer anterior) ───────────────────
+  // Con un modal encima, ESC cierra PRIMERO el modal: cerrar el drawer entero por debajo
+  // dejaría el modal flotando sobre la lista, sin nada detrás que lo explique.
   useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (modal) { cerrarModal(); return; }
+      onClose();
+    };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [onClose]);
+  }, [onClose, modal, cerrarModal]);
 
   // ── Carga LAZY, con cancelación ──────────────────────────────────────────────
   // Nada de cargar en el render: al cambiar de servicio (o al remontar) la respuesta vieja
@@ -410,7 +525,7 @@ export default function FichaServicio({
   useEffect(() => {
     if (!r) return;
     let vivo = true;
-    setFase("cargando"); setDatos(null); setHoraManual(""); setAhoraMs(Date.now());
+    setFase("cargando"); setDatos(null); setHoraManual(""); setHoraFinManual(""); setAhoraMs(Date.now());
     cargarFichaDatos(r, { paradaIds: (s?.paradas || []).map((p: any) => p?.id).filter(Boolean) })
       .then(d => { if (vivo) { setDatos(d); setFase("listo"); } })
       .catch(() => { if (vivo) setFase("error"); });
@@ -507,8 +622,52 @@ export default function FichaServicio({
     onRefresh();
   }, [rid, horaManual, onRefresh, r?.estado]);
 
-  /** Viáticos: el ÚNICO flag manual que sobrevive al rediseño. Describe un hecho físico
-   *  (se entregó efectivo en mano) que el ERP no puede observar por ningún otro medio. */
+  /**
+   * Registro MANUAL de la hora de LLEGADA (`reservas.hora_real_fin`).
+   *
+   * POR QUÉ EXISTE: al podar la tarjeta clásica se fue con ella `guardarHoras`, que escribía
+   * inicio Y FIN. Los únicos escritores que quedaron son los endpoints del conductor y el
+   * Radar; ninguno lo escribe si el conductor no cerró el servicio desde su app. Mientras
+   * tanto lib/liquidacion-datos.ts imprime `hora_real_fin` como la LLEGADA del servicio: el
+   * operador veía la hora correcta en pantalla (derivada del último paradero) y no tenía
+   * dónde escribirla, así que la liquidación salía con la llegada en blanco para siempre.
+   *
+   * MISMO CRITERIO QUE EL INICIO, sin excepciones:
+   *   · se PIDE en un campo — jamás `now()`. Persistir la hora del clic ya costó un bug real:
+   *     sobre un servicio de las 05:00 revisado a las 11:00 se guardaba "salió 11:00" con
+   *     etiqueta de dato humano fiable.
+   *   · solo se ofrece cuando NO hay ninguna evidencia de la que derivar el fin
+   *     (`puedeRegistrarFinManual`), y nunca con la evidencia a medio leer.
+   *   · queda con fuente "operador" (lib/servicio-tiempos.ts:757 lo lee así), no como
+   *     evidencia del viaje.
+   *
+   * Y arrastra el CIERRE, igual que hacía la tarjeta clásica (HEAD:page.tsx:538-547): una
+   * llegada registrada es un servicio terminado, así que pasa a `finalizada` y, si nunca
+   * arrancó su dimensión B, siembra `estado_admin` para que entre en la cola de liquidación.
+   * `estado_admin` solo se siembra si está VACÍO: aquí no se pisa ningún valor existente.
+   */
+  const guardarFinManual = useCallback(async () => {
+    if (!rid || !/^\d{2}:\d{2}$/.test(horaFinManual)) return;
+    setGuardandoFin(true);
+    const estadoAhora = normalizaEstado(r?.estado);
+    // Un cancelado no llega a ningún sitio y este campo ni se le ofrece; la comprobación se
+    // repite aquí porque es la que protege la ESCRITURA, no la que decide qué se pinta.
+    const cerrar = estadoAhora !== "cancelada" && estadoAhora !== "finalizada";
+    const yaTieneAdmin = !!r?.estado_admin;
+    const { error } = await supabase.from("reservas")
+      .update({
+        hora_real_fin: `${horaFinManual}:00`,
+        ...(cerrar ? { estado: "finalizada" } : {}),
+        ...(cerrar && !yaTieneAdmin ? { estado_admin: ESTADO_ADMIN_INICIAL } : {}),
+      })
+      .eq("id", rid);
+    setGuardandoFin(false);
+    if (error) { alert("No se pudo guardar: " + error.message); return; }
+    onRefresh();
+  }, [rid, horaFinManual, onRefresh, r]);
+
+  /** Viáticos: flag manual que describe un hecho físico (se entregó efectivo en mano) que el
+   *  ERP no puede observar por ningún otro medio. */
   const alternarViaticos = useCallback(async () => {
     if (!rid) return;
     const { error } = await supabase.from("reservas")
@@ -516,6 +675,27 @@ export default function FichaServicio({
     if (error) { alert("No se pudo guardar: " + error.message); return; }
     onRefresh();
   }, [rid, r?.viaticos_entregados, onRefresh]);
+
+  /**
+   * Conformidad del cliente (`reservas.conformidad_firmada`).
+   *
+   * La columna se quedó HUÉRFANA con la poda: el toggle de la tarjeta eventual era su único
+   * escritor y su único lector en todo el repo. Se le da sitio aquí, en el cierre
+   * administrativo, en vez de dejar una columna muerta — porque el dato es exactamente el
+   * mismo tipo de cosa que los viáticos: un hecho FÍSICO (el cliente firmó el acta al bajar)
+   * que el ERP no puede observar por ningún otro medio y que se necesita para facturar.
+   *
+   * Se ofrece en TODO servicio, no solo en los eventuales: la firma de conformidad se pide
+   * igual en un servicio recurrente, y la tarjeta que lo limitaba a los eventuales ya no
+   * existe. En un servicio CANCELADO se apaga: no hubo viaje del que dar conformidad.
+   */
+  const alternarConformidad = useCallback(async () => {
+    if (!rid) return;
+    const { error } = await supabase.from("reservas")
+      .update({ conformidad_firmada: !r?.conformidad_firmada }).eq("id", rid);
+    if (error) { alert("No se pudo guardar: " + error.message); return; }
+    onRefresh();
+  }, [rid, r, onRefresh]);
 
   /** Arranca la dimensión B (cierre administrativo). Es el mismo puente que ya dispara el
    *  guardado de horas del drawer clásico (page.tsx:545); aquí solo se hace explícito para
@@ -559,6 +739,32 @@ export default function FichaServicio({
   /** Roster y abordajes salen de la MISMA lectura: si falla, "0 pasajeros" no es un cero. */
   const rosterIlegible = fase === "error" || fallos.includes("roster") || fallos.includes("abordajes");
   const fallosDoc = fallos.filter(f => PIEZAS_DOCUMENTALES.includes(f));
+
+  /**
+   * RESPALDO DOCUMENTAL DE LA PÁGINA. `s.docs_vencidos` y `s.seguro_vence_hoy` los calcula el
+   * lote diario de /seguimiento y ya están en memoria: NO dependen de `cargarFichaDatos`.
+   *
+   * En el camino feliz no se pintan — `evaluarAptitud` responde la misma pregunta mejor
+   * (contra la FECHA DEL SERVICIO, con la lista de obligatorios y con el filtro por placa de
+   * los terceros) y duplicarlas daría dos avisos del mismo documento, a veces contradictorios.
+   * Pero cuando la ficha NO ha podido pronunciarse, callar es peor: el aviso duro se perdería
+   * entero, y el chip rojo "DOC" de la fila vive en un contenedor `hidden md:flex`, o sea que
+   * en una tablet no existe. Entonces sí se usa el dato viejo, diciendo de dónde sale y contra
+   * qué está medido.
+   */
+  const sinVeredictoDoc = !cargando && (fase === "error" || fallosDoc.length > 0 || !aptitud);
+  const docsVencidosPagina: string[] = sinVeredictoDoc ? (s?.docs_vencidos ?? []) : [];
+  const seguroHoyPagina = sinVeredictoDoc && !!s?.seguro_vence_hoy;
+
+  /** Veredicto de puntualidad que llega YA CALCULADO del servidor (solo existe para HOY:
+   *  /seguimiento no lo pide para otros días, y la puntualidad es una pregunta del presente).
+   *  "en_hora" y "na" no se pintan: una ficha que también grita cuando todo va bien enseña a
+   *  no mirarla. */
+  const punt: Puntualidad | null = (() => {
+    const p = s?.puntualidad as Puntualidad | undefined;
+    if (!p || !p.nivel || p.nivel === "na" || p.nivel === "en_hora") return null;
+    return p;
+  })();
 
   // Chip del veredicto de salida. El texto cambia según el nivel; el COLOR sale de
   // NIVEL_SALIDA, donde "operó sin hora" es GRIS y nunca rojo (esa confusión es el bug).
@@ -673,10 +879,54 @@ export default function FichaServicio({
       ? "Disponible cuando el servicio está en curso o finalizado"
       : null;
 
-  const btn = `flex items-center gap-1.5 text-[11.5px] font-bold px-3 py-2 rounded-xl transition-colors ${FOCO} disabled:opacity-40 disabled:cursor-not-allowed`;
+  /**
+   * POR QUÉ NO SE PUEDE HACER CADA ACCIÓN (null = sí se puede). Son DOS motivos y no uno,
+   * porque las dos acciones no son la misma cosa (ver la cabecera del archivo):
+   *
+   *   · CHECKLIST DE SALIDA = comprobación PREVIA al despacho. Sobre un servicio terminal ya
+   *     no queda nada que impedir, así que se apaga. `esEstadoTerminal` en vez de
+   *     `finalizado || cancelado` a mano: la lista la define lib/estados.ts y si mañana entra
+   *     otra terminal (p. ej. "anulada") esta ficha se entera sola.
+   *   · REEMPLAZO DE UNIDAD = REGISTRO de lo que de verdad salió. Se puede teclear después:
+   *     operación se entera tarde casi siempre, y si no se deja registrar, se factura la
+   *     unidad programada en vez de la real. Solo se apaga en CANCELADA — ahí no salió nada.
+   */
+  // Solo se apaga del todo en CANCELADA: ahí no hubo salida que verificar. En un servicio
+  // TERMINADO el botón sigue abriendo el checklist, pero en modo CONSULTA — firmarlo después de
+  // la salida sería fabricar evidencia; no poder leerlo sería perder la que ya existe, que es
+  // justo lo que hace falta cuando algo salió mal.
+  const checklistSoloLectura = esEstadoTerminal(estado) && !cancelado;
+  const motivoChecklist = cancelado ? "el servicio está anulado, no hay salida que verificar" : null;
+  const motivoReemplazo = cancelado
+    ? "el servicio está anulado: no salió ninguna unidad a la que reemplazar"
+    : null;
+
+  /**
+   * ¿PUEDE EL OPERADOR TECLEAR LA HORA DE LLEGADA?
+   *
+   * lib/servicio-tiempos.ts expone `puedeRegistrarInicioManual` pero NO un equivalente para el
+   * fin, y ese módulo es de otra sesión: la regla se replica aquí con el MISMO razonamiento,
+   * no se inventa uno nuevo. Las cuatro condiciones, en el mismo orden que el motor:
+   *   1. `t.fin === null` — si el sistema ya sabe la hora (paradero, cierre del conductor, GPS
+   *      o un valor tecleado antes), un campo editable al lado solo sirve para contradecirla.
+   *      `fin` es el MÁS TARDÍO de todas las fuentes, así que null aquí es "no hay ninguna".
+   *   2. línea de tiempo no vacía — el único caso vacío es CANCELADA, que no admite registro.
+   *   3. el servicio tiene que haber empezado: a un "por salir" no se le pide la llegada.
+   *   4. y la evidencia tiene que haberse podido LEER. Con una pieza caída, `fin === null`
+   *      puede significar "no lo pude leer", y ofrecer el campo ahí es invitar a teclear a
+   *      mano encima de un dato que sí existe.
+   */
+  const puedeRegistrarFinManual = !!tiempos
+    && tiempos.fin === null
+    && tiempos.linea.length > 0
+    && nivel !== "por_salir"
+    && !evidenciaIlegible;
+
+  const btn =`flex items-center gap-1.5 text-[11.5px] font-bold px-3 py-2 rounded-xl transition-colors ${FOCO} disabled:opacity-40 disabled:cursor-not-allowed`;
 
   // ══════════════════════════════════════════════════════════════════════════════
   return (
+    <>
     <div className="fixed inset-0 z-40 flex justify-end">
       <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose}
         role="button" tabIndex={-1} aria-label="Cerrar la ficha del servicio" />
@@ -738,6 +988,41 @@ export default function FichaServicio({
 
         <div className="flex-1 overflow-y-auto p-3">
 
+          {/* ══ RESPALDO DOCUMENTAL DE LA PÁGINA ═══════════════════════════════
+              Solo cuando esta ficha NO ha podido dar su propio veredicto documental (carga
+              caída o pieza documental ilegible). Es el aviso duro que pintaba la tarjeta
+              clásica, con datos que la PÁGINA ya tiene en memoria y que no dependen de
+              `cargarFichaDatos`. Va lo primero y en rojo: "no despachar" es de las pocas
+              cosas que no admiten esperar a un reintento. Se dice de dónde sale y contra qué
+              está medido, porque el criterio NO es el mismo que el de `evaluarAptitud`. */}
+          {docsVencidosPagina.length > 0 && (
+            <div className="bg-red-50 border border-red-200 rounded-2xl px-3 py-2.5 mb-3 flex items-start gap-2.5">
+              <span className="mt-0.5 flex-shrink-0"><I.Shield size={14} color="#b91c1c" /></span>
+              <div className="min-w-0">
+                <p className="text-[12px] font-black text-red-700 leading-snug">
+                  ⛔ DOCUMENTOS VENCIDOS: {docsVencidosPagina.join(", ")} — No despachar la unidad
+                </p>
+                <p className="text-[10.5px] text-red-600 leading-snug mt-1">
+                  Dato del tablero, medido contra HOY. Se muestra porque la verificación documental de
+                  esta ficha (que mide contra la fecha del servicio) no se pudo completar.
+                </p>
+              </div>
+            </div>
+          )}
+          {seguroHoyPagina && (
+            <div className="bg-red-50 border border-red-100 rounded-2xl px-3 py-2.5 mb-3 flex items-start gap-2.5">
+              <span className="mt-0.5 flex-shrink-0"><I.Shield size={14} color="#dc2626" /></span>
+              <div className="min-w-0">
+                <p className="text-[12px] font-bold text-red-600 leading-snug">
+                  SEGURO DE LA UNIDAD VENCE HOY — Verificar antes de salir
+                </p>
+                <p className="text-[10.5px] text-red-600 leading-snug mt-1">
+                  Dato del tablero: la verificación documental de esta ficha no se pudo completar.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* CARGA CAÍDA ENTERA. La sección 1 no se pinta en este estado (exige fase "listo"),
               así que el aviso y el botón de reintentar viven aquí. */}
           {fase === "error" && (
@@ -757,7 +1042,9 @@ export default function FichaServicio({
                calcula con `diasPara(...) ?? 1` contra HOY. evaluarAptitud() responde la misma
                pregunta mejor (contra la FECHA DEL SERVICIO, con la lista de obligatorios y con
                el filtro por placa de los terceros): duplicarlas daría dos avisos del mismo
-               documento, a veces contradictorios. */
+               documento, a veces contradictorios. La ÚNICA excepción es el respaldo de arriba
+               del todo, que solo entra cuando evaluarAptitud no ha podido pronunciarse: ahí no
+               hay duplicado posible, o sale ese aviso o no sale ninguno. */
             <Seccion titulo="Requiere atención" icono={<I.Alert size={12} color="#dc2626" />}>
               <div className="space-y-2">
                 {/* Lo que IMPIDE salir. `bloquea` lo decide el motor; aquí no se replica
@@ -853,6 +1140,14 @@ export default function FichaServicio({
               </span>
             )}>
             <div className={`${TARJETA} p-3`}>
+              {/* EVIDENCIA DE PUNTUALIDAD — lo primero de la sección, porque es lo único de
+                  aquí que puede exigir una llamada AHORA. Va en esta sección y no en
+                  "Requiere atención" porque habla de HORAS, que es de lo que trata esta.
+                  Se pinta al margen de `fase`: el veredicto lo trae la página ya calculado
+                  (s.puntualidad ← /api/seguimiento/retrasos), así que sigue en pie aunque la
+                  carga perezosa de la ficha se haya caído. */}
+              {punt && <EvidenciaPuntualidad p={punt} />}
+
               {cargando && (
                 /* ESQUELETO, no veredicto: mientras `datos` es null el motor ni se ejecuta. */
                 <div className="py-2 space-y-2" role="status" aria-label="Cargando el horario real">
@@ -976,6 +1271,39 @@ export default function FichaServicio({
                       </p>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* ── REGISTRO MANUAL DE LA LLEGADA ────────────────────────────────
+                  Bloque PROPIO y no una segunda casilla del de arriba: la salida y la llegada
+                  son dos hechos distintos y casi nunca faltan los dos a la vez. Aquí se cierra
+                  el agujero que dejó la poda: `reservas.hora_real_fin` se quedó sin ningún
+                  escritor humano, y es la columna que lib/liquidacion-datos.ts imprime como
+                  "llegada" en la liquidación del cliente. */}
+              {puedeRegistrarFinManual && (
+                <div className="mt-3 pt-2.5 border-t border-gray-100">
+                  <p className="text-[12px] font-bold text-gray-500">Sin hora de llegada</p>
+                  <p className="text-[11px] text-gray-400 leading-snug mt-0.5">
+                    El conductor no cerró el servicio y no hay ninguna llegada al último paradero de la que
+                    derivarla. La liquidación imprime esta hora: sin ella sale en blanco.
+                  </p>
+                  <div className="mt-2.5 flex items-center gap-2 flex-wrap">
+                    <input type="time" value={horaFinManual} onChange={e => setHoraFinManual(e.target.value)}
+                      aria-label="Hora real de llegada"
+                      className={`border border-gray-200 rounded-lg px-2.5 py-1.5 text-[13px] font-bold font-mono text-[#0b315f] ${FOCO} focus:border-[#0b315f]`} />
+                    <button onClick={guardarFinManual} disabled={guardandoFin || !/^\d{2}:\d{2}$/.test(horaFinManual)}
+                      className={`${btn} bg-[#0b315f] hover:bg-[#1262bd] text-white`}>
+                      {guardandoFin ? "Guardando…" : "Registrar llegada"}
+                    </button>
+                    <p className="text-[10px] text-gray-400 basis-full leading-snug">
+                      {/* Se dice lo que va a pasar ANTES de que pase: el botón no solo escribe una
+                          hora, cierra el servicio. Un efecto lateral que sorprende es un efecto
+                          lateral que alguien deshace a mano en la base de datos. */}
+                      Escribe la hora que indiques — <b>nunca la hora del clic</b> — y quedará marcada como
+                      <b> registrada por operación</b>{!finalizado ? ", además de dar el servicio por finalizado y ponerlo en la cola de liquidación" : ""}.
+                      Regístrala solo cuando el servicio haya terminado de verdad.
+                    </p>
+                  </div>
                 </div>
               )}
             </div>
@@ -1155,6 +1483,58 @@ export default function FichaServicio({
                   </div>
                 )}
               </div>
+
+              {/* ── ACCIONES SOBRE LA UNIDAD ─────────────────────────────────────
+                  Viven aquí y no en un cajón aparte porque son lo que se hace con lo que
+                  se acaba de leer arriba: si un documento avisa, se reemplaza la unidad; si
+                  todo está conforme, se firma el checklist. Cada una con SU condición: el
+                  checklist es una comprobación previa (muere al terminar el servicio), el
+                  reemplazo es un registro de lo que pasó (se puede teclear después). Ver la
+                  cabecera del archivo. */}
+              <div className="mt-2.5 pt-2.5 border-t border-gray-100">
+                <div className="flex gap-2 flex-wrap">
+                  <button onClick={() => setModal("checklist")} disabled={!!motivoChecklist}
+                    title={motivoChecklist
+                      || (checklistSoloLectura
+                        ? "Consultar lo que se verificó antes de despachar (solo lectura: el servicio ya terminó)"
+                        : "Checklist de salida: las 8 verificaciones antes de despachar")}
+                    className={`${btn} bg-[#E3F1E6] hover:bg-[#cfe8d4] text-[#15803d]`}>
+                    <I.Check size={13} color="#15803d" /> {checklistSoloLectura ? "Ver checklist de salida" : "Checklist de salida"}
+                  </button>
+                  <button onClick={() => setModal("reemplazo")} disabled={!!motivoReemplazo}
+                    title={motivoReemplazo
+                      || (finalizado
+                        ? "Registrar a posteriori la unidad que de verdad salió, en lugar de la programada"
+                        : "Registrar la unidad que sale en lugar de la programada")}
+                    className={`${btn} bg-[#FDF3E3] hover:bg-[#fbe9cd] text-[#b45309]`}>
+                    <I.Swap size={13} color="#b45309" /> Reemplazo de unidad
+                  </button>
+                </div>
+                {/* El motivo va ESCRITO, no solo en un `title` que hay que descubrir con el
+                    ratón: mismo criterio que la sección 6. Uno por acción: decir "las dos
+                    están apagadas" cuando solo lo está una es exactamente igual de inútil. */}
+                <div className="mt-2 space-y-0.5">
+                  {motivoChecklist && (
+                    <p className="text-[10.5px] text-gray-400 leading-snug">
+                      Checklist de salida: {motivoChecklist}.
+                    </p>
+                  )}
+                  {motivoReemplazo && (
+                    <p className="text-[10.5px] text-gray-400 leading-snug">
+                      Reemplazo de unidad: {motivoReemplazo}. Si hubo uno registrado, sale arriba en “Reemplazada por”.
+                    </p>
+                  )}
+                  {!motivoReemplazo && finalizado && (
+                    // Un botón habilitado sobre un servicio terminado necesita decir para qué:
+                    // sin esta línea parece un descuido, y con ella es una invitación a corregir
+                    // el dato que factura.
+                    <p className="text-[10.5px] text-gray-400 leading-snug">
+                      El servicio ya terminó, pero el reemplazo sigue disponible: documenta qué unidad
+                      salió de verdad. Sin ese registro se factura la programada.
+                    </p>
+                  )}
+                </div>
+              </div>
             </div>
           </Seccion>
 
@@ -1221,14 +1601,42 @@ export default function FichaServicio({
           {/* ══ 5 · ECONOMÍA Y CIERRE ═══════════════════════════════════════════ */}
           <Seccion titulo="Economía y cierre" icono={<I.DollarSign size={12} color="#0b315f" />}>
             <div className={`${TARJETA} p-3`}>
-              <Dato k="Gastos del servicio" v={soles(s?.gastos_total)} mono />
+              {/* GASTOS: la cifra ES el botón. No se condiciona por fase — la boleta del peaje
+                  aparece casi siempre DESPUÉS del servicio, y un gasto que no se puede
+                  registrar es un gasto que se pierde. */}
+              <div className="flex items-center justify-between gap-3 py-1">
+                <span className="text-[11px] text-gray-400 font-semibold">Gastos del servicio</span>
+                <button onClick={() => setModal("gastos")}
+                  title="Abrir el control de gastos: ver, agregar o quitar gastos operativos de este servicio"
+                  className={`text-[10px] font-bold px-2 py-1 rounded-lg bg-gray-50 text-gray-600 hover:bg-gray-100 transition-colors flex items-center gap-1.5 ${FOCO}`}>
+                  <I.DollarSign size={11} />
+                  <span className="font-mono text-[11px]">{soles(s?.gastos_total)}</span>
+                  <span className="text-gray-400">· gestionar</span>
+                </button>
+              </div>
 
               <div className="flex items-center justify-between gap-3 py-1.5">
                 <span className="text-[11px] text-gray-400 font-semibold">Viáticos al conductor</span>
                 <button onClick={alternarViaticos}
-                  title="Único flag manual que sobrevive: describe un hecho físico (efectivo entregado en mano) que el ERP no puede observar."
+                  title="Flag manual: describe un hecho físico (efectivo entregado en mano) que el ERP no puede observar."
                   className={`text-[10px] font-bold px-2 py-1 rounded-lg transition-colors ${FOCO} ${r.viaticos_entregados ? "bg-green-50 text-green-700 hover:bg-green-100" : "bg-gray-50 text-gray-500 hover:bg-gray-100"}`}>
                   {r.viaticos_entregados ? "✓ Entregados" : "○ Sin entregar"}
+                </button>
+              </div>
+
+              {/* CONFORMIDAD DEL CLIENTE. Estaba solo en la tarjeta eventual y se quedó sin
+                  sitio con la poda: `conformidad_firmada` no tenía ya ni un escritor ni un
+                  lector en todo el repo. Vive aquí porque es cierre administrativo — es lo que
+                  respalda la factura cuando el cliente reclama — y es el mismo tipo de dato que
+                  los viáticos: un hecho físico (firmó el acta al bajar) que el ERP no observa. */}
+              <div className="flex items-center justify-between gap-3 py-1.5">
+                <span className="text-[11px] text-gray-400 font-semibold">Conformidad del cliente</span>
+                <button onClick={alternarConformidad} disabled={cancelado}
+                  title={cancelado
+                    ? "Servicio anulado: no hubo viaje del que firmar conformidad"
+                    : "El cliente firmó la conformidad del servicio (acta en papel o correo de aceptación). Respalda la facturación."}
+                  className={`text-[10px] font-bold px-2 py-1 rounded-lg transition-colors ${FOCO} disabled:opacity-40 disabled:cursor-not-allowed ${r.conformidad_firmada ? "bg-green-50 text-green-700 hover:bg-green-100" : "bg-gray-50 text-gray-500 hover:bg-gray-100"}`}>
+                  {r.conformidad_firmada ? "✓ Firmada" : "○ Sin firmar"}
                 </button>
               </div>
 
@@ -1318,24 +1726,12 @@ export default function FichaServicio({
             </div>
           </Seccion>
 
-          {/* ══ 8 · ACCIONES Y VISTA CLÁSICA ════════════════════════════════════
-              DEUDA CONSCIENTE Y TEMPORAL. La tarjeta anterior (gastos, checklist de salida,
-              reemplazo, teléfono) sigue viva aquí dentro, cerrada por defecto. Sus modales
-              (ModalGastos, ModalChecklist, ModalReemplazo) viven en app/seguimiento/page.tsx
-              y OTRA SESIÓN está editando ese archivo ahora mismo: moverlos hoy sería pelear
-              por el mismo fichero y perder trabajo ajeno. Cuando el semáforo de puntualidad
-              esté commiteado, esos modales deben salir a components/seguimiento/ y esta
-              sección desaparecer. */}
-          {children && (
-            <Seccion titulo="Acciones y vista clásica">
-              <div className={`${TARJETA} p-3`}>
-                <Plegable abierto={false}
-                  resumen={<span className="text-[12px] font-bold text-gray-600">Gastos, checklist de salida, reemplazo y contacto</span>}>
-                  <div className="pt-1">{children}</div>
-                </Plegable>
-              </div>
-            </Seccion>
-          )}
+          {/* La sección 8 ("Acciones y vista clásica") se ELIMINÓ. Era un acordeón cerrado con la
+              tarjeta antigua entera dentro, y existía solo porque sus modales vivían en
+              app/seguimiento/page.tsx. Ahora viven en ./ModalesServicio y se disparan desde la
+              sección a la que pertenecen: gastos y viáticos en "Economía y cierre", checklist y
+              reemplazo en "Unidad, conductor y cumplimiento", teléfono junto al conductor. Un
+              cajón llamado "vista clásica" es donde va a morir lo que nadie quiso ordenar. */}
 
           <p className="text-[10px] text-gray-400 text-center px-4 pb-2 leading-snug">
             Las horas de esta ficha se derivan de la evidencia que dejó el conductor (paradas marcadas,
@@ -1344,5 +1740,27 @@ export default function FichaServicio({
         </div>
       </div>
     </div>
+
+    {/* ══ MODALES OPERATIVOS ═══════════════════════════════════════════════════
+        HERMANOS del drawer, no hijos: el contenedor de arriba es `fixed z-40` y eso abre un
+        contexto de apilamiento propio: un modal `z-50` metido dentro solo sería z-50 RESPECTO
+        A SUS HERMANOS, y seguiría por debajo de cualquier cosa de la página con z-45. Aquí
+        fuera, el 50 gana al 40 de verdad.
+        `rid != null` porque los tres escriben con `.eq("id", reservaId)`: sin id, esa consulta
+        no apunta a ninguna fila concreta y no se lanza siquiera. */}
+    {rid != null && modal === "gastos" && (
+      <ModalGastos reservaId={rid} vehiculoId={(r as any).vehiculo_id ?? null}
+        cliente={s?.cliente_nombre || "—"}
+        onClose={() => setModal(null)} onSaved={onRefresh} />
+    )}
+    {rid != null && modal === "checklist" && (
+      <ModalChecklist reservaId={rid} cliente={s?.cliente_nombre || "—"} soloLectura={checklistSoloLectura}
+        onClose={() => setModal(null)} onSaved={onRefresh} />
+    )}
+    {rid != null && modal === "reemplazo" && (
+      <ModalReemplazo reservaId={rid} placaOriginal={placa || "sin unidad"}
+        onClose={() => setModal(null)} onSaved={onRefresh} />
+    )}
+    </>
   );
 }

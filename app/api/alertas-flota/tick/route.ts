@@ -32,6 +32,11 @@ const admin = createClient(
 // El dedupe garantiza "una sola vez", así que ampliar la ventana solo permite recuperar.
 const VENTANA_HORA_FIJA = 120;
 
+const DIA_MS = 86_400_000;
+// Techo de duración. 26 h y no 12: hay tours full day de hasta 24 h — mismo techo que
+// app/api/cliente/gps/route.ts:60 y lib/servicio-tiempos.ts:308.
+const DURACION_MAX_MS = 26 * 3_600_000;
+
 type ResultadoEnvio = "enviado" | "sin_canal" | "fallo";
 
 function fechaManana(): string {
@@ -47,6 +52,27 @@ function nombreCorto(n?: string | null): string {
   return (n || "").trim().split(/\s+/).slice(0, 2).join(" ") || "Conductor";
 }
 function horaCorta(h?: string | null): string { return h?.slice(0, 5) ?? "-"; }
+
+/**
+ * Instante de fin de un servicio en ms UTC, anclando la hora a `fecha_servicio`.
+ *
+ * `reservas.hora_real_fin` es "HH:MM:SS" DEL DÍA, SIN fecha: componerla a pelo con
+ * `fecha_servicio` deja un nocturno (sale 22:00, cierra 01:30) 20,5 h ANTES de su propia salida.
+ * Un fin anterior al inicio se lee como cruce de medianoche (+24 h) y se acepta solo si la
+ * duración cabe en el techo de 26 h; si no cabe, se cae a la hora pactada — que es lo que este
+ * bloque usaba cuando la columna estaba vacía. Mismo criterio que lib/servicio-tiempos.ts:765 y
+ * lib/alertas-flota.ts (`duracionMin`).
+ */
+function finServicioMs(r: {
+  fecha_servicio?: string | null; hora_servicio?: string | null; hora_real_fin?: string | null;
+}): number | null {
+  const ini = limaAUtcMs(r.fecha_servicio, horaCorta(r.hora_servicio));
+  const fin = limaAUtcMs(r.fecha_servicio, horaCorta(r.hora_real_fin));
+  if (fin == null) return ini;
+  if (ini == null) return fin;
+  const corregido = fin < ini ? fin + DIA_MS : fin;
+  return corregido - ini <= DURACION_MAX_MS ? corregido : ini;
+}
 
 export async function GET(req: NextRequest) { return handler(req); }
 export async function POST(req: NextRequest) { return handler(req); }
@@ -634,7 +660,7 @@ async function handler(req: NextRequest) {
           if (yaCheckout.has(cid)) continue;                       // ya cerró la jornada
           if (!servicios.every((s) => s.estado === "finalizada")) continue; // aún tiene servicios abiertos
           const tiempos = servicios
-            .map((s) => limaAUtcMs(s.fecha_servicio, horaCorta(s.hora_real_fin ?? s.hora_servicio)))
+            .map((s) => finServicioMs(s))
             .filter((t): t is number => Number.isFinite(t as any) && (t as number) > 0);
           const finMs = tiempos.length ? Math.max(...tiempos) : 0;
           if (finMs > 0 && (Date.now() - finMs) / 60000 < graciaMin) continue; // aún dentro de la gracia

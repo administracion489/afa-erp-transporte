@@ -51,8 +51,9 @@
 // Promesa central del diseño: un valor de fuente "operador" NUNCA se descarta en silencio por
 // una estimación. Un solo punto GPS suelto llegó a anular una `hora_real_fin` tecleada y a dejar
 // la duración en 0 (defecto :498). Reglas, en este orden:
-//   1. "parada" (llegada al último paradero) y "gps_finalizado" (el conductor PULSÓ finalizar)
-//      son evidencia DURA del cierre y mandan sobre lo tecleado.
+//   1. "parada" (llegada al último paradero), "conductor_finalizo" (el conductor pulsó finalizar
+//      y el SERVIDOR lo registró) y "gps_finalizado" (el mismo acto, visto por el GPS del
+//      teléfono) son evidencia DURA del cierre y mandan sobre lo tecleado.
 //   2. "operador" gana SIEMPRE a "gps_ultimo" (que solo dice "hasta aquí transmitió").
 //   3. Si el operador tecleó un fin y además hay evidencia dura que lo contradice, se CONSERVAN
 //      LOS DOS (`finOperador` + `finCierre`) y la discrepancia se enseña; no se tira ninguno.
@@ -63,6 +64,37 @@
 //      colocarlo en la línea. Se pierde. Anclarlo al reloj del servidor sería meter por la puerta
 //      de atrás justo el error que este módulo evita.
 //
+// ── UN SOLO NOMBRE PARA EL CIERRE DEL CONDUCTOR: 'conductor_finalizo' ─────────────────
+// Los endpoints que cierran un servicio desde la app del conductor sellaban el mismo hecho con
+// DOS nombres distintos ('conductor' en app/api/conductor/route.ts, 'conductor_finalizo' en
+// app/api/conductor-tercero/finalizar/route.ts) y ninguno de los dos existía en el CHECK del SQL:
+// el UPDATE moría con 23514 y `fin_real_ts` no se escribía nunca. El vocabulario canónico es
+// **'conductor_finalizo'**, y esa es la cadena EXACTA que deben escribir ambos endpoints.
+//
+// Por qué ese nombre y no 'conductor' a secas: 'parada' y 'abordaje' también las produce el
+// conductor, así que "conductor" no distingue un hecho, distingue a una persona — y un nombre así
+// se convierte en el cajón de sastre donde acaba entrando cualquier hora que "vino del conductor",
+// incluida una inferida por geocerco o por GPS. El nombre tiene que decir QUÉ ACTO fue, igual que
+// 'evento_salio'. Aquí el acto es: pulsó finalizar.
+//
+// Por qué es una fuente PROPIA y no se reaprovecha una existente:
+//   · 'gps_finalizado' es OTRO testigo del MISMO acto — el fix que la app fuerza al pulsar
+//     finalizar. Su hora la pone el TELÉFONO, así que sale `estimado: true` y confianza media, y
+//     puede no existir (conductor sin señal, GPS apagado). 'conductor_finalizo' es el registro del
+//     SERVIDOR de esa misma pulsación: mismo hecho, reloj bueno. Por eso GANA al GPS.
+//   · 'operador' mentiría al revés: no es alguien tecleando en /seguimiento días después, es el
+//     conductor cerrando en la calle. Degradarlo a 'operador' —que es lo que hacía el fallback de
+//     `instantePersistido` con toda fuente desconocida— convertía un cierre automático en "lo
+//     tecleó una persona en el ERP", y con RANGO_INICIO eso le ganaba a evidencia mejor.
+// Confianza ALTA: es un acto humano cuyo instante lo estampa el servidor, como 'abordaje'.
+// Y NO es estimado: no se pinta con "~" ni se le prohíbe facturar.
+//
+// En qué extremo vale: SOLO en el fin. "Pulsó finalizar" no significa nada como hora de inicio, así
+// que 'conductor_finalizo' queda FUERA de FUENTES_INICIO y del CHECK del inicio, por el mismo
+// motivo por el que ya quedan fuera 'gps_finalizado' y 'gps_ultimo'. Si alguna vez apareciera en
+// `inicio_real_fuente`, el candado 3 de `instantePersistido` lo degrada a 'operador' y RANGO_INICIO
+// lo manda al fondo: se conserva el hecho de que alguien registró esa hora, no la autoridad.
+//
 // ── LA TRAMPA DE LA MEDIANOCHE ────────────────────────────────────────────────────────
 // `reservas.hora_real_inicio` / `hora_real_fin` son "HH:MM:SS" DEL DÍA, sin fecha
 // (app/seguimiento/page.tsx:1144-1148 lo documenta). Un servicio que sale 22:00 y cierra 01:30
@@ -71,6 +103,33 @@
 // si el fin cae antes del inicio, se asume cruce de medianoche (+1 día) SOLO si el resultado
 // cabe en 26 h — el mismo techo que ya usa la ventana de la huella
 // (app/api/cliente/gps/route.ts:56-58: "26 h y no 12: hay tours full day de hasta 24 h").
+//
+// ── EL INSTANTE GUARDADO GANA A LA HORA RECOMPUESTA ───────────────────────────────────
+// supabase/servicio-horas-reales.sql agrega a `reservas` cuatro columnas que arreglan el dato
+// EN EL ORIGEN, no solo en la pantalla:
+//     inicio_real_ts / fin_real_ts          timestamptz — el instante COMPLETO
+//     inicio_real_fuente / fin_real_fuente  text        — de dónde salió
+// Un timestamptz no tiene medianoche que adivinar: 22:00 y 01:30 son dos instantes y restarlos
+// da 3 h 30 min. Por eso, cuando existen, se prefieren a recomponer un "HH:MM" con la fecha.
+// Hasta que ese SQL se corra Y pase un día de operación estarán en NULL, y todo lo de abajo
+// funciona exactamente igual que hoy: son un ATAJO exacto, no un requisito.
+//
+// CON CUÁNTA AUTORIDAD entran: la de SU PROPIA FUENTE, ni más ni menos. El instante guardado no
+// se cuela por encima de la cascada; se sienta en el escalón que le corresponde
+// (`RANGO_INICIO`) y gana solo a lo que esté por debajo. Un `inicio_real_fuente = 'operador'`
+// no le gana a una parada marcada por el conductor solo por estar en una columna nueva; lo que
+// sí hace es sustituir a la recomposición de `hora_real_inicio`, que es el mismo hecho peor
+// contado. Ante EMPATE de rango gana el guardado: es el mismo hecho con hora exacta.
+//
+// Y LA FUENTE GUARDADA MANDA SOBRE LA ETIQUETA: si dice 'parada', la procedencia que se pinta es
+// "marcado por el conductor", no "registrado por operación". Si dice algo que este módulo no
+// reconoce, degrada a "operador" (el escalón más humilde que sigue siendo un registro) en vez de
+// inventarse autoridad.
+//
+// EL LAVADO NO FUNCIONA: una fuente gps* leída de la BD sigue saliendo con `estimado: true` y su
+// confianza baja, igual que si viniera de `ubicaciones_gps`. Guardar una estimación y volver a
+// leerla NO la convierte en dato duro. El SQL explica por qué el CHECK admite esos valores aun
+// así (describen procedencia, no otorgan permiso).
 //
 // ── CALIBRACIÓN CITADA, NO INVENTADA ──────────────────────────────────────────────────
 // La gracia para declarar "no arrancó" es la MISMA que ya rige en el repo: `no_inicio` de
@@ -111,10 +170,12 @@ export type FuenteTiempo =
   | "parada"          // paradas.hora_llegada — el conductor marcó el paradero
   | "abordaje"        // pasajeros_parada.hora_abordaje — alguien subió (reloj de SERVIDOR)
   | "evento_salio"    // push_eventos_viaje.evento='salio' — se avisó a los pasajeros
+  | "conductor_finalizo" // el conductor pulsó "finalizar" en su app y el SERVIDOR lo registró
   | "gps"             // primer punto de ubicaciones_gps del servicio
   | "gps_finalizado"  // punto GPS con estado='finalizado' (el conductor pulsó finalizar)
   | "gps_ultimo"      // última señal, sin cierre explícito
-  | "operador";       // reservas.hora_real_inicio / hora_real_fin, tecleado a mano
+  | "operador"        // reservas.hora_real_inicio / hora_real_fin, tecleado a mano
+  | "radar";          // Radar IA lo dedujo de un WhatsApp (lib/radar/acciones.ts:1355-1356)
 
 export type Confianza = "alta" | "media" | "baja";
 
@@ -194,6 +255,18 @@ export type ReservaTiempos = {
   hora_real_inicio?: string | null;
   /** "HH:MM:SS" del día, SIN fecha */
   hora_real_fin?: string | null;
+  // ── Instante completo + procedencia (supabase/servicio-horas-reales.sql) ─────────────
+  // NULL mientras ese SQL no se corra y pase un día de operación. Ver la cabecera: cuando
+  // vienen, se prefieren a recomponer "HH:MM" con `fecha_servicio`, pero entran con la
+  // autoridad de su propia fuente, no por encima de la cascada.
+  /** timestamptz ISO — instante COMPLETO de salida */
+  inicio_real_ts?: string | null;
+  /** timestamptz ISO — instante COMPLETO de cierre */
+  fin_real_ts?: string | null;
+  /** 'parada' | 'abordaje' | 'evento_salio' | 'gps' | 'operador' | 'radar' */
+  inicio_real_fuente?: string | null;
+  /** 'parada' | 'conductor_finalizo' | 'gps_finalizado' | 'gps_ultimo' | 'operador' | 'radar' */
+  fin_real_fuente?: string | null;
 };
 
 export type ParadaTiempos = {
@@ -290,34 +363,82 @@ const MEDIO_DIA_MIN = 720;
 
 /** Texto por fuente. Una sola redacción para toda la app (torre, drawer, reporte, cron). */
 const ETIQUETA_FUENTE: Record<FuenteTiempo, string> = {
-  parada:         "marcado por el conductor",
-  abordaje:       "abordaje QR",
-  evento_salio:   "aviso de salida a los pasajeros",
-  gps:            "estimado por GPS",
-  gps_finalizado: "cierre del conductor",
-  gps_ultimo:     "última señal GPS",
-  operador:       "registrado por operación",
+  parada:             "marcado por el conductor",
+  abordaje:           "abordaje QR",
+  evento_salio:       "aviso de salida a los pasajeros",
+  conductor_finalizo: "cierre del conductor",
+  gps:                "estimado por GPS",
+  // Antes también decía "cierre del conductor", exactamente igual que la fuente de arriba. Son
+  // dos testigos del mismo acto con MUY distinto valor —uno lo estampa el servidor, este el
+  // teléfono— y con el mismo texto el operador no podía distinguirlos: en la ficha veía dos veces
+  // "cierre del conductor" sin saber cuál se puede facturar. El "~" de `procedencia()` marca que
+  // es estimado, pero no dice POR QUÉ; el paréntesis sí.
+  gps_finalizado:     "cierre del conductor (por GPS)",
+  gps_ultimo:         "última señal GPS",
+  operador:           "registrado por operación",
+  radar:              "registrado por Radar IA",
 };
 
 /**
  * Cuánto vale cada evidencia.
  *  • parada / abordaje / evento_salio → ALTA: son actos humanos registrados, y en los dos
  *    últimos el timestamp lo pone el SERVIDOR.
+ *  • conductor_finalizo → ALTA: el conductor pulsó finalizar y el instante lo estampa el SERVIDOR
+ *    al atender la llamada (app/api/conductor/route.ts, app/api/conductor-tercero/finalizar).
+ *    Mismo tipo de prueba que `abordaje`: acto humano + reloj de servidor. Es la versión buena de
+ *    `gps_finalizado`, que es ese mismo acto contado por el reloj del teléfono.
  *  • gps / gps_ultimo → BAJA: `created_at` es el reloj del CELULAR y el primer/último punto
  *    puede ser el traslado de cochera, no el servicio.
  *  • gps_finalizado → MEDIA: el punto existe porque el conductor PULSÓ finalizar
  *    (app/conductor/page.tsx:1819,1905 y app/api/conductor-tercero/finalizar/route.ts:33), así
  *    que el HECHO es firme; lo que sigue siendo dudoso es la hora, por el mismo reloj.
  *  • operador → MEDIA: es un humano tecleando, a veces días después y de memoria.
+ *  • radar → MEDIA: detrás hay un mensaje real de un humano en WhatsApp, pero la hora la
+ *    interpretó un modelo del texto del mensaje, no un acto registrado por el sistema.
  */
 const CONFIANZA_FUENTE: Record<FuenteTiempo, Confianza> = {
-  parada: "alta", abordaje: "alta", evento_salio: "alta",
+  parada: "alta", abordaje: "alta", evento_salio: "alta", conductor_finalizo: "alta",
   gps: "baja", gps_finalizado: "media", gps_ultimo: "baja",
-  operador: "media",
+  operador: "media", radar: "media",
 };
 
-/** Todo lo que sale del GPS es una ESTIMACIÓN y jamás se persiste (ver cabecera). */
+/**
+ * Todo lo que sale del GPS es una ESTIMACIÓN y jamás se persiste (ver cabecera).
+ * Esta lista se aplica TAMBIÉN a lo que llega desde `reservas.inicio_real_fuente` /
+ * `fin_real_fuente`: si alguien guardó una hora de GPS en esas columnas, sigue saliendo
+ * estimada. Pasar un dato por la base de datos no lo asciende a dato duro.
+ */
 const FUENTES_ESTIMADAS: FuenteTiempo[] = ["gps", "gps_finalizado", "gps_ultimo"];
+
+/**
+ * Escalón de la CASCADA DE INICIO que le toca a cada fuente. Es el mismo orden que ejecuta la
+ * cascada de abajo, escrito como tabla para que el instante PERSISTIDO pueda entrar por su
+ * escalón en vez de por arriba (ver cabecera). Menor = manda.
+ * Las fuentes de cierre (conductor_finalizo / gps_finalizado / gps_ultimo) no significan nada como
+ * inicio: van al fondo, junto al GPS crudo, por si alguna vez aparecen en `inicio_real_fuente`.
+ * OJO con `conductor_finalizo`: su confianza es ALTA, pero eso mide cuánto vale la hora COMO
+ * CIERRE. Como hora de salida no vale nada —"pulsó finalizar" no es "arrancó"— y por eso baja al
+ * escalón 5 igual que las demás. Confianza y rango son dos ejes distintos.
+ */
+const RANGO_INICIO: Record<FuenteTiempo, number> = {
+  parada: 1, abordaje: 2, evento_salio: 3,
+  operador: 4, radar: 4,
+  gps: 5, conductor_finalizo: 5, gps_finalizado: 5, gps_ultimo: 5,
+};
+
+/** Fuentes que tienen sentido en cada extremo. Espejo de los CHECK del SQL. */
+const FUENTES_INICIO = new Set<FuenteTiempo>(["parada", "abordaje", "evento_salio", "gps", "operador", "radar"]);
+const FUENTES_FIN    = new Set<FuenteTiempo>(["parada", "conductor_finalizo", "gps_finalizado", "gps_ultimo", "operador", "radar"]);
+
+/**
+ * Cuánto puede separarse el instante guardado de la `hora_llegada` de una parada para seguir
+ * considerándose LA MISMA llegada. Sirve para dos cosas: recuperar el NOMBRE del paradero de un
+ * `inicio_real_ts` con fuente 'parada' (la columna guarda la hora, no el paradero), y colapsar en
+ * la línea de tiempo la fila "Inicio del servicio" con la del primer paradero cuando son el mismo
+ * hecho. 60 s: las paradas de una ruta real están a minutos entre sí, así que no hay dos
+ * candidatas dentro de este margen; y absorbe el redondeo de un ida y vuelta por la base.
+ */
+const COLAPSO_PARADA_MS = 60_000;
 
 /**
  * Estados CRUDOS (tal como vienen en la fila, antes de normalizar) que significan "todavía no
@@ -459,6 +580,60 @@ function normalizarGps(gps: PuntoGpsTiempos[] | null | undefined, v: Ventana): {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════════
+// EL INSTANTE GUARDADO EN `reservas` (supabase/servicio-horas-reales.sql)
+// ══════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Parada completada cuya `hora_llegada` es la MISMA llegada que `ts` (± COLAPSO_PARADA_MS).
+ * Devuelve la más cercana, no la primera que pase: si dos cayeran dentro del margen, la
+ * ambigüedad se resuelve por distancia y no por el orden del array.
+ */
+function paradaCercana(ts: number, paradas: ParadaNorm[]): ParadaNorm | null {
+  let mejor: ParadaNorm | null = null;
+  let mejorDif = Infinity;
+  for (const p of paradas) {
+    if (!p.completada || p.llegadaTs === null) continue;
+    const dif = Math.abs(p.llegadaTs - ts);
+    if (dif <= COLAPSO_PARADA_MS && dif < mejorDif) { mejor = p; mejorDif = dif; }
+  }
+  return mejor;
+}
+
+/**
+ * Convierte `inicio_real_ts` + `inicio_real_fuente` (o el par del fin) en un Instante.
+ *
+ * Tres candados, todos deliberados:
+ *  1. LA MISMA VENTANA DE SANIDAD que el resto de la evidencia. Que un timestamp esté guardado
+ *     en `reservas` no lo hace creíble: si cae fuera del día del servicio es un reloj roto o un
+ *     UPDATE equivocado, y entrar envenenaría la línea de tiempo entera. Se descarta y la
+ *     cascada sigue su camino, igual que con una `hora_llegada` corrupta.
+ *  2. FUENTE DESCONOCIDA O AUSENTE → "operador". Nunca se asciende sola a evidencia dura: el
+ *     escalón por defecto es el más humilde que sigue siendo un registro humano. (El SQL ya
+ *     rechaza guardar una hora sin fuente, pero este módulo también lee filas viejas, respuestas
+ *     recortadas de PostgREST y datos de prueba.)
+ *  3. FUENTE QUE NO PEGA EN ESTE EXTREMO → también "operador". Un 'abordaje' como hora de fin, o
+ *     un 'gps_ultimo' como hora de inicio, no significan nada; se conserva el HECHO de que
+ *     alguien registró esa hora y se tira la autoridad que no le corresponde.
+ *
+ * Si la fuente es 'parada' se recupera el NOMBRE del paradero de las paradas cargadas: la
+ * columna guarda la hora, no a qué paradero pertenece.
+ */
+function instantePersistido(
+  iso: string | null | undefined,
+  fuenteCruda: string | null | undefined,
+  permitidas: Set<FuenteTiempo>,
+  v: Ventana,
+  paradas: ParadaNorm[],
+): Instante | null {
+  const ts = tsIso(iso);
+  if (!dentro(ts, v)) return null;
+  const cruda = String(fuenteCruda ?? "").trim().toLowerCase() as FuenteTiempo;
+  const fuente: FuenteTiempo = permitidas.has(cruda) ? cruda : "operador";
+  const detalle = fuente === "parada" ? paradaCercana(ts as number, paradas)?.nombre ?? null : null;
+  return crearInstante(ts as number, fuente, detalle);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════════
 // MOTOR
 // ══════════════════════════════════════════════════════════════════════════════════════
 
@@ -529,6 +704,11 @@ export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
 
   const completadasConHora = paradas.filter((p) => p.completada && p.llegadaTs !== null);
 
+  // Instantes GUARDADOS en `reservas` (supabase/servicio-horas-reales.sql). NULL mientras ese
+  // SQL no se corra: todo lo de abajo funciona igual sin ellos.
+  const inicioPersistido = instantePersistido(r.inicio_real_ts, r.inicio_real_fuente, FUENTES_INICIO, v, paradas);
+  const finPersistido    = instantePersistido(r.fin_real_ts,    r.fin_real_fuente,    FUENTES_FIN,    v, paradas);
+
   // ── Cancelada: no hay horario que derivar y forzarlo solo ensucia el reporte ─────────
   if (estado === "cancelada") return SIN_TIEMPOS("na", "servicio cancelado");
 
@@ -559,8 +739,14 @@ export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
   //    y puede ser el traslado de cochera), y la corrección humana gana siempre a una estimación
   //    (misma doctrina que arregla el defecto :498 en la cascada de fin).
   //    Se compone SIEMPRE, gane o no, para poder dejar rastro de él en la línea de tiempo.
-  let inicioOperador: Instante | null = null;
-  if (r.hora_real_inicio) {
+  //
+  //    Si `inicio_real_ts` viene con fuente de registro ('operador'/'radar'), ES este valor: un
+  //    instante exacto y el MISMO hecho que `hora_real_inicio`, solo que bien contado. Se usa en
+  //    su lugar en vez de recomponer el "HH:MM" —y así no salen DOS filas del mismo registro en
+  //    la línea de tiempo, una diciendo que no se usó la otra.
+  let inicioOperador: Instante | null =
+    inicioPersistido && RANGO_INICIO[inicioPersistido.fuente] === RANGO_INICIO.operador ? inicioPersistido : null;
+  if (!inicioOperador && r.hora_real_inicio) {
     let ts = limaMs(r.fecha_servicio, r.hora_real_inicio);
     // "HH:MM:SS" sin fecha: si queda más de medio día ANTES de la hora pactada, en realidad es
     // del día siguiente (servicio nocturno que arrancó pasada la medianoche).
@@ -573,31 +759,55 @@ export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
   //    hora es la del celular. Sirve para PINTAR, nunca para cobrar.
   if (!inicio && gps.length) inicio = crearInstante(gps[0].ts, "gps");
 
+  // 6. El instante GUARDADO entra por SU escalón, no por arriba (ver cabecera). Gana a lo que
+  //    esté por debajo y también al EMPATE —mismo hecho, hora exacta en vez de recompuesta—,
+  //    pero un 'operador' guardado no le arrebata la salida a una parada que el conductor marcó.
+  //    Ya cubierto arriba cuando es el propio `inicioOperador`; esto resuelve el resto.
+  if (inicioPersistido && (!inicio || RANGO_INICIO[inicioPersistido.fuente] <= RANGO_INICIO[inicio.fuente])) {
+    inicio = inicioPersistido;
+  }
+
   // ────────────────────────────────────────────────────────────────────────────────────
   // CASCADA DE FIN — DOS valores separados (decisión del dueño, ver cabecera)
   // ────────────────────────────────────────────────────────────────────────────────────
 
+  // El `fin_real_ts` guardado no es "el fin" a secas: entra por la puerta que le abre SU fuente.
+  // 'parada' es la llegada al último paradero (la que factura); el resto son cierre operativo, y
+  // cada uno pelea contra su homólogo derivado, no contra todos. Así un `fin_real_fuente` puesto
+  // por descuido no puede convertir "hasta aquí transmitió" en "hora de llegada facturable".
+  const persistidoEs = (f: FuenteTiempo) => (finPersistido && finPersistido.fuente === f ? finPersistido : null);
+
   // A. Llegada al ÚLTIMO paradero marcado. La que factura.
   const ultimaMarcada = completadasConHora.length ? completadasConHora[completadasConHora.length - 1] : null;
   const finParadero: Instante | null =
-    ultimaMarcada ? crearInstante(ultimaMarcada.llegadaTs as number, "parada", ultimaMarcada.nombre || null) : null;
+    persistidoEs("parada") ||
+    (ultimaMarcada ? crearInstante(ultimaMarcada.llegadaTs as number, "parada", ultimaMarcada.nombre || null) : null);
 
-  // B. Cierre operativo. El punto con estado='finalizado' NO es un fix más: la app lo FUERZA al
+  // B. Cierre operativo. Tres testigos del mismo acto, de mejor a peor reloj:
+  //
+  //    B.1 `conductor_finalizo` — el SERVIDOR registró la llamada de "finalizar". No tiene
+  //    homólogo derivable aquí: esta ruta no ve las peticiones HTTP, solo la columna que dejaron.
+  //    Por eso es `persistidoEs(...)` a secas y no un `|| <derivado>` como los otros dos.
+  const finConductor: Instante | null = persistidoEs("conductor_finalizo");
+
+  //    B.2 El punto GPS con estado='finalizado' NO es un fix más: la app lo FUERZA al
   //    pulsar finalizar, saltándose el throttle (app/conductor/page.tsx:1212 "forzar"), así que su
   //    existencia prueba el cierre. Se toma el ÚLTIMO por si el conductor cerró, revirtió y volvió
   //    a cerrar. Sin él queda la última señal, que solo dice "hasta aquí transmitió".
   const finalizados = gps.filter((g) => g.estado === "finalizado");
-  const finGpsFinalizado: Instante | null = finalizados.length
-    ? crearInstante(finalizados[finalizados.length - 1].ts, "gps_finalizado")
-    : null;
-  const finGpsUltimo: Instante | null = gps.length
-    ? crearInstante(gps[gps.length - 1].ts, "gps_ultimo")
-    : null;
+  const finGpsFinalizado: Instante | null =
+    persistidoEs("gps_finalizado") ||
+    (finalizados.length ? crearInstante(finalizados[finalizados.length - 1].ts, "gps_finalizado") : null);
+  const finGpsUltimo: Instante | null =
+    persistidoEs("gps_ultimo") ||
+    (gps.length ? crearInstante(gps[gps.length - 1].ts, "gps_ultimo") : null);
 
   // C. Lo tecleado por el operador. Se COMPONE SIEMPRE, gane o no gane el cierre: es un valor
   //    humano y no puede desaparecer sin rastro (si no gana, sale en la línea de tiempo con nota).
-  let finOperador: Instante | null = null;
-  if (r.hora_real_fin) {
+  //    Si `fin_real_ts` viene con fuente de registro, ES ese valor: el mismo hecho con instante
+  //    exacto, sin la trampa de la medianoche que obliga a los malabares de abajo.
+  let finOperador: Instante | null = persistidoEs("operador") || persistidoEs("radar");
+  if (!finOperador && r.hora_real_fin) {
     let ts = limaMs(r.fecha_servicio, r.hora_real_fin);
     if (ts !== null) {
       // AQUÍ vive el bug de la medianoche. `Math.max(0, fin − ini)` de
@@ -621,7 +831,14 @@ export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
   // duración salía 0; ejecutado: finalizada, inicio 05:00, fin 12:00, un punto GPS a 05:02).
   // Orden: evidencia DURA de cierre (el conductor pulsó finalizar) > corrección HUMANA >
   // "hasta aquí transmitió". `gps_ultimo` no puede ganarle nunca a un valor del operador.
-  const finCierre: Instante | null = finGpsFinalizado || finOperador || finGpsUltimo;
+  //
+  // `conductor_finalizo` entra ARRIBA de `gps_finalizado` porque son el MISMO acto con distinto
+  // reloj: el del servidor y el del teléfono. Teniendo el bueno, usar el malo sería elegir a
+  // propósito la peor versión del mismo hecho — y además el bueno no sale `estimado`, así que la
+  // ficha deja de pintar con "~" un cierre que sí se puede facturar. Y va ARRIBA de `operador` por
+  // la regla 1 de la cabecera: la evidencia dura del cierre manda sobre lo tecleado de memoria (lo
+  // tecleado no se pierde — sigue saliendo en la línea de tiempo vía `finOperadorDescartado`).
+  const finCierre: Instante | null = finConductor || finGpsFinalizado || finOperador || finGpsUltimo;
 
   // El más tardío de los dos. No el "mejor": el más tardío, porque el servicio no terminó
   // mientras alguna de las dos evidencias siga viva.
@@ -684,9 +901,12 @@ export function derivarTiempos(e: EntradaTiempos): TiemposServicio {
   //     05:02  Óvalo Naranjal
   // Cuando coinciden no se pinta la fila suelta; la parada se rotula como el arranque y la
   // línea empieza donde de verdad empezó el servicio.
-  const paradaInicio = inicio && inicio.fuente === "parada"
-    ? paradas.find((p) => p.completada && p.llegadaTs === inicio.ts) ?? null
-    : null;
+  // El match es POR CERCANÍA (± COLAPSO_PARADA_MS) y no por igualdad exacta: un
+  // `inicio_real_ts` con fuente 'parada' es la misma llegada aunque el ida y vuelta por la base
+  // le haya movido el redondeo, y con igualdad estricta se pintaba dos veces —"Inicio del
+  // servicio 05:02" y "Óvalo Naranjal 05:02"— como si fueran dos hechos. Si NO hay parada dentro
+  // del margen, no se colapsa nada: son dos hechos distintos y se enseñan los dos.
+  const paradaInicio = inicio && inicio.fuente === "parada" ? paradaCercana(inicio.ts, paradas) : null;
 
   if (!paradaInicio) {
     linea.push(filaDe({

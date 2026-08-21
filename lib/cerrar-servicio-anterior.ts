@@ -16,6 +16,8 @@
 // contradicción "arrancó otro", no toca nada — un servicio que sigue abierto porque de verdad
 // sigue en ruta no debe cerrarse jamás.
 
+import { ESTADO_ADMIN_INICIAL } from "@/lib/estados";
+
 /** Cierra los `en_curso` que hayan quedado abiertos para el mismo vehículo. */
 export async function cerrarServiciosAnterioresDelVehiculo(
   admin: any,
@@ -45,6 +47,17 @@ export async function cerrarServiciosAnterioresDelVehiculo(
       console.warn("[cerrar-servicio-anterior] no se pudo cerrar:", errUpd.message);
       return 0;
     }
+
+    // Este es el TERCER camino por el que una reserva llega a "finalizada" (los otros dos son la
+    // app del conductor y el link del tercero) y hasta ahora era el único que no sembraba el
+    // puente a la dimensión administrativa: el servicio quedaba cerrado en operaciones e
+    // invisible para liquidación, sin que nadie pudiera notarlo. Solo si `estado_admin` está
+    // NULL, y en silencio si la columna todavía no existe (supabase/estado-admin.sql sin correr):
+    // el cierre ya ocurrió y no puede fallar por esto.
+    const { error: errAdmin } = await admin.from("reservas")
+      .update({ estado_admin: ESTADO_ADMIN_INICIAL })
+      .in("id", ids).eq("estado", "finalizada").is("estado_admin", null);
+    if (errAdmin) console.warn("[cerrar-servicio-anterior] estado_admin:", errAdmin.message);
     console.info(`[cerrar-servicio-anterior] reserva ${reservaIdNueva} arrancó → cerrados ${ids.join(", ")}`);
     return ids.length;
   } catch (e: any) {

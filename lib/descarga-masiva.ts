@@ -150,7 +150,7 @@ export async function cargarServiciosRango(
     paginarFilas(() => supabase.from("clientes").select("id,nombre,empresa,ruc").order("id"), 50000),
     paginarFilas(() => supabase.from("vehiculos").select("id,placa").order("id"), 50000),
     paginarFilas(() => supabase.from("vehiculos_tercero").select("id,placa").order("id"), 50000),
-    paginarFilas(() => supabase.from("conductores").select("id,nombre,numero_licencia").order("id"), 50000),
+    paginarFilas(() => supabase.from("conductores").select("id,nombre,numero_licencia:licencia").order("id"), 50000),
     paginarFilas(() => supabase.from("conductores_tercero").select("id,nombre,licencia").order("id"), 50000),
   ]);
 

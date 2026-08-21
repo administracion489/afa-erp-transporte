@@ -13,6 +13,7 @@ import { registrarLectura, corregirCapturaPorReloj, hashDeFoto } from "@/lib/odo
 import { emitirEventoViaje, pasajerosDeReserva, pasajerosEsperandoDeParada, payloadsViaje, horaLimaHHmm, enviarPushAPasajeros, payloadRespuestaChat } from "@/lib/push";
 import { evaluarProximidad, emitirLlego } from "@/lib/proximidad";
 import { cerrarServiciosAnterioresDelVehiculo } from "@/lib/cerrar-servicio-anterior";
+import { ESTADO_ADMIN_INICIAL } from "@/lib/estados";
 import {
   firmarTokenConductor, sesionDeToken,
   loginBloqueado, registrarIntentoFallido, limpiarIntentos,
@@ -90,6 +91,208 @@ function esViolacionUnica(err: any): boolean {
   if (!err) return false;
   if (err.code === "23505") return true;
   return /duplicate key value violates unique constraint/i.test(err.message || "");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// HORA REAL DEL SERVICIO — sellar el instante, y solo con evidencia dura
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// Medido sobre 30 días de producción (corte 2026-08-20, 575 servicios operados):
+//     reservas.hora_real_fin ......  0 de 575   ← CERO en un mes
+//     reservas.hora_real_inicio ...  1 de 575
+// No es que falte el hecho: es que hasta hoy esas dos columnas SOLO las llenaba un humano
+// tecleando en /seguimiento, y nadie teclea. La ficha del servicio ya DERIVA la hora de la
+// evidencia del conductor (lib/servicio-tiempos.ts + components/seguimiento/FichaServicio.tsx),
+// pero lo derivado se PINTA y no se guarda, así que todo lo que lee la columna sigue vacío: la
+// liquidación imprime salida/llegada en blanco (lib/liquidacion-datos.ts:217-218) y las alertas
+// de solape de flota asumen un bloque fijo por defecto cuando no hay fin (lib/alertas-flota.ts:40).
+// El dato hay que arreglarlo en el ORIGEN — aquí, donde el conductor deja la evidencia.
+//
+// DOCTRINA DE LA CASA (lib/avance-paradas.ts:30): "inferir para PINTAR es otra cosa que inferir
+// para ESCRIBIR". Esta función se llama ÚNICAMENTE con el instante de un acto humano registrado:
+// el conductor marcó la parada (hora de LLEGADA, que puede venir del geocerco) o pulsó finalizar.
+// Una hora estimada por GPS se pinta en la ficha; por aquí no entra jamás.
+//
+// TRES PROMESAS, en este orden:
+//   1. NUNCA pisa un valor existente. El filtro `.is(col, null)` va en la BD, no en JS: dos
+//      dispositivos marcando a la vez no se pisan, y la corrección humana manda siempre.
+//   2. NUNCA rompe al conductor. Todo es best-effort: si falla, se avisa por consola y el
+//      marcado de la parada sigue siendo un éxito para quien está en la calle.
+//   3. FUNCIONA SIN EL SQL CORRIDO. Las columnas de procedencia (inicio_real_ts / fin_real_ts /
+//      inicio_real_fuente / fin_real_fuente, de supabase/servicio-horas-reales.sql) y estado_admin
+//      (supabase/estado-admin.sql) son OPCIONALES: si la BD no las tiene, se reintenta con menos
+//      columnas hasta guardar al menos la hora de toda la vida.
+
+/** De qué acto salió la hora que se sella. Vocabulario CANÓNICO, el mismo que el `FuenteTiempo`
+ *  de lib/servicio-tiempos.ts y el mismo que admiten los CHECK de supabase/servicio-horas-reales.sql
+ *  — la cadena tiene que coincidir EXACTAMENTE o el UPDATE muere con 23514:
+ *   · 'parada'             → llegada al paradero marcada por el conductor. Evidencia dura.
+ *   · 'conductor_finalizo' → el conductor pulsó "finalizar" y no hay ninguna parada con hora; el
+ *                            instante lo estampa el SERVIDOR al atender la llamada. Solo vale como
+ *                            hora de FIN ("pulsó finalizar" no significa nada como inicio). No se
+ *                            usa 'operador' (reservado para lo que teclea un humano en /seguimiento)
+ *                            ni 'gps_finalizado' (ese designa un punto de ubicaciones_gps, con el
+ *                            reloj del teléfono). Ver la nota larga en lib/servicio-tiempos.ts:67. */
+type FuenteHoraReal = "parada" | "conductor_finalizo";
+
+/** ISO → "HH:MM:SS" en hora de Lima (UTC-5 fijo), que es el formato que ya guardan
+ *  hora_real_inicio/hora_real_fin (lo escribe a mano `guardarHoraManual`, en
+ *  components/seguimiento/FichaServicio.tsx). Mismo offset que
+ *  LIMA_OFFSET_MS en lib/servicio-tiempos.ts. null si el ISO no parsea. */
+function hhmmssLima(iso: string): string | null {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return null;
+  return new Date(t - 5 * 3_600_000).toISOString().slice(11, 19);
+}
+
+/** Sella hora_real_inicio / hora_real_fin de una reserva SOLO SI está NULL. Best-effort: nunca
+ *  lanza, nunca convierte un fallo suyo en un error para el conductor. `instanteISO` es el momento
+ *  del HECHO (llegada a la parada / cierre del servicio), no el del clic que lo reporta. */
+async function sellarHoraReal(
+  reservaId: number,
+  extremo: "inicio" | "fin",
+  instanteISO: string,
+  fuente: FuenteHoraReal,
+): Promise<void> {
+  try {
+    const hhmmss = hhmmssLima(instanteISO);
+    if (!hhmmss || !Number.isFinite(reservaId) || reservaId <= 0) return;
+    const col = extremo === "inicio" ? "hora_real_inicio" : "hora_real_fin";
+
+    // Estado actual + ¿ya hay hora?
+    const { data: r } = await admin.from("reservas")
+      .select("estado, hora_real_inicio, hora_real_fin")
+      .eq("id", reservaId).maybeSingle();
+    if (!r) return;
+    if ((r as any)[col]) return;                                  // promesa 1: no se pisa nada
+    if (r.estado === "cancelada") return;                         // un servicio anulado no tiene hora real
+    if (extremo === "fin" && r.estado !== "finalizada") return;   // el fin solo se sella si el servicio cerró
+
+    const base: Record<string, any> = extremo === "inicio"
+      // `checkin_realizado` ya no decide nada (el tablero dejó de leerlo justamente porque estaba
+      // puesto en 1 de 784 servicios; ver la nota de app/seguimiento/page.tsx `checkin_realizado`),
+      // pero mientras exista que al
+      // menos deje de mentir: si el conductor marcó una parada, el servicio arrancó.
+      ? { hora_real_inicio: hhmmss, checkin_realizado: true }
+      : { hora_real_fin: hhmmss };
+    const procedencia: Record<string, any> = extremo === "inicio"
+      ? { inicio_real_ts: instanteISO, inicio_real_fuente: fuente }
+      : { fin_real_ts: instanteISO, fin_real_fuente: fuente };
+
+    // De más a menos columnas. Se degrada tanto si la BD no tiene las columnas nuevas como si
+    // rechaza el valor de `fuente` por un CHECK: lo importante es que la hora quede guardada.
+    const intentos: Record<string, any>[] = [];
+    const proponer = (p: Record<string, any>) => {
+      const firma = Object.keys(p).sort().join(",");
+      if (!intentos.some((q) => Object.keys(q).sort().join(",") === firma)) intentos.push(p);
+    };
+    proponer({ ...base, ...procedencia });
+    proponer(base);
+    proponer({ [col]: hhmmss });
+
+    let ultimo: any = null;
+    for (const payload of intentos) {
+      // `.is(col, null)` = el "solo si está NULL" lo decide la BD (0 filas afectadas si ya había
+      // hora, y eso NO es error). Hace la operación idempotente y a prueba de carreras.
+      const { error } = await admin.from("reservas").update(payload).eq("id", reservaId).is(col, null);
+      if (!error) return;
+      ultimo = error;
+    }
+    console.warn(`[sellarHoraReal] reserva ${reservaId} ${extremo}: no se pudo guardar:`, ultimo?.message);
+  } catch (e: any) {
+    console.warn(`[sellarHoraReal] reserva ${reservaId} ${extremo}:`, e?.message);
+  }
+}
+
+/**
+ * Puente dimensión A (operativa) → dimensión B (administrativa) de lib/estados.ts: un servicio
+ * que acaba de cerrarse entra al embudo `por_liquidar → liquidada → facturada → cobrada`.
+ *
+ * VA APARTE DEL SELLO DE LA HORA, y no dentro de él, porque son dos hechos distintos: el
+ * servicio cerró (siempre) y además dejó una hora nueva (a veces). Montado en el mismo UPDATE
+ * —que lleva `.is(hora_real_fin, null)`— un servicio cuya hora de fin ya hubiera tecleado un
+ * operador NUNCA entraría al embudo administrativo, justo el que más falta hace cobrar.
+ *
+ * Tres guardas: solo si el servicio quedó `finalizada`, solo si `estado_admin` está NULL, y
+ * silencioso si la columna todavía no existe (supabase/estado-admin.sql sin correr).
+ * Lo llaman las TRES vías de cierre: esta ruta, app/api/conductor-tercero/{parada,finalizar}
+ * y lib/cerrar-servicio-anterior.ts.
+ */
+async function sembrarEstadoAdmin(reservaId: number): Promise<void> {
+  try {
+    if (!Number.isFinite(reservaId) || reservaId <= 0) return;
+    const { error } = await admin.from("reservas")
+      .update({ estado_admin: ESTADO_ADMIN_INICIAL })
+      .eq("id", reservaId).eq("estado", "finalizada").is("estado_admin", null);
+    if (error && !esColumnaInexistente(error)) {
+      console.warn(`[sembrarEstadoAdmin] reserva ${reservaId}:`, error.message);
+    }
+  } catch (e: any) {
+    console.warn(`[sembrarEstadoAdmin] reserva ${reservaId}:`, e?.message);
+  }
+}
+
+/**
+ * DESHACE el sello que dejó ESTA MISMA llegada — el otro lado de `sellarHoraReal`.
+ *
+ * El "Deshacer" del nudge de auto-llegada (app/conductor/page.tsx) existe precisamente porque el
+ * geocerco se equivoca: el bus duerme dentro del radio del primer paradero y a las 04:00 se marca
+ * una llegada que no ocurrió. Sin esto, ese —el ÚNICO caso en que la evidencia es dudosa— era el
+ * único que quedaba grabado en piedra: `anular_parada` devolvía la parada a pendiente pero la hora
+ * del servicio seguía sellada, con fuente 'parada' (la de máxima autoridad, lib/servicio-tiempos.ts
+ * RANGO_INICIO=1), y como el sello es "solo si está NULL" la salida REAL de las 07:00 ya no podía
+ * corregirlo jamás. La ficha pintaba las 04:00 y la liquidación facturaba desde las 04:00.
+ *
+ * SOLO revierte lo que selló esta ruta con ESTA parada, nunca lo que puso un humano:
+ *   · la procedencia guardada tiene que ser 'parada' (si dice 'operador'/'radar' → intocable);
+ *   · el instante guardado tiene que ser el de ESTA llegada (± 1 s), o —si la BD todavía no tiene
+ *     las columnas de procedencia— su "HH:MM:SS" tiene que coincidir exactamente;
+ *   · el UPDATE viaja con `.eq(col, <valor leído>)`: compare-and-swap, así que si entre la lectura
+ *     y la escritura alguien puso otra hora, no se borra nada.
+ * Best-effort como todo lo demás: si falla, la parada ya quedó anulada igual.
+ */
+async function revertirSelloDeParada(
+  reservaId: number,
+  extremo: "inicio" | "fin",
+  instanteISO: string,
+): Promise<void> {
+  try {
+    const hhmmss = hhmmssLima(instanteISO);
+    if (!hhmmss || !Number.isFinite(reservaId) || reservaId <= 0) return;
+    const col       = extremo === "inicio" ? "hora_real_inicio"   : "hora_real_fin";
+    const colTs     = extremo === "inicio" ? "inicio_real_ts"     : "fin_real_ts";
+    const colFuente = extremo === "inicio" ? "inicio_real_fuente" : "fin_real_fuente";
+
+    let conProcedencia = true;
+    const sel = await admin.from("reservas")
+      .select(`${col}, ${colTs}, ${colFuente}`).eq("id", reservaId).maybeSingle();
+    let r = sel.data;
+    if (sel.error && esColumnaInexistente(sel.error)) {
+      conProcedencia = false;
+      ({ data: r } = await admin.from("reservas").select(col).eq("id", reservaId).maybeSingle());
+    }
+    const guardada = r ? (r as any)[col] : null;
+    if (!guardada) return;                                    // no hay nada que deshacer
+
+    const tsGuardado = conProcedencia ? Date.parse((r as any)[colTs] ?? "") : NaN;
+    const tsEvento   = Date.parse(instanteISO);
+    if (conProcedencia && (r as any)[colFuente] && (r as any)[colFuente] !== "parada") return;
+    if (Number.isFinite(tsGuardado) && Number.isFinite(tsEvento)) {
+      if (Math.abs(tsGuardado - tsEvento) > 1_000) return;     // el sello es de OTRO hecho
+    } else if (guardada !== hhmmss) return;                    // sin instante guardado: por la hora del día
+
+    // `checkin_realizado` vuelve como estaba: lo puso a true este mismo sello (ver `base` en
+    // sellarHoraReal) y sin parada marcada vuelve a ser mentira.
+    const limpiar: Record<string, any> = { [col]: null };
+    if (extremo === "inicio") limpiar.checkin_realizado = false;
+    let { error } = await admin.from("reservas")
+      .update({ ...limpiar, [colTs]: null, [colFuente]: null }).eq("id", reservaId).eq(col, guardada);
+    if (error && esColumnaInexistente(error)) {
+      ({ error } = await admin.from("reservas").update(limpiar).eq("id", reservaId).eq(col, guardada));
+    }
+    if (error) console.warn(`[revertirSelloDeParada] reserva ${reservaId} ${extremo}:`, error.message);
+  } catch (e: any) {
+    console.warn(`[revertirSelloDeParada] reserva ${reservaId} ${extremo}:`, e?.message);
+  }
 }
 
 // Sube la foto del odómetro (base64 que manda el conductor) al bucket vehiculos-fotos vía
@@ -456,10 +659,33 @@ export async function POST(req: NextRequest) {
         // de ENTRADA al radio del paradero; el marcado manual manda null → now(). La
         // columna es opcional (SQL paradas-hora-llegada.sql); si el build de la BD aún
         // no la tiene, se reintenta sin ella para no romper el marcado.
-        const llegadaISO = typeof horaLlegada === "string" && horaLlegada ? horaLlegada : new Date().toISOString();
-        let { error } = await admin.from("paradas")
-          .update({ estado: "completada", hora_llegada: llegadaISO }).eq("id", paradaId);
+        // Se re-serializa lo que llega del cliente (`new Date(t).toISOString()`) en vez de
+        // reenviarlo tal cual: normaliza el formato y garantiza que el valor que se mete en el
+        // filtro de abajo no lleva comas ni comillas que rompan la sintaxis de PostgREST.
+        const tLlegada = typeof horaLlegada === "string" && horaLlegada ? Date.parse(horaLlegada) : NaN;
+        const llegadaISO = Number.isFinite(tLlegada) ? new Date(tLlegada).toISOString() : new Date().toISOString();
+
+        // REGLA DE LA COLUMNA `hora_llegada`: GANA LA LLEGADA MÁS TEMPRANA YA REGISTRADA.
+        // Hasta ahora el UPDATE no llevaba guarda y cada reenvío de la misma parada la pisaba con
+        // un instante más tardío — y esta columna no es un campo cualquiera: es la evidencia
+        // humana de la que vive toda la línea de tiempo (lib/servicio-tiempos.ts) y ahora también
+        // la hora que se PERSISTE en la reserva. Los dos casos reales que llegan repetidos son:
+        //   · el reenvío por mala señal (mismo hecho, instante posterior) → se descarta, bien;
+        //   · el nudge del geocerco, que reporta la ENTRADA al radio y puede llegar DESPUÉS del
+        //     toque manual describiendo un instante ANTERIOR → corrige hacia atrás, que es lo
+        //     correcto: el bus llegó cuando entró al radio, no cuando el conductor lo confirmó.
+        // Una sola regla cubre ambos, y es la misma que ya aplica `sellarHoraReal` a la reserva:
+        // el hecho más cercano a la llegada manda, y nunca lo pisa un clic posterior.
+        const marcado = await admin.from("paradas")
+          .update({ estado: "completada", hora_llegada: llegadaISO }, { count: "exact" })
+          .eq("id", paradaId)
+          .or(`hora_llegada.is.null,hora_llegada.gt."${llegadaISO}"`);
+        let error = marcado.error;
         if (error && esColumnaInexistente(error)) {
+          ({ error } = await admin.from("paradas").update({ estado: "completada" }).eq("id", paradaId));
+        } else if (!error && !marcado.count) {
+          // La guarda rechazó la hora (ya había una anterior, o el reenvío repite la misma): se
+          // conserva la registrada y se asegura solo el estado, que es lo que el conductor pidió.
           ({ error } = await admin.from("paradas").update({ estado: "completada" }).eq("id", paradaId));
         }
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -476,11 +702,42 @@ export async function POST(req: NextRequest) {
           const { data: pMarcada } = await admin.from("paradas").select("reserva_id").eq("id", paradaId).maybeSingle();
           const rid = Number(pMarcada?.reserva_id);
           if (Number.isFinite(rid) && rid > 0) {
-            const { data: todas } = await admin.from("paradas").select("estado").eq("reserva_id", rid);
-            const completas = (todas ?? []).length > 0 && (todas ?? []).every((p: any) => p.estado === "completada");
+            // En ORDEN DE RECORRIDO y con la hora: es exactamente lo que lee el motor
+            // (lib/servicio-tiempos.ts `completadasConHora`, ordenado por `paradas.orden`), así
+            // que la hora que se PERSISTE es la misma que la ficha ya DERIVA. `hora_llegada` es
+            // opcional → si la BD no la tiene, se releen solo estado+orden y se sella con
+            // `llegadaISO`, que es la evidencia que acaba de entrar por esta misma petición.
+            const leerParadas = (cols: string) =>
+              admin.from("paradas").select(cols).eq("reserva_id", rid).order("orden");
+            let { data: todas, error: eTodas } = await leerParadas("estado, hora_llegada, orden");
+            if (eTodas && esColumnaInexistente(eTodas)) ({ data: todas, error: eTodas } = await leerParadas("estado, orden"));
+            if (eTodas) throw new Error(eTodas.message);
+            const filas = (todas ?? []) as any[];
+            const conHora = filas.filter((p) => p.estado === "completada" && p.hora_llegada);
+            const completas = filas.length > 0 && filas.every((p: any) => p.estado === "completada");
+
+            // HORA REAL DE INICIO: la llegada al PRIMER paradero marcado, la del geocerco si el
+            // nudge la detectó. Deliberadamente NO se usa now(): escribir el instante del CLIC en
+            // vez del de la llegada es justo el defecto que se eliminó del tablero — el botón de
+            // check-in manual de /seguimiento guardaba la hora del clic y firmaba "salió 11:00" un
+            // servicio de las 05:00.
+            //
+            // La condición de "primera" la pone `sellarHoraReal` con su `.is(col, null)`, NO un
+            // contador. Contar aquí (`completadas === 1`) era una igualdad exacta sobre una lectura
+            // POSTERIOR al update y en otra consulta: dos marcados solapados —doble toque, reintento
+            // por mala señal, dos dispositivos— veían los dos "2" y NINGUNO sellaba el arranque, sin
+            // ninguna vía posterior de recuperación. Ahora cada marcado lo intenta y la BD decide.
+            await sellarHoraReal(rid, "inicio", conHora.length ? conHora[0].hora_llegada : llegadaISO, "parada");
+
             if (completas) {
               await admin.from("reservas").update({ estado: "finalizada" })
                 .eq("id", rid).eq("estado", "en_curso"); // no pisar un estado distinto
+              // HORA REAL DE FIN, mismo criterio: la hora de llegada a la ÚLTIMA parada, que es la
+              // que va a la LIQUIDACIÓN (lib/servicio-tiempos.ts separa `finParadero` de
+              // `finCierre`: cobrar el cierre de la app sería cobrar el retorno a cochera).
+              // sellarHoraReal comprueba que la reserva quedó "finalizada" antes de sellar nada.
+              await sellarHoraReal(rid, "fin", conHora.length ? conHora[conHora.length - 1].hora_llegada : llegadaISO, "parada");
+              await sembrarEstadoAdmin(rid);
             }
           }
         } catch (e: any) { console.warn("[marcar_parada] no se pudo auto-cerrar:", e?.message); }
@@ -519,12 +776,36 @@ export async function POST(req: NextRequest) {
       case "anular_parada": {
         const { paradaId } = body;
         if (!paradaId) return NextResponse.json({ error: "paradaId requerido" }, { status: 400 });
+
+        // La llegada se lee ANTES de borrarla: es lo único que permite saber después si el sello
+        // del servicio salió de ESTA parada (ver revertirSelloDeParada).
+        const pre = await admin.from("paradas")
+          .select("reserva_id, hora_llegada").eq("id", paradaId).maybeSingle();
+        let pAntes = pre.data;
+        if (pre.error && esColumnaInexistente(pre.error)) {
+          ({ data: pAntes } = await admin.from("paradas").select("reserva_id").eq("id", paradaId).maybeSingle());
+        }
+
         let { error } = await admin.from("paradas")
           .update({ estado: "pendiente", hora_llegada: null }).eq("id", paradaId);
         if (error && esColumnaInexistente(error)) {
           ({ error } = await admin.from("paradas").update({ estado: "pendiente" }).eq("id", paradaId));
         }
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+        // Deshacer TAMBIÉN el horario del servicio, si lo había sellado esta misma llegada. Sin
+        // esto el "Deshacer" no deshacía: la parada volvía a pendiente y la reserva se quedaba
+        // fechada para siempre por una llegada que el conductor acababa de desmentir.
+        // Se intentan los dos extremos porque el marcado sella el inicio y, cuando era el último
+        // paradero, también el fin. El estado de la reserva NO se toca: reabrir un servicio ya
+        // cerrado es una decisión de operación, no del botón "Deshacer"; y si el conductor vuelve
+        // a marcar la parada, el sello se rehace solo.
+        const ridAnular = Number(pAntes?.reserva_id);
+        const llegadaAnulada = (pAntes as any)?.hora_llegada;
+        if (Number.isFinite(ridAnular) && ridAnular > 0 && llegadaAnulada) {
+          await revertirSelloDeParada(ridAnular, "inicio", llegadaAnulada);
+          await revertirSelloDeParada(ridAnular, "fin", llegadaAnulada);
+        }
         return NextResponse.json({ ok: true });
       }
 
@@ -907,8 +1188,46 @@ export async function POST(req: NextRequest) {
         const estadosConductor = ["en_curso", "finalizada"];
         if (!estadosConductor.includes(estado))
           return NextResponse.json({ error: "El conductor solo puede marcar 'en_curso' o 'finalizada'" }, { status: 403 });
-        const { error } = await admin.from("reservas").update({ estado }).eq("id", reservaId);
+        // `.neq("estado", "cancelada")`: un servicio anulado en el ERP no se resucita desde la
+        // app. El conductor puede tener la pantalla abierta desde antes de la cancelación (o
+        // dispararlo el auto-finalizar por geocerco) y hasta ahora eso devolvía la reserva a
+        // "finalizada"/"en_curso" y borraba la decisión de operación. Las horas ya estaban
+        // protegidas (sellarHoraReal ignora las canceladas); faltaba el estado, que es el dato
+        // que se destruía primero.
+        const { error } = await admin.from("reservas").update({ estado })
+          .eq("id", reservaId).neq("estado", "cancelada");
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+        // HORA REAL DE FIN al cerrar desde la app. Cubre el cierre anticipado y el APK viejo, que
+        // todavía llama aquí en una segunda petición tras marcar la última parada. Best-effort: si
+        // falla, el estado ya quedó guardado y el conductor no se entera de nada.
+        //   1º la llegada a la ÚLTIMA parada completada — es el hecho que se le factura al cliente
+        //      y no depende del reloj del servidor;
+        //   2º si ninguna parada tiene hora (o la columna `hora_llegada` aún no existe), now(), con
+        //      fuente 'conductor'. Aquí now() SÍ vale: quien pulsa finalizar es el conductor arriba
+        //      del bus, en ese mismo instante. Es un hecho distinto del check-in manual que se
+        //      eliminó de /seguimiento, donde el clic lo daba un operador horas después.
+        if (estado === "finalizada") {
+          try {
+            const rid = Number(reservaId);
+            let instante = new Date().toISOString();
+            let fuente: FuenteHoraReal = "conductor_finalizo";
+            // En orden de RECORRIDO, igual que marcar_parada, que el link y que el motor: la
+            // última parada marcada es la llegada que factura. (Antes se tomaba el MAX de las
+            // horas; coincide salvo si el conductor marcó los paraderos desordenados, y en ese
+            // caso el orden del recorrido es el que manda para lib/servicio-tiempos.ts.)
+            const { data: ps, error: ePs } = await admin.from("paradas")
+              .select("hora_llegada, orden").eq("reserva_id", rid).eq("estado", "completada").order("orden");
+            if (!ePs) {
+              const conHora = (ps ?? []).filter((p: any) => p.hora_llegada);
+              const ultima = conHora.length ? Date.parse(conHora[conHora.length - 1].hora_llegada) : NaN;
+              if (Number.isFinite(ultima)) { instante = new Date(ultima).toISOString(); fuente = "parada"; }
+            }
+            await sellarHoraReal(rid, "fin", instante, fuente);
+            await sembrarEstadoAdmin(rid);
+          } catch (e: any) { console.warn("[actualizar_estado] hora_real_fin:", e?.message); }
+        }
+
         // Push "¡tu bus ya salió!" a todos los pasajeros no cancelados de la reserva.
         // Insert-once: si el conductor revierte y vuelve a iniciar, NO se re-notifica
         // (preferible a spamear por un arranque equivocado). También siembra la fila
