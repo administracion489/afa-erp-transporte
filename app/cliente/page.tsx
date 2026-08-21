@@ -141,6 +141,88 @@ const fmtFechaLrg = (f: string | null) => f ? new Date(f + "T00:00:00").toLocale
 const fmtTs       = (ts: string) => new Date(ts).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" });
 const fmtSoles    = (n: number) => `S/ ${Number(n || 0).toLocaleString("es-PE", { minimumFractionDigits: 2 })}`;
 
+// ─── PERIODO DEL HISTORIAL ────────────────────────────────────────────────
+// Un solo periodo gobierna toda la pestaña: las cinco tarjetas, los chips de estado,
+// la tabla, la agenda y el Excel. Antes cada tarjeta medía un tramo distinto —una el
+// mes, otra "total histórico", otra todo— y la fila entera se leía como si fueran
+// cifras comparables.
+// Todo se calcula con strings "YYYY-MM-DD" comparados como texto: es exactamente lo
+// que guarda fecha_servicio y evita por completo los corrimientos de zona horaria.
+type PeriodoId = "mes" | "mes_pasado" | "3meses" | "anio" | "todo" | "custom";
+type Rango = { desde: string | null; hasta: string | null; etiqueta: string };
+
+const PERIODOS: { id: PeriodoId; label: string }[] = [
+  { id: "mes",        label: "Este mes" },
+  { id: "mes_pasado", label: "Mes pasado" },
+  { id: "3meses",     label: "Últimos 3 meses" },
+  { id: "anio",       label: "Este año" },
+  { id: "todo",       label: "Todo" },
+  { id: "custom",     label: "Personalizado" },
+];
+
+const MES_CORTO = ["ENE","FEB","MAR","ABR","MAY","JUN","JUL","AGO","SET","OCT","NOV","DIC"];
+const dosDig    = (n: number) => String(n).padStart(2, "0");
+const ultimoDiaMes = (y: number, m: number) => new Date(Date.UTC(y, m, 0)).getUTCDate(); // m = 1..12
+/** Suma días a una fecha "YYYY-MM-DD" sin salir del calendario ni tocar zonas horarias. */
+function sumarDias(f: string, dias: number): string {
+  const d = new Date(f + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() + dias);
+  return d.toISOString().slice(0, 10);
+}
+
+function rangoDePeriodo(p: PeriodoId, hoy: string, desdeC: string, hastaC: string): Rango {
+  const Y = Number(hoy.slice(0, 4)), M = Number(hoy.slice(5, 7));
+  const mesCompleto = (y: number, m: number): Rango => ({
+    desde: `${y}-${dosDig(m)}-01`,
+    hasta: `${y}-${dosDig(m)}-${dosDig(ultimoDiaMes(y, m))}`,
+    etiqueta: `${MES_CORTO[m - 1]} ${y}`,
+  });
+  switch (p) {
+    case "mes":        return mesCompleto(Y, M);
+    case "mes_pasado": return mesCompleto(M === 1 ? Y - 1 : Y, M === 1 ? 12 : M - 1);
+    case "3meses":     return { desde: sumarDias(hoy, -90), hasta: hoy, etiqueta: "ÚLT. 3 MESES" };
+    case "anio":       return { desde: `${Y}-01-01`, hasta: `${Y}-12-31`, etiqueta: String(Y) };
+    case "todo":       return { desde: null, hasta: null, etiqueta: "TODO EL HISTORIAL" };
+    case "custom": {
+      const d = desdeC || null, h = hastaC || null;
+      if (!d && !h) return { desde: null, hasta: null, etiqueta: "TODO EL HISTORIAL" };
+      const et = d && h ? `${fmtFecha(d)} – ${fmtFecha(h)}` : d ? `DESDE ${fmtFecha(d)}` : `HASTA ${fmtFecha(h)}`;
+      return { desde: d, hasta: h, etiqueta: et };
+    }
+  }
+}
+
+/** El periodo inmediatamente anterior, para el "vs" de la primera tarjeta. */
+function rangoAnterior(p: PeriodoId, hoy: string, r: Rango): Rango | null {
+  const Y = Number(hoy.slice(0, 4)), M = Number(hoy.slice(5, 7));
+  const mesCompleto = (y: number, m: number): Rango => ({
+    desde: `${y}-${dosDig(m)}-01`,
+    hasta: `${y}-${dosDig(m)}-${dosDig(ultimoDiaMes(y, m))}`,
+    etiqueta: `${MES_CORTO[m - 1]} ${y}`,
+  });
+  if (p === "mes")        return mesCompleto(M === 1 ? Y - 1 : Y, M === 1 ? 12 : M - 1);
+  if (p === "mes_pasado") { const y = M === 1 ? Y - 1 : Y, m = M === 1 ? 12 : M - 1;
+                            return mesCompleto(m === 1 ? y - 1 : y, m === 1 ? 12 : m - 1); }
+  if (p === "anio")       return { desde: `${Y-1}-01-01`, hasta: `${Y-1}-12-31`, etiqueta: String(Y - 1) };
+  if (p === "todo")       return null;                       // no hay "antes de todo"
+  if (!r.desde || !r.hasta) return null;                     // rango abierto: nada que comparar
+  const dias = Math.max(1, Math.round((Date.parse(r.hasta) - Date.parse(r.desde)) / 86400000) + 1);
+  return { desde: sumarDias(r.desde, -dias), hasta: sumarDias(r.desde, -1), etiqueta: "periodo anterior" };
+}
+
+// Cuánto futuro trae la carga inicial. DEBE coincidir con DIAS_FUTURO de
+// app/api/cliente/route.ts: es la frontera que decide si un periodo se puede
+// resolver en el navegador o hay que pedirlo al servidor.
+const DIAS_VENTANA_FUTURO = 90;
+
+/** ¿Cae la fecha del servicio dentro del rango? Sin fecha = fuera de cualquier periodo acotado. */
+function enRango(f: string | null | undefined, r: Rango): boolean {
+  if (!r.desde && !r.hasta) return true;
+  if (!f) return false;
+  const d = f.slice(0, 10);
+  return (!r.desde || d >= r.desde) && (!r.hasta || d <= r.hasta);
+}
+
 // Normalización de estados (incluye valores legados) → lib/estados.ts (normalizaEstado()).
 
 function Badge({ estado }: { estado: string }) {
@@ -283,6 +365,16 @@ export default function ClientePortal() {
   const [filtroEstado,   setFiltroEstado]   = useState("todos");
   const [filtroBusqueda, setFiltroBusqueda] = useState("");
   const [vistaAgenda,    setVistaAgenda]    = useState(false);
+  // Periodo del Historial: gobierna tarjetas, chips, tabla, agenda y Excel.
+  const [periodo,        setPeriodo]        = useState<PeriodoId>("mes");
+  const [periodoDesde,   setPeriodoDesde]   = useState("");
+  const [periodoHasta,   setPeriodoHasta]   = useState("");
+  const [periodoAbierto, setPeriodoAbierto] = useState(false);
+  // Reservas traídas del servidor para un periodo que cae fuera de la ventana de "datos"
+  // (programación a más de 90 días). Se unen a las cargadas, deduplicando por id.
+  const [reservasExtra,  setReservasExtra]  = useState<Reserva[]>([]);
+  const [cargandoRango,  setCargandoRango]  = useState(false);
+  const rangoPedidoRef = useRef("");
   const [reservaStats,   setReservaStats]   = useState<Record<number, { embarcados: number; esperados: number }>>({});
   const [loadingStats,   setLoadingStats]   = useState(false);
   const [exportando,     setExportando]     = useState(false);
@@ -836,6 +928,54 @@ export default function ClientePortal() {
       cargarHistorialStats();
     }
   }, [tab, reservas.length, cargarHistorialStats]);
+
+  // El rango vive aquí arriba porque lo necesitan tanto los efectos (para saber si hay
+  // que pedirle datos al servidor) como el render de la pestaña Historial.
+  const rango = rangoDePeriodo(periodo, getHoyPeru(), periodoDesde, periodoHasta);
+
+  // ─── El periodo elegido se recuerda entre visitas ─────────────────────────
+  useEffect(() => {
+    try {
+      const g = JSON.parse(localStorage.getItem("afa_cliente_periodo") || "null");
+      if (g && PERIODOS.some(p => p.id === g.p)) {
+        setPeriodo(g.p); setPeriodoDesde(g.d || ""); setPeriodoHasta(g.h || "");
+      }
+    } catch {}
+  }, []);
+  useEffect(() => {
+    try {
+      localStorage.setItem("afa_cliente_periodo", JSON.stringify({ p: periodo, d: periodoDesde, h: periodoHasta }));
+    } catch {}
+  }, [periodo, periodoDesde, periodoHasta]);
+
+  // ─── Periodos que se salen de la ventana cargada ──────────────────────────
+  // "datos" trae todo el pasado + DIAS_VENTANA_FUTURO. Un periodo dentro de eso se filtra
+  // en el navegador, sin red. Uno que se pase (todo el año en curso, la programación de
+  // 2027, "Todo") se pide al servidor una vez y queda en reservasExtra — sin esto, el
+  // selector mostraría cero servicios y estaría mintiendo.
+  useEffect(() => {
+    if (tab !== "historial") return;
+    const tope = sumarDias(getHoyPeru(), DIAS_VENTANA_FUTURO);
+    if (rango.hasta !== null && rango.hasta <= tope) return;   // cabe en lo ya cargado
+    const clave = `${rango.desde ?? ""}|${rango.hasta ?? ""}`;
+    if (rangoPedidoRef.current === clave) return;              // ya se pidió este rango
+    rangoPedidoRef.current = clave;
+    setCargandoRango(true);
+    portalApi("reservas_rango", { desde: rango.desde, hasta: rango.hasta })
+      .then(({ ok, data }) => {
+        if (ok && Array.isArray(data?.reservas)) {
+          setReservasExtra(prev => {
+            const m = new Map<number, Reserva>();
+            prev.forEach(r => m.set(r.id, r));
+            (data.reservas as Reserva[]).forEach(r => m.set(r.id, r));
+            return [...m.values()];
+          });
+        } else {
+          rangoPedidoRef.current = "";                         // falló: que se pueda reintentar
+        }
+      })
+      .finally(() => setCargandoRango(false));
+  }, [tab, rango.desde, rango.hasta]);
 
   // ─── Redirección si el tab actual no está permitido ───────────────────────
   useEffect(() => {
@@ -1790,7 +1930,6 @@ export default function ClientePortal() {
   // entre ellos, por eso marcaba 0%. El total lo cuenta Postgres (total_historico).
   const reservasPasadas = reservas.filter(r => !esFuturo(r.fecha_servicio));
   const serviciosTotal = totalHistorico ?? reservasPasadas.length;
-  const gastosTotal    = reservasPasadas.reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
   const completados    = reservasPasadas.filter(r => esFinalizado(r.estado)).length;
   const puntualidad    = reservasPasadas.length > 0 ? Math.round((completados / reservasPasadas.length) * 100) : 0;
   const pasajerosTotal = Object.values(boarding).flat().length;
@@ -1922,8 +2061,18 @@ export default function ClientePortal() {
     return [...m.entries()].map(([ruta, d]) => ({ ruta, sla: d.total > 0 ? Math.round((d.comp / d.total) * 100) : 100, servicios: d.total })).sort((a, b) => b.servicios - a.servicios).slice(0, 4);
   })();
 
-  // ─── Historial filtrado ───────────────────────────────────────────────────
-  const reservasFiltradas = reservas.filter(r => {
+  // ─── Historial: periodo → filtros ─────────────────────────────────────────
+  // (el `rango` se resolvió arriba, junto a los efectos que lo consultan)
+  // Universo = lo cargado + lo que se pidió aparte por caer fuera de la ventana.
+  const universoReservas = reservasExtra.length === 0 ? reservas : (() => {
+    const m = new Map<number, Reserva>();
+    reservas.forEach(r => m.set(r.id, r));
+    reservasExtra.forEach(r => { if (!m.has(r.id)) m.set(r.id, r); });
+    return [...m.values()];
+  })();
+  const reservasPeriodo = universoReservas.filter(r => enRango(r.fecha_servicio, rango));
+
+  const reservasFiltradas = reservasPeriodo.filter(r => {
     const cumpleEstado   = filtroEstado === "todos" || efectivoEstado(r) === filtroEstado;
     const cumpleBusqueda = !filtroBusqueda || r.origen.toLowerCase().includes(filtroBusqueda.toLowerCase()) || r.destino.toLowerCase().includes(filtroBusqueda.toLowerCase()) || fmtFecha(r.fecha_servicio).includes(filtroBusqueda);
     return cumpleEstado && cumpleBusqueda;
@@ -3497,14 +3646,33 @@ export default function ClientePortal() {
 
         {/* HISTORIAL */}
         {tab === "historial" && !reservaSel && (() => {
-          const totalEmbarcados = Object.values(reservaStats).reduce((s, x) => s + x.embarcados, 0);
-          const reservasConStats = Object.values(reservaStats).filter(x => x.esperados > 0);
+          // ── Las CINCO tarjetas miden el mismo periodo ──────────────────────
+          // (antes: una el mes, otra "total histórico", otra todo — números que se leían
+          // como comparables sin serlo).
+          const statsPeriodo = reservasPeriodo.map(r => reservaStats[r.id]).filter(Boolean);
+          const totalEmbarcados = statsPeriodo.reduce((s, x) => s + x.embarcados, 0);
+          const reservasConStats = statsPeriodo.filter(x => x.esperados > 0);
           const slaPromedio = reservasConStats.length > 0
             ? Math.round(reservasConStats.reduce((s, x) => s + Math.min(100, (x.embarcados / x.esperados) * 100), 0) / reservasConStats.length)
             : null;
-          const tasaCancelacion = reservas.length > 0
-            ? Math.round((reservas.filter(r => esCancelado(r.estado)).length / reservas.length) * 100)
+          const canceladosPeriodo = reservasPeriodo.filter(r => esCancelado(r.estado)).length;
+          const tasaCancelacion = reservasPeriodo.length > 0
+            ? Math.round((canceladosPeriodo / reservasPeriodo.length) * 100)
             : 0;
+          // Gasto = lo que YA se prestó. Sumar servicios futuros mezclaría gasto real con
+          // compromiso y el número dejaría de cuadrar con la contabilidad del cliente;
+          // lo programado se informa aparte, en el subtexto.
+          const gastoPeriodo = reservasPeriodo
+            .filter(r => !esCancelado(r.estado) && !esFuturo(r.fecha_servicio))
+            .reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
+          const programadoPeriodo = reservasPeriodo
+            .filter(r => !esCancelado(r.estado) && esFuturo(r.fecha_servicio))
+            .reduce((s, r) => s + Number(r.precio_cliente || 0), 0);
+          // Comparación contra el periodo equivalente anterior (mes anterior, año anterior,
+          // o el tramo de igual duración justo antes).
+          const rangoPrev = rangoAnterior(periodo, hoy, rango);
+          const conteoPrev = rangoPrev ? universoReservas.filter(r => enRango(r.fecha_servicio, rangoPrev)).length : null;
+          const deltaPeriodo = conteoPrev === null ? null : reservasPeriodo.length - conteoPrev;
           const slaColor = (pct: number) => pct >= 95 ? C.success : pct >= 85 ? C.warn : C.danger;
           // Exporta el historial (respetando filtro/búsqueda activos) a un .xlsx REAL con
           // estilos: banners de marca, cabecera navy, filas cebra, estado coloreado según
@@ -3662,13 +3830,56 @@ export default function ClientePortal() {
             {/* Header */}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" as const, gap: 12 }}>
               <div>
-                <p style={{ margin: 0, fontSize: 10, fontWeight: 800, color: C.mute, letterSpacing: "1.2px", textTransform: "uppercase" as const }}>HISTORIAL COMPLETO</p>
+                <p style={{ margin: 0, fontSize: 10, fontWeight: 800, color: C.mute, letterSpacing: "1.2px", textTransform: "uppercase" as const }}>HISTORIAL</p>{/* ya no es "completo": lo que se ve depende del periodo elegido */}
                 <h2 style={{ margin: "4px 0 6px", fontSize: 22, fontWeight: 900, color: C.ink, letterSpacing: -0.5 }}>Servicios contratados</h2>
                 <p style={{ margin: 0, fontSize: 13, color: C.mute }}>
-                  <span style={{ fontFamily: C.fontMono, fontWeight: 700, color: C.navy }}>{reservas.length}</span> servicios registrados · {cliente?.empresa || cliente?.nombre}
+                  <span style={{ fontFamily: C.fontMono, fontWeight: 700, color: C.navy }}>{reservasPeriodo.length}</span> servicios en {rango.etiqueta.toLowerCase()} · {cliente?.empresa || cliente?.nombre}
+                  {cargandoRango && <span style={{ marginLeft: 8, color: C.mute2 }}>· cargando periodo…</span>}
                 </p>
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+                {/* ── Selector de periodo: manda sobre tarjetas, chips, tabla, agenda y Excel ── */}
+                <div style={{ position: "relative" as const }}>
+                  <button onClick={() => setPeriodoAbierto(v => !v)}
+                    title="Elegir el periodo que se muestra en toda la pestaña"
+                    style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 14px", borderRadius: 10, border: `1.5px solid ${periodo === "todo" ? C.line2 : C.navy}`, background: periodo === "todo" ? C.surface : C.navyTint, color: periodo === "todo" ? C.ink2 : C.navy, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                    {rango.etiqueta}
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ transform: periodoAbierto ? "rotate(180deg)" : "none", transition: "transform .15s" }}><polyline points="6 9 12 15 18 9"/></svg>
+                  </button>
+                  {periodoAbierto && (
+                    <>
+                      <div onClick={() => setPeriodoAbierto(false)} style={{ position: "fixed" as const, inset: 0, zIndex: 40 }} />
+                      <div style={{ position: "absolute" as const, top: "calc(100% + 6px)", left: 0, zIndex: 41, background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, boxShadow: "0 12px 32px rgba(11,49,95,.16)", padding: 6, minWidth: 220 }}>
+                        {PERIODOS.map(p => (
+                          <button key={p.id}
+                            onClick={() => { setPeriodo(p.id); if (p.id !== "custom") setPeriodoAbierto(false); }}
+                            style={{ display: "block", width: "100%", textAlign: "left" as const, padding: "9px 12px", borderRadius: 8, border: "none", background: periodo === p.id ? C.navyTint : "transparent", color: periodo === p.id ? C.navy : C.ink2, fontSize: 12.5, fontWeight: periodo === p.id ? 800 : 600, cursor: "pointer", fontFamily: C.fontSans }}>
+                            {p.label}
+                          </button>
+                        ))}
+                        {periodo === "custom" && (
+                          <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 6, paddingTop: 10, padding: "10px 12px 6px", display: "flex", flexDirection: "column" as const, gap: 8 }}>
+                            <label style={{ fontSize: 10.5, fontWeight: 800, color: C.mute, letterSpacing: ".06em", textTransform: "uppercase" as const }}>
+                              Desde
+                              <input type="date" value={periodoDesde} onChange={e => setPeriodoDesde(e.target.value)}
+                                style={{ display: "block", width: "100%", marginTop: 4, padding: "7px 9px", border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12.5, fontFamily: C.fontSans, background: C.bg, color: C.ink, boxSizing: "border-box" as const }} />
+                            </label>
+                            <label style={{ fontSize: 10.5, fontWeight: 800, color: C.mute, letterSpacing: ".06em", textTransform: "uppercase" as const }}>
+                              Hasta
+                              <input type="date" value={periodoHasta} onChange={e => setPeriodoHasta(e.target.value)}
+                                style={{ display: "block", width: "100%", marginTop: 4, padding: "7px 9px", border: `1px solid ${C.line}`, borderRadius: 8, fontSize: 12.5, fontFamily: C.fontSans, background: C.bg, color: C.ink, boxSizing: "border-box" as const }} />
+                            </label>
+                            <button onClick={() => setPeriodoAbierto(false)}
+                              style={{ padding: "8px 12px", borderRadius: 8, border: "none", background: C.navy, color: "white", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
+                              Aplicar
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
                 <button onClick={() => cliente && cargarDatos(cliente.id)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 10, border: `1.5px solid ${C.line2}`, background: C.surface, color: C.ink2, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: C.fontSans }}>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                   Actualizar
@@ -3690,32 +3901,34 @@ export default function ClientePortal() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12 }}>
               {[
                 {
-                  label: "Servicios este mes", value: serviciosMes,
-                  sub: deltaServicios !== 0 ? `${deltaServicios > 0 ? "+" : ""}${deltaServicios} vs mes anterior` : "igual al mes anterior",
-                  accent: C.navy, subColor: deltaServicios > 0 ? C.success : deltaServicios < 0 ? C.danger : C.mute,
+                  label: `Servicios · ${rango.etiqueta}`, value: reservasPeriodo.length,
+                  sub: deltaPeriodo === null ? "sin periodo con qué comparar"
+                     : deltaPeriodo !== 0 ? `${deltaPeriodo > 0 ? "+" : ""}${deltaPeriodo} vs ${rangoPrev!.etiqueta.toLowerCase()}`
+                     : `igual que ${rangoPrev!.etiqueta.toLowerCase()}`,
+                  accent: C.navy, subColor: (deltaPeriodo ?? 0) > 0 ? C.success : (deltaPeriodo ?? 0) < 0 ? C.danger : C.mute,
                   icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
                 },
                 {
-                  label: "Pasajeros embarcados", value: loadingStats ? "..." : totalEmbarcados || "–",
-                  sub: "total histórico",
+                  label: `Pasajeros · ${rango.etiqueta}`, value: loadingStats ? "..." : totalEmbarcados || "–",
+                  sub: "embarcados en el periodo",
                   accent: C.info, subColor: C.mute,
                   icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
                 },
                 ...(puedeVerMontos ? [{
-                  label: "Gasto total", value: fmtSoles(gastosTotal),
-                  sub: `${fmtSoles(gastoMes)} este mes`,
+                  label: `Gasto · ${rango.etiqueta}`, value: fmtSoles(gastoPeriodo),
+                  sub: programadoPeriodo > 0 ? `+ ${fmtSoles(programadoPeriodo)} programado` : "servicios realizados",
                   accent: C.navyDeep, subColor: C.mute,
                   icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
                 }] : []),
                 {
-                  label: "SLA promedio", value: loadingStats ? "..." : slaPromedio !== null ? `${slaPromedio}%` : "–",
+                  label: `SLA · ${rango.etiqueta}`, value: loadingStats ? "..." : slaPromedio !== null ? `${slaPromedio}%` : "–",
                   sub: "tasa de embarque",
                   accent: slaPromedio !== null ? slaColor(slaPromedio) : C.mute, subColor: C.mute,
                   icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
                 },
                 {
-                  label: "Tasa cancelación", value: `${tasaCancelacion}%`,
-                  sub: `${reservas.filter(r => esCancelado(r.estado)).length} cancelados`,
+                  label: `Cancelación · ${rango.etiqueta}`, value: `${tasaCancelacion}%`,
+                  sub: `${canceladosPeriodo} cancelados`,
                   accent: tasaCancelacion > 10 ? C.danger : C.mute, subColor: C.mute,
                   icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
                 },
@@ -3742,7 +3955,7 @@ export default function ClientePortal() {
               </div>
               <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
                 {(["todos","pendiente","programada","confirmada","en_curso","finalizada","cancelada"] as const).map(e => {
-                  const cnt = e === "todos" ? reservas.length : reservas.filter(r => efectivoEstado(r) === e).length;
+                  const cnt = e === "todos" ? reservasPeriodo.length : reservasPeriodo.filter(r => efectivoEstado(r) === e).length;
                   const active = filtroEstado === e;
                   return (
                     <button key={e} onClick={() => setFiltroEstado(e)}
@@ -3754,7 +3967,7 @@ export default function ClientePortal() {
                 })}
               </div>
               <span style={{ fontSize: 11, color: C.mute2, fontWeight: 600, whiteSpace: "nowrap" as const }}>
-                {reservasFiltradas.length !== reservas.length ? `${reservasFiltradas.length} de ${reservas.length}` : `${reservas.length} servicios`}
+                {reservasFiltradas.length !== reservasPeriodo.length ? `${reservasFiltradas.length} de ${reservasPeriodo.length}` : `${reservasPeriodo.length} servicios`}
               </span>
               <button
                 onClick={() => setVistaAgenda(v => !v)}

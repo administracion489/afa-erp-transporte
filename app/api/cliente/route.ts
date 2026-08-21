@@ -252,6 +252,24 @@ export async function POST(req: NextRequest) {
         });
       }
 
+      // ── RESERVAS DE UN RANGO ───────────────────────────────────────────────
+      // Para el selector de periodo del Historial cuando pide fechas que la ventana de
+      // "datos" no trae (programación de más de 90 días adelante). Dentro de la ventana
+      // el navegador filtra sin red; esto es solo para lo de afuera.
+      case "reservas_rango": {
+        const fecha = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+        const desde = fecha(body.desde);
+        const hasta = fecha(body.hasta);
+        if (!desde && !hasta) return err("Rango inválido");
+        const filas = await paginado((f, t) => {
+          let q = admin.from("reservas").select(COLS_PORTAL).eq("cliente_id", cid);
+          if (desde) q = q.gte("fecha_servicio", desde);
+          if (hasta) q = q.lte("fecha_servicio", hasta);
+          return q.order("fecha_servicio", { ascending: false }).order("id", { ascending: false }).range(f, t);
+        });
+        return NextResponse.json({ reservas: filas.map(limpiarReserva) });
+      }
+
       // ── PARADAS_JSON bajo demanda ──────────────────────────────────────────
       // La columna pesada de reservas, solo para los servicios que la pintan: los de
       // HOY (tarjetas "En curso" y su mapa) y el que se abre en el modal GPS.
