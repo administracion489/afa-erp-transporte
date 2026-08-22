@@ -357,6 +357,8 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
     items: [
       { href: "/liquidaciones", label: "Liquidaciones", sub: "Cierre cliente / proveedor", icon: Ic.Scale,        modulo: "liquidaciones" },
       { href: "/finanzas",      label: "Finanzas",      sub: "Ingresos · Egresos · Tesorería", icon: Ic.Wallet,   modulo: "finanzas"      },
+      { href: "/tesoreria",     label: "Cuentas por Pagar", sub: "CxP · Planilla · Detracciones · Banco", icon: Ic.Clipboard, modulo: "tesoreria" },
+      { href: "/caja-chica",    label: "Caja Chica",    sub: "Entregas y rendiciones", icon: Ic.DollarSign,  modulo: "caja-chica"  },
       { href: "/facturacion",   label: "Facturación",   sub: "SUNAT / comprobantes",  icon: Ic.Receipt,      modulo: "facturacion" },
       { href: "/gastos",        label: "Gastos",        sub: "Egresos",               icon: Ic.TrendingDown, modulo: "gastos"      },
     ],

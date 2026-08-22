@@ -33,7 +33,7 @@ const GRUPOS_MODULOS = [
   { label: "Flota",        icono: "🚗", modulos: ["vehiculos", "mantenimiento", "neumaticos", "combustible", "seguros"] },
   { label: "Personal",     icono: "👷", modulos: ["conductores", "personal-administrativo"] },
   { label: "Proveedores",  icono: "🤝", modulos: ["proveedores", "ordenes-compra"] },
-  { label: "Finanzas",     icono: "💰", modulos: ["liquidaciones", "finanzas", "facturacion", "gastos"] },
+  { label: "Finanzas",     icono: "💰", modulos: ["liquidaciones", "finanzas", "tesoreria", "caja-chica", "facturacion", "gastos"] },
   { label: "Contabilidad", icono: "🧮", modulos: ["contabilidad"] },
   { label: "Documentos",   icono: "📁", modulos: ["documentos", "vencimientos"] },
   { label: "Sistema",      icono: "⚙️", modulos: ["reportes", "configuracion", "ajustes", "usuarios"] },
@@ -53,6 +53,7 @@ const nombresModulo: Record<string, string> = {
   conductores: "Conductores", "personal-administrativo": "Personal Adm.",
   proveedores: "Proveedores", "ordenes-compra": "Órdenes de Compra",
   liquidaciones: "Liquidaciones", finanzas: "Finanzas",
+  tesoreria: "Cuentas por Pagar", "caja-chica": "Caja Chica",
   facturacion: "Facturación", gastos: "Gastos",
   contabilidad: "Contabilidad",
   documentos: "Documentos", vencimientos: "Vencimientos",
@@ -409,6 +410,7 @@ export default function UsuariosPage() {
               <select value={form.rol} onChange={(e) => setForm({ ...form, rol: e.target.value })}
                 className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f]">
                 <option value="operador">Operador</option>
+                <option value="gerente">Gerente</option>
                 <option value="admin">Administrador</option>
               </select>
             </div>
@@ -441,6 +443,9 @@ export default function UsuariosPage() {
           </div>
         ) : usuarios.map((user) => {
           const esAdmin  = user.rol === "admin";
+          // El gerente aprueba gasto (CxP, planilla, lotes, caja chica) pero sigue
+          // sujeto a permisos por módulo como cualquier operador.
+          const esGerente = user.rol === "gerente";
           const esActivo = user.activo !== false;
           const esTu     = user.id === currentUserId;
           const permisoCount = Object.values(permisos[user.id] || {}).filter(Boolean).length;
@@ -468,8 +473,8 @@ export default function UsuariosPage() {
                   </div>
                   <p className="text-sm text-gray-500 truncate">{user.email}</p>
                   <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                    <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-black ${esAdmin ? "bg-yellow-100 text-yellow-800" : "bg-blue-100 text-blue-800"}`}>
-                      {esAdmin ? "👑 Administrador" : "👤 Operador"}
+                    <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-black ${esAdmin ? "bg-yellow-100 text-yellow-800" : esGerente ? "bg-emerald-100 text-emerald-800" : "bg-blue-100 text-blue-800"}`}>
+                      {esAdmin ? "👑 Administrador" : esGerente ? "✅ Gerente" : "👤 Operador"}
                     </span>
                     <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-black ${esActivo ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
                       {esActivo ? "● Activo" : "● Inactivo"}
@@ -486,8 +491,9 @@ export default function UsuariosPage() {
                 <div className="flex items-center gap-2 flex-wrap">
                   <select value={user.rol} onChange={(e) => cambiarRol(user, e.target.value)}
                     className="border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
-                    style={{ color: esAdmin ? "#854d0e" : "#1e40af" }}>
+                    style={{ color: esAdmin ? "#854d0e" : esGerente ? "#065f46" : "#1e40af" }}>
                     <option value="operador">Operador</option>
+                    <option value="gerente">Gerente</option>
                     <option value="admin">Administrador</option>
                   </select>
 

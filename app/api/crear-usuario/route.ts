@@ -44,6 +44,8 @@ const MODULOS = [
   "ordenes-compra",
   "liquidaciones",
   "finanzas",
+  "tesoreria",
+  "caja-chica",
   "facturacion",
   "gastos",
   "contabilidad",
@@ -88,7 +90,10 @@ export async function POST(request: Request) {
     const nombre = String(body.nombre || "").trim();
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "").trim();
-    const rol = body.rol === "admin" ? "admin" : "operador";
+    // "gerente" es el perfil que APRUEBA gasto (cuentas por pagar, planilla, lotes de
+    // pago, rendiciones de caja chica) sin ser administrador del sistema. Ver
+    // fn_es_aprobador() en supabase/finanzas-06-gastos-caja-chica.sql.
+    const rol = ["admin", "gerente"].includes(body.rol) ? body.rol : "operador";
 
     if (!nombre || !email || !password) {
       return NextResponse.json(
