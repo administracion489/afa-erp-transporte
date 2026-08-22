@@ -260,7 +260,9 @@ export async function POST(req: NextRequest) {
         const fecha = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
         const desde = fecha(body.desde);
         const hasta = fecha(body.hasta);
-        if (!desde && !hasta) return err("Rango inválido");
+        // Sin fechas = el periodo "Todo": el histórico completo del cliente, programación
+        // futura incluida. Es una petición explícita suya y el cid del token la acota;
+        // rechazarla dejaba a ese preset mostrando solo la ventana, en silencio.
         const filas = await paginado((f, t) => {
           let q = admin.from("reservas").select(COLS_PORTAL).eq("cliente_id", cid);
           if (desde) q = q.gte("fecha_servicio", desde);
