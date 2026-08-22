@@ -105,11 +105,17 @@ create table if not exists public.cat_detraccion (
   umbral_min  numeric(12,2) not null default 700,  -- opera si el total ≥ umbral
   activo      boolean not null default true
 );
--- Semillas (CONFIRMAR con el contador el código y % vigentes para AFA):
+-- Semillas mínimas según el Catálogo 54 de SUNAT. OJO con estos dos, que es fácil
+-- invertirlos (esta semilla los tuvo al revés hasta la fase 07):
+--   026 = transporte de PERSONAS → 10 % · umbral S/ 700 (Anexo 3)
+--   027 = transporte de CARGA    →  4 % · umbral S/ 400 (R.S. 073-2006/SUNAT)
+-- El catálogo COMPLETO y editable lo carga finanzas-07-detracciones-catalogo.sql; las
+-- tasas cambian por Resolución de Superintendencia, así que la verdad es lo que el
+-- contador mantenga en esta tabla, no lo que diga este archivo.
 insert into public.cat_detraccion (codigo, descripcion, porcentaje, umbral_min) values
-  ('027', 'Transporte de personas',        10.0, 700),
-  ('026', 'Transporte de bienes/carga',     4.0, 400),
-  ('037', 'Demás servicios gravados',       12.0, 700)
+  ('026', 'Servicio de transporte de personas',                    10.0, 700),
+  ('027', 'Servicio de transporte de carga (bienes por vía terrestre)', 4.0, 400),
+  ('037', 'Demás servicios gravados con IGV',                      12.0, 700)
 on conflict (codigo) do nothing;
 
 -- ────────────────────────────────────────────────────────────────────────────

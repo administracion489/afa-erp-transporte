@@ -31,6 +31,9 @@ Deben salir las **seis**. Si falta alguna, corre primero, en este orden:
 `finanzas-00-fundacion.sql` → `finanzas-01-tesoreria-pagos.sql` →
 `finanzas-02-compras-cxp.sql` → `liquidaciones-v2.sql`.
 
+Después de la fase 06, corre también `supabase/finanzas-07-detracciones-catalogo.sql`
+(catálogo de detracciones SUNAT completo y editable — ver §3.2).
+
 ### Verificar que quedó bien
 
 ```sql
@@ -96,23 +99,73 @@ values ('BCP Corriente Soles', 'banco', 'PEN', 'BCP', '191-XXXXXXX-0-XX', '00219
        ('Caja Chica Oficina',  'caja',  'PEN', null, null, null);
 ```
 
-### 3.2 Confirmar la detracción con tu contador
+### 3.2 Las tasas de detracción — ahora se editan desde la pantalla
 
-Esto **no lo puede decidir el sistema**. El catálogo viene sembrado con tres códigos:
+Corre también `supabase/finanzas-07-detracciones-catalogo.sql`. Carga el **catálogo
+completo de SUNAT** (31 códigos, anexos 1, 2 y 3 más los dos regímenes propios) y deja
+todo editable en **Cuentas por Pagar → Detracciones → ⚙️ Tasas y códigos**.
 
-| Código | Servicio | % | Umbral |
-|---|---|---|---|
-| 027 | Transporte de **personas** | 10 % | S/ 700 |
-| 026 | Transporte de bienes/carga | 4 % | S/ 400 |
-| 037 | Demás servicios gravados | 12 % | S/ 700 |
+Ahí puedes cambiar el porcentaje y el umbral de cualquier código, activar o desactivar
+los que no uses, agregar uno nuevo y fijar el **código por defecto** de la empresa (el que
+el formulario de facturas propone solo). Solo admin y gerente pueden guardar; el resto lo
+ve en modo consulta.
 
-Pregúntale a tu contador cuál aplica a AFA y si esas tasas siguen vigentes. Luego:
+> ⚠️ **Corregí un error que traía el sistema.** La semilla anterior tenía los dos códigos
+> de transporte **invertidos**: ponía el 027 como transporte de personas al 10 % y el 026
+> como carga al 4 %. Según el Catálogo 54 de SUNAT es al revés:
+>
+> | Código | Servicio | % | Umbral | Norma |
+> |---|---|---|---|---|
+> | **026** | Transporte de **personas** | 10 % | S/ 700 | Anexo 3, R.S. 183-2004 |
+> | **027** | Transporte de **carga** (bienes por vía terrestre) | 4 % | S/ 400 | R.S. 073-2006 |
+>
+> A AFA le toca el **026**. La migración corrige las dos filas, pero **solo si siguen con
+> el valor equivocado**: si tu contador ya las había ajustado a mano, no las toca.
+
+Las tasas del Anexo 3 más frecuentes, tal como quedan cargadas:
+
+| Código | Servicio | % |
+|---|---|---|
+| 012 | Intermediación laboral y tercerización | 12 % |
+| 019 | Arrendamiento de bienes | 10 % |
+| 020 | Mantenimiento y reparación de bienes muebles | 12 % |
+| 021 | Movimiento de carga | 10 % |
+| 022 | Otros servicios empresariales | 12 % |
+| 024 | Comisión mercantil | 10 % |
+| 025 | Fabricación de bienes por encargo | 10 % |
+| **026** | **Transporte de personas** | **10 %** |
+| 030 | Contratos de construcción | 4 % |
+| 037 | Demás servicios gravados con IGV | 12 % |
+
+El umbral general del Anexo 3 es **S/ 700**: por debajo de eso no se detrae.
+
+**Dos cosas que conviene que revise tu contador**, porque no son un simple porcentaje:
+
+- **027 · transporte de carga**: el 4 % se aplica sobre el importe de la operación **o el
+  valor referencial, el que sea mayor** (R.S. 073-2006 y el D.S. de valores referenciales
+  del MTC). El ERP calcula sobre el importe; si el valor referencial manda, corrígelo a
+  mano en el comprobante.
+- **028 · transporte público de pasajeros**: es otro régimen (R.S. 057-2007). Se deposita
+  un **monto fijo por vehículo** al pasar por garita, no un porcentaje. Viene cargado pero
+  **desactivado** a propósito.
+
+También desde esa pantalla se edita el **IGV vigente** (18 % por defecto), que antes
+estaba escrito a mano en la pantalla de facturación.
+
+Si prefieres tocarlo por SQL:
 
 ```sql
-select * from public.cat_detraccion order by codigo;   -- ver
-update public.cat_detraccion set porcentaje = 10, umbral_min = 700 where codigo = '027';
-select * from public.config_tributaria;                 -- IGV vigente (default 18 %)
+select codigo, descripcion, porcentaje, umbral_min, anexo, activo
+  from public.cat_detraccion order by anexo, codigo;
+update public.cat_detraccion set porcentaje = 10, umbral_min = 700 where codigo = '026';
+select igv_pct, detraccion_activa, detraccion_codigo_defecto from public.config_tributaria;
 ```
+
+**Verifica siempre contra la fuente oficial antes de cambiar una tasa:** los porcentajes
+se modifican por Resolución de Superintendencia y sin previo aviso. La tabla vigente está
+en [los apéndices del sistema de detracciones de
+SUNAT](https://orientacion.sunat.gob.pe/apendices-del-sistema-de-detracciones). El panel
+tiene ese enlace a la vista.
 
 ### 3.3 Fondos de caja chica
 
@@ -396,7 +449,7 @@ motivo exacto de cada rechazo.
 
 | Tema | Por qué no lo decidí solo |
 |---|---|
-| Código y tasa de detracción | Es materia tributaria; lo confirma tu contador (§3.2) |
+| Qué código de detracción usar | El catálogo está cargado y es editable; cuál aplica lo confirma tu contador (§3.2) |
 | Formato del archivo Telecrédito | Lo define tu convenio con el BCP (§7) |
 | Prorrateo de costos de vehículo | Criterio contable, no dato (§9) |
 | Tope y días de rendición por conductor | Política interna tuya (§3.3) |

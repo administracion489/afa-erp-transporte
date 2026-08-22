@@ -225,7 +225,7 @@ export default function ModalCxP({ abierto, onCerrar, onGuardado, documento, usu
           .select("id, nombre, razon_social, ruc, banco, cuenta_bancaria, cci, titular_cuenta")
           .order("nombre"),
         supabase.from("cat_detraccion").select("codigo, descripcion, porcentaje, umbral_min, activo").order("codigo"),
-        supabase.from("config_tributaria").select("igv_pct").eq("id", 1).maybeSingle(),
+        supabase.from("config_tributaria").select("igv_pct, detraccion_codigo_defecto").eq("id", 1).maybeSingle(),
       ]);
       setProveedores((ps.data ?? []) as ProveedorRef[]);
       setCatalogo((cs.data ?? []) as FilaDetraccion[]);
@@ -237,8 +237,16 @@ export default function ModalCxP({ abierto, onCerrar, onGuardado, documento, usu
         setIgvPct(18);
         setIgvPorDefecto(true);
       }
+
+      // Código de detracción por defecto de la empresa (Detracciones → Tasas y códigos).
+      // Solo se propone en un comprobante NUEVO y si nadie eligió todavía: en uno que se
+      // está editando manda lo que ya tiene guardado.
+      const porDefecto = cfg.data?.detraccion_codigo_defecto;
+      if (porDefecto && !documento) {
+        setForm((f) => (f.detraccion_codigo ? f : { ...f, detraccion_codigo: String(porDefecto) }));
+      }
     })();
-  }, [abierto, catalogo.length, proveedores.length]);
+  }, [abierto, catalogo.length, proveedores.length, documento]);
 
   const desglose = useMemo(() => {
     const importe = num(form.importe);

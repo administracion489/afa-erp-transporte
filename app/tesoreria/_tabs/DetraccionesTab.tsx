@@ -17,6 +17,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { fmtMoneda, redondear } from "@/lib/finanzas/dinero";
 import { exportarXlsx, type Columna } from "@/lib/finanzas/exportar";
+import PanelTasasDetraccion from "../PanelTasasDetraccion";
 
 type FilaDetraccion = {
   lado: "compra" | "venta";
@@ -94,6 +95,9 @@ export default function DetraccionesTab() {
   const [fechaDeposito, setFechaDeposito] = useState(hoyLima());
   const [procesando, setProcesando] = useState(false);
 
+  // Editar tasas es decisión de gerencia; el resto ve el catálogo en lectura.
+  const [puedeEditarTasas, setPuedeEditarTasas] = useState(false);
+
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const showToast = useCallback((msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -117,6 +121,17 @@ export default function DetraccionesTab() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     cargar();
   }, [cargar]);
+
+  useEffect(() => {
+    let vivo = true;
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user) return;
+      const { data } = await supabase.from("usuarios").select("rol").eq("id", session.user.id).maybeSingle();
+      if (vivo) setPuedeEditarTasas(data?.rol === "admin" || data?.rol === "gerente");
+    })();
+    return () => { vivo = false; };
+  }, []);
 
   const compras = useMemo(() => filas.filter((d) => d.lado === "compra"), [filas]);
   const ventas = useMemo(() => filas.filter((d) => d.lado === "venta"), [filas]);
@@ -236,12 +251,10 @@ export default function DetraccionesTab() {
         ))}
       </section>
 
-      {/* Aviso permanente: la tasa y el código son decisión del contador, no del ERP. */}
-      <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-center gap-3 text-sm text-amber-800">
-        <span>⚠️</span>
-        Confirma con tu contador el código de servicio y la tasa vigente (cat_detraccion trae 027 transporte de personas 10%, 026 carga
-        4%, 037 demás servicios 12%).
-      </div>
+      {/* La tasa y el código son decisión del contador, no del ERP: aquí se editan.
+          El aviso que había antes citaba los códigos AL REVÉS (027 como transporte de
+          personas); ahora el dato vive en el catálogo y no en un texto suelto. */}
+      <PanelTasasDetraccion puedeEditar={puedeEditarTasas} onCambio={cargar} />
 
       {/* ── Lado compra ── */}
       <section className="bg-white rounded-2xl border shadow-sm overflow-hidden">
