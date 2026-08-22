@@ -18,6 +18,8 @@ import {
   Chip, Eyebrow, StatusDot, PrimaryBtn, SecondaryBtn, TabBar,
   FONT_SANS, FONT_MONO, type TabItem,
 } from "@/app/_components/ui";
+import { fmtMoneda } from "@/lib/finanzas/dinero";
+import { configCategoriaCC, configRendicion, ESTADOS_REVISION, type EstadoRevisionGasto } from "@/lib/finanzas/caja-chica";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -42,7 +44,42 @@ type PasajeroParada = { id: number; parada_id: number; pasajero_id: number; esta
 type CheckItem = { id: string; label: string; categoria: string; ok: boolean | null; };
 type DocCond   = { id: number; tipo: string; nombre: string | null; url: string; vencimiento: string | null; };
 
-type Tab = "ruta" | "paradas" | "checklist" | "documentos" | "perfil";
+type Tab = "ruta" | "paradas" | "checklist" | "documentos" | "rendicion" | "perfil";
+
+// ─── Caja chica: lo que devuelve /api/conductor (mi_caja_chica) ───────────────
+// Espejo del subconjunto que pide la app. La forma canónica de estas filas vive en
+// lib/finanzas/caja-chica.ts; aquí solo se declara lo que el celular pinta.
+
+/** Fila de v_caja_chica_rendiciones. monto_rendido, saldo_pendiente, atrasada y dias_atraso
+ *  son DERIVADOS de la vista: nunca se recalculan en el cliente. */
+type MiRendicion = {
+  id: number; codigo: string | null; estado: string; moneda: string;
+  monto_asignado: number; monto_rendido: number; monto_por_revisar: number;
+  monto_rechazado: number; monto_devuelto: number; saldo_pendiente: number;
+  comprobantes: number; fecha_entrega: string; fecha_limite: string | null;
+  atrasada: boolean; dias_atraso: number; motivo_observacion: string | null;
+};
+
+type GastoRendido = {
+  id: number; fecha: string; categoria: string; descripcion: string | null;
+  monto: number; moneda: string; tipo_comprobante: string | null;
+  estado_revision: EstadoRevisionGasto; motivo_rechazo: string | null; created_at: string;
+};
+
+/** Payload de un gasto tal cual viaja al API. Es TAMBIÉN lo que se guarda en la cola offline,
+ *  foto incluida — el token NO: se inyecta al enviar, para que un gasto encolado siga siendo
+ *  enviable después de que el conductor vuelva a iniciar sesión. */
+type GastoPendiente = {
+  /** Id local del envío (lo pone la cola al persistir; el servidor lo ignora). */
+  _cola_id?: string;
+  sin_comprobante?: boolean;
+  gasto: {
+    fecha: string; categoria: string; descripcion: string | null; monto: number;
+    reserva_id: number | null; vehiculo_id: number | null; vehiculo_es_tercero: boolean;
+    lat: number | null; lng: number | null; capturado_en: string;
+    foto_adjunto?: { media_type: string; data: string };
+  };
+};
 
 type IncidenciaTipo = "trafico" | "mecanica" | "pasajero" | "accidente" | "combustible" | "seguridad";
 type Severidad      = "bajo" | "medio" | "alto";
@@ -67,6 +104,48 @@ const CHECKLIST_ITEMS: CheckItem[] = [
 ];
 
 const TIPOS_DOC = ["Licencia de conducir", "SCTR Salud", "Examen médico", "Psicosométrico", "Antecedentes", "Foto DNI", "Otro"];
+
+// Categorías que el chofer ve en el celular: SUBCONJUNTO deliberado de CATEGORIAS_CAJA_CHICA.
+// Combustible tiene su propio circuito (Radar IA + odómetro) y multa / trámite / repuesto menor
+// no los decide él en la calle. Las etiquetas y emojis salen del diccionario compartido para que
+// la bandeja del contador diga EXACTAMENTE lo mismo que vio el conductor al fotografiar.
+const CATEGORIAS_GASTO_APP = ["peaje", "lavado", "estacionamiento", "viaticos", "movilidad", "otro"] as const;
+
+// ─── Cola offline de gastos ───────────────────────────────────────────────────
+// El check-out NO tiene cola, y por eso se pierden cierres hechos en cochera sin señal. La
+// rendición sí la tiene: el gasto entero (foto en base64 incluida) espera en localStorage y se
+// drena en los eventos `online` / `visibilitychange`, igual que el check-in pendiente.
+const COLA_GASTOS = "afa_rendicion_pendiente";
+
+function leerColaGastos(): GastoPendiente[] {
+  try {
+    const raw = localStorage.getItem(COLA_GASTOS);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? (arr as GastoPendiente[]) : [];
+  } catch { return []; }
+}
+
+/** Id local del envío encolado. NO lo lee el servidor (ignora las claves que no conoce): sirve
+ *  para sacar de la cola EXACTAMENTE los envíos que se resolvieron, sin pisar los que el chofer
+ *  agregó mientras el drenado estaba en vuelo. */
+function nuevoIdCola(): string {
+  try { return crypto.randomUUID(); } catch { return `g-${Date.now()}-${Math.random().toString(36).slice(2)}`; }
+}
+
+/** Guarda la cola y devuelve lo que realmente cupo. Cada gasto arrastra su foto comprimida
+ *  (~300-500 KB en base64) contra los ~5 MB de localStorage, así que se limita a los últimos 6 y,
+ *  si aun así revienta la cuota, se van cayendo los MÁS VIEJOS: perder el intento antiguo es
+ *  mejor que perder el ticket que el chofer acaba de fotografiar. */
+function guardarColaGastos(arr: GastoPendiente[]): GastoPendiente[] {
+  // Sella aquí el id porque este es el ÚNICO escritor de la cola: así nada persistido queda sin él.
+  let cola = arr.slice(-6).map(p => (p._cola_id ? p : { ...p, _cola_id: nuevoIdCola() }));
+  while (cola.length > 0) {
+    try { localStorage.setItem(COLA_GASTOS, JSON.stringify(cola)); return cola; }
+    catch { cola = cola.slice(1); }
+  }
+  try { localStorage.removeItem(COLA_GASTOS); } catch {}
+  return cola;
+}
 
 const INCIDENCIA_TIPOS: { id: IncidenciaTipo; label: string; icon: (p: any) => ReactElement }[] = [
   { id: "trafico",     label: "Tráfico",     icon: IconActivity },
@@ -145,8 +224,19 @@ async function condApi(accion: string, params: Record<string, any> = {}) {
     body: JSON.stringify(bodyObj),
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.error || "Error de red");
+  // El estado HTTP y el cuerpo viajan PEGADOS al Error (aditivo: ningún llamador previo los
+  // lee). La cola de gastos los necesita para distinguir "sin red, reintenta luego" de un
+  // rechazo definitivo — sobre todo `duplicado`, que significa "ese gasto YA entró en un
+  // intento anterior": reintentarlo sería un bucle infinito contra el índice único.
+  if (!res.ok) throw Object.assign(new Error(json.error || "Error de red"), { estado: res.status, datos: json });
   return json;
+}
+
+/** Error de condApi con lo que el servidor dijo. `estado` y `datos` faltan cuando el fallo fue
+ *  antes de la respuesta (sin red, DNS, abort): eso es justo lo que hay que reintentar. */
+type ErrorApi = Error & { estado?: number; datos?: { duplicado?: boolean } };
+function errorApi(e: unknown): ErrorApi {
+  return (e instanceof Error ? e : new Error(String(e))) as ErrorApi;
 }
 
 function docEstado(f: string | null): "ok" | "pronto" | "vencido" | "sin" {
@@ -802,6 +892,26 @@ export default function ConductorApp() {
   const [docUrl,       setDocUrl]       = useState("");
   const [docVenc,      setDocVenc]      = useState("");
   const [docSaving,    setDocSaving]    = useState(false);
+
+  // ── Rendición de gastos (caja chica) ───────────────────────────────────────
+  // Foto del comprobante: mismo pipeline de compresión que la del odómetro, SIN OCR — un ticket
+  // de peaje no tiene un número que valga la pena adivinar, y el monto lo teclea el chofer.
+  type FotoComprobante = { base64: string; previewUrl: string; capturadoEn: string; lat: number | null; lng: number | null };
+  const [ccRendicion,  setCcRendicion]  = useState<MiRendicion | null>(null);
+  const [ccGastos,     setCcGastos]     = useState<GastoRendido[]>([]);
+  const [ccCargando,   setCcCargando]   = useState(false);
+  const [ccError,      setCcError]      = useState("");
+  const [ccAviso,      setCcAviso]      = useState("");
+  const [ccCola,       setCcCola]       = useState(0);          // gastos esperando en la cola offline
+  const [ccForm,       setCcForm]       = useState(false);      // hoja de registro abierta
+  const [ccCat,        setCcCat]        = useState<string>("peaje");
+  const [ccMonto,      setCcMonto]      = useState("");
+  const [ccDesc,       setCcDesc]       = useState("");
+  const [ccReservaId,  setCcReservaId]  = useState<number | null>(null);
+  const [ccFoto,       setCcFoto]       = useState<FotoComprobante | null>(null);
+  const [ccFotoProc,   setCcFotoProc]   = useState(false);
+  const [ccGuardando,  setCcGuardando]  = useState(false);
+  const [ccEnviando,   setCcEnviando]   = useState(false);
 
   // ── Perfil ─────────────────────────────────────────────────────────────────
   const [pinNuevo,     setPinNuevo]     = useState("");
@@ -2490,6 +2600,204 @@ export default function ConductorApp() {
     };
   }, []);
 
+  // ─── Rendición de gastos (caja chica) ───────────────────────────────────────
+  // El chofer fotografía el peaje o el lavado y el ticket queda rendido contra su caja chica.
+  // TODO va con el token firmado: el servidor deriva de él contra qué bolsa de dinero se carga
+  // el gasto y quién puede leer los comprobantes (ver la nota de identidad en la ruta).
+
+  const cargarCajaChica = useCallback(async () => {
+    const token = conductor?._token;
+    if (!token) { setCcError("Vuelve a iniciar sesión para ver tu caja chica."); return; }
+    setCcCargando(true); setCcError("");
+    try {
+      const r = await condApi("mi_caja_chica", { token });
+      setCcRendicion((r.rendicion as MiRendicion | null) ?? null);
+      setCcGastos(Array.isArray(r.gastos) ? (r.gastos as GastoRendido[]) : []);
+    } catch (e) {
+      setCcError(errorApi(e).message || "No se pudo cargar tu caja chica.");
+    } finally {
+      setCcCargando(false);
+    }
+  }, [conductor?._token]);
+
+  /** Drena la cola offline. Un envío solo SALE de la cola cuando entró de verdad (o cuando
+   *  reintentarlo no puede funcionar nunca): `duplicado` = ya se registró en un intento previo
+   *  cuya respuesta se perdió, y 400 = payload inválido. Un 409 por "rendición en revisión"
+   *  se queda esperando: será enviable en cuanto administración la liquide.
+   *
+   *  Dos cuidados que el drenado NO puede saltarse, porque cada POST tarda lo que tarde la señal
+   *  y en esa ventana pasan cosas:
+   *   · `drenando` — `online` y `visibilitychange` disparan de a dos (volver a primer plano con
+   *     señal recuperada es UN gesto, dos eventos). Sin el candado, dos drenados mandan el MISMO
+   *     gasto a la vez; el índice único del servidor solo salva a los que llevan foto, y un gasto
+   *     "sin comprobante" (foto_hash null) entraría DUPLICADO en la rendición.
+   *   · se descartan ids, no se reescribe la cola con la foto que se leyó al empezar: si el chofer
+   *     registra un gasto y falla mientras esto está en vuelo, escribir el snapshot viejo le
+   *     BORRABA el ticket recién fotografiado. */
+  const drenando = useRef(false);
+  const drenarGastos = useCallback(async () => {
+    const cola = leerColaGastos();
+    setCcCola(cola.length);
+    const token = conductor?._token;
+    if (!token || cola.length === 0 || drenando.current) return;
+    drenando.current = true;
+    // Envíos resueltos (entraron, o reintentarlos no puede funcionar nunca) → fuera de la cola.
+    const resueltos = new Set<string>();
+    let enviados = 0;
+    try {
+      for (const p of cola) {
+        let ok = false;
+        try { await condApi("rendir_gasto", { ...p, token }); enviados++; ok = true; }
+        catch (e) {
+          const err = errorApi(e);
+          ok = err.datos?.duplicado === true || err.estado === 400;
+        }
+        if (ok && p._cola_id) resueltos.add(p._cola_id);
+      }
+    } finally {
+      drenando.current = false;
+    }
+    // Se relee: la cola de AHORA puede traer gastos que el chofer encoló durante el drenado.
+    const restante = leerColaGastos().filter(p => !p._cola_id || !resueltos.has(p._cola_id));
+    setCcCola(guardarColaGastos(restante).length);
+    if (enviados > 0) await cargarCajaChica();
+  }, [conductor?._token, cargarCajaChica]);
+
+  // La caja chica se carga al TOCAR la pestaña (ver el onChange del TabBar), no en el arranque:
+  // es dato de oficina, no del viaje, y el arranque ya pelea por la red con servicios y GPS.
+
+  // Cola offline: mismo drenado que el check-in pendiente (online + volver a primer plano).
+  useEffect(() => {
+    const drenar = () => { void drenarGastos(); };
+    drenar();
+    const onVis = () => { if (typeof document !== "undefined" && document.visibilityState === "visible") drenar(); };
+    window.addEventListener("online", drenar);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("online", drenar);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [drenarGastos]);
+
+  useEffect(() => {
+    if (!ccAviso) return;
+    const t = setTimeout(() => setCcAviso(""), 6000);
+    return () => clearTimeout(t);
+  }, [ccAviso]);
+
+  function limpiarFormGasto() {
+    setCcFoto(prev => { if (prev) URL.revokeObjectURL(prev.previewUrl); return null; });
+    setCcCat("peaje"); setCcMonto(""); setCcDesc(""); setCcReservaId(null);
+  }
+
+  async function capturarComprobante(file: File | undefined) {
+    if (!file) return;
+    setCcFotoProc(true);
+    try {
+      const { base64, blobUrl } = await comprimirFoto(file);
+      setCcFoto(prev => {
+        if (prev) URL.revokeObjectURL(prev.previewUrl);
+        return {
+          base64, previewUrl: blobUrl, capturadoEn: new Date().toISOString(),
+          lat: posActual?.coords.latitude ?? null, lng: posActual?.coords.longitude ?? null,
+        };
+      });
+    } catch (e) {
+      alert(`No se pudo procesar la foto: ${errorApi(e).message}`);
+    } finally {
+      setCcFotoProc(false);
+    }
+  }
+
+  async function registrarGasto() {
+    if (!conductor?._token) { alert("Vuelve a iniciar sesión para registrar gastos."); return; }
+    // Coma decimal: en el teclado numérico del celular es lo que sale, y "12,50" parseado en
+    // crudo da NaN. El monto SIEMPRE es editable a mano (no hay OCR que lo prellene).
+    const monto = Number(ccMonto.replace(",", "."));
+    if (!Number.isFinite(monto) || monto <= 0) { alert("Ingresa el monto del gasto."); return; }
+    if (!ccFoto && !confirm("No adjuntaste el comprobante.\n\nSe registrará como gasto SIN comprobante y administración lo va a revisar aparte. ¿Continuar?")) return;
+
+    const vSel = vehiculos.find(v => v.id === vehiculoId);
+    const pendiente: GastoPendiente = {
+      // El id se sella AQUÍ, no al encolar: el servidor lo guarda como llave de idempotencia
+      // (uq_cc_gastos_idem). Si se sellara solo al caer en la cola, el reintento de un envío
+      // cuya RESPUESTA se perdió tras el commit llevaría un id nuevo y entraría duplicado —
+      // el índice de foto_hash no cubre los gastos declarados sin comprobante.
+      _cola_id: nuevoIdCola(),
+      sin_comprobante: !ccFoto,
+      gasto: {
+        fecha: getFechaLocal(),
+        categoria: ccCat,
+        descripcion: ccDesc.trim() || null,
+        monto,
+        reserva_id: ccReservaId,
+        vehiculo_id: vehiculoId,
+        // La flota la manda el VEHÍCULO elegido, no la tabla del conductor: los ids se solapan
+        // entre vehiculos y vehiculos_tercero (misma regla que el check-in).
+        vehiculo_es_tercero: (vSel?._flota ?? (conductor._tabla === "conductores_tercero" ? "tercero" : "propia")) === "tercero",
+        lat: ccFoto?.lat ?? posActual?.coords.latitude ?? null,
+        lng: ccFoto?.lng ?? posActual?.coords.longitude ?? null,
+        capturado_en: ccFoto?.capturadoEn ?? new Date().toISOString(),
+        // La foto viaja DENTRO del payload: si no hay red, el gasto ENTERO cae en la cola y se
+        // sube solo al reconectar, sin una cola de subidas aparte que mantener.
+        ...(ccFoto ? { foto_adjunto: { media_type: "image/jpeg", data: ccFoto.base64 } } : {}),
+      },
+    };
+
+    setCcGuardando(true);
+    try {
+      const r = await condApi("rendir_gasto", { ...pendiente, token: conductor._token });
+      limpiarFormGasto(); setCcForm(false);
+      setCcAviso(`Gasto registrado en ${r.rendicion_codigo ?? "tu rendición"} · rendido ${fmtMoneda(Number(r.total_rendido ?? 0))}`);
+      await cargarCajaChica();
+    } catch (e) {
+      const err = errorApi(e);
+      const estado = err.estado ?? 0;
+      if (err.datos?.duplicado === true) {
+        limpiarFormGasto(); setCcForm(false);
+        setCcAviso(err.message || "Ese comprobante ya estaba registrado.");
+        await cargarCajaChica();
+      } else if (estado >= 400 && estado < 500) {
+        // El servidor rechazó el CONTENIDO (monto, categoría, rendición en revisión, sesión
+        // vencida): encolarlo sería encolar un error. El formulario queda intacto para corregir.
+        alert(err.message || "No se pudo registrar el gasto.");
+      } else {
+        // Sin red, o falló la subida de la foto (502). El gasto NO se pierde.
+        setCcCola(guardarColaGastos([...leerColaGastos(), pendiente]).length);
+        limpiarFormGasto(); setCcForm(false);
+        setCcAviso("Sin conexión: el gasto quedó guardado y se enviará solo al recuperar señal.");
+      }
+    } finally {
+      setCcGuardando(false);
+    }
+  }
+
+  async function enviarRendicion() {
+    if (!conductor?._token || ccEnviando) return;
+    // Cerrar con gastos aún en la cola los condena: al pasar a `por_revisar` el servidor los
+    // rechaza con 409 hasta que administración liquide, y el chofer no entiende por qué el
+    // comprobante que fotografió nunca apareció. Se intenta subirlos primero.
+    if (ccCola > 0) {
+      setCcEnviando(true);
+      try { await drenarGastos(); } finally { setCcEnviando(false); }
+      if (leerColaGastos().length > 0) {
+        alert("Todavía hay gastos sin subir.\n\nConéctate a una red y espera a que suban antes de cerrar la rendición: si la cierras ahora, esos comprobantes no van a entrar.");
+        return;
+      }
+    }
+    if (!confirm("Vas a cerrar tu rendición y mandarla a administración.\n\nDespués no podrás agregarle más comprobantes. ¿Continuar?")) return;
+    setCcEnviando(true);
+    try {
+      const r = await condApi("enviar_rendicion", { token: conductor._token });
+      setCcAviso(r.rendicion_codigo ? `Rendición ${r.rendicion_codigo} enviada a revisión.` : "Rendición enviada a revisión.");
+      await cargarCajaChica();
+    } catch (e) {
+      alert(errorApi(e).message || "No se pudo enviar la rendición.");
+    } finally {
+      setCcEnviando(false);
+    }
+  }
+
   // ─── Docs ───────────────────────────────────────────────────────────────────
 
   async function subirDoc() {
@@ -2546,6 +2854,13 @@ export default function ConductorApp() {
   const checkFallas   = checks.filter(c => c.ok === false).length;
   const categorias    = Array.from(new Set(CHECKLIST_ITEMS.map(i => i.categoria)));
   const docsBadge     = docs.filter(d => docEstado(d.vencimiento) === "vencido").length;
+
+  // Caja chica: la rendición "viva" es la única que admite comprobantes nuevos o el envío a
+  // revisión. `saldo_pendiente` NEGATIVO = el chofer puso de su bolsillo y la empresa le debe.
+  const ccAbierta   = ccRendicion?.estado === "abierta" || ccRendicion?.estado === "observada";
+  const ccSaldo     = Number(ccRendicion?.saldo_pendiente ?? 0);
+  const ccDiasRendir = diasPara(ccRendicion?.fecha_limite ?? null);
+  const ccBadge     = ccCola > 0 || !!ccRendicion?.atrasada;
 
   const hoyLocal         = getFechaLocal();
   const esModoOtraFecha  = fechaVista !== hoyLocal;
@@ -2798,11 +3113,15 @@ export default function ConductorApp() {
   // SHELL PRINCIPAL
   // ═══════════════════════════════════════════════════════════════════════════
 
+  // Seis pestañas: el TabBar reparte el ancho a partes iguales y a 11px "Check-in" ya no entra
+  // en una pantalla de 320 px sin partirse en dos líneas → se acorta a "Check". Es el único
+  // rótulo que hubo que tocar.
   const TABS: TabItem<Tab>[] = [
     { id: "ruta",       label: "Hoy",       icon: <IconCalendar size={20} /> },
     { id: "paradas",    label: "Ruta",      icon: <IconRoute size={20} />, badge: enRuta && paradaActual ? true : false },
-    { id: "checklist",  label: "Check-in",  icon: <IconShield size={20} />, badge: !checkDone },
+    { id: "checklist",  label: "Check",     icon: <IconShield size={20} />, badge: !checkDone },
     { id: "documentos", label: "Docs",      icon: <IconReceipt size={20} />, badge: docsBadge > 0 },
+    { id: "rendicion",  label: "Gastos",    icon: <IconReceipt size={20} />, badge: ccBadge },
     { id: "perfil",     label: "Perfil",    icon: <IconUser size={20} /> },
   ];
 
@@ -4217,6 +4536,213 @@ export default function ConductorApp() {
           </section>
         )}
 
+        {/* ═══ GASTOS (caja chica) ═══ */}
+        {tab === "rendicion" && (
+          <section style={{ padding: "16px 18px 0" }}>
+            <Eyebrow>Caja chica</Eyebrow>
+            <h2 style={{ margin: "4px 0 16px", fontSize: 28, fontWeight: 800, letterSpacing: -1 }}>
+              Mis gastos
+            </h2>
+
+            {/* Rendición vencida: es lo que le impide recibir más dinero, así que va arriba de todo. */}
+            {ccRendicion?.atrasada && (
+              <div style={{
+                background: "var(--c-danger-tint)", border: "1px solid var(--c-danger)",
+                borderRadius: 14, padding: "12px 14px", marginBottom: 10,
+                display: "flex", gap: 10, alignItems: "flex-start",
+              }}>
+                <IconCircleAlert size={18} color="var(--c-danger)" />
+                <p style={{ margin: 0, fontSize: 12.5, fontWeight: 700, color: "var(--c-danger)", lineHeight: 1.45 }}>
+                  Tu rendición venció hace {ccRendicion.dias_atraso} día{ccRendicion.dias_atraso === 1 ? "" : "s"}.
+                  Envíala para que te puedan entregar más dinero.
+                </p>
+              </div>
+            )}
+
+            {ccCola > 0 && (
+              <div style={{
+                background: "var(--c-warn-tint)", border: "1px solid var(--c-warn)",
+                borderRadius: 14, padding: "10px 14px", marginBottom: 10,
+                display: "flex", gap: 9, alignItems: "center",
+              }}>
+                <IconRefresh size={16} color="var(--c-warn)" />
+                <p style={{ margin: 0, fontSize: 12.5, fontWeight: 700, color: "var(--c-warn)" }}>
+                  {ccCola} gasto{ccCola === 1 ? "" : "s"} sin enviar · se subirá{ccCola === 1 ? "" : "n"} solo{ccCola === 1 ? "" : "s"} al recuperar señal
+                </p>
+              </div>
+            )}
+
+            {ccAviso && (
+              <div style={{
+                background: "var(--c-success-tint)", border: "1px solid var(--c-success)",
+                borderRadius: 14, padding: "10px 14px", marginBottom: 10,
+              }}>
+                <p style={{ margin: 0, fontSize: 12.5, fontWeight: 700, color: "var(--c-success)" }}>{ccAviso}</p>
+              </div>
+            )}
+
+            {ccError && (
+              <div style={{
+                background: "var(--c-danger-tint)", border: "1px solid var(--c-danger)",
+                borderRadius: 14, padding: "10px 14px", marginBottom: 10,
+              }}>
+                <p style={{ margin: 0, fontSize: 12.5, fontWeight: 700, color: "var(--c-danger)" }}>{ccError}</p>
+              </div>
+            )}
+
+            {/* Estado de la rendición */}
+            {ccCargando && !ccRendicion ? (
+              <div style={{
+                background: "var(--c-surface)", border: "1px solid var(--c-line)",
+                borderRadius: 18, padding: "26px 16px", marginBottom: 12, textAlign: "center",
+              }}>
+                <div style={{ width: 26, height: 26, border: "3px solid var(--c-line)", borderTop: "3px solid var(--c-navy)", borderRadius: "50%", animation: "spin 1s linear infinite", margin: "0 auto 10px" }} />
+                <p style={{ margin: 0, fontSize: 13, color: "var(--c-mute)" }}>Cargando tu caja chica…</p>
+              </div>
+            ) : ccRendicion ? (
+              <div style={{
+                background: "var(--c-navy)", color: "#fff", borderRadius: 22,
+                padding: 18, marginBottom: 12, position: "relative", overflow: "hidden",
+                boxShadow: "0 14px 36px -14px rgba(11,49,95,0.5)",
+              }}>
+                <div style={{ position: "absolute", right: -14, top: -14, opacity: 0.08 }}>
+                  <IconReceipt size={116} color="#fff" />
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, position: "relative" }}>
+                  <div>
+                    <Eyebrow color="rgba(255,255,255,0.6)">Rendición</Eyebrow>
+                    <p style={{ margin: "5px 0 0", fontFamily: FONT_MONO, fontSize: 17, fontWeight: 800, letterSpacing: 0.4 }}>
+                      {ccRendicion.codigo ?? "En curso"}
+                    </p>
+                  </div>
+                  <Chip color={configRendicion(ccRendicion.estado).color} bg={configRendicion(ccRendicion.estado).bg} sw>
+                    {configRendicion(ccRendicion.estado).label}
+                  </Chip>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 14, position: "relative" }}>
+                  {[
+                    { lbl: "Asignado", val: Number(ccRendicion.monto_asignado || 0), color: "#fff" },
+                    { lbl: "Rendido",  val: Number(ccRendicion.monto_rendido || 0),  color: "#fff" },
+                    // Saldo negativo = puso de su bolsillo. Se muestra en positivo bajo el rótulo
+                    // "A tu favor": "saldo −S/ 40" no significa nada arriba de un bus.
+                    { lbl: ccSaldo < 0 ? "A tu favor" : "Te queda", val: Math.abs(ccSaldo), color: ccSaldo < 0 ? "#86efac" : "#fff" },
+                  ].map(k => (
+                    <div key={k.lbl} style={{ background: "rgba(255,255,255,0.10)", borderRadius: 14, padding: "10px 11px" }}>
+                      <p style={{ margin: 0, fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: "rgba(255,255,255,0.6)" }}>
+                        {k.lbl}
+                      </p>
+                      <p style={{ margin: "4px 0 0", fontFamily: FONT_MONO, fontSize: 14, fontWeight: 800, color: k.color, letterSpacing: -0.2 }}>
+                        {fmtMoneda(k.val, ccRendicion.moneda)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, position: "relative", flexWrap: "wrap" }}>
+                  {ccRendicion.atrasada ? (
+                    <Chip color="var(--c-danger)" bg="#fee2e2" sw>
+                      Vencida hace {ccRendicion.dias_atraso} d
+                    </Chip>
+                  ) : ccDiasRendir === null ? (
+                    <Chip color="#fff" bg="rgba(255,255,255,0.14)" sw>Sin fecha límite</Chip>
+                  ) : (
+                    <Chip color={ccDiasRendir <= 2 ? "var(--c-warn)" : "#fff"} bg={ccDiasRendir <= 2 ? "#fef9c3" : "rgba(255,255,255,0.14)"} sw>
+                      {ccDiasRendir <= 0 ? "Vence hoy" : `Te quedan ${ccDiasRendir} día${ccDiasRendir === 1 ? "" : "s"}`}
+                    </Chip>
+                  )}
+                  <Chip color="#fff" bg="rgba(255,255,255,0.14)" sw>
+                    {ccRendicion.comprobantes} comprobante{ccRendicion.comprobantes === 1 ? "" : "s"}
+                  </Chip>
+                </div>
+
+                {ccRendicion.motivo_observacion && (
+                  <p style={{ margin: "12px 0 0", fontSize: 12, lineHeight: 1.45, color: "#fecaca", position: "relative" }}>
+                    Observada: {ccRendicion.motivo_observacion}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div style={{
+                background: "var(--c-surface)", border: "1px solid var(--c-line)",
+                borderRadius: 18, padding: "26px 18px", marginBottom: 12, textAlign: "center",
+              }}>
+                <p style={{ margin: "0 0 6px", fontSize: 30 }}>🧾</p>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 800, color: "var(--c-ink)" }}>Todavía no has rendido nada</p>
+                <p style={{ margin: "5px 0 0", fontSize: 12.5, color: "var(--c-mute)", lineHeight: 1.45 }}>
+                  Fotografía el peaje o el lavado apenas lo pagues. Tu rendición se abre sola con el primer gasto.
+                </p>
+              </div>
+            )}
+
+            <PrimaryBtn onClick={() => { setCcAviso(""); setCcForm(true); }} size="lg" icon={<IconCamera size={17} color="#fff" />}>
+              Registrar gasto
+            </PrimaryBtn>
+
+            {ccAbierta && ccGastos.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <SecondaryBtn onClick={enviarRendicion} disabled={ccEnviando} icon={<IconArrowRight size={15} color="var(--c-navy)" />}>
+                  {ccEnviando ? "Enviando…" : "Enviar a revisión"}
+                </SecondaryBtn>
+              </div>
+            )}
+
+            {/* Comprobantes del ciclo */}
+            <div style={{ marginTop: 18 }}>
+              <Eyebrow style={{ marginBottom: 8 }}>Comprobantes de este ciclo</Eyebrow>
+              {ccGastos.length === 0 ? (
+                <p style={{ margin: 0, fontSize: 12.5, color: "var(--c-mute)" }}>
+                  Aún no hay comprobantes registrados.
+                </p>
+              ) : ccGastos.map(g => {
+                const cat = configCategoriaCC(g.categoria);
+                const rev = ESTADOS_REVISION[g.estado_revision] ?? ESTADOS_REVISION.pendiente;
+                return (
+                  <div key={g.id} style={{
+                    background: "var(--c-surface)", border: "1px solid var(--c-line)",
+                    borderRadius: 14, padding: "11px 13px", marginBottom: 8,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div style={{
+                        width: 38, height: 38, borderRadius: 12, background: cat.bg,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 18, flexShrink: 0,
+                      }}>
+                        {cat.emoji}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <p style={{ margin: 0, fontSize: 13, fontWeight: 800, color: "var(--c-ink)", letterSpacing: -0.1 }}>
+                          {cat.label}
+                        </p>
+                        <p style={{ margin: "2px 0 0", fontSize: 11.5, color: "var(--c-mute)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {new Date(g.fecha + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit" })}
+                          {g.descripcion ? ` · ${g.descripcion}` : ""}
+                          {g.tipo_comprobante === "sin_comprobante" ? " · sin comprobante" : ""}
+                        </p>
+                      </div>
+                      <div style={{ textAlign: "right", flexShrink: 0 }}>
+                        <p style={{ margin: 0, fontFamily: FONT_MONO, fontSize: 14, fontWeight: 800, color: "var(--c-ink)" }}>
+                          {fmtMoneda(Number(g.monto || 0), g.moneda)}
+                        </p>
+                        <Chip color={rev.color} bg={rev.bg} sw style={{ marginTop: 4 }}>{rev.label}</Chip>
+                      </div>
+                    </div>
+                    {g.estado_revision === "rechazado" && g.motivo_rechazo && (
+                      <p style={{
+                        margin: "9px 0 0", padding: "7px 10px", borderRadius: 10,
+                        background: "var(--c-danger-tint)", color: "var(--c-danger)",
+                        fontSize: 11.5, fontWeight: 600, lineHeight: 1.4,
+                      }}>
+                        Rechazado: {g.motivo_rechazo}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
         {/* ═══ PERFIL ═══ */}
         {tab === "perfil" && (
           <section style={{ padding: "16px 18px 0" }}>
@@ -4450,7 +4976,11 @@ export default function ConductorApp() {
         )}
       </main>
 
-      <TabBar tabs={TABS} active={tab} onChange={setTab} />
+      <TabBar
+        tabs={TABS}
+        active={tab}
+        onChange={(t) => { setTab(t); if (t === "rendicion") void cargarCajaChica(); }}
+      />
 
       {/* Divulgación destacada de ubicación en segundo plano (Google Play) */}
       {mostrarDivulgacion && (
@@ -5440,6 +5970,171 @@ export default function ConductorApp() {
                   icon={<IconBell size={15} color="#fff" />}
                 >
                   {incSaving ? "Enviando…" : "Enviar"}
+                </PrimaryBtn>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {/* HOJA: REGISTRAR GASTO DE CAJA CHICA                                 */}
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {ccForm && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 105,
+          background: "rgba(11,31,58,0.75)",
+          display: "flex", alignItems: "flex-end", justifyContent: "center",
+          animation: "sheetIn 0.25s ease-out",
+        }}>
+          <div style={{
+            background: "var(--c-paper)", borderRadius: "28px 28px 0 0",
+            padding: "0 0 22px", width: "100%", maxWidth: 520,
+            maxHeight: "92vh", overflowY: "auto",
+            boxShadow: "0 -10px 30px rgba(0,0,0,0.15)",
+          }}>
+            <div style={{ width: 40, height: 4, background: "var(--c-line)", borderRadius: 2, margin: "14px auto 16px" }} />
+
+            <div style={{ padding: "0 22px", display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div>
+                <Eyebrow>Caja chica</Eyebrow>
+                <h2 style={{ margin: "4px 0 0", fontSize: 24, fontWeight: 800, letterSpacing: -0.8 }}>
+                  Registrar gasto
+                </h2>
+              </div>
+              <button
+                onClick={() => setCcForm(false)}
+                style={{
+                  width: 34, height: 34, borderRadius: 12,
+                  background: "var(--c-soft)", border: "none", cursor: "pointer",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}
+              >
+                <IconClose size={15} color="var(--c-ink)" />
+              </button>
+            </div>
+
+            <div style={{ padding: "0 22px" }}>
+              <Eyebrow style={{ marginBottom: 8 }}>Categoría</Eyebrow>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
+                {CATEGORIAS_GASTO_APP.map(id => {
+                  const cat = configCategoriaCC(id);
+                  const sel = ccCat === id;
+                  return (
+                    <button
+                      key={id}
+                      onClick={() => setCcCat(id)}
+                      style={{
+                        padding: "12px 6px", borderRadius: 14, cursor: "pointer",
+                        border: sel ? `2px solid ${cat.color}` : "1px solid var(--c-line)",
+                        background: sel ? cat.bg : "var(--c-surface)",
+                        display: "flex", flexDirection: "column", alignItems: "center", gap: 5,
+                        fontFamily: FONT_SANS,
+                      }}
+                    >
+                      <span style={{ fontSize: 21, lineHeight: 1 }}>{cat.emoji}</span>
+                      <span style={{ fontSize: 10.5, fontWeight: 700, color: sel ? cat.color : "var(--c-ink-2)", textAlign: "center", lineHeight: 1.15 }}>
+                        {cat.label}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Foto del comprobante. Es lo que convierte el gasto en rendible, así que va antes
+                  del monto — pero el monto NUNCA depende de ella: no hay OCR que prellenar. */}
+              <Eyebrow style={{ marginBottom: 8 }}>Comprobante</Eyebrow>
+              {!ccFoto ? (
+                <label style={{
+                  display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 5,
+                  padding: "22px 14px", borderRadius: 14, border: "2px dashed var(--c-navy)",
+                  cursor: ccFotoProc ? "default" : "pointer", background: "var(--c-navy-tint)", color: "var(--c-navy)",
+                  fontFamily: FONT_SANS, fontSize: 14, fontWeight: 800, textAlign: "center", marginBottom: 14,
+                }}>
+                  <span style={{ fontSize: 26 }}>📷</span>
+                  {ccFotoProc ? "Procesando la foto…" : "Fotografía el ticket"}
+                  <span style={{ fontSize: 11, fontWeight: 600, color: "var(--c-mute)" }}>
+                    El peaje, el lavado, la boleta… tal como está
+                  </span>
+                  <input type="file" accept="image/*" capture="environment" hidden disabled={ccFotoProc}
+                    onChange={(e) => { capturarComprobante(e.target.files?.[0]); e.currentTarget.value = ""; }} />
+                </label>
+              ) : (
+                <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14 }}>
+                  <img src={ccFoto.previewUrl} alt="comprobante" style={{ width: 78, height: 78, objectFit: "cover", borderRadius: 12, border: "1px solid var(--c-line)" }} />
+                  <div style={{ flex: 1 }}>
+                    <p style={{ margin: 0, fontSize: 12.5, fontWeight: 800, color: "var(--c-success)" }}>✓ Comprobante listo</p>
+                    <button
+                      onClick={() => setCcFoto(prev => { if (prev) URL.revokeObjectURL(prev.previewUrl); return null; })}
+                      style={{ marginTop: 4, background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--c-navy)", fontFamily: FONT_SANS, fontSize: 12, fontWeight: 700 }}>
+                      Tomar otra
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <Eyebrow style={{ marginBottom: 8 }}>Monto</Eyebrow>
+              <div style={{
+                display: "flex", alignItems: "center", gap: 10, marginBottom: 14,
+                border: "1.5px solid var(--c-line)", borderRadius: 12, padding: "10px 14px",
+                background: "var(--c-surface)",
+              }}>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 18, fontWeight: 800, color: "var(--c-mute)" }}>S/</span>
+                <input
+                  type="text" inputMode="decimal" value={ccMonto}
+                  onChange={e => setCcMonto(e.target.value.replace(/[^\d.,]/g, "").slice(0, 10))}
+                  placeholder="0.00"
+                  style={{
+                    flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent",
+                    fontFamily: FONT_MONO, fontSize: 24, fontWeight: 800, color: "var(--c-ink)", letterSpacing: 0.5,
+                  }}
+                />
+              </div>
+
+              <Eyebrow style={{ marginBottom: 8 }}>Detalle (opcional)</Eyebrow>
+              <input
+                value={ccDesc} onChange={e => setCcDesc(e.target.value.slice(0, 120))}
+                placeholder="Peaje Villa · garita sur"
+                style={{
+                  width: "100%", marginBottom: 14, padding: "12px 14px", borderRadius: 12,
+                  border: "1.5px solid var(--c-line)", fontFamily: FONT_SANS, fontSize: 13,
+                  color: "var(--c-ink)", background: "var(--c-surface)", outline: "none", boxSizing: "border-box",
+                }}
+              />
+
+              {/* Atar el gasto al servicio es lo que permite después calcular el costo real de esa
+                  reserva (v_costo_servicio.costo_caja_chica). Opcional: hay gastos de la jornada
+                  que no son de ningún servicio en concreto. */}
+              {reservasHoy.length > 0 && (
+                <>
+                  <Eyebrow style={{ marginBottom: 8 }}>Servicio del día (opcional)</Eyebrow>
+                  <select
+                    value={ccReservaId ?? ""}
+                    onChange={e => setCcReservaId(e.target.value ? Number(e.target.value) : null)}
+                    style={{
+                      width: "100%", marginBottom: 16, padding: "12px 14px", borderRadius: 12,
+                      border: "1.5px solid var(--c-line)", fontFamily: FONT_SANS, fontSize: 13, fontWeight: 600,
+                      color: "var(--c-ink)", background: "var(--c-surface)", outline: "none", boxSizing: "border-box",
+                    }}
+                  >
+                    <option value="">Sin servicio asociado</option>
+                    {reservasHoy.map(r => (
+                      <option key={r.id} value={r.id}>
+                        {(r.hora_servicio ?? "").slice(0, 5)} · {acortarLugar(r.origen)} → {acortarLugar(r.destino)}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              )}
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <SecondaryBtn onClick={() => { limpiarFormGasto(); setCcForm(false); }}>Cancelar</SecondaryBtn>
+                <PrimaryBtn
+                  onClick={registrarGasto}
+                  disabled={ccGuardando || ccFotoProc}
+                  icon={<IconCheck size={15} color="#fff" sw={2.5} />}
+                >
+                  {ccGuardando ? "Guardando…" : "Rendir"}
                 </PrimaryBtn>
               </div>
             </div>

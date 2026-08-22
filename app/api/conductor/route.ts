@@ -17,7 +17,10 @@ import { ESTADO_ADMIN_INICIAL } from "@/lib/estados";
 import {
   firmarTokenConductor, sesionDeToken,
   loginBloqueado, registrarIntentoFallido, limpiarIntentos,
+  type SesionConductor,
 } from "@/lib/conductor-auth";
+import { CATEGORIAS_CAJA_CHICA, enviarARevision, hoyLima } from "@/lib/finanzas/caja-chica";
+import { redondear } from "@/lib/finanzas/dinero";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -91,6 +94,16 @@ function esViolacionUnica(err: any): boolean {
   if (!err) return false;
   if (err.code === "23505") return true;
   return /duplicate key value violates unique constraint/i.test(err.message || "");
+}
+
+// ¿Violación de clave foránea (23503)? La usa la rendición de gastos: las FKs de enganche
+// (conductor / vehículo / reserva) de caja_chica_gastos apuntan a la flota PROPIA, y un id de
+// la flota tercerizada no existe allí. Un peaje ya pagado no se puede perder por eso: se
+// reintenta el insert sin las columnas de enganche.
+function esViolacionFk(err: { code?: string; message?: string } | null): boolean {
+  if (!err) return false;
+  if (err.code === "23503") return true;
+  return /violates foreign key constraint/i.test(err.message || "");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
@@ -313,6 +326,177 @@ async function subirFotoOdometro(
   });
   if (error) throw new Error("upload_foto: " + error.message);
   return admin.storage.from("vehiculos-fotos").getPublicUrl(path).data.publicUrl;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// RENDICIÓN DE GASTOS DESDE LA APP DEL CONDUCTOR (caja chica)
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// El chofer fotografía el peaje o el lavado y el ticket queda rendido contra SU caja chica
+// (supabase/finanzas-06-gastos-caja-chica.sql). Tres acciones: `rendir_gasto`, `mi_caja_chica`
+// y `enviar_rendicion`.
+//
+// IDENTIDAD — POR TOKEN, NUNCA POR `cid`. 22 de las 24 acciones de esta ruta confían en el `cid`
+// que llega en el body; estas tres no pueden. El body decide contra QUÉ BOLSA DE DINERO se carga
+// el gasto: confiar en el `cid` sería dejar que cualquiera cargue sus peajes a la caja chica de
+// otro conductor (y que le lea sus comprobantes). Mismo patrón que suscribir_push.
+//
+// IDENTIDAD COMPUESTA. El conductor vive en dos tablas cuyos ids SE SOLAPAN, pero
+// caja_chica_fondos.conductor_id y caja_chica_gastos.conductor_id apuntan por FK a `conductores`
+// (flota propia). Para un tercero esas columnas van en NULL, la llave del fondo pasa a ser su DNI
+// (responsable_tipo 'otro') y su nombre queda escrito en el fondo y en las observaciones del
+// gasto — que es lo que el contador necesita leer para saber a quién le está pagando.
+
+/** Sube el comprobante (base64 que manda el conductor) al bucket PRIVADO `comprobantes`.
+ *  Gemelo de subirFotoOdometro con una diferencia que importa: devuelve la RUTA, no una URL
+ *  pública. El bucket es privado, así que lo que se guarda en caja_chica_gastos.foto_url es el
+ *  path y la bandeja del contador lo abre con createSignedUrl. Lanza si la subida falla → el
+ *  cliente lo trata como fallo de red y re-encola (nunca un gasto "ok" sin su evidencia). */
+async function subirFotoComprobante(
+  adj: { media_type?: string; data?: string } | undefined | null,
+  o: { conductor_id: number; fecha: string }
+): Promise<string | null> {
+  if (!adj?.data) return null;
+  const path = `gastos/${o.conductor_id}/${o.fecha}/${crypto.randomUUID()}.jpg`;
+  const buf = Buffer.from(adj.data, "base64");
+  const { error } = await admin.storage.from("comprobantes").upload(path, buf, {
+    contentType: adj.media_type || "image/jpeg",
+    upsert: true,
+  });
+  if (error) throw new Error("upload_comprobante: " + error.message);
+  return path;
+}
+
+type FondoCC     = { id: number; moneda: string | null; dias_para_rendir: number | null };
+type RendicionCC = { id: number; codigo: string | null; estado: string };
+
+/** Datos mínimos del conductor DEL TOKEN. Nombre y DNI son lo que identifica al responsable
+ *  en el fondo (el DNI es además la llave del fondo cuando el conductor es tercerizado). */
+async function conductorDeSesion(
+  ses: SesionConductor
+): Promise<{ id: number; nombre: string; dni: string | null } | null> {
+  const { data } = await admin.from(ses.tabla).select("id, nombre, dni").eq("id", ses.cid).maybeSingle();
+  if (!data) return null;
+  return {
+    id: Number(data.id),
+    nombre: String(data.nombre ?? "").trim() || "Conductor",
+    dni: data.dni ? String(data.dni).trim() : null,
+  };
+}
+
+/**
+ * Fondo de caja chica del conductor. Con `crear` lo abre al vuelo: el chofer no puede esperar a
+ * que administración le dé de alta la ficha para fotografiar un peaje que ya pagó de su bolsillo.
+ * Sin `crear` (lecturas) devuelve null y la app pinta el estado vacío, sin escribir nada.
+ */
+async function fondoDeConductor(
+  c: { id: number; nombre: string; dni: string | null },
+  esTercero: boolean,
+  crear: boolean,
+): Promise<{ fondo: FondoCC | null; error?: string }> {
+  const COLS = "id, moneda, dias_para_rendir";
+  const nombreFondo = `Caja chica · ${c.nombre}`;
+  let fondo: FondoCC | null = null;
+
+  if (!esTercero) {
+    const { data } = await admin.from("caja_chica_fondos").select(COLS)
+      .eq("conductor_id", c.id).eq("activo", true).order("id").limit(1).maybeSingle();
+    fondo = (data as FondoCC | null) ?? null;
+  }
+  // Por DNI: es la ÚNICA llave del tercero (su conductor_id no vale en estas tablas) y de paso
+  // recupera el fondo del conductor propio que administración abrió a mano sin enlazarlo.
+  if (!fondo && c.dni) {
+    const { data } = await admin.from("caja_chica_fondos").select(COLS)
+      .eq("documento_identidad", c.dni).eq("activo", true).order("id").limit(1).maybeSingle();
+    fondo = (data as FondoCC | null) ?? null;
+  }
+  // Último recurso, SOLO sin DNI: el nombre con el que esta misma función creó el fondo. `dni` es
+  // nullable en conductores y en conductores_tercero, y sin esta rama un tercero sin DNI no tiene
+  // NINGUNA llave: cada gasto le abriría un fondo nuevo (y `mi_caja_chica`, que no crea nada,
+  // nunca encontraría ninguno → el chofer vería "todavía no has rendido nada" para siempre).
+  if (!fondo && !c.dni) {
+    const { data } = await admin.from("caja_chica_fondos").select(COLS)
+      .eq("nombre", nombreFondo).eq("activo", true).order("id").limit(1).maybeSingle();
+    fondo = (data as FondoCC | null) ?? null;
+  }
+  if (fondo || !crear) return { fondo };
+
+  const base: Record<string, unknown> = {
+    nombre: nombreFondo,
+    responsable_tipo: esTercero ? "otro" : "conductor",
+    responsable_nombre: c.nombre,
+    documento_identidad: c.dni,
+    moneda: "PEN",
+    observaciones: "Abierto automáticamente desde la app del conductor.",
+  };
+  const crearFondo = (extra: Record<string, unknown>) =>
+    admin.from("caja_chica_fondos").insert({ ...base, ...extra }).select(COLS).single();
+  let { data, error } = await crearFondo(esTercero ? {} : { conductor_id: c.id });
+  if (error && !esTercero && (esViolacionFk(error) || esColumnaInexistente(error))) {
+    ({ data, error } = await crearFondo({})); // el enlace al maestro es un lujo; el fondo, no
+  }
+  if (error) return { fondo: null, error: error.message };
+  return { fondo: data as FondoCC };
+}
+
+const RENDICION_EN_REVISION =
+  "Tu rendición anterior está en revisión. Cuando administración la liquide podrás registrar gastos nuevos.";
+
+/**
+ * Rendición viva del fondo, abriéndola si no existe. `monto_asignado` arranca en 0 a propósito:
+ * el chofer puede adelantar de su bolsillo ANTES de que le entreguen efectivo, y en ese caso el
+ * saldo de la vista sale negativo, que es exactamente "la empresa le debe".
+ *
+ * NO se usa `abrirRendicion()` de lib/finanzas/caja-chica: esa exige monto > 0 y pasa por la
+ * regla de bloqueo, que es la del contador entregando dinero. Aquí no sale dinero de tesorería.
+ *
+ * `bloqueo` distingue las DOS razones por las que esto puede no devolver rendición, porque el
+ * cliente hace cosas opuestas con cada una: `bloqueo: true` es una regla de negocio (la anterior
+ * está en revisión) → 409, no se reintenta, el chofer lee el motivo; sin `bloqueo` es un fallo de
+ * infraestructura (BD caída, migración sin correr) → 500, y ahí el gasto SÍ tiene que caer en la
+ * cola offline en vez de perderse. Devolver 409 para ambas dejaba el ticket sin guardar.
+ */
+async function rendicionVivaDeFondo(
+  fondo: FondoCC
+): Promise<{ rendicion: RendicionCC | null; error?: string; bloqueo?: boolean }> {
+  const fondoId = fondo.id;
+  const COLS = "id, codigo, estado";
+  const leerViva = () => admin.from("caja_chica_rendiciones").select(COLS)
+    .eq("fondo_id", fondoId).in("estado", ["abierta", "observada"])
+    .order("id", { ascending: false }).limit(1).maybeSingle();
+  const hayEnRevision = async () => {
+    const { data } = await admin.from("caja_chica_rendiciones").select("id")
+      .eq("fondo_id", fondoId).eq("estado", "por_revisar").limit(1).maybeSingle();
+    return !!data;
+  };
+
+  const { data: viva } = await leerViva();
+  if (viva) return { rendicion: viva as RendicionCC };
+
+  // `por_revisar` bloquea, y está bien que bloquee: el índice uq_cc_rend_abierta impide abrir
+  // otra, y colgar gastos nuevos de la rendición que el contador está revisando le cambiaría
+  // los números mientras la mira.
+  if (await hayEnRevision()) return { rendicion: null, error: RENDICION_EN_REVISION, bloqueo: true };
+
+  const hoy = hoyLima();
+  const { data: nueva, error } = await admin.from("caja_chica_rendiciones").insert({
+    fondo_id: fondoId, monto_asignado: 0, moneda: fondo.moneda ?? "PEN",
+    fecha_entrega: hoy, periodo_desde: hoy, estado: "abierta",
+    creado_por: "app_conductor",
+  }).select(COLS).single();
+
+  if (error) {
+    // Carrera real: dos gastos enviados a la vez (o la cola offline drenando en paralelo). El
+    // índice único deja pasar uno solo; el otro recupera el que ganó en vez de fallar.
+    if (esViolacionUnica(error)) {
+      const { data: ya } = await leerViva();
+      if (ya) return { rendicion: ya as RendicionCC };
+      // La que ganó la carrera se envió a revisión entre el chequeo y el insert: es el mismo
+      // bloqueo de arriba, y merece el mismo mensaje humano en vez del texto crudo de Postgres.
+      if (await hayEnRevision()) return { rendicion: null, error: RENDICION_EN_REVISION, bloqueo: true };
+    }
+    return { rendicion: null, error: error.message };
+  }
+  return { rendicion: nueva as RendicionCC };
 }
 
 export async function POST(req: NextRequest) {
@@ -1290,6 +1474,189 @@ export async function POST(req: NextRequest) {
         const { error } = await admin.from(t).update({ pin_acceso: pin }).eq("id", cid);
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
         return NextResponse.json({ ok: true });
+      }
+
+      // ── Rendir un gasto de caja chica (foto del peaje / lavado) ──────────────
+      // Ver la nota larga de identidad en la cabecera de la sección de caja chica.
+      case "rendir_gasto": {
+        const ses = sesionDeToken(body.token);
+        if (!ses) return NextResponse.json({ error: "Sesión vencida. Vuelve a iniciar sesión." }, { status: 401 });
+
+        const g = (body.gasto ?? {}) as Record<string, unknown>;
+        const monto = Number(g.monto);
+        if (!Number.isFinite(monto) || monto <= 0) {
+          return NextResponse.json({ error: "Ingresa el monto del gasto." }, { status: 400 });
+        }
+        const categoria = String(g.categoria ?? "otro");
+        if (!(categoria in CATEGORIAS_CAJA_CHICA)) {
+          return NextResponse.json({ error: "Categoría de gasto desconocida." }, { status: 400 });
+        }
+        // El comprobante es obligatorio salvo declaración expresa: hay gastos que en la calle no
+        // dan papel (una movilidad, una propina de estacionamiento) y quedan marcados como tales
+        // para que el contador los mire aparte, en vez de empujar al chofer a inventar una foto.
+        const sinComprobante = body.sin_comprobante === true || g.sin_comprobante === true;
+        const fotoAdjunto = g.foto_adjunto as { media_type?: string; data?: string } | undefined;
+        if (!sinComprobante && !fotoAdjunto?.data) {
+          return NextResponse.json({ error: "Falta la foto del comprobante." }, { status: 400 });
+        }
+
+        const cond = await conductorDeSesion(ses);
+        if (!cond) return NextResponse.json({ error: "No encontramos tu ficha de conductor." }, { status: 404 });
+        const esTercero = ses.tabla === "conductores_tercero";
+
+        const { fondo, error: eFondo } = await fondoDeConductor(cond, esTercero, true);
+        if (!fondo) return NextResponse.json({ error: eFondo || "No se pudo abrir tu caja chica." }, { status: 500 });
+
+        // 409 SOLO si el bloqueo es real (rendición en revisión): el cliente no reintenta un 4xx.
+        // Un fallo de infraestructura va como 500 para que el gasto caiga en la cola offline.
+        const { rendicion, error: eRend, bloqueo } = await rendicionVivaDeFondo(fondo);
+        if (!rendicion) {
+          return NextResponse.json({ error: eRend || "No se pudo abrir tu rendición." },
+            { status: bloqueo ? 409 : 500 });
+        }
+
+        const fechaGasto = /^\d{4}-\d{2}-\d{2}$/.test(String(g.fecha ?? "")) ? String(g.fecha) : hoyLima();
+        // Mismo descuento del error de reloj que el check-in y el check-out (ver allí): la hora de
+        // la captura la pone el celular, y con la cola offline puede llegar horas después.
+        const reloj = corregirCapturaPorReloj({
+          capturado_en: typeof g.capturado_en === "string" ? g.capturado_en : null,
+          clienteTs: body._cliente_ts,
+        });
+        if (reloj.nota) console.warn(`[rendir_gasto] conductor ${cond.id}: ${reloj.nota}`);
+
+        // La foto se sube ANTES de insertar y su fallo se propaga: un gasto guardado sin su
+        // evidencia es un gasto que el contador va a rechazar.
+        let fotoPath: string | null = null;
+        try {
+          fotoPath = await subirFotoComprobante(fotoAdjunto, { conductor_id: cond.id, fecha: fechaGasto });
+        } catch (e) {
+          return NextResponse.json({ error: (e as Error)?.message || "No se pudo subir la foto" }, { status: 502 });
+        }
+
+        const num = (v: unknown) => (Number.isFinite(Number(v)) && v !== null && v !== "" ? Number(v) : null);
+        const fila: Record<string, unknown> = {
+          rendicion_id: rendicion.id,
+          fecha: fechaGasto,
+          categoria,
+          descripcion: String(g.descripcion ?? "").trim().slice(0, 300) || null,
+          monto: redondear(monto),
+          moneda: fondo.moneda ?? "PEN",
+          tipo_comprobante: sinComprobante ? "sin_comprobante" : "ticket",
+          foto_url: fotoPath,   // RUTA del bucket privado, NO una URL pública (ver subirFotoComprobante)
+          // El índice único (rendicion_id, foto_hash) convierte el mismo ticket reenviado en un
+          // 23505 en vez de en dos gastos: es la red que protege de la cola offline reintentando.
+          foto_hash: await hashDeFoto({ base64: fotoAdjunto?.data ?? null }),
+          lat: num(g.lat),
+          lng: num(g.lng),
+          capturado_en: reloj.capturado_en,
+          estado_revision: "pendiente",
+          origen: "conductor_app",
+          observaciones: [
+            esTercero ? `Rendido por ${cond.nombre}${cond.dni ? ` · DNI ${cond.dni}` : ""} (flota tercerizada)` : null,
+            reloj.nota,
+          ].filter(Boolean).join(" · ") || null,
+        };
+        // Enganches a la flota PROPIA (ver la nota de identidad compuesta): para un tercero se
+        // omiten y su trazabilidad vive en `observaciones`.
+        const engancheVehiculo = g.vehiculo_es_tercero === true ? null : num(g.vehiculo_id);
+        const enganche: Record<string, unknown> = {};
+        // Llave de idempotencia del envío. El índice único de foto_hash es PARCIAL, así que
+        // un gasto SIN comprobante no está protegido por él: si la respuesta se pierde
+        // después del commit, la cola offline lo reintenta y entraría dos veces.
+        // uq_cc_gastos_idem lo convierte en el mismo 23505 que ya sabemos tratar.
+        const colaId = typeof body._cola_id === "string" ? body._cola_id.slice(0, 80) : null;
+        if (colaId) enganche.idem_key = colaId;
+        if (!esTercero) enganche.conductor_id = cond.id;
+        if (engancheVehiculo) enganche.vehiculo_id = engancheVehiculo;
+        if (num(g.reserva_id)) enganche.reserva_id = num(g.reserva_id);
+
+        const insertar = (extra: Record<string, unknown>) =>
+          admin.from("caja_chica_gastos").insert({ ...fila, ...extra }).select("id").single();
+        let { data: creado, error } = await insertar(enganche);
+        if (error && (esViolacionFk(error) || esColumnaInexistente(error))) {
+          ({ data: creado, error } = await insertar({}));
+        }
+        if (error) {
+          if (esViolacionUnica(error)) {
+            // Best-effort: la foto que acabamos de subir ya no cuelga de ningún gasto.
+            if (fotoPath) { try { await admin.storage.from("comprobantes").remove([fotoPath]); } catch {} }
+            // `duplicado` deja que la app saque el envío de su cola offline en vez de reintentarlo
+            // para siempre: el gasto SÍ quedó registrado, solo que en un intento anterior.
+            return NextResponse.json({
+              error: "Ese comprobante ya lo registraste en esta rendición.", duplicado: true,
+            }, { status: 409 });
+          }
+          return NextResponse.json({ error: error.message }, { status: 500 });
+        }
+
+        // El total lo DERIVA la vista (monto_rendido = Σ gastos no rechazados); aquí no se
+        // recalcula nada. Best-effort: el gasto ya está guardado, que es lo que importa.
+        const { data: v } = await admin.from("v_caja_chica_rendiciones")
+          .select("codigo, monto_rendido").eq("id", rendicion.id).maybeSingle();
+        return NextResponse.json({
+          ok: true,
+          gasto_id: creado?.id ?? null,
+          rendicion_codigo: v?.codigo ?? rendicion.codigo ?? null,
+          total_rendido: Number(v?.monto_rendido ?? 0),
+        });
+      }
+
+      // ── Resumen de caja chica del conductor (pestaña "Gastos") ───────────────
+      case "mi_caja_chica": {
+        const ses = sesionDeToken(body.token);
+        if (!ses) return NextResponse.json({ error: "Sesión vencida. Vuelve a iniciar sesión." }, { status: 401 });
+        const cond = await conductorDeSesion(ses);
+        if (!cond) return NextResponse.json({ error: "No encontramos tu ficha de conductor." }, { status: 404 });
+
+        // Lectura pura: NO abre fondo ni rendición. Que la pestaña se mire no debe crear filas.
+        const { fondo } = await fondoDeConductor(cond, ses.tabla === "conductores_tercero", false);
+        if (!fondo) return NextResponse.json({ ok: true, rendicion: null, gastos: [] });
+
+        // La VISTA, no la tabla: monto_rendido, saldo_pendiente, atrasada y dias_atraso son
+        // DERIVADOS y solo existen ahí.
+        const vistaRendicion = () => admin.from("v_caja_chica_rendiciones")
+          .select("id, codigo, estado, moneda, monto_asignado, monto_rendido, monto_por_revisar, monto_rechazado, monto_devuelto, saldo_pendiente, comprobantes, fecha_entrega, fecha_limite, atrasada, dias_atraso, motivo_observacion")
+          .eq("fondo_id", fondo.id);
+
+        const { data: viva } = await vistaRendicion()
+          .in("estado", ["abierta", "por_revisar", "observada"])
+          .order("id", { ascending: false }).limit(1).maybeSingle();
+        let rend = viva ?? null;
+        if (!rend) {
+          // Sin ciclo vivo se muestra el último cerrado: el chofer necesita ver qué pasó con los
+          // tickets que entregó, no una pantalla en blanco.
+          const { data: ultima } = await vistaRendicion().order("id", { ascending: false }).limit(1).maybeSingle();
+          rend = ultima ?? null;
+        }
+        if (!rend) return NextResponse.json({ ok: true, rendicion: null, gastos: [] });
+
+        // `foto_url` NO viaja: es una ruta de un bucket privado, inútil e innecesaria en el celular.
+        const { data: gastos } = await admin.from("caja_chica_gastos")
+          .select("id, fecha, categoria, descripcion, monto, moneda, tipo_comprobante, estado_revision, motivo_rechazo, created_at")
+          .eq("rendicion_id", rend.id).order("id", { ascending: false });
+        return NextResponse.json({ ok: true, rendicion: rend, gastos: gastos || [] });
+      }
+
+      // ── El conductor cierra su rendición y la manda a revisión ───────────────
+      case "enviar_rendicion": {
+        const ses = sesionDeToken(body.token);
+        if (!ses) return NextResponse.json({ error: "Sesión vencida. Vuelve a iniciar sesión." }, { status: 401 });
+        const cond = await conductorDeSesion(ses);
+        if (!cond) return NextResponse.json({ error: "No encontramos tu ficha de conductor." }, { status: 404 });
+
+        const { fondo } = await fondoDeConductor(cond, ses.tabla === "conductores_tercero", false);
+        if (!fondo) return NextResponse.json({ error: "Todavía no tienes gastos registrados." }, { status: 409 });
+
+        const { data: abierta } = await admin.from("caja_chica_rendiciones").select("id, codigo")
+          .eq("fondo_id", fondo.id).in("estado", ["abierta", "observada"])
+          .order("id", { ascending: false }).limit(1).maybeSingle();
+        if (!abierta) return NextResponse.json({ error: "No tienes una rendición abierta para enviar." }, { status: 409 });
+
+        // La regla (estado válido + al menos un comprobante) vive en lib/finanzas/caja-chica:
+        // es la MISMA que aplica la bandeja del contador, no una copia.
+        const r = await enviarARevision(admin, Number(abierta.id));
+        if (!r.ok) return NextResponse.json({ error: r.error }, { status: 409 });
+        return NextResponse.json({ ok: true, rendicion_codigo: abierta.codigo ?? null });
       }
 
       default:

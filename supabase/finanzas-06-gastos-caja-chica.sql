@@ -190,10 +190,20 @@ select public._fin_add_fk('caja_chica_gastos','gasto_id','gastos');
 create index if not exists idx_cc_gastos_rend   on public.caja_chica_gastos (rendicion_id);
 create index if not exists idx_cc_gastos_fecha  on public.caja_chica_gastos (fecha desc);
 create index if not exists idx_cc_gastos_estado on public.caja_chica_gastos (estado_revision);
--- Anti-duplicado: el mismo responsable no puede rendir dos veces la MISMA foto.
+-- Anti-duplicado nº1: el mismo responsable no puede rendir dos veces la MISMA foto.
 create unique index if not exists uq_cc_gastos_foto_hash
   on public.caja_chica_gastos (rendicion_id, foto_hash)
   where foto_hash is not null;
+
+-- Anti-duplicado nº2: clave de idempotencia del cliente. El índice de arriba es PARCIAL
+-- (solo protege lo que tiene foto), así que un gasto declarado SIN comprobante —una
+-- movilidad, un parqueo sin papel— entraría dos veces si la respuesta se pierde después
+-- de que el servidor ya insertó y la cola offline del conductor lo reintenta.
+-- La app manda un id propio por envío (`_cola_id`) y aquí se guarda como llave.
+alter table public.caja_chica_gastos add column if not exists idem_key text;
+create unique index if not exists uq_cc_gastos_idem
+  on public.caja_chica_gastos (idem_key)
+  where idem_key is not null;
 
 -- 1.4) Correlativo CC-AAAA-NNNNNN (mismo patrón atómico que pagos/OC).
 create table if not exists public.caja_chica_secuencia (
@@ -496,6 +506,13 @@ alter table public.documentos_compra add column if not exists cuenta_destino    
 alter table public.documentos_compra add column if not exists cci_destino            text;
 select public._fin_add_fk('documentos_compra','vehiculo_id','vehiculos');
 select public._fin_add_fk('documentos_compra','reserva_id','reservas');
+
+-- `liquidacion_proveedor_id` la declara finanzas-03, PERO el encabezado de
+-- liquidaciones-v2.sql dice que la fase 03 nunca se corrió — y aun así
+-- lib/liquidaciones.ts:768 escribe esa columna al aprobar una liquidación de
+-- proveedor. Se agrega aquí de forma defensiva: sin ella, v_cuentas_por_pagar (7.2)
+-- no se puede crear y abortaría toda esta migración.
+select public._fin_add_fk('documentos_compra','liquidacion_proveedor_id','liquidacion_proveedor');
 
 -- Estado de la DETRACCIÓN, independiente del estado de pago de la factura: se puede
 -- haber pagado al proveedor y seguir debiendo el depósito al Banco de la Nación.
@@ -906,45 +923,89 @@ create or replace view public.v_cuentas_por_pagar as
 -- 7.3) v_detracciones_pendientes — la bandeja de control SUNAT / Banco de la Nación.
 --      Une el lado COMPRA (documentos_compra) con el lado VENTA (facturas), que es
 --      donde el cliente nos detrae a nosotros.
-create or replace view public.v_detracciones_pendientes as
-  select 'compra'::text                  as lado,
-         d.id                            as origen_id,
-         coalesce(d.razon_social, p.nombre) as contraparte,
-         coalesce(d.ruc_emisor, p.ruc)   as ruc,
-         nullif(concat_ws('-', d.serie, d.numero), '') as comprobante,
-         d.fecha_emision,
-         d.total,
-         d.detraccion_codigo,
-         d.detraccion_pct,
-         d.detraccion_monto,
-         d.estado_detraccion,
-         d.detraccion_constancia,
-         d.detraccion_fecha_pago,
-         ((now() at time zone 'America/Lima')::date - d.fecha_emision) as dias_desde_emision
-    from public.documentos_compra d
-    left join public.proveedores p on p.id = d.proveedor_id
-   where coalesce(d.detraccion_monto, 0) > 0
-     and d.estado_detraccion = 'pendiente'
-  union all
-  select 'venta',
-         f.id,
-         cl.nombre,
-         cl.ruc,
-         nullif(concat_ws('-', f.serie, f.numero), ''),
-         f.fecha_emision,
-         f.total,
-         null::text,
-         null::numeric,
-         coalesce(f.monto_detraccion, 0),
-         case when f.nro_op_detraccion is not null then 'pagada' else 'pendiente' end,
-         f.nro_op_detraccion,
-         f.fecha_detraccion,
-         ((now() at time zone 'America/Lima')::date - f.fecha_emision)
-    from public.facturas f
-    left join public.clientes cl on cl.id = f.cliente_id
-   where coalesce(f.monto_detraccion, 0) > 0
-     and f.nro_op_detraccion is null
-     and coalesce(f.estado, '') <> 'anulada';
+--
+--      El lado VENTA lee columnas de `facturas`, una tabla LEGADA cuyo DDL nunca se
+--      versionó (solo vive en Supabase): monto_detraccion, nro_op_detraccion y
+--      fecha_detraccion se infirieron del tipo del front. Por eso ese medio se agrega
+--      condicionalmente: si esas columnas no existen, la vista se crea solo con el lado
+--      COMPRA (que es el que alimenta el pago al Banco de la Nación) en vez de abortar
+--      la migración entera.
+do $vw$
+declare v_tiene_venta boolean;
+begin
+  select count(*) = 3 into v_tiene_venta
+    from information_schema.columns
+   where table_schema = 'public' and table_name = 'facturas'
+     and column_name in ('monto_detraccion','nro_op_detraccion','fecha_detraccion');
+
+  if v_tiene_venta then
+    execute $q$
+      create or replace view public.v_detracciones_pendientes as
+        select 'compra'::text                  as lado,
+               d.id                            as origen_id,
+               coalesce(d.razon_social, p.nombre) as contraparte,
+               coalesce(d.ruc_emisor, p.ruc)   as ruc,
+               nullif(concat_ws('-', d.serie, d.numero), '') as comprobante,
+               d.fecha_emision,
+               d.total,
+               d.detraccion_codigo,
+               d.detraccion_pct,
+               d.detraccion_monto,
+               d.estado_detraccion,
+               d.detraccion_constancia,
+               d.detraccion_fecha_pago,
+               ((now() at time zone 'America/Lima')::date - d.fecha_emision) as dias_desde_emision
+          from public.documentos_compra d
+          left join public.proveedores p on p.id = d.proveedor_id
+         where coalesce(d.detraccion_monto, 0) > 0
+           and d.estado_detraccion = 'pendiente'
+        union all
+        select 'venta',
+               f.id,
+               cl.nombre,
+               cl.ruc,
+               nullif(concat_ws('-', f.serie, f.numero), ''),
+               f.fecha_emision,
+               f.total,
+               null::text,
+               null::numeric,
+               coalesce(f.monto_detraccion, 0),
+               case when f.nro_op_detraccion is not null then 'pagada' else 'pendiente' end,
+               f.nro_op_detraccion,
+               f.fecha_detraccion,
+               ((now() at time zone 'America/Lima')::date - f.fecha_emision)
+          from public.facturas f
+          left join public.clientes cl on cl.id = f.cliente_id
+         where coalesce(f.monto_detraccion, 0) > 0
+           and f.nro_op_detraccion is null
+           and coalesce(f.estado, '') <> 'anulada'
+    $q$;
+  else
+    raise notice '[fase06] facturas no tiene las columnas de detracción de VENTA: v_detracciones_pendientes se crea solo con el lado COMPRA';
+    execute $q$
+      create or replace view public.v_detracciones_pendientes as
+        select 'compra'::text                  as lado,
+               d.id                            as origen_id,
+               coalesce(d.razon_social, p.nombre) as contraparte,
+               coalesce(d.ruc_emisor, p.ruc)   as ruc,
+               nullif(concat_ws('-', d.serie, d.numero), '') as comprobante,
+               d.fecha_emision,
+               d.total,
+               d.detraccion_codigo,
+               d.detraccion_pct,
+               d.detraccion_monto,
+               d.estado_detraccion,
+               d.detraccion_constancia,
+               d.detraccion_fecha_pago,
+               ((now() at time zone 'America/Lima')::date - d.fecha_emision) as dias_desde_emision
+          from public.documentos_compra d
+          left join public.proveedores p on p.id = d.proveedor_id
+         where coalesce(d.detraccion_monto, 0) > 0
+           and d.estado_detraccion = 'pendiente'
+    $q$;
+  end if;
+end $vw$;
+
 
 -- 7.4) v_costo_servicio — LA VISTA QUE PEDÍA EL USUARIO: qué costó de verdad cada
 --      servicio EJECUTADO, contra lo que se le cobró al cliente, y en qué estado de
