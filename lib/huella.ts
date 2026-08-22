@@ -246,6 +246,61 @@ export function gateVelocidad(pts: HuellaPt[], vmaxKmh = VMAX_BUS_KMH, reanclaN 
   return out;
 }
 
+// ── FILTRO DEL FIX EN VIVO (ícono) ───────────────────────────────────────────
+// El ícono consume el ÚLTIMO fix crudo (poll + realtime, un valor a la vez); NO pasa por
+// limpiarHuella. quitarPicosV/quitarExcursiones (que sí filtran ese mismo glitch para la
+// huella) exigen ver el punto SIGUIENTE para juzgar uno — imposible en un stream de un solo
+// valor. Un glitch de red aislado (el equipo manda un fix con precisión pésima a cientos de
+// metros del track real, y el SIGUIENTE fix vuelve solo, sin que el bus se haya movido así)
+// llegaba SIN FILTRAR al ícono: "avanza y retrocede" / "pasa por encima de casas" aunque la
+// huella —que sí ve el fix siguiente— lo hubiera descartado. Confirmado con datos reales
+// (reserva #24742, 2026-08-22): dos saltos de ~300 m en ~3 s (405 km/h implícito, precisión
+// 300 m) intercalados en un stream por lo demás de chip GPS (3.8 m) — ago-2026.
+//
+// Máquina con memoria de 1 (mismo criterio de gateVelocidad, adaptado a un fix a la vez):
+// acepta el fix si su velocidad implícita desde el ÚLTIMO ACEPTADO es plausible (≤vmax). Si
+// no, lo retiene como pendiente y NO mueve el ícono — solo lo acepta tras `reanclaN`
+// pendientes COHERENTES ENTRE SÍ (relocalización real tras un hueco de señal: cada pendiente
+// nuevo debe ser alcanzable a velocidad plausible DESDE EL PENDIENTE ANTERIOR, no solo "N
+// rechazos any"; dos glitches sueltos sin relación entre sí ya no bastan para reanclar). Un
+// pendiente incoherente con el anterior no se descarta sin más: REINICIA la cadena con él
+// mismo como primer pendiente (podría ser el arranque de la relocalización real). `ultimo` NO
+// avanza mientras hay pendientes: el próximo candidato se sigue midiendo contra la última
+// posición BUENA, igual que gateVelocidad.
+//
+// DEDUP: la MISMA fila puede llegar dos veces — el poll de 10-15 s vuelve a traer la última
+// fila de la BD si el conductor no mandó un fix nuevo a tiempo, o el poll y el realtime
+// entregan el mismo INSERT casi a la vez. Sin esto, una sola lectura mala contada dos veces
+// alcanzaba `reanclaN` por sí sola y el filtro aceptaba el glitch como si fueran dos
+// evidencias independientes — justamente lo que este filtro existe para evitar. Se compara
+// contra el ÚLTIMO pendiente (por ts): una fila repetida nunca avanza la cadena.
+//
+// `ts` NO FIABLE (NaN/no numérico): acepta SIN TOCAR el estado interno (ni `ultimo` ni
+// `pendientes`) — no hay con qué medir velocidad, y contaminar `ultimo.ts` con NaN dejaría el
+// filtro ciego un par de fixes más (NaN nunca es "mayor que" nada). Autocontenido: los
+// llamadores no necesitan validar `ts` antes de invocar esta función.
+// Uso: una instancia POR VEHÍCULO/servicio (crea un filtro nuevo por reserva, no global).
+export function crearFiltroFixVivo(vmaxKmh = VMAX_BUS_KMH, reanclaN = 2) {
+  type Pt = { lat: number; lng: number; ts: number };
+  let ultimo: Pt | null = null;
+  let pendientes: Pt[] = [];
+  const vmax = vmaxKmh / 3.6;
+  const plausible = (a: Pt, b: Pt) => distM(a.lat, a.lng, b.lat, b.lng) / Math.max(1, (b.ts - a.ts) / 1000) <= vmax;
+  return (lat: number, lng: number, ts: number): boolean => {
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+    if (!Number.isFinite(ts)) return true;                          // sin ts fiable → aceptar, no tocar el estado
+    const cand: Pt = { lat, lng, ts };
+    if (!ultimo || !(ts > ultimo.ts)) { ultimo = cand; pendientes = []; return true; }
+    const ultimoPendiente = pendientes[pendientes.length - 1];
+    if (ultimoPendiente && ultimoPendiente.ts === ts) return false;  // misma fila ya vista → no cuenta de nuevo
+    if (plausible(ultimo, cand)) { ultimo = cand; pendientes = []; return true; }
+    if (ultimoPendiente && !plausible(ultimoPendiente, cand)) pendientes = [];  // rompe la cadena → reinicia con este candidato
+    pendientes.push(cand);
+    if (pendientes.length >= reanclaN) { ultimo = cand; pendientes = []; return true; }  // N pendientes COHERENTES → relocalización real
+    return false;                                                   // glitch aislado → descartar, conservar la posición previa
+  };
+}
+
 // PICOS-V (filtro Hampel): un vértice es un pico ida-y-vuelta cuando sus DOS vecinos concuerdan
 // entre sí (prev-next chico) y discrepan de él (legs grandes) — el GPS "saltó" 200-1000 m y
 // REGRESÓ en el siguiente fix (#1147: 9 picos, hasta 1080 m ida / 1016 m vuelta con prev-next a

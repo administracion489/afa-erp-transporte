@@ -10,7 +10,7 @@ import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, distM, paginarFilas,
-  pegarIconoAVia, caminoEntreSnaps, enParalelo,
+  pegarIconoAVia, caminoEntreSnaps, enParalelo, crearFiltroFixVivo,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
 import { fmtCoord } from "@/lib/coordenadas";
@@ -483,6 +483,10 @@ export default function ClientePortal() {
   const cargandoDatosRef = useRef(false);
   const ultimoDatosRef   = useRef(0);
   const cargandoFlotaRef = useRef(false);
+  // Filtro del fix EN VIVO, uno por vehículo (mismo criterio que ModalGps — ver
+  // crearFiltroFixVivo en lib/huella.ts): rechaza el glitch de red aislado que "avanza y
+  // retrocede" antes de aceptarlo como la posición más reciente de ESE bus.
+  const filtrosVivoRef = useRef<Record<string, ReturnType<typeof crearFiltroFixVivo>>>({});
   // "Total histórico": lo cuenta Postgres (servicios ya realizados), no el largo del
   // array —que ahora es una ventana, y antes incluía la programación de 2027-2028.
   const [totalHistorico, setTotalHistorico] = useState<number | null>(null);
@@ -1016,7 +1020,11 @@ export default function ClientePortal() {
       (prev as any[]).forEach(p => { merged[keyDe(p)] = p; });
       gpsLista.forEach((g: any) => {
         const k = keyDe(g);
-        if (!merged[k] || tMs(g) >= tMs(merged[k])) merged[k] = g;
+        if (merged[k] && tMs(g) < tMs(merged[k])) return;   // no es más reciente → ni se evalúa
+        if (!filtrosVivoRef.current[k]) filtrosVivoRef.current[k] = crearFiltroFixVivo();
+        // Glitch de red aislado (salto imposible que el propio track corrige solo) → conservar
+        // la posición previa de ESTE bus en vez de mover el marcador a la posición falsa.
+        if (filtrosVivoRef.current[k](Number(g.lat), Number(g.lng), tMs(g))) merged[k] = g;
       });
       const ahora = Date.now();
       return Object.values(merged).filter((g: any) => ahora - tMs(g) <= MAX_EDAD_MS);

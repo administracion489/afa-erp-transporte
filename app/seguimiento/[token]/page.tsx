@@ -5,7 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { idAfa } from "@/lib/folio";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { animarMarcador, animarMarcadorPorCamino } from "@/lib/anim-marker";
-import { pegarIconoAVia, caminoEntreSnaps, distM } from "@/lib/huella";
+import { pegarIconoAVia, caminoEntreSnaps, distM, crearFiltroFixVivo } from "@/lib/huella";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 type Parada = {
@@ -110,6 +110,9 @@ export default function SeguimientoPage() {
   const snapTokenRef = useRef<{ lat: number; lng: number; s: number | null } | null>(null); // continuidad del ícono pegado a la ruta
   const paradaMarkersRef = useRef<any[]>([]);
   const ubicacionRef = useRef<UbicacionGPS | null>(null);
+  // Filtro del fix EN VIVO (una instancia por carga de la página): rechaza el glitch de red
+  // aislado que "avanza y retrocede" en el ícono — ver crearFiltroFixVivo en lib/huella.ts.
+  const filtroVivoRef = useRef(crearFiltroFixVivo());
   const mapDescentradoRef = useRef(false);
 
   // State
@@ -158,6 +161,9 @@ export default function SeguimientoPage() {
         setReserva(data.reserva);
         setParadas(data.paradas ?? []);
         if (data.ultimaUbicacion) {
+          // Siembra el filtro con el primer fix (siempre se acepta) para que las comparaciones
+          // de velocidad del realtime/poll de abajo tengan una referencia desde el inicio.
+          filtroVivoRef.current(data.ultimaUbicacion.lat, data.ultimaUbicacion.lng, new Date(data.ultimaUbicacion.created_at).getTime());
           ubicacionRef.current = data.ultimaUbicacion;
           setUbicacion(data.ultimaUbicacion);
           setUltimaActualizacion(new Date(data.ultimaUbicacion.created_at));
@@ -416,9 +422,14 @@ export default function SeguimientoPage() {
           estado: d.estado, created_at: d.created_at,
           precision_m: d.precision_m != null ? Number(d.precision_m) : null,   // el snap del ícono acota la corrección con la imprecisión REAL
         };
-        ubicacionRef.current = nueva;
-        setUbicacion(nueva);
-        setUltimaActualizacion(new Date(nueva.created_at));
+        setUltimaActualizacion(new Date(nueva.created_at));   // llegó un fix fresco: frescura aparte de si su posición se rechaza abajo
+        // Filtro del fix EN VIVO: descarta el glitch de red aislado (salto imposible que se
+        // corrige solo en el siguiente fix) ANTES de mover el ícono del pasajero.
+        const tsFix = nueva.created_at ? new Date(nueva.created_at).getTime() : NaN;
+        if (!Number.isFinite(tsFix) || filtroVivoRef.current(nueva.lat, nueva.lng, tsFix)) {
+          ubicacionRef.current = nueva;
+          setUbicacion(nueva);
+        }
       })
       .subscribe();
 
@@ -430,8 +441,11 @@ export default function SeguimientoPage() {
         if (data.ultimaUbicacion) {
           const nueva = data.ultimaUbicacion as UbicacionGPS;
           if (!ubicacionRef.current || ubicacionRef.current.created_at !== nueva.created_at) {
-            ubicacionRef.current = nueva;
-            setUbicacion(nueva);
+            const tsFix = nueva.created_at ? new Date(nueva.created_at).getTime() : NaN;
+            if (!Number.isFinite(tsFix) || filtroVivoRef.current(nueva.lat, nueva.lng, tsFix)) {
+              ubicacionRef.current = nueva;
+              setUbicacion(nueva);
+            }
             setUltimaActualizacion(new Date(nueva.created_at));
           }
         }

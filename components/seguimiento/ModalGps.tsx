@@ -11,6 +11,7 @@ import {
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
   calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, puentesCrudos,
   pegarIconoAVia, viasCercanasTilequery, esAccCruda, MAX_SEG_M, caminoEntreSnaps, enParalelo,
+  crearFiltroFixVivo,
 } from "@/lib/huella";
 import { animarMarcador, animarMarcadorPorCamino } from "@/lib/anim-marker";
 import { fmtCoord } from "@/lib/coordenadas";
@@ -143,6 +144,9 @@ export default function ModalGps({
   const esCrudoRef = useRef<boolean[]>([]);       // espejo de esCrudoArr para leerlo en efectos SIN re-dispararlos
   // Snap del ícono a la vía: continuidad + caché de vías cercanas (Tilequery, fallback del GPS crudo).
   const snapIconoRef = useRef<{ lat: number; lng: number; s: number | null } | null>(null);
+  // Filtro del fix EN VIVO (una instancia por apertura del modal): rechaza el glitch de red
+  // aislado que "avanza y retrocede" — ver crearFiltroFixVivo en lib/huella.ts.
+  const filtroVivoRef = useRef(crearFiltroFixVivo());
   const viasCercaRef = useRef<{ lat: number; lng: number; puntos: { lat: number; lng: number }[] } | null>(null);
   const tilequeryPendRef = useRef(false);
   const tilequeryLastMsRef = useRef(0);           // throttle TEMPORAL (≥15 s): el jitter de red >80 m de un bus quieto no debe re-consultar en cada fix
@@ -1229,12 +1233,20 @@ export default function ModalGps({
         const prev = ubicRef.current;
         const mismoFix = prev && prev.lat === d.lat && prev.lng === d.lng
           && (prev.created_at || prev.timestamp) === (d.created_at || d.timestamp);
-        if (!mismoFix) {
-          ubicRef.current = d;
-          setUbic(d); setUltimaActualiz(new Date());
-        }
         const fechaRef = d.created_at || d.timestamp;
+        // "Última señal" y "sin señal" reflejan cuándo llegó ALGO del dispositivo — se
+        // recalculan con cualquier fix distinto del anterior, se acepte o no su POSICIÓN abajo
+        // (mostrar "En vivo" arriba y una hora vieja debajo era la misma tarjeta contradiciéndose).
+        if (!mismoFix) setUltimaActualiz(new Date());
         setSinSenal(!fechaRef || (Date.now() - new Date(fechaRef).getTime()) / 1000 > 60);
+        // Filtro del fix en vivo: descarta el glitch de red aislado (salto imposible que se
+        // corrige solo en el siguiente fix) ANTES de mover el ícono. Autocontenido ante ts no
+        // fiable (NaN) — no hace falta validarlo aquí.
+        const tsFix = fechaRef ? new Date(fechaRef).getTime() : NaN;
+        if (!mismoFix && filtroVivoRef.current(d.lat, d.lng, tsFix)) {
+          ubicRef.current = d;
+          setUbic(d);
+        }
       } else if (!ubicRef.current) {
         // Sin datos y sin nada previo (ni realtime): recién ahí marcamos sin señal.
         setSinSenal(true);
@@ -1270,9 +1282,18 @@ export default function ModalGps({
           precision_m: d.precision_m, estado: d.estado,
           created_at: d.created_at ?? null, timestamp: d.timestamp ?? null,
         };
-        ubicRef.current = nueva;
-        setUbic(nueva);
-        setUltimaActualiz(new Date()); setSinSenal(false);
+        // Frescura aparte de si la posición se acepta abajo (misma razón que el poll): llegó
+        // un INSERT real, así que la señal está viva.
+        setSinSenal(false);
+        setUltimaActualiz(new Date());
+        const fechaRef = nueva.created_at || nueva.timestamp;
+        const tsFix = fechaRef ? new Date(fechaRef).getTime() : NaN;
+        // Mismo filtro que el poll: un glitch aislado (realtime lo empuja de inmediato, sin
+        // esperar los 10s del poll) no debe mover el ícono. Autocontenido ante ts no fiable.
+        if (filtroVivoRef.current(nueva.lat, nueva.lng, tsFix)) {
+          ubicRef.current = nueva;
+          setUbic(nueva);
+        }
       }).subscribe();
     return () => { supabase.removeChannel(ch); };
   }, [reservaId, vehiculoId, vehiculoTerceroId]);
