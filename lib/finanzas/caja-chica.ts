@@ -44,23 +44,78 @@ export const ESTADOS_REVISION: Record<EstadoRevisionGasto, ConfigEstadoCC> = {
   rechazado: { label: "Rechazado", descripcion: "No se acepta el comprobante",  bg: "#fee2e2", color: "#991b1b" },
 };
 
-/** Categorías de gasto de caja chica (espejo del CHECK de caja_chica_gastos). */
-export const CATEGORIAS_CAJA_CHICA: Record<string, { label: string; emoji: string; color: string; bg: string }> = {
-  peaje:           { label: "Peaje",            emoji: "🛣️", color: "#0369a1", bg: "#e0f2fe" },
-  lavado:          { label: "Lavado",           emoji: "🧼", color: "#0f766e", bg: "#f0fdfa" },
-  estacionamiento: { label: "Estacionamiento",  emoji: "🅿️", color: "#4b5563", bg: "#f3f4f6" },
-  viaticos:        { label: "Viáticos",         emoji: "🍽️", color: "#854d0e", bg: "#fef9c3" },
-  movilidad:       { label: "Movilidad",        emoji: "🚕", color: "#1d4ed8", bg: "#dbeafe" },
-  repuesto_menor:  { label: "Repuesto menor",   emoji: "🔩", color: "#c2410c", bg: "#fff7ed" },
-  combustible:     { label: "Combustible",      emoji: "⛽", color: "#ea580c", bg: "#fff7ed" },
-  tramite:         { label: "Trámite",          emoji: "📄", color: "#6d28d9", bg: "#ede9fe" },
-  multa:           { label: "Multa",            emoji: "🚨", color: "#dc2626", bg: "#fee2e2" },
-  otro:            { label: "Otro",             emoji: "📌", color: "#4b5563", bg: "#f3f4f6" },
+/**
+ * Categorías de gasto de caja chica (espejo del CHECK de caja_chica_gastos).
+ *
+ * `ambito` NO restringe nada: solo ordena el selector. La caja chica no es solo del
+ * conductor —también la recibe gerencia, contabilidad y administración— y sus gastos
+ * son otros (útiles, courier, notaría, refrigerio). Un fondo de oficina igual paga un
+ * taxi, y un conductor igual compra útiles, así que la lista completa está siempre
+ * disponible: lo que cambia es qué se ofrece primero.
+ */
+export type AmbitoCategoria = "calle" | "oficina" | "ambos";
+
+export type ConfigCategoriaCC = {
+  label: string;
+  emoji: string;
+  color: string;
+  bg: string;
+  ambito: AmbitoCategoria;
+  /** Advertencia tributaria que la UI muestra al elegirla. */
+  ojo?: string;
 };
 
-export function configCategoriaCC(c: string | null | undefined) {
+export const CATEGORIAS_CAJA_CHICA: Record<string, ConfigCategoriaCC> = {
+  // ── Calle / operación ──
+  peaje:           { label: "Peaje",            emoji: "🛣️", color: "#0369a1", bg: "#e0f2fe", ambito: "calle" },
+  lavado:          { label: "Lavado",           emoji: "🧼", color: "#0f766e", bg: "#f0fdfa", ambito: "calle" },
+  estacionamiento: { label: "Estacionamiento",  emoji: "🅿️", color: "#4b5563", bg: "#f3f4f6", ambito: "calle" },
+  viaticos:        { label: "Viáticos",         emoji: "🍽️", color: "#854d0e", bg: "#fef9c3", ambito: "calle" },
+  repuesto_menor:  { label: "Repuesto menor",   emoji: "🔩", color: "#c2410c", bg: "#fff7ed", ambito: "calle" },
+  combustible:     { label: "Combustible",      emoji: "⛽", color: "#ea580c", bg: "#fff7ed", ambito: "calle" },
+  multa:           { label: "Multa",            emoji: "🚨", color: "#dc2626", bg: "#fee2e2", ambito: "calle",
+                     ojo: "La multa no es gasto deducible (art. 44 LIR). Se registra igual, pero el contador la repara." },
+  // ── Oficina / administración ──
+  utiles_oficina:  { label: "Útiles de oficina", emoji: "🖇️", color: "#4b5563", bg: "#f3f4f6", ambito: "oficina" },
+  courier:         { label: "Courier / envíos",  emoji: "📦", color: "#0369a1", bg: "#e0f2fe", ambito: "oficina" },
+  refrigerio:      { label: "Refrigerio",        emoji: "☕", color: "#854d0e", bg: "#fef9c3", ambito: "oficina" },
+  representacion:  { label: "Representación",    emoji: "🤝", color: "#6d28d9", bg: "#ede9fe", ambito: "oficina",
+                     ojo: "Gasto de representación: deducible hasta 0.5 % de los ingresos brutos, con tope de 40 UIT (art. 37 inc. q LIR). Exige comprobante con RUC de AFA." },
+  servicios_basicos:   { label: "Servicios básicos", emoji: "💡", color: "#0f766e", bg: "#f0fdfa", ambito: "oficina" },
+  limpieza:            { label: "Limpieza",         emoji: "🧴", color: "#0f766e", bg: "#f0fdfa", ambito: "oficina" },
+  mantenimiento_local: { label: "Mant. del local",  emoji: "🛠️", color: "#c2410c", bg: "#fff7ed", ambito: "oficina" },
+  capacitacion:        { label: "Capacitación",     emoji: "🎓", color: "#1d4ed8", bg: "#dbeafe", ambito: "oficina" },
+  // ── Comunes ──
+  movilidad:       { label: "Movilidad",        emoji: "🚕", color: "#1d4ed8", bg: "#dbeafe", ambito: "ambos" },
+  tramite:         { label: "Trámite",          emoji: "📄", color: "#6d28d9", bg: "#ede9fe", ambito: "ambos" },
+  otro:            { label: "Otro",             emoji: "📌", color: "#4b5563", bg: "#f3f4f6", ambito: "ambos" },
+};
+
+export function configCategoriaCC(c: string | null | undefined): ConfigCategoriaCC {
   return CATEGORIAS_CAJA_CHICA[c ?? "otro"] ?? CATEGORIAS_CAJA_CHICA.otro;
 }
+
+/**
+ * Categorías ordenadas para el selector: primero las del ámbito del responsable,
+ * después las comunes y al final las del otro ámbito (que siguen siendo elegibles).
+ */
+export function categoriasParaTipo(
+  tipo: FondoCajaChica["responsable_tipo"] | string | null | undefined
+): { clave: string; cfg: ConfigCategoriaCC }[] {
+  const propio: AmbitoCategoria = tipo === "conductor" ? "calle" : "oficina";
+  const peso = (a: AmbitoCategoria) => (a === propio ? 0 : a === "ambos" ? 1 : 2);
+  return Object.entries(CATEGORIAS_CAJA_CHICA)
+    .map(([clave, cfg]) => ({ clave, cfg }))
+    .sort((a, b) => peso(a.cfg.ambito) - peso(b.cfg.ambito) || a.cfg.label.localeCompare(b.cfg.label, "es"));
+}
+
+/** Cómo se llama de cara al usuario cada tipo de responsable. */
+export const TIPOS_RESPONSABLE_CC: Record<FondoCajaChica["responsable_tipo"], { label: string; emoji: string; ayuda: string }> = {
+  conductor:               { label: "Conductor",             emoji: "🧑‍✈️", ayuda: "Recibe efectivo para la calle: peajes, lavado, estacionamiento." },
+  personal_administrativo: { label: "Personal administrativo", emoji: "🧑‍💼", ayuda: "Gerencia, contabilidad, operaciones, RR. HH. Su área sale de su ficha de personal." },
+  usuario:                 { label: "Usuario del ERP",       emoji: "👤", ayuda: "Alguien con cuenta en el sistema que no está en la planilla administrativa." },
+  otro:                    { label: "Otro",                  emoji: "📌", ayuda: "Practicante, personal temporal o cualquiera sin ficha propia." },
+};
 
 export function etiquetaRendicion(e: string | null | undefined): string {
   if (!e) return "—";
@@ -76,11 +131,17 @@ export function configRendicion(e: string | null | undefined): ConfigEstadoCC {
 export type FondoCajaChica = {
   id: number;
   nombre: string;
-  responsable_tipo: "conductor" | "usuario" | "otro";
+  responsable_tipo: "conductor" | "personal_administrativo" | "usuario" | "otro";
   responsable_nombre: string;
   documento_identidad: string | null;
   conductor_id: number | null;
+  /** Ficha en `personal_administrativo` (gerencia, contabilidad, administración…). */
+  personal_administrativo_id: number | null;
   usuario_id: string | null;
+  /** Solo para 'usuario' y 'otro': el administrativo lo hereda de SU ficha. */
+  cargo: string | null;
+  /** Centro de costo declarado a mano; el administrativo hereda su departamento. */
+  centro_costo: string | null;
   cuenta_tesoreria_id: number | null;
   moneda: string;
   tope: number;
@@ -98,6 +159,12 @@ export type RendicionCajaChica = {
   responsable_nombre: string;
   documento_identidad: string | null;
   conductor_id: number | null;
+  personal_administrativo_id: number | null;
+  usuario_id: string | null;
+  /** Cargo del responsable (del administrativo sale de su ficha). */
+  cargo: string | null;
+  /** Centro de costo: departamento del administrativo, "Operaciones" para el conductor. */
+  area: string | null;
   vehiculo_id: number | null;
   periodo_desde: string;
   periodo_hasta: string | null;
@@ -434,6 +501,174 @@ export async function revisarGasto(
   return error ? { ok: false, error: error.message } : { ok: true, data: undefined };
 }
 
+// ── Registrar un comprobante desde el ERP ─────────────────────────────────────
+
+/**
+ * SHA-256 del binario, en hexadecimal. Es el MISMO algoritmo que `hashDeFoto`
+ * (lib/odometro.ts) usa en el servidor, así que la misma foto subida desde la app del
+ * conductor y desde el ERP produce el mismo hash y el índice único
+ * (rendicion_id, foto_hash) la detecta como duplicada en ambos caminos.
+ *
+ * Sin `crypto.subtle` (contexto no seguro, navegador viejo) devuelve null: se pierde
+ * el anti-duplicado por foto, no la posibilidad de registrar el gasto.
+ */
+export async function hashArchivo(f: File | Blob | null | undefined): Promise<string | null> {
+  try {
+    if (!f || typeof globalThis.crypto?.subtle?.digest !== "function") return null;
+    const buf = await f.arrayBuffer();
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", buf);
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  } catch {
+    return null;
+  }
+}
+
+export type RegistrarGastoArgs = {
+  rendicion_id: number;
+  fecha?: string;
+  categoria: string;
+  descripcion?: string | null;
+  monto: number;
+  moneda?: string;
+  tipo_comprobante?: string | null;
+  ruc_proveedor?: string | null;
+  comprobante_serie?: string | null;
+  comprobante_numero?: string | null;
+  igv?: number;
+  /** Foto o PDF del comprobante. Va al bucket PRIVADO `comprobantes`. */
+  archivo?: File | null;
+  /** Declaración expresa de que no hubo papel (una propina de parqueo, una movilidad). */
+  sin_comprobante?: boolean;
+  vehiculo_id?: number | null;
+  reserva_id?: number | null;
+  proveedor_id?: number | null;
+  observaciones?: string | null;
+};
+
+/**
+ * Registra un comprobante en una rendición VIVA desde el ERP web.
+ *
+ * Hasta la fase 08 el único camino para crear un `caja_chica_gastos` era la app del
+ * conductor (`POST /api/conductor` → `rendir_gasto`). Eso dejaba a gerencia y a
+ * administración con rendiciones que nunca podían llenar ni liquidar: podían recibir
+ * el dinero, pero no rendirlo. Esta función es su camino, con las mismas reglas.
+ *
+ * La foto se sube ANTES de insertar y, si el insert falla, se borra: un comprobante
+ * huérfano en el bucket es basura que nadie va a encontrar para limpiar.
+ */
+export async function registrarGasto(
+  sb: any,
+  a: RegistrarGastoArgs
+): Promise<Resultado<{ id: number }>> {
+  try {
+    const monto = Number(a.monto);
+    if (!(monto > 0)) return { ok: false, error: "El monto debe ser mayor a 0." };
+    if (!(a.categoria in CATEGORIAS_CAJA_CHICA)) return { ok: false, error: "Categoría de gasto desconocida." };
+    if (!a.archivo && !a.sin_comprobante) {
+      return { ok: false, error: "Adjunta el comprobante o marca «sin comprobante»." };
+    }
+
+    // Solo se rinde sobre una rendición viva: a una enviada a revisión o ya liquidada
+    // no se le pueden meter gastos por detrás, o el monto revisado dejaría de calzar
+    // con lo que el revisor aprobó.
+    const { data: r } = await sb
+      .from("caja_chica_rendiciones")
+      .select("id, estado, moneda")
+      .eq("id", a.rendicion_id)
+      .maybeSingle();
+    if (!r) return { ok: false, error: "La rendición no existe." };
+    if (!["abierta", "observada"].includes(r.estado)) {
+      return {
+        ok: false,
+        error: `La rendición está "${etiquetaRendicion(r.estado)}" y ya no admite comprobantes. Pide que te la devuelvan observada.`,
+      };
+    }
+
+    const fecha = /^\d{4}-\d{2}-\d{2}$/.test(String(a.fecha ?? "")) ? String(a.fecha) : hoyLima();
+
+    // Subida al bucket PRIVADO. Se guarda la RUTA, nunca una URL pública: un ticket
+    // de peaje trae placa y ubicación (ver finanzas-06 §11).
+    let ruta: string | null = null;
+    if (a.archivo) {
+      const ext = (a.archivo.name.split(".").pop() || "jpg").toLowerCase().slice(0, 5);
+      ruta = `gastos/rendicion-${a.rendicion_id}/${fecha}/${crypto.randomUUID()}.${ext}`;
+      const { error: eUp } = await sb.storage
+        .from("comprobantes")
+        .upload(ruta, a.archivo, { contentType: a.archivo.type || "image/jpeg", upsert: false });
+      if (eUp) return { ok: false, error: `No se pudo subir el comprobante: ${eUp.message}` };
+    }
+
+    const fila: Record<string, unknown> = {
+      rendicion_id: a.rendicion_id,
+      fecha,
+      categoria: a.categoria,
+      descripcion: (a.descripcion ?? "").trim().slice(0, 300) || null,
+      monto: redondear(monto),
+      moneda: a.moneda || r.moneda || "PEN",
+      tipo_comprobante: a.sin_comprobante ? "sin_comprobante" : a.tipo_comprobante || "boleta",
+      ruc_proveedor: (a.ruc_proveedor ?? "").trim() || null,
+      comprobante_serie: (a.comprobante_serie ?? "").trim() || null,
+      comprobante_numero: (a.comprobante_numero ?? "").trim() || null,
+      igv: redondear(Number(a.igv ?? 0)),
+      foto_url: ruta,
+      foto_hash: await hashArchivo(a.archivo),
+      estado_revision: "pendiente",
+      origen: "manual",
+      observaciones: (a.observaciones ?? "").trim() || null,
+    };
+
+    // Los enganches operativos van aparte: si una FK no existe en esta base (una fase
+    // sin correr), se reintenta sin ellos en vez de perder el comprobante.
+    const enganche: Record<string, unknown> = {};
+    if (a.vehiculo_id) enganche.vehiculo_id = a.vehiculo_id;
+    if (a.reserva_id) enganche.reserva_id = a.reserva_id;
+    if (a.proveedor_id) enganche.proveedor_id = a.proveedor_id;
+
+    const insertar = (extra: Record<string, unknown>) =>
+      sb.from("caja_chica_gastos").insert({ ...fila, ...extra }).select("id").single();
+
+    let { data: creado, error } = await insertar(enganche);
+    if (error && /column .* does not exist|violates foreign key/i.test(error.message ?? "")) {
+      ({ data: creado, error } = await insertar({}));
+    }
+
+    if (error) {
+      if (ruta) { try { await sb.storage.from("comprobantes").remove([ruta]); } catch {} }
+      if (/duplicate key|23505/i.test(error.message ?? "")) {
+        return { ok: false, error: "Ese mismo comprobante ya está registrado en esta rendición." };
+      }
+      return { ok: false, error: error.message };
+    }
+
+    return { ok: true, data: { id: Number(creado.id) } };
+  } catch (e: unknown) {
+    return { ok: false, error: String((e as Error)?.message ?? e) };
+  }
+}
+
+/** Borra un comprobante aún pendiente (y su foto). Un gasto ya revisado no se toca. */
+export async function eliminarGasto(sb: any, gastoId: number): Promise<Resultado> {
+  const { data: g } = await sb
+    .from("caja_chica_gastos")
+    .select("id, estado_revision, foto_url, gasto_id")
+    .eq("id", gastoId)
+    .maybeSingle();
+  if (!g) return { ok: false, error: "El comprobante no existe." };
+  if (g.gasto_id) return { ok: false, error: "Ya se promovió al libro de gastos: anúlalo desde /gastos." };
+  if (g.estado_revision !== "pendiente") {
+    return { ok: false, error: "Solo se puede borrar un comprobante que todavía no se revisó." };
+  }
+
+  const { error } = await sb.from("caja_chica_gastos").delete().eq("id", gastoId);
+  if (error) return { ok: false, error: error.message };
+  if (g.foto_url && !/^https?:\/\//i.test(g.foto_url)) {
+    try { await sb.storage.from("comprobantes").remove([g.foto_url]); } catch {}
+  }
+  return { ok: true, data: undefined };
+}
+
 /**
  * Promueve al libro `gastos` los comprobantes aprobados que aún no se promovieron.
  * A partir de ese momento v_egresos los cuenta por el lado de `gastos` y deja de
@@ -464,7 +699,7 @@ export async function promoverGastos(sb: any, rendicionId: number): Promise<Resu
         .insert({
           fecha: g.fecha,
           categoria: mapaCategoriaAGastos(g.categoria),
-          tipo_gasto: "operativo",
+          tipo_gasto: tipoGastoDeCategoria(g.categoria),
           descripcion: [g.descripcion, `Caja chica ${rend?.codigo ?? ""}`.trim()].filter(Boolean).join(" · "),
           monto: redondear(Number(g.monto)),
           vehiculo_id: g.vehiculo_id ?? rend?.vehiculo_id ?? null,
@@ -490,8 +725,8 @@ export async function promoverGastos(sb: any, rendicionId: number): Promise<Resu
 
 /**
  * Traduce la categoría de caja chica al vocabulario de `gastos` (que es más viejo y
- * más corto). Lo que no tiene equivalente cae en "otro" antes que inventar un valor
- * que rompería los filtros de /gastos.
+ * más corto). Lo que no tiene equivalente cae en "otro" o "administrativo" antes que
+ * inventar un valor que rompería los filtros de /gastos.
  */
 export function mapaCategoriaAGastos(c: string): string {
   switch (c) {
@@ -500,12 +735,32 @@ export function mapaCategoriaAGastos(c: string): string {
     case "estacionamiento": return "estacionamiento";
     case "multa": return "multa";
     case "combustible": return "combustible";
+    // Todo lo de oficina aterriza en la categoría "administrativo" de /gastos: es la
+    // única que existe allí para esto y la que ya lleva tipo_gasto = administrativo.
+    case "utiles_oficina":
+    case "courier":
+    case "refrigerio":
+    case "representacion":
+    case "servicios_basicos":
+    case "limpieza":
+    case "mantenimiento_local":
+    case "capacitacion":
+      return "administrativo";
     case "lavado":
     case "movilidad":
     case "repuesto_menor":
     case "tramite":
     default: return "otro";
   }
+}
+
+/**
+ * Plano contable del gasto promovido. Antes se escribía "operativo" fijo, lo que metía
+ * el tóner de gerencia en el costo operativo de la flota y ensuciaba el margen por
+ * vehículo. El ámbito de la categoría es el que manda.
+ */
+export function tipoGastoDeCategoria(c: string): "operativo" | "administrativo" {
+  return configCategoriaCC(c).ambito === "oficina" ? "administrativo" : "operativo";
 }
 
 // ── Derivados de presentación ─────────────────────────────────────────────────

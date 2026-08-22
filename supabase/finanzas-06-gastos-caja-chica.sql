@@ -512,6 +512,13 @@ select public._fin_add_fk('documentos_compra','reserva_id','reservas');
 -- lib/liquidaciones.ts:768 escribe esa columna al aprobar una liquidación de
 -- proveedor. Se agrega aquí de forma defensiva: sin ella, v_cuentas_por_pagar (7.2)
 -- no se puede crear y abortaría toda esta migración.
+--
+-- La COLUMNA va aparte del FK a propósito: _fin_add_fk se rinde cuando la tabla
+-- destino no existe, así que en una base sin finanzas-03 no llegaba a crearla y la
+-- vista de CxP caía con "column d.liquidacion_proveedor_id does not exist". La
+-- columna se crea siempre; la integridad referencial se agrega solo si hay a qué
+-- apuntar, y si luego se corre la fase 03 esta misma línea la engancha.
+alter table public.documentos_compra add column if not exists liquidacion_proveedor_id bigint;
 select public._fin_add_fk('documentos_compra','liquidacion_proveedor_id','liquidacion_proveedor');
 
 -- Estado de la DETRACCIÓN, independiente del estado de pago de la factura: se puede

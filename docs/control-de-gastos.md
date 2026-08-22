@@ -32,7 +32,9 @@ Deben salir las **seis**. Si falta alguna, corre primero, en este orden:
 `finanzas-02-compras-cxp.sql` → `liquidaciones-v2.sql`.
 
 Después de la fase 06, corre también `supabase/finanzas-07-detracciones-catalogo.sql`
-(catálogo de detracciones SUNAT completo y editable — ver §3.2).
+(catálogo de detracciones SUNAT completo y editable — ver §3.2) y
+`supabase/finanzas-08-caja-chica-todo-el-personal.sql` (habilita la caja chica para
+gerencia y personal administrativo, no solo conductores — ver §3.3 y §6).
 
 ### Verificar que quedó bien
 
@@ -170,15 +172,36 @@ tiene ese enlace a la vista.
 ### 3.3 Fondos de caja chica
 
 Un **fondo** es la bolsa asignada a una persona. Créalos en **Caja Chica → Fondos**.
-Para cada conductor que maneja efectivo:
+Uno por cada persona que maneja efectivo de la empresa — **no solo los conductores**:
+el gerente, el contador, el asistente administrativo y la recepcionista también reciben
+caja chica, y el módulo los contempla.
 
-- **Responsable**: elige el conductor de la lista (autocompleta el nombre).
+Lo primero que se elige es **quién lo recibe**:
+
+| Tipo | De dónde sale la persona | Área |
+|---|---|---|
+| 🧑‍✈️ Conductor | tabla `conductores` | Operaciones |
+| 🧑‍💼 Personal administrativo | tabla `personal_administrativo` | su **departamento** |
+| 👤 Usuario del ERP | tabla `usuarios` | la que escribas |
+| 📌 Otro | se teclea el nombre | la que escribas |
+
+Al elegir a la persona se completan solos su nombre, DNI, cargo y área.
+
 - **Tope**: máximo que puede tener en la calle sin rendir. `0` = sin tope.
 - **Días para rendir**: a partir de la entrega, cuántos días tiene antes de que su
-  rendición cuente como vencida. Por defecto 7.
+  rendición cuente como vencida. El ERP sugiere **7 para la calle y 15 para oficina**.
+
+> **El área no se teclea dos veces.** Para el personal administrativo sale de su ficha
+> en *Personal administrativo*; si esa persona cambia de departamento, los reportes de
+> caja chica la siguen sin tocar nada aquí.
+
+> **Un fondo activo por persona.** Crear un segundo para el mismo conductor o el mismo
+> administrativo está bloqueado en la base de datos: partir su saldo en dos dejaría sin
+> efecto la regla de "no se entrega a quien no ha rendido".
 
 > Si vas a importar el histórico de caja chica, **no hace falta** crear los fondos a mano:
-> el importador crea uno por responsable que encuentre en la hoja.
+> el importador crea uno por responsable que encuentre en la hoja, y si el nombre calza
+> con una ficha de personal administrativo lo liga a ella con su cargo y su área.
 
 ---
 
@@ -306,16 +329,56 @@ bloqueado hasta que se resuelva.
 Está implementada en la base de datos, no en la pantalla, así que aplica igual desde la
 app del conductor, desde la bandeja del contador y desde cualquier automatización futura.
 
-### Desde el celular del conductor
+### Hay dos caminos para rendir, y llegan al mismo sitio
 
-El chofer abre su app en la pestaña **Gastos**, elige categoría (peaje, lavado,
-estacionamiento, viáticos, movilidad), pone el monto y **fotografía el comprobante**.
-La foto se guarda con su ubicación GPS y la hora real de captura.
+**A · Desde el celular del conductor.** El chofer abre su app en la pestaña **Gastos**,
+elige categoría (peaje, lavado, estacionamiento, viáticos, movilidad), pone el monto y
+**fotografía el comprobante**. La foto se guarda con su ubicación GPS y la hora real de
+captura.
 
 - Si no hay señal, el gasto queda en cola en el celular y se sube solo al reconectar.
 - La misma foto no se puede rendir dos veces (se compara el contenido de la imagen, no
   el nombre del archivo).
 - El chofer puede rendir aunque no le hayas entregado plata: el saldo queda a su favor.
+
+**B · Desde el ERP, con el botón "+ Comprobante".** Es el camino de gerencia y
+administración, que no tienen la app del conductor. En **Caja Chica → Rendiciones**,
+cualquier rendición **Abierta** u **Observada** trae ese botón en su fila: abre un
+formulario con categoría, fecha, monto, RUC, serie-número y **adjunto** (foto o PDF).
+
+- El comprobante entra a la misma rendición, con el mismo estado *Pendiente*, y lo
+  revisa la misma persona. Es indistinguible de uno subido desde el celular.
+- El botón **solo aparece en rendiciones vivas**: a una ya enviada a revisión no se le
+  pueden agregar gastos por detrás, porque el monto revisado dejaría de calzar con lo
+  que el revisor aprobó. Si falta uno, hay que **observarla** para devolverla.
+- Un comprobante todavía sin revisar se puede **borrar** (junto con su foto) desde la
+  fila desplegada. Uno ya aprobado o rechazado no: eso se corrige rechazándolo.
+
+### Categorías: la calle y la oficina gastan en cosas distintas
+
+El selector muestra primero las que van con el tipo de responsable del fondo:
+
+- **Calle** — peaje, lavado, estacionamiento, viáticos, repuesto menor, combustible, multa.
+- **Oficina** — útiles de oficina, courier, refrigerio, representación, servicios básicos,
+  limpieza, mantenimiento del local, capacitación.
+- **Comunes** — movilidad, trámite, otro.
+
+Dos avisos que la pantalla muestra sola al elegirlas:
+
+- **Representación** es deducible hasta el 0.5 % de los ingresos brutos acumulados, con
+  tope de 40 UIT (art. 37 inc. q LIR), y exige comprobante con el RUC de AFA. Por eso
+  está separada de *refrigerio*: para que el contador pueda sumarla aparte.
+- **Multa** no es gasto deducible (art. 44 LIR). Se registra igual, pero se repara.
+
+Al promover al libro de **Gastos**, lo de calle entra como **operativo** y lo de oficina
+como **administrativo**: así el tóner de gerencia no ensucia el costo por vehículo ni el
+margen de un servicio con el que no tuvo nada que ver.
+
+### Cuánto gasta cada área
+
+**Caja Chica → Fondos** muestra arriba unas pastillas con el dinero en la calle **por
+área** (Gerencia, Contabilidad, Operaciones…), y la tabla trae su columna *Área*. En SQL,
+el corte por área, mes y categoría es la vista `v_caja_chica_por_area`.
 
 ### La revisión
 

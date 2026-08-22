@@ -13,6 +13,7 @@ import {
   configCategoriaCC,
   configRendicion,
   cuadra,
+  eliminarGasto,
   type GastoCajaChica,
   type RendicionCajaChica,
 } from "@/lib/finanzas/caja-chica";
@@ -20,6 +21,7 @@ import { exportarXlsx, type Columna } from "@/lib/finanzas/exportar";
 import { PERFILES_CAJA_CHICA } from "@/lib/importador/perfiles-finanzas";
 import ImportadorFinanzas from "@/app/_components/ImportadorFinanzas";
 import ModalEntrega from "../ModalEntrega";
+import ModalGasto from "../ModalGasto";
 import ModalRendicion from "../ModalRendicion";
 
 type Props = { onCambio: () => void };
@@ -85,6 +87,9 @@ export default function RendicionesTab({ onCambio }: Props) {
   const [entregando, setEntregando] = useState(false);
   const [importando, setImportando] = useState(false);
   const [revisando, setRevisando] = useState<number | null>(null);
+  // Registrar un comprobante desde el ERP: el camino de gerencia y administración,
+  // que no tienen la app del conductor para fotografiarlo en la calle.
+  const [rindiendo, setRindiendo] = useState<number | null>(null);
   const [puedeAprobar, setPuedeAprobar] = useState(false);
   const [usuarioNombre, setUsuarioNombre] = useState("");
 
@@ -195,6 +200,21 @@ export default function RendicionesTab({ onCambio }: Props) {
       onCambio();
     },
     [cargar, cargarGastos, expandida, onCambio]
+  );
+
+  /** Borra un comprobante todavía sin revisar (y su foto del bucket privado). */
+  const borrarGasto = useCallback(
+    async (gastoId: number, rendicionId: number) => {
+      if (!window.confirm("¿Borrar este comprobante? Se elimina también su foto.")) return;
+      const r = await eliminarGasto(supabase, gastoId);
+      if (!r.ok) {
+        showToast(r.error, false);
+        return;
+      }
+      showToast("Comprobante borrado");
+      refrescarTras(rendicionId);
+    },
+    [refrescarTras, showToast]
   );
 
   function colorSaldo(r: RendicionCajaChica): string {
@@ -392,12 +412,24 @@ export default function RendicionesTab({ onCambio }: Props) {
                           </span>
                         </td>
                         <td className="p-3">
-                          <button
-                            onClick={() => setRevisando(r.id)}
-                            className="px-2.5 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700"
-                          >
-                            Revisar
-                          </button>
+                          <div className="flex gap-2">
+                            {["abierta", "observada"].includes(r.estado) && (
+                              <button
+                                onClick={() => setRindiendo(r.id)}
+                                title="Registrar un comprobante en esta rendición"
+                                className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white hover:opacity-90 whitespace-nowrap"
+                                style={{ background: "#0b315f" }}
+                              >
+                                + Comprobante
+                              </button>
+                            )}
+                            <button
+                              onClick={() => setRevisando(r.id)}
+                              className="px-2.5 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 text-gray-700"
+                            >
+                              Revisar
+                            </button>
+                          </div>
                         </td>
                       </tr>
 
@@ -469,6 +501,17 @@ export default function RendicionesTab({ onCambio }: Props) {
                                       >
                                         {rev.label}
                                       </span>
+                                      {/* Solo lo aún NO revisado y en una rendición viva: un comprobante
+                                          ya decidido se corrige rechazándolo, que deja rastro. */}
+                                      {g.estado_revision === "pendiente" && ["abierta", "observada"].includes(r.estado) && (
+                                        <button
+                                          onClick={() => borrarGasto(g.id, r.id)}
+                                          title="Borrar este comprobante"
+                                          className="px-2 py-1 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50 shrink-0"
+                                        >
+                                          Borrar
+                                        </button>
+                                      )}
                                     </div>
                                   );
                                 })}
@@ -497,6 +540,23 @@ export default function RendicionesTab({ onCambio }: Props) {
             showToast(msg);
             cargar();
             onCambio();
+          }}
+        />
+      )}
+
+      {rindiendo !== null && (
+        <ModalGasto
+          rendicionId={rindiendo}
+          onCerrar={() => {
+            const id = rindiendo;
+            setRindiendo(null);
+            refrescarTras(id);
+          }}
+          onListo={(msg) => {
+            const id = rindiendo;
+            setRindiendo(null);
+            showToast(msg);
+            refrescarTras(id);
           }}
         />
       )}

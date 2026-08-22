@@ -5,6 +5,7 @@ import { useEffect, useState, type ReactElement } from "react";
 import { Manrope, JetBrains_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabase";
 import EliaPanel from "./_components/elia";
+import AyudaModulo from "./_components/AyudaModulo";
 import NotificadorMensajesPasajeros from "@/components/NotificadorMensajesPasajeros";
 import { useMensajesNoLeidosPasajero } from "@/lib/useMensajesNoLeidos";
 import "./globals.css";
@@ -807,6 +808,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
             {/* ELIA — asistente de operaciones (solo usuarios internos autenticados) */}
             <EliaPanel nombre={nombreUsuario} rol={rolUsuario} permisos={permisos} />
+
+            {/* Ayuda contextual — "?" con la ficha de la pantalla actual y el glosario contable.
+                Se pinta solo si la ruta tiene ficha (lib/ayuda decide), así que no estorba. */}
+            <AyudaModulo />
 
             {/* Aviso global de mensajes de pasajeros — toast/sonido/notificación, en cualquier página */}
             {permisos.includes("seguimiento") && (

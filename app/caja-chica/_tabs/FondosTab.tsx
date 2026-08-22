@@ -4,15 +4,23 @@
 // v_caja_chica_saldos (trae saldo_en_calle y rendiciones_vivas ya agregados) y se
 // completa con las columnas de configuración que solo viven en la tabla.
 //
+// La caja chica NO es solo del conductor: también la reciben el gerente, el contador y
+// el personal administrativo. Por eso lo PRIMERO que se elige es el TIPO de
+// responsable, y recién entonces se carga la lista que corresponde (conductores ·
+// personal administrativo · usuarios del ERP). Antes solo había selector de conductor
+// y a la oficina había que teclearle el nombre a mano, sin quedar ligada a nadie.
+//
 // Un fondo NO se borra: se desactiva. Sus rendiciones históricas siguen contando en el
 // costo de los servicios y borrarlo dejaría huecos en v_egresos.
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { fmtMoneda } from "@/lib/finanzas/dinero";
-import type { FondoCajaChica } from "@/lib/finanzas/caja-chica";
+import { TIPOS_RESPONSABLE_CC, type FondoCajaChica } from "@/lib/finanzas/caja-chica";
 
 type Props = { onCambio: () => void };
+
+type TipoResponsable = FondoCajaChica["responsable_tipo"];
 
 type FilaSaldo = {
   fondo_id: number;
@@ -20,6 +28,10 @@ type FilaSaldo = {
   responsable_tipo: string;
   responsable_nombre: string;
   conductor_id: number | null;
+  personal_administrativo_id: number | null;
+  usuario_id: string | null;
+  cargo: string | null;
+  area: string | null;
   moneda: string;
   tope: number | null;
   activo: boolean;
@@ -29,12 +41,24 @@ type FilaSaldo = {
   ultima_entrega: string | null;
 };
 
-type ConductorRef = { id: number; nombre: string };
+/** Una persona elegible, ya normalizada: de dónde salga es problema de `cargar`. */
+type Persona = { id: string; nombre: string; documento: string | null; cargo: string | null; area: string | null };
+
+// Las tres tablas de origen. Se declaran sueltas porque cada una llama distinto a lo
+// mismo: el "área" es `departamento` en personal y no existe en conductores ni usuarios.
+type FilaConductor = { id: number; nombre: string | null; dni: string | null };
+type FilaAdministrativo = {
+  id: number; nombre: string | null; dni: string | null;
+  cargo: string | null; departamento: string | null; estado: string | null;
+};
+type FilaUsuario = { id: string; nombre: string | null; rol: string | null; activo: boolean | null };
+
 type CuentaRef = { id: number; nombre: string; tipo: string; moneda: string };
 
 const CABECERAS = [
   "Responsable",
   "Tipo",
+  "Área",
   "DNI",
   "Tope",
   "Días para rendir",
@@ -44,11 +68,7 @@ const CABECERAS = [
   "Acciones",
 ];
 
-const TIPOS_RESPONSABLE: { valor: FondoCajaChica["responsable_tipo"]; label: string }[] = [
-  { valor: "conductor", label: "Conductor" },
-  { valor: "usuario", label: "Usuario del ERP" },
-  { valor: "otro", label: "Otro" },
-];
+const TIPOS: TipoResponsable[] = ["conductor", "personal_administrativo", "usuario", "otro"];
 
 function inputCls(extra = "") {
   return "w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all " + extra;
@@ -65,10 +85,13 @@ function Campo({ label, span, children }: { label: string; span?: number; childr
 
 type FormFondo = {
   nombre: string;
-  responsable_tipo: FondoCajaChica["responsable_tipo"];
+  responsable_tipo: TipoResponsable;
   responsable_nombre: string;
   documento_identidad: string;
-  conductor_id: string;
+  /** id de la persona elegida en la lista del tipo actual (vacío para "otro"). */
+  persona_id: string;
+  cargo: string;
+  centro_costo: string;
   cuenta_tesoreria_id: string;
   moneda: string;
   tope: string;
@@ -81,7 +104,9 @@ const FORM_VACIO: FormFondo = {
   responsable_tipo: "conductor",
   responsable_nombre: "",
   documento_identidad: "",
-  conductor_id: "",
+  persona_id: "",
+  cargo: "",
+  centro_costo: "",
   cuenta_tesoreria_id: "",
   moneda: "PEN",
   tope: "0",
@@ -89,10 +114,23 @@ const FORM_VACIO: FormFondo = {
   observaciones: "",
 };
 
+/** El plazo típico de rendición no es el mismo en la calle que en la oficina. */
+const DIAS_SUGERIDOS: Record<TipoResponsable, string> = {
+  conductor: "7",
+  personal_administrativo: "15",
+  usuario: "15",
+  otro: "7",
+};
+
 export default function FondosTab({ onCambio }: Props) {
   const [saldos, setSaldos] = useState<FilaSaldo[]>([]);
   const [fondos, setFondos] = useState<FondoCajaChica[]>([]);
-  const [conductores, setConductores] = useState<ConductorRef[]>([]);
+  const [personas, setPersonas] = useState<Record<TipoResponsable, Persona[]>>({
+    conductor: [],
+    personal_administrativo: [],
+    usuario: [],
+    otro: [],
+  });
   const [cuentas, setCuentas] = useState<CuentaRef[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -110,16 +148,48 @@ export default function FondosTab({ onCambio }: Props) {
 
   const cargar = useCallback(async () => {
     setLoading(true);
-    const [s, f, c, ct] = await Promise.all([
+    // `personal_administrativo` puede no existir en una base sin ese módulo: la consulta
+    // se aísla para que su fallo no vacíe también conductores y usuarios.
+    const [s, f, c, pa, us, ct] = await Promise.all([
       supabase.from("v_caja_chica_saldos").select("*").order("responsable_nombre"),
       supabase.from("caja_chica_fondos").select("*"),
-      supabase.from("conductores").select("id, nombre").order("nombre"),
+      supabase.from("conductores").select("id, nombre, dni").order("nombre"),
+      supabase.from("personal_administrativo").select("id, nombre, dni, cargo, departamento, estado").order("nombre"),
+      supabase.from("usuarios").select("id, nombre, rol, activo").order("nombre"),
       supabase.from("cuentas_tesoreria").select("id, nombre, tipo, moneda").eq("activo", true).order("nombre"),
     ]);
+
     setSaldos((s.data ?? []) as FilaSaldo[]);
     setFondos((f.data ?? []) as FondoCajaChica[]);
-    setConductores((c.data ?? []) as ConductorRef[]);
     setCuentas((ct.data ?? []) as CuentaRef[]);
+    setPersonas({
+      conductor: ((c.data ?? []) as FilaConductor[]).map((x) => ({
+        id: String(x.id),
+        nombre: String(x.nombre ?? ""),
+        documento: x.dni ?? null,
+        cargo: "Conductor",
+        area: "Operaciones",
+      })),
+      personal_administrativo: ((pa.data ?? []) as FilaAdministrativo[])
+        .filter((x) => (x.estado ?? "activo") === "activo")
+        .map((x) => ({
+          id: String(x.id),
+          nombre: String(x.nombre ?? ""),
+          documento: x.dni ?? null,
+          cargo: x.cargo ?? null,
+          area: x.departamento ?? null,
+        })),
+      usuario: ((us.data ?? []) as FilaUsuario[])
+        .filter((x) => x.activo !== false)
+        .map((x) => ({
+          id: String(x.id),
+          nombre: String(x.nombre ?? ""),
+          documento: null,
+          cargo: x.rol ?? null,
+          area: null,
+        })),
+      otro: [],
+    });
     setLoading(false);
   }, []);
 
@@ -138,6 +208,9 @@ export default function FondosTab({ onCambio }: Props) {
     return mapa;
   }, [fondos]);
 
+  const lista = personas[form.responsable_tipo] ?? [];
+  const necesitaLista = form.responsable_tipo !== "otro";
+
   function abrirNuevo() {
     setEditandoId(null);
     setForm(FORM_VACIO);
@@ -148,13 +221,16 @@ export default function FondosTab({ onCambio }: Props) {
   function abrirEdicion(id: number) {
     const f = detalle[id];
     if (!f) return;
+    const tipo = (f.responsable_tipo ?? "conductor") as TipoResponsable;
     setEditandoId(id);
     setForm({
       nombre: f.nombre ?? "",
-      responsable_tipo: f.responsable_tipo ?? "conductor",
+      responsable_tipo: tipo,
       responsable_nombre: f.responsable_nombre ?? "",
       documento_identidad: f.documento_identidad ?? "",
-      conductor_id: f.conductor_id ? String(f.conductor_id) : "",
+      persona_id: idDePersona(f, tipo),
+      cargo: f.cargo ?? "",
+      centro_costo: f.centro_costo ?? "",
       cuenta_tesoreria_id: f.cuenta_tesoreria_id ? String(f.cuenta_tesoreria_id) : "",
       moneda: f.moneda ?? "PEN",
       tope: String(Number(f.tope ?? 0)),
@@ -165,16 +241,34 @@ export default function FondosTab({ onCambio }: Props) {
     setMostrarForm(true);
   }
 
-  function elegirConductor(id: string) {
-    const c = conductores.find((x) => String(x.id) === id);
+  /** Cambiar de tipo limpia a la persona elegida: un id de conductor no vale para un administrativo. */
+  function elegirTipo(tipo: TipoResponsable) {
     setForm((f) => ({
       ...f,
-      conductor_id: id,
-      // Elegir un conductor fija el tipo y copia el nombre: la vista muestra esa copia
-      // legible, así que dejarla desincronizada rompería el listado.
-      responsable_tipo: id ? "conductor" : f.responsable_tipo,
-      responsable_nombre: c ? c.nombre : f.responsable_nombre,
-      nombre: c && !f.nombre.trim() ? `Caja chica · ${c.nombre}` : f.nombre,
+      responsable_tipo: tipo,
+      persona_id: "",
+      // Solo se borran los datos que venían AUTOCOMPLETADOS de la persona anterior.
+      // Si el usuario los tecleó a mano (tipo "otro"), se respetan.
+      responsable_nombre: f.persona_id ? "" : f.responsable_nombre,
+      documento_identidad: f.persona_id ? "" : f.documento_identidad,
+      cargo: f.persona_id ? "" : f.cargo,
+      centro_costo: f.persona_id ? "" : f.centro_costo,
+      dias_para_rendir: DIAS_SUGERIDOS[tipo],
+    }));
+    setError("");
+  }
+
+  /** Elegir a la persona copia su nombre, DNI, cargo y área al formulario. */
+  function elegirPersona(id: string) {
+    const p = (personas[form.responsable_tipo] ?? []).find((x) => x.id === id);
+    setForm((f) => ({
+      ...f,
+      persona_id: id,
+      responsable_nombre: p ? p.nombre : f.responsable_nombre,
+      documento_identidad: p?.documento ?? f.documento_identidad,
+      cargo: p?.cargo ?? f.cargo,
+      centro_costo: p?.area ?? f.centro_costo,
+      nombre: p && !f.nombre.trim() ? `Caja chica · ${p.nombre}` : f.nombre,
     }));
   }
 
@@ -184,18 +278,30 @@ export default function FondosTab({ onCambio }: Props) {
       setError("Indica el nombre del responsable.");
       return;
     }
+    if (necesitaLista && !form.persona_id) {
+      setError(`Elige a la persona de la lista de ${TIPOS_RESPONSABLE_CC[form.responsable_tipo].label.toLowerCase()}.`);
+      return;
+    }
     const dias = Number(form.dias_para_rendir);
     if (!(dias > 0)) {
       setError("Los días para rendir deben ser mayores a 0.");
       return;
     }
 
-    const fila = {
+    const tipo = form.responsable_tipo;
+    const fila: Record<string, unknown> = {
       nombre: form.nombre.trim() || `Caja chica · ${form.responsable_nombre.trim()}`,
-      responsable_tipo: form.responsable_tipo,
+      responsable_tipo: tipo,
       responsable_nombre: form.responsable_nombre.trim(),
       documento_identidad: form.documento_identidad.trim() || null,
-      conductor_id: form.responsable_tipo === "conductor" && form.conductor_id ? Number(form.conductor_id) : null,
+      // El CHECK cc_fondos_responsable_coherente exige que solo venga el id que calza
+      // con el tipo: mandarlos todos guardaría un fondo que la bandeja no sabría leer.
+      conductor_id: tipo === "conductor" && form.persona_id ? Number(form.persona_id) : null,
+      personal_administrativo_id:
+        tipo === "personal_administrativo" && form.persona_id ? Number(form.persona_id) : null,
+      usuario_id: tipo === "usuario" && form.persona_id ? form.persona_id : null,
+      cargo: form.cargo.trim() || null,
+      centro_costo: form.centro_costo.trim() || null,
       cuenta_tesoreria_id: form.cuenta_tesoreria_id ? Number(form.cuenta_tesoreria_id) : null,
       moneda: form.moneda,
       tope: Number(form.tope) || 0,
@@ -210,7 +316,7 @@ export default function FondosTab({ onCambio }: Props) {
     setGuardando(false);
 
     if (res.error) {
-      setError(String(res.error.message ?? "No se pudo guardar el fondo."));
+      setError(mensajeDeError(res.error.message));
       return;
     }
     setMostrarForm(false);
@@ -229,7 +335,7 @@ export default function FondosTab({ onCambio }: Props) {
     }
     const { error: err } = await supabase.from("caja_chica_fondos").update({ activo: !fila.activo }).eq("id", fila.fondo_id);
     if (err) {
-      showToast(String(err.message ?? "No se pudo cambiar el estado."), false);
+      showToast(mensajeDeError(String(err.message ?? "")), false);
       return;
     }
     showToast(fila.activo ? "Fondo desactivado" : "Fondo activado");
@@ -239,13 +345,26 @@ export default function FondosTab({ onCambio }: Props) {
 
   const totalEnCalle = useMemo(() => saldos.reduce((s, f) => s + Number(f.saldo_en_calle ?? 0), 0), [saldos]);
 
+  // Cuánto hay en la calle por área: el corte que la oficina no tenía y que ahora
+  // v_caja_chica_saldos publica ya derivado.
+  const porArea = useMemo(() => {
+    const mapa: Record<string, number> = {};
+    for (const f of saldos) {
+      const k = f.area || "Sin asignar";
+      mapa[k] = (mapa[k] ?? 0) + Number(f.saldo_en_calle ?? 0);
+    }
+    return Object.entries(mapa)
+      .filter(([, v]) => v > 0)
+      .sort((a, b) => b[1] - a[1]);
+  }, [saldos]);
+
   return (
     <main className="p-6 space-y-5 max-w-7xl mx-auto">
       <div className="flex items-start justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Fondos</h1>
           <p className="text-gray-400 text-sm mt-1">
-            Un fondo por responsable · Tope de dinero en la calle · Plazo para rendir
+            Conductores, gerencia y administración · Tope de dinero en la calle · Plazo para rendir
           </p>
         </div>
         <button
@@ -257,6 +376,16 @@ export default function FondosTab({ onCambio }: Props) {
         </button>
       </div>
 
+      {porArea.length > 0 && (
+        <div className="flex gap-2 flex-wrap">
+          {porArea.map(([area, monto]) => (
+            <span key={area} className="text-xs font-bold px-3 py-1.5 rounded-xl border" style={{ background: "#f8fafc", borderColor: "#e2e8f0", color: "#0b315f" }}>
+              {area}: {fmtMoneda(monto)}
+            </span>
+          ))}
+        </div>
+      )}
+
       {mostrarForm && (
         <section className="bg-white rounded-2xl border shadow-sm p-6 space-y-5">
           <div className="flex items-center gap-3">
@@ -266,54 +395,83 @@ export default function FondosTab({ onCambio }: Props) {
             <div>
               <h2 className="text-lg font-bold text-gray-900">{editandoId ? "Editar fondo" : "Nuevo fondo de caja chica"}</h2>
               <p className="text-xs text-gray-400">
-                Al elegir un conductor se completan solos el nombre del responsable y el tipo
+                Elige primero de qué tipo es el responsable; la lista y el plazo se ajustan solos
               </p>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Campo label="Conductor">
-              <select className={inputCls()} value={form.conductor_id} onChange={(e) => elegirConductor(e.target.value)}>
-                <option value="">— Sin conductor —</option>
-                {conductores.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.nombre}
-                  </option>
-                ))}
-              </select>
-            </Campo>
-            <Campo label="Tipo de responsable">
-              <select
-                className={inputCls()}
-                value={form.responsable_tipo}
-                onChange={(e) =>
-                  setForm({ ...form, responsable_tipo: e.target.value as FondoCajaChica["responsable_tipo"] })
-                }
-              >
-                {TIPOS_RESPONSABLE.map((t) => (
-                  <option key={t.valor} value={t.valor}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-            </Campo>
-            <Campo label="Nombre del responsable">
-              <input
-                className={inputCls()}
-                value={form.responsable_nombre}
-                onChange={(e) => setForm({ ...form, responsable_nombre: e.target.value })}
-                placeholder="Juan Pérez"
-              />
-            </Campo>
+          {/* Paso 1 — el tipo manda: define qué lista se ofrece y a qué tabla se liga. */}
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-2">
+              ¿Quién recibe la caja chica?
+            </label>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              {TIPOS.map((t) => {
+                const cfg = TIPOS_RESPONSABLE_CC[t];
+                const activo = form.responsable_tipo === t;
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => elegirTipo(t)}
+                    className="text-left px-3 py-2.5 rounded-xl border transition-all"
+                    style={
+                      activo
+                        ? { borderColor: "#0b315f", background: "#eef3f8", boxShadow: "0 0 0 1px #0b315f inset" }
+                        : { borderColor: "#e2e8f0", background: "#fff" }
+                    }
+                  >
+                    <span className="text-sm font-bold text-gray-900">
+                      {cfg.emoji} {cfg.label}
+                    </span>
+                    <span className="block text-[11px] text-gray-400 mt-0.5 leading-snug">{cfg.ayuda}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
-            <Campo label="Nombre del fondo">
-              <input
-                className={inputCls()}
-                value={form.nombre}
-                onChange={(e) => setForm({ ...form, nombre: e.target.value })}
-                placeholder="Caja chica · Juan Pérez"
-              />
-            </Campo>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Paso 2 — la persona. Para "otro" no hay lista: el nombre se teclea. */}
+            {necesitaLista ? (
+              <Campo label={TIPOS_RESPONSABLE_CC[form.responsable_tipo].label}>
+                <select className={inputCls()} value={form.persona_id} onChange={(e) => elegirPersona(e.target.value)}>
+                  <option value="">— Elige a la persona —</option>
+                  {lista.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.nombre}
+                      {p.cargo ? ` · ${p.cargo}` : ""}
+                    </option>
+                  ))}
+                </select>
+                {lista.length === 0 && (
+                  <p className="text-[11px] text-amber-700 mt-1">
+                    No hay nadie activo en esa lista todavía.
+                  </p>
+                )}
+              </Campo>
+            ) : (
+              <Campo label="Nombre del responsable">
+                <input
+                  className={inputCls()}
+                  value={form.responsable_nombre}
+                  onChange={(e) => setForm({ ...form, responsable_nombre: e.target.value })}
+                  placeholder="Practicante, personal temporal…"
+                />
+              </Campo>
+            )}
+
+            {necesitaLista && (
+              <Campo label="Nombre del responsable">
+                <input
+                  className={inputCls()}
+                  value={form.responsable_nombre}
+                  onChange={(e) => setForm({ ...form, responsable_nombre: e.target.value })}
+                  placeholder="Se completa al elegir a la persona"
+                />
+              </Campo>
+            )}
+
             <Campo label="DNI">
               <input
                 className={inputCls()}
@@ -322,6 +480,32 @@ export default function FondosTab({ onCambio }: Props) {
                 placeholder="12345678"
               />
             </Campo>
+
+            <Campo label="Cargo">
+              <input
+                className={inputCls()}
+                value={form.cargo}
+                onChange={(e) => setForm({ ...form, cargo: e.target.value })}
+                placeholder="Gerente General"
+              />
+            </Campo>
+            <Campo label="Centro de costo / área">
+              <input
+                className={inputCls()}
+                value={form.centro_costo}
+                onChange={(e) => setForm({ ...form, centro_costo: e.target.value })}
+                placeholder="Gerencia, Contabilidad, Operaciones…"
+              />
+            </Campo>
+            <Campo label="Nombre del fondo">
+              <input
+                className={inputCls()}
+                value={form.nombre}
+                onChange={(e) => setForm({ ...form, nombre: e.target.value })}
+                placeholder="Caja chica · Juan Pérez"
+              />
+            </Campo>
+
             <Campo label="Cuenta de tesorería">
               <select
                 className={inputCls()}
@@ -336,7 +520,6 @@ export default function FondosTab({ onCambio }: Props) {
                 ))}
               </select>
             </Campo>
-
             <Campo label="Moneda">
               <select className={inputCls()} value={form.moneda} onChange={(e) => setForm({ ...form, moneda: e.target.value })}>
                 <option value="PEN">Soles (PEN)</option>
@@ -353,6 +536,7 @@ export default function FondosTab({ onCambio }: Props) {
                 onChange={(e) => setForm({ ...form, tope: e.target.value })}
               />
             </Campo>
+
             <Campo label="Días para rendir">
               <input
                 type="number"
@@ -364,7 +548,7 @@ export default function FondosTab({ onCambio }: Props) {
               />
             </Campo>
 
-            <Campo label="Observaciones" span={3}>
+            <Campo label="Observaciones" span={2}>
               <textarea
                 rows={2}
                 className={inputCls()}
@@ -374,6 +558,16 @@ export default function FondosTab({ onCambio }: Props) {
               />
             </Campo>
           </div>
+
+          {form.responsable_tipo === "personal_administrativo" && form.persona_id && (
+            <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 flex items-start gap-3 text-sm text-blue-900">
+              <span className="text-lg leading-none">ℹ️</span>
+              <span>
+                El área de esta persona la manda su ficha en <span className="font-bold">Personal administrativo</span>.
+                Si cambia de departamento allí, los reportes de caja chica la siguen sin tocar nada aquí.
+              </span>
+            </div>
+          )}
 
           {error && (
             <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 flex items-center gap-3 text-sm text-red-800">
@@ -442,14 +636,17 @@ export default function FondosTab({ onCambio }: Props) {
                   const cfgFondo = detalle[f.fondo_id];
                   const vivas = Number(f.rendiciones_vivas ?? 0);
                   const atrasadas = Number(f.rendiciones_atrasadas ?? 0);
-                  const tipo = TIPOS_RESPONSABLE.find((t) => t.valor === f.responsable_tipo)?.label ?? f.responsable_tipo;
+                  const cfgTipo = TIPOS_RESPONSABLE_CC[f.responsable_tipo as TipoResponsable];
                   return (
                     <tr key={f.fondo_id} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
                       <td className="p-3 text-xs text-gray-600 font-medium">
                         {f.responsable_nombre}
-                        <span className="block text-[10px] text-gray-400">{f.nombre}</span>
+                        <span className="block text-[10px] text-gray-400">{f.cargo || f.nombre}</span>
                       </td>
-                      <td className="p-3 text-xs text-gray-600 font-medium">{tipo}</td>
+                      <td className="p-3 text-xs text-gray-600 font-medium whitespace-nowrap">
+                        {cfgTipo ? `${cfgTipo.emoji} ${cfgTipo.label}` : f.responsable_tipo}
+                      </td>
+                      <td className="p-3 text-xs text-gray-600 font-medium">{f.area || "—"}</td>
                       <td className="p-3 font-mono font-black text-xs text-[#0b315f]">{cfgFondo?.documento_identidad || "—"}</td>
                       <td className="p-3 text-xs text-gray-600 font-medium">
                         {Number(f.tope ?? 0) > 0 ? fmtMoneda(Number(f.tope), f.moneda) : "Sin tope"}
@@ -523,4 +720,32 @@ export default function FondosTab({ onCambio }: Props) {
       )}
     </main>
   );
+}
+
+/** Recupera, al editar, cuál de los tres ids es el que corresponde al tipo del fondo. */
+function idDePersona(f: FondoCajaChica, tipo: TipoResponsable): string {
+  if (tipo === "conductor") return f.conductor_id ? String(f.conductor_id) : "";
+  if (tipo === "personal_administrativo") return f.personal_administrativo_id ? String(f.personal_administrativo_id) : "";
+  if (tipo === "usuario") return f.usuario_id ? String(f.usuario_id) : "";
+  return "";
+}
+
+/**
+ * Traduce a castellano los errores de las guardas de finanzas-08. Un mensaje crudo de
+ * Postgres con el nombre del índice no le dice nada a quien está creando el fondo.
+ */
+function mensajeDeError(msg: string): string {
+  if (/uq_cc_fondo_administrativo|uq_cc_fondo_conductor/.test(msg)) {
+    return "Esa persona ya tiene un fondo de caja chica activo. Usa el que ya existe o desactívalo primero.";
+  }
+  if (/cc_fondos_responsable_coherente/.test(msg)) {
+    return "El tipo de responsable no calza con la persona elegida. Vuelve a elegirla tras cambiar el tipo.";
+  }
+  if (/responsable_tipo_check/.test(msg)) {
+    return "Tipo de responsable no válido. ¿Falta correr la migración finanzas-08 en Supabase?";
+  }
+  if (/column .*(personal_administrativo_id|centro_costo|cargo)/.test(msg)) {
+    return "Falta correr finanzas-08-caja-chica-todo-el-personal.sql en Supabase para habilitar los fondos de oficina.";
+  }
+  return msg || "No se pudo guardar el fondo.";
 }

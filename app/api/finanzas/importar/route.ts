@@ -349,13 +349,38 @@ async function importarCajaChica(db: any, filas: FilaCajaChica[], perfil: string
   const errores: Resumen["errores"] = [];
   const placas = await mapaPlacas(db);
 
-  const { data: fondos } = await db.from("caja_chica_fondos").select("id, responsable_nombre, conductor_id, moneda");
+  const { data: fondos } = await db
+    .from("caja_chica_fondos")
+    .select("id, responsable_nombre, conductor_id, personal_administrativo_id, moneda");
   const porResponsable = new Map<string, any>();
-  for (const f of (fondos as any[]) ?? []) porResponsable.set(normaliza(f.responsable_nombre), f);
+  // Doble índice: por nombre y por la persona a la que el fondo está ligado. Sin el
+  // segundo, un nombre escrito distinto en el Sheet ("Juan Perez" vs "Juan Pérez")
+  // intentaría crear un SEGUNDO fondo de la misma persona, y el índice único de
+  // finanzas-08 lo rechazaría en vez de reutilizar el que ya existe.
+  type FondoRef = { id: number; moneda: string | null };
+  const porConductor = new Map<number, FondoRef>();
+  const porAdministrativo = new Map<number, FondoRef>();
+  for (const f of (fondos as any[]) ?? []) {
+    porResponsable.set(normaliza(f.responsable_nombre), f);
+    if (f.conductor_id) porConductor.set(Number(f.conductor_id), f);
+    if (f.personal_administrativo_id) porAdministrativo.set(Number(f.personal_administrativo_id), f);
+  }
 
   const { data: conductores } = await db.from("conductores").select("id, nombre");
   const conductorPorNombre = new Map<string, number>();
   for (const c of (conductores as any[]) ?? []) conductorPorNombre.set(normaliza(c.nombre), c.id);
+
+  // La caja chica no es solo de la calle: el histórico de un Sheet puede traer al
+  // gerente o a contabilidad. Si el nombre calza con una ficha administrativa, el
+  // fondo nace ligado a ella y hereda su área. Si la tabla no existe, se ignora.
+  type AdministrativoRef = {
+    id: number; nombre: string; dni: string | null; cargo: string | null; departamento: string | null;
+  };
+  const { data: administrativos } = await db
+    .from("personal_administrativo")
+    .select("id, nombre, dni, cargo, departamento");
+  const administrativoPorNombre = new Map<string, AdministrativoRef>();
+  for (const p of (administrativos as AdministrativoRef[]) ?? []) administrativoPorNombre.set(normaliza(p.nombre), p);
 
   // Agrupar por responsable.
   const grupos = new Map<string, FilaCajaChica[]>();
@@ -369,31 +394,64 @@ async function importarCajaChica(db: any, filas: FilaCajaChica[], perfil: string
   let creadasRend = 0;
 
   for (const [clave, grupo] of grupos) {
-    let fondo = porResponsable.get(clave);
+    const conductorId = conductorPorNombre.get(clave) ?? null;
+    const admin = administrativoPorNombre.get(clave) ?? null;
 
-    // Fondo automático para el responsable que aún no lo tiene.
+    // El fondo se busca por nombre y, si no calza, por la persona: así un nombre
+    // escrito distinto en el Sheet reutiliza el fondo que esa persona ya tiene.
+    let fondo =
+      porResponsable.get(clave) ??
+      (conductorId ? porConductor.get(conductorId) : null) ??
+      (admin ? porAdministrativo.get(Number(admin.id)) : null);
+
+    // Fondo automático para el responsable que aún no lo tiene. El tipo sale de dónde
+    // se encontró a la persona: un gerente en el histórico no debe entrar como "otro".
     if (!fondo && !fondoIdFijo) {
       const nombre = grupo[0].responsable_nombre;
-      const conductorId = conductorPorNombre.get(clave) ?? null;
-      const { data: nuevo, error } = await db
-        .from("caja_chica_fondos")
-        .insert({
-          nombre: `Caja chica · ${nombre}`,
-          responsable_tipo: conductorId ? "conductor" : "otro",
-          responsable_nombre: nombre,
-          conductor_id: conductorId,
-          moneda: grupo[0].moneda || "PEN",
-          activo: true,
-          observaciones: `Creado por importación histórica de ${usuario}`,
-        })
-        .select("id, moneda")
-        .single();
+      const fila: Record<string, unknown> = {
+        nombre: `Caja chica · ${nombre}`,
+        responsable_tipo: conductorId ? "conductor" : admin ? "personal_administrativo" : "otro",
+        responsable_nombre: nombre,
+        // Solo se manda el id que calza con el tipo: el CHECK de coherencia de
+        // finanzas-08 rechaza un fondo que apunte a dos personas a la vez.
+        conductor_id: conductorId,
+        moneda: grupo[0].moneda || "PEN",
+        activo: true,
+        observaciones: `Creado por importación histórica de ${usuario}`,
+      };
+      if (!conductorId && admin) {
+        fila.personal_administrativo_id = admin.id;
+        fila.documento_identidad = admin.dni ?? null;
+        fila.cargo = admin.cargo ?? null;
+        fila.centro_costo = admin.departamento ?? null;
+      }
+
+      // Reintento sin las columnas de la fase 08: en una base donde no se corrió, el
+      // histórico se importa igual (como "otro") en vez de perderse entero.
+      let { data: nuevo, error } = await db.from("caja_chica_fondos").insert(fila).select("id, moneda").single();
+      if (error && /column .* does not exist|responsable_tipo/i.test(error.message ?? "")) {
+        ({ data: nuevo, error } = await db
+          .from("caja_chica_fondos")
+          .insert({
+            nombre: fila.nombre,
+            responsable_tipo: conductorId ? "conductor" : "otro",
+            responsable_nombre: nombre,
+            conductor_id: conductorId,
+            moneda: fila.moneda,
+            activo: true,
+            observaciones: fila.observaciones,
+          })
+          .select("id, moneda")
+          .single());
+      }
       if (error || !nuevo) {
         errores.push({ motivo: `No se pudo crear el fondo de "${nombre}": ${error?.message ?? "error desconocido"}` });
         continue;
       }
       fondo = nuevo;
       porResponsable.set(clave, nuevo);
+      if (conductorId) porConductor.set(conductorId, nuevo);
+      else if (admin) porAdministrativo.set(Number(admin.id), nuevo);
     }
 
     const fondoId = fondoIdFijo ?? fondo?.id;
