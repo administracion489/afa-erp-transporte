@@ -20,6 +20,15 @@
 // empuja. Con la huella vacía o el endpoint caído, `pisoGps = 0` y se cae solo al
 // comportamiento actual: el fallback no hay que escribirlo, sale del max().
 //
+// LATENCIA (ago-2026). Declarar "ya pasó" tardaba 70-75 s tras cruzar el paradero, porque la
+// única señal fuerte utilizable en rutas de paraderos espaciados exigía alejarse 600 m EN RECTA.
+// Esos 600 m no miden "ya pasó": miden "esto ya no puede ser un retorno de avenida con
+// separador". Se añaden tres vías que resuelven esa ambigüedad en vez de esperarla —señal C
+// (avance sobre la POLILÍNEA, donde un retorno en U no avanza), detención comprobada EN el
+// paradero, y umbrales recortados solo con precisión mediana buena— y ninguna afloja el caso que
+// motivó los 600 m. Medido en simulación: 70-75 s → 35 s, sin disparar en el escenario de
+// retorno. Detalle y justificación de cada constante en el bloque "DETECCIÓN MÁS RÁPIDA".
+//
 // PURO A PROPÓSITO: sin React, sin DOM, sin fetch, sin Mapbox. Único import: distM de
 // ./huella (misma convención relativa que lib/km-servicio.ts). Así mañana lib/proximidad.ts
 // —que es server-side— puede derivar avance sin duplicar nada, que es el camino que ya
@@ -44,6 +53,8 @@ const GAP_CERCA_M    = 25;    // gap < 25 → sigue en su mínimo (línea 936)
 const BAJANDO_M      = 40;    // se acercó ≥40 m vs. la muestra previa (línea 934)
 const RACHA_ALEJA    = 3;     // ~3 muestras seguidas alejándose (línea 952)
 const RACHA_REGRESO  = 2;     // (línea 962)
+// OJO: `RACHA_ALEJA` sigue siendo el piso con GPS mediocre; con GPS bueno rige
+// `RACHA_ALEJA_FINA` (ver el bloque de DETECCIÓN MÁS RÁPIDA).
 const REGRESO_M      = 400;   // volvió a <400 m = retorno real, no una curva de la vía (963-966)
 const MIN_CERCA_M    = 450;   // "se acercó de verdad" (línea 951)
 const GAP_ATRAS_M    = 600;   // "+600 m, más que un retorno típico de avenida con separador" (947-948)
@@ -134,6 +145,61 @@ const CRUCE_EXENTO_M = 120;
 // un punto "va sobre la ruta", y margen de avance exigido sobre la polilínea.
 const PERP_CORREDOR_M = 70;
 const VETO_MARGEN_M   = 80;
+
+// ── DETECCIÓN MÁS RÁPIDA DE "YA PASÓ" ────────────────────────────────────────────────
+// El motor tardaba 60-110 s en declarar una parada pasada porque la ÚNICA señal fuerte
+// utilizable en rutas de paraderos espaciados (`dejoAtrasClaro`) exige alejarse 600 m EN LÍNEA
+// RECTA del punto más cercano. Esos 600 m no miden "ya pasó": miden "esto ya no puede ser el
+// retorno en U de una avenida con separador", que es el falso positivo que documenta la cabecera
+// de `vetaGeometria`. O sea, se paga latencia en TODAS las paradas para cubrir una ambigüedad
+// que solo aparece en algunas.
+//
+// Las tres constantes de abajo atacan esa ambigüedad por su causa en vez de esperarla, y NINGUNA
+// afloja el caso que motivó los 600 m: el umbral base solo se relaja cuando otra evidencia ya
+// descartó el retorno (geometría de la ruta, haber estado EN el paradero, o precisión buena).
+
+// Avance mínimo A LO LARGO DE LA POLILÍNEA para creer que el bus dejó atrás la parada (señal C).
+// Es el mismo hecho que mide GAP_ATRAS_M, pero sobre la vía en vez de en recta — y sobre la vía
+// el retorno en U NO acumula avance (vuelve sobre el mismo tramo), que es justo lo que los 600 m
+// compraban a fuerza de esperar. Por eso alcanza con bastante menos.
+// 250 m > VETO_MARGEN_M (80) por un margen amplio: la proyección puede engancharse al pase
+// opuesto en una avenida con separador (15-30 m entre sentidos), y ahí el `along` del tramo de
+// vuelta crece; 250 m exige más avance del que produce ese enganche antes de que el bus regrese
+// al corredor correcto. Se combina SIEMPRE con `cruzo` y con haber estado cerca (MIN_CERCA_M).
+const AVANCE_RUTA_M = 250;
+
+// Umbral de alejamiento en recta cuando consta que el bus SE DETUVO EN el paradero (ver
+// `dwellCerca`). Ahí alejarse ya no es ambiguo: un bus que se paró en el paradero y ahora está a
+// 350 m lo pasó, sin más.
+//
+// SE EXIGE DETENCIÓN Y NO SOLO CERCANÍA, y la diferencia no es cosmética: en una avenida con
+// separador los dos sentidos distan 15-30 m, así que un bus que pasa de largo por la calzada
+// contraria y luego hace el retorno para recoger TAMBIÉN queda a pocos metros del paradero. Con
+// un umbral de pura cercanía se le declararía "ya pasó" justo antes de que llegue a recoger —
+// exactamente el falso positivo que los 600 m de GAP_ATRAS_M existen para evitar. Detenerse, en
+// cambio, es lo que ese bus NO hace en la pasada de largo.
+const GAP_ATRAS_CERCA_M = 350;
+
+// ── Umbrales adaptativos a la calidad real del GPS ───────────────────────────────────
+// Los umbrales de arriba están dimensionados para el PEOR GPS que el motor acepta (hasta
+// ACC_MAX_M = 150 m). Con ±4-10 m —lo que entrega un equipo con GNSS sano, y la mediana típica
+// de buena parte de la flota según ACC_RED_M en app/conductor— ese margen es puro seguro contra
+// un ruido que no existe, pagado en latencia.
+// ACC_BUENA_M = 15 m se ancla a ACC_RED_M (12 m, app/conductor/page.tsx:278), el corte MEDIDO
+// sobre la flota entre GNSS real (mediana 1.8-7.7 m) y ubicación de red (15.9-200 m), con un
+// pelo de holgura para no oscilar en el borde. Por debajo de esto las puertas de 25/60 m del gap
+// están MUY por encima del ruido y la señal es confiable con menos evidencia.
+const ACC_BUENA_M = 15;
+// Muestras mínimas antes de creerle a la mediana. Con 2-3 fixes una mediana buena puede ser
+// suerte, y estos umbrales solo deben relajarse ante una calidad SOSTENIDA.
+const ACC_BUENA_MIN_MUESTRAS = 5;
+// Cuánto se recortan los umbrales de distancia con GPS bueno. 0.7 y no menos: aun con precisión
+// perfecta, los umbrales también absorben la geometría real de la vía (curvas, separadores), que
+// no mejora porque el GPS mejore. Solo se devuelve el margen que compraba el RUIDO.
+const FACTOR_GPS_BUENO = 0.7;
+// Racha exigida con GPS bueno. 2 y no 1: una muestra suelta sigue pudiendo ser un outlier que
+// pasó el filtro de glitch, y RACHA_REGRESO ya usa 2 como "evidencia mínima creíble" en el repo.
+const RACHA_ALEJA_FINA = 2;
 // Reevaluar el veto como mucho cada 20 s de tiempo-de-fix por parada: proyectar sobre la
 // polilínea es O(vértices) y durante una siembra completa se llamaría por cada muestra.
 const VETO_THROTTLE_MS = 20_000;
@@ -165,6 +231,12 @@ export type OpcionesAvance = {
   resembrarPorHueco?: boolean;
   /** false = paridad exacta con app/pasajero (que NO exige proximidad previa para la señal A). */
   endurecerSenalA?: boolean;
+  /** Señal C: confirmar "ya pasó" por avance sobre la polilínea (requiere `ruta`).
+   *  false = paridad exacta con app/pasajero, que solo tiene las señales A y B. */
+  senalRuta?: boolean;
+  /** Recortar umbrales y racha cuando la precisión mediana reciente es buena (≤ ACC_BUENA_M).
+   *  false = paridad exacta con app/pasajero, que usa umbrales fijos. */
+  adaptarAPrecision?: boolean;
   /** Ignorar fixes anteriores a este instante (rama por-vehículo de terceros: 12 h que pueden
    *  arrastrar el viaje ANTERIOR si la separación fue <30 min — app/api/cliente/gps:85-99). */
   desdeTs?: number;
@@ -187,6 +259,14 @@ export type EstadoParada = {
                            // estado VIGENTE (ver leerAvance): este campo puede quedar pegajoso.
   vetoTs: number;         // último instante en que se evaluó el veto geométrico
   vetoActivo: boolean;    // resultado cacheado de ese veto
+  // Señal C (avance sobre la polilínea). Se cachea igual que el veto y por el mismo motivo:
+  // proyectar es O(vértices) y durante una siembra completa se llamaría por cada muestra.
+  rutaTs: number;
+  rutaActiva: boolean;
+  // El bus estuvo DETENIDO a menos de CRUCE_EXENTO_M de esta parada, o sea paró en el paradero
+  // (no pasó de largo por la calzada contraria). Habilita el umbral rápido GAP_ATRAS_CERCA_M.
+  // Es monótono como minDist: haberse detenido ahí es un hecho del pasado que no se deshace.
+  dwellCerca: boolean;
 };
 
 export type EstadoAvance = {
@@ -204,6 +284,12 @@ export type EstadoAvance = {
   muestras: number;            // aceptadas; 0 = sin evidencia GPS
   accReciente: number[];       // últimas 25 precisiones → confianza "degradada"
   resiembras: number;
+  // Racha de alejamiento exigida en la ÚLTIMA muestra procesada (RACHA_ALEJA o RACHA_ALEJA_FINA
+  // según la precisión mediana de ese momento). La guarda el motor para que `leerAvance` juzgue
+  // "se aleja" con el MISMO listón con el que se declaró "ya pasó": si leerAvance siguiera fijo
+  // en 3, con GPS bueno una parada podría estar declarada pasada (racha 2) mientras el panel
+  // sigue diciendo que el bus no se aleja — el estado se contradiría en pantalla.
+  rachaAlejaVigente: number;
 };
 
 export type MotivoPaso = "conductor" | "gps" | "arrastre" | null;
@@ -303,16 +389,52 @@ function vetaGeometria(r: RutaProyeccion, fix: FixAvance, pLat: number, pLng: nu
   return pb.along < pp.along - VETO_MARGEN_M;
 }
 
+/**
+ * SEÑAL C — ¿el bus avanzó CLARAMENTE más allá de la parada SOBRE LA VÍA?
+ *
+ * Es la misma pregunta que responde `dejoAtrasClaro` (señal B), pero midiendo el alejamiento a lo
+ * largo de la polilínea en vez de en línea recta. Esa diferencia es la que permite bajar el
+ * umbral de 600 m a 250 m sin reabrir el falso positivo que motivó los 600: un bus haciendo el
+ * retorno en U de una avenida con separador se ALEJA en recta, pero NO avanza sobre la ruta
+ * (vuelve sobre el mismo tramo), así que esta señal no dispara donde la B necesitaba esperar.
+ *
+ * NO CONTRADICE la doctrina de `vetaGeometria` ("solo veto, nunca disparador"). Lo que ahí se
+ * prohíbe es usar el avance sobre la polilínea COMO ÚNICA prueba: la ruta de Google incluye el
+ * propio retorno como waypoints, así que un bus EN PLENO RETORNO proyecta sobre el tramo de
+ * vuelta y "avanzaría" cientos de metros justo cuando vuelve a recoger. Aquí no es única prueba:
+ * el llamador exige ADEMÁS racha sostenida, `cruzo` y haber estado a menos de MIN_CERCA_M. Un bus
+ * en el retorno falla `cruzo` (sigue del mismo lado del paradero que en su punto más cercano), y
+ * es esa conjunción —no la geometría sola— la que sostiene el veredicto.
+ *
+ * Se abstiene (false) si bus o parada caen fuera del corredor, igual que el veto: ahí la
+ * proyección no significa nada y manda la cinemática con sus umbrales normales.
+ */
+function avanzoSobreRuta(r: RutaProyeccion, fix: FixAvance, pLat: number, pLng: number): boolean {
+  const pb = proyectar(r, fix.lat, fix.lng);
+  if (pb.perp > PERP_CORREDOR_M) return false;
+  const pp = proyectar(r, pLat, pLng);
+  if (pp.perp > PERP_CORREDOR_M) return false;
+  return pb.along > pp.along + AVANCE_RUTA_M;
+}
+
+/** Mediana de las precisiones recientes. 0 muestras → Infinity (no se puede afirmar calidad). */
+function medianaAcc(accs: number[]): number {
+  if (!accs.length) return Infinity;
+  const o = accs.slice().sort((a, b) => a - b);
+  return o[Math.floor(o.length / 2)];
+}
+
 // ── Motor ────────────────────────────────────────────────────────────────────────────
 
 export function estadoAvanceVacio(n: number): EstadoAvance {
   return {
     porParada: Array.from({ length: Math.max(0, n) }, () => ({
       minDist: Infinity, minLat: null, minLng: null, lastD: null, recStreak: 0, apprStreak: 0,
-      pasada: false, alejando: false, vetoTs: 0, vetoActivo: false,
+      pasada: false, alejando: false, vetoTs: 0, vetoActivo: false, rutaTs: 0, rutaActiva: false,
+      dwellCerca: false,
     })),
     lastTs: 0, lastLat: null, lastLng: null, lastMovLat: null, lastMovLng: null,
-    muestras: 0, accReciente: [], resiembras: 0,
+    muestras: 0, accReciente: [], resiembras: 0, rachaAlejaVigente: RACHA_ALEJA,
   };
 }
 
@@ -361,6 +483,8 @@ export function avanzarAvance(
   const ventana  = opts.ventana  ?? VENTANA_PARADAS;
   const endurecer = opts.endurecerSenalA ?? true;
   const resembrarHueco = opts.resembrarPorHueco ?? true;
+  const usarSenalRuta = opts.senalRuta ?? true;
+  const adaptar = opts.adaptarAPrecision ?? true;
 
   // 0. GPS congelado: las filas repiten un fix viejo con created_at fresco. No dice nada del
   //    presente y, procesado, dispara rachas fantasma en ambos sentidos.
@@ -419,6 +543,16 @@ export function avanzarAvance(
   const piso = Math.max(pisoDeConductor(paradas), pisoDeGps(e));
   let avanzoAlguna = false;   // máximo UN ascenso de piso por muestra (ver más abajo)
 
+  // ¿La precisión SOSTENIDA reciente permite exigir menos evidencia? Se evalúa una vez por
+  // muestra (no por parada): describe el equipo, no el paradero. Se usa la MEDIANA y no la
+  // precisión de este fix para que un único fix bueno en medio de una racha mala no relaje nada
+  // — es el mismo criterio con el que `leerAvance` decide la confianza "degradada".
+  const gpsBueno = adaptar &&
+    e.accReciente.length >= ACC_BUENA_MIN_MUESTRAS &&
+    medianaAcc(e.accReciente) <= ACC_BUENA_M;
+  const rachaAleja = gpsBueno ? RACHA_ALEJA_FINA : RACHA_ALEJA;
+  e.rachaAlejaVigente = rachaAleja;
+
   for (let i = 0; i < paradas.length; i++) {
     const enVentana = i >= piso && i <= piso + ventana;
     const esFoco    = opts.foco != null && opts.foco === i;
@@ -439,8 +573,13 @@ export function avanzarAvance(
     // sobre el pasado y sigue siendo cierto al otro lado del corte. Reiniciarlo a la distancia
     // post-hueco borraba justo la evidencia que necesitan las dos señales fuertes, y un bus que
     // pasó por el paradero antes de perder señal ya no podía declararse pasado nunca más.
-    if (resembrar) { s.recStreak = 0; s.apprStreak = 0; s.lastD = null; }
+    // Tras un hueco con salto también caduca la señal C cacheada: durante el corte el bus pudo ir
+    // a cualquier parte, así que un "avanzó sobre la ruta" calculado antes ya no describe nada.
+    if (resembrar) { s.recStreak = 0; s.apprStreak = 0; s.lastD = null; s.rutaTs = 0; s.rutaActiva = false; }
     if (d < s.minDist) { s.minDist = d; s.minLat = fix.lat; s.minLng = fix.lng; }   // mínimo monótono
+    // Detención EN el paradero (embarque). Se registra ANTES del `continue` de abajo justamente
+    // porque son las muestras "quietas" las que la prueban. Ver GAP_ATRAS_CERCA_M.
+    if (quieto && d < CRUCE_EXENTO_M) s.dwellCerca = true;
     if (quieto) continue;
 
     const gap     = d - s.minDist;
@@ -488,10 +627,34 @@ export function avanzarAvance(
       const v2x = (fix.lng - pLng) * kLng,   v2y = fix.lat - pLat;
       return v1x * v2x + v1y * v2y < 0;
     })();
-    const dejoAtrasClaro = s.minDist < MIN_CERCA_M && gap > GAP_ATRAS_M && cruzo;
-    const sostenido      = s.recStreak >= RACHA_ALEJA;
+    // Umbral de la señal B, en dos ejes independientes (ver el bloque de constantes):
+    //  · DETENCIÓN — si consta que el bus PARÓ en el paradero, alejarse deja de ser ambiguo y no
+    //    hace falta el margen anti-retorno de 600 m (ver GAP_ATRAS_CERCA_M: la cercanía sola NO
+    //    sirve, porque la calzada contraria de una avenida también queda cerca).
+    //  · PRECISIÓN — con GPS bueno se devuelve el margen que compraba el ruido, no el que
+    //    compra la geometría de la vía (de ahí que el factor sea 0.7 y no menos).
+    const gapAtras = (s.dwellCerca ? GAP_ATRAS_CERCA_M : GAP_ATRAS_M) *
+                     (gpsBueno ? FACTOR_GPS_BUENO : 1);
+    const dejoAtrasClaro = s.minDist < MIN_CERCA_M && gap > gapAtras && cruzo;
+    const sostenido      = s.recStreak >= rachaAleja;
 
-    if (sostenido && (masCercaDelSiguiente || dejoAtrasClaro)) {
+    // SEÑAL C — avance sobre la polilínea. Se evalúa SOLO si la racha ya está sostenida y las
+    // otras dos señales fallaron: así el coste de proyectar (O(vértices)) se paga únicamente en
+    // el puñado de muestras donde puede cambiar el veredicto, y no en cada fix de la siembra.
+    // Las precondiciones (`cruzo`, MIN_CERCA_M) son las MISMAS de la señal B — lo único que
+    // cambia es dónde se mide el alejamiento; sin ellas, esto sería el disparador geométrico
+    // suelto que la cabecera de `vetaGeometria` prohíbe.
+    let dejoAtrasRuta = false;
+    if (usarSenalRuta && opts.ruta && sostenido && !dejoAtrasClaro && !masCercaDelSiguiente &&
+        cruzo && s.minDist < MIN_CERCA_M) {
+      if (fix.ts - s.rutaTs >= VETO_THROTTLE_MS) {
+        s.rutaTs = fix.ts;
+        s.rutaActiva = avanzoSobreRuta(opts.ruta, fix, Number(paradas[i].lat), Number(paradas[i].lng));
+      }
+      dejoAtrasRuta = s.rutaActiva;
+    }
+
+    if (sostenido && (masCercaDelSiguiente || dejoAtrasClaro || dejoAtrasRuta)) {
       s.alejando = true;                       // BLANDO: se afirma siempre
       if (!s.pasada) {
         // FUERTE. DOS candados sobre el piso, no uno:
@@ -536,7 +699,13 @@ export function avanzarAvance(
       // Re-sembrar SÍ tiene sentido cuando se está revirtiendo un "ya pasó"/"se aleja": ahí le
       // da al bus una oportunidad limpia en vez de re-disparar el aviso de inmediato. Cuando no
       // hay nada que revertir, el mínimo monótono de más arriba ya hace lo correcto solo.
-      if (s.pasada || s.alejando) { s.minDist = d; s.vetoTs = 0; s.vetoActivo = false; }
+      if (s.pasada || s.alejando) {
+        s.minDist = d; s.vetoTs = 0; s.vetoActivo = false;
+        // La señal C se re-evalúa desde cero por el mismo motivo que el veto: su `along` cacheado
+        // describe un avance que el regreso acaba de desmentir, y con el throttle de 20 s
+        // sobreviviría al reset y volvería a declarar "ya pasó" en la muestra siguiente.
+        s.rutaTs = 0; s.rutaActiva = false;
+      }
       s.alejando = false; s.pasada = false; s.recStreak = 0;
     }
   }
@@ -609,7 +778,11 @@ export function leerAvance(estado: EstadoAvance, paradas: ParadaAvance[]): Avanc
   // hacia ella — y borraría su hora de llegada justo cuando más se necesita. Para AFIRMARLO en
   // presente se exige que la racha de alejamiento siga VIGENTE en la última muestra procesada.
   const sProx = proximaIdx != null ? estado.porParada[proximaIdx] : null;
-  const seAleja = !!sProx?.alejando && sProx.recStreak >= RACHA_ALEJA;
+  // El listón lo fija el motor (ver `rachaAlejaVigente`), no esta constante: con GPS bueno el
+  // veredicto "ya pasó" se declara con 2 muestras y este flag debe poder acompañarlo.
+  // `|| RACHA_ALEJA` cubre un estado construido por una versión anterior del módulo (campo
+  // ausente → undefined), que de otro modo haría el flag siempre verdadero.
+  const seAleja = !!sProx?.alejando && sProx.recStreak >= (estado.rachaAlejaVigente || RACHA_ALEJA);
 
   return {
     proximaIdx, pasadas, motivo,
