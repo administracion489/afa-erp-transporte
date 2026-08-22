@@ -265,6 +265,37 @@ async function safe<T>(q: PromiseLike<RespuestaSupabase<T>>): Promise<T[]> {
   return r.data ?? [];
 }
 
+/**
+ * Consulta que TOLERA que la migración de la fase 06 todavía no se haya corrido.
+ *
+ * `combustible`, `mantenimiento` y `neumaticos` son tablas viejas a las que esa
+ * migración les agrega `reserva_id` / `documento_compra_id`. Pidiéndolas sin que existan,
+ * PostgREST devuelve 400 y `safe()` entrega un array vacío: la pantalla no se rompe con
+ * un error, simplemente deja de mostrar esas tres fuentes y el total baja a S/ 0.00, que
+ * es peor porque parece un dato y no una falla.
+ *
+ * Aquí se reintenta con el juego de columnas de siempre. Así el orden entre desplegar el
+ * código y correr el SQL deja de importar: sin migración se ve lo de antes, con migración
+ * aparecen el enganche al servicio y el chip de comprobante.
+ */
+async function safeConFallback<T>(
+  tabla: string,
+  columnasNuevas: string,
+  columnasBase: string,
+  ordenCampo: string
+): Promise<T[]> {
+  const pedir = (cols: string) =>
+    supabase.from(tabla).select(cols).order(ordenCampo, { ascending: false }) as unknown as PromiseLike<RespuestaSupabase<T>>;
+
+  const r = await pedir(columnasNuevas);
+  if (!r.error) return r.data ?? [];
+
+  console.warn(`[gastos] ${tabla}: ${r.error.message} — se reintenta sin las columnas de la fase 06.`);
+  const base = await pedir(columnasBase);
+  if (base.error) { console.warn(base.error.message); return []; }
+  return base.data ?? [];
+}
+
 // ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 export default function GastosPage() {
@@ -319,9 +350,21 @@ export default function GastosPage() {
   /** Las 12 consultas, sin tocar estado de React: solo devuelve datos. */
   const traerTodo = useCallback(() => Promise.all([
       safe<GastoPropio>(supabase.from("gastos").select("*").order("fecha", { ascending: false })),
-      safe<RegCombustible>(supabase.from("combustible").select("id,fecha,vehiculo_id,galones,precio_galon,total,grifo,conductor,tipo_combustible,unidad,reserva_id,documento_compra_id").order("fecha", { ascending: false })),
-      safe<RegMantenimiento>(supabase.from("mantenimiento").select("id,vehiculo_id,tipo,descripcion,fecha,costo,estado,proveedor_id,reserva_id,documento_compra_id").order("fecha", { ascending: false })),
-      safe<RegNeumatico>(supabase.from("neumaticos").select("id,vehiculo_id,marca,medida,posicion,fecha_instalacion,costo_compra,estado,documento_compra_id").order("fecha_instalacion", { ascending: false })),
+      safeConFallback<RegCombustible>(
+        "combustible",
+        "id,fecha,vehiculo_id,galones,precio_galon,total,grifo,conductor,tipo_combustible,unidad,reserva_id,documento_compra_id",
+        "id,fecha,vehiculo_id,galones,precio_galon,total,grifo,conductor,tipo_combustible,unidad",
+        "fecha"),
+      safeConFallback<RegMantenimiento>(
+        "mantenimiento",
+        "id,vehiculo_id,tipo,descripcion,fecha,costo,estado,proveedor_id,reserva_id,documento_compra_id",
+        "id,vehiculo_id,tipo,descripcion,fecha,costo,estado,proveedor_id",
+        "fecha"),
+      safeConFallback<RegNeumatico>(
+        "neumaticos",
+        "id,vehiculo_id,marca,medida,posicion,fecha_instalacion,costo_compra,estado,documento_compra_id",
+        "id,vehiculo_id,marca,medida,posicion,fecha_instalacion,costo_compra,estado",
+        "fecha_instalacion"),
       // Caja chica: SOLO los gastos que aún NO se promovieron al libro `gastos`
       // (gasto_id null). Es la regla de oro del ERP — contarlos también aquí sería
       // sumar el mismo sol dos veces. Es exactamente el filtro que aplica v_egresos.
