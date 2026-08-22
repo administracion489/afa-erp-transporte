@@ -198,8 +198,13 @@ Da igual si están en mayúsculas, con tildes o con puntos: `N° FACTURA`, `Nro.
 `PROVEEDOR` / `RAZON SOCIAL` · `RUC` · `TITULAR DE LA CUENTA` · `BANCO` ·
 `NUMERO DE CUENTA` · `CCI` · `CODIGO DE SERVICIO` · `DETALLE DEL SERVICIO` /
 `FECHA Y TURNO` · `PLACA DE VEHICULO` · `FECHA DE SERVICIO` · `N FACTURA` ·
-`FECHA DE EMISION` · `MONTO NETO` · `ADELANTO 1` · `ADELANTO 2` · `DETRACCION` ·
-`ESTADO DETRACCION` · `ESTADO` · `NRO OPERACION` · `FECHA DE PAGO` · `OBSERVACIONES`
+`NRO. DE RECIBO DE HONORARIOS` · `FECHA DE EMISION` · `MONTO NETO` ·
+`MONTO A CANCELAR` · `ADELANTO 1` · `ADELANTO 2` / `ADELANTOS 2` · `DETRACCION` ·
+`ESTADO DETRACCION` · `ESTADO` · `NRO. OPERACION` · `FECHA DE PAGO` · `VOUCHER` ·
+`INFORMACIÓN ADICIONAL` / `COMENTARIO`
+
+> Estas dos plantillas ya están probadas contra tus archivos reales
+> (`SERVICIOS DIEGO GRIJALVA` y `PAGOS DE PROVEEDORES OSLO PIURA`) — ver §10.
 
 **Planilla y gastos administrativos**
 `BENEFICIARIO` · `DNI` / `RUC` · `CATEGORIA` · `CONCEPTO` · `PERIODO` · `FECHA` ·
@@ -338,7 +343,56 @@ margen de verdad, no el pactado.
 
 ---
 
-## 10. Qué falta decidir contigo
+## 10. Tus dos planillas, ya probadas
+
+Las plantillas de importación se ajustaron contra los archivos reales de dos proveedores.
+Ambos entran completos, sin una sola fila rechazada:
+
+| Archivo | Filas | Importe | Detracción | Resultado |
+|---|---|---|---|---|
+| `SERVICIOS DIEGO GRIJALVA` | 4 | S/ 6,720.00 | S/ 672.00 | 4 válidas · 0 errores |
+| `PAGOS DE PROVEEDORES OSLO PIURA` | 108 | S/ 625,402.86 | S/ 57,971.00 | 108 válidas · 0 errores |
+
+Los totales cuadran al céntimo con la suma de las hojas, y el sistema verificó fila por
+fila que el `MONTO A CANCELAR` de tu Excel coincida con monto − adelantos − detracción
+(si alguna fila no cuadrara, la rechazaría diciéndote exactamente cuánto sobra o falta).
+
+**Lo que hubo que resolver de tus hojas**, por si te sirve saber qué reconoce el sistema:
+
+- **Cabecera de dos pisos.** Las dos planillas agrupan columnas con celdas combinadas: una
+  fila con el rótulo del grupo (`FACTURA`, `DETALLE DE PAGO`) y otra debajo con el de cada
+  columna. El importador ahora las combina. Antes leía una sola fila y en Grijalva perdía
+  PROVEEDOR, RUC, PLACA y FECHA — el archivo entero fallaba.
+- **Recibo por honorarios o factura.** En OSLO, 47 filas usan `NRO. DE RECIBO DE HONORARIOS`
+  y 61 usan `NUMERO FACTURA`, nunca las dos. El sistema toma la que tenga dato y marca el
+  tipo de comprobante en consecuencia.
+- **Dos columnas `MONTO NETO`.** Misma historia: cada fila llena solo una. Se leen ambas.
+- **`FECHA DE SERVICIO` que no es una fecha.** En OSLO es texto libre con el rango y el
+  turno (`14-19 DE OCTUBRE - TURNO DÍA`). Se guarda en el detalle del servicio y de ahí se
+  deduce el turno: quedaron 83 de 108 filas con turno detectado.
+- **Filas sin ninguna fecha.** 47 de 108. El importador pide una **fecha de referencia** y
+  la aplica solo a esas; las demás conservan la suya.
+- **`NUMERO DE CUENTA BCP/INTERBANK/BBVA`** es, en tu hoja, la columna del **banco**
+  (los datos son BCP, INTERBANK, PICHINCHA…). Se reconoce como tal: 108 de 108 filas
+  quedaron con banco.
+- **`NRO. OPERACION / MONTO / FECHA`** viene con tres cosas juntas
+  (`OP 12071844 / 18/08/2026`). Se separa el número de operación y, cuando hay una fecha
+  dentro, se usa como fecha de pago.
+- **`NO SE HA PAGADO DETRACCION`** en la columna de información adicional se lee como
+  detracción **pendiente**, no pagada. Es una negación y el sistema la entiende.
+
+Para volver a comprobarlo con cualquier archivo nuevo, sin tocar la base de datos:
+
+```bash
+npx tsx scripts/probar-importador.ts "ruta/al/archivo.xlsx"
+```
+
+Te muestra qué formato detectó, qué columna alimentó cada campo, cuántas filas entran y el
+motivo exacto de cada rechazo.
+
+---
+
+## 11. Qué falta decidir contigo
 
 | Tema | Por qué no lo decidí solo |
 |---|---|

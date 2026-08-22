@@ -14,11 +14,14 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import {
+  type CampoPerfil,
+  type ContextoPerfil,
   type Perfil,
   type ValoresFila,
   parsearComprobante,
   parsearCci,
   parsearCuenta,
+  parsearFecha,
   parsearPlaca,
   parsearRuc,
   normaliza,
@@ -122,32 +125,98 @@ export type FilaExtracto = {
 const A_RUC = ["ruc", "r u c", "ruc proveedor", "nro ruc", "n ruc", "ruc emisor"];
 const A_RAZON = [
   "razon social", "proveedor", "razon social proveedor", "nombre proveedor",
+  "razon social del proveedor", "proveedor conductor empresa", "conductor empresa",
   "empresa", "beneficiario", "nombre o razon social", "acreedor",
 ];
 const A_TITULAR = ["titular de la cuenta", "titular cuenta", "titular", "nombre del titular"];
-const A_BANCO = ["banco", "entidad bancaria", "banco destino", "entidad financiera"];
+// "NUMERO DE CUENTA BCP/INTERBANK/BBVA" es, en la hoja de OSLO, la columna donde se
+// anota EL BANCO (los datos son "BCP", "INTERBANK", "PICHINCHA"…): el rótulo enumera los
+// bancos posibles, no pide un número. Se registra como alias de banco para que no se la
+// lleve `numero_cuenta`, que ya tiene su propia columna en esa misma hoja.
+const A_BANCO = [
+  "banco", "entidad bancaria", "banco destino", "entidad financiera",
+  "numero de cuenta bcp interbank bbva", "numero de cuenta bcp interbancario",
+];
 const A_CUENTA = ["numero de cuenta", "nro de cuenta", "n de cuenta", "cuenta", "cuenta bancaria", "nro cuenta", "cuenta destino"];
 const A_CCI = ["cci", "codigo interbancario", "cuenta interbancaria", "codigo de cuenta interbancario"];
 const A_FACTURA = ["n factura", "nro factura", "numero factura", "factura", "comprobante", "n comprobante", "documento", "nro documento"];
+const A_RECIBO_HON = [
+  "nro de recibo de honorarios", "recibo de honorarios", "n recibo de honorarios",
+  "nro recibo honorarios", "recibo por honorarios", "rh", "nro rh",
+];
 const A_FEMISION = ["fecha de emision", "fecha emision", "f emision", "emision", "fecha factura", "fecha"];
+const A_FSERVICIO = ["fecha del servicio", "fecha de servicio", "fecha servicio", "f servicio", "fecha y turno"];
 const A_FVENC = ["fecha de vencimiento", "fecha vencimiento", "vencimiento", "f vencimiento", "vence"];
 const A_PLACA = ["placa de vehiculo", "placa del vehiculo", "placa", "unidad", "nro placa", "vehiculo"];
+const A_DETALLE = [
+  "detalle del servicio", "descripcion del servicio", "placa de vehiculo descripcion del servicio",
+  "servicio realizado", "detalle", "ruta", "turno", "concepto", "descripcion", "glosa",
+];
 const A_MONTO = ["monto neto", "monto", "importe", "total", "monto total", "valor", "importe total", "monto facturado"];
+const A_A_CANCELAR = ["monto a cancelar", "a cancelar", "neto a pagar", "total a pagar", "importe a pagar"];
 const A_DETRACCION = ["detraccion", "monto detraccion", "importe detraccion", "det", "monto de detraccion"];
 const A_ESTADO_DET = ["estado detraccion", "estado de detraccion", "detraccion estado", "situacion detraccion"];
-const A_NRO_OP = ["nro operacion", "n operacion", "numero de operacion", "nro de operacion", "operacion", "n op", "cod operacion"];
+const A_NRO_OP = [
+  "nro operacion", "n operacion", "numero de operacion", "nro de operacion", "operacion",
+  "n op", "cod operacion", "nro operacion monto fecha",
+];
 const A_ESTADO = ["estado", "estado pago", "situacion", "status", "estado de pago"];
-const A_OBS = ["observaciones", "observacion", "obs", "comentarios", "nota", "notas", "detalle adicional"];
+const A_OBS = [
+  "observaciones", "observacion", "obs", "comentarios", "comentario", "nota", "notas",
+  "informacion adicional", "detalle adicional",
+];
+const A_VOUCHER = ["voucher", "adjuntar url de archivo", "url del voucher", "comprobante url", "url"];
 
 // ── Helpers de normalización de valores ───────────────────────────────────────
 
-/** Mapea el "ESTADO" libre de un Google Sheet al eje de PAGO del ERP. */
+/** Colapsa saltos de línea y espacios repetidos: los nombres de las hojas traen "\n". */
+function limpiarTexto(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Mapea el "ESTADO" libre de un Google Sheet al eje de PAGO del ERP.
+ * "PENDIENTE" se evalúa PRIMERO y de forma explícita: sin eso, el resultado dependía de
+ * que "PENDIENTE POR DEPOSITAR" no llegara a casar con ninguna raíz de pagado, lo cual
+ * era suerte y no diseño.
+ */
 function estadoPagoDe(txt: string): "impaga" | "parcial" | "pagada" {
   const s = normaliza(txt);
   if (!s) return "impaga";
+  if (/pendiente|por pagar|por deposit|debe|impag/.test(s)) return "impaga";
+  if (/parcial|a cuenta/.test(s)) return "parcial";
   if (/pagad|cancelad|abonad|depositad|liquidad/.test(s)) return "pagada";
-  if (/parcial|adelant|a cuenta/.test(s)) return "parcial";
   return "impaga";
+}
+
+/**
+ * Nº de operación bancaria de un texto que en la práctica trae varias cosas juntas:
+ * "OP 12071844 / 18/08/2026", "OP 04272196/5760.00", "11990319".
+ * Se conserva como TEXTO para no perder los ceros a la izquierda.
+ */
+function nroOperacionDe(txt: string): string | null {
+  const s = String(txt ?? "").trim();
+  if (!s) return null;
+  const sinPrefijo = s.replace(/^\s*(o\.?p\.?|operacion|op\.)\s*[:.\-]?\s*/i, "");
+  const m = sinPrefijo.match(/\d{5,}/);
+  return m ? m[0] : limpiarTexto(s).slice(0, 40) || null;
+}
+
+/** Fecha suelta dentro de un texto libre ("OP 12071844 / 18/08/2026" → 2026-08-18). */
+function fechaEnTexto(txt: string): string | null {
+  const m = String(txt ?? "").match(/\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b/);
+  return m ? parsearFecha(m[1]) : null;
+}
+
+/** Placa peruana embebida en una descripción ("… ABC-123 …"). */
+function placaEnTexto(txt: string): string | null {
+  const m = String(txt ?? "").toUpperCase().match(/\b([A-Z][A-Z0-9]{2}-\d{3})\b/);
+  return m ? m[1] : null;
+}
+
+/** ¿El valor es realmente una URL? La columna VOUCHER se usa a veces como comentario. */
+function esUrl(s: string): boolean {
+  return /^(https?:\/\/|www\.)/i.test(s.trim());
 }
 
 /** Mapea el mismo "ESTADO" al eje de APROBACIÓN (ortogonal al de pago). */
@@ -159,11 +228,21 @@ function estadoAprobacionDe(txt: string): FilaCxP["estado_aprobacion"] {
   return "pendiente";
 }
 
+/**
+ * Estado de la detracción a partir de texto libre.
+ *
+ * La NEGACIÓN se evalúa antes que el pago, y no es un detalle: la hoja de Grijalva anota
+ * "NO SE HA PAGADO DETRACCION", que contiene la raíz "pagad". Buscando primero el pago,
+ * cada una de esas filas se marcaba como detracción PAGADA — exactamente al revés, y
+ * justo en el dato que sirve para no quedar mal con SUNAT.
+ */
 function estadoDetraccionDe(txt: string, monto: number): FilaCxP["estado_detraccion"] {
   const s = normaliza(txt);
-  if (/no aplica|n a|sin detrac|no corresponde/.test(s)) return "no_aplica";
-  if (/pagad|deposit|cancelad|si/.test(s)) return "pagada";
-  if (/pendiente|por pagar|falta|no/.test(s)) return "pendiente";
+  if (/no aplica|sin detrac|no corresponde|no afecto/.test(s)) return "no_aplica";
+  if (/\bno\b[^.]*\b(pagad|deposit|cancelad)|sin pagar|sin deposit|falta|pendiente|por pagar|por deposit|debe/.test(s)) {
+    return "pendiente";
+  }
+  if (/pagad|deposit|cancelad|\bsi\b/.test(s)) return "pagada";
   return monto > 0 ? "pendiente" : "no_aplica";
 }
 
@@ -189,180 +268,205 @@ function montoObligatorio(v: ValoresFila, campo: string, etiqueta: string): numb
   if (n < 0) return `${etiqueta} negativo (${n})`;
   return n;
 }
+// ── Cuentas por pagar · constructor compartido ────────────────────────────────
+//
+// Los dos formatos que usa AFA (el tradicional de facturas y el de servicios por turno
+// tipo OSLO) son la MISMA planilla con distintas columnas llenas, así que comparten el
+// constructor y solo se diferencian en qué campos exigen. Lo aprendido de los archivos
+// reales y que no era obvio desde el Plan Maestro:
+//
+//   · El comprobante llega por DOS columnas excluyentes — "NRO. DE RECIBO DE HONORARIOS"
+//     y "NUMERO FACTURA" — y de cuál venga decide el tipo de comprobante. En la hoja de
+//     OSLO Piura, 47 filas traen recibo por honorarios y 61 traen factura.
+//   · "MONTO NETO" aparece DOS veces (una por bloque de la cabecera agrupada) y cada
+//     fila llena solo una. Por eso el campo es `multiple`.
+//   · "FECHA DE SERVICIO" NO siempre es una fecha: en OSLO es texto libre con el rango y
+//     el turno ("14-19 DE OCTUBRE - TURNO DÍA"). Si parsea se usa como fecha; si no, se
+//     conserva en el detalle, que es donde ese dato tiene sentido.
+//   · Casi la mitad de las filas no tienen NINGUNA fecha. Antes que rechazarlas o
+//     inventarles una, el perfil pide una fecha de referencia (`ctx.fecha_por_defecto`).
+
+/** Campos comunes a los dos formatos de cuentas por pagar. */
+const CAMPOS_CXP: CampoPerfil[] = [
+  { campo: "proveedor_razon_social", alias: A_RAZON, requerido: true },
+  { campo: "proveedor_ruc", alias: A_RUC },
+  { campo: "titular_cuenta", alias: A_TITULAR },
+  { campo: "banco", alias: A_BANCO },
+  { campo: "numero_cuenta", alias: A_CUENTA },
+  { campo: "cci", alias: A_CCI },
+  { campo: "codigo_servicio", alias: ["codigo de servicio", "cod servicio", "codigo servicio", "cod", "codigo", "cod oslo"] },
+  { campo: "detalle_servicio", alias: A_DETALLE },
+  { campo: "fecha_servicio", alias: A_FSERVICIO },
+  { campo: "vehiculo_placa", alias: A_PLACA },
+  { campo: "numero_factura", alias: A_FACTURA },
+  { campo: "nro_recibo_honorarios", alias: A_RECIBO_HON },
+  { campo: "fecha_emision", alias: A_FEMISION },
+  { campo: "fecha_vencimiento", alias: A_FVENC },
+  { campo: "subtotal", alias: ["subtotal", "base imponible", "valor venta", "sub total"] },
+  { campo: "igv", alias: ["igv", "impuesto", "i g v"] },
+  // Dos columnas "MONTO NETO" en la misma hoja: se lee la que traiga dato.
+  { campo: "monto_neto", alias: A_MONTO, requerido: true, multiple: true },
+  { campo: "monto_a_cancelar", alias: A_A_CANCELAR },
+  { campo: "adelanto_1", alias: ["adelanto 1", "adelanto1", "adelantos 1", "primer adelanto", "adelanto", "a cuenta 1"] },
+  { campo: "adelanto_2", alias: ["adelanto 2", "adelanto2", "adelantos 2", "adelantos", "segundo adelanto", "a cuenta 2"] },
+  { campo: "monto_detraccion", alias: A_DETRACCION },
+  { campo: "estado_detraccion", alias: A_ESTADO_DET },
+  { campo: "categoria", alias: ["categoria", "tipo de gasto", "tipo gasto", "rubro", "clasificacion"] },
+  { campo: "estado_pago", alias: A_ESTADO },
+  { campo: "nro_operacion_bancaria", alias: A_NRO_OP },
+  { campo: "fecha_pago", alias: ["fecha de pago", "fecha pago", "f pago", "fecha abono"] },
+  { campo: "voucher", alias: A_VOUCHER },
+  { campo: "moneda", alias: ["moneda", "mon", "divisa"] },
+  { campo: "observaciones", alias: A_OBS, multiple: true },
+];
+
+function construirCxP(v: ValoresFila, ctx: ContextoPerfil): FilaCxP | string {
+  const razon = limpiarTexto(v.texto("proveedor_razon_social"));
+  if (!razon) return "Falta el proveedor / razón social";
+
+  const total = montoObligatorio(v, "monto_neto", "Monto neto");
+  if (typeof total === "string") return total;
+  if (total === 0) return "El monto neto es 0";
+
+  // Comprobante: recibo por honorarios y factura son columnas distintas y excluyentes.
+  const rh = limpiarTexto(v.texto("nro_recibo_honorarios"));
+  const fac = limpiarTexto(v.texto("numero_factura"));
+  const comprobante = parsearComprobante(fac || rh);
+  const tipoComprobante = fac ? "factura" : rh ? "recibo_honorarios" : "factura";
+
+  // La fecha de servicio puede ser una fecha real o texto libre con el rango y el turno.
+  const fServicioTexto = limpiarTexto(v.texto("fecha_servicio"));
+  const fServicio = v.fecha("fecha_servicio");
+
+  const detallePartes = [
+    ...v.textos("detalle_servicio").map(limpiarTexto),
+    fServicio ? "" : fServicioTexto,
+  ].filter(Boolean);
+  const detalle = [...new Set(detallePartes)].join(" · ") || null;
+
+  // Sin fecha propia se usa la de referencia que da la UI. Rechazarla sería descartar
+  // casi la mitad del histórico; inventarla en silencio sería peor.
+  const porDefecto = typeof ctx.fecha_por_defecto === "string" ? ctx.fecha_por_defecto : null;
+  const fEmision = v.fecha("fecha_emision") ?? fServicio ?? porDefecto;
+  if (!fEmision) {
+    return "La fila no tiene ninguna fecha legible. Indica una fecha de referencia arriba para importarla.";
+  }
+
+  const detraccion = v.monto("monto_detraccion") ?? 0;
+  const igv = v.monto("igv") ?? 0;
+  const subtotal = v.monto("subtotal");
+  const estadoTxt = v.texto("estado_pago");
+
+  // El nº de operación viene mezclado con el importe y la fecha del abono.
+  const opTexto = v.texto("nro_operacion_bancaria");
+  const nroOperacion = nroOperacionDe(opTexto);
+  const fechaPago = v.fecha("fecha_pago") ?? fechaEnTexto(opTexto);
+
+  // La columna VOUCHER se usa a veces como comentario ("DETRACCION PAGADA"): solo se
+  // guarda como URL si de verdad lo es, y si no se suma a las observaciones.
+  const voucher = limpiarTexto(v.texto("voucher"));
+  const notas = [
+    ...v.textos("observaciones").map(limpiarTexto),
+    voucher && !esUrl(voucher) ? voucher : "",
+  ].filter(Boolean);
+  const observaciones = [...new Set(notas)].join(" · ") || null;
+
+  // El estado de la detracción sale de su columna propia o, si no existe, del texto
+  // suelto que las hojas usan para eso ("NO SE HA PAGADO DETRACCION").
+  const estadoDetraccion = estadoDetraccionDe(
+    v.texto("estado_detraccion") || notas.join(" "),
+    detraccion
+  );
+
+  const placa = parsearPlaca(v.texto("vehiculo_placa")) ?? placaEnTexto(detalle ?? "");
+
+  const fila: FilaCxP = {
+    proveedor_ruc: parsearRuc(v.texto("proveedor_ruc")),
+    proveedor_razon_social: razon,
+    titular_cuenta: limpiarTexto(v.texto("titular_cuenta")) || razon,
+    banco_destino: limpiarTexto(v.texto("banco")) || null,
+    cuenta_destino: parsearCuenta(v.texto("numero_cuenta")) ?? (limpiarTexto(v.texto("numero_cuenta")) || null),
+    cci_destino: parsearCci(v.texto("cci")),
+    tipo_comprobante: tipoComprobante,
+    serie: comprobante.serie,
+    numero: comprobante.numero,
+    fecha_emision: fEmision,
+    fecha_vencimiento: v.fecha("fecha_vencimiento"),
+    moneda: monedaDe(v.texto("moneda")),
+    subtotal: subtotal ?? Math.max(0, total - igv),
+    igv,
+    total,
+    detraccion_pct: total > 0 && detraccion > 0 ? Number(((detraccion / total) * 100).toFixed(4)) : null,
+    detraccion_monto: detraccion,
+    estado_detraccion: estadoDetraccion,
+    adelanto_1: v.monto("adelanto_1") ?? 0,
+    adelanto_2: v.monto("adelanto_2") ?? 0,
+    vehiculo_placa: placa,
+    codigo_servicio: limpiarTexto(v.texto("codigo_servicio")) || null,
+    detalle_servicio: detalle,
+    turno: turnoDe([detalle, fServicioTexto].filter(Boolean).join(" ")),
+    fecha_servicio: fServicio,
+    estado_aprobacion: estadoAprobacionDe(estadoTxt),
+    estado_pago: estadoPagoDe(estadoTxt),
+    nro_operacion_bancaria: nroOperacion,
+    fecha_pago: fechaPago,
+    voucher_url: voucher && esUrl(voucher) ? voucher : null,
+    categoria: normaliza(v.texto("categoria")) || "tercero",
+    observaciones,
+  };
+
+  // La hoja trae su propio "MONTO A CANCELAR". No se importa (en la base es una columna
+  // calculada), pero si no cuadra con lo que sale de los datos hay un error de captura
+  // en el Excel y el usuario tiene que verlo ANTES de que entre a la contabilidad.
+  const declarado = v.monto("monto_a_cancelar");
+  if (declarado != null && declarado > 0) {
+    const calculado = total - fila.adelanto_1 - fila.adelanto_2 - detraccion;
+    if (Math.abs(declarado - calculado) > 1) {
+      return (
+        `El "monto a cancelar" de la hoja (${declarado.toFixed(2)}) no cuadra con ` +
+        `monto ${total.toFixed(2)} − adelantos ${(fila.adelanto_1 + fila.adelanto_2).toFixed(2)} ` +
+        `− detracción ${detraccion.toFixed(2)} = ${calculado.toFixed(2)}. Revisa la fila.`
+      );
+    }
+  }
+
+  return fila;
+}
 
 // ── Perfil 1 · Cuentas por pagar, formato OSLO ────────────────────────────────
-// El del Plan Maestro: rutas por turno con código de servicio y placa.
+// Servicios por turno de conductores y pequeñas empresas, casi siempre con recibo por
+// honorarios y sin RUC en la planilla.
 
 export const PERFIL_CXP_OSLO: Perfil<FilaCxP> = {
   clave: "cxp_oslo",
   nombre: "Cuentas por pagar · formato OSLO",
   descripcion:
-    "Servicios tercerizados por turno con código de servicio (COD-OSLO-01), placa y adelantos.",
+    "Servicios por turno de conductores y terceros, con recibo por honorarios o factura, rango de fechas en texto y datos de abono.",
+  pideFechaPorDefecto: true,
   campos: [
-    { campo: "proveedor_razon_social", alias: A_RAZON, requerido: true },
-    { campo: "proveedor_ruc", alias: A_RUC },
-    { campo: "titular_cuenta", alias: A_TITULAR },
-    { campo: "banco", alias: A_BANCO },
-    { campo: "numero_cuenta", alias: A_CUENTA },
-    { campo: "cci", alias: A_CCI },
-    { campo: "codigo_servicio", alias: ["codigo de servicio", "cod servicio", "codigo servicio", "cod", "codigo", "servicio cod", "cod oslo"] },
-    { campo: "detalle_servicio", alias: ["detalle del servicio", "detalle servicio", "fecha y turno", "servicio realizado", "ruta", "detalle", "descripcion del servicio", "turno"], requerido: true },
-    { campo: "vehiculo_placa", alias: A_PLACA },
-    { campo: "fecha_servicio", alias: ["fecha de servicio", "fecha servicio", "fecha del servicio", "f servicio"] },
-    { campo: "numero_factura", alias: A_FACTURA },
-    { campo: "fecha_emision", alias: A_FEMISION },
-    { campo: "fecha_vencimiento", alias: A_FVENC },
-    { campo: "monto_neto", alias: A_MONTO, requerido: true },
-    { campo: "igv", alias: ["igv", "impuesto", "i g v"] },
-    { campo: "adelanto_1", alias: ["adelanto 1", "adelanto1", "primer adelanto", "adelanto", "a cuenta 1"] },
-    { campo: "adelanto_2", alias: ["adelanto 2", "adelanto2", "segundo adelanto", "a cuenta 2"] },
-    { campo: "monto_detraccion", alias: A_DETRACCION },
-    { campo: "estado_detraccion", alias: A_ESTADO_DET },
-    { campo: "estado_pago", alias: A_ESTADO },
-    { campo: "nro_operacion_bancaria", alias: A_NRO_OP },
-    { campo: "fecha_pago", alias: ["fecha de pago", "fecha pago", "f pago", "fecha abono"] },
-    { campo: "moneda", alias: ["moneda", "mon", "divisa"] },
-    { campo: "observaciones", alias: A_OBS },
+    ...CAMPOS_CXP.map((c) =>
+      // En este formato el detalle es obligatorio: es lo único que identifica qué se
+      // está pagando (turno y rango de días), porque no hay código de servicio.
+      c.campo === "detalle_servicio" ? { ...c, requerido: true } : c
+    ),
   ],
-  construir(v) {
-    const razon = v.texto("proveedor_razon_social");
-    if (!razon) return "Falta el proveedor / razón social";
-
-    const total = montoObligatorio(v, "monto_neto", "Monto neto");
-    if (typeof total === "string") return total;
-    if (total === 0) return "El monto neto es 0";
-
-    const detalle = v.texto("detalle_servicio");
-    const comprobante = parsearComprobante(v.texto("numero_factura"));
-    const detraccion = v.monto("monto_detraccion") ?? 0;
-    const estadoTxt = v.texto("estado_pago");
-    const igv = v.monto("igv") ?? 0;
-
-    // fecha_emision: si el Sheet no la trae, se cae a la fecha de servicio. Si no hay
-    // ninguna, se rechaza la fila: una CxP sin fecha no se puede vencer ni conciliar.
-    const fEmision = v.fecha("fecha_emision") ?? v.fecha("fecha_servicio");
-    if (!fEmision) return "Falta la fecha de emisión (y tampoco hay fecha de servicio)";
-
-    return {
-      proveedor_ruc: parsearRuc(v.texto("proveedor_ruc")),
-      proveedor_razon_social: razon,
-      titular_cuenta: v.texto("titular_cuenta") || razon,
-      banco_destino: v.texto("banco") || null,
-      cuenta_destino: parsearCuenta(v.texto("numero_cuenta")) ?? (v.texto("numero_cuenta") || null),
-      cci_destino: parsearCci(v.texto("cci")),
-      tipo_comprobante: "factura",
-      serie: comprobante.serie,
-      numero: comprobante.numero,
-      fecha_emision: fEmision,
-      fecha_vencimiento: v.fecha("fecha_vencimiento"),
-      moneda: monedaDe(v.texto("moneda")),
-      subtotal: Math.max(0, total - igv),
-      igv,
-      total,
-      detraccion_pct: total > 0 && detraccion > 0 ? Number(((detraccion / total) * 100).toFixed(4)) : null,
-      detraccion_monto: detraccion,
-      estado_detraccion: estadoDetraccionDe(v.texto("estado_detraccion"), detraccion),
-      adelanto_1: v.monto("adelanto_1") ?? 0,
-      adelanto_2: v.monto("adelanto_2") ?? 0,
-      vehiculo_placa: parsearPlaca(v.texto("vehiculo_placa")),
-      codigo_servicio: v.texto("codigo_servicio") || null,
-      detalle_servicio: detalle || null,
-      turno: turnoDe(detalle),
-      fecha_servicio: v.fecha("fecha_servicio"),
-      estado_aprobacion: estadoAprobacionDe(estadoTxt),
-      estado_pago: estadoPagoDe(estadoTxt),
-      nro_operacion_bancaria: v.texto("nro_operacion_bancaria") || null,
-      fecha_pago: v.fecha("fecha_pago"),
-      voucher_url: null,
-      categoria: "tercero",
-      observaciones: v.texto("observaciones") || null,
-    };
-  },
+  construir: construirCxP,
 };
 
 // ── Perfil 2 · Cuentas por pagar, formato tradicional ─────────────────────────
-// Facturas de proveedor sin el eje de servicio (talleres, grifos, repuestos).
+// Facturas de empresas con RUC: talleres, grifos, repuestos y transportistas formales.
 
 export const PERFIL_CXP_TRADICIONAL: Perfil<FilaCxP> = {
   clave: "cxp_tradicional",
   nombre: "Cuentas por pagar · formato tradicional",
-  descripcion: "Facturas de proveedores (talleres, grifos, repuestos) sin turno ni código de servicio.",
-  campos: [
-    { campo: "proveedor_razon_social", alias: A_RAZON, requerido: true },
-    { campo: "proveedor_ruc", alias: A_RUC },
-    { campo: "titular_cuenta", alias: A_TITULAR },
-    { campo: "banco", alias: A_BANCO },
-    { campo: "numero_cuenta", alias: A_CUENTA },
-    { campo: "cci", alias: A_CCI },
-    { campo: "numero_factura", alias: A_FACTURA, requerido: true },
-    { campo: "fecha_emision", alias: A_FEMISION, requerido: true },
-    { campo: "fecha_vencimiento", alias: A_FVENC },
-    { campo: "concepto", alias: ["concepto", "descripcion", "detalle", "glosa", "servicio", "producto"] },
-    { campo: "subtotal", alias: ["subtotal", "base imponible", "valor venta", "neto", "sub total"] },
-    { campo: "igv", alias: ["igv", "impuesto", "i g v"] },
-    { campo: "monto_neto", alias: A_MONTO, requerido: true },
-    { campo: "monto_detraccion", alias: A_DETRACCION },
-    { campo: "estado_detraccion", alias: A_ESTADO_DET },
-    { campo: "vehiculo_placa", alias: A_PLACA },
-    { campo: "categoria", alias: ["categoria", "tipo de gasto", "tipo gasto", "rubro", "clasificacion"] },
-    { campo: "estado_pago", alias: A_ESTADO },
-    { campo: "nro_operacion_bancaria", alias: A_NRO_OP },
-    { campo: "fecha_pago", alias: ["fecha de pago", "fecha pago", "f pago"] },
-    { campo: "moneda", alias: ["moneda", "mon", "divisa"] },
-    { campo: "observaciones", alias: A_OBS },
-  ],
-  construir(v) {
-    const razon = v.texto("proveedor_razon_social");
-    if (!razon) return "Falta el proveedor / razón social";
-
-    const total = montoObligatorio(v, "monto_neto", "Monto");
-    if (typeof total === "string") return total;
-    if (total === 0) return "El monto es 0";
-
-    const fEmision = v.fecha("fecha_emision");
-    if (!fEmision) return `Fecha de emisión ilegible ("${v.texto("fecha_emision")}")`;
-
-    const comprobante = parsearComprobante(v.texto("numero_factura"));
-    const detraccion = v.monto("monto_detraccion") ?? 0;
-    const estadoTxt = v.texto("estado_pago");
-    const subtotal = v.monto("subtotal");
-    const igv = v.monto("igv") ?? (subtotal != null ? Math.max(0, total - subtotal) : 0);
-
-    return {
-      proveedor_ruc: parsearRuc(v.texto("proveedor_ruc")),
-      proveedor_razon_social: razon,
-      titular_cuenta: v.texto("titular_cuenta") || razon,
-      banco_destino: v.texto("banco") || null,
-      cuenta_destino: parsearCuenta(v.texto("numero_cuenta")) ?? (v.texto("numero_cuenta") || null),
-      cci_destino: parsearCci(v.texto("cci")),
-      tipo_comprobante: "factura",
-      serie: comprobante.serie,
-      numero: comprobante.numero,
-      fecha_emision: fEmision,
-      fecha_vencimiento: v.fecha("fecha_vencimiento"),
-      moneda: monedaDe(v.texto("moneda")),
-      subtotal: subtotal ?? Math.max(0, total - igv),
-      igv,
-      total,
-      detraccion_pct: total > 0 && detraccion > 0 ? Number(((detraccion / total) * 100).toFixed(4)) : null,
-      detraccion_monto: detraccion,
-      estado_detraccion: estadoDetraccionDe(v.texto("estado_detraccion"), detraccion),
-      adelanto_1: 0,
-      adelanto_2: 0,
-      vehiculo_placa: parsearPlaca(v.texto("vehiculo_placa")),
-      codigo_servicio: null,
-      detalle_servicio: v.texto("concepto") || null,
-      turno: null,
-      fecha_servicio: null,
-      estado_aprobacion: estadoAprobacionDe(estadoTxt),
-      estado_pago: estadoPagoDe(estadoTxt),
-      nro_operacion_bancaria: v.texto("nro_operacion_bancaria") || null,
-      fecha_pago: v.fecha("fecha_pago"),
-      voucher_url: null,
-      categoria: normaliza(v.texto("categoria")) || null,
-      observaciones: v.texto("observaciones") || null,
-    };
-  },
+  descripcion: "Facturas de proveedores con RUC, número de comprobante y fecha de emisión.",
+  pideFechaPorDefecto: true,
+  campos: CAMPOS_CXP.map((c) =>
+    c.campo === "proveedor_ruc" || c.campo === "numero_factura" || c.campo === "fecha_emision"
+      ? { ...c, requerido: true }
+      : c
+  ),
+  construir: construirCxP,
 };
 
 // ── Perfil 3 · Planilla y gastos administrativos ──────────────────────────────

@@ -58,6 +58,15 @@ export type CampoPerfil = {
   /** Si falta, la fila se rechaza. */
   requerido?: boolean;
   tipo?: "texto" | "numero" | "monto" | "fecha" | "booleano";
+  /**
+   * El campo puede venir repartido en VARIAS columnas y se toma la primera con dato.
+   *
+   * No es un capricho: en la hoja real de OSLO conviven "NRO. DE RECIBO DE HONORARIOS" y
+   * "NUMERO FACTURA" (47 filas usan una, 61 la otra, ninguna las dos), y lo mismo pasa
+   * con dos columnas "MONTO NETO". Con una sola columna por campo, la mitad de las filas
+   * se rechazaba por vacía.
+   */
+  multiple?: boolean;
 };
 
 export type Perfil<T> = {
@@ -65,22 +74,30 @@ export type Perfil<T> = {
   nombre: string;
   descripcion?: string;
   campos: CampoPerfil[];
+  /**
+   * El formato admite filas sin fecha propia (histórico de recibos por honorarios sin
+   * fecha de emisión). La UI pide una fecha de referencia y la pasa en
+   * `ctx.fecha_por_defecto`; el perfil decide dónde aplicarla.
+   */
+  pideFechaPorDefecto?: boolean;
   /** Convierte una fila ya mapeada en la entidad final. Devuelve el error como string. */
   construir: (v: ValoresFila, ctx: ContextoPerfil) => T | string;
 };
 
 /** Acceso tipado a los valores ya mapeados de una fila. */
 export type ValoresFila = {
-  /** Texto crudo recortado de la celda del campo (o "" si no existe). */
+  /** Texto de la primera columna del campo que traiga dato ("" si ninguna). */
   texto: (campo: string) => string;
-  /** Importe parseado; null si la celda está vacía o no es un número. */
+  /** Importe parseado; null si todas las columnas del campo están vacías. */
   monto: (campo: string) => number | null;
   /** Fecha "YYYY-MM-DD"; null si vacía o ilegible. */
   fecha: (campo: string) => string | null;
   numero: (campo: string) => number | null;
   booleano: (campo: string) => boolean | null;
-  /** ¿La columna existe en el archivo? (distinto de "existe pero vacía"). */
+  /** ¿El campo tiene alguna columna asignada? (distinto de "existe pero vacía"). */
   tiene: (campo: string) => boolean;
+  /** TODOS los textos con dato del campo, para los que se concatenan (detalle, notas). */
+  textos: (campo: string) => string[];
   fila: number;
   raw: unknown[];
 };
@@ -138,6 +155,27 @@ export function scoreMatch(nh: string, alias: string): number {
  * Devuelve el índice de columna por campo (-1 = no encontrada).
  */
 export function mapearColumnas(cabeceras: unknown[], campos: CampoPerfil[]): Record<string, number> {
+  const multiples = mapearColumnasMultiples(cabeceras, campos);
+  const mapa: Record<string, number> = {};
+  for (const c of campos) mapa[c.campo] = multiples[c.campo]?.[0] ?? -1;
+  return mapa;
+}
+
+/**
+ * Resuelve columna ↔ campo en UNA pasada por puntaje descendente. Cada columna se usa
+ * una sola vez; un campo toma una sola columna, salvo que esté marcado `multiple`, en
+ * cuyo caso se queda con todas las que le puntúen.
+ *
+ * La pasada tiene que ser única. Resolviendo primero los campos simples y después los
+ * múltiples, un campo débil se llevaba una columna que le correspondía a uno fuerte: en
+ * la hoja de OSLO, `subtotal` (que puntúa 104 por el alias "neto") se quedaba con la
+ * segunda columna "MONTO NETO" antes de que `monto_neto` (que puntúa 1010, exacta)
+ * pudiera reclamarla, y las 61 filas que usan esa columna se rechazaban por monto vacío.
+ */
+export function mapearColumnasMultiples(
+  cabeceras: unknown[],
+  campos: CampoPerfil[]
+): Record<string, number[]> {
   const nh = cabeceras.map(normHeader);
   const candidatos: { campo: string; col: number; score: number }[] = [];
 
@@ -154,14 +192,16 @@ export function mapearColumnas(cabeceras: unknown[], campos: CampoPerfil[]): Rec
   }
 
   candidatos.sort((a, b) => b.score - a.score);
-  const mapa: Record<string, number> = {};
-  for (const c of campos) mapa[c.campo] = -1;
+
+  const esMultiple = new Map(campos.map((c) => [c.campo, c.multiple === true]));
+  const mapa: Record<string, number[]> = {};
+  for (const c of campos) mapa[c.campo] = [];
   const colUsada = new Set<number>();
 
   for (const cand of candidatos) {
-    if (mapa[cand.campo] !== -1) continue;
     if (colUsada.has(cand.col)) continue;
-    mapa[cand.campo] = cand.col;
+    if (mapa[cand.campo].length && !esMultiple.get(cand.campo)) continue;
+    mapa[cand.campo].push(cand.col);
     colUsada.add(cand.col);
   }
   return mapa;
@@ -399,24 +439,50 @@ export async function leerArchivo(file: File, opts?: { hoja?: string }): Promise
 
   if (!todas.length) throw new Error("El archivo está vacío.");
 
-  // La cabecera es, entre las primeras 15 filas, la que tenga más celdas de texto
-  // no numérico: así se salta títulos ("REPORTE DE PROVEEDORES") y filas sueltas.
-  let filaCabecera = 0;
-  let mejor = -1;
-  for (let i = 0; i < Math.min(15, todas.length); i++) {
-    const fila = todas[i] ?? [];
-    const puntaje = fila.filter((c) => {
+  // La cabecera es, entre las primeras 15 filas, la que produzca MÁS rótulos, contando
+  // la fila siguiente cuando forma con ella una cabecera de dos pisos. Puntuar cada fila
+  // por separado elegía mal: en la hoja de Grijalva la segunda fila tiene más rótulos que
+  // la primera, así que se tomaba esa y se perdían PROVEEDOR, RUC, PLACA y FECHA — las
+  // cuatro columnas que van combinadas en vertical y solo se rotulan arriba.
+  const rotulos = (fila: unknown[]) =>
+    (fila ?? []).filter((c) => {
       const s = String(c ?? "").trim();
       return s.length > 1 && !/^-?[\d.,\s]+$/.test(s);
     }).length;
+
+  let filaCabecera = 0;
+  let mejor = -1;
+  for (let i = 0; i < Math.min(15, todas.length); i++) {
+    const arr = (todas[i] ?? []).map((c) => String(c ?? "").trim());
+    const sig = (todas[i + 1] ?? []).map((c) => String(c ?? "").trim());
+    const combinada = esContinuacionCabecera(arr, sig)
+      ? Array.from({ length: Math.max(arr.length, sig.length) }, (_, k) => sig[k] || arr[k] || "")
+      : arr;
+    const puntaje = rotulos(combinada);
     if (puntaje > mejor) {
       mejor = puntaje;
       filaCabecera = i;
     }
   }
 
-  const cabeceras = (todas[filaCabecera] ?? []).map((c) => String(c ?? "").trim());
-  const filas = todas.slice(filaCabecera + 1).filter(
+  // CABECERA DE DOS FILAS. Las plantillas reales de AFA agrupan columnas con celdas
+  // combinadas: la fila de arriba trae el rótulo del grupo ("FACTURA", "DETALLE DE PAGO")
+  // y la de abajo el de cada columna ("N° FACTURA", "MONTO NETO", "FECHA DE EMISION"),
+  // mientras que las columnas sin grupo van combinadas en vertical y solo tienen rótulo
+  // arriba. Leer una sola fila perdía la mitad de las columnas: en el archivo de Grijalva
+  // se perdían PROVEEDOR, RUC, PLACA y FECHA DEL SERVICIO, y el archivo entero fallaba.
+  // Se combinan tomando la fila de abajo cuando aporta y la de arriba como respaldo.
+  const arriba = (todas[filaCabecera] ?? []).map((c) => String(c ?? "").trim());
+  const abajo = (todas[filaCabecera + 1] ?? []).map((c) => String(c ?? "").trim());
+  const dosFilas = esContinuacionCabecera(arriba, abajo);
+
+  const ancho = Math.max(arriba.length, abajo.length);
+  const cabeceras = dosFilas
+    ? Array.from({ length: ancho }, (_, i) => abajo[i] || arriba[i] || "")
+    : arriba;
+
+  const primeraDato = filaCabecera + (dosFilas ? 2 : 1);
+  const filas = todas.slice(primeraDato).filter(
     (r) => r && r.some((c) => String(c ?? "").trim() !== "")
   );
 
@@ -429,6 +495,28 @@ export async function leerArchivo(file: File, opts?: { hoja?: string }): Promise
   return { cabeceras, filas, filaCabecera, hoja: nombreHoja };
 }
 
+/**
+ * ¿La fila de abajo es la segunda mitad de la cabecera, y no ya un dato?
+ * Tres señales, todas necesarias:
+ *   1. trae al menos dos rótulos,
+ *   2. casi ninguno es un número (una fila de datos viene llena de importes),
+ *   3. APORTA: llena al menos dos columnas que la de arriba deja vacías — que es
+ *      justamente lo que hace una cabecera agrupada y no un registro cualquiera.
+ */
+function esContinuacionCabecera(arriba: string[], abajo: string[]): boolean {
+  const conDato = abajo.filter((c) => c !== "");
+  if (conDato.length < 2) return false;
+
+  const numericos = conDato.filter((c) => /^-?[\d.,\s/]+$/.test(c)).length;
+  if (numericos / conDato.length > 0.2) return false;
+
+  let aporta = 0;
+  for (let i = 0; i < abajo.length; i++) {
+    if (abajo[i] && !(arriba[i] ?? "")) aporta++;
+  }
+  return aporta >= 2;
+}
+
 // ── Perfiles ──────────────────────────────────────────────────────────────────
 
 export type PuntajePerfil = { clave: string; nombre: string; puntaje: number; requeridosFaltantes: string[] };
@@ -439,22 +527,40 @@ export type PuntajePerfil = { clave: string; nombre: string; puntaje: number; re
  * Sirve para elegir automáticamente entre "formato tradicional" y "formato OSLO".
  */
 export function puntuarPerfiles<T>(cabeceras: unknown[], perfiles: Perfil<T>[]): PuntajePerfil[] {
+  const conRotulo = cabeceras.filter((c) => String(c ?? "").trim() !== "").length;
+
   return perfiles
     .map((p) => {
-      const mapa = mapearColumnas(cabeceras, p.campos);
-      let puntaje = 0;
+      const mapa = mapearColumnasMultiples(cabeceras, p.campos);
+      let cubierto = 0;
       let maximo = 0;
       const faltantes: string[] = [];
+      const columnas = new Set<number>();
+
       for (const c of p.campos) {
         const peso = c.requerido ? 3 : 1;
         maximo += peso;
-        if (mapa[c.campo] >= 0) puntaje += peso;
-        else if (c.requerido) faltantes.push(c.campo);
+        const cols = mapa[c.campo] ?? [];
+        if (cols.length) {
+          cubierto += peso;
+          for (const col of cols) columnas.add(col);
+        } else if (c.requerido) {
+          faltantes.push(c.campo);
+        }
       }
+
+      // Dos mitades. La primera mide cuánto del PERFIL encontró el archivo; la segunda,
+      // cuánto del ARCHIVO explica el perfil. Sin la segunda, un perfil de pocos campos
+      // gana siempre por ser fácil de satisfacer: la hoja de OSLO Piura, con 22 columnas
+      // de cuentas por pagar, se detectaba como "caja chica" porque ese perfil tiene diez
+      // campos y le calzaban seis.
+      const ladoPerfil = maximo ? cubierto / maximo : 0;
+      const ladoArchivo = conRotulo ? columnas.size / conRotulo : 0;
+
       return {
         clave: p.clave,
         nombre: p.nombre,
-        puntaje: maximo ? puntaje / maximo : 0,
+        puntaje: 0.5 * ladoPerfil + 0.5 * ladoArchivo,
         requeridosFaltantes: faltantes,
       };
     })
@@ -478,13 +584,27 @@ export function aplicarPerfil<T>(
   ctx: ContextoPerfil = {},
   sobrescribirMapa?: Record<string, number>
 ): ResultadoImport<T> {
-  const mapa = { ...mapearColumnas(crudas.cabeceras, perfil.campos), ...(sobrescribirMapa ?? {}) };
+  // Un campo puede leer de varias columnas (ver CampoPerfil.multiple). El override manual
+  // de la UI es de UNA columna por campo y, cuando el usuario elige una, manda.
+  //
+  // Pero la pantalla envía el mapa COMPLETO en cada parseo, no solo lo que el usuario
+  // tocó. Tomar cada entrada como un override colapsaba todos los campos múltiples a su
+  // primera columna: la hoja de OSLO Piura pasaba de 108 filas válidas a 47, porque las
+  // 61 que traen el importe en la segunda columna "MONTO NETO" quedaban sin monto.
+  // Por eso una entrada que coincide con lo detectado NO cuenta como override.
+  const detectado = mapearColumnasMultiples(crudas.cabeceras, perfil.campos);
+  const mapa: Record<string, number[]> = { ...detectado };
+  for (const [campo, col] of Object.entries(sobrescribirMapa ?? {})) {
+    const auto = detectado[campo] ?? [];
+    if (col >= 0 && auto[0] === col) continue; // es el valor detectado, no una elección
+    mapa[campo] = col >= 0 ? [col] : [];
+  }
   const errores: FilaError[] = [];
   const ok: T[] = [];
 
-  const camposSinMapear = perfil.campos.filter((c) => (mapa[c.campo] ?? -1) < 0).map((c) => c.campo);
+  const camposSinMapear = perfil.campos.filter((c) => !(mapa[c.campo] ?? []).length).map((c) => c.campo);
   const requeridosFaltantes = perfil.campos
-    .filter((c) => c.requerido && (mapa[c.campo] ?? -1) < 0)
+    .filter((c) => c.requerido && !(mapa[c.campo] ?? []).length)
     .map((c) => c.campo);
 
   if (requeridosFaltantes.length) {
@@ -508,20 +628,37 @@ export function aplicarPerfil<T>(
   crudas.filas.forEach((raw, i) => {
     // Número tal como lo ve el usuario en Excel (la cabecera es filaCabecera+1).
     const fila = crudas.filaCabecera + 2 + i;
+    /** Primera columna del campo cuya celda traiga algo; undefined si todas vacías. */
     const celda = (campo: string): unknown => {
-      const col = mapa[campo] ?? -1;
-      return col >= 0 ? raw[col] : undefined;
+      for (const col of mapa[campo] ?? []) {
+        const c = raw[col];
+        if (c !== undefined && c !== null && String(c).trim() !== "") return c;
+      }
+      return undefined;
+    };
+    /** Igual, pero para el tipo pedido: una columna puede traer texto donde otra trae
+     *  la fecha o el importe de verdad (en OSLO la fecha de servicio es texto libre). */
+    const primero = <R>(campo: string, conv: (c: unknown) => R | null): R | null => {
+      for (const col of mapa[campo] ?? []) {
+        const r = conv(raw[col]);
+        if (r !== null) return r;
+      }
+      return null;
     };
 
     const v: ValoresFila = {
       fila,
       raw,
-      tiene: (campo) => (mapa[campo] ?? -1) >= 0,
+      tiene: (campo) => (mapa[campo] ?? []).length > 0,
       texto: (campo) => String(celda(campo) ?? "").trim(),
-      monto: (campo) => parsearMonto(celda(campo)),
-      numero: (campo) => parsearNumero(celda(campo)),
-      fecha: (campo) => parsearFecha(celda(campo)),
-      booleano: (campo) => parsearBooleano(celda(campo)),
+      textos: (campo) =>
+        (mapa[campo] ?? [])
+          .map((col) => String(raw[col] ?? "").trim())
+          .filter((s) => s !== ""),
+      monto: (campo) => primero(campo, parsearMonto),
+      numero: (campo) => primero(campo, parsearNumero),
+      fecha: (campo) => primero(campo, parsearFecha),
+      booleano: (campo) => primero(campo, parsearBooleano),
     };
 
     try {

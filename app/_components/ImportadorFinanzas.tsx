@@ -137,6 +137,11 @@ export default function ImportadorFinanzas(props: ImportadorProps) {
   const [perfilClave, setPerfilClave] = useState("");
   const [mapa, setMapa] = useState<Record<string, number>>({});
   const [resultado, setResultado] = useState<ResultadoImport<FilaImportada> | null>(null);
+  // Fecha de referencia para las filas del histórico que no traen ninguna fecha propia.
+  // En la planilla real de OSLO Piura son 47 de 108: recibos por honorarios cuyo único
+  // dato temporal es un rango escrito a mano ("14-19 DE OCTUBRE"). Rechazarlas sería
+  // botar media carga; inventarles una fecha en silencio sería peor.
+  const [fechaPorDefecto, setFechaPorDefecto] = useState("");
 
   const [subiendo, setSubiendo] = useState(false);
   const [progreso, setProgreso] = useState(0);
@@ -176,6 +181,7 @@ export default function ImportadorFinanzas(props: ImportadorProps) {
       setPerfilClave("");
       setMapa({});
       setResultado(null);
+      setFechaPorDefecto("");
       setSubiendo(false);
       setProgreso(0);
       setTandaMsg("");
@@ -203,7 +209,7 @@ export default function ImportadorFinanzas(props: ImportadorProps) {
         const m = mapearColumnas(c.cabeceras, elegido.campos);
         setPerfilClave(elegido.clave);
         setMapa(m);
-        setResultado(aplicarPerfil(c, elegido, {}, m));
+        setResultado(aplicarPerfil(c, elegido, { fecha_por_defecto: fechaPorDefecto || null }, m));
       } else {
         setPerfilClave("");
         setMapa({});
@@ -211,7 +217,7 @@ export default function ImportadorFinanzas(props: ImportadorProps) {
       }
       setPaso(2);
     },
-    [perfiles]
+    [perfiles, fechaPorDefecto]
   );
 
   async function cargarArchivo(file: File) {
@@ -280,14 +286,21 @@ export default function ImportadorFinanzas(props: ImportadorProps) {
     }
     const m = mapearColumnas(crudas.cabeceras, p.campos);
     setMapa(m);
-    setResultado(aplicarPerfil(crudas, p, {}, m));
+    setResultado(aplicarPerfil(crudas, p, { fecha_por_defecto: fechaPorDefecto || null }, m));
   }
 
   function cambiarMapeo(campo: string, col: number) {
     if (!crudas || !perfilSel) return;
     const m = { ...mapa, [campo]: col };
     setMapa(m);
-    setResultado(aplicarPerfil(crudas, perfilSel, {}, m));
+    setResultado(aplicarPerfil(crudas, perfilSel, { fecha_por_defecto: fechaPorDefecto || null }, m));
+  }
+
+  /** Re-parsea con la nueva fecha: las filas sin fecha propia pasan a ser válidas en vivo. */
+  function cambiarFechaPorDefecto(valor: string) {
+    setFechaPorDefecto(valor);
+    if (!crudas || !perfilSel) return;
+    setResultado(aplicarPerfil(crudas, perfilSel, { fecha_por_defecto: valor || null }, mapa));
   }
 
   /**
@@ -655,6 +668,23 @@ export default function ImportadorFinanzas(props: ImportadorProps) {
                       </p>
                     </div>
                   ))}
+                </section>
+              )}
+
+              {/* Fecha de referencia · solo si el formato admite filas sin fecha propia */}
+              {perfilSel?.pideFechaPorDefecto && (
+                <section className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex flex-wrap items-center gap-3 text-sm text-amber-800">
+                  <span className="font-bold">📅 Fecha de referencia</span>
+                  <input
+                    type="date"
+                    value={fechaPorDefecto}
+                    onChange={(e) => cambiarFechaPorDefecto(e.target.value)}
+                    className="border border-amber-300 rounded-xl px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
+                  />
+                  <span className="text-xs text-amber-700 flex-1 min-w-[240px]">
+                    Se usa solo en las filas que no traen ninguna fecha propia (recibos por honorarios
+                    con el periodo escrito a mano). El resto conserva la suya.
+                  </span>
                 </section>
               )}
 
