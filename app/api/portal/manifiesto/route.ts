@@ -1,11 +1,19 @@
 // POST /api/portal/manifiesto
 // Gestión de pasajeros del manifiesto desde el portal cliente.
 // Acciones: add | remove | bulk | assign_parada | actualizar_config
-// Seguridad: verifica que reservas.cliente_id === cliente_id y que el servicio sea editable.
+// Seguridad: el cliente_id sale del TOKEN de sesión del portal, nunca del body, y se
+// verifica que reservas.cliente_id === ese cliente y que el servicio sea editable.
+//
+// Antes el `cliente_id` llegaba en el body y `verificarAcceso` lo comparaba contra el de
+// la reserva. Como los dos lados los controlaba quien llamaba, bastaba con probar
+// reserva_id=N contra cliente_id=1,2,3… hasta que dejara de dar 403 para leer y EDITAR el
+// manifiesto (nombres y DNI de los pasajeros) de cualquier empresa cliente. Es el mismo
+// IDOR que ya se cerró en /api/cliente y /api/cliente/gps, con la misma receta.
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { normalizarEmpresa } from "@/lib/empresa";
+import { verificarTokenPortal } from "@/lib/portal-auth";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -77,9 +85,17 @@ async function setParadaAsignacion(
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { action, cliente_id, reserva_id } = body;
+    const { action, reserva_id } = body;
 
-    if (!action || !cliente_id || !reserva_id) {
+    // La identidad SIEMPRE del token firmado. Un `cliente_id` que venga en el body se
+    // ignora en silencio: es exactamente el parámetro con el que se hacía el IDOR.
+    const sesion = verificarTokenPortal(body.token);
+    if (!sesion) {
+      return NextResponse.json({ error: "Sesión inválida o expirada" }, { status: 401 });
+    }
+    const cliente_id = sesion.cid;
+
+    if (!action || !reserva_id) {
       return NextResponse.json({ error: "Parámetros incompletos" }, { status: 400 });
     }
 

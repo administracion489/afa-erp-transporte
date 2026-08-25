@@ -2,6 +2,14 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/lib/supabase";
+
+// Cabecera con el Bearer de la sesión. Las rutas /api/pasajeros/* corren con
+// service_role (se saltan el RLS), así que re-verifican identidad y módulo en el
+// servidor con lib/api-auth: sin este token responden 401.
+async function cabecerasApi(): Promise<Record<string, string>> {
+  const { data: { session } } = await supabase.auth.getSession();
+  return { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token ?? ""}` };
+}
 import { parsearManifiesto, descargarPlantilla } from "@/lib/manifiesto-csv";
 import { parsearPortalUsuarios, descargarPlantillaPortalUsuarios, descargarCredencialesPortal, type CredencialExport } from "@/lib/portal-usuarios-csv";
 import { useCanalesInvitacion } from "@/lib/useCanalesInvitacion";
@@ -839,7 +847,7 @@ export default function ClientesPage() {
       // Upsert via API route (service role — evita RLS)
       const res = await fetch("/api/pasajeros/upsert-nomina", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await cabecerasApi(),
         body: JSON.stringify({
           clienteId,
           pasajeros: resultado.ok.map(p => ({
@@ -903,7 +911,7 @@ export default function ClientesPage() {
       setSavingPax(true);
       const res = await fetch("/api/pasajeros/upsert-nomina", {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: await cabecerasApi(),
         body: JSON.stringify({
           id: editandoPax.id,
           campos: {
@@ -964,7 +972,7 @@ export default function ClientesPage() {
     setEnviandoCreds(new Set(ids));
     try {
       const res = await fetch("/api/pasajeros/credenciales", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await cabecerasApi(),
         body: JSON.stringify({ pasajeroIds: ids }),
       });
       const json = await res.json();

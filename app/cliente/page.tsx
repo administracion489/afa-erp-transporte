@@ -9,7 +9,7 @@ import { animarMarcador, animarMarcadorPorCamino, tweenEnVuelo } from "@/lib/ani
 import {
   limpiarHuella, colorearMatched, crearAjustadorHuella, filasAPuntos, huellaCrudaFeatures, colaViva, conVelocidadColor, puentesCrudos,
   puntosTelemetria, type PuntoTelemetria, resumenViaje, type ResumenViaje,
-  calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, distM, paginarFilas,
+  calcularPuentes, decidirPuente, validarPuente, anclarImprecisos, puentePorRuta, distM,
   pegarIconoAVia, caminoEntreSnaps, enParalelo, crearFiltroFixVivo,
 } from "@/lib/huella";
 import { idAfa } from "@/lib/folio";
@@ -17,6 +17,61 @@ import { fmtCoord } from "@/lib/coordenadas";
 import { estadoCliente, normalizaEstado } from "@/lib/estados";
 import { manifiestoMtcHTML, reporteServicioHTML, abrirImprimible, esAbordado } from "@/lib/documentos-servicio";
 import { saveSession, loadSession, clearSession, getPortalToken, portalApi } from "@/lib/portal-sesion";
+
+/** Fila cruda de `ubicaciones_gps` tal como la publica /api/cliente/gps. */
+type PuntoHuellaCrudo = {
+  lat: number; lng: number; velocidad: number | null; rumbo: number | null;
+  precision_m: number | null; created_at: string | null; timestamp: string | null;
+};
+
+type AsignacionConductor = { nombre: string; licencia: string | null; numero_licencia: string | null; telefono: string | null };
+type AsignacionPlaca     = { placa: string };
+
+// ─── Lecturas de asignación: quién conduce y en qué placa ─────────────────────
+// Iban DIRECTAS a Supabase con la clave anon, que es pública (viaja en el bundle de JS).
+// Eso obligaba a dejar `conductores`, `conductores_tercero` y `vehiculos_tercero` sin RLS,
+// y con eso cualquiera podía barrer el padrón de choferes —nombre, licencia, teléfono—
+// sin iniciar sesión. Ahora van por /api/cliente, que valida el token y además exige que
+// ese conductor/vehículo esté asignado a una reserva DE ESTE cliente.
+//
+// Devuelven `{ data }` a propósito: es la misma forma que traía PostgREST, así que los
+// consumidores (que hacen `.then(({ data }) => …)`) no cambian.
+async function leerConductorPropio(id: number): Promise<{ data: AsignacionConductor | null }> {
+  const { ok, data } = await portalApi("asignacion_datos", { conductor_id: id });
+  return { data: ok ? (data?.conductor ?? null) : null };
+}
+async function leerConductorTercero(id: number): Promise<{ data: AsignacionConductor | null }> {
+  const { ok, data } = await portalApi("asignacion_datos", { conductor_tercero_id: id });
+  return { data: ok ? (data?.conductor ?? null) : null };
+}
+async function leerPlacaTercero(id: number): Promise<{ data: AsignacionPlaca | null }> {
+  const { ok, data } = await portalApi("asignacion_datos", { vehiculo_tercero_id: id });
+  return { data: ok ? (data?.vehiculo_tercero ?? null) : null };
+}
+
+// ─── Lecturas de GPS ─────────────────────────────────────────────────────────
+// Últimos restos de lectura anon de `ubicaciones_gps`: quedaron sin portar cuando el
+// resto del portal ya se había mudado a /api/cliente/gps (ver las llamadas del mapa
+// "En vivo" y del modal). Con la clave anon bastaba con conocer —o tantear— un
+// reservaId para seguir en vivo el bus de otra empresa y descargar su recorrido
+// completo. El endpoint exige token y comprueba que la reserva sea de este cliente.
+async function leerGpsReserva(reservaId: number): Promise<GPS | null> {
+  const j = await fetch("/api/cliente/gps", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: getPortalToken(), reservaId }),
+  }).then(r => r.json()).catch(() => null);
+  return (j?.ubicacion as GPS | undefined) ?? null;
+}
+
+// El servidor ya pagina (PostgREST corta en 1000 filas y la huella se congelaba a
+// medio viaje), así que aquí no hace falta paginarFilas.
+async function leerHuellaReserva(reservaId: number): Promise<PuntoHuellaCrudo[]> {
+  const j = await fetch("/api/cliente/gps", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: getPortalToken(), huella: true, reservaId }),
+  }).then(r => r.json()).catch(() => null);
+  return Array.isArray(j?.huella) ? (j.huella as PuntoHuellaCrudo[]) : [];
+}
 
 // Los dos modales se cargan al abrirlos, no al entrar al portal. Ambos se montan detrás
 // de un guard (`{gpsModalOpen && …}`, `{modalManifiestoData && …}`), así que no necesitan
@@ -752,7 +807,7 @@ export default function ClientePortal() {
 
     }
     if (activo?.conductor_id) {
-      supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", activo.conductor_id).maybeSingle()
+      leerConductorPropio(activo.conductor_id)
         .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); });
     }
     if (activo?.vehiculo_id) {
@@ -801,12 +856,12 @@ export default function ClientePortal() {
     const ra = r as any;
     if (r.conductor_id) {
       tasks.push(
-        supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", r.conductor_id).maybeSingle()
+        leerConductorPropio(r.conductor_id)
           .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); })
       );
     } else if (ra.conductor_tercero_id) {
       tasks.push(
-        supabase.from("conductores_tercero").select("nombre,licencia,telefono").eq("id", ra.conductor_tercero_id).maybeSingle()
+        leerConductorTercero(ra.conductor_tercero_id)
           .then(({ data }: any) => { if (data) setConductorInfo({ nombre: (data as any).nombre, numero_licencia: (data as any).licencia ?? null, telefono: (data as any).telefono || "" } as ConductorInfo); })
       );
     } else if (ra.empresa_tercerizada_id) {
@@ -822,7 +877,7 @@ export default function ClientePortal() {
       );
     } else if (ra.vehiculo_tercero_id) {
       tasks.push(
-        supabase.from("vehiculos_tercero").select("placa").eq("id", ra.vehiculo_tercero_id).maybeSingle()
+        leerPlacaTercero(ra.vehiculo_tercero_id)
           .then(({ data }: any) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
       );
     }
@@ -861,13 +916,13 @@ export default function ClientePortal() {
     if (r.conductor_id) {
       // Propio: conductor desde tabla conductores
       tasks.push(
-        supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", r.conductor_id).maybeSingle()
+        leerConductorPropio(r.conductor_id)
           .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); })
       );
     } else if (ra.conductor_tercero_id) {
       // Tercerizado con conductor asignado (no revelar empresa al cliente)
       tasks.push(
-        supabase.from("conductores_tercero").select("nombre,telefono").eq("id", ra.conductor_tercero_id).maybeSingle()
+        leerConductorTercero(ra.conductor_tercero_id)
           .then(({ data }: any) => { if (data) setConductorInfo({ nombre: (data as any).nombre, telefono: (data as any).telefono || "" } as ConductorInfo); })
       );
     } else if (ra.empresa_tercerizada_id) {
@@ -882,7 +937,7 @@ export default function ClientePortal() {
       );
     } else if (ra.vehiculo_tercero_id) {
       tasks.push(
-        supabase.from("vehiculos_tercero").select("placa").eq("id", ra.vehiculo_tercero_id).maybeSingle()
+        leerPlacaTercero(ra.vehiculo_tercero_id)
           .then(({ data }: any) => { if (data) setVehiculoInfo({ placa: (data as any).placa }); })
       );
     }
@@ -1162,7 +1217,7 @@ export default function ClientePortal() {
             // reserva_id es la llave no ambigua para el GPS en vivo (también terceros)
             setReservaActivaId(updated.id);
             if (updated.conductor_id) {
-              supabase.from("conductores").select("nombre,numero_licencia:licencia,telefono").eq("id", updated.conductor_id).maybeSingle()
+              leerConductorPropio(updated.conductor_id)
                 .then(({ data }: any) => { if (data) setConductorInfo(data as ConductorInfo); });
             }
             if (updated.vehiculo_id) {
@@ -1476,10 +1531,10 @@ export default function ClientePortal() {
       if (!(r.id in condInfoMap)) {
         let nombre = "", tel = "";
         if (ra.conductor_id) {
-          const { data } = await supabase.from("conductores").select("nombre,telefono").eq("id", ra.conductor_id).maybeSingle();
+          const { data } = await leerConductorPropio(ra.conductor_id);
           if (data) { nombre = (data as any).nombre || ""; tel = (data as any).telefono || ""; }
         } else if (ra.conductor_tercero_id) {
-          const { data } = await supabase.from("conductores_tercero").select("nombre,telefono").eq("id", ra.conductor_tercero_id).maybeSingle();
+          const { data } = await leerConductorTercero(ra.conductor_tercero_id);
           if (data) { nombre = (data as any).nombre || ""; tel = (data as any).telefono || ""; }
         }
         setCondInfoMap(prev => ({ ...prev, [r.id]: { nombre: nombre || "Conductor asignado", tel } }));
@@ -1491,7 +1546,7 @@ export default function ClientePortal() {
           const placa = ok ? data?.vehiculos?.[0]?.placa : null;
           if (placa) setVehPlacaMap(prev => ({ ...prev, [r.id]: placa }));
         } else if (ra.vehiculo_tercero_id) {
-          const { data } = await supabase.from("vehiculos_tercero").select("placa").eq("id", ra.vehiculo_tercero_id).maybeSingle();
+          const { data } = await leerPlacaTercero(ra.vehiculo_tercero_id);
           if ((data as any)?.placa) setVehPlacaMap(prev => ({ ...prev, [r.id]: (data as any).placa }));
         }
       }
@@ -1499,9 +1554,7 @@ export default function ClientePortal() {
       // `created_at` y `estado` viajan también: sin la edad del fix no se puede distinguir un bus
       // en marcha de uno cuyo GPS murió hace una hora, y el ETA de la tarjeta se refrescaba
       // igual (comprando llamadas caras a Google para pintar una hora imposible).
-      const { data: gd } = await supabase.from("ubicaciones_gps")
-        .select("lat,lng,velocidad,estado,created_at").eq("reserva_id", r.id)
-        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      const gd = await leerGpsReserva(r.id);
       const g = gd as { lat?: unknown; lng?: unknown; velocidad?: unknown; estado?: string | null; created_at?: string | null } | null;
       if (g?.lat && g?.lng) {
         setGpsCardMap(prev => ({ ...prev, [r.id]: {
@@ -1763,13 +1816,8 @@ export default function ClientePortal() {
       if (cargandoHuellaCliRef.current) return;   // ciclo anterior aún en vuelo → saltar este tick
       cargandoHuellaCliRef.current = true;
       try {
-      // PAGINADO (paginarFilas): PostgREST recorta al max-rows del servidor (1000) aunque se
-      // pida .limit(5000) → la huella se congelaba en el punto 1000 en viajes largos.
-      const data = await paginarFilas(() =>
-        supabase.from("ubicaciones_gps")
-          .select("lat,lng,velocidad,rumbo,precision_m,created_at,timestamp")
-          .eq("reserva_id", rid)
-          .order("created_at", { ascending: true }).order("id", { ascending: true }));
+      // La paginación (y el recorte al servicio) los hace ahora /api/cliente/gps.
+      const data = await leerHuellaReserva(rid);
       if (cancel) return;
       const filas = (data || []).filter((p: any) => p.lat && p.lng);
       // Anclar imprecisos al corredor confiable (mata el zigzag off-road) + limpieza de jitter

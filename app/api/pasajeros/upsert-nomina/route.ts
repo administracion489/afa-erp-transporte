@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { normalizarEmpresa } from "@/lib/empresa";
+import { verificarUsuarioApi } from "@/lib/api-auth";
 
 const supaAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -12,7 +13,12 @@ const supaAdmin = createClient(
  *  body: { clienteId, pasajeros: [{nombre,dni,telefono,empresa,email,edad}] }
  *  Upsert bulk — service role bypasses RLS
  */
+// service_role = sin RLS. Sin este gate, cualquiera escribía la nómina de pasajeros de
+// cualquier cliente (nombre + DNI) sin iniciar sesión.
 export async function POST(req: NextRequest) {
+  const auth = await verificarUsuarioApi(req, "clientes");
+  if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+
   const { clienteId, pasajeros } = await req.json();
   if (!clienteId || !Array.isArray(pasajeros) || pasajeros.length === 0)
     return NextResponse.json({ error: "Datos inválidos" }, { status: 400 });
@@ -65,6 +71,9 @@ export async function POST(req: NextRequest) {
  *  Update individual — service role bypasses RLS
  */
 export async function PATCH(req: NextRequest) {
+  const auth = await verificarUsuarioApi(req, "clientes");
+  if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+
   const { id, campos } = await req.json();
   if (!id || !campos)
     return NextResponse.json({ error: "Datos inválidos" }, { status: 400 });

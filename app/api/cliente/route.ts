@@ -228,6 +228,63 @@ export async function POST(req: NextRequest) {
     const cid = ses.cid;
 
     switch (accion) {
+      // ── ASIGNACIÓN: quién conduce y en qué placa ──────────────────────────
+      // El portal leía `conductores`, `conductores_tercero` y `vehiculos_tercero`
+      // DIRECTAMENTE con la clave anon (que es pública: viaja en el bundle). Eso
+      // significaba dos cosas: que esas tres tablas tenían que quedarse sin RLS, y
+      // que cualquiera podía barrer el padrón completo de choferes — nombre, DNI,
+      // licencia y teléfono — sin ni siquiera iniciar sesión en el portal.
+      //
+      // Aquí se resuelve lo mismo con service_role y una condición que antes no
+      // existía: el id pedido tiene que aparecer en alguna reserva DE ESTE cliente
+      // (el cid sale del token). Un cliente ve al chofer que le maneja, no al resto.
+      case "asignacion_datos": {
+        const idDe = (v: unknown) => {
+          const n = Number(v ?? 0);
+          return Number.isFinite(n) && n > 0 ? n : null;
+        };
+        const conductorId        = idDe(body.conductor_id);
+        const conductorTerceroId = idDe(body.conductor_tercero_id);
+        const vehiculoTerceroId  = idDe(body.vehiculo_tercero_id);
+
+        // ¿Ese id aparece en alguna reserva del cliente? Es la llave de todo el caso.
+        const asignadoAlCliente = async (columna: string, id: number) => {
+          const { data } = await admin.from("reservas")
+            .select("id").eq("cliente_id", cid).eq(columna, id).limit(1).maybeSingle();
+          return !!data;
+        };
+
+        // `numero_licencia` se añade además de `licencia` porque el portal consumía el
+        // alias de PostgREST `numero_licencia:licencia`.
+        const conAlias = (d: { nombre?: string; licencia?: string | null; telefono?: string | null } | null) =>
+          d ? { ...d, numero_licencia: d.licencia ?? null } : null;
+
+        const [conductor, vehiculoTercero] = await Promise.all([
+          (async () => {
+            if (conductorId && await asignadoAlCliente("conductor_id", conductorId)) {
+              const { data } = await admin.from("conductores")
+                .select("nombre,licencia,telefono").eq("id", conductorId).maybeSingle();
+              return conAlias(data);
+            }
+            if (conductorTerceroId && await asignadoAlCliente("conductor_tercero_id", conductorTerceroId)) {
+              const { data } = await admin.from("conductores_tercero")
+                .select("nombre,licencia,telefono").eq("id", conductorTerceroId).maybeSingle();
+              return conAlias(data);
+            }
+            return null;
+          })(),
+          (async () => {
+            if (!vehiculoTerceroId) return null;
+            if (!(await asignadoAlCliente("vehiculo_tercero_id", vehiculoTerceroId))) return null;
+            const { data } = await admin.from("vehiculos_tercero")
+              .select("placa").eq("id", vehiculoTerceroId).maybeSingle();
+            return data ?? null;
+          })(),
+        ]);
+
+        return NextResponse.json({ conductor, vehiculo_tercero: vehiculoTercero });
+      }
+
       // ── DATOS: reservas + facturas + documentos del cliente ────────────────
       case "datos": {
         const [reservas, factRes, docsRes, histRes] = await Promise.all([

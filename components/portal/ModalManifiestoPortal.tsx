@@ -9,7 +9,7 @@
 //   - Llama a /api/portal/manifiesto (verifica cliente_id)
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { portalApi } from "@/lib/portal-sesion";
+import { portalApi, getPortalToken } from "@/lib/portal-sesion";
 import { parsearManifiesto, descargarPlantillaPortal } from "@/lib/manifiesto-csv";
 
 // ─── Paleta (misma que page.tsx) ─────────────────────────────────────────────
@@ -78,10 +78,12 @@ const ESTADOS_EDITABLES = ["pendiente","confirmado","confirmada","por_confirmar"
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 async function callApi(body: Record<string, unknown>): Promise<{ ok: boolean; data: any }> {
+  // El token es la credencial: el servidor deriva de él el cliente_id y descarta el que
+  // venga en el body. El `clienteId` que el modal sigue mandando es solo informativo.
   const res = await fetch("/api/portal/manifiesto", {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify(body),
+    body:    JSON.stringify({ ...body, token: getPortalToken() }),
   });
   const data = await res.json();
   return { ok: res.ok, data };

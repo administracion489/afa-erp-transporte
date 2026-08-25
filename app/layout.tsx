@@ -590,6 +590,13 @@ function GrupoMenu({
 }
 
 // ─── Layout principal ───────────────────────────────────────────────────────
+/** ¿Es el enlace público de seguimiento, `/seguimiento/<token>`? Exactamente un segmento
+ *  más, y nunca la sub-ruta `gps` (que es una pantalla interna con lecturas directas). */
+function esSeguimientoPorToken(pathname: string): boolean {
+  const partes = pathname.split("/").filter(Boolean);   // "/seguimiento/abc" → ["seguimiento","abc"]
+  return partes.length === 2 && partes[0] === "seguimiento" && partes[1] !== "gps";
+}
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -601,8 +608,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad", "/cliente", "/conductor-tercero", "/manuales", "/conformidad", "/proveedor"].some(
       (r) => pathname === r || pathname.startsWith(r + "/")
     ) ||
-    // /seguimiento/[token] es público — pero /seguimiento (módulo ERP) NO
-    pathname.startsWith("/seguimiento/") ||
+    // /seguimiento/[token] es público — pero /seguimiento (módulo ERP) NO.
+    //
+    // Y SOLO esa: el patrón viejo era startsWith("/seguimiento/"), que también dejaba
+    // pública /seguimiento/gps/[id]. Esa página consulta reservas, clientes, vehículos y
+    // conductores DIRECTAMENTE con la clave anon y su llave es el id CORRELATIVO de la
+    // reserva, no un token: 1, 2, 3… recorrían la cartera entera de servicios sin
+    // autenticarse. No la enlaza nadie en el ERP, así que pasa a exigir sesión.
+    // El enlace que sí se comparte con el cliente es /seguimiento/<token_seguimiento>,
+    // que no consulta Supabase directo — va por /api/seguimiento, que valida el token
+    // y su fecha de expiración.
+    esSeguimientoPorToken(pathname) ||
     // Bancos de pruebas visuales (/dev/*) — solo existen en desarrollo
     (process.env.NODE_ENV !== "production" && pathname.startsWith("/dev/"));
 

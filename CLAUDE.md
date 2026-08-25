@@ -30,6 +30,17 @@ The sidebar/menu is defined in `app/layout.tsx` as `menuGrupos`. **Each route mu
 
 For client pages that need a finer-grained guard, use `lib/usePermiso.ts` (`usePermiso("modulo")` → `{ validando, permitido }`).
 
+3. **RLS en Postgres** (`supabase/seguridad-09-rls-global.sql`) — la capa que faltaba, y la única que un atacante no puede saltarse desde el navegador. **La clave `anon` viaja en el bundle de JS: es pública por diseño.** Lo único que la separa de la base de datos es RLS; con RLS apagado es una llave maestra. Las capas 1 y 2 son UI y servidor — evadibles con `curl` la primera, inexistentes para quien consulta PostgREST directo. Guía operativa en `docs/seguridad-rls.md`.
+
+   - La migración enciende RLS **solo en tablas que hoy la tienen apagada**, así que jamás ensancha una política afinada a mano. Las políticas son PERMISIVAS (se combinan con OR): añadir una base `using (true)` a una tabla ya cerrada la ABRIRÍA. Por eso el criterio es `relrowsecurity = false` y no "todas".
+   - **`usuarios` y `permisos_usuario` son la corona**: `app/usuarios/page.tsx` las escribe DESDE EL NAVEGADOR, así que sin RLS un `update usuarios set rol='admin'` sobre la propia fila era una escalada de privilegios de una línea. Ahora leer sigue abierto (el layout las necesita en cada navegación) y escribir es exclusivo de admin vía `fn_es_admin()`.
+   - `fn_es_admin()` / `fn_usuario_activo()` son **`SECURITY DEFINER` a propósito**: una política sobre `usuarios` que consulte `usuarios` recursa infinitamente. Al correr como su dueño se saltan el RLS y cortan la recursión. No las conviertas en `SECURITY INVOKER`.
+   - **Las vistas necesitan `security_invoker = on`.** Una vista de Postgres corre por omisión con los permisos de su DUEÑO, así que se salta el RLS de las tablas que lee: sin eso `v_egresos` y compañía son un túnel alrededor de todo lo demás.
+   - La política base concede a `authenticated` lo mismo que la app ya tenía: **no** implementa autorización por módulo en Postgres. Eso sigue en `lib/api-auth.ts`. La migración cierra la puerta de calle, no las interiores.
+   - Solo `empresa_perfil` y `paginas_legales` quedan legibles por `anon` (branding del login y textos de `/privacidad`). **Si una pantalla pública nueva necesita datos, va por una ruta `/api/*` con su token — no se le abre la tabla a `anon`.**
+
+**Regla para rutas API nuevas:** una ruta que usa `SUPABASE_SERVICE_ROLE_KEY` se salta el RLS, así que **la identidad se verifica ahí o no se verifica en ninguna parte**. Usa el helper que corresponda: `verificarUsuarioApi(req, "modulo")` (lib/api-auth.ts) para el ERP, `sesionDeToken` (lib/conductor-auth.ts) para la app del conductor, `verificarTokenPortal` (lib/portal-auth.ts) para el portal del cliente. **El id del sujeto se deriva del TOKEN, nunca del body** — ese fue el IDOR de `/api/portal/manifiesto`, `/api/cliente` y `/api/cliente/gps`, los tres iguales. `docs/seguridad-rls.md` §5.4 lista las rutas que todavía no lo hacen.
+
 ### Supabase clients
 
 - `lib/supabase.ts` — browser client using `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY`. Typed as `any`. Use this from `"use client"` components.

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { enviarCredencialEmailPasajero } from "@/lib/pasajero-email";
+import { verificarUsuarioApi } from "@/lib/api-auth";
 
 const supaAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -8,7 +9,14 @@ const supaAdmin = createClient(
   { auth: { autoRefreshToken: false, persistSession: false } },
 );
 
+// Corre con service_role (se salta el RLS), así que la identidad se verifica aquí o no se
+// verifica en ninguna parte. Sin este gate, un POST anónimo con una lista de ids disparaba
+// correos de credenciales a pasajeros reales — spam y regalo de un vector de phishing con
+// el remitente legítimo de AFA — además de leer su `pin_acceso`.
 export async function POST(req: NextRequest) {
+  const auth = await verificarUsuarioApi(req, "clientes");
+  if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+
   const body = await req.json();
   const pasajeroIds: number[] = body.pasajeroIds ?? [];
   if (!pasajeroIds.length)
