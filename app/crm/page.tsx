@@ -885,28 +885,46 @@ export default function CRMPage() {
   );
 }
 
-// ── Vincular un WhatsApp Business del celular al CRM ─────────────────────────
-// Mismo flujo que public/conectar-whatsapp.html (Embedded Signup de Meta,
-// featureType "whatsapp_business_app_onboarding" = coexistencia), pero embebido como
-// modal para no salir del CRM. El número lo elige el usuario en la ventana de Meta:
-// aquí no hay ninguno fijo. Al terminar, el número se registra en whatsapp_numeros
-// para que además de recibir se pueda ENVIAR por él.
+// ── Vincular un WhatsApp Business del celular al CRM (COEXISTENCIA) ──────────
+//
+// Embedded Signup de Meta con featureType "whatsapp_business_app_onboarding": el
+// número SIGUE funcionando en la app WhatsApp Business del celular y además queda
+// conectado a la Cloud API. No se desvincula nada — no es el QR de WhatsApp Web.
+// El QR que aparece a mitad del flujo lo pinta Meta y lo escanea el dueño con su
+// propia app; es el gesto de siempre, pero por la vía oficial.
+//
+// ┌─ POR QUÉ ESTE MODAL NO FUNCIONABA ─────────────────────────────────────────┐
+// │ El `code` que devuelve Meta vive 30 SEGUNDOS. Antes se pintaba en pantalla │
+// │ con un "guárdalo, aún falta activarlo", así que vencía sin canjearse y el  │
+// │ número jamás terminaba de conectarse. Ahora se manda al servidor en el     │
+// │ mismo instante en que llega (/api/crm/whatsapp/activar).                   │
+// └────────────────────────────────────────────────────────────────────────────┘
+//
+// Los datos llegan por DOS vías independientes y hacen falta las dos:
+//   · window.postMessage → phone_number_id y waba_id
+//   · callback de FB.login → el code
+// El orden no está garantizado, así que se guardan en refs y la activación se
+// dispara cuando ya están ambos (activarSiListo).
 declare global {
   interface Window { FB?: any; fbAsyncInit?: () => void; }
 }
 
-const WA_APP_ID = "1776032736701552";
-const WA_CONFIG_ID = "1912835406054543";
+const WA_APP_ID = process.env.NEXT_PUBLIC_META_APP_ID ?? "1776032736701552";
+const WA_CONFIG_ID = process.env.NEXT_PUBLIC_META_CONFIG_ID ?? "1912835406054543";
 
+type Paso = { clave: string; titulo: string; estado: "ok" | "error" | "omitido"; detalle?: string };
+
+async function autorizacion(): Promise<string> {
+  const { data: s } = await supabase.auth.getSession();
+  return `Bearer ${s?.session?.access_token ?? ""}`;
+}
+
+/** Red de seguridad: si el canje falla, al menos que el número quede anotado. */
 async function registrarNumero(phoneId: string, wabaId?: string): Promise<string> {
   try {
-    const { data: s } = await supabase.auth.getSession();
     const r = await fetch("/api/crm/whatsapp/registrar", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${s?.session?.access_token ?? ""}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: await autorizacion() },
       body: JSON.stringify({ phone_number_id: phoneId, waba_id: wabaId }),
     });
     const d = await r.json();
@@ -923,10 +941,12 @@ type NumeroFila = {
 };
 
 function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
-  const [paso, setPaso] = useState<"cargando" | "listo" | "conectando" | "ok" | "error">("cargando");
+  const [paso, setPaso] = useState<"cargando" | "listo" | "conectando" | "activando" | "ok" | "error">("cargando");
   const [detalle, setDetalle] = useState<string>("");
-  const [codigo, setCodigo] = useState<string>("");
   const [registro, setRegistro] = useState<string>("");
+  const [pasos, setPasos] = useState<Paso[]>([]);
+  const [avisos, setAvisos] = useState<string[]>([]);
+  const [errorDominio, setErrorDominio] = useState(false);
   // null = aún cargando; [] = la tabla existe pero está vacía, o todavía no se creó.
   const [numerosTabla, setNumerosTabla] = useState<NumeroFila[] | null>(null);
   const [detectando, setDetectando] = useState(false);
@@ -948,10 +968,9 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
     setDetectando(true);
     setResultadoDeteccion("");
     try {
-      const { data: s } = await supabase.auth.getSession();
       const r = await fetch("/api/crm/whatsapp/detectar", {
         method: "POST",
-        headers: { Authorization: `Bearer ${s?.session?.access_token ?? ""}` },
+        headers: { Authorization: await autorizacion() },
       });
       const d = await r.json();
       if (!r.ok) {
@@ -971,6 +990,53 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
     setDetectando(false);
   };
 
+  // Los dos datos llegan por vías distintas y en orden no garantizado.
+  // Van en refs y no en estado: el listener de `message` se registra una sola vez
+  // y con estado leería siempre los valores del primer render.
+  const datos = useRef<{ code?: string; phoneId?: string; wabaId?: string; coexistencia?: boolean }>({});
+  const yaActivado = useRef(false);
+
+  /** Canjea el código en cuanto están el code y el phone_number_id. Una sola vez. */
+  const activarSiListo = useCallback(async () => {
+    const d = datos.current;
+    if (!d.code || !d.phoneId || yaActivado.current) return;
+    yaActivado.current = true;
+
+    setPaso("activando");
+    setPasos([]);
+    setAvisos([]);
+    try {
+      const r = await fetch("/api/crm/whatsapp/activar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: await autorizacion() },
+        body: JSON.stringify({
+          code: d.code,
+          phone_number_id: d.phoneId,
+          waba_id: d.wabaId,
+          es_coexistencia: d.coexistencia !== false,
+        }),
+      });
+      const res = await r.json().catch(() => ({}) as any);
+      setPasos(res.pasos ?? []);
+      setAvisos(res.avisos ?? []);
+
+      if (r.ok && res.ok) {
+        setPaso("ok");
+        setRegistro(`Número conectado y listo: "${res.numero?.alias ?? "sin alias"}".`);
+      } else {
+        setPaso("error");
+        setDetalle(res.error ?? `El servidor respondió ${r.status}.`);
+        // Aunque la activación completa falle, dejar anotado el número: así se
+        // puede reintentar sin volver a pasar por toda la ventana de Meta.
+        if (d.phoneId) setRegistro(await registrarNumero(d.phoneId, d.wabaId));
+      }
+    } catch (e: any) {
+      setPaso("error");
+      setDetalle(`No se pudo activar: ${e?.message ?? e}`);
+    }
+    cargarTabla();
+  }, [cargarTabla]);
+
   useEffect(() => {
     function onMensaje(event: MessageEvent) {
       if (event.origin !== "https://www.facebook.com" && event.origin !== "https://web.facebook.com") return;
@@ -978,17 +1044,24 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
         const data = JSON.parse(event.data);
         if (data.type !== "WA_EMBEDDED_SIGNUP") return;
         if (["FINISH", "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING", "FINISH_ONLY_WABA"].includes(data.event)) {
-          setPaso("ok");
-          const phoneId = data.data?.phone_number_id;
-          const wabaId  = data.data?.waba_id;
-          setDetalle(`phone_number_id: ${phoneId ?? "—"} · waba_id: ${wabaId ?? "—"}`);
-          // Guardarlo para poder ENVIAR por este número, no sólo recibir.
-          if (phoneId) {
-            registrarNumero(phoneId, wabaId).then((msg) => {
-              setRegistro(msg);
-              cargarTabla();   // que el número recién conectado salga en la lista de arriba
-            });
+          datos.current.phoneId = data.data?.phone_number_id;
+          datos.current.wabaId = data.data?.waba_id;
+          // Solo el evento de la app del celular es coexistencia; los otros dos
+          // son alta de API pura y no llevan sincronización de historial.
+          datos.current.coexistencia = data.event === "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING";
+          setDetalle(`phone_number_id: ${datos.current.phoneId ?? "—"} · waba_id: ${datos.current.wabaId ?? "—"}`);
+          if (!datos.current.phoneId) {
+            // FINISH_ONLY_WABA: se creó la cuenta pero sin número. Sin
+            // phone_number_id no hay nada que activar, y sin decirlo el modal se
+            // quedaría girando en "Esperando a que termines en Meta…".
+            setPaso("error");
+            setDetalle(
+              "Se creó la cuenta de WhatsApp Business pero no se eligió ningún número. " +
+                "Vuelve a tocar el botón y completa el paso del número de teléfono.",
+            );
+            return;
           }
+          void activarSiListo();
         } else if (data.event === "CANCEL") {
           setPaso("error");
           setDetalle(`Se canceló en: ${data.data?.current_step ?? "?"}`);
@@ -1008,22 +1081,44 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
         const js = document.createElement("script");
         js.id = "facebook-jssdk";
         js.src = "https://connect.facebook.net/es_LA/sdk.js";
+        // Si el SDK ni siquiera carga, el botón se quedaría en "Cargando…" para
+        // siempre sin decir por qué.
+        js.onerror = () => {
+          setPaso("error");
+          setDetalle("No se pudo cargar el SDK de Facebook. ¿Hay un bloqueador de anuncios o un proxy filtrando connect.facebook.net?");
+        };
         document.body.appendChild(js);
       }
     }
     return () => window.removeEventListener("message", onMensaje);
-  }, []);
+  }, [activarSiListo]);
 
   const lanzar = () => {
     if (!window.FB) return;
     setPaso("conectando");
+    setDetalle("");
+    setErrorDominio(false);
+    setPasos([]);
+    setAvisos([]);
+    datos.current = {};
+    yaActivado.current = false;
+
     window.FB.login(
       (response: any) => {
         if (response.authResponse?.code) {
-          setCodigo(response.authResponse.code);
-        } else if (paso !== "ok") {
+          datos.current.code = response.authResponse.code;
+          void activarSiListo();
+          return;
+        }
+        // Sin código y sin ids = la ventana de Meta ni siquiera llegó a arrancar.
+        // La causa habitual es que este dominio no está autorizado en la app de
+        // Meta ("Dominio de host desconocido de JSSDK"): el error se ve DENTRO de
+        // la ventana emergente y no llega como excepción, así que hay que
+        // deducirlo aquí o el usuario se queda sin pista.
+        if (!datos.current.phoneId) {
           setPaso("error");
-          setDetalle("No se completó la conexión (se cerró la ventana).");
+          setErrorDominio(true);
+          setDetalle("No se completó la conexión: la ventana se cerró sin devolver ningún dato.");
         }
       },
       {
@@ -1110,25 +1205,36 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
         {/* ── Conectar uno nuevo ── */}
         <div className="border-t border-gray-100 pt-4">
           <p className="text-sm text-gray-500 mb-3 text-left">
-            <b className="text-[#0b315f]">Conectar otro número.</b> Vincula un WhatsApp Business
-            al CRM sin dejar de usarlo desde el celular. El número lo eliges tú en la ventana de
-            Meta: puede ser uno ya existente o uno nuevo. Ten a mano el celular donde está esa cuenta.
+            <b className="text-[#0b315f]">Conectar un número (coexistencia).</b> El número sigue
+            funcionando igual en la app WhatsApp Business del celular y además entra al CRM.
+            <b> No se desvincula el teléfono</b> ni se cierra la sesión de nadie. Lo eliges tú en la
+            ventana de Meta: puede ser uno que ya usas o uno nuevo. Ten el celular a mano para
+            escanear el QR que te muestre Meta.
           </p>
 
         <button
           onClick={lanzar}
-          disabled={paso === "cargando" || paso === "conectando"}
+          disabled={paso === "cargando" || paso === "conectando" || paso === "activando"}
           className="w-full bg-[#25D366] hover:bg-[#1fb855] disabled:bg-gray-300 text-white font-bold text-sm py-3 rounded-xl transition-colors"
         >
-          {paso === "cargando" ? "Cargando conexión con Meta…" : paso === "conectando" ? "Esperando el QR…" : "Conectar mi WhatsApp"}
+          {paso === "cargando"
+            ? "Cargando conexión con Meta…"
+            : paso === "conectando"
+              ? "Esperando a que termines en Meta…"
+              : paso === "activando"
+                ? "Activando la cuenta…"
+                : paso === "ok"
+                  ? "Conectar otro número"
+                  : "Conectar mi WhatsApp"}
         </button>
 
         <div className="text-left mt-4 rounded-xl overflow-hidden border border-gray-100">
           {[
             { txt: "1. Toca el botón verde de arriba", activa: paso === "listo" },
             { txt: "2. Elige el número en la ventana de Meta (existente o nuevo)", activa: paso === "conectando" },
-            { txt: "3. Si es un número que ya usas: llega un mensaje al celular → escanea el QR", activa: false },
-            { txt: "4. El número queda conectado y sus mensajes entran al Inbox", ok: paso === "ok" },
+            { txt: "3. Si el número ya está en tu celular: Meta te muestra un QR → escanéalo con esa misma app de WhatsApp Business", activa: paso === "conectando" },
+            { txt: "4. El ERP activa la cuenta (no cierres esta ventana)", activa: paso === "activando" },
+            { txt: "5. Listo: sigues usando el celular y los mensajes también entran al Inbox", ok: paso === "ok" },
           ].map((p, i) => (
             <div
               key={i}
@@ -1141,21 +1247,73 @@ function ConectarWhatsAppModal({ onClose }: { onClose: () => void }) {
           ))}
         </div>
 
-        {codigo && (
-          <div className="mt-4 bg-gray-50 border border-dashed border-gray-300 rounded-xl p-3 text-left text-xs font-mono break-all">
-            <b className="text-[#0b315f]">Código de autorización (guárdalo, aún falta activarlo):</b>
-            <div className="mt-1">{codigo}</div>
+        {/* Detalle real de la activación en el servidor: se ve en cuál paso se atascó. */}
+        {pasos.length > 0 && (
+          <div className="mt-4 text-left rounded-xl overflow-hidden border border-gray-100">
+            {pasos.map((p) => (
+              <div key={p.clave} className="px-3 py-2 border-b last:border-b-0 border-gray-50">
+                <div className="flex items-start gap-2">
+                  <span className={`text-xs mt-px ${p.estado === "ok" ? "text-emerald-600" : p.estado === "error" ? "text-red-600" : "text-gray-400"}`}>
+                    {p.estado === "ok" ? "✓" : p.estado === "error" ? "✕" : "—"}
+                  </span>
+                  <div className="flex-1">
+                    <div className={`text-xs ${p.estado === "error" ? "text-red-700 font-medium" : "text-gray-700"}`}>{p.titulo}</div>
+                    {p.detalle && <div className="text-[11px] text-gray-500 mt-0.5">{p.detalle}</div>}
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         )}
+
+        {avisos.map((a, i) => (
+          <div key={i} className="mt-3 bg-amber-50 border border-amber-200 rounded-xl p-3 text-left text-xs text-amber-900">
+            {a}
+          </div>
+        ))}
+
+        {paso === "activando" && (
+          <div className="mt-4 bg-[#0b315f]/5 border border-[#0b315f]/20 rounded-xl p-3 text-left text-xs text-[#0b315f]">
+            Activando la cuenta en Meta… El código de autorización solo dura 30 segundos, así que
+            esto se hace solo y de inmediato. No cierres la ventana.
+          </div>
+        )}
+
         {paso === "ok" && (
           <div className="mt-4 bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-left text-xs text-emerald-800">
-            <b>Número conectado en Meta ✓</b>
+            <b>Número conectado ✓</b>
             <div className="mt-1 font-mono break-all">{detalle}</div>
             {registro && <div className="mt-2 pt-2 border-t border-emerald-200">{registro}</div>}
+            <div className="mt-2 pt-2 border-t border-emerald-200">
+              Sigue usando WhatsApp normal en el celular. Lo que contestes desde el teléfono
+              aparecerá también en el Inbox, y la IA se pausa sola en ese chat para no responder encima.
+            </div>
           </div>
         )}
+
         {paso === "error" && (
-          <div className="mt-4 bg-red-50 border border-red-200 rounded-xl p-3 text-left text-xs text-red-700">{detalle}</div>
+          <div className="mt-4 bg-red-50 border border-red-200 rounded-xl p-3 text-left text-xs text-red-700">
+            {detalle}
+            {errorDominio && (
+              <div className="mt-2 pt-2 border-t border-red-200 text-red-800">
+                <b>Causa más probable: este dominio no está autorizado en tu app de Meta.</b>
+                <div className="mt-1">
+                  Si en la ventana emergente viste <i>&quot;Dominio de host desconocido de JSSDK&quot;</i>, agrega{" "}
+                  <b className="font-mono">{typeof window !== "undefined" ? window.location.hostname : "tu dominio"}</b>{" "}
+                  en el panel de Meta, app <b className="font-mono">{WA_APP_ID}</b>:
+                </div>
+                <div className="mt-1.5 pl-3 border-l-2 border-red-200">
+                  Inicio de sesión con Facebook para empresas → Configuración →
+                  <b> Dominios permitidos para el SDK de JavaScript</b>, y también en
+                  <b> URI de redireccionamiento de OAuth válidos</b>.
+                </div>
+                <div className="mt-1.5">
+                  Ojo: la traducción de Meta dice <i>&quot;está en la lista&quot;</i>, pero el mensaje original
+                  dice <b>no</b> está. Solo admite dominios con HTTPS.
+                </div>
+              </div>
+            )}
+          </div>
         )}
         </div>
 

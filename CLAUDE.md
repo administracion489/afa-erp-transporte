@@ -43,6 +43,30 @@ The actual data model lives in Supabase (Postgres). Tables referenced across the
 - `POST /api/ruta` — Google Directions proxy. Reads `GOOGLE_MAPS_API_KEY` (or `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` as fallback). Returns Mapbox-style `[lng, lat]` coordinates from a decoded polyline plus per-leg distance/duration with traffic.
 - `GET /api/notificaciones/recordatorio` — Vercel cron target (`vercel.json` → `0 13 * * *` UTC = 08:00 Lima). Protected by `CRON_SECRET` bearer if set. Finds reservas for "tomorrow Peru-time", dedupes against `notificaciones_enviadas` rows already logged today with `trigger_origen = "cron_recordatorio"`, and calls `notificarReserva()` per reserva.
 - `POST /api/notificaciones/sincronizar` — manual trigger for the same notification flow.
+- `POST /api/crm/whatsapp/activar` — cierra el Embedded Signup de Meta (ver sección de coexistencia).
+
+### CRM · WhatsApp oficial y coexistencia (`lib/meta-*.ts`, `lib/crm-coexistencia.ts`)
+
+**Los TRES números de la empresa no son intercambiables y confundirlos rompe producción:**
+
+| Número | Uso | Conexión |
+|---|---|---|
+| +51 966 707 225 | Atención al cliente (CRM) | Cloud API oficial · **coexistencia** |
+| +51 905 438 216 | Avisos a pasajeros/conductores | Cloud API oficial |
+| +51 997 683 199 | Radar IA | Baileys/QR, número **dedicado** (`radar-worker/`) |
+
+**Nunca vincular Baileys a los dos primeros**: están dados de alta en la Cloud API y el QR de WhatsApp Web rompería la integración oficial. Esa separación es la razón de que el Radar tenga chip propio.
+
+**Coexistencia** = el número sigue en la app WhatsApp Business del celular *y* está en la Cloud API. Solo la puede ofrecer un Tech Provider aprobado (AFA lo es desde ago-2026). El flujo tiene un QR, pero lo pinta Meta y lo escanea el dueño con su propia app — **no es WhatsApp Web**. Se lanza con `featureType: "whatsapp_business_app_onboarding"` + `sessionInfoVersion: "3"` desde `ConectarWhatsAppModal` en `app/crm/page.tsx`.
+
+- **El `code` del Embedded Signup vive 30 SEGUNDOS.** Antes el modal lo pintaba en pantalla ("guárdalo, aún falta activarlo") y vencía sin canjearse, así que ningún número llegaba a conectarse. Va directo del `postMessage` al servidor. `phone_number_id`/`waba_id` y el `code` llegan por **vías distintas y sin orden garantizado** (postMessage vs. callback de `FB.login`): por eso viven en refs y la activación se dispara con `activarSiListo()` cuando ya están los dos.
+- `POST /api/crm/whatsapp/activar` hace los seis pasos y devuelve un **array `pasos`** con ok/error por cada uno — no un booleano — para que la UI diga en cuál se atascó. En coexistencia **NO se llama a `POST /{phone_number_id}/register`**: el número ya está registrado por la app del celular y llamarlo lo desvincularía. `POST /{waba_id}/subscribed_apps` es el paso que más se olvida: sin él el Inbox se queda vacío aunque el número figure conectado.
+- **Webhooks que solo existen en coexistencia** (`lib/crm-coexistencia.ts`, despachados en `app/api/crm/webhook/meta/route.ts`): `smb_message_echoes` (lo que responden desde el celular → entra como **saliente** con `origen: 'app_movil'`), `history` (hasta 6 meses; `origen: 'historial'`, no incrementa `no_leidos` y `ultimo_mensaje_at` **solo avanza**, o el backfill desordena la bandeja) y `smb_app_state_sync` (contactos). **Ninguno dispara el agente IA.** Un echo además **pausa la IA** en ese hilo (`crm_agentes_ia.pausar_si_responde_humano`, activado por defecto): con coexistencia una persona y la IA pueden contestar el mismo chat y el cliente recibiría dos respuestas.
+- Meta solo acepta pedir el historial **dentro de las 24 h** del onboarding; pasado el plazo hay que desconectar y reconectar el número. Por eso `/activar` lo pide de inmediato y guarda `historial_solicitado_en`.
+- **Token por número, no global** (`lib/meta-tokens.ts` + tabla `whatsapp_tokens`, cifrada con AES-256-GCM y **sin política RLS permisiva**: solo service-role). `lib/crm-meta.ts` resuelve el token del número al que le habla y cae a `META_WA_TOKEN`. Es lo que hace posible vender el ERP: la cuenta de otra empresa no cuelga del system user de AFA. Sin `TOKEN_ENCRYPTION_KEY` no se guarda nada — nunca en texto plano.
+- `lib/crm-ingesta.ts` centraliza resolver contacto/conversación para las cuatro fuentes (entrante, echo, historial, contactos) para que todas caigan en el mismo hilo. Reintenta ante choques de UNIQUE: el backfill inserta cientos de filas en paralelo.
+
+Puesta en marcha, el arreglo del error "Dominio de host desconocido de JSSDK" y la hoja de ruta comercial: **`docs/whatsapp-coexistencia.md`**.
 
 ### Notification pipeline (`lib/notificaciones.ts`)
 
