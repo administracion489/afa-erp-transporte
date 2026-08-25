@@ -96,6 +96,13 @@ body {
   from { transform: translateY(-30px); opacity: 0; }
   to   { transform: translateY(0);     opacity: 1; }
 }
+/* Barra de la tarjeta de embarque: se vacía sola en 3 s. Animada por el compositor
+   (transform:scaleX), NO por un setInterval que re-renderizaba todo el árbol 33 veces/s
+   por cada escaneo — era una de las causas del congelamiento al escanear varios QR seguidos. */
+@keyframes barraResultado {
+  from { transform: scaleX(1); }
+  to   { transform: scaleX(0); }
+}
 @keyframes numIn {
   0%   { transform: translateY(20px); opacity: 0; }
   70%  { transform: translateY(-3px); opacity: 1; }

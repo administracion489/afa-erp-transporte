@@ -294,10 +294,30 @@ function fmtDuracion(ms: number): string {
   return `${m}m`;
 }
 
+// UN solo AudioContext para toda la vida de la página, reutilizado en cada beep.
+// ANTES se creaba `new AudioContext()` por beep y nunca se cerraba: al 6º-7º escaneo
+// se agotaba el límite de contextos del WebView (los beeps enmudecían y quedaban
+// contextos zombis con su hilo de audio vivo, presión de recursos en gama baja). Era
+// una de las causas del congelamiento al escanear muchos QR seguidos. Lazy + resume()
+// (Android suspende los contextos creados fuera de un gesto del usuario).
+let beepCtx: AudioContext | null = null;
+function getBeepCtx(): AudioContext | null {
+  try {
+    const AC: typeof AudioContext | undefined =
+      (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!AC) return null;
+    let ctx = beepCtx;
+    if (!ctx || ctx.state === "closed") { ctx = new AC(); beepCtx = ctx; }
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    return ctx;
+  } catch { return null; }
+}
 function playBeep(tipo: "ok" | "warn" | "error") {
   try {
-    const ctx = new ((window as any).AudioContext || (window as any).webkitAudioContext)();
-    // Compresor para maximizar volumen sin distorsión
+    const ctx = getBeepCtx();
+    if (!ctx) return;
+    // Compresor para maximizar volumen sin distorsión (uno por beep; es barato y se
+    // libera solo al terminar los osciladores — lo caro era el AudioContext, ya compartido).
     const comp = ctx.createDynamicsCompressor();
     comp.threshold.value = -6;
     comp.ratio.value = 4;
@@ -842,8 +862,11 @@ export default function ConductorApp() {
   const [escanear,          setEscanear]          = useState(false);
   const [validando,         setValidando]         = useState<Pasajero | null>(null); // kept for TS compat, unused after redesign
   const [resultadoEmbarque, setResultadoEmbarque] = useState<{ pasajero: Pasajero; fueraLista: boolean; otroBus?: boolean; cambioParada?: boolean; empresaAjena?: boolean; paradaOriginalNombre?: string | null; paradaEmbarqueNombre?: string | null } | null>(null);
-  const [resultProgreso,    setResultProgreso]    = useState(0);
   const [boardingMsg,       setBoardingMsg]       = useState<{ok: boolean; msg: string} | null>(null);
+  // Timer del toast boardingMsg: guardado para poder LIMPIARLO antes de mostrar el siguiente.
+  // Sin esto, el timeout del escaneo N borraba a los 4 s el mensaje del escaneo N+1 (y cada
+  // disparo tardío forzaba un render completo). Un solo timer, siempre reemplazado.
+  const boardingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Nudge de auto-llegada: banner DENTRO del app (además de la notificación del SO).
   // `tipo` = "suave" (estás en el paradero) | "fuerte" (te alejaste sin marcar).
   const [nudgeLlegada,  setNudgeLlegada]  = useState<{ paradaId: number; nombre: string; tipo: "suave" | "fuerte"; horaLlegada: number | null } | null>(null);
@@ -857,6 +880,9 @@ export default function ConductorApp() {
   const qrRef               = useRef<any>(null);
   const resultIntervalRef   = useRef<NodeJS.Timeout | null>(null);
   const [btScanFlash,       setBtScanFlash]       = useState(false);
+  // Timer del destello del escáner BT: un solo timer reemplazable (cada gatillo ya no deja
+  // su propio setTimeout suelto que dispara un render tardío en plena ráfaga de escaneos).
+  const btFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Ref siempre actualizado a procesarQR para evitar closure obsoleto en el listener BT.
   const procesarQRRef = useRef<(qr: string) => Promise<void>>(async () => {});
   // Candado de procesamiento COMPARTIDO entre cámara y escáner BT: evita doble embarque
@@ -2078,11 +2104,18 @@ export default function ConductorApp() {
 
   useEffect(() => {
     if (!escanear) {
-      if (qrRef.current) { qrRef.current.stop().catch(() => {}); qrRef.current = null; }
+      // Apagar y LIBERAR la cámara al cerrar la pantalla (stop → clear libera tracks y buffers).
+      const s = qrRef.current; qrRef.current = null;
+      if (s) { s.stop().then(() => { try { s.clear(); } catch { /* noop */ } }).catch(() => {}); }
       return;
     }
     let stopped = false;
-    import("html5-qrcode").then(async ({ Html5Qrcode }) => {
+    // Dedupe propio: con un callback custom, html5-qrcode dispara el éxito en CADA cuadro
+    // mientras el mismo QR esté frente a la cámara (no hay dedupe interno). Sin esto, un QR
+    // sostenido genera decenas de llamadas por segundo.
+    let ultimoTxt = ""; let ultimoTxtTs = 0;
+    const ahoraMs = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+    import("html5-qrcode").then(async ({ Html5Qrcode, Html5QrcodeScannerState }) => {
       if (stopped) return;
       // En la app nativa, pedir el permiso de CÁMARA con el plugin nativo ANTES de
       // getUserMedia. Sin esto, html5-qrcode falla con "No se pudo acceder a la cámara".
@@ -2106,30 +2139,67 @@ export default function ConductorApp() {
       if (!container) return;
       const scanner = new Html5Qrcode("qr-container");
       qrRef.current = scanner;
-      scanner.start(
-        { facingMode: "environment" },
-        // fps 12 → 6: html5-qrcode decodifica cada cuadro en el MISMO hilo JS que recibe los fixes
-        // del plugin nativo y drena la cola de GPS. A 12 fps ese hilo queda saturado mientras la
-        // cámara está abierta (servicio #24738: dos huecos de ~2 min caen justo entre escaneos).
-        // 6 fps sigue siendo el doble de rápido que un escaneo humano y libera la mitad del hilo.
-        { fps: 6 },   // sin qrbox → detecta en toda la pantalla
-        async (text: string) => {
-          scanner.stop().catch(() => {}); qrRef.current = null; setEscanear(false);
-          await procesarQR(text);
-        },
-        () => {}
-      ).catch((err: any) => {
+      try {
+        // La cámara se ABRE UNA sola vez y queda viva mientras la pantalla esté abierta.
+        // Por cada QR: pause(true) (congela el visor y detiene el decodificado SIN cerrar el
+        // MediaStream) → procesarQR → resume(). ANTES se hacía stop()+setEscanear(false) por
+        // escaneo, re-negociando getUserMedia cada vez: en el WebView de Android eso deja la
+        // cámara sin liberar y CONGELA el app tras unos pocos ciclos (issues html5-qrcode
+        // #466/#764/#779). pause/resume no toca getUserMedia, así que el conductor escanea
+        // pasajero tras pasajero sin churn de cámara.
+        await scanner.start(
+          { facingMode: "environment" },
+          // fps 12 → 6: html5-qrcode decodifica cada cuadro en el MISMO hilo JS que recibe los fixes
+          // del plugin nativo y drena la cola de GPS. A 12 fps ese hilo queda saturado mientras la
+          // cámara está abierta (servicio #24738: dos huecos de ~2 min caen justo entre escaneos).
+          // 6 fps sigue siendo el doble de rápido que un escaneo humano y libera la mitad del hilo.
+          { fps: 6 },   // sin qrbox → detecta en toda la pantalla
+          async (text: string) => {
+            const t = ahoraMs();
+            // Dedupe: ignora el mismo QR repetido dentro de 3.5 s (cubre el rebote entre resume()
+            // y que el conductor retire el código; > la tarjeta de resultado de 3 s).
+            if (text === ultimoTxt && t - ultimoTxtTs < 3500) return;
+            if (procesandoQRRef.current) return;   // ya hay un escaneo en curso
+            ultimoTxt = text; ultimoTxtTs = t;
+            // Pausar el decodificado ANTES de procesar (síncrono a nivel de estado, no cierra
+            // la cámara). Guardado por getState() para no lanzar si no está escaneando.
+            try {
+              if (scanner.getState() === Html5QrcodeScannerState.SCANNING) await scanner.pause(true);
+            } catch { /* transición en curso o estado inesperado: seguir igual */ }
+            await procesarQR(text);
+            // Reanudar para el siguiente pasajero, solo si la pantalla sigue abierta y es el
+            // mismo scanner (no uno recreado por un remonte). resume() trae 200 ms de gracia
+            // interna anti-re-escaneo; refrescamos la marca de dedupe al reanudar.
+            try {
+              if (!stopped && qrRef.current === scanner && scanner.getState() === Html5QrcodeScannerState.PAUSED) {
+                await scanner.resume();
+                ultimoTxtTs = ahoraMs();
+              }
+            } catch { /* si falla el resume, la pantalla se está cerrando: el cleanup libera */ }
+          },
+          () => {}
+        );
+      } catch (err: any) {
         console.error("[QR] Error al iniciar scanner:", err);
+        if (qrRef.current === scanner) qrRef.current = null;
         setEscanear(false);
         alert("No se pudo acceder a la cámara. Verifica los permisos.");
-      });
+        return;
+      }
+      // Si la pantalla se cerró mientras start() estaba en vuelo, apagar YA para no dejar
+      // el MediaStream vivo (la carrera stop-vs-start que filtraba cámaras invisibles).
+      if (stopped && qrRef.current === scanner) {
+        qrRef.current = null;
+        scanner.stop().then(() => { try { scanner.clear(); } catch { /* noop */ } }).catch(() => {});
+      }
     }).catch((err: any) => {
       console.error("[QR] Error al cargar html5-qrcode:", err);
       alert("El módulo QR no está disponible. Ejecuta: npm install html5-qrcode");
     });
     return () => {
       stopped = true;
-      if (qrRef.current) { qrRef.current.stop().catch(() => {}); qrRef.current = null; }
+      const s = qrRef.current; qrRef.current = null;
+      if (s) { s.stop().then(() => { try { s.clear(); } catch { /* noop */ } }).catch(() => {}); }
     };
   }, [escanear]);
 
@@ -2145,12 +2215,24 @@ export default function ConductorApp() {
     return attachHidScanner({
       onScan: (code) => {
         setBtScanFlash(true);
-        setTimeout(() => setBtScanFlash(false), 500);
+        if (btFlashTimerRef.current) clearTimeout(btFlashTimerRef.current);
+        btFlashTimerRef.current = setTimeout(() => { btFlashTimerRef.current = null; setBtScanFlash(false); }, 500);
         return procesarQRRef.current(code);
       },
       isBusy: () => procesandoQRRef.current,
     });
   }, [reservaActiva?.id, tab, escanear]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Toast de embarque con auto-cierre, reemplazando cualquier toast previo (un solo timer):
+  // evita que el timeout de un escaneo borre el mensaje del siguiente.
+  function mostrarBoarding(ok: boolean, msg: string, ms = 4000) {
+    if (boardingTimerRef.current) clearTimeout(boardingTimerRef.current);
+    setBoardingMsg({ ok, msg });
+    boardingTimerRef.current = setTimeout(() => {
+      boardingTimerRef.current = null;
+      setBoardingMsg(null);
+    }, ms);
+  }
 
   // Procesa un QR (de cámara o escáner BT) en UNA sola llamada al servidor: embarcar_qr
   // resuelve el pasajero desde el QR, registra el embarque y consolida por "horario de salida",
@@ -2164,8 +2246,7 @@ export default function ConductorApp() {
       const paradaActual = paradas[paradaIdx];
       if (!paradaActual) {
         playBeep("error");
-        setBoardingMsg({ ok: false, msg: "Error: no hay parada activa." });
-        setTimeout(() => setBoardingMsg(null), 4000);
+        mostrarBoarding(false, "Error: no hay parada activa.");
         return;
       }
       // Atribuir el embarque al paradero REAL por GPS (no al puntero, que el nudge o el
@@ -2181,15 +2262,13 @@ export default function ConductorApp() {
         });
       } catch (e: any) {
         playBeep("error");
-        setBoardingMsg({ ok: false, msg: `Error al registrar embarque: ${e?.message}` });
-        setTimeout(() => setBoardingMsg(null), 4000);
+        mostrarBoarding(false, `Error al registrar embarque: ${e?.message}`);
         return;
       }
 
       if (resp?.noEncontrado || !resp?.ok) {
         playBeep("error");
-        setBoardingMsg({ ok: false, msg: "QR no reconocido. Pasajero no encontrado en el sistema." });
-        setTimeout(() => setBoardingMsg(null), 4000);
+        mostrarBoarding(false, "QR no reconocido. Pasajero no encontrado en el sistema.");
         return;
       }
 
@@ -2198,8 +2277,7 @@ export default function ConductorApp() {
       // Re-escaneo: el server marca yaEmbarcado si ya estaba a bordo en este servicio.
       if (resp?.yaEmbarcado) {
         playBeep("warn");
-        setBoardingMsg({ ok: false, msg: `${pasajero.nombre} ya está registrado en este servicio.` });
-        setTimeout(() => setBoardingMsg(null), 4000);
+        mostrarBoarding(false, `${pasajero.nombre} ya está registrado en este servicio.`);
         return;
       }
 
@@ -2227,21 +2305,15 @@ export default function ConductorApp() {
 
       playBeep(empresaAjena || fueraLista || otroBus ? "warn" : "ok");
 
-      // Mostrar tarjeta resultado con barra de progreso (3 s)
-      if (resultIntervalRef.current) clearInterval(resultIntervalRef.current);
+      // Mostrar tarjeta resultado (3 s). La barra se vacía por CSS (@keyframes barraResultado):
+      // ANTES un setInterval de 30 ms re-renderizaba el componente entero ~100 veces por escaneo,
+      // saturando el hilo justo cuando llegaba el siguiente pasajero. Ahora es UN solo setTimeout.
+      if (resultIntervalRef.current) clearTimeout(resultIntervalRef.current);
       setResultadoEmbarque({ pasajero, fueraLista, otroBus, cambioParada, empresaAjena, paradaOriginalNombre, paradaEmbarqueNombre: paradaEmbarque.nombre });
-      setResultProgreso(0);
-      let prog = 0;
-      resultIntervalRef.current = setInterval(() => {
-        prog++;
-        setResultProgreso(prog);
-        if (prog >= 100) {
-          clearInterval(resultIntervalRef.current!);
-          resultIntervalRef.current = null;
-          setResultadoEmbarque(null);
-          setResultProgreso(0);
-        }
-      }, 30); // 100 pasos × 30 ms = 3 000 ms
+      resultIntervalRef.current = setTimeout(() => {
+        resultIntervalRef.current = null;
+        setResultadoEmbarque(null);
+      }, 3000);
     } finally {
       // Soltar al terminar la ida y vuelta al server (NO al cerrarse la tarjeta de
       // resultado, que vive 3 s): así el siguiente pasajero se puede escanear enseguida.
@@ -2297,15 +2369,13 @@ export default function ConductorApp() {
       } });
     } catch (e: any) {
       setIncSaving(false);
-      setBoardingMsg({ ok: false, msg: `Error: ${e?.message}` });
-      setTimeout(() => setBoardingMsg(null), 4000);
+      mostrarBoarding(false, `Error: ${e?.message}`);
       return;
     }
     setIncSaving(false);
     setShowIncidencia(false);
     setIncTipo(null); setIncSev("medio"); setIncDesc(""); setIncRetraso("");
-    setBoardingMsg({ ok: true, msg: "Incidencia reportada a operaciones" });
-    setTimeout(() => setBoardingMsg(null), 3000);
+    mostrarBoarding(true, "Incidencia reportada a operaciones", 3000);
   }
 
   // ─── NAV (Waze / Google Maps) ───────────────────────────────────────────────
@@ -5688,7 +5758,7 @@ export default function ConductorApp() {
             display: "flex", flexDirection: "column", alignItems: "center", gap: 16,
           }}>
             <p style={{ margin: 0, color: "rgba(255,255,255,0.75)", fontSize: 14, fontWeight: 500, textAlign: "center" }}>
-              Apunta al QR del pasajero
+              Escanea un pasajero tras otro · la cámara sigue abierta
             </p>
             <button
               onClick={() => setEscanear(false)}
@@ -5699,7 +5769,7 @@ export default function ConductorApp() {
                 fontFamily: FONT_SANS, fontWeight: 700, fontSize: 15, cursor: "pointer",
               }}
             >
-              Cancelar
+              Terminar
             </button>
           </div>
         </div>
@@ -5731,8 +5801,8 @@ export default function ConductorApp() {
                 ? `Subió aquí · asignado en ${paradaOriginalNombre ?? "otra parada"}`
                 : "Embarque registrado correctamente";
         const cerrar = () => {
-          if (resultIntervalRef.current) { clearInterval(resultIntervalRef.current); resultIntervalRef.current = null; }
-          setResultadoEmbarque(null); setResultProgreso(0);
+          if (resultIntervalRef.current) { clearTimeout(resultIntervalRef.current); resultIntervalRef.current = null; }
+          setResultadoEmbarque(null);
         };
         return (
           <div
@@ -5805,8 +5875,8 @@ export default function ConductorApp() {
               <div style={{ padding: "8px 22px 28px" }}>
                 <div style={{ height: 4, background: "var(--c-line-2)", borderRadius: 2, overflow: "hidden" }}>
                   <div style={{
-                    height: "100%", width: `${resultProgreso}%`,
-                    background: color, transition: "width 0.03s linear",
+                    height: "100%", width: "100%", background: color,
+                    transformOrigin: "left", animation: "barraResultado 3s linear forwards",
                   }} />
                 </div>
                 <p style={{ margin: "8px 0 0", fontSize: 11, color: "var(--c-mute)", textAlign: "center" }}>
