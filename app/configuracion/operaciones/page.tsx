@@ -177,6 +177,29 @@ export default function ConfigOperacionesPage() {
     botonTexto: "Abrir app conductor",
     botonUrl: "https://transportesafa.com/conductor",
   };
+  // Asignación AGRUPADA: la usa el motor de alertas cuando a un mismo conductor se le
+  // programan VARIOS servicios de una sentada (antes recibía un WhatsApp por cada uno).
+  // Mientras no exista/esté aprobada, el motor cae solo a los mensajes de uno en uno,
+  // así que crearla es opcional — sólo mejora el resultado.
+  //
+  // SIN botón: los de mapa son por servicio y aquí hay varios.
+  // {{4}} va en UNA línea con " • " de separador porque Meta rechaza los parámetros con
+  // saltos de línea; los saltos que se ven en el mensaje son del texto fijo de abajo.
+  const PLANTILLA_ASIGNACION_MULTIPLE: NuevaPlantilla = {
+    name: "conductor_asignacion_multiple",
+    category: "UTILITY",
+    body: "Hola {{1}} 👋, se te asignaron *{{2}} servicios* para el {{3}}:\n\n{{4}}\n\nRevisa el detalle de cada uno en la app. Ante cualquier duda: {{5}}",
+    ejemplos: [
+      "Peter",
+      "4",
+      "viernes 28 de agosto",
+      "06:35 El Agustino → Punta Hermosa • 10:35 Primero de Mayo → Villa El Salvador",
+      "+51 999 888 777",
+    ],
+    botonTexto: "",
+    botonUrl: "",
+  };
+
   const [nuevaTpl, setNuevaTpl] = useState<NuevaPlantilla | null>(null);
   const [creandoTpl, setCreandoTpl] = useState(false);
   const varsDe = (texto: string) => [...new Set((texto.match(/\{\{\s*\d+\s*\}\}/g) ?? []).map((v) => v.replace(/\s/g, "")))].sort();
@@ -455,9 +478,14 @@ export default function ConfigOperacionesPage() {
         <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
           <h2 className="text-sm font-bold text-gray-700">Crear plantilla nueva</h2>
           {!nuevaTpl && (
-            <button onClick={() => setNuevaTpl({ ...PLANTILLA_CHECKOUT })} className="text-xs font-semibold text-[#0b315f] hover:underline">
-              Prellenar: recordatorio de Check-out
-            </button>
+            <div className="flex items-center gap-3 flex-wrap">
+              <button onClick={() => setNuevaTpl({ ...PLANTILLA_CHECKOUT })} className="text-xs font-semibold text-[#0b315f] hover:underline">
+                Prellenar: recordatorio de Check-out
+              </button>
+              <button onClick={() => setNuevaTpl({ ...PLANTILLA_ASIGNACION_MULTIPLE })} className="text-xs font-semibold text-[#0b315f] hover:underline">
+                Prellenar: varios servicios asignados
+              </button>
+            </div>
           )}
         </div>
         <p className="text-xs text-gray-500 mb-3">

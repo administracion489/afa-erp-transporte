@@ -1,6 +1,12 @@
 # Plantilla `conductor_asignacion_multiple` (WhatsApp / Meta)
 
-Hay que crearla en **WhatsApp Manager → Plantillas**, en la cuenta **Afa Notificaciones
+## Cómo crearla (sin salir del ERP)
+
+**ERP → Configuración → Operaciones** (`/configuracion/operaciones`), bloque
+**"Crear plantilla nueva"** → botón **"Prellenar: varios servicios asignados"** → revisa
+y pulsa crear. Sale ya rellenada con todo lo de abajo y se manda sola a revisión de Meta.
+
+Alternativa manual: **WhatsApp Manager → Plantillas**, en la cuenta **Afa Notificaciones
 (+51 905438216)** — la WABA de avisos (`1336334522036982`), que es de donde salen los
 mensajes a conductores y pasajeros.
 
