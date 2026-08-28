@@ -24,14 +24,18 @@ import { supabase } from "@/lib/supabase";
 import { fmtMoneda } from "@/lib/finanzas/dinero";
 import SinCostoTab from "./_tabs/SinCostoTab";
 import PorVisarTab from "./_tabs/PorVisarTab";
+import ConformidadesTab from "./_tabs/ConformidadesTab";
+import CierreTab from "./_tabs/CierreTab";
 import HistorialTab from "./_tabs/HistorialTab";
 
 type TabComp = React.ComponentType<{ onCambio: () => void }>;
 
 const TABS: { key: string; label: string; Comp: TabComp }[] = [
-  { key: "sin-costo",  label: "🔴 Sin costo pactado", Comp: SinCostoTab },
-  { key: "por-visar",  label: "✋ Por visar",          Comp: PorVisarTab },
-  { key: "historial",  label: "📜 Historial",         Comp: HistorialTab },
+  { key: "sin-costo",     label: "🔴 Sin costo pactado", Comp: SinCostoTab },
+  { key: "por-visar",     label: "✋ Por visar",          Comp: PorVisarTab },
+  { key: "conformidades", label: "✍️ Conformidades",     Comp: ConformidadesTab },
+  { key: "cierre",        label: "🔒 Periodos cerrados", Comp: CierreTab },
+  { key: "historial",     label: "📜 Historial",         Comp: HistorialTab },
 ];
 
 type Resumen = {
