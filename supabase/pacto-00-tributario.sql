@@ -312,7 +312,8 @@ end $$;
 --    Hoy devuelve aplica=false y coeficiente 100. El día que aparezca una venta no
 --    gravada se enciende sola, con la historia ya clasificada detrás.
 -- ────────────────────────────────────────────────────────────────────────────
-create or replace view public.v_prorrata_credito_fiscal as
+drop view if exists public.v_prorrata_credito_fiscal cascade;
+create view public.v_prorrata_credito_fiscal as
 with ventas as (
   select coalesce(a.grava, true) as grava,
          coalesce(a.da_credito, true) as da_credito,

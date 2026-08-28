@@ -186,7 +186,8 @@ comment on view public.v_costo_servicio is
 --    el dato está en la factura de compra o en el gasto de pago a tercero, en la otra
 --    punta del ERP, y nadie lo fue a buscar. Esta vista lo propone.
 -- ────────────────────────────────────────────────────────────────────────────
-create or replace view public.v_costo_tercero_huerfano as
+drop view if exists public.v_costo_tercero_huerfano cascade;
+create view public.v_costo_tercero_huerfano as
 select r.id as reserva_id, r.codigo as os, r.fecha_servicio, r.empresa_tercerizada_id,
        et.razon_social as proveedor,
        dc.id as origen_id, dc.total as importe_propuesto,
@@ -224,7 +225,8 @@ comment on view public.v_costo_tercero_huerfano is
 -- Una FACTURA que calza con varios servicios no dice el costo de ninguno: dice el total
 -- de todos. Aceptarla en cada uno multiplicaría el costo por el número de servicios.
 -- Esta vista es la que debe consumir la UI: solo deja pasar los cruces 1 a 1.
-create or replace view public.v_costo_tercero_propuesta as
+drop view if exists public.v_costo_tercero_propuesta cascade;
+create view public.v_costo_tercero_propuesta as
 with cruces as (
   select h.*,
          count(*) over (partition by h.reserva_id)             as candidatas_del_servicio,
@@ -246,7 +248,8 @@ comment on view public.v_costo_tercero_propuesta is
 --    Se deriva de reservas, no de un registro de cambios: así ve TODOS los rotos,
 --    los haya tocado alguien o no.
 -- ────────────────────────────────────────────────────────────────────────────
-create or replace view public.v_servicios_sin_costo as
+drop view if exists public.v_servicios_sin_costo cascade;
+create view public.v_servicios_sin_costo as
 select r.id as reserva_id, r.codigo as os, r.fecha_servicio, r.hora_servicio,
        r.direccion_servicio, r.ruta_nombre, r.estado, r.estado_proveedor,
        r.cotizacion_id, r.reserva_vinculada_id,
