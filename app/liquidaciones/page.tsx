@@ -31,7 +31,7 @@ import { buildLiquidacionHtml } from "@/lib/liquidacion-doc";
 import ModalEditor from "./ModalEditor";
 import ModalSede, { SEDE_VACIA, type Sede } from "./ModalSede";
 import ModalEnviar from "./ModalEnviar";
-import ModalCostos, { type ReservaSinCosto } from "./ModalCostos";
+import ModalCostos, { type ReservaSinCosto } from "@/components/pactos/ModalCostos";
 
 const COLS_RESERVA =
   "id,codigo,fecha_servicio,hora_servicio,estado,estado_admin,estado_proveedor,cliente_id,cliente_sede_id," +

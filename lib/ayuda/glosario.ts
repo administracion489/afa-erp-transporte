@@ -755,4 +755,64 @@ export const GLOSARIO: Record<string, Concepto> = {
       "Esta es la respuesta a “¿por qué Gastos y Finanzas me daban números distintos?”: antes cada pantalla sumaba por su cuenta y hoy las dos leen exactamente el mismo conjunto de egresos. Si algún día dos reportes te dan cifras diferentes, no elijas la que más te guste: revisa primero que los dos tengan los mismos filtros de fecha y de estado, y si aun así no cuadran, es señal de que algún monto se está registrando en dos sitios y hay que arreglarlo en el origen.",
     verTambien: ["saldo", "caja_chica", "margen_real", "comprobante", "fuga_bancaria"],
   },
+
+  pacto_servicio: {
+    clave: "pacto_servicio",
+    termino: "Pacto del servicio",
+    definicion:
+      "Es **lo que se acordó cobrar y lo que se acordó pagar por un servicio**, con nombre, fecha y motivo. Cada servicio tiene dos: uno de venta con el cliente y uno de compra con el proveedor.\nCada vez que uno de esos importes cambia, el sistema levanta un acta sola —con folio, el antes y el después, quién lo hizo y por qué—. No la escribe nadie a mano: la escribe la base de datos.",
+    ejemplo:
+      "Pactaste RUTA 1 con GLOBAL BUS en S/ 500. A los tres días mandan a TRANSPORTES B y cobran S/ 550. Al guardar el cambio nace el acta PSC-2026-000118: “GLOBAL BUS → TRANSPORTES B, S/ 500 → S/ 550, el proveedor no tenía unidad, Rosa, 14-ago”. Nadie escribió esa frase: salió del gesto de cambiar el proveedor.",
+    ojo:
+      "El pacto NO frena la operación. El bus sale igual, el conductor recibe su aviso igual y el servicio se presta igual. Lo único que se puede frenar es el pago al proveedor si el sobrecosto quedó sin visto bueno. Confundir las dos cosas es lo que hace que las reglas se odien y se saboteen.",
+    verTambien: ["adenda", "visado_gerencia", "costo_real_comparable", "regla_oro"],
+  },
+
+  afectacion_igv: {
+    clave: "afectacion_igv",
+    termino: "Afectación al IGV (gravado, exonerado, exportación)",
+    definicion:
+      "Es **cómo trata el IGV cada operación**, y no es igual para todas. En AFA conviven tres casos:\n• **Gravado** — lleva IGV 18 %. Es el transporte de personal, el grueso del negocio.\n• **Exonerado** — no lleva IGV. Es el servicio de taxi que AFA compra.\n• **Exportación** — no lleva IGV y además da derecho a recuperar el IGV de las compras. Es el paquete turístico vendido a un operador del exterior.",
+    ejemplo:
+      "Un mismo cierre de mes puede llevar una liquidación a una minera con 18 % de IGV y otra a una agencia extranjera a 0 %. Antes el sistema aplicaba una sola tasa a todo el periodo, así que ese cierre era imposible de emitir bien.",
+    ojo:
+      "De la afectación dependen tres cosas a la vez: si el comprobante lleva IGV, si hay detracción (**si no hay IGV, no hay detracción**) y cuánto te cuesta de verdad una compra. Por eso se declara por línea y no como una regla general de la casa.",
+    verTambien: ["igv", "credito_fiscal", "detraccion", "costo_real_comparable"],
+  },
+
+  costo_real_comparable: {
+    clave: "costo_real_comparable",
+    termino: "Costo real (comparable entre proveedores)",
+    definicion:
+      "Es **lo que de verdad sale del bolsillo de AFA** por una compra, una vez descontado el IGV que se recupera.\nSi el proveedor da factura y la operación es gravada, el IGV vuelve como crédito fiscal y el costo real es el importe sin IGV. Si es exonerado, o si el proveedor entrega boleta o es del RUS, no hay nada que recuperar y el costo real es el importe completo.",
+    ejemplo:
+      "Un bus **gravado** que te factura S/ 550 te cuesta **S/ 466.10**. Un taxi **exonerado** que te cobra S/ 500 te cuesta **S/ 500.00**. El “caro” de 550 es en realidad 7 % más barato que el “barato” de 500.",
+    ojo:
+      "Nunca compares dos costos por lo que dice el importe. Al revés también engaña: un exonerado de S/ 550 contra un gravado de S/ 500 no es 10 % más caro, es **30 %**. El panel de margen de Programación ya hace esta cuenta sola; el número que muestra es el bueno.",
+    verTambien: ["afectacion_igv", "credito_fiscal", "margen_real", "tercerizado"],
+  },
+
+  adenda: {
+    clave: "adenda",
+    termino: "Adenda del contrato",
+    definicion:
+      "Es **el resumen de todo lo que cambió en un contrato después de haberlo cotizado**: cuántos servicios se tocaron, cuánto subió o bajó la venta, cuánto el costo y cómo quedó el margen.\nNo se escribe: se arma sola juntando las actas de ese contrato.",
+    ejemplo:
+      "“Cotización #77 · +S/ 4 500 de venta · +S/ 1 800 de costo · 18 servicios · el cliente pidió otra unidad”. Eso es lo que se le imprime al cliente o a gerencia para sustentar por qué el mes salió distinto de lo cotizado.",
+    ojo:
+      "La adenda cuenta solo los cambios POSTERIORES a que el importe quedara pactado. Cargar por primera vez un costo que faltaba no es un cambio de contrato: es un dato que se estaba debiendo, y contarlo como adenda haría que un servicio regularizado pareciera una pérdida.",
+    verTambien: ["pacto_servicio", "liquidacion_cliente", "conformidad"],
+  },
+
+  visado_gerencia: {
+    clave: "visado_gerencia",
+    termino: "Visado (visto bueno de gerencia)",
+    definicion:
+      "Es **la autorización de un cambio que empeora el margen** más allá de lo tolerado. Llega a la cola de gerencia con el antes, el después, el motivo y quién lo hizo, y se aprueba o se rechaza en bloque.",
+    ejemplo:
+      "Con la política en +10 % o +S/ 100 y margen mínimo 15 %, un cambio de S/ 500 a S/ 550 se auto-aprueba y no molesta a nadie. Uno de S/ 550 a S/ 950 sí llega a la cola.",
+    ojo:
+      "Un cambio que MEJORA el margen nunca pide visado, y es a propósito: si conseguir un proveedor más barato costara el mismo trámite que uno más caro, el operador aprende a esconder los dos. Y visar no deshace nada —el servicio ya se prestó—: autoriza la plata, no la operación.",
+    verTambien: ["pacto_servicio", "estado_aprobacion", "margen_real"],
+  },
 };
