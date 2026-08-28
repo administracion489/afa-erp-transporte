@@ -73,15 +73,6 @@ export function nombreEsElNumero(c?: ContactoConTelefono | null): boolean {
   return tel9(nombre) === tel9(tel);
 }
 
-/** Enlace wa.me (requiere E.164 sin "+"), o null si no aplica. */
-export function enlaceWhatsApp(c?: ContactoConTelefono | null): string | null {
-  const d = telefonoDeContacto(c);
-  if (!d) return null;
-  // wa.me exige el código de país. Un número peruano de 9 dígitos lo lleva implícito.
-  const e164 = d.length === 9 ? `51${d}` : d;
-  return `https://wa.me/${e164}`;
-}
-
 /** ¿Coincide el número del contacto con lo que se está buscando? */
 export function coincideBusquedaTelefono(c: ContactoConTelefono | null | undefined, consulta: string): boolean {
   const digitosConsulta = consulta.replace(/\D/g, "");

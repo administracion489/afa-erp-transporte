@@ -2,9 +2,9 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import {
-  telefonoLegible, telefonoDeContacto, nombreEsElNumero,
-  enlaceWhatsApp, coincideBusquedaTelefono,
+  telefonoLegible, telefonoDeContacto, nombreEsElNumero, coincideBusquedaTelefono,
 } from "@/lib/crm-telefono";
+import { avisosAutomaticosDeTelefono, etiquetaAviso, type AvisoAutomatico } from "@/lib/crm-avisos-automaticos";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -120,6 +120,7 @@ export default function CRMPage() {
   const [cargando, setCargando] = useState(true);
   const [sincronizando, setSincronizando] = useState(false);
   const [acciones, setAcciones] = useState<AccionIA[]>([]);
+  const [avisos, setAvisos] = useState<AvisoAutomatico[]>([]);
   const [pidiendoIA, setPidiendoIA] = useState(false);
   const [nuevoContactoModal, setNuevoContactoModal] = useState(false);
   const [nuevoForm, setNuevoForm] = useState({ nombre: "", empresa: "", telefono: "", email: "", canal: "whatsapp", notas: "" });
@@ -221,6 +222,15 @@ export default function CRMPage() {
     setAcciones((data ?? []) as AccionIA[]);
   }, []);
 
+  // Qué recordatorio/aviso automático (fuera del CRM) le llegó a este contacto antes de
+  // escribir. Sólo aplica a WhatsApp: los avisos automáticos hoy sólo salen por ahí (o SMS
+  // de respaldo, que comparte número). Ver lib/crm-avisos-automaticos.ts para el porqué.
+  const cargarAvisosAutomaticos = useCallback(async (contacto?: Contacto, canal?: string) => {
+    const tel = telefonoDeContacto(contacto);
+    if (canal !== "whatsapp" || !tel) { setAvisos([]); return; }
+    setAvisos(await avisosAutomaticosDeTelefono(supabase, tel));
+  }, []);
+
   useEffect(() => {
     if (selected) {
       cargarMensajes(selected.id);
@@ -231,6 +241,17 @@ export default function CRMPage() {
       setAcciones([]);
     }
   }, [selected, cargarMensajes, cargarAcciones]);
+
+  // Efecto aparte: los avisos automáticos no cambian con cada patch de realtime
+  // (borrador, ia_pausada) que reasigna `selected`, así que se guarda el id ya
+  // consultado en un ref para no reconsultar notificaciones_enviadas en cada uno de esos.
+  const avisosCargadosDe = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selected) { avisosCargadosDe.current = null; setAvisos([]); return; }
+    if (avisosCargadosDe.current === selected.id) return;
+    avisosCargadosDe.current = selected.id;
+    cargarAvisosAutomaticos(selected.crm_contactos, selected.canal);
+  }, [selected, cargarAvisosAutomaticos]);
 
   // ── Realtime ───────────────────────────────────────────────────────────
 
@@ -626,17 +647,6 @@ export default function CRMPage() {
                       >
                         📞 {telefonoLegible(selected.crm_contactos)}
                       </button>
-                      {selected.canal === "whatsapp" && enlaceWhatsApp(selected.crm_contactos) && (
-                        <a
-                          href={enlaceWhatsApp(selected.crm_contactos)!}
-                          target="_blank"
-                          rel="noreferrer"
-                          title="Abrir este chat en WhatsApp"
-                          className="text-[#16a34a] hover:underline"
-                        >
-                          ↗
-                        </a>
-                      )}
                     </span>
                   )}
                   {selected.crm_contactos?.email && <span>· {selected.crm_contactos.email}</span>}
@@ -699,6 +709,31 @@ export default function CRMPage() {
               </a>
             </div>
           </div>
+
+          {/* ── Avisos automáticos previos ──
+              Recordatorios/avisos que el sistema le mandó a este número FUERA del CRM
+              (lib/notificaciones.ts nunca escribe en crm_mensajes). Sin esto no hay forma
+              de saber si un mensaje del cliente es espontáneo o una respuesta a un
+              recordatorio de reserva; no se guarda el texto exacto que se envió, sólo el
+              qué/cuándo. */}
+          {avisos.length > 0 && (
+            <div className="bg-amber-50/60 border-b border-amber-100 px-5 py-2.5">
+              <div className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide mb-1">
+                📨 Avisos automáticos enviados a este número
+              </div>
+              <div className="space-y-0.5">
+                {avisos.map((a) => (
+                  <div key={a.id} className="text-xs text-amber-800 flex items-center gap-1.5">
+                    <span>{etiquetaAviso(a)}</span>
+                    {a.reserva_id && <span className="text-amber-600">· reserva #{a.reserva_id}</span>}
+                    <span className="text-amber-500">
+                      · {new Date(a.created_at).toLocaleString("es-PE", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Mensajes */}
           <div className="flex-1 overflow-y-auto px-5 py-4 space-y-2">
