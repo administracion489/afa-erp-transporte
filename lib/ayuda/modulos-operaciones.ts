@@ -667,6 +667,11 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
           "Entran **WhatsApp, Messenger, Instagram, Gmail** y las **llamadas** que registres a mano. Cada conversación viene con su etiqueta de canal.\n\nSon dos números porque cumplen funciones distintas: uno de **Ventas** y otro de **Avisos** (el que manda los recordatorios a los pasajeros). Los dos caen en esta misma bandeja, y si te estorba mezclarlos hay un filtro por número.\n\nOjo: este WhatsApp es el **oficial de Meta**, el de la empresa. No confundir con el número del **Radar IA**, que es un teléfono aparte dedicado a escuchar grupos.",
       },
       {
+        pregunta: "¿Dónde veo el número de teléfono del que me escribe?",
+        respuesta:
+          "Al lado del nombre, arriba del chat, con un **📞** delante. Púlsalo y el número se copia al portapapeles; la flechita verde de al lado abre ese mismo chat en WhatsApp.\n\nTambién sale en la lista de la izquierda, debajo de cada conversación, para que puedas barrer la bandeja sin abrir hilo por hilo. Y el buscador acepta números: da igual que teclees **987654321** o **+51 987 654 321**, encuentra igual.\n\nNo lo confundas con el chip gris de la derecha, que dice **Ventas** o **Avisos**: ese es **tu** número, el de la empresa por el que entró la conversación.\n\nSi un contacto aparece con el número como nombre es porque su WhatsApp no tiene nombre de perfil público. Puedes ponerle nombre desde Clientes.\n\nEn Messenger e Instagram **no hay número**: Meta no lo entrega, sólo un identificador interno. Ahí el único contacto posible es responder por el mismo canal.",
+      },
+      {
         pregunta: "¿La IA le contesta sola a mis clientes?",
         respuesta:
           "**No sin ti.** Lo que hace es **proponer**: cuando llega un mensaje, prepara un borrador que aparece abajo marcado como “✨ Sugerencia de la IA”, y tú decides entre enviarlo, editarlo o descartarlo.\n\nNada sale hasta que alguien pulsa enviar. Si en una conversación delicada prefieres que ni siquiera sugiera, arriba del chat hay un interruptor que alterna entre **“🤖 IA activa”** y **“🤖 IA pausada”**, y afecta solo a ese hilo.\n\nTambién puedes pedirle ayuda tú, con el botón **✨ IA** al lado del cuadro de respuesta.",

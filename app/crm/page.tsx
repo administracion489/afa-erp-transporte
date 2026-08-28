@@ -1,6 +1,10 @@
 "use client";
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
+import {
+  telefonoLegible, telefonoDeContacto, nombreEsElNumero,
+  enlaceWhatsApp, coincideBusquedaTelefono,
+} from "@/lib/crm-telefono";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -33,6 +37,10 @@ const ALIAS_NUMERO: Record<string, string> = {
 
 // Meta manda display_phone_number como "51966707225" (sin +). Se filtra por ahí y no por
 // phone_number_id, que es un id interno y vive en variables de entorno del servidor.
+//
+// SÓLO para los números DE LA EMPRESA. Para el número del CLIENTE usa
+// formatearTelefono/telefonoLegible de @/lib/crm-telefono: si un cliente cayera aquí y su
+// número terminase igual que uno nuestro, se pintaría con el alias "Ventas"/"Avisos".
 const formatearNumero = (d: string) => {
   const alias = Object.entries(ALIAS_NUMERO).find(([suf]) => d.endsWith(suf))?.[1];
   const legible = d.startsWith("51") ? `+51 ${d.slice(2)}` : `+${d}`;
@@ -392,7 +400,10 @@ export default function CRMPage() {
     return (
       c.crm_contactos?.nombre?.toLowerCase().includes(q) ||
       c.crm_contactos?.empresa?.toLowerCase().includes(q) ||
-      c._ultimo_texto?.toLowerCase().includes(q)
+      c._ultimo_texto?.toLowerCase().includes(q) ||
+      // Por número: se comparan sólo los dígitos, así que da igual si se teclea
+      // "987654321", "+51 987 654 321" o "51-987-654-321".
+      coincideBusquedaTelefono(c.crm_contactos, busqueda)
     );
   });
 
@@ -453,7 +464,7 @@ export default function CRMPage() {
           {/* Búsqueda */}
           <input
             value={busqueda} onChange={(e) => setBusqueda(e.target.value)}
-            placeholder="Buscar conversación..."
+            placeholder="Buscar por nombre, empresa o número..."
             className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20"
           />
         </div>
@@ -533,12 +544,22 @@ export default function CRMPage() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-1">
                         <span className={`text-sm truncate ${c.no_leidos ? "font-semibold text-gray-900" : "font-medium text-gray-700"}`}>
-                          {c.crm_contactos?.nombre ?? "Sin nombre"}
+                          {nombreEsElNumero(c.crm_contactos)
+                            ? telefonoLegible(c.crm_contactos)
+                            : c.crm_contactos?.nombre ?? "Sin nombre"}
                         </span>
                         <span className="text-[10px] text-gray-400 flex-shrink-0">{fmtHora(c.ultimo_mensaje_at)}</span>
                       </div>
                       {c.crm_contactos?.empresa && (
                         <div className="text-[11px] text-gray-400 truncate">{c.crm_contactos.empresa}</div>
+                      )}
+                      {/* El número también en la lista: se barre la bandeja buscando "quién
+                          me escribió" sin tener que abrir cada hilo. Se omite cuando el
+                          nombre YA es el número, para no pintarlo dos veces. */}
+                      {!nombreEsElNumero(c.crm_contactos) && telefonoLegible(c.crm_contactos) && (
+                        <div className="text-[11px] text-gray-400 truncate">
+                          📞 {telefonoLegible(c.crm_contactos)}
+                        </div>
                       )}
                       <div className="flex items-center gap-1.5 mt-0.5">
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium" style={{ background: cfg.bg, color: cfg.color }}>
@@ -577,10 +598,47 @@ export default function CRMPage() {
                 {iniciales(selected.crm_contactos?.nombre ?? "?")}
               </div>
               <div>
-                <div className="font-semibold text-gray-900">{selected.crm_contactos?.nombre}</div>
+                <div className="font-semibold text-gray-900">
+                  {/* Sin nombre de perfil, el webhook guarda el número como nombre: en ese
+                      caso se muestra formateado y no se repite abajo. */}
+                  {nombreEsElNumero(selected.crm_contactos)
+                    ? telefonoLegible(selected.crm_contactos)
+                    : selected.crm_contactos?.nombre}
+                </div>
                 <div className="flex items-center gap-2 text-xs text-gray-500">
                   {selected.crm_contactos?.empresa && <span>{selected.crm_contactos.empresa}</span>}
-                  {selected.crm_contactos?.telefono && <span>· {selected.crm_contactos.telefono}</span>}
+                  {/* Número DEL CLIENTE. Va con su propio botón de copiar porque para eso
+                      se mira: para llamar o guardarlo. No confundir con el chip gris de la
+                      derecha, que es el número DE LA EMPRESA por el que entró el hilo. */}
+                  {!nombreEsElNumero(selected.crm_contactos) && telefonoLegible(selected.crm_contactos) && (
+                    <span className="flex items-center gap-1">
+                      <span>·</span>
+                      <button
+                        onClick={() => {
+                          const t = telefonoDeContacto(selected.crm_contactos);
+                          if (t) {
+                            navigator.clipboard?.writeText(t);
+                            showToast("Número copiado");
+                          }
+                        }}
+                        title="Copiar el número del contacto"
+                        className="font-medium text-gray-700 hover:text-[#0b315f] transition-colors"
+                      >
+                        📞 {telefonoLegible(selected.crm_contactos)}
+                      </button>
+                      {selected.canal === "whatsapp" && enlaceWhatsApp(selected.crm_contactos) && (
+                        <a
+                          href={enlaceWhatsApp(selected.crm_contactos)!}
+                          target="_blank"
+                          rel="noreferrer"
+                          title="Abrir este chat en WhatsApp"
+                          className="text-[#16a34a] hover:underline"
+                        >
+                          ↗
+                        </a>
+                      )}
+                    </span>
+                  )}
                   {selected.crm_contactos?.email && <span>· {selected.crm_contactos.email}</span>}
                 </div>
               </div>

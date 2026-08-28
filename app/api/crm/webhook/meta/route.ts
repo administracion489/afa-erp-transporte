@@ -145,17 +145,34 @@ async function processarMensaje(m: MsgInput): Promise<string | null> {
   // Buscar o crear contacto
   let { data: contacto } = await supabase
     .from("crm_contactos")
-    .select("id")
+    .select("id, telefono")
     .eq(m.idField, m.senderId)
     .maybeSingle();
+
+  // En WhatsApp el senderId ES el teléfono del cliente en E.164 sin "+" (51987654321).
+  // Se copia además a `telefono` porque `wa_id` es la clave técnica de Meta y las
+  // pantallas del ERP leen `telefono`: sin esta copia el operador veía el nombre del
+  // contacto y ningún número al que llamar. En Messenger/Instagram el senderId es un id
+  // opaco (fb_psid/ig_id), NO un teléfono — ahí no se copia nada.
+  const telefonoWa = m.canal === "whatsapp" ? m.senderId : null;
 
   if (!contacto) {
     const { data: nc } = await supabase
       .from("crm_contactos")
-      .insert({ nombre: m.senderName || m.senderId, canal_origen: m.canal, [m.idField]: m.senderId })
-      .select("id")
+      .insert({
+        nombre: m.senderName || m.senderId,
+        canal_origen: m.canal,
+        [m.idField]: m.senderId,
+        ...(telefonoWa ? { telefono: telefonoWa } : {}),
+      })
+      .select("id, telefono")
       .single();
     contacto = nc;
+  } else if (telefonoWa && !contacto.telefono) {
+    // Contacto anterior a este cambio: se rellena una sola vez. La condición
+    // `!contacto.telefono` es la que impide pisar un número corregido a mano — este
+    // bloque corre en CADA mensaje entrante.
+    await supabase.from("crm_contactos").update({ telefono: telefonoWa }).eq("id", contacto.id);
   }
 
   // Consentimiento WhatsApp: quien escribe por WhatsApp queda opt-in automático
