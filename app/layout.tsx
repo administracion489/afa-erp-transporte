@@ -356,6 +356,7 @@ const menuGrupos: { grupo: string; items: MenuItem[] }[] = [
   {
     grupo: "Finanzas",
     items: [
+      { href: "/pactos",        label: "Pactos",        sub: "Costos sin pactar · Por visar", icon: Ic.Handshake, modulo: "pactos" },
       { href: "/liquidaciones", label: "Liquidaciones", sub: "Cierre cliente / proveedor", icon: Ic.Scale,        modulo: "liquidaciones" },
       { href: "/finanzas",      label: "Finanzas",      sub: "Ingresos · Egresos · Tesorería", icon: Ic.Wallet,   modulo: "finanzas"      },
       { href: "/tesoreria",     label: "Cuentas por Pagar", sub: "CxP · Planilla · Detracciones · Banco", icon: Ic.Clipboard, modulo: "tesoreria" },
@@ -598,7 +599,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const esPublica =
     // Rutas públicas estándar (raíz + sub-rutas)
     // /conformidad/[token] es público: el cliente aprueba su liquidación sin cuenta.
-    ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad", "/cliente", "/conductor-tercero", "/manuales", "/conformidad", "/proveedor"].some(
+    // /conformidad-cambio/[token] es su equivalente para UN cambio de servicio (el
+    // cliente pidió una unidad mayor): su firma es lo que hace cobrable el diferencial.
+    // Va ANTES que "/conformidad" en la lista por claridad; el `some` no depende del
+    // orden, pero sí de que sea su propia entrada — "/conformidad" no lo cubre, porque
+    // el prefijo se compara con "/" al final y "conformidad-cambio" no calza.
+    ["/conductor", "/lector", "/pasajero", "/registro", "/privacidad", "/cliente", "/conductor-tercero", "/manuales", "/conformidad-cambio", "/conformidad", "/proveedor"].some(
       (r) => pathname === r || pathname.startsWith(r + "/")
     ) ||
     // /seguimiento/[token] es público — pero /seguimiento (módulo ERP) NO

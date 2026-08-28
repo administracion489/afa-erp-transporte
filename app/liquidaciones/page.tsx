@@ -31,6 +31,7 @@ import { buildLiquidacionHtml } from "@/lib/liquidacion-doc";
 import ModalEditor from "./ModalEditor";
 import ModalSede, { SEDE_VACIA, type Sede } from "./ModalSede";
 import ModalEnviar from "./ModalEnviar";
+import ModalCostos, { type ReservaSinCosto } from "@/components/pactos/ModalCostos";
 
 const COLS_RESERVA =
   "id,codigo,fecha_servicio,hora_servicio,estado,estado_admin,estado_proveedor,cliente_id,cliente_sede_id," +
@@ -123,6 +124,7 @@ export default function LiquidacionesPage() {
   const [editor, setEditor] = useState<number | null>(null);
   const [modalSede, setModalSede] = useState<{ sede: Sede; cliente: string } | null>(null);
   const [enviar, setEnviar] = useState<any | null>(null);
+  const [modalCostos, setModalCostos] = useState<ReservaSinCosto[] | null>(null);
 
   // ── Carga ────────────────────────────────────────────────────────────────
   async function cargar() {
@@ -156,6 +158,17 @@ export default function LiquidacionesPage() {
       const comap: Record<string, string> = {};
       for (const c of ((co.data as any[]) ?? [])) comap["p" + c.id] = c.nombre;
       for (const c of ((ct.data as any[]) ?? [])) comap["t" + c.id] = c.nombre;
+      // Campos tributarios en consulta aparte y tolerante: si todavía no se corrió
+      // supabase/pacto-00-tributario.sql las columnas no existen y PostgREST rechaza
+      // el select entero. Sin ellos el modal de costos asume gravado, que es el caso
+      // normal de AFA — la pantalla no se cae por una migración pendiente.
+      const tt = await supabase
+        .from("empresas_tercerizadas")
+        .select("id,afectacion_defecto,emite_factura");
+      if (!tt.error)
+        for (const t of ((tt.data as any[]) ?? []))
+          if (tmap[t.id]) Object.assign(tmap[t.id], { afectacion_defecto: t.afectacion_defecto, emite_factura: t.emite_factura });
+
       setClientes(cmap); setTerceros(tmap); setVehiculos(vmap); setConductores(comap); setIgvPct(cfg);
 
       // Las tablas nuevas pueden no existir todavía: se avisa y la pantalla sigue viva.
@@ -254,6 +267,25 @@ export default function LiquidacionesPage() {
 
   const seleccionados = grupos.filter((g) => sel.has(g.clave) && g.lineas.length);
   const totalSeleccionado = seleccionados.reduce((a, g) => a + g.total, 0);
+
+  /**
+   * Los servicios que el bloque rojo marca "Sin costo de proveedor". Antes solo se
+   * podían mirar: había que ir a Programación uno por uno, sin saber cuánto se pactó.
+   * Ahora alimentan el modal que los carga en lote y desbloquea el cierre del mes.
+   */
+  const sinCosto = useMemo<ReservaSinCosto[]>(() => {
+    if (lado !== "proveedor") return [];
+    const vistos = new Set<number>();
+    const out: ReservaSinCosto[] = [];
+    for (const g of grupos)
+      for (const { r, motivos } of g.bloqueadas) {
+        if (!motivos.some((m: string) => m.includes("Sin costo de proveedor"))) continue;
+        if (vistos.has(r.id)) continue;
+        vistos.add(r.id);
+        out.push(r as ReservaSinCosto);
+      }
+    return out;
+  }, [grupos, lado]);
 
   function toggle(clave: string) {
     setSel((s) => { const n = new Set(s); n.has(clave) ? n.delete(clave) : n.add(clave); return n; });
@@ -412,6 +444,12 @@ export default function LiquidacionesPage() {
               <b>{grupos.length}</b> grupo(s) en el periodo · <b>{seleccionados.length}</b> seleccionado(s)
             </span>
             <span className="font-black" style={{ color: cp }}>{fmtMoneda(totalSeleccionado)}</span>
+            {sinCosto.length > 0 && (
+              <button onClick={() => setModalCostos(sinCosto)}
+                className="px-3 py-2 rounded-xl text-sm font-bold text-red-700 bg-red-50 border border-red-200 hover:bg-red-100">
+                Cargar {sinCosto.length} costo(s) faltante(s)
+              </button>
+            )}
             <button disabled={trabajando || !seleccionados.length} onClick={liquidarSeleccion}
               className="ml-auto px-4 py-2 rounded-xl text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40">
               {trabajando ? "Generando…" : `Liquidar ${seleccionados.length || ""} grupo(s) → ${seleccionados.length || 0} documento(s)`}
@@ -593,6 +631,11 @@ export default function LiquidacionesPage() {
           contraparte={lado === "cliente" ? clientes[enviar.cliente_id] : terceros[enviar.empresa_tercerizada_id]}
           onCerrar={() => setEnviar(null)}
           onEnviado={() => { setEnviar(null); cargarLiquidaciones(); }} />
+      )}
+      {modalCostos && (
+        <ModalCostos reservas={modalCostos} terceros={terceros}
+          onCerrar={() => setModalCostos(null)}
+          onGuardado={() => { setModalCostos(null); setMsg("Costos pactados. El bloque rojo se recalcula."); cargar(); }} />
       )}
     </div>
   );
