@@ -33,6 +33,13 @@
 -- Cómo correrlo: Supabase → SQL Editor → pegar y ejecutar. Es idempotente.
 -- ══════════════════════════════════════════════════════════════════════════════
 
+-- El ERP de AFA está EN USO mientras esto corre. `alter table` sobre `reservas`
+-- necesita el candado exclusivo de la tabla más consultada del sistema: con
+-- lock_timeout, si está ocupada esto falla en 15 segundos con un mensaje claro en vez
+-- de quedarse colgado bloqueando la operación. Si falla, se reintenta en un momento
+-- tranquilo — la transacción se revierte completa y no queda nada a medias.
+set lock_timeout = '15s';
+
 -- ────────────────────────────────────────────────────────────────────────────
 -- 1) EL VEREDICTO — ¿este cambio necesita visto bueno?
 --

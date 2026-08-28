@@ -28,6 +28,71 @@
 -- Cómo correrlo: Supabase → SQL Editor → pegar y ejecutar. Es idempotente.
 -- ══════════════════════════════════════════════════════════════════════════════
 
+-- ══════════════════════════════════════════════════════════════════════════════
+-- ANTES QUE NADA: el candado sobre `reservas`, UNA sola vez y de entrada.
+--
+-- Este bloque iba al final y provocó un deadlock real en la base de producción de
+-- AFA. La causa: `servicio_pacto` tiene una FK a `reservas`, así que crearla toma un
+-- candado ligero sobre esa tabla; el `alter table` de más abajo necesitaba ESCALARLO
+-- a exclusivo. Entre una cosa y otra, una consulta del ERP —que estaba en uso— pidió
+-- leer `reservas` y se puso en cola detrás del exclusivo pendiente. Las tres se
+-- trabaron y Postgres abortó la transacción entera.
+--
+-- Escalar un candado a mitad de transacción es una receta conocida de deadlock. Pedir
+-- el más fuerte al principio lo elimina: cuando se cree la FK, la transacción ya
+-- tiene el candado que necesita y no hay nada que escalar.
+--
+-- `lock_timeout` es el cinturón: si la tabla está ocupada, esto falla en 15 segundos
+-- con un mensaje claro en vez de quedarse colgado bloqueando la operación. Si falla,
+-- se reintenta en un momento tranquilo. No pasa nada: la transacción se revierte
+-- completa y no queda nada a medias.
+--
+-- Agregar columnas nulables sin default es una operación de catálogo: no reescribe la
+-- tabla ni depende de cuántas filas tenga. El candado dura milisegundos.
+-- ══════════════════════════════════════════════════════════════════════════════
+set lock_timeout = '15s';
+
+-- ESTADOS DEL MONTO en `reservas`.
+--
+--   NO se cambia el tipo ni el significado de precio_cliente / costo_proveedor: los
+--   38 escritores y las 17 pantallas que hoy los leen siguen viendo lo mismo. Lo que
+--   se agrega es qué SIGNIFICA su cero, que hoy es ambiguo:
+--
+--     pendiente  → nadie pactó nada. Es deuda con plazo.
+--     pactado    → hay importe acordado.
+--     incluido   → la tarifa va en el tramo hermano (el retorno de un par).
+--     no_aplica  → flota propia, no hay proveedor a quien pagarle.
+--
+--   Volver NULL el importe habría sido lo semánticamente correcto y lo operativamente
+--   suicida: hay once lugares que fuerzan el nulo a cero, incluidos los tres de
+--   liquidacion-agrupacion.ts que deciden el bloqueo de la liquidación.
+alter table public.reservas
+  add column if not exists costo_estado      text,
+  add column if not exists precio_estado     text,
+  add column if not exists costo_pactado_at  timestamptz,
+  add column if not exists costo_limite_at   timestamptz,
+  add column if not exists precio_pactado_at timestamptz,
+  add column if not exists cambio_motivo     text,
+  add column if not exists cambio_nota       text,
+  add column if not exists cambio_at         timestamptz,
+  add column if not exists actualizado_at    timestamptz,
+  add column if not exists actualizado_por   uuid;
+
+alter table public.reservas drop constraint if exists reservas_costo_estado_check;
+alter table public.reservas add constraint reservas_costo_estado_check
+  check (costo_estado is null or costo_estado in ('pendiente','pactado','incluido','no_aplica'));
+alter table public.reservas drop constraint if exists reservas_precio_estado_check;
+alter table public.reservas add constraint reservas_precio_estado_check
+  check (precio_estado is null or precio_estado in ('pendiente','pactado','incluido','no_aplica'));
+
+comment on column public.reservas.costo_estado is
+  'Resuelve la ambigüedad del cero SIN cambiar el tipo de costo_proveedor. Un retorno '
+  '"incluido" deja de aparecer en el rojo de /liquidaciones, que es lo que infla las '
+  'líneas rojas a casi el doble de los problemas reales.';
+comment on column public.reservas.cambio_motivo is
+  'Lo declara quien guarda el cambio (clave de pacto_motivo). El trigger lo copia al '
+  'acta y lo limpia, para que no quede pegado al siguiente cambio.';
+
 -- ────────────────────────────────────────────────────────────────────────────
 -- 1) MOTIVOS — por qué cambió. Tabla y no enum: los motivos se afinan con el uso.
 --    Son pocos y de un clic a propósito: si pedir el motivo cuesta escribir un
@@ -185,49 +250,6 @@ comment on table public.servicio_pacto is
   'El acta de todo cambio económico de un servicio. La escribe un trigger, no la app: '
   'las escrituras del ERP salen del navegador y cualquier regla de pantalla se salta. '
   'Append-only — solo se actualiza para visar o para marcar el efecto de cierre.';
-
--- ────────────────────────────────────────────────────────────────────────────
--- 5) ESTADOS DEL MONTO en `reservas`.
---
---    NO se cambia el tipo ni el significado de precio_cliente / costo_proveedor: los
---    38 escritores y las 17 pantallas que hoy los leen siguen viendo lo mismo. Lo que
---    se agrega es qué SIGNIFICA su cero, que hoy es ambiguo:
---
---      pendiente  → nadie pactó nada. Es deuda con plazo.
---      pactado    → hay importe acordado.
---      incluido   → la tarifa va en el tramo hermano (el retorno de un par).
---      no_aplica  → flota propia, no hay proveedor a quien pagarle.
---
---    Volver NULL el importe habría sido lo semánticamente correcto y lo
---    operativamente suicida: hay once lugares que fuerzan el nulo a cero, incluidos
---    los tres de liquidacion-agrupacion.ts que deciden el bloqueo.
--- ────────────────────────────────────────────────────────────────────────────
-alter table public.reservas
-  add column if not exists costo_estado      text,
-  add column if not exists precio_estado     text,
-  add column if not exists costo_pactado_at  timestamptz,
-  add column if not exists costo_limite_at   timestamptz,
-  add column if not exists precio_pactado_at timestamptz,
-  add column if not exists cambio_motivo     text,
-  add column if not exists cambio_nota       text,
-  add column if not exists cambio_at         timestamptz,
-  add column if not exists actualizado_at    timestamptz,
-  add column if not exists actualizado_por   uuid;
-
-alter table public.reservas drop constraint if exists reservas_costo_estado_check;
-alter table public.reservas add constraint reservas_costo_estado_check
-  check (costo_estado is null or costo_estado in ('pendiente','pactado','incluido','no_aplica'));
-alter table public.reservas drop constraint if exists reservas_precio_estado_check;
-alter table public.reservas add constraint reservas_precio_estado_check
-  check (precio_estado is null or precio_estado in ('pendiente','pactado','incluido','no_aplica'));
-
-comment on column public.reservas.costo_estado is
-  'Resuelve la ambigüedad del cero SIN cambiar el tipo de costo_proveedor. Un retorno '
-  '"incluido" deja de aparecer en el rojo de /liquidaciones, que es lo que infla las '
-  'líneas rojas a casi el doble de los problemas reales.';
-comment on column public.reservas.cambio_motivo is
-  'Lo declara quien guarda el cambio (clave de pacto_motivo). El trigger lo copia al '
-  'acta y lo limpia, para que no quede pegado al siguiente cambio.';
 
 create index if not exists idx_reservas_costo_estado
   on public.reservas (costo_estado, fecha_servicio) where costo_estado = 'pendiente';

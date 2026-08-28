@@ -27,6 +27,13 @@
 -- No crea triggers ni bloquea ninguna escritura: es 100 % aditivo y reversible.
 -- ══════════════════════════════════════════════════════════════════════════════
 
+-- El ERP de AFA está EN USO mientras esto corre. `alter table` sobre `reservas`
+-- necesita el candado exclusivo de la tabla más consultada del sistema: con
+-- lock_timeout, si está ocupada esto falla en 15 segundos con un mensaje claro en vez
+-- de quedarse colgado bloqueando la operación. Si falla, se reintenta en un momento
+-- tranquilo — la transacción se revierte completa y no queda nada a medias.
+set lock_timeout = '15s';
+
 -- ────────────────────────────────────────────────────────────────────────────
 -- 1) CATÁLOGO 07 DE SUNAT — Tipo de afectación del IGV.
 --    Se usa el catálogo oficial (y no un enum propio) porque es exactamente lo que
