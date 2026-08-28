@@ -20,6 +20,16 @@
 -- Es idempotente: se puede correr de nuevo sin duplicar (el `not exists` lo impide).
 -- ══════════════════════════════════════════════════════════════════════════════
 
+-- Este es el único archivo que escribe sobre TODAS las filas de `reservas`. No toma el
+-- candado exclusivo de la tabla (un UPDATE no bloquea las lecturas del ERP), pero sí
+-- bloquea fila por fila: si alguien guarda una reserva justo mientras esto corre, su
+-- guardado espera a que termine. Con lock_timeout, el que cede es este script y no la
+-- operación de la empresa. Reintentar es seguro: la transacción se revierte completa.
+--
+-- Nada de esto toca precio_cliente ni costo_proveedor: solo las columnas de estado que
+-- crearon pacto-00 y pacto-02, que están vacías en todas las filas.
+set lock_timeout = '15s';
+
 -- ────────────────────────────────────────────────────────────────────────────
 -- 1) DECLARAR EL ESTADO DEL MONTO en lo que ya existe.
 --    Los triggers solo actúan sobre filas nuevas o que se modifiquen; el parque
