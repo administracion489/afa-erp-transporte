@@ -222,14 +222,22 @@ export default function CRMPage() {
     setAcciones((data ?? []) as AccionIA[]);
   }, []);
 
-  // Qué recordatorio/aviso automático (fuera del CRM) le llegó a este contacto ANTES de
-  // que arrancara esta conversación. Sólo aplica a WhatsApp: los avisos automáticos hoy
-  // sólo salen por ahí (o SMS de respaldo, que comparte número). Ver
-  // lib/crm-avisos-automaticos.ts para el porqué del filtro "antes de".
-  const cargarAvisosAutomaticos = useCallback(async (conv: Conversacion) => {
+  // Los avisos automáticos (fuera del CRM) que recibió este número, para intercalarlos
+  // en la línea de tiempo del chat. Sólo aplica a WhatsApp: los avisos automáticos hoy
+  // sólo salen por ahí (o SMS de respaldo, que comparte número).
+  //
+  // Se ancla al PRIMER MENSAJE del hilo — no a conv.created_at: la conversación puede
+  // llevar semanas abierta, y anclarla a su creación ocultaba todo aviso posterior,
+  // que son justo los que explican los mensajes recientes. El margen de 24h hacia atrás
+  // es para alcanzar el aviso que provocó ese primer mensaje.
+  const cargarAvisosAutomaticos = useCallback(async (conv: Conversacion, msgs: Mensaje[]) => {
     const tel = telefonoDeContacto(conv.crm_contactos);
     if (conv.canal !== "whatsapp" || !tel) { setAvisos([]); return; }
-    setAvisos(await avisosAutomaticosDeTelefono(supabase, tel, conv.created_at, 3));
+    const primero = msgs[0]?.created_at ?? conv.created_at;
+    const desde = primero
+      ? new Date(new Date(primero).getTime() - 24 * 60 * 60 * 1000).toISOString()
+      : null;
+    setAvisos(await avisosAutomaticosDeTelefono(supabase, tel, desde));
   }, []);
 
   useEffect(() => {
@@ -243,16 +251,17 @@ export default function CRMPage() {
     }
   }, [selected, cargarMensajes, cargarAcciones]);
 
-  // Efecto aparte: los avisos automáticos no cambian con cada patch de realtime
-  // (borrador, ia_pausada) que reasigna `selected`, así que se guarda el id ya
-  // consultado en un ref para no reconsultar notificaciones_enviadas en cada uno de esos.
+  // Depende de los mensajes ya cargados (el primero fija la ventana), así que corre
+  // después de cargarMensajes y no en el efecto de arriba. El ref evita reconsultar
+  // notificaciones_enviadas en cada patch de realtime que reasigna `selected`.
   const avisosCargadosDe = useRef<string | null>(null);
   useEffect(() => {
     if (!selected) { avisosCargadosDe.current = null; setAvisos([]); return; }
-    if (avisosCargadosDe.current === selected.id) return;
-    avisosCargadosDe.current = selected.id;
-    cargarAvisosAutomaticos(selected);
-  }, [selected, cargarAvisosAutomaticos]);
+    const clave = `${selected.id}:${mensajes.length}`;
+    if (avisosCargadosDe.current === clave) return;
+    avisosCargadosDe.current = clave;
+    cargarAvisosAutomaticos(selected, mensajes);
+  }, [selected, mensajes, cargarAvisosAutomaticos]);
 
   // ── Realtime ───────────────────────────────────────────────────────────
 
@@ -413,6 +422,19 @@ export default function CRMPage() {
       }
     }
   };
+
+  // ── Línea de tiempo del chat ───────────────────────────────────────────
+  // Mensajes del hilo + avisos automáticos (que viven fuera del CRM) fundidos por fecha,
+  // para que cada mensaje quede debajo del envío que lo pudo provocar.
+
+  type ItemTimeline =
+    | { kind: "mensaje"; at: string; mensaje: Mensaje }
+    | { kind: "aviso"; at: string; aviso: AvisoAutomatico };
+
+  const timeline: ItemTimeline[] = [
+    ...mensajes.map((m): ItemTimeline => ({ kind: "mensaje", at: m.created_at, mensaje: m })),
+    ...avisos.map((a): ItemTimeline => ({ kind: "aviso", at: a.created_at, aviso: a })),
+  ].sort((x, y) => new Date(x.at).getTime() - new Date(y.at).getTime());
 
   // ── Filtros ────────────────────────────────────────────────────────────
 
@@ -711,50 +733,50 @@ export default function CRMPage() {
             </div>
           </div>
 
-          {/* ── Por qué escribió: el aviso automático justo antes de esta conversación ──
-              Recordatorios/avisos que el sistema le mandó a este número FUERA del CRM
-              (lib/notificaciones.ts nunca escribe en crm_mensajes). avisos[0] es SIEMPRE
-              el más cercano — y anterior — al inicio del hilo (filtrado en
-              cargarAvisosAutomaticos con conv.created_at); si no hay ninguno antes, la
-              conversación fue espontánea y no se pinta nada. No se guarda el texto exacto
+          {/* Mensajes — con los avisos automáticos intercalados en su momento exacto.
+              Esos avisos salen FUERA del CRM (lib/notificaciones.ts nunca escribe en
+              crm_mensajes), así que sin intercalarlos un "Muchas gracias" suelto no dice
+              nada; debajo del aviso que lo precede se explica solo. No se guarda el texto
               que se envió, sólo el qué/cuándo — nunca se finge citarlo. */}
-          {avisos.length > 0 && (
-            <div className="bg-amber-50/60 border-b border-amber-100 px-5 py-2.5">
-              <div className="text-xs text-amber-800">
-                <span className="font-semibold">📨 Posible motivo:</span> justo antes de
-                escribir, el sistema le había enviado un{" "}
-                <span className="font-medium">{etiquetaAviso(avisos[0]).toLowerCase()}</span>
-                {avisos[0].reserva_id && <> (reserva #{avisos[0].reserva_id})</>}
-                {" "}el{" "}
-                {new Date(avisos[0].created_at).toLocaleString("es-PE", {
-                  day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
-                })}.
-              </div>
-              {avisos.length > 1 && (
-                <div className="text-[11px] text-amber-600 mt-0.5">
-                  + {avisos.length - 1} aviso{avisos.length > 2 ? "s" : ""} más antes de esa fecha
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Mensajes */}
           <div className="flex-1 overflow-y-auto px-5 py-4 space-y-2">
-            {mensajes.length === 0 && (
+            {mensajes.length === 0 && avisos.length === 0 && (
               <div className="text-center text-gray-400 text-sm py-12">Sin mensajes aún</div>
             )}
-            {mensajes.map((m, i) => {
-              const esMio = m.direccion === "saliente";
+            {timeline.map((item, i) => {
               const showDate =
                 i === 0 ||
-                new Date(mensajes[i - 1].created_at).toDateString() !== new Date(m.created_at).toDateString();
+                new Date(timeline[i - 1].at).toDateString() !== new Date(item.at).toDateString();
+              const separador = showDate && (
+                <div className="text-center text-xs text-gray-400 py-2">
+                  {new Date(item.at).toLocaleDateString("es-PE", { weekday: "long", day: "2-digit", month: "long" })}
+                </div>
+              );
+
+              if (item.kind === "aviso") {
+                const a = item.aviso;
+                return (
+                  <React.Fragment key={`a-${a.id}`}>
+                    {separador}
+                    <div className="flex justify-center">
+                      <div
+                        className="max-w-md w-full bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-xs text-amber-800"
+                        title="Aviso automático del sistema — no forma parte del chat de WhatsApp"
+                      >
+                        <span className="font-semibold">📨 Envío automático del sistema:</span>{" "}
+                        {etiquetaAviso(a).toLowerCase()}
+                        {a.reserva_id && <> · reserva #{a.reserva_id}</>}
+                        <span className="text-amber-600"> · {fmtFechaMsg(a.created_at)}</span>
+                      </div>
+                    </div>
+                  </React.Fragment>
+                );
+              }
+
+              const m = item.mensaje;
+              const esMio = m.direccion === "saliente";
               return (
                 <React.Fragment key={m.id}>
-                  {showDate && (
-                    <div className="text-center text-xs text-gray-400 py-2">
-                      {new Date(m.created_at).toLocaleDateString("es-PE", { weekday: "long", day: "2-digit", month: "long" })}
-                    </div>
-                  )}
+                  {separador}
                   <div className={`flex ${esMio ? "justify-end" : "justify-start"}`}>
                     <div
                       className={`max-w-sm px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed

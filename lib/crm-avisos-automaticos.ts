@@ -1,6 +1,5 @@
-// Qué aviso automático le llegó a un contacto ANTES de que escribiera — para responder
-// "¿por qué me está escribiendo?" cuando la conversación la abrió una respuesta a un
-// recordatorio, no un mensaje espontáneo.
+// Los avisos automáticos que le llegaron a un contacto, para intercalarlos en el chat y
+// poder responder "¿por qué me está escribiendo?" en cada punto del hilo.
 //
 // El sistema manda recordatorios de reserva, avisos de llegada, etc. por WhatsApp
 // (lib/notificaciones.ts) totalmente fuera del CRM: nunca se insertan en
@@ -8,8 +7,10 @@
 // (tabla pensada para el dedupe del cron, no para mostrarse). Sin este cruce, el
 // operador ve el mensaje del cliente sin ningún rastro de qué lo provocó.
 //
-// Se filtra por ANTES de que empezara la conversación: mostrar avisos posteriores no
-// explica nada — son cosas que pasaron después, no lo que la activó — y sólo confunden.
+// Se devuelven en orden cronológico para pintarlos EN LA LÍNEA DE TIEMPO, junto a los
+// mensajes. Ese es el punto: un "Muchas gracias" suelto no dice nada, pero justo debajo
+// del aviso que lo precede se explica solo — y vale para cada mensaje del hilo, no sólo
+// para el primero.
 //
 // No hay texto guardado del mensaje enviado (esa tabla no lo loguea, sólo tipo/estado/
 // trigger/fecha), así que esto NUNCA finge mostrar "lo que se le mandó" literal — sólo
@@ -37,22 +38,27 @@ export const etiquetaAviso = (a: Pick<AvisoAutomatico, "trigger_origen">) =>
   ETIQUETA_TRIGGER[a.trigger_origen] ?? a.trigger_origen;
 
 /**
- * Avisos por WhatsApp/SMS mandados a un teléfono ANTES de `antesDe` (ISO), lo más
- * recientes primero. Sin `antesDe` no filtra por fecha — úsalo sólo para depurar; en el
- * Inbox siempre se pasa el momento en que arrancó la conversación.
+ * Avisos por WhatsApp/SMS mandados a un teléfono DESDE `desde` (ISO) en adelante, para
+ * intercalarlos en la línea de tiempo del chat.
+ *
+ * Se ancla al PRIMER MENSAJE del hilo, no a cuándo se creó la conversación: un hilo
+ * abierto hace semanas sigue recibiendo mensajes, y cada uno puede ser respuesta a un
+ * aviso distinto. Anclarlo a la conversación dejaba fuera todo aviso posterior al día
+ * en que se abrió — justo los que explican los mensajes recientes.
  *
  * Se matchea por los últimos 9 dígitos (mismo criterio que el resto del CRM, ver
  * lib/crm-telefono.ts) porque `notificaciones_enviadas.destinatario` guarda E.164 con
  * "+" y no siempre con el mismo prefijo que trae `wa_id`.
  *
  * Un mismo aviso puede haberse logueado dos veces (WhatsApp y su fallback SMS): se
- * deduplica por reserva_id + trigger_origen, quedándose con el más reciente de cada uno.
+ * deduplica por reserva_id + trigger_origen dentro de la misma hora, para no pintar dos
+ * líneas idénticas seguidas sin colapsar avisos legítimamente repetidos en días distintos.
  */
 export async function avisosAutomaticosDeTelefono(
   sb: SupabaseClient,
   telefonoDigits: string,
-  antesDe?: string | null,
-  limite = 15,
+  desde?: string | null,
+  limite = 50,
 ): Promise<AvisoAutomatico[]> {
   const nueve = telefonoDigits.replace(/\D/g, "").slice(-9);
   if (nueve.length < 9) return [];
@@ -63,9 +69,9 @@ export async function avisosAutomaticosDeTelefono(
     .in("tipo", ["whatsapp", "sms"])
     .eq("estado", "enviado")
     .ilike("destinatario", `%${nueve}`)
-    .order("created_at", { ascending: false })
+    .order("created_at", { ascending: true })
     .limit(limite);
-  if (antesDe) q = q.lt("created_at", antesDe);
+  if (desde) q = q.gte("created_at", desde);
 
   const { data, error } = await q;
   if (error || !data) return [];
@@ -73,7 +79,8 @@ export async function avisosAutomaticosDeTelefono(
   const vistos = new Set<string>();
   const avisos: AvisoAutomatico[] = [];
   for (const r of data) {
-    const clave = `${r.reserva_id ?? "sin-reserva"}:${r.trigger_origen}`;
+    const hora = String(r.created_at).slice(0, 13); // YYYY-MM-DDTHH
+    const clave = `${r.reserva_id ?? "sin-reserva"}:${r.trigger_origen}:${hora}`;
     if (vistos.has(clave)) continue;
     vistos.add(clave);
     avisos.push({
