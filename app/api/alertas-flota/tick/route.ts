@@ -12,7 +12,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { enviarAvisoWhatsApp, enviarAConductor, notificarReserva, notificarConductor } from "@/lib/notificaciones";
+import {
+  enviarAvisoWhatsApp, enviarAConductor, notificarReserva, notificarConductor,
+  notificarConductorAsignacionAgrupada,
+} from "@/lib/notificaciones";
 import {
   cargarMotor, directorioDe, reclamarEnvio, liberarEnvio, cargarEstados, upsertEstado,
   hoyLima, ahoraLimaMin, hhmmAMin, telefonoContingencia, canalesConductor, type AlertaConfig,
@@ -214,6 +217,17 @@ async function handler(req: NextRequest) {
             cCanc = activa("cancelacion"), cDes = activa("desasignacion");
       if (cAsig || cCamb || cCanc || cDes) {
         let n = 0;
+        // Las ASIGNACIONES no se envían dentro del bucle: se acumulan por conductor y
+        // salen agrupadas al final (un conductor al que se le programan 5 servicios de
+        // una sentada recibía 5 WhatsApp seguidos). El resto de avisos del bloque
+        // —cambio, cancelación, desasignación— sigue saliendo aquí, uno por reserva:
+        // cada uno informa un hecho distinto sobre un servicio concreto.
+        //
+        // Al diferir el envío hay que diferir también su upsertEstado: si se grabara
+        // ahora y el envío agrupado fallara, la reserva quedaría marcada como avisada
+        // y el conductor nunca se enteraría. Por eso `diferido` salta el grabado del
+        // final del bucle y se hace después, sólo para las que salieron.
+        const pendientesAsig = new Map<string, { ref: RefCond; reservas: number[] }>();
         for (const r of cicloVida) {
           const est = estados.get(r.id);
           const fecha = r.fecha_servicio; const hora = horaCorta(r.hora_servicio);
@@ -241,6 +255,7 @@ async function handler(req: NextRequest) {
 
           let avanzar = true; // por defecto graba baseline (config off o sin cambio) para no
                               // disparar un "cambio" espurio después.
+          let diferido = false; // asignación encolada: su estado se graba tras el envío agrupado
           const tieneTel = !!datosCond(ref)?.telefono;
           if (!mismoCond) {
             // Reasignación: avisar al conductor SALIENTE que ya no cubre el servicio.
@@ -249,13 +264,15 @@ async function handler(req: NextRequest) {
               await aConductor(cDes, refPrev, [ant, fecha, ruta]);
             }
             if (cAsig && avisaA(cAsig, ref)) {
-              // notificarConductor arma los datos ricos (origen/destino/dirección + botón de mapa).
-              // Sin teléfono aún → no llamar (evita log-spam); avanzar=false reintenta cuando lo tenga.
+              // Sin teléfono aún → no encolar (evita log-spam); avanzar=false reintenta
+              // cuando lo tenga.
               if (!tieneTel) { avanzar = false; }
               else {
-                const rc = await notificarConductor(r.id, "asignacion", cAsig.plantilla ?? undefined, canalesConductor(cAsig));
-                avanzar = rc.estado === "enviado";
-                if (avanzar) n++;
+                const clave = `${ref.tabla}:${ref.id}`;
+                const g = pendientesAsig.get(clave) ?? { ref, reservas: [] };
+                g.reservas.push(r.id);
+                pendientesAsig.set(clave, g);
+                diferido = true;
               }
             }
           } else if (est!.hora_avisada !== hora || est!.vehiculo_avisado !== (r.vehiculo_id ?? null)) {
@@ -268,7 +285,7 @@ async function handler(req: NextRequest) {
               }
             }
           }
-          if (avanzar) {
+          if (avanzar && !diferido) {
             await upsertEstado(r.id, {
               conductor_avisado: ref.id,
               conductor_tabla_avisada: ref.tabla,
@@ -276,6 +293,52 @@ async function handler(req: NextRequest) {
               hora_avisada: hora,
             });
           }
+        }
+
+        // ── Envío agrupado de las asignaciones encoladas ──
+        // Un servicio → mensaje detallado de siempre (conserva los botones de mapa, que
+        // son por servicio y se pierden al agrupar). Varios → un mensaje con la lista.
+        const marcarEnviadas = async (g: { ref: RefCond; reservas: number[] }, ids: number[]) => {
+          for (const id of ids) {
+            const r = cicloVida.find((x) => x.id === id);
+            if (!r) continue;
+            await upsertEstado(id, {
+              conductor_avisado: g.ref.id,
+              conductor_tabla_avisada: g.ref.tabla,
+              vehiculo_avisado: r.vehiculo_id ?? null,
+              hora_avisada: horaCorta(r.hora_servicio),
+            });
+          }
+        };
+
+        for (const g of pendientesAsig.values()) {
+          if (g.reservas.length === 1) {
+            const rc = await notificarConductor(g.reservas[0], "asignacion", cAsig!.plantilla ?? undefined, canalesConductor(cAsig!));
+            if (rc.estado === "enviado") { n++; await marcarEnviadas(g, g.reservas); }
+            continue;   // si falló, sin grabar → el próximo tick reintenta
+          }
+
+          const c = datosCond(g.ref);
+          const rc = await notificarConductorAsignacionAgrupada({
+            reservaIds: g.reservas,
+            conductor: { id: g.ref.id, nombre: c?.nombre, telefono: c?.telefono, email: c?.email },
+            tabla: g.ref.tabla,
+            canales: canalesConductor(cAsig!),
+          });
+          if (rc.estado === "enviado") { n++; await marcarEnviadas(g, g.reservas); continue; }
+
+          // RESPALDO: el agrupado no salió — típicamente porque la plantilla
+          // `conductor_asignacion_multiple` todavía no está creada/aprobada en Meta.
+          // Se cae al envío de siempre, uno por reserva, para que el conductor se entere
+          // igual; sin esto quedaría incomunicado y el tick reintentaría cada 10 min
+          // indefinidamente. En cuanto la plantilla exista, el agrupado gana y esto
+          // deja de ejecutarse solo.
+          const enviadas: number[] = [];
+          for (const id of g.reservas) {
+            const r1 = await notificarConductor(id, "asignacion", cAsig!.plantilla ?? undefined, canalesConductor(cAsig!));
+            if (r1.estado === "enviado") { n++; enviadas.push(id); }
+          }
+          await marcarEnviadas(g, enviadas);
         }
         res.ciclo_vida = n;
       }
