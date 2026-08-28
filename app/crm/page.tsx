@@ -19,7 +19,7 @@ type Contacto = {
 type Conversacion = {
   id: string; canal: Canal; estado: Estado; asunto?: string;
   ultimo_mensaje_at?: string; no_leidos: number; pipeline_id?: string;
-  contacto_id: string; crm_contactos: Contacto;
+  contacto_id: string; crm_contactos: Contacto; created_at?: string;
   ia_pausada?: boolean; borrador_ia?: string | null; borrador_ia_at?: string | null;
   _ultimo_texto?: string;
   // Número de la empresa por el que entró (los 2 números del WABA caen en este
@@ -222,13 +222,14 @@ export default function CRMPage() {
     setAcciones((data ?? []) as AccionIA[]);
   }, []);
 
-  // Qué recordatorio/aviso automático (fuera del CRM) le llegó a este contacto antes de
-  // escribir. Sólo aplica a WhatsApp: los avisos automáticos hoy sólo salen por ahí (o SMS
-  // de respaldo, que comparte número). Ver lib/crm-avisos-automaticos.ts para el porqué.
-  const cargarAvisosAutomaticos = useCallback(async (contacto?: Contacto, canal?: string) => {
-    const tel = telefonoDeContacto(contacto);
-    if (canal !== "whatsapp" || !tel) { setAvisos([]); return; }
-    setAvisos(await avisosAutomaticosDeTelefono(supabase, tel));
+  // Qué recordatorio/aviso automático (fuera del CRM) le llegó a este contacto ANTES de
+  // que arrancara esta conversación. Sólo aplica a WhatsApp: los avisos automáticos hoy
+  // sólo salen por ahí (o SMS de respaldo, que comparte número). Ver
+  // lib/crm-avisos-automaticos.ts para el porqué del filtro "antes de".
+  const cargarAvisosAutomaticos = useCallback(async (conv: Conversacion) => {
+    const tel = telefonoDeContacto(conv.crm_contactos);
+    if (conv.canal !== "whatsapp" || !tel) { setAvisos([]); return; }
+    setAvisos(await avisosAutomaticosDeTelefono(supabase, tel, conv.created_at, 3));
   }, []);
 
   useEffect(() => {
@@ -250,7 +251,7 @@ export default function CRMPage() {
     if (!selected) { avisosCargadosDe.current = null; setAvisos([]); return; }
     if (avisosCargadosDe.current === selected.id) return;
     avisosCargadosDe.current = selected.id;
-    cargarAvisosAutomaticos(selected.crm_contactos, selected.canal);
+    cargarAvisosAutomaticos(selected);
   }, [selected, cargarAvisosAutomaticos]);
 
   // ── Realtime ───────────────────────────────────────────────────────────
@@ -710,28 +711,30 @@ export default function CRMPage() {
             </div>
           </div>
 
-          {/* ── Avisos automáticos previos ──
+          {/* ── Por qué escribió: el aviso automático justo antes de esta conversación ──
               Recordatorios/avisos que el sistema le mandó a este número FUERA del CRM
-              (lib/notificaciones.ts nunca escribe en crm_mensajes). Sin esto no hay forma
-              de saber si un mensaje del cliente es espontáneo o una respuesta a un
-              recordatorio de reserva; no se guarda el texto exacto que se envió, sólo el
-              qué/cuándo. */}
+              (lib/notificaciones.ts nunca escribe en crm_mensajes). avisos[0] es SIEMPRE
+              el más cercano — y anterior — al inicio del hilo (filtrado en
+              cargarAvisosAutomaticos con conv.created_at); si no hay ninguno antes, la
+              conversación fue espontánea y no se pinta nada. No se guarda el texto exacto
+              que se envió, sólo el qué/cuándo — nunca se finge citarlo. */}
           {avisos.length > 0 && (
             <div className="bg-amber-50/60 border-b border-amber-100 px-5 py-2.5">
-              <div className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide mb-1">
-                📨 Avisos automáticos enviados a este número
+              <div className="text-xs text-amber-800">
+                <span className="font-semibold">📨 Posible motivo:</span> justo antes de
+                escribir, el sistema le había enviado un{" "}
+                <span className="font-medium">{etiquetaAviso(avisos[0]).toLowerCase()}</span>
+                {avisos[0].reserva_id && <> (reserva #{avisos[0].reserva_id})</>}
+                {" "}el{" "}
+                {new Date(avisos[0].created_at).toLocaleString("es-PE", {
+                  day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+                })}.
               </div>
-              <div className="space-y-0.5">
-                {avisos.map((a) => (
-                  <div key={a.id} className="text-xs text-amber-800 flex items-center gap-1.5">
-                    <span>{etiquetaAviso(a)}</span>
-                    {a.reserva_id && <span className="text-amber-600">· reserva #{a.reserva_id}</span>}
-                    <span className="text-amber-500">
-                      · {new Date(a.created_at).toLocaleString("es-PE", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
-                    </span>
-                  </div>
-                ))}
-              </div>
+              {avisos.length > 1 && (
+                <div className="text-[11px] text-amber-600 mt-0.5">
+                  + {avisos.length - 1} aviso{avisos.length > 2 ? "s" : ""} más antes de esa fecha
+                </div>
+              )}
             </div>
           )}
 
