@@ -1091,4 +1091,99 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       { etiqueta: "Tesorería · la factura que llega después", href: "/tesoreria" },
     ],
   },
+
+  {
+    clave: "pactos",
+    rutas: ["/pactos"],
+    titulo: "Pactos · lo que se acordó, y todo lo que cambió después",
+    resumen:
+      "Aquí se ve lo que se acordó pagarle a cada proveedor y cobrarle a cada cliente por un servicio, qué servicios nadie pactó todavía, y cada cambio que ocurrió después de la cotización: quién lo hizo, cuándo y por qué.",
+    paraQueSirve: [
+      "Encontrar HOY los servicios tercerizados sin costo pactado, en vez de descubrirlos al cerrar el mes.",
+      "Cargar esos costos en lote, agrupados por proveedor y ruta, con el importe que ya está en tus facturas de compra.",
+      "Que gerencia autorice solo los cambios que de verdad bajan el margen, y no todos.",
+      "Responder “¿quién le cambió el proveedor a este servicio y por qué?” sin llamar a nadie.",
+      "Imprimir la adenda de un contrato: el sustento de por qué el mes salió distinto de lo cotizado.",
+    ],
+    conceptos: [
+      "pacto_servicio",
+      "costo_real_comparable",
+      "afectacion_igv",
+      "visado_gerencia",
+      "adenda",
+      "tercerizado",
+      "margen_real",
+      "regla_oro",
+    ],
+    faqs: [
+      {
+        pregunta: "¿Por qué aparecen menos servicios acá que líneas rojas en Liquidaciones?",
+        respuesta:
+          "Porque esta pantalla cuenta **decisiones**, no líneas.\n\nUn servicio de ida y vuelta son dos filas en la base, pero la tarifa va en una sola: el retorno se cobra dentro de la ida. Cuando las dos están en cero, Liquidaciones marca las dos en rojo —y con razón, porque no puede saber cuál llevará el importe—. Acá, en cambio, se muestra **una sola**: en cuanto pactas la ida, el retorno pasa solo a “incluido” y desaparece.\n\nPor eso 67 líneas rojas suelen ser unas 30 decisiones de verdad. El número de acá es el que te dice cuánto trabajo real tienes por delante.",
+      },
+      {
+        pregunta: "¿Esto va a impedir que mis operadores despachen?",
+        respuesta:
+          "**No. Nunca.**\n\nEl servicio se guarda igual, el estado avanza igual, el conductor recibe su aviso igual y el bus sale igual. Si el costo va vacío, el sistema advierte lo que va a pasar y deja guardar de todos modos.\n\nLa decisión de diseño es esa a propósito: una regla que impide despachar a las 5 de la mañana se esquiva el primer día y termina odiada. Lo que sí se puede frenar —y solo cuando tú lo decidas, en una fase posterior— es **el pago al proveedor** cuando el sobrecosto quedó sin visto bueno. Se congela la plata, no el bus.",
+      },
+      {
+        pregunta: "¿Por qué un proveedor de S/ 550 aparece como más barato que uno de S/ 500?",
+        respuesta:
+          "Porque no siempre pagas IGV, y **el IGV que sí pagas te lo devuelven** como crédito fiscal.\n\n• Un bus **gravado** que te factura S/ 550: el IGV vuelve, así que te cuesta **S/ 466.10**.\n• Un taxi **exonerado** de S/ 500: no hay IGV que recuperar, te cuesta **S/ 500.00**.\n\nEl “caro” es 7 % más barato. Al revés es peor: un exonerado de S/ 550 contra un gravado de S/ 500 no es 10 % más caro, es **30 %**.\n\nTodas las cifras de esta pantalla y el panel de margen de Programación ya vienen con esa cuenta hecha. El número que ves es el bueno.",
+      },
+      {
+        pregunta: "¿Qué llega a “Por visar” y qué no?",
+        respuesta:
+          "Solo lo que **empeora el margen más allá de lo tolerado**. Con la política por defecto (+10 % o +S/ 100, margen mínimo 15 %):\n\n• Cargar por primera vez un costo que faltaba → **no** pide visado. Es un dato que se debía, no un deterioro.\n• Cambiar de S/ 500 a S/ 550 → **no** pide visado. Está dentro de la tolerancia.\n• Cambiar de S/ 550 a S/ 950 → **sí**.\n• Conseguir un proveedor más barato → **nunca** pide visado.\n\nEso último es deliberado: si el cambio bueno costara el mismo trámite que el malo, el operador aprende a esconder los dos.",
+      },
+      {
+        pregunta: "¿Qué significa “Cuenta de control: cuadrado”?",
+        respuesta:
+          "Que **el acta y la realidad dicen lo mismo**: para cada servicio, el importe que figura en su ficha coincide con el último importe registrado en su historial.\n\nEs el semáforo más importante de la pantalla y el que menos se mira. Si alguna vez muestra un número en vez de “Cuadrado”, significa que alguien escribió un importe por un camino que no dejó rastro, y hay que encontrarlo antes de endurecer ninguna regla.",
+      },
+      {
+        pregunta: "¿Qué son las “actas de apertura” que no se muestran?",
+        respuesta:
+          "Son la **foto del día en que se instaló el Pacto**: una por cada servicio vivo, con el importe que tenía en ese momento y **sin autor**.\n\nNo se inventaron autores para el pasado: antes de esto el ERP no guardaba ningún historial, así que firmar por lo que pasó antes sería mentir. La línea de corte queda explícita — de ahí para atrás nadie firma, de ahí para adelante todo tiene nombre, fecha y motivo. Ningún reporte histórico cambió de valor por esto.",
+      },
+    ],
+    comoHacer: [
+      {
+        titulo: "Cargar de una vez los costos que faltan del mes",
+        pasos: [
+          "Entra a la pestaña “Sin costo pactado”. Arriba se ve cuántas decisiones reales hay.",
+          "Empieza por los grupos marcados “Ya ejecutado”: ahí el proveedor ya trabajó y está esperando su plata.",
+          "En cada grupo (proveedor + ruta) usa “Pactar”. Si el importe ya está en una factura de compra tuya, aparece propuesto: acéptalo con un clic.",
+          "Si no hay propuesta, escribe el importe una vez en “Aplicar a todo el grupo” y se reparte a los servicios de ese grupo.",
+          "Revisa que el IGV del grupo sea el correcto (gravado para un bus, exonerado para un taxi) y guarda.",
+        ],
+        advertencia:
+          "Cuando una misma factura calza con varios servicios, el sistema NO propone importe para ninguno: esa factura dice el total de todos juntos, no el costo de cada uno. Ahí decide una persona mirando el detalle.",
+      },
+      {
+        titulo: "Autorizar o rechazar los cambios pendientes",
+        pasos: [
+          "Entra a “Por visar”. Arriba se ve el impacto acumulado en soles de lo que está sin autorizar.",
+          "Prioriza los marcados “Vencido” y los de “Margen negativo”.",
+          "Lee el antes → después y el motivo que declaró quien hizo el cambio.",
+          "Marca varios y aprueba en bloque, o rechaza uno explicando por qué (el motivo queda en el acta y lo lee quien hizo el cambio).",
+        ],
+        advertencia:
+          "Aprobar o rechazar es solo para administración y gerencia. Rechazar no deshace nada —el servicio ya se prestó—: deja constancia de que ese sobrecosto no estaba autorizado.",
+      },
+      {
+        titulo: "Sustentarle a un cliente por qué el mes salió distinto",
+        pasos: [
+          "Entra a “Historial” y quédate en la vista “Por contrato”.",
+          "Busca la cotización del cliente: verás cuántos servicios cambiaron, cuánto subió la venta, cuánto el costo y cómo quedó el margen.",
+          "Para el detalle servicio por servicio, cambia a “Movimientos” y busca por el número de la ruta o del contrato.",
+        ],
+      },
+    ],
+    relacionadas: [
+      { etiqueta: "Programación · donde se pacta el cambio", href: "/programacion" },
+      { etiqueta: "Liquidaciones · el cierre del periodo", href: "/liquidaciones" },
+      { etiqueta: "Tercerizadas · los proveedores y sus unidades", href: "/tercerizadas" },
+    ],
+  },
 ];

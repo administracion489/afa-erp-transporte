@@ -10,6 +10,11 @@ import {
 } from "@/lib/estados";
 import type { EstadoReserva, EstadoAdmin } from "@/lib/estados";
 import { idAfa } from "@/lib/folio";
+import {
+  guardarReservas, normalizarAsignacion, avisosDe, margenEnVivo, sugerirCosto,
+  describirResultado,
+} from "@/lib/reservas-pacto";
+import { AFECTACIONES, afectacionDe, type CodigoAfectacion } from "@/lib/finanzas/afectacion";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
 import ModalGenerarPrograma from "@/components/programacion/ModalGenerarPrograma";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
@@ -179,6 +184,7 @@ type Reserva = {
   reserva_vinculada_id?: number | null;
   direccion_servicio?: string | null;
   lote_generacion?: string | null;
+  ruta_nombre?: string | null;
 };
 
 type Ocupacion = {
@@ -200,7 +206,25 @@ const FORM_VACIO = {
   vehiculo_id: "", conductor_id: "",
   empresa_tercerizada_id: "", vehiculo_tercero_id: "", conductor_tercero_id: "",
   costo_proveedor: "", observaciones: "",
+  // El PRECIO DE VENTA no existía en ninguna pantalla del ERP: una vez creado el
+  // servicio, su precio era inmodificable. Por eso "el cliente pidió una unidad mayor"
+  // era literalmente irrepresentable y el operador solo podía cambiar el bus y callarse.
+  precio_cliente: "",
+  cambio_motivo: "", cambio_nota: "",
 };
+
+/** Motivos de un clic. Si declarar el porqué cuesta un párrafo, nadie lo declara. */
+const MOTIVOS_CAMBIO = [
+  { clave: "cliente_unidad_mayor",   nombre: "Cliente pidió unidad mayor",  lado: "ambos"  },
+  { clave: "cliente_unidad_menor",   nombre: "Cliente pidió unidad menor",  lado: "ambos"  },
+  { clave: "cliente_cambio_ruta",    nombre: "Cliente cambió ruta u hora",  lado: "ambos"  },
+  { clave: "proveedor_sin_unidad",   nombre: "Proveedor sin unidad",        lado: "compra" },
+  { clave: "proveedor_mejor_precio", nombre: "Proveedor más barato",        lado: "compra" },
+  { clave: "proveedor_incumplio",    nombre: "Proveedor incumplió",         lado: "compra" },
+  { clave: "precio_renegociado",     nombre: "Importe renegociado",         lado: "compra" },
+  { clave: "averia_unidad",          nombre: "Avería de la unidad",         lado: "compra" },
+  { clave: "correccion_carga",       nombre: "Corrección de un dato",       lado: "ambos"  },
+];
 
 // ─── CARGA ACOTADA (rendimiento) ────────────────────────────────────────────
 // La tabla `reservas` crece sin tope (los "Programa fijo" generan meses adelante).
@@ -219,7 +243,7 @@ const COLS_LISTA =
   "tipo_asignacion,empresa_tercerizada_id,vehiculo_tercero_id,conductor_tercero_id," +
   "tipo_servicio_detalle,sincronizado_app,fecha_sincronizacion,token_seguimiento," +
   "token_conductor_tercero,token_expira_at,reserva_vinculada_id,direccion_servicio," +
-  "lote_generacion,origen,destino";
+  "lote_generacion,origen,destino,ruta_nombre";
 
 // Proyección ultraligera para los agregados globales (KPIs, flujo de estados, sumas).
 const COLS_RESUMEN = "id,estado,estado_admin,fecha_servicio,precio_cliente,costo_proveedor,margen,sincronizado_app";
@@ -401,6 +425,10 @@ export default function ReservasPage() {
   const [conductores,  setConductores]  = useState<Conductor[]>([]);
   const [empresasTer,  setEmpresasTer]  = useState<EmpresaTercerizada[]>([]);
   const [vehTercero,   setVehTercero]   = useState<VehiculoTercero[]>([]);
+  /** Aviso de las migraciones del Pacto pendientes. No bloquea: informa. */
+  const [msgPacto, setMsgPacto] = useState("");
+  /** Último costo pactado con el proveedor elegido — el tarifario de compra ya existe. */
+  const [costoSug, setCostoSug] = useState<{ costo: number; base: string; dias: number } | null>(null);
   const [condTercero,  setCondTercero]  = useState<ConductorTercero[]>([]);
   const [docsTercero,  setDocsTercero]  = useState<DocumentoTercero[]>([]);
   const [otPendientePorVeh, setOtPendientePorVeh] = useState<Set<number>>(new Set()); // vehiculo_id (flota propia) con OT abierta
@@ -1068,15 +1096,26 @@ export default function ReservasPage() {
     const otrosIds     = targets.filter(r => r.estado !== "pendiente").map(r => r.id);
     const BATCH = 50;
 
-    const asignBase = { vehiculo_id: Number(asignarVehId), conductor_id: asignarCondId ? Number(asignarCondId) : null, tipo_asignacion: "propio" };
+    // Asignar flota propia en bloque: normalizarAsignacion pone tipo='propia' y limpia
+    // el lado tercerizado. Sin eso, un servicio que venía de un proveedor se quedaba con
+    // su empresa y su costo pegados mientras lo operaba un bus de AFA — y la liquidación
+    // al proveedor cobraba un servicio que nunca prestó.
+    const asignBase = normalizarAsignacion({
+      vehiculo_id: Number(asignarVehId),
+      conductor_id: asignarCondId ? Number(asignarCondId) : null,
+      tipo_asignacion: "propio",
+      empresa_tercerizada_id: null, vehiculo_tercero_id: null, conductor_tercero_id: null,
+    }, vehTercero);
 
-    for (let i = 0; i < pendienteIds.length; i += BATCH) {
-      const { error } = await supabase.from("reservas").update({ ...asignBase, estado: "programada" }).in("id", pendienteIds.slice(i, i + BATCH));
-      if (error) { alert("Error: " + error.message); setAsignando(false); return; }
-    }
-    for (let i = 0; i < otrosIds.length; i += BATCH) {
-      const { error } = await supabase.from("reservas").update(asignBase).in("id", otrosIds.slice(i, i + BATCH));
-      if (error) { alert("Error: " + error.message); setAsignando(false); return; }
+    const cambio = { motivo: "correccion_carga", nota: "Asignación de flota propia en bloque" };
+    const resP = await guardarReservas(supabase, pendienteIds, { ...asignBase, estado: "programada" }, cambio);
+    const resO = await guardarReservas(supabase, otrosIds, asignBase, cambio);
+    const rechazos = [...resP.rechazos, ...resO.rechazos];
+    if (resP.aviso || resO.aviso) setMsgPacto(resP.aviso || resO.aviso || "");
+    if (rechazos.length > 0) {
+      alert(`${rechazos.length} servicio(s) no se pudieron asignar:\n` +
+            rechazos.slice(0, 5).map(x => `#${x.id}: ${x.motivo}`).join("\n"));
+      setAsignando(false); return;
     }
 
     const allIds = targets.map(r => r.id);
@@ -1366,10 +1405,64 @@ export default function ReservasPage() {
       conductor_tercero_id:   r.conductor_tercero_id      ? String(r.conductor_tercero_id)      : "",
       costo_proveedor:        r.costo_proveedor           ? String(r.costo_proveedor)           : "",
       observaciones:          r.observaciones             || "",
+      precio_cliente:         r.precio_cliente            ? String(r.precio_cliente)            : "",
+      // El motivo es de CADA cambio: se arranca en blanco para que no quede pegado el
+      // de la edición anterior y termine sustentando algo que no ocurrió.
+      cambio_motivo: "", cambio_nota: "",
     });
+    setCostoSug(null);
     setEditandoId(r.id); setMostrarForm(true);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
   };
+
+  // ── Autocompletado del costo ──────────────────────────────────────────────
+  // Es lo ÚNICO del Pacto que le AHORRA trabajo al operador, y por eso es lo que hace
+  // que la regla se cumpla: hoy ese número vive en la cabeza de una persona y se teclea
+  // de memoria (o no se teclea). Al elegir empresa, se propone lo último realmente
+  // pactado con ella en esa ruta. No pisa un importe ya escrito.
+  useEffect(() => {
+    const emp = Number(form.empresa_tercerizada_id) || null;
+    if (form.tipo_asignacion !== "tercerizado" || !emp) { setCostoSug(null); return; }
+    let vivo = true;
+    (async () => {
+      const r = reservas.find(x => x.id === editandoId);
+      const s = await sugerirCosto(supabase, emp, r?.ruta_nombre ?? null,
+        form.vehiculo_tercero_id ? Number(form.vehiculo_tercero_id) : null);
+      if (!vivo) return;
+      setCostoSug(s);
+      // Se rellena solo si el campo está vacío: nunca se pisa lo que el operador escribió.
+      if (s && !form.costo_proveedor) setForm(p => ({ ...p, costo_proveedor: String(s.costo) }));
+    })();
+    return () => { vivo = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.empresa_tercerizada_id, form.vehiculo_tercero_id, form.tipo_asignacion, editandoId]);
+
+  /** Sugerencia de motivo según lo que se está moviendo. Un clic, no un párrafo. */
+  const motivoSugerido = useMemo(() => {
+    const r = reservas.find(x => x.id === editandoId);
+    if (!r) return null;
+    const empCambio = String(r.empresa_tercerizada_id ?? "") !== String(form.empresa_tercerizada_id ?? "");
+    if (empCambio && r.empresa_tercerizada_id) return "proveedor_sin_unidad";
+    const capAntes = vehTercero.find(v => v.id === r.vehiculo_tercero_id)?.capacidad ?? null;
+    const capAhora = vehTercero.find(v => v.id === Number(form.vehiculo_tercero_id))?.capacidad ?? null;
+    if (capAntes != null && capAhora != null && capAhora > capAntes) return "cliente_unidad_mayor";
+    if (capAntes != null && capAhora != null && capAhora < capAntes) return "cliente_unidad_menor";
+    return null;
+  }, [form.empresa_tercerizada_id, form.vehiculo_tercero_id, editandoId, reservas, vehTercero]);
+
+  /** Margen en vivo, normalizado por afectación: sin eso se equivoca hasta en 30 %. */
+  const margenVivo = useMemo(() => {
+    const r = reservas.find(x => x.id === editandoId);
+    const emp: any = empresasTer.find(e => e.id === Number(form.empresa_tercerizada_id));
+    const precio = form.precio_cliente !== "" ? form.precio_cliente : (r?.precio_cliente ?? 0);
+    const antes = margenEnVivo(r?.precio_cliente ?? 0, r?.costo_proveedor ?? 0, {
+      compraAfectacion: (r as any)?.compra_afectacion, emiteFactura: emp?.emite_factura !== false,
+    });
+    const ahora = margenEnVivo(precio, form.costo_proveedor, {
+      compraAfectacion: emp?.afectacion_defecto, emiteFactura: emp?.emite_factura !== false,
+    });
+    return { antes, ahora, afectacion: (emp?.afectacion_defecto ?? "10") as CodigoAfectacion };
+  }, [form.precio_cliente, form.costo_proveedor, form.empresa_tercerizada_id, editandoId, reservas, empresasTer]);
 
   const guardarReserva = async () => {
     if (!editandoId) return;
@@ -1382,6 +1475,20 @@ export default function ReservasPage() {
     }
     if (form.tipo_asignacion === "tercerizado" && riesgoEmpSel === "alto") {
       const ok = confirm("ALERTA: Esta empresa tiene documentos OBLIGATORIOS vencidos. Continuar de todas formas?");
+      if (!ok) return;
+    }
+
+    // El campo dice "Costo S/ *" con asterisco desde siempre, pero nada lo exigía:
+    // guardar con el campo vacío escribía 0 en silencio y el problema aparecía 30 días
+    // después, en el bloque rojo de /liquidaciones. Ahora se avisa aquí. NO se bloquea:
+    // a las 5 a.m. el bus tiene que salir igual, y una regla que impide despachar se
+    // esquiva el primer día. Lo que se gobierna es la plata, no la operación.
+    if (form.tipo_asignacion === "tercerizado" && !(Number(form.costo_proveedor) > 0)) {
+      const ok = confirm(
+        "Este servicio tercerizado se va a guardar SIN COSTO PACTADO.\n\n" +
+        "Finanzas no podrá liquidarlo al cierre del mes y va a quedar en la bandeja de " +
+        "pendientes hasta que alguien lo cargue.\n\n¿Guardar así de todos modos?"
+      );
       if (!ok) return;
     }
 
@@ -1412,9 +1519,11 @@ export default function ReservasPage() {
       if (!ok) { setGuardando(false); return; }
     }
 
-    const asignPayload = {
+    // normalizarAsignacion aplica las mismas reglas de coherencia que el trigger de
+    // nacimiento (derivar la empresa del vehículo de tercero, limpiar el lado que no
+    // corresponde), para que el operador vea el resultado antes de guardar.
+    const asignPayload = normalizarAsignacion({
       hora_servicio:          form.hora_servicio,
-      tipo:                   form.tipo_asignacion === "propio" ? "propia" : "tercerizada",
       tipo_asignacion:        form.tipo_asignacion,
       vehiculo_id:            form.tipo_asignacion === "propio" ? Number(form.vehiculo_id) : null,
       conductor_id:           form.tipo_asignacion === "propio" ? Number(form.conductor_id) : null,
@@ -1422,23 +1531,31 @@ export default function ReservasPage() {
       vehiculo_tercero_id:    form.tipo_asignacion === "tercerizado" && form.vehiculo_tercero_id ? Number(form.vehiculo_tercero_id) : null,
       conductor_tercero_id:   form.tipo_asignacion === "tercerizado" && form.conductor_tercero_id ? Number(form.conductor_tercero_id) : null,
       costo_proveedor:        costo,
-    };
+    }, vehTercero);
 
     // Puente A→B: si el servicio pasa a "finalizada" y aún no tiene estado administrativo,
     // arranca en "por_liquidar".
     const adminPayload = (nuevoEstado === "finalizada" && !reservaActual?.estado_admin)
       ? { estado_admin: ESTADO_ADMIN_INICIAL }
       : {};
-    const { error } = await supabase.from("reservas").update({
+    // El precio de venta solo se manda si el operador lo tocó: mandarlo siempre haría
+    // que cada guardado escribiera un acta de venta idéntica y llenaría la línea de
+    // tiempo del servicio de ruido.
+    const precioTocado = form.precio_cliente !== ""
+      && Number(form.precio_cliente) !== Number(reservaActual?.precio_cliente ?? 0);
+
+    const res = await guardarReservas(supabase, [editandoId], {
       ...asignPayload,
       ...adminPayload,
+      ...(precioTocado ? { precio_cliente: Number(form.precio_cliente) } : {}),
       fecha_servicio:  form.fecha_servicio,
       hora_servicio:   form.hora_servicio,
       estado:          nuevoEstado,
       observaciones:   form.observaciones.trim() || null,
-    }).eq("id", editandoId);
+    }, { motivo: form.cambio_motivo || null, nota: form.cambio_nota.trim() || null });
 
-    if (error) { alert(error.message); setGuardando(false); return; }
+    if (!res.ok) { alert(describirResultado(res)); setGuardando(false); return; }
+    if (res.aviso) setMsgPacto(res.aviso);
 
     // ── Si es servicio FIJO con contrato, ofrecer aplicar a otros días ──
     if (reservaActual && !esEventual(reservaActual) && reservaActual.cotizacion_id) {
@@ -1569,11 +1686,20 @@ export default function ReservasPage() {
       lotes.set(key, lote);
     }
 
+    // Por el helper, igual que el guardado individual: si un lote falla, se reintenta
+    // fila por fila y se dice CUÁL falló. Antes, un `.in("id", [50 ids])` que reventaba
+    // solo decía "error al actualizar 1 lote" y el operador tenía que adivinar entre 50.
     const results = await Promise.all(
-      [...lotes.values()].map(l => supabase.from("reservas").update(l.patch).in("id", l.ids))
+      [...lotes.values()].map(l =>
+        guardarReservas(supabase, l.ids, l.patch,
+          { motivo: form.cambio_motivo || null, nota: form.cambio_nota.trim() || null }))
     );
-    const errores = results.filter(r => r.error);
-    if (errores.length > 0) alert(`Error al actualizar ${errores.length} lote(s). Revisa la consola.`);
+    const rechazos = results.flatMap(r => r.rechazos);
+    const aviso = results.find(r => r.aviso)?.aviso;
+    if (aviso) setMsgPacto(aviso);
+    if (rechazos.length > 0)
+      alert(`${rechazos.length} servicio(s) no se pudieron actualizar:\n` +
+            rechazos.slice(0, 5).map(x => `#${x.id}: ${x.motivo}`).join("\n"));
 
     setModalAplicarMasivo(null);
     setAplicando(false);
@@ -2722,6 +2848,26 @@ export default function ReservasPage() {
             </div>
           </div>
 
+          {msgPacto && (
+            <div className="rounded-xl px-4 py-3 text-xs bg-amber-50 border border-amber-200 text-amber-800 flex items-start gap-3">
+              <span className="flex-1">{msgPacto}</span>
+              <button onClick={() => setMsgPacto("")} className="text-amber-500 hover:text-amber-700">×</button>
+            </div>
+          )}
+
+          {/* Lo que ya está pactado, leído del propio servicio: el operador ve con quién
+              y en cuánto se quedó antes de tocar nada. */}
+          {(() => {
+            const r = reservas.find(x => x.id === editandoId);
+            if (!r || !(Number(r.costo_proveedor) > 0)) return null;
+            return (
+              <p className="text-[11px] text-gray-500">
+                Pactado hoy: <b className="text-gray-700">{nombreEmpTer(r.empresa_tercerizada_id)}</b>
+                {" · "}<b className="text-gray-700">{fmtSoles(Number(r.costo_proveedor))}</b>
+              </p>
+            );
+          })()}
+
           <div className="rounded-xl px-4 py-3 text-xs" style={{ background: "#e0f2fe", color: "#0369a1" }}>
             Al asignar recursos el estado pasara automaticamente a Programada. Para tercerizado el sistema verificara que la empresa no tenga documentos vencidos.
           </div>
@@ -2802,15 +2948,126 @@ export default function ReservasPage() {
                       ))}
                     </select>
                   </Campo>
-                  <Campo label="Costo S/ *">
+                  <Campo label="Costo del proveedor S/ *">
                     <input type="number" min="0" className={inputCls()} placeholder="0.00" value={form.costo_proveedor} onChange={f("costo_proveedor")} />
-                    {form.costo_proveedor && (() => {
-                      const r = reservas.find(r => r.id === editandoId);
-                      const margen = Number(r?.precio_cliente || 0) - Number(form.costo_proveedor);
-                      return <p className="text-[10px] mt-1 font-bold" style={{ color: margen >= 0 ? "#166534" : "#dc2626" }}>Margen: {fmtSoles(margen)}</p>;
-                    })()}
+                    {costoSug && (
+                      <button type="button"
+                        onClick={() => setForm(p => ({ ...p, costo_proveedor: String(costoSug.costo) }))}
+                        className="text-[10px] mt-1 text-violet-700 hover:underline text-left">
+                        Último con este proveedor en {costoSug.base}: {fmtSoles(costoSug.costo)} · hace {costoSug.dias} día(s)
+                      </button>
+                    )}
+                    {!afectacionDe(margenVivo.afectacion).grava && Number(form.costo_proveedor) > 0 && (
+                      <p className="text-[10px] mt-1 text-amber-700">
+                        {afectacionDe(margenVivo.afectacion).etiqueta}: sin IGV que recuperar, cuesta los {fmtSoles(Number(form.costo_proveedor))} completos.
+                      </p>
+                    )}
                   </Campo>
                 </div>
+
+                {/* ── Precio de venta ─────────────────────────────────────────
+                    Este campo NO existía en ninguna pantalla del ERP: una vez creado
+                    el servicio, su precio era inmodificable (los únicos updates de
+                    precio_cliente del repo son sobre la tabla `cotizaciones`). Por eso
+                    "el cliente pidió una unidad mayor" era irrepresentable: se cambiaba
+                    el bus y el servicio se seguía vendiendo al precio del bus anterior. */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <Campo label="Precio al cliente S/">
+                    <input type="number" min="0" className={inputCls()} placeholder="0.00"
+                      value={form.precio_cliente} onChange={f("precio_cliente")} />
+                    <p className="text-[10px] mt-1 text-gray-400">
+                      Súbelo cuando el cliente pida una unidad mayor. Se le pedirá conformidad.
+                    </p>
+                  </Campo>
+
+                  {/* Panel de margen en vivo: es lo que le ENSEÑA al operador por qué le
+                      conviene cobrar el diferencial. Es la primera vez que el ERP se lo
+                      muestra en el momento de decidir. */}
+                  <div className="md:col-span-2">
+                    <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">Margen</p>
+                    <div className="rounded-xl border bg-gray-50 px-4 py-3 flex flex-wrap items-center gap-4">
+                      <div>
+                        <span className="block text-[10px] uppercase text-gray-400">Antes</span>
+                        <span className="font-black text-gray-600 tabular-nums">
+                          {margenVivo.antes.pct != null ? `${margenVivo.antes.pct.toFixed(1)}%` : "—"}
+                        </span>
+                        <span className="block text-[10px] text-gray-400 tabular-nums">
+                          {fmtSoles(margenVivo.antes.ingreso)} / {fmtSoles(margenVivo.antes.costo)}
+                        </span>
+                      </div>
+                      <span className="text-gray-300 text-lg">→</span>
+                      <div>
+                        <span className="block text-[10px] uppercase text-gray-400">Después</span>
+                        <span className="font-black tabular-nums" style={{
+                          color: margenVivo.ahora.pct == null ? "#6b7280"
+                               : margenVivo.ahora.pct < 0 ? "#dc2626"
+                               : margenVivo.ahora.pct < (margenVivo.antes.pct ?? 0) ? "#b45309" : "#166534",
+                        }}>
+                          {margenVivo.ahora.pct != null ? `${margenVivo.ahora.pct.toFixed(1)}%` : "—"}
+                        </span>
+                        <span className="block text-[10px] text-gray-400 tabular-nums">
+                          {fmtSoles(margenVivo.ahora.ingreso)} / {fmtSoles(margenVivo.ahora.costo)}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-gray-400 flex-1 min-w-[180px]">
+                        Importes netos, normalizados por IGV: así un proveedor gravado y uno
+                        exonerado se comparan de verdad.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── Motivo del cambio: un clic, no un párrafo ───────────────── */}
+                <div>
+                  <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">
+                    ¿Por qué cambia? {motivoSugerido && <span className="text-violet-600 normal-case font-normal">· sugerido</span>}
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {MOTIVOS_CAMBIO.filter(m => m.lado !== "venta").map(m => {
+                      const sel = form.cambio_motivo === m.clave;
+                      const sug = motivoSugerido === m.clave && !form.cambio_motivo;
+                      return (
+                        <button key={m.clave} type="button"
+                          onClick={() => setForm(p => ({ ...p, cambio_motivo: sel ? "" : m.clave }))}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors ${
+                            sel ? "bg-violet-600 text-white border-violet-600"
+                                : sug ? "bg-violet-50 text-violet-700 border-violet-300"
+                                      : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"}`}>
+                          {m.nombre}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {form.cambio_motivo && (
+                    <input className={inputCls() + " mt-2"} placeholder="Detalle (opcional)"
+                      value={form.cambio_nota} onChange={f("cambio_nota")} />
+                  )}
+                </div>
+
+                {/* Lo que va a pasar al guardar, dicho antes de guardar. No bloquea nada:
+                    en esta fase la política está en modo observa y el bus sale igual. */}
+                {(() => {
+                  const r = reservas.find(x => x.id === editandoId);
+                  const avisos = avisosDe({
+                    tipo_asignacion: form.tipo_asignacion,
+                    costo_proveedor: Number(form.costo_proveedor || 0),
+                    precio_cliente: form.precio_cliente !== "" ? Number(form.precio_cliente) : Number(r?.precio_cliente ?? 0),
+                    cambio_motivo: form.cambio_motivo || null,
+                  }, r ? { precio_cliente: r.precio_cliente, costo_proveedor: r.costo_proveedor } : null);
+                  if (!avisos.length) return null;
+                  return (
+                    <div className="space-y-1.5">
+                      {avisos.map((a, i) => (
+                        <p key={i} className={`text-[11px] rounded-lg px-3 py-2 border ${
+                          a.nivel === "alerta"
+                            ? "bg-red-50 border-red-200 text-red-700"
+                            : "bg-sky-50 border-sky-200 text-sky-800"}`}>
+                          {a.texto}
+                        </p>
+                      ))}
+                    </div>
+                  );
+                })()}
 
                 {empSelId && riesgoEmpSel === "alto" && (
                   <div className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-800">
@@ -3511,6 +3768,15 @@ export default function ReservasPage() {
                         <span className="mt-1 inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-md" style={esTer ? { background: "#ede9fe", color: "#6d28d9" } : { background: "#dbeafe", color: "#1d4ed8" }}>
                           {esTer ? "Tercerizado" : "Propio"}
                         </span>
+                        {/* Un tercerizado sin costo pactado se ve AQUÍ, el día que se
+                            programa, y no 30 días después en el bloque rojo del cierre. */}
+                        {esTer && !(Number(r.costo_proveedor) > 0) && (
+                          <span className="mt-1 ml-1 inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-md"
+                            style={{ background: "#fee2e2", color: "#b91c1c" }}
+                            title="Finanzas no podrá liquidar este servicio al cierre hasta que se cargue el costo.">
+                            Sin costo
+                          </span>
+                        )}
                       </td>
 
                       <td className="p-3" onClick={e => e.stopPropagation()}>
