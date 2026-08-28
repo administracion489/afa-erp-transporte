@@ -233,30 +233,45 @@ create index if not exists idx_reservas_costo_estado
   on public.reservas (costo_estado, fecha_servicio) where costo_estado = 'pendiente';
 
 -- ────────────────────────────────────────────────────────────────────────────
--- 6) RLS — la app SOLO LEE el acta. Escribe el trigger, que corre como dueño.
+-- 6) RLS — una sentencia explícita por tabla.
+--
+--    Las CUATRO tablas que crea este archivo quedan con RLS. Va escrito una por una y
+--    no en un bucle dinámico a propósito: el `execute format(...)` funcionaba igual,
+--    pero la postura de seguridad de un archivo tiene que leerse de un vistazo, y el
+--    analizador del editor de Supabase —que lee el texto del SQL— no puede mirar
+--    dentro de un bloque dinámico y avisaba "crea tablas sin RLS" sobre tablas que sí
+--    la tienen. Un aviso que es mentira enseña a ignorar los avisos.
+--
+--    La app SOLO LEE el acta: la escribe el trigger, que corre como dueño. El visado
+--    es la única escritura legítima desde la app y va por RPC (fn_pacto_visar), no por
+--    un update genérico.
 -- ────────────────────────────────────────────────────────────────────────────
-alter table public.servicio_pacto enable row level security;
+alter table public.servicio_pacto  enable row level security;
+alter table public.pacto_motivo    enable row level security;
+alter table public.pacto_politica  enable row level security;
+alter table public.pacto_secuencia enable row level security;
+
 drop policy if exists p_pacto_select on public.servicio_pacto;
 create policy p_pacto_select on public.servicio_pacto
   for select using (auth.role() = 'authenticated');
--- El visado sí es una escritura legítima de la app; se hace por RPC (fn_pacto_visar),
--- que corre como definer. No se abre un update genérico sobre el acta.
 
-do $$
-declare t text;
-begin
-  foreach t in array array['pacto_motivo','pacto_politica','pacto_secuencia'] loop
-    execute format('alter table public.%I enable row level security', t);
-    execute format('drop policy if exists %I on public.%I', t || '_auth', t);
-    execute format(
-      'create policy %I on public.%I for select using (auth.role() = ''authenticated'')',
-      t || '_auth', t);
-  end loop;
-  -- La política la edita un administrador desde el ERP.
-  drop policy if exists pacto_politica_rw on public.pacto_politica;
-  create policy pacto_politica_rw on public.pacto_politica
-    for update using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
-end $$;
+drop policy if exists pacto_motivo_auth on public.pacto_motivo;
+create policy pacto_motivo_auth on public.pacto_motivo
+  for select using (auth.role() = 'authenticated');
+
+drop policy if exists pacto_politica_auth on public.pacto_politica;
+create policy pacto_politica_auth on public.pacto_politica
+  for select using (auth.role() = 'authenticated');
+
+-- Los umbrales los edita un administrador desde el ERP; por eso esta sí acepta update.
+drop policy if exists pacto_politica_rw on public.pacto_politica;
+create policy pacto_politica_rw on public.pacto_politica
+  for update using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+-- pacto_secuencia queda con RLS y SIN policy: es el correlativo de los folios y nadie
+-- tiene por qué leerlo ni tocarlo desde el navegador. Lo maneja fn_pacto_folio, que
+-- corre como definer y no pasa por RLS.
+drop policy if exists pacto_secuencia_auth on public.pacto_secuencia;
 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- VERIFICACIÓN
