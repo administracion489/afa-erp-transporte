@@ -855,9 +855,20 @@ export async function aprobarLiquidacionProveedor(
       if (eDoc) throw new Error(eDoc.message);
       docId = Number((doc as any).id);
       await sb.from("liquidacion_proveedor").update({ documento_compra_id: docId }).eq("id", liquidacionId);
-      await anclarDetalleAServicios(sb, docId, ids);
     } catch (e: any) {
       aviso = "La liquidación quedó aprobada, pero no se generó la cuenta por pagar: falta correr el módulo de compras (supabase/finanzas-02).";
+    }
+
+    // El anclaje al servicio va en su PROPIO try: si falla, la CxP igual quedó bien
+    // creada y decir "no se generó la cuenta por pagar" sería falso. Lo único que se
+    // pierde es el cruce pactado ↔ facturado, que se puede rehacer después.
+    if (docId) {
+      try {
+        await anclarDetalleAServicios(sb, docId, ids);
+      } catch {
+        aviso = "La cuenta por pagar se creó, pero no se pudo enlazar con los servicios: "
+              + "el costo facturado no aparecerá en el margen por servicio.";
+      }
     }
 
     if (reservaIds.length) {
