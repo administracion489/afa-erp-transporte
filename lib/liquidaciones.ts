@@ -714,6 +714,87 @@ export async function aprobarLiquidacionCliente(
 }
 
 /**
+ * Ancla cada línea de la CxP al SERVICIO que la originó (documentos_compra_detalle.
+ * reserva_id).
+ *
+ * Sin esto, `costo_facturado_tercero` de v_costo_servicio vale 0 SIEMPRE: la vista
+ * hace el join por `dd.reserva_id` desde finanzas-06, pero hasta ahora ningún código
+ * del repo escribía esa columna — el único insert sobre la tabla
+ * (lib/contabilidad/factura-ia.ts:242) solo llena `combustible_id`. Resultado: todo
+ * servicio tercerizado aparecía con 100 % de margen, y "pactado vs. facturado" no se
+ * podía comparar porque el facturado era siempre cero.
+ *
+ * El importe de la línea se reparte entre las reservas que cubre en proporción a su
+ * costo pactado. Eso resuelve solo el caso normal del par IDA+RETORNO: la tarifa va
+ * en la ida y el retorno está incluido en S/ 0.00, así que la ida se lleva todo. Si
+ * ninguna tiene costo, se reparte en partes iguales para no perder el importe. La
+ * suma de los detalles siempre es el total de la línea.
+ *
+ * Es best-effort: si falla, la liquidación ya está aprobada y no se revierte por esto.
+ */
+async function anclarDetalleAServicios(sb: any, docId: number, lineaIds: number[]): Promise<void> {
+  if (!lineaIds.length) return;
+
+  const { data: lineas } = await sb
+    .from("liquidacion_proveedor_linea")
+    .select("id,descripcion,total_linea")
+    .in("id", lineaIds);
+
+  const puentes: any[] = [];
+  for (let i = 0; i < lineaIds.length; i += 100) {
+    const { data } = await sb
+      .from("liquidacion_proveedor_linea_reserva")
+      .select("linea_id,reserva_id")
+      .in("linea_id", lineaIds.slice(i, i + 100));
+    puentes.push(...((data as any[]) ?? []));
+  }
+  if (!puentes.length) return;
+
+  const reservaIds = [...new Set(puentes.map((p) => Number(p.reserva_id)))];
+  const costos = new Map<number, number>();
+  for (let i = 0; i < reservaIds.length; i += 300) {
+    const { data } = await sb
+      .from("reservas")
+      .select("id,costo_proveedor")
+      .in("id", reservaIds.slice(i, i + 300));
+    for (const r of ((data as any[]) ?? [])) costos.set(Number(r.id), Number(r.costo_proveedor ?? 0));
+  }
+
+  const filas: any[] = [];
+  for (const l of ((lineas as any[]) ?? [])) {
+    const deLaLinea = puentes.filter((p) => Number(p.linea_id) === Number(l.id));
+    if (!deLaLinea.length) continue;
+
+    const total = redondear(Number(l.total_linea ?? 0));
+    const pesos = deLaLinea.map((p) => costos.get(Number(p.reserva_id)) ?? 0);
+    const suma = pesos.reduce((a, b) => a + b, 0);
+
+    let asignado = 0;
+    deLaLinea.forEach((p, i) => {
+      // El último se lleva el remanente: así la suma cuadra exacta con la línea aunque
+      // el reparto tenga decimales que no cierran.
+      const monto = i === deLaLinea.length - 1
+        ? redondear(total - asignado)
+        : redondear(suma > 0 ? (total * pesos[i]) / suma : total / deLaLinea.length);
+      asignado = redondear(asignado + monto);
+      filas.push({
+        documento_compra_id: docId,
+        descripcion: l.descripcion ?? "Servicio tercerizado",
+        cantidad: 1,
+        unidad: "SERV.",
+        precio_unitario: monto,
+        subtotal: monto,
+        reserva_id: Number(p.reserva_id),
+      });
+    });
+  }
+
+  for (let i = 0; i < filas.length; i += 200) {
+    await sb.from("documentos_compra_detalle").insert(filas.slice(i, i + 200));
+  }
+}
+
+/**
  * Aprueba la liquidación al proveedor → genera la Cuenta por Pagar y avanza la
  * dimensión C. Si el módulo de compras (documentos_compra) todavía no está corrido,
  * la liquidación igual queda "por_pagar" y se avisa: el cierre operativo no se
@@ -774,6 +855,7 @@ export async function aprobarLiquidacionProveedor(
       if (eDoc) throw new Error(eDoc.message);
       docId = Number((doc as any).id);
       await sb.from("liquidacion_proveedor").update({ documento_compra_id: docId }).eq("id", liquidacionId);
+      await anclarDetalleAServicios(sb, docId, ids);
     } catch (e: any) {
       aviso = "La liquidación quedó aprobada, pero no se generó la cuenta por pagar: falta correr el módulo de compras (supabase/finanzas-02).";
     }
