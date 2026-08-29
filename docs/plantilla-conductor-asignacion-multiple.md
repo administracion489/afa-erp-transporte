@@ -2,7 +2,7 @@
 
 ## Cómo crearla (sin salir del ERP)
 
-**ERP → Configuración → Operaciones** (`/configuracion/operaciones`), bloque
+**ERP → Configuración → Alertas y Mensajes** (`/configuracion/operaciones`), bloque
 **"Crear plantilla nueva"** → botón **"Prellenar: varios servicios asignados"** → revisa
 y pulsa crear. Sale ya rellenada con todo lo de abajo y se manda sola a revisión de Meta.
 
@@ -61,7 +61,7 @@ enviarla a revisión. Por eso cierra la línea de la app, que es texto fijo.
 
 **Ojo con `{{5}}`:** el texto fijo lo presenta como *"Coordinador de Operaciones"*, pero el
 valor sale de `alerta_destinatarios` donde `es_contingencia = true`. Verifica que esa ficha
-del directorio sea esa persona; si la tabla está vacía, el código cae al respaldo fijo
+del directorio (Configuración → **Alertas y Mensajes**) sea esa persona; si la tabla está vacía, el código cae al respaldo fijo
 `+51 912 569 005` (`telefonoContingencia()` en `lib/alertas.ts`).
 
 ### Ejemplos que pide Meta al crear la plantilla
