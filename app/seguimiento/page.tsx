@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import Link from "next/link";
 import ModalGps from "@/components/seguimiento/ModalGps";
 import PanelMensajesPasajeros from "@/components/seguimiento/PanelMensajesPasajeros";
@@ -39,6 +39,10 @@ type Reserva = {
   reemplazo_motivo?: string|null; pasajeros_abordados?: number|null;
   precio_cliente: number; costo_proveedor: number; margen: number;
   observaciones: string|null; origen?: string|null; destino?: string|null;
+  // Nombre de ruta VISIBLE AL PASAJERO (app/pasajero/page.tsx:2362 lo pinta al elegir bus).
+  // Ya venía en el `select("*")` de esta página; lo que faltaba era declararlo para poder
+  // mostrarlo y editarlo en la lista — ver CeldaRuta.
+  ruta_nombre?: string|null;
 };
 
 type Cliente   = { id: number; nombre: string; empresa?: string|null };
@@ -320,7 +324,99 @@ function chipsAlerta(s: ServicioView): { label: string; color: string; bg: strin
   return out;
 }
 
-function FilaServicio({ s, onOpen, onGps }: { s: ServicioView; onOpen: () => void; onGps: () => void }) {
+/**
+ * Nombre de ruta EDITABLE en la propia fila (`reservas.ruta_nombre`).
+ *
+ * POR QUÉ AQUÍ: hasta ahora este texto solo se veía y se tocaba dentro de "Configurar ruta",
+ * en el modal de Manifiesto de Programación (components/programacion/ModalManifiesto.tsx:1396)
+ * — a otra pantalla y tres clics de la torre de control. Y es JUSTO el texto que el PASAJERO
+ * lee para elegir su bus (app/pasajero/page.tsx:2362), así que un nombre mal puesto se ve
+ * fuera antes que dentro. La torre es donde se mira el día entero de un vistazo: es donde
+ * se detecta el nombre en blanco o equivocado, y ahora también donde se corrige.
+ *
+ * MISMAS REGLAS DE ESCRITURA QUE EL MODAL (guardarConfig, ModalManifiesto.tsx:1048): se guarda
+ * el texto recortado y el vacío se guarda como NULL, nunca como "". No es cosmético: el
+ * pasajero cae al "origen → destino" solo cuando el campo es nulo; con la cadena vacía le
+ * quedaría el renglón del nombre en blanco.
+ *
+ * OJO AL EDITAR — esta cadena NO es un rótulo suelto. De ella salen, parseando el texto:
+ * la etiqueta de ruta, el turno y el sentido ida/retorno de la liquidación
+ * (lib/liquidacion-agrupacion.ts:78-107), y el costeo de pactos casa `upper(ruta_nombre)`
+ * contra la ruta pactada (supabase/pacto-01-costeo.sql:54). Por eso el campo se EDITA
+ * respetando el formato que ya usa la operación ("RUTA B/ ENTRADA 05:10/ CHILCA→BSF PUNTA
+ * HERMOSA"), y por eso el aviso vive en el tooltip y en la ficha de ayuda del módulo.
+ */
+function CeldaRuta({ s, onGuardado }: { s: ServicioView; onGuardado: (id: number, valor: string|null) => void }) {
+  const [editando, setEditando] = useState(false);
+  const [borrador, setBorrador] = useState("");
+  const [guardando, setGuardando] = useState(false);
+  // Esc no puede limpiar el estado a secas: al desmontar el input el `blur` puede llegar
+  // igualmente y guardaría lo que el operador acababa de descartar. Se marca la intención,
+  // se hace blur con el input TODAVÍA montado, y `guardar` consume la marca.
+  const cancelado = useRef(false);
+
+  const nombre = (s.reserva.ruta_nombre || "").trim();
+
+  const abrir = () => { cancelado.current = false; setBorrador(nombre); setEditando(true); };
+
+  const guardar = async () => {
+    setEditando(false);
+    if (cancelado.current) { cancelado.current = false; return; }
+    const valor = borrador.trim() || null;
+    const previo = s.reserva.ruta_nombre ?? null;
+    if (valor === previo) return;   // sin cambios: ni un UPDATE ni un evento realtime de más
+    setGuardando(true);
+    onGuardado(s.reserva.id, valor);   // optimista: la fila ya enseña lo nuevo
+    const { error } = await supabase.from("reservas").update({ ruta_nombre: valor }).eq("id", s.reserva.id);
+    setGuardando(false);
+    if (error) {
+      onGuardado(s.reserva.id, previo);   // se deshace: la fila nunca miente sobre lo guardado
+      alert("No se pudo guardar el nombre de ruta: " + error.message);
+    }
+  };
+
+  return (
+    // El clic y las teclas se quedan aquí: la fila entera es un botón que abre la ficha y su
+    // onKeyDown dispara con Enter y con ESPACIO — sin frenarlos, escribir un nombre con
+    // espacios abriría el drawer a media palabra.
+    <div className="hidden lg:block lg:w-[150px] xl:w-[210px] flex-shrink-0"
+      onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+      <div className="text-[9px] font-bold uppercase text-gray-400 leading-none mb-1 px-1.5">Ruta</div>
+      <div className="relative h-[22px]">
+        {editando ? (
+          // Se desborda a propósito sobre la fila: en 150 px no se corrige un nombre de 45
+          // caracteres sin pelearse con el scroll horizontal del propio input.
+          <input
+            autoFocus
+            value={borrador}
+            onChange={e => setBorrador(e.target.value)}
+            onBlur={guardar}
+            onKeyDown={e => {
+              if (e.key === "Enter")  { e.preventDefault(); e.currentTarget.blur(); }
+              if (e.key === "Escape") { cancelado.current = true; e.currentTarget.blur(); }
+            }}
+            placeholder="Ej. RUTA B/ ENTRADA 05:10/ CHILCA→BSF"
+            className="absolute left-0 top-0 z-20 w-[330px] h-[22px] rounded-md border px-1.5 text-[11px] font-semibold text-[#0b315f] bg-white outline-none focus:ring-2 focus:ring-[#0b315f]/20 shadow-lg"
+            style={{ borderColor: "#bfdbfe" }}
+          />
+        ) : (
+          <button
+            onClick={abrir}
+            disabled={guardando}
+            title={nombre
+              ? `${nombre}\n\nEs el nombre que ve el pasajero al elegir su bus. Clic para editarlo.`
+              : "Sin nombre de ruta: al pasajero le saldrá “origen → destino”. Clic para ponerle nombre."}
+            className={`absolute inset-0 flex items-center rounded-md px-1.5 text-left text-[11px] leading-tight transition-colors ${guardando ? "opacity-50" : ""} ${
+              nombre ? "font-semibold text-[#0b315f] hover:bg-[#EFF6FF]" : "font-medium italic text-gray-300 hover:bg-gray-50 hover:text-gray-400"}`}>
+            <span className="truncate">{nombre || "Sin nombre"}</span>
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FilaServicio({ s, onOpen, onGps, onRutaNombre }:{ s: ServicioView; onOpen: () => void; onGps: () => void; onRutaNombre: (id: number, valor: string|null) => void }) {
   const est      = ESTADO_VIS[s.estado_visual];
   const progreso = s.paradas_total > 0 ? Math.round((s.paradas_completadas / s.paradas_total) * 100) : 0;
   const alertas  = chipsAlerta(s);
@@ -329,10 +425,18 @@ function FilaServicio({ s, onOpen, onGps }: { s: ServicioView; onOpen: () => voi
       onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
       className="group flex items-center gap-3 px-4 py-3 hover:bg-[#f6f9fd] cursor-pointer transition-colors outline-none focus-visible:bg-[#eef4fb]">
       <div className="w-1.5 h-10 rounded-full flex-shrink-0" style={{ background: est.dot }} />
-      <div className="w-12 flex-shrink-0 text-center">
+      {/* w-12 no daba para "PROGRAMADO" ni "FINALIZADA" (≈63 px a 9 px): el rótulo se salía de
+          su celda y se montaba encima de la vecina — antes sobre la placa, y desde que la ruta
+          ocupa ese sitio, sobre el nombre de ruta. */}
+      <div className="w-[68px] flex-shrink-0 text-center">
         <div className="font-black text-[#0b315f] text-sm font-mono leading-none">{s.reserva.hora_servicio?.slice(0, 5) || "—"}</div>
         <div className="text-[9px] font-bold uppercase mt-1 leading-none" style={{ color: est.color }}>{est.label.replace("⚠ ", "")}</div>
       </div>
+      {/* La ruta va ANTES del bloque `flex-1`, no después: `flex-1` se come todo el hueco
+          sobrante, así que cualquier celda posterior queda a una distancia distinta del borde
+          según cuántos chips de alerta traiga la fila — y una columna que baila de sitio en
+          cada fila deja de leerse como columna. Aquí arranca siempre en el mismo píxel. */}
+      <CeldaRuta s={s} onGuardado={onRutaNombre} />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-bold text-[#0b315f] text-sm truncate">{s.cliente_nombre}</span>
@@ -510,6 +614,13 @@ export default function SeguimientoPage() {
 
   useEffect(()=>{ cargar(); },[cargar]);
 
+  /** Parche local del nombre de ruta editado en la fila (CeldaRuta).
+   *  El UPDATE ya se hizo; esto solo evita el parpadeo de esperar a que vuelva el realtime,
+   *  y sirve además de marcha atrás si Supabase rechaza la escritura. */
+  const patchRutaNombre = useCallback((id: number, valor: string|null) => {
+    setReservas(prev => prev.map(r => r.id === id ? { ...r, ruta_nombre: valor } : r));
+  }, []);
+
   useEffect(()=>{
     const ch = supabase.channel("seguimiento-reservas")
       .on("postgres_changes",{event:"*",schema:"public",table:"reservas"},()=>cargar())
@@ -666,7 +777,9 @@ export default function SeguimientoPage() {
     if (filtroNivel!=="todos"&&s.puntualidad?.nivel!==filtroNivel) return false;
     if (busqueda) {
       const q=busqueda.toLowerCase();
-      return s.vehiculo_placa.toLowerCase().includes(q)||s.conductor_nombre.toLowerCase().includes(q)||s.cliente_nombre.toLowerCase().includes(q);
+      // La ruta entra a la búsqueda desde que se puede ver y editar en la lista: lo normal es
+      // querer repasar de una vez todos los servicios de "RUTA B", no ir fila por fila.
+      return s.vehiculo_placa.toLowerCase().includes(q)||s.conductor_nombre.toLowerCase().includes(q)||s.cliente_nombre.toLowerCase().includes(q)||(s.reserva.ruta_nombre||"").toLowerCase().includes(q);
     }
     return true;
   });
@@ -786,7 +899,7 @@ export default function SeguimientoPage() {
             <div className="relative flex-1">
               <Ic.Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-300 pointer-events-none"/>
               <input className="w-full pl-9 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:border-[#0b315f] transition-colors"
-                placeholder="Buscar por placa, conductor o cliente..." value={busqueda} onChange={e=>setBusqueda(e.target.value)}/>
+                placeholder="Buscar por placa, conductor, cliente o ruta..." value={busqueda} onChange={e=>setBusqueda(e.target.value)}/>
             </div>
             <div className="flex gap-1 bg-gray-50 rounded-xl p-1">
               {(["todos","fijo","eventual"] as const).map(t=>(
@@ -838,7 +951,7 @@ export default function SeguimientoPage() {
               </div>
               <div className="divide-y divide-gray-50">
                 {[...filtrados].sort((a,b)=>(a.reserva.hora_servicio||"").localeCompare(b.reserva.hora_servicio||"")).map(s=>(
-                  <FilaServicio key={s.reserva.id} s={s} onOpen={()=>setDrawer(s)} onGps={()=>setGpsModal(s)} />
+                  <FilaServicio key={s.reserva.id} s={s} onOpen={()=>setDrawer(s)} onGps={()=>setGpsModal(s)} onRutaNombre={patchRutaNombre} />
                 ))}
               </div>
             </div>
