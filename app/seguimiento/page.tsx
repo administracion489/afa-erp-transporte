@@ -358,10 +358,25 @@ function CeldaRuta({ s, onGuardado, onMasivo }: { s: ServicioView; onGuardado: (
   // igualmente y guardaría lo que el operador acababa de descartar. Se marca la intención,
   // se hace blur con el input TODAVÍA montado, y `guardar` consume la marca.
   const cancelado = useRef(false);
+  /**
+   * Oferta de "y en los demás días" DESPUÉS de guardar.
+   *
+   * El atajo al lote vivía SOLO dentro del editor abierto, y así no se encuentra: quien
+   * escribe el nombre y pulsa Enter guarda, el editor se cierra, y el atajo se va con él sin
+   * que nadie lo haya visto — reportado en cuanto salió a producción. El momento en que el
+   * operador PIENSA "esto hay que ponerlo todos los días" es justo el de después de guardar,
+   * así que la oferta aparece ahí.
+   *
+   * Guarda los DOS nombres porque el lote los necesita distintos: el ANTERIOR es con el que se
+   * reconoce a los hermanos ("los que hoy se llaman igual" — si se buscara por el nuevo, un
+   * renombrado no encontraría a nadie, porque el único ya renombrado es este) y el NUEVO es el
+   * que se aplica.
+   */
+  const [ofrecerLote, setOfrecerLote] = useState<{ previo: string|null; nuevo: string } | null>(null);
 
   const nombre = (s.reserva.ruta_nombre || "").trim();
 
-  const abrir = () => { cancelado.current = false; setBorrador(nombre); setEditando(true); };
+  const abrir = () => { cancelado.current = false; setOfrecerLote(null); setBorrador(nombre); setEditando(true); };
 
   const guardar = async () => {
     setEditando(false);
@@ -376,8 +391,19 @@ function CeldaRuta({ s, onGuardado, onMasivo }: { s: ServicioView; onGuardado: (
     if (error) {
       onGuardado(s.reserva.id, previo);   // se deshace: la fila nunca miente sobre lo guardado
       alert("No se pudo guardar el nombre de ruta: " + error.message);
+      return;
     }
+    if (valor) setOfrecerLote({ previo, nuevo: valor });
   };
+
+  // La oferta se retira sola: es una sugerencia, no una tarea pendiente, y dejarla clavada
+  // taparía la fila de abajo. El setState va dentro del temporizador, no en el cuerpo del
+  // efecto, para no encadenar renders.
+  useEffect(() => {
+    if (!ofrecerLote) return;
+    const t = setTimeout(() => setOfrecerLote(null), 15000);
+    return () => clearTimeout(t);
+  }, [ofrecerLote]);
 
   return (
     // El clic y las teclas se quedan aquí: la fila entera es un botón que abre la ficha y su
@@ -416,9 +442,26 @@ function CeldaRuta({ s, onGuardado, onMasivo }: { s: ServicioView; onGuardado: (
                   setEditando(false);
                   onMasivo(s.reserva, borrador.trim());
                 }}
-                className="text-[10px] font-bold text-[#0b315f] hover:underline whitespace-nowrap">
+                className="text-[10px] font-black rounded px-1.5 py-0.5 whitespace-nowrap text-white"
+                style={{ background: "#0b315f" }}>
                 Aplicar a varios días…
               </button>
+            </div>
+          </div>
+        ) : ofrecerLote ? (
+          // Mismo ancho desbordado que el editor: el texto no cabe en 150 px, y esta barra
+          // sustituye al nombre durante unos segundos en vez de empujar la fila.
+          <div className="absolute left-0 top-0 z-20 w-[330px] rounded-md bg-white border shadow-lg px-2 py-1 flex items-center justify-between gap-2"
+            style={{ borderColor: "#bbf7d0" }}>
+            <span className="text-[10px] font-bold text-green-700 whitespace-nowrap">✓ Guardado en este servicio</span>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => { onMasivo({ ...s.reserva, ruta_nombre: ofrecerLote.previo }, ofrecerLote.nuevo); setOfrecerLote(null); }}
+                className="text-[10px] font-black rounded px-1.5 py-0.5 text-white whitespace-nowrap"
+                style={{ background: "#0b315f" }}>
+                Aplicar a más días…
+              </button>
+              <button onClick={() => setOfrecerLote(null)} className="text-gray-300 hover:text-gray-500 text-[11px] leading-none px-1">✕</button>
             </div>
           </div>
         ) : (
