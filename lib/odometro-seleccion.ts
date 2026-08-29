@@ -7,6 +7,10 @@
 // dentro del mismo JSON, y ninguna línea de código lo miraba. Ningún prompt garantiza que eso
 // no vuelva a pasar; el km vigente del vehículo sí lo decide sin ambigüedad.
 //
+// El segundo modo de fallo, el de CUP-435: su odómetro muestra una DÉCIMA ("22 744.7") y la
+// lectura la pega al final del entero → 227.447, el mismo número ×10. Ahí no hay que elegir
+// otro número del tablero: hay que quitarle la décima al que ya se leyó (ver kmSinDecima).
+//
 // Reglas de diseño (aprendidas de la revisión adversarial de este fix):
 //   1. NUNCA inventa. Si el modelo se abstuvo (kmIA null), el resultado se abstiene también.
 //   2. NUNCA impide registrar. Cuando no puede decidir devuelve el número de la IA tal cual
@@ -41,7 +45,43 @@ function formaValida(n: number): boolean {
   return d >= 3 && d <= 7;
 }
 
+/** Cuántos dígitos tiene el entero: la FORMA del número, que es lo que delata una décima de más. */
+function digitosDe(n: number): number {
+  return Math.abs(Math.round(n)).toString().length;
+}
+
 const fmt = (n: number) => Math.round(n).toLocaleString("es-PE");
+
+/**
+ * ¿El número leído es el de ESTE tablero con la DÉCIMA pegada al final?
+ *
+ * Muchos odómetros muestran una décima ("22 744.7", a veces con el último dígito en otra
+ * casilla o en otro color). Si la lectura ignora el punto, transcribe 227447: el kilometraje
+ * real ×10 más la décima. Es el error sistemático de CUP-435 — todas sus fotos de WhatsApp
+ * entraban ×10 y morían en "Lecturas por revisar", donde el único botón verde ("Aceptar")
+ * habría escrito 230.056 km como km vigente de una unidad que va por 23.005.
+ *
+ * NO adivina: exige que el número tenga EXACTAMENTE un dígito más que la base conocida y que,
+ * al quitarle la décima, caiga dentro del rango plausible de la unidad. Si algo de eso no
+ * encaja devuelve null y el caso sigue su curso normal (revisión humana).
+ *
+ * Devuelve la parte entera (floor), no el redondeo: 22744.7 km de tablero son 22.744 km
+ * recorridos, igual que los muestra el propio odómetro.
+ */
+export function kmSinDecima(opts: {
+  kmLeido: number;
+  kmBase: number;   // km vigente / última lectura viva de la unidad
+  piso: number;     // mínimo plausible (anti-retroceso)
+  techo: number;    // máximo plausible (anti-salto)
+}): number | null {
+  const leido = Math.round(Number(opts.kmLeido));
+  const base = Math.round(Number(opts.kmBase));
+  if (!Number.isFinite(leido) || !Number.isFinite(base) || leido <= 0 || base <= 0) return null;
+  if (digitosDe(leido) !== digitosDe(base) + 1) return null;
+  const sinDecima = Math.floor(leido / 10);
+  if (!formaValida(sinDecima)) return null;
+  return sinDecima >= opts.piso && sinDecima <= opts.techo ? sinDecima : null;
+}
 
 /**
  * Extrae números del texto libre que la IA devuelve como `texto_leido`. Es prosa, no una
@@ -128,7 +168,26 @@ export function elegirOdometro(e: {
   const designados = enBanda.filter((c) => c.fuente !== "texto");
   const elegibles = designados.length ? designados : [];
 
+  // Candidato "sin la décima": el MISMO número que leyó la IA, con el punto decimal del
+  // tablero restituido. No es otro número del tablero, así que no compite con los designados
+  // —solo entra cuando ninguno de ellos resuelve el caso— pero cuando la forma encaja es la
+  // explicación más probable de un valor ×10 (ver kmSinDecima).
+  const sinDecima = kmSinDecima({ kmLeido: kmIA, kmBase: kmVigente, piso, techo });
+  const corroboraTexto = sinDecima != null && delTexto.some((t) => t.decimal && t.valor === sinDecima);
+  const corregirDecima = (): VeredictoOdometro => ({
+    km: sinDecima!,
+    kmIA,
+    origen: "corregido",
+    autoOk: true,
+    motivo:
+      `la IA devolvió ${fmt(kmIA)}, imposible para esta unidad (vigente ${fmt(kmVigente)}): es su lectura con la ` +
+      `DÉCIMA del tablero pegada al final${corroboraTexto ? " (el texto leído la muestra con decimal)" : ""}; ` +
+      `el sistema registró ${fmt(sinDecima!)}`,
+    candidatos: bruto,
+  });
+
   if (elegibles.length === 0) {
+    if (sinDecima != null) return corregirDecima();
     const detalle = enBanda.length
       ? `la IA devolvió ${fmt(kmIA)}, imposible para esta unidad (vigente ${fmt(kmVigente)}), y ningún número leído del tablero encaja`
       : `la IA devolvió ${fmt(kmIA)}, imposible para esta unidad (vigente ${fmt(kmVigente)})`;
@@ -146,6 +205,9 @@ export function elegirOdometro(e: {
   // tolerancia del piso (0,1% = 174 km en un odómetro de 174.000) es más que un día de
   // recorrido, y usarla aquí descartaría avances reales como si fueran ecos.
   if (Math.abs(ganador.valor - kmVigente) <= 2) {
+    // Antes de mandarlo a revisión: si el número de la IA era el de siempre con la décima
+    // pegada, esa sí es una lectura (no un eco) y resuelve el caso.
+    if (sinDecima != null) return corregirDecima();
     return {
       km: kmIA, kmIA, origen: "ia", autoOk: false,
       motivo: `la IA devolvió ${fmt(kmIA)} y el único número compatible (${fmt(ganador.valor)}) coincide con el km vigente — puede ser un eco, no una lectura`,

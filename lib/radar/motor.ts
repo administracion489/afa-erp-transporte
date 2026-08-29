@@ -343,30 +343,37 @@ function seleccionarMediaCluster(candidatos: any[], cap: number): any[] {
 }
 
 /**
- * Guías de lectura del odómetro por vehículo (propio + tercerizado, vehiculos.guia_odometro /
- * vehiculos_tercero.guia_odometro). Se cargan una sola vez por lote, solo si hay algún
- * candidato con pinta de combustible (para no gastar la consulta en lotes sin eso).
+ * Lo que el ERP sabe del odómetro de cada vehículo (propio + tercerizado): la guía escrita por
+ * el operador (vehiculos.guia_odometro / vehiculos_tercero.guia_odometro) y cuántos dígitos
+ * tiene su kilometraje vigente. Se carga una sola vez por lote, solo si hay algún candidato
+ * con pinta de combustible/foto (para no gastar la consulta en lotes sin eso).
+ *
+ * Entran TODAS las unidades con guía o con km vigente, no solo las que tienen guía escrita: la
+ * cantidad de dígitos es la señal que atrapa el ×10 (la décima del tablero pegada al total) y
+ * limitarla a las unidades con guía dejaba a casi toda la flota leyendo sin ancla.
  */
-async function cargarGuiasOdometro(sb: any): Promise<{ placa: string; guia: string; digitos: number | null }[]> {
+async function cargarGuiasOdometro(sb: any): Promise<{ placa: string; guia: string | null; digitos: number | null }[]> {
   try {
     // `kilometraje_actual` viaja en la MISMA fila: de ahí sale cuántos dígitos tiene el odómetro
-    // de esa unidad, que es lo que distingue un parcial de 4 cifras de un total de 6. Se manda
-    // la cantidad de dígitos, nunca el km exacto (ver ContextoPrompt.guiasOdometro).
+    // de esa unidad, que es lo que distingue un parcial de 4 cifras de un total de 6 y delata la
+    // décima leída como un dígito más. Se manda la cantidad de dígitos, nunca el km exacto
+    // (ver ContextoPrompt.guiasOdometro).
     const [{ data: propios }, { data: terceros }] = await Promise.all([
-      sb.from("vehiculos").select("placa, guia_odometro, kilometraje_actual").not("guia_odometro", "is", null),
-      sb.from("vehiculos_tercero").select("placa, guia_odometro, kilometraje_actual").not("guia_odometro", "is", null),
+      sb.from("vehiculos").select("placa, guia_odometro, kilometraje_actual"),
+      sb.from("vehiculos_tercero").select("placa, guia_odometro, kilometraje_actual"),
     ]);
     const filas = [...((propios as any[]) ?? []), ...((terceros as any[]) ?? [])];
     return filas
-      .filter((f) => String(f.guia_odometro ?? "").trim())
       .map((f) => {
         const km = Number(f.kilometraje_actual ?? 0);
+        const guia = String(f.guia_odometro ?? "").trim();
         return {
           placa: String(f.placa ?? ""),
-          guia: String(f.guia_odometro).trim(),
+          guia: guia || null,
           digitos: km > 0 ? Math.round(km).toString().length : null,
         };
-      });
+      })
+      .filter((g) => g.placa && (g.guia || g.digitos));
   } catch {
     return [];
   }
@@ -404,7 +411,7 @@ async function procesarMensaje(
   config: RadarConfig,
   forzar: boolean,
   grupoInfo: GrupoInfo | null,
-  guiasOdometro: { placa: string; guia: string; digitos: number | null }[],
+  guiasOdometro: { placa: string; guia: string | null; digitos: number | null }[],
   leccionesOdo: string,
   leccionesComb: string
 ): Promise<ResultadoMensaje> {

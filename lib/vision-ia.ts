@@ -115,9 +115,10 @@ export async function extraerPlanFabricante(adjuntos: Adjunto[]): Promise<any> {
 const PROMPT_ODO = `Te paso la foto del ODÓMETRO (cuentakilómetros) del tablero de un vehículo.
 Devuelve SOLO un JSON:
 {"km": number, "trip_km": number|null, "confianza": "alta"|"media"|"baja", "calidad_imagen": "buena"|"regular"|"mala", "motivo": string, "texto_leido": string}.
-"km" es el kilometraje TOTAL del vehículo (entero, sin decimales).
+"km" es el kilometraje TOTAL del vehículo, en kilómetros ENTEROS.
 "trip_km" es el cuentakilómetros PARCIAL/trip. Si la pantalla muestra DOS contadores de km, este campo NUNCA debe ser null: pon aquí el otro número que viste.
-ANTI-INVERSIÓN: en un mismo tablero el TOTAL es SIEMPRE el número MAYOR y va sin decimales; el parcial es el MENOR y suele llevar un decimal (p. ej. "1803.6"). Si el número que ibas a poner en "km" es MENOR que otro número de kilómetros de la pantalla, los estás intercambiando.
+DÉCIMAS: muchos odómetros muestran el total CON UNA DÉCIMA — un punto o una coma antes del último dígito, o ese último dígito en otra casilla, de otro tamaño o de otro color (p. ej. "22744.7", "22744,7", "22744|7"). En "km" va SOLO la parte entera: 22744.7 → 22744. JAMÁS pegues la décima al número (22744.7 NO es 227447): eso multiplica el kilometraje por 10.
+ANTI-INVERSIÓN: en un mismo tablero el TOTAL es SIEMPRE el número MAYOR y el parcial el MENOR (p. ej. total "22744.7" y parcial "180.3"). Que un número lleve décima NO significa que sea el parcial: los dos suelen llevarla. Si el número que ibas a poner en "km" es MENOR que otro número de kilómetros de la pantalla, los estás intercambiando.
 La temperatura ("28.0°C"), la hora ("20:25") y una tasa de consumo ("16.3 L/100km") NO son kilómetros.
 "calidad_imagen"="mala" si la foto está borrosa, con reflejo/brillo que tape dígitos, muy oscura, o el odómetro no es legible; "regular" si se lee con algo de esfuerzo; "buena" si es nítida.
 "motivo" = por qué esa confianza/calidad, en pocas palabras (ej "lectura nítida", "reflejo sobre el último dígito", "foto borrosa").
@@ -140,9 +141,16 @@ export async function extraerOdometro(
 
   const bloques: string[] = [PROMPT_ODO];
   if (c.guia?.trim()) {
+    bloques.push(`Cómo leer el tablero de ESTA unidad${c.placa ? ` (${c.placa})` : ""}, según el operador de AFA: ${c.guia.trim()}`);
+  }
+  // La FORMA del número va SIEMPRE que se conozca, haya o no guía escrita: es la señal que
+  // atrapa el error caro (leer la décima como un dígito más → kilometraje ×10) y no es una
+  // cifra copiable. Antes viajaba dentro del bloque de la guía, así que las unidades sin guía
+  // —la mayoría— se quedaban sin ancla ninguna.
+  if (c.digitos) {
     bloques.push(
-      `Cómo leer el tablero de ESTA unidad${c.placa ? ` (${c.placa})` : ""}, según el operador de AFA: ${c.guia.trim()}` +
-        (c.digitos ? `\nEn esta unidad el odómetro TOTAL es un número de ${c.digitos} dígitos.` : "")
+      `En esta unidad${c.placa ? ` (${c.placa})` : ""} el odómetro TOTAL es un número de ${c.digitos} dígitos. ` +
+        `Si lo que leíste tiene ${c.digitos + 1} dígitos, casi seguro incluiste la décima: quítala (el último dígito) y vuelve a mirar la foto para confirmarlo.`
     );
   }
   if (c.lecciones?.trim()) {

@@ -11,6 +11,8 @@
 //   - marcarReinicio() re-ancla el vigente cuando cambian el tablero (odómetro
 //     físico reemplazado), evitando que "el mayor gana" deje al bus ciego.
 
+import { kmSinDecima } from "./odometro-seleccion";
+
 export type EstadoLectura = "aceptada" | "sospechosa" | "rechazada" | "reinicio" | "anulada";
 export type FuenteLectura =
   | "combustible" | "checklist" | "servicio"
@@ -187,14 +189,39 @@ export function evaluarLectura(opts: {
 
   if (kmBase <= 0) return { estado: "aceptada", motivo: null }; // primera lectura de la unidad
 
+  // Presupuesto de avance de la unidad. Se usa el tiempo real transcurrido pero con PISO de 1
+  // día completo: una segunda lectura del mismo día (check-out, combustible) conserva el
+  // presupuesto de una jornada entera y no se marca por prorratear el tope a pocas horas
+  // (un bus interprovincial recorre en 10–14 h más de lo que daría kmDiaMax×horas/24).
+  // Sin tiempo conocido se cae a 30 días; el guard de ratio de más abajo es el respaldo.
+  // Ojo con el 0: dos lecturas del mismo instante (o una retroactiva, cuyo delta se aplasta
+  // a 0) NO significan "no se sabe" — significan "sin tiempo para avanzar". Tratarlas como
+  // desconocido daba 30 días de presupuesto y desactivaba ese guard justo cuando más hace
+  // falta, así que solo `null` cae al fallback.
+  const dias = opts.horasDesdeUltima != null
+    ? Math.max(opts.horasDesdeUltima / 24, 1)  // piso de 1 día completo
+    : 30;
+  const saltoMax = kmDiaMax * dias;
+
   if (kmNuevo < kmBase) {
     // Retroceso graduado: un ruido de OCR de pocos km no es lo mismo que un rollback grande.
     const retro = kmBase - kmNuevo;
     const tol = Math.max(5, Math.round(kmBase * 0.001)); // ±0.1% de la base, mínimo 5 km
     const contra = ref ? `frente a la lectura ${describirRef(ref)}` : `frente al vigente ${kmBase.toLocaleString("es-PE")}`;
-    return retro <= tol
-      ? { estado: "sospechosa", motivo: `Retroceso leve (−${retro.toLocaleString("es-PE")} km) ${contra}: posible ruido de lectura` }
-      : { estado: "sospechosa", motivo: `Retrocede ${retro.toLocaleString("es-PE")} km ${contra} (posible manipulación)` };
+    if (retro <= tol) {
+      return { estado: "sospechosa", motivo: `Retroceso leve (−${retro.toLocaleString("es-PE")} km) ${contra}: posible ruido de lectura` };
+    }
+    // ¿Y si la mala es la ANTERIOR? Una lectura con la décima del tablero pegada al final (×10)
+    // que llegó a aceptarse deja el km vigente diez veces más alto, y desde ahí TODA lectura
+    // buena parece un retroceso enorme (caso B4N-968: 56.036 km acusados contra 560.287).
+    // Culpar a la lectura correcta manda al operador a rechazar justo la que hay que conservar.
+    const baseConDecima = kmSinDecima({
+      kmLeido: kmBase, kmBase: kmNuevo, piso: kmNuevo - saltoMax, techo: kmNuevo + tol,
+    });
+    const pista = baseConDecima != null
+      ? ` — ojo: la lectura anterior parece llevar una décima de más (serían ${baseConDecima.toLocaleString("es-PE")} km); si es así, la que hay que corregir es ESA, no esta`
+      : "";
+    return { estado: "sospechosa", motivo: `Retrocede ${retro.toLocaleString("es-PE")} km ${contra} (posible manipulación)${pista}` };
   }
 
   if (kmNuevo === kmBase) {
@@ -227,22 +254,17 @@ export function evaluarLectura(opts: {
   //    falsos positivos sin perder el caso real (un dígito de más siempre deja el vigente alto).
   if (kmBase >= 5000 && kmNuevo >= kmBase * RATIO_DIGITO_DE_MAS) {
     const veces = Math.round(kmNuevo / kmBase);
-    return { estado: "sospechosa", motivo: `Salto ×${veces} (${kmNuevo.toLocaleString("es-PE")}): posible dígito de más` };
+    // La causa más común del ×10 en esta flota es un tablero con DÉCIMAS leído sin el punto
+    // decimal. Si al quitarla el número encaja, se dice cuál sería: el operador de la bandeja
+    // ve la lectura buena sin tener que calcularla (y "Aceptar" deja de ser su única salida).
+    const conDecima = kmSinDecima({ kmLeido: kmNuevo, kmBase, piso: kmBase, techo: kmBase + saltoMax });
+    const pista = conDecima != null
+      ? ` — si el tablero muestra décimas, la lectura sería ${conDecima.toLocaleString("es-PE")} km`
+      : "";
+    return { estado: "sospechosa", motivo: `Salto ×${veces} (${kmNuevo.toLocaleString("es-PE")}): posible dígito de más${pista}` };
   }
 
-  // 2) Salto físicamente imposible. Se usa el tiempo real transcurrido pero con PISO de 1 día
-  //    completo: una segunda lectura del mismo día (check-out, combustible) conserva el
-  //    presupuesto de una jornada entera y no se marca por prorratear el tope a pocas horas
-  //    (un bus interprovincial recorre en 10–14 h más de lo que daría kmDiaMax×horas/24).
-  //    Sin tiempo conocido se cae a 30 días; el guard de ratio de arriba es el respaldo.
-  //    Ojo con el 0: dos lecturas del mismo instante (o una retroactiva, cuyo delta se aplasta
-  //    a 0) NO significan "no se sabe" — significan "sin tiempo para avanzar". Tratarlas como
-  //    desconocido daba 30 días de presupuesto y desactivaba este guard justo cuando más hace
-  //    falta, así que solo `null` cae al fallback.
-  const dias = opts.horasDesdeUltima != null
-    ? Math.max(opts.horasDesdeUltima / 24, 1)  // piso de 1 día completo
-    : 30;
-  const saltoMax = kmDiaMax * dias;
+  // 2) Salto físicamente imposible para el tiempo transcurrido.
   if (salto > saltoMax) {
     const cuando = opts.horasDesdeUltima != null
       ? (opts.horasDesdeUltima < 36 ? "el día" : `~${Math.round(opts.horasDesdeUltima / 24)} día(s)`)
@@ -846,6 +868,9 @@ export async function anularLectura(
       foto_url: l.foto_url ?? null,
       momento: l.momento ?? null,
       created_at: l.created_at,                 // conserva la posición temporal en la jornada
+      // …y `capturado_en`, que es por donde la ordena de verdad la analítica: sin él, una foto
+      // de WhatsApp de las 04:55 corregida hoy se recolocaría a la hora de su INSERCIÓN.
+      capturado_en: l.capturado_en ?? null,
       ref_origen: refCorreccion,                // trazabilidad + idempotencia
       estado: "aceptada",
       motivo: `Corregida desde ${Number(l.km).toLocaleString("es-PE")} km`,
