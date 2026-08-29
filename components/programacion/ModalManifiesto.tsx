@@ -3,6 +3,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { paginarFilas } from "@/lib/huella";
+// La huella de ruta ya no se define aquí: la comparten esta pantalla y el renombrado en lote
+// de la torre de control. Dos definiciones de "la misma ruta" daban dos lotes distintos.
+import { huellaRuta } from "@/lib/ruta-equivalente";
 import { normalizarEmpresa } from "@/lib/empresa";
 import { parsearManifiesto, descargarPlantilla } from "@/lib/manifiesto-csv";
 import SelectorGrupos from "./SelectorGrupos";
@@ -94,22 +97,6 @@ async function geocodearParadas(
   return out;
 }
 
-// Huella de ruta = secuencia ORDENADA de paraderos "nombre@lat,lng".
-// Es sensible al orden ⇒ una ruta en sentido inverso produce una huella distinta.
-// Sirve para decidir si dos servicios comparten exactamente la misma ruta
-// (mismos paraderos: nombre + coordenadas, en el mismo orden).
-function huellaRuta(lista: Array<{ orden?: number | null; nombre?: string | null; lat?: number | null; lng?: number | null }> | undefined | null): string {
-  if (!lista || lista.length === 0) return "";
-  return [...lista]
-    .sort((a, b) => (a.orden ?? 0) - (b.orden ?? 0))
-    .map((p) => {
-      const nom = (p.nombre || "").trim().toLowerCase().replace(/\s+/g, " ");
-      const lat = p.lat == null ? "" : Number(p.lat).toFixed(4);
-      const lng = p.lng == null ? "" : Number(p.lng).toFixed(4);
-      return `${nom}@${lat},${lng}`;
-    })
-    .join(" › ");
-}
 
 export default function ModalManifiesto(props: Props) {
   const { reservaId, clienteId, capacidad, sincronizadoApp, fechaSincronizacion,
