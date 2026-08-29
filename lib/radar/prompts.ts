@@ -41,10 +41,10 @@ export type ContextoPrompt = {
 const CASO_ODOMETRO = `
 
 LECTURA DEL TABLERO (aplica a las categorías "odometro" y "combustible"): si ves una foto del tablero sin ningún dato de recarga (sin monto, sin grifo, sin galones/litros), la categoría es "odometro". Al leerlo:
-- El odómetro TOTAL es el número MAYOR de kilómetros de la pantalla. El "Trip"/parcial es el MENOR.
-- NI UN DÍGITO DE MÁS: cuenta los dígitos del odómetro y transcribe SOLO los de ese grupo. Un dígito añadido al final multiplica el kilometraje por 10 (22744 convertido en 227447), y es el error más caro y más frecuente en esta flota. No arrastres al número un dígito vecino de la pantalla —el trip, el reloj, la temperatura, el nivel de combustible, la marcha, un icono— ni completes el número con lo que creas que falta. Si el total aparece con una décima separada por punto o coma, en "kilometraje" va solo la parte entera; si NO hay separador, todos los dígitos que ves son el total y no sobra ninguno.
+- ROTULADO: si el tablero rotula los contadores ("ODO", "ODOMETER", "TOTAL" / "TRIP", "TRIP A", "VIAJE"), manda el rótulo: el de ODO/TOTAL va en "kilometraje" y el de TRIP en "trip_km". Sin rótulos, el TOTAL es el número MAYOR de kilómetros de la pantalla y el parcial el MENOR.
+- NI UN DÍGITO DE MÁS: cuenta los dígitos del odómetro UNO POR UNO y transcribe solo esos. Un dígito de más multiplica el kilometraje por 10 y es el error más caro y más frecuente en esta flota. El fallo típico es REPETIR un dígito que aparece una sola vez —sobre todo ceros y dígitos consecutivos iguales: "23056" transcrito "230056"—; también arrastrar un dígito vecino de la pantalla (el trip, el reloj, la temperatura, el nivel de combustible, la marcha) o completar el número con lo que creas que falta. Antes de responder, cuenta los dígitos de tu propia respuesta y compáralos con los de la foto. Si el total aparece con una décima separada por punto o coma, en "kilometraje" va solo la parte entera; si NO hay separador, todos los dígitos que ves son el total y no sobra ninguno.
 - Nunca conviertas el parcial en el total ni al revés. Si dudas de cuál es cuál, pon los DOS: el mayor en "kilometraje" y el otro en "trip_km".
-- En "texto_leido" copia los dígitos TAL COMO SE VEN, con su separador si lo tiene ("22744.7") y sin añadir ninguno, aunque en "kilometraje" pongas el entero.
+- En "texto_leido" copia el odómetro EXACTAMENTE como se ve, con su rótulo y su separador si los tiene ("ODO 23056 km") y sin añadir ni quitar dígitos. Ese texto es lo que permite verificar el número, así que tiene que ser una transcripción, no un resumen.
 - "16.3 L/100km" es una tasa de consumo, y la temperatura ("28.0°C") y la hora ("20:25") no son kilómetros.`;
 
 /** Bloque de "errores que ya cometiste" para inyectar en la lectura de odómetro. */
@@ -236,15 +236,15 @@ const FORMA_ODOMETRO = `{
   "unidad": string|null,                // referencia informal ("bus 45") si no hay placa
   "kilometraje": number|null,           // odómetro TOTAL en km ENTEROS (número puro, sin puntos ni comas de miles).
                                         // Ignora el "Trip"/parcial.
-                                        // NI UN DÍGITO DE MÁS: cuenta los dígitos del odómetro y pon solo los de ese
-                                        // grupo. Uno añadido al final es el kilometraje ×10 (22744 → 227447). No
-                                        // arrastres dígitos vecinos (trip, reloj, temperatura, nivel) ni completes lo
-                                        // que creas que falta. Si el total lleva una décima separada por punto o coma,
-                                        // aquí va solo la parte entera; si no hay separador, no sobra ningún dígito.
-                                        // ANTI-INVERSIÓN: en un mismo tablero el TOTAL es SIEMPRE el número MAYOR y el
-                                        // parcial el menor. Si el número que ibas a poner aquí es MENOR que otro número
-                                        // de kilómetros de la pantalla, los estás intercambiando: el mayor va aquí y el
-                                        // menor en "trip_km".
+                                        // NI UN DÍGITO DE MÁS: cuenta los dígitos del odómetro uno por uno y pon solo
+                                        // esos. Uno de más es el kilometraje ×10; el fallo típico es REPETIR un dígito
+                                        // ("23056" → "230056") o arrastrar uno vecino (trip, reloj, temperatura, nivel).
+                                        // Si el total lleva una décima separada por punto o coma, aquí va solo la parte
+                                        // entera; si no hay separador, no sobra ningún dígito.
+                                        // ANTI-INVERSIÓN: manda el rótulo (ODO/TOTAL aquí, TRIP en "trip_km"); sin
+                                        // rótulos, el TOTAL es el número MAYOR y el parcial el menor. Si el número que
+                                        // ibas a poner aquí es MENOR que otro número de kilómetros de la pantalla, los
+                                        // estás intercambiando.
   "trip_km": number|null,               // cuentakm PARCIAL del tablero. Si la pantalla muestra DOS contadores de km,
                                         // este campo NUNCA debe ser null: pon aquí el otro número que viste (así se puede
                                         // verificar cuál es cuál). null solo si de verdad hay un único contador.
@@ -253,8 +253,9 @@ const FORMA_ODOMETRO = `{
   "conductor": string|null,             // nombre del conductor si se menciona
   "calidad_imagen": "buena"|"regular"|"mala"|null,  // SOLO si viste una foto del tablero: "mala" = borrosa/reflejo/oscura/ilegible; null si es texto
   "confianza_lectura": number|null,     // 0..1 qué tan seguro estás del NÚMERO del odómetro (null si es texto claro)
-  "texto_leido": string|null,           // los dígitos crudos que leíste en el odómetro, TAL COMO SE VEN (con su punto o
-                                        // separador si lo tiene ("22744.7") y sin añadir ninguno, para poder verificar
+  "texto_leido": string|null,           // transcripción EXACTA del odómetro tal como se ve, con su rótulo y su separador
+                                        // si los tiene ("ODO 23056 km"), sin añadir ni quitar dígitos: es lo que permite
+                                        // verificar el número
   "observaciones": string|null          // cualquier detalle relevante adicional
 }`;
 
@@ -415,7 +416,7 @@ function bloqueGuiasOdometro(ctx: ContextoPrompt): string | null {
         // La forma del número desambigua parcial vs total sin dar una cifra copiable (un trip
         // de 4 dígitos no puede ser un total de 6) y delata el dígito añadido al final.
         const forma = g.digitos
-          ? `el odómetro TOTAL es un número de ${g.digitos} dígitos (si leíste ${g.digitos + 1}, sobra uno: vuelve a contarlos en la foto)`
+          ? `el odómetro TOTAL es un número de ${g.digitos} dígitos (si transcribiste ${g.digitos + 1}, sobra uno: cuéntalos en la foto y mira si repetiste alguno)`
           : "";
         const guia = g.guia?.trim() ?? "";
         const detalle = [forma, guia].filter(Boolean).join(". ");

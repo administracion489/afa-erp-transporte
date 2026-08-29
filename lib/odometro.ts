@@ -44,6 +44,11 @@ function describirRef(r: RefLectura | null | undefined): string {
   return `${cuando} (${Number(r.km).toLocaleString("es-PE")} km)`;
 }
 
+/** "23.056 o 23.006 o 23.005" — lista corta de kilometrajes para un motivo legible. */
+function fmtKm(ns: number[], max = 4, sep = " o "): string {
+  return ns.slice(0, max).map((n) => n.toLocaleString("es-PE")).join(sep);
+}
+
 /** HH:MM en hora Lima (UTC-5) a partir de un epoch ms. */
 function horaLimaDeTs(ts: number): string | null {
   if (!Number.isFinite(ts)) return null;
@@ -211,15 +216,15 @@ export function evaluarLectura(opts: {
     if (retro <= tol) {
       return { estado: "sospechosa", motivo: `Retroceso leve (−${retro.toLocaleString("es-PE")} km) ${contra}: posible ruido de lectura` };
     }
-    // ¿Y si la mala es la ANTERIOR? Una lectura con un dígito de más al final (×10) que llegó a
-    // aceptarse deja el km vigente diez veces más alto, y desde ahí TODA lectura buena parece un
-    // retroceso enorme (caso B4N-968: 56.036 km acusados contra 560.287). Culpar a la lectura
-    // correcta manda al operador a rechazar justo la que hay que conservar.
-    const baseSobrante = kmSinDigitoDeMas({
+    // ¿Y si la mala es la ANTERIOR? Una lectura con un dígito de más (×10) que llegó a aceptarse
+    // deja el km vigente diez veces más alto, y desde ahí TODA lectura buena parece un retroceso
+    // enorme (caso B4N-968: 56.036 km acusados contra 560.287). Culpar a la lectura correcta
+    // manda al operador a rechazar justo la que hay que conservar.
+    const baseSobrantes = kmSinDigitoDeMas({
       kmLeido: kmBase, kmBase: kmNuevo, piso: kmNuevo - saltoMax, techo: kmNuevo + tol,
     });
-    const pista = baseSobrante != null
-      ? ` — ojo: la lectura anterior parece traer un dígito de más al final (serían ${baseSobrante.toLocaleString("es-PE")} km); si es así, la que hay que corregir es ESA, no esta`
+    const pista = baseSobrantes.length
+      ? ` — ojo: a la lectura anterior parece sobrarle un dígito (sin él sería ${fmtKm(baseSobrantes, 3, " o ")} km); si es así, la que hay que corregir es ESA, no esta`
       : "";
     return { estado: "sospechosa", motivo: `Retrocede ${retro.toLocaleString("es-PE")} km ${contra} (posible manipulación)${pista}` };
   }
@@ -254,12 +259,14 @@ export function evaluarLectura(opts: {
   //    falsos positivos sin perder el caso real (un dígito de más siempre deja el vigente alto).
   if (kmBase >= 5000 && kmNuevo >= kmBase * RATIO_DIGITO_DE_MAS) {
     const veces = Math.round(kmNuevo / kmBase);
-    // El ×10 de esta flota viene de un dígito añadido al FINAL. Si al quitarlo el número encaja,
-    // se dice cuál sería: el operador de la bandeja ve la lectura buena sin tener que calcularla
-    // (y "Aceptar" deja de ser su única salida).
-    const sinSobrante = kmSinDigitoDeMas({ kmLeido: kmNuevo, kmBase, piso: kmBase, techo: kmBase + saltoMax });
-    const pista = sinSobrante != null
-      ? ` — si sobra el último dígito, la lectura sería ${sinSobrante.toLocaleString("es-PE")} km`
+    // El ×10 de esta flota viene de un dígito añadido a la lectura (CUP-435: `ODO 23056` leído
+    // 230.056, con el 0 duplicado). Se listan los kilometrajes que quedan al quitarlo, para que
+    // el operador de la bandeja los compare con la foto en vez de calcularlos — y para que
+    // "Aceptar" deje de ser su única salida. El sistema NO elige: el dígito que sobra puede
+    // estar en cualquier posición, y quedarse con el último daría 23.005 en vez de 23.056.
+    const posibles = kmSinDigitoDeMas({ kmLeido: kmNuevo, kmBase, piso: kmBase, techo: kmBase + saltoMax });
+    const pista = posibles.length
+      ? ` — quitando el dígito que sobra sería ${fmtKm(posibles, 4, " o ")} km`
       : "";
     return { estado: "sospechosa", motivo: `Salto ×${veces} (${kmNuevo.toLocaleString("es-PE")}): posible dígito de más${pista}` };
   }

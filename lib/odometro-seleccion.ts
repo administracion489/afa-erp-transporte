@@ -7,15 +7,16 @@
 // dentro del mismo JSON, y ninguna línea de código lo miraba. Ningún prompt garantiza que eso
 // no vuelva a pasar; el km vigente del vehículo sí lo decide sin ambigüedad.
 //
-// El segundo modo de fallo, el de CUP-435: la lectura trae UN DÍGITO DE MÁS AL FINAL — 22.744
-// transcrito como 227.447, el mismo número ×10. Ahí no hay que elegir otro número del tablero:
-// hay que quitarle el dígito sobrante al que ya se leyó (ver kmSinDigitoDeMas).
+// El segundo modo de fallo, el de CUP-435: la lectura trae UN DÍGITO DE MÁS — el tablero marca
+// `ODO 23056 km` (enteros, sin décimas: verificado en físico) y la IA devuelve 230.056, con un
+// 0 duplicado en medio. Ahí no hay que elegir otro número del tablero: hay que quitarle a ese
+// mismo número el dígito que sobra (ver kmSinDigitoDeMas).
 //
-// De dónde sale ese dígito NO se afirma aquí. En algunos tableros es la décima del total; en
-// CUP-435 no —el operador verificó la unidad en físico: su odómetro es de enteros, sin décimas—
-// así que ahí el dígito lo añade la lectura (un vecino de la pantalla, un segmento mal leído).
-// La corrección no depende de la causa: se prueba por la FORMA del número y por el kilometraje
-// que el ERP ya conoce de la unidad, que es lo único verificable desde el código.
+// Y el dígito sobrante NO está siempre al final: quitar el último de 230.056 da 23.005, falso
+// por 51 km. Por eso el selector prueba todas las posiciones y solo corrige solo cuando queda
+// UN candidato posible (o cuando el propio texto crudo del modelo dice cuál es). Con varios,
+// la lectura sigue yendo a revisión con los números posibles a la vista: elegir por el
+// operador, teniendo su foto delante, es exactamente cómo se registra un número equivocado.
 //
 // Reglas de diseño (aprendidas de la revisión adversarial de este fix):
 //   1. NUNCA inventa. Si el modelo se abstuvo (kmIA null), el resultado se abstiene también.
@@ -59,34 +60,50 @@ function digitosDe(n: number): number {
 const fmt = (n: number) => Math.round(n).toLocaleString("es-PE");
 
 /**
- * ¿El número leído es el kilometraje de la unidad con UN DÍGITO DE MÁS AL FINAL (×10)?
+ * El número leído tiene UN DÍGITO DE MÁS (queda ×10). ¿Qué kilometrajes podría ser?
  *
- * Es el error sistemático de CUP-435: 22.744 transcrito como 227.447 foto tras foto, hasta
- * morir todas en "Lecturas por revisar", donde el único botón verde ("Aceptar") habría escrito
- * 230.056 km como km vigente de una unidad que va por 23.005.
+ * Es el error sistemático de CUP-435: el tablero marca `ODO 23056 km` y la lectura devuelve
+ * 230.056 — un 0 DUPLICADO en medio. Todas sus fotos morían así en "Lecturas por revisar",
+ * donde el único botón verde ("Aceptar") habría escrito 230.056 km como km vigente de una
+ * unidad que va por 23.056.
  *
- * Solo mira la FORMA, no la causa (el tablero de CUP-435 no tiene décimas: verificado en
- * físico): exige que el número tenga EXACTAMENTE un dígito más que la base conocida y que, al
- * quitarle el último, caiga dentro del rango plausible de la unidad. Si algo de eso no encaja
- * devuelve null y el caso sigue su curso normal (revisión humana).
+ * El dígito sobrante NO está siempre al final: quitar el último de 230.056 da 23.005, que es
+ * falso por 51 km. Así que se prueban TODAS las posiciones y se devuelven los kilometrajes
+ * que caen en el rango plausible de la unidad, de mayor a menor. Quién elige entre ellos es
+ * asunto del llamador: uno solo se puede corregir sin adivinar; varios hay que mirarlos contra
+ * la foto (aquí es donde se equivocaría el sistema si eligiera por su cuenta).
  *
- * Se quita SIEMPRE el último dígito, nunca uno intermedio: es donde aparece de hecho (los
- * dígitos de la izquierda coinciden con la serie real de la unidad), y probar otras posiciones
- * daría dos candidatos plausibles a la vez, o sea una corrección adivinada.
+ * Solo mira la FORMA, nunca la causa: exige que el número tenga EXACTAMENTE un dígito más que
+ * la base conocida y que el candidato conserve los dígitos de la base. Lista vacía = el patrón
+ * no encaja y el caso sigue su curso normal (revisión humana).
  */
 export function kmSinDigitoDeMas(opts: {
   kmLeido: number;
   kmBase: number;   // km vigente / última lectura viva de la unidad
   piso: number;     // mínimo plausible (anti-retroceso)
   techo: number;    // máximo plausible (anti-salto)
-}): number | null {
+}): number[] {
   const leido = Math.round(Number(opts.kmLeido));
   const base = Math.round(Number(opts.kmBase));
-  if (!Number.isFinite(leido) || !Number.isFinite(base) || leido <= 0 || base <= 0) return null;
-  if (digitosDe(leido) !== digitosDe(base) + 1) return null;
-  const sinUltimo = Math.floor(leido / 10);
-  if (!formaValida(sinUltimo)) return null;
-  return sinUltimo >= opts.piso && sinUltimo <= opts.techo ? sinUltimo : null;
+  if (!Number.isFinite(leido) || !Number.isFinite(base) || leido <= 0 || base <= 0) return [];
+  const digitos = String(leido);
+  if (digitos.length !== digitosDe(base) + 1) return [];
+
+  const posibles = new Set<number>();
+  for (let i = 0; i < digitos.length; i++) {
+    const cand = Number(digitos.slice(0, i) + digitos.slice(i + 1));
+    if (!Number.isFinite(cand) || !formaValida(cand)) continue;
+    // Quitar un dígito de la izquierda puede dejar ceros delante ("023056" → 23.056, que ya no
+    // tiene la forma del odómetro de esta unidad): se descarta por longitud.
+    if (String(cand).length !== digitos.length - 1) continue;
+    if (cand >= opts.piso && cand <= opts.techo) posibles.add(cand);
+  }
+  return [...posibles].sort((a, b) => b - a);
+}
+
+/** "23.056 · 23.006 · 23.005" — para ofrecerle al operador los números posibles. */
+function listar(ns: number[], max = 4, sep = " · "): string {
+  return ns.slice(0, max).map(fmt).join(sep);
 }
 
 /**
@@ -174,30 +191,41 @@ export function elegirOdometro(e: {
   const designados = enBanda.filter((c) => c.fuente !== "texto");
   const elegibles = designados.length ? designados : [];
 
-  // Candidato "sin el dígito de más": el MISMO número que leyó la IA, sin su último dígito. No
-  // es otro número del tablero, así que no compite con los designados —solo entra cuando
-  // ninguno de ellos resuelve el caso— pero cuando la forma encaja es la explicación más
-  // probable de un valor ×10 (ver kmSinDigitoDeMas).
-  const sinSobrante = kmSinDigitoDeMas({ kmLeido: kmIA, kmBase: kmVigente, piso, techo });
-  const corroboraTexto = sinSobrante != null && delTexto.some((t) => t.decimal && t.valor === sinSobrante);
+  // Candidatos "sin el dígito que sobra": el MISMO número que leyó la IA, quitándole un dígito.
+  // No son otros números del tablero, así que no compiten con los designados —solo entran
+  // cuando ninguno de ellos resuelve el caso— pero cuando la forma encaja son la explicación
+  // más probable de un valor ×10 (ver kmSinDigitoDeMas).
+  const sobrantes = kmSinDigitoDeMas({ kmLeido: kmIA, kmBase: kmVigente, piso, techo });
+  // El desempate honesto cuando hay varios: el número que el propio modelo transcribió en el
+  // texto crudo. Es su lectura, no una preferencia del sistema. Sin eso NO se elige — quitar
+  // "el último dígito" daba 23.005 donde el tablero marcaba 23.056.
+  const enTexto = sobrantes.filter((v) => delTexto.some((t) => t.valor === v));
+  const sobranteUnico =
+    sobrantes.length === 1 ? sobrantes[0] : enTexto.length === 1 ? enTexto[0] : null;
+
   const corregirSobrante = (): VeredictoOdometro => ({
-    km: sinSobrante!,
+    km: sobranteUnico!,
     kmIA,
     origen: "corregido",
     autoOk: true,
     motivo:
       `la IA devolvió ${fmt(kmIA)}, imposible para esta unidad (vigente ${fmt(kmVigente)}): es su lectura con un ` +
-      `DÍGITO DE MÁS al final${corroboraTexto ? " (en el texto leído ese último dígito va separado)" : ""}; ` +
-      `el sistema registró ${fmt(sinSobrante!)}`,
+      `DÍGITO DE MÁS${enTexto.length === 1 && sobrantes.length > 1 ? ` (el texto que leyó dice ${fmt(sobranteUnico!)})` : ""}; ` +
+      `el sistema registró ${fmt(sobranteUnico!)}`,
     candidatos: bruto,
   });
 
+  /** Los números posibles, para que el operador elija contra la foto (nunca el sistema). */
+  const pistaSobrantes = sobrantes.length
+    ? `: le sobra un dígito. Quitando uno queda ${listar(sobrantes)} — hay que mirar la foto para saber cuál`
+    : "";
+
   if (elegibles.length === 0) {
-    if (sinSobrante != null) return corregirSobrante();
+    if (sobranteUnico != null) return corregirSobrante();
     const detalle = enBanda.length
       ? `la IA devolvió ${fmt(kmIA)}, imposible para esta unidad (vigente ${fmt(kmVigente)}), y ningún número leído del tablero encaja`
       : `la IA devolvió ${fmt(kmIA)}, imposible para esta unidad (vigente ${fmt(kmVigente)})`;
-    return { km: kmIA, kmIA, origen: "ia", autoOk: false, motivo: detalle, candidatos: bruto };
+    return { km: kmIA, kmIA, origen: "ia", autoOk: false, motivo: detalle + pistaSobrantes, candidatos: bruto };
   }
 
   // Desempate: fuera los que se leyeron con decimales (un total no los tiene), y si aún
@@ -212,11 +240,11 @@ export function elegirOdometro(e: {
   // recorrido, y usarla aquí descartaría avances reales como si fueran ecos.
   if (Math.abs(ganador.valor - kmVigente) <= 2) {
     // Antes de mandarlo a revisión: si el número de la IA era el de siempre con un dígito de
-    // más al final, esa sí es una lectura (no un eco) y resuelve el caso.
-    if (sinSobrante != null) return corregirSobrante();
+    // más, esa sí es una lectura (no un eco) y resuelve el caso.
+    if (sobranteUnico != null) return corregirSobrante();
     return {
       km: kmIA, kmIA, origen: "ia", autoOk: false,
-      motivo: `la IA devolvió ${fmt(kmIA)} y el único número compatible (${fmt(ganador.valor)}) coincide con el km vigente — puede ser un eco, no una lectura`,
+      motivo: `la IA devolvió ${fmt(kmIA)} y el único número compatible (${fmt(ganador.valor)}) coincide con el km vigente — puede ser un eco, no una lectura${pistaSobrantes}`,
       candidatos: bruto,
     };
   }

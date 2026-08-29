@@ -607,27 +607,29 @@ export default function OdometroTab() {
   }, [lecturas, porRevisar]);
 
   /**
-   * Lecturas que traen UN DÍGITO DE MÁS al final (el kilometraje ×10). Se reconoce por la FORMA
-   * —un dígito más que la lectura viva anterior— y porque al quitarlo el número encaja con el
-   * avance normal de la unidad (ver kmSinDigitoDeMas).
+   * Lecturas que traen UN DÍGITO DE MÁS (el kilometraje ×10), con los kilometrajes que quedan
+   * al quitarlo. Se reconoce por la FORMA —un dígito más que la lectura viva anterior— y por
+   * que el candidato encaje con el avance normal de la unidad (ver kmSinDigitoDeMas).
    *
-   * Es el caso de CUP-435: la bandeja mostraba 230.056 km para una unidad que va por 23.005 y
-   * la única acción verde era "Aceptar", que habría escrito ese número como km vigente. Aquí
-   * se ofrece la corrección ya calculada, que además queda como lección para la IA.
+   * Es el caso de CUP-435: la bandeja mostraba 230.056 km para una unidad cuyo tablero marcaba
+   * `ODO 23056` y la única acción verde era "Aceptar", que habría escrito ese número como km
+   * vigente. Se ofrecen TODOS los posibles, no uno elegido por el sistema: el dígito que sobra
+   * puede estar en cualquier posición y quien tiene la foto delante es el operador. Su clic
+   * corrige la lectura y de paso queda como lección para la IA.
    */
-  const sobranteDeSospechosa = useMemo(() => {
-    const m = new Map<string, number>();
+  const sobrantesDeSospechosa = useMemo(() => {
+    const m = new Map<string, number[]>();
     for (const s of porRevisar) {
       const ref = refDeSospechosa.get(s.id);
       if (!ref) continue;
       const dias = Math.max(1, (tsEfectivoDe(s) - tsEfectivoDe(ref)) / 86400000);
-      const km = kmSinDigitoDeMas({
+      const kms = kmSinDigitoDeMas({
         kmLeido: Number(s.km),
         kmBase: Number(ref.km),
         piso: Number(ref.km),
         techo: Number(ref.km) + kmDiaMax * dias,
       });
-      if (km != null) m.set(s.id, km);
+      if (kms.length) m.set(s.id, kms.slice(0, 4));
     }
     return m;
   }, [porRevisar, refDeSospechosa, kmDiaMax]);
@@ -752,29 +754,31 @@ export default function OdometroTab() {
                     </td>
                     <td className="p-3">
                       <div className="flex gap-1.5 flex-wrap">
-                        {/* Atajo del caso conocido: la lectura trae un dígito de más al final. Va
-                            primero y como acción principal porque aquí "Aceptar" grabaría un km
-                            vigente diez veces mayor que el real. */}
-                        {(() => {
-                          const kmSobra = sobranteDeSospechosa.get(l.id);
-                          if (kmSobra == null) return null;
-                          return (
-                            <button
-                              onClick={() => abrirCorreccion(l, {
-                                motivo: "ia_digito",
-                                km: kmSobra,
-                                // La nota es lo que se le enseña a la IA. Va sin cifras (una cifra en
-                                // el prompt es una cifra copiable) y sin inventar una causa: solo el
-                                // hecho comprobable, que es contar los dígitos del odómetro.
-                                nota: "Añadiste un dígito de más al final del odómetro (lo dejaste ×10). Cuenta los dígitos del tablero y transcribe solo esos, sin arrastrar ningún número vecino.",
-                              })}
-                              className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white hover:opacity-90"
-                              style={{ background: "#0b315f" }}
-                              title="El número leído es el kilometraje con un dígito de más al final (×10). Se corrige y se le enseña a la IA.">
-                              ✓ Corregir a {fmtNum(kmSobra)}
-                            </button>
-                          );
-                        })()}
+                        {/* Atajo del caso conocido: a la lectura le sobra un dígito. Se ofrecen
+                            TODOS los kilometrajes posibles —el dígito de más puede estar en
+                            cualquier posición— para que el operador elija mirando la foto, que
+                            está a un clic en esta misma fila. Van primero y como acción principal
+                            porque aquí "Aceptar" grabaría un km vigente diez veces mayor. */}
+                        {(sobrantesDeSospechosa.get(l.id)?.length ?? 0) > 0 && (
+                          <span className="self-center text-[11px] font-bold text-[#0b315f]">Corregir a</span>
+                        )}
+                        {(sobrantesDeSospechosa.get(l.id) ?? []).map((kmSobra, i) => (
+                          <button
+                            key={kmSobra}
+                            onClick={() => abrirCorreccion(l, {
+                              motivo: "ia_digito",
+                              km: kmSobra,
+                              // La nota es lo que se le enseña a la IA. Va sin cifras (una cifra en
+                              // el prompt es una cifra copiable) y sin inventar una causa: solo el
+                              // hecho comprobable, que es contar los dígitos del odómetro.
+                              nota: "Añadiste un dígito de más al número del odómetro (lo dejaste ×10). Cuenta los dígitos del tablero, no repitas ninguno y no arrastres números vecinos.",
+                            })}
+                            className={`px-2.5 py-1.5 rounded-lg text-xs font-bold hover:opacity-90 ${i === 0 ? "text-white" : "text-[#0b315f] border border-[#0b315f]/30"}`}
+                            style={i === 0 ? { background: "#0b315f" } : undefined}
+                            title="Al número leído le sobra un dígito (quedó ×10). Compara con la foto y elige el que marca el tablero: se corrige la lectura y se le enseña a la IA.">
+                            ✓ {fmtNum(kmSobra)}
+                          </button>
+                        ))}
                         <button onClick={() => aceptar(l)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-green-700 border border-green-200 hover:bg-green-50">✓ Aceptar</button>
                         <button onClick={() => abrirCorreccion(l)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50" title="Corregir el km o descartar con motivo (no se pierde la lectura)">✕ Rechazar</button>
                         <button onClick={() => reiniciar(l)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-blue-700 border border-blue-200 hover:bg-blue-50">↻ Reinicio tablero</button>
