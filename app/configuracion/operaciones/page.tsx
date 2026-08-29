@@ -112,7 +112,7 @@ export default function ConfigOperacionesPage() {
       notifica_conductor_tercero: c.notifica_conductor_tercero ?? false,
       destinatarios: c.destinatarios, ...canales, updated_at: new Date().toISOString(),
     }).eq("clave", c.clave);
-    showToast(error ? "Error al guardar" : `Guardado: ${c.nombre}`, !error);
+    showToast(error ? `Error al guardar: ${error.message}` : `Guardado: ${c.nombre}`, !error);
   };
 
 
@@ -257,7 +257,9 @@ export default function ConfigOperacionesPage() {
   };
   const guardarDest = async (d: Destinatario) => {
     const { error } = await supabase.from("alerta_destinatarios").update({ nombre: d.nombre, funcion: d.funcion, telefono: d.telefono, activo: d.activo, es_contingencia: d.es_contingencia ?? false }).eq("id", d.id);
-    showToast(error ? "Error al guardar" : "Contacto actualizado", !error);
+    // El mensaje de Supabase se MUESTRA, no se traga: un "Error al guardar" pelado deja
+    // al usuario sin saber si falta una migración, si es RLS o si el dato es inválido.
+    showToast(error ? `Error al guardar: ${error.message}` : "Contacto actualizado", !error);
   };
   const borrarDest = async (id: number) => {
     if (!confirm("¿Eliminar este contacto de las alertas?")) return;
@@ -558,8 +560,11 @@ export default function ConfigOperacionesPage() {
         )}
       </div>
 
+      {/* Arriba, NO abajo: en bottom-right viven los botones flotantes de ELIA y de la
+          ayuda (ver app/layout.tsx), que tapaban el aviso — y justo los errores, que son
+          los que hay que leer. z-50 para quedar por encima de ambos. */}
       {toast && (
-        <div className={`fixed bottom-6 right-6 px-4 py-3 rounded-xl text-sm text-white shadow-lg ${toast.ok ? "bg-[#0b315f]" : "bg-red-600"}`}>{toast.msg}</div>
+        <div className={`fixed top-6 right-6 z-50 max-w-md px-4 py-3 rounded-xl text-sm text-white shadow-lg ${toast.ok ? "bg-[#0b315f]" : "bg-red-600"}`}>{toast.msg}</div>
       )}
     </div>
   );
