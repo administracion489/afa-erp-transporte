@@ -38,12 +38,16 @@ Hola {{1}} 👋
 
 {{4}}
 
-📱 Ruta y detalle de cada servicio en la app del conductor
 ☎️ Coordinador de Operaciones: {{5}}
+📱 Ruta y detalle de cada servicio en la app AFA conductor.
 ```
 
 Los iconos van en el texto FIJO, uno por bloque, para que el conductor localice de un
 vistazo qué es cada parte. El listado (`{{4}}`) va numerado con emoji desde el código.
+
+**El orden de las dos últimas líneas no es estético:** Meta rechaza las plantillas cuyo
+cuerpo TERMINA en una variable. Con `{{5}}` al final, la plantilla queda bloqueada al
+enviarla a revisión. Por eso cierra la línea de la app, que es texto fijo.
 
 ## Variables
 

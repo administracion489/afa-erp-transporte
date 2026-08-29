@@ -183,12 +183,14 @@ export default function ConfigOperacionesPage() {
   // así que crearla es opcional — sólo mejora el resultado.
   //
   // SIN botón: los de mapa son por servicio y aquí hay varios.
+  // El teléfono NO puede ir en la última línea: Meta rechaza las plantillas cuyo cuerpo
+  // TERMINA en variable. Por eso cierra la línea de la app, que es texto fijo.
   // {{4}} va en UNA línea con " • " de separador porque Meta rechaza los parámetros con
   // saltos de línea; los saltos que se ven en el mensaje son del texto fijo de abajo.
   const PLANTILLA_ASIGNACION_MULTIPLE: NuevaPlantilla = {
     name: "conductor_asignacion_multiple",
     category: "UTILITY",
-    body: "Hola {{1}} 👋\n\n📋 *{{2}} servicios asignados* para el {{3}}\n\n{{4}}\n\n📱 Ruta y detalle de cada servicio en la app del conductor\n☎️ Coordinador de Operaciones: {{5}}",
+    body: "Hola {{1}} 👋\n\n📋 *{{2}} servicios asignados* para el {{3}}\n\n{{4}}\n\n☎️ Coordinador de Operaciones: {{5}}\n📱 Ruta y detalle de cada servicio en la app AFA conductor.",
     ejemplos: [
       "Peter",
       "4",

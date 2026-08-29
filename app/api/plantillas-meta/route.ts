@@ -95,6 +95,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "El nombre solo puede tener minúsculas, números y guion bajo (_), sin espacios" }, { status: 400 });
     }
     if (!bodyTexto) return NextResponse.json({ error: "El cuerpo del mensaje es obligatorio" }, { status: 400 });
+    // Meta BLOQUEA la plantilla si el cuerpo empieza o termina en variable. Se avisa aquí
+    // con un mensaje claro en vez de dejar que la rechace tras enviarla a revisión.
+    if (/\{\{\s*\d+\s*\}\}\s*$/.test(bodyTexto)) {
+      return NextResponse.json({ error: "El cuerpo no puede TERMINAR en una variable. Añade texto fijo después (o mueve esa línea hacia arriba)." }, { status: 400 });
+    }
+    if (/^\s*\{\{\s*\d+\s*\}\}/.test(bodyTexto)) {
+      return NextResponse.json({ error: "El cuerpo no puede EMPEZAR con una variable. Antepón texto fijo (p. ej. \"Hola\")." }, { status: 400 });
+    }
     if (boton && !/^https?:\/\//i.test(boton.url)) {
       return NextResponse.json({ error: "La URL del botón debe empezar con http:// o https://" }, { status: 400 });
     }
