@@ -6,6 +6,7 @@ import ModalGps from "@/components/seguimiento/ModalGps";
 import PanelMensajesPasajeros from "@/components/seguimiento/PanelMensajesPasajeros";
 import DescargaMasivaModal from "@/components/seguimiento/DescargaMasivaModal";
 import FichaServicioNueva from "@/components/seguimiento/FichaServicio";
+import ModalRutaMasiva from "@/components/seguimiento/ModalRutaMasiva";
 import { supabase } from "@/lib/supabase";
 import { ESTADOS_RESERVA } from "@/lib/estados";
 import { idAfa } from "@/lib/folio";
@@ -43,6 +44,9 @@ type Reserva = {
   // Ya venía en el `select("*")` de esta página; lo que faltaba era declararlo para poder
   // mostrarlo y editarlo en la lista — ver CeldaRuta.
   ruta_nombre?: string|null;
+  // Los tres que necesita el renombrado en lote para reconocer "los demás días de esta misma
+  // ruta" (lib/ruta-equivalente.ts). También venían ya en el `select("*")`.
+  cotizacion_id?: number|null; direccion_servicio?: string|null; paradas_json?: unknown;
 };
 
 type Cliente   = { id: number; nombre: string; empresa?: string|null };
@@ -346,7 +350,7 @@ function chipsAlerta(s: ServicioView): { label: string; color: string; bg: strin
  * respetando el formato que ya usa la operación ("RUTA B/ ENTRADA 05:10/ CHILCA→BSF PUNTA
  * HERMOSA"), y por eso el aviso vive en el tooltip y en la ficha de ayuda del módulo.
  */
-function CeldaRuta({ s, onGuardado }: { s: ServicioView; onGuardado: (id: number, valor: string|null) => void }) {
+function CeldaRuta({ s, onGuardado, onMasivo }: { s: ServicioView; onGuardado: (id: number, valor: string|null) => void; onMasivo: (r: Reserva, nombre: string) => void }) {
   const [editando, setEditando] = useState(false);
   const [borrador, setBorrador] = useState("");
   const [guardando, setGuardando] = useState(false);
@@ -386,19 +390,37 @@ function CeldaRuta({ s, onGuardado }: { s: ServicioView; onGuardado: (id: number
         {editando ? (
           // Se desborda a propósito sobre la fila: en 150 px no se corrige un nombre de 45
           // caracteres sin pelearse con el scroll horizontal del propio input.
-          <input
-            autoFocus
-            value={borrador}
-            onChange={e => setBorrador(e.target.value)}
-            onBlur={guardar}
-            onKeyDown={e => {
-              if (e.key === "Enter")  { e.preventDefault(); e.currentTarget.blur(); }
-              if (e.key === "Escape") { cancelado.current = true; e.currentTarget.blur(); }
-            }}
-            placeholder="Ej. RUTA B/ ENTRADA 05:10/ CHILCA→BSF"
-            className="absolute left-0 top-0 z-20 w-[330px] h-[22px] rounded-md border px-1.5 text-[11px] font-semibold text-[#0b315f] bg-white outline-none focus:ring-2 focus:ring-[#0b315f]/20 shadow-lg"
-            style={{ borderColor: "#bfdbfe" }}
-          />
+          <div className="absolute left-0 top-0 z-20 w-[330px]">
+            <input
+              autoFocus
+              value={borrador}
+              onChange={e => setBorrador(e.target.value)}
+              onBlur={guardar}
+              onKeyDown={e => {
+                if (e.key === "Enter")  { e.preventDefault(); e.currentTarget.blur(); }
+                if (e.key === "Escape") { cancelado.current = true; e.currentTarget.blur(); }
+              }}
+              placeholder="Ej. RUTA B/ ENTRADA 05:10/ CHILCA→BSF"
+              className="w-full h-[22px] rounded-md border px-1.5 text-[11px] font-semibold text-[#0b315f] bg-white outline-none focus:ring-2 focus:ring-[#0b315f]/20 shadow-lg"
+              style={{ borderColor: "#bfdbfe" }}
+            />
+            <div className="mt-1 rounded-md bg-white border border-gray-100 shadow-lg px-2 py-1 flex items-center justify-between gap-2">
+              <span className="text-[9px] text-gray-400 whitespace-nowrap">Enter guarda · Esc cancela</span>
+              {/* onMouseDown + preventDefault, NO onClick: pulsarlo haría `blur` en el input, y el
+                  blur desmonta este botón antes de que llegue su propio clic — el clásico botón
+                  que no se puede pulsar. Así el foco ni se mueve y el lote decide qué guardar. */}
+              <button
+                onMouseDown={e => {
+                  e.preventDefault();
+                  cancelado.current = true;   // lo de la fila NO se guarda: lo decide el lote
+                  setEditando(false);
+                  onMasivo(s.reserva, borrador.trim());
+                }}
+                className="text-[10px] font-bold text-[#0b315f] hover:underline whitespace-nowrap">
+                Aplicar a varios días…
+              </button>
+            </div>
+          </div>
         ) : (
           <button
             onClick={abrir}
@@ -416,7 +438,7 @@ function CeldaRuta({ s, onGuardado }: { s: ServicioView; onGuardado: (id: number
   );
 }
 
-function FilaServicio({ s, onOpen, onGps, onRutaNombre }:{ s: ServicioView; onOpen: () => void; onGps: () => void; onRutaNombre: (id: number, valor: string|null) => void }) {
+function FilaServicio({ s, onOpen, onGps, onRutaNombre, onRutaMasiva }:{ s: ServicioView; onOpen: () => void; onGps: () => void; onRutaNombre: (id: number, valor: string|null) => void; onRutaMasiva: (r: Reserva, nombre: string) => void }) {
   const est      = ESTADO_VIS[s.estado_visual];
   const progreso = s.paradas_total > 0 ? Math.round((s.paradas_completadas / s.paradas_total) * 100) : 0;
   const alertas  = chipsAlerta(s);
@@ -436,7 +458,7 @@ function FilaServicio({ s, onOpen, onGps, onRutaNombre }:{ s: ServicioView; onOp
           sobrante, así que cualquier celda posterior queda a una distancia distinta del borde
           según cuántos chips de alerta traiga la fila — y una columna que baila de sitio en
           cada fila deja de leerse como columna. Aquí arranca siempre en el mismo píxel. */}
-      <CeldaRuta s={s} onGuardado={onRutaNombre} />
+      <CeldaRuta s={s} onGuardado={onRutaNombre} onMasivo={onRutaMasiva} />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-bold text-[#0b315f] text-sm truncate">{s.cliente_nombre}</span>
@@ -511,6 +533,10 @@ export default function SeguimientoPage() {
   const [gpsModal,    setGpsModal]    = useState<ServicioView | null>(null);
   const [drawer,      setDrawer]      = useState<ServicioView | null>(null);
   const [descargaMasiva, setDescargaMasiva] = useState(false);
+  // Renombrado en lote del nombre de ruta. Vive en la PÁGINA, no en la fila: el modal tapa la
+  // pantalla entera y monta su propia consulta, y colgarlo de una fila lo desmontaría en cuanto
+  // el realtime reconstruya la lista a media edición.
+  const [rutaMasiva, setRutaMasiva] = useState<{ reserva: Reserva; nombre: string } | null>(null);
   const [empresaPerfil, setEmpresaPerfil] = useState<EmpresaPerfil | null>(null);
   const [puntualidad, setPuntualidad] = useState<Record<number, Puntualidad>>({});
   const [resumenPunt, setResumenPunt] = useState<ResumenPuntualidad | null>(null);
@@ -951,7 +977,7 @@ export default function SeguimientoPage() {
               </div>
               <div className="divide-y divide-gray-50">
                 {[...filtrados].sort((a,b)=>(a.reserva.hora_servicio||"").localeCompare(b.reserva.hora_servicio||"")).map(s=>(
-                  <FilaServicio key={s.reserva.id} s={s} onOpen={()=>setDrawer(s)} onGps={()=>setGpsModal(s)} onRutaNombre={patchRutaNombre} />
+                  <FilaServicio key={s.reserva.id} s={s} onOpen={()=>setDrawer(s)} onGps={()=>setGpsModal(s)} onRutaNombre={patchRutaNombre} onRutaMasiva={(r,n)=>setRutaMasiva({reserva:r,nombre:n})} />
                 ))}
               </div>
             </div>
@@ -988,6 +1014,17 @@ export default function SeguimientoPage() {
       {/* ── MODAL: DESCARGA MASIVA POR RUTA ── */}
       {descargaMasiva && (
         <DescargaMasivaModal fechaInicial={fechaFiltro} onClose={() => setDescargaMasiva(false)} />
+      )}
+
+      {/* ── MODAL: NOMBRE DE RUTA EN LOTE ── */}
+      {rutaMasiva && (
+        <ModalRutaMasiva
+          reserva={rutaMasiva.reserva}
+          nombreInicial={rutaMasiva.nombre}
+          clientes={clientes} vehiculos={vehiculos} vehsTer={vehsTer}
+          onClose={() => setRutaMasiva(null)}
+          onAplicado={cargar}
+        />
       )}
     </div>
   );
