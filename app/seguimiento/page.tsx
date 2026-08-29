@@ -541,7 +541,14 @@ function FilaServicio({ s, onOpen, onGps, onRutaNombre, onRutaMasiva }:{ s: Serv
         <button onClick={onGps} title="GPS en vivo" className="flex items-center gap-1 bg-[#EFF6FF] hover:bg-[#DBEAFE] text-[#1d4ed8] text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors">
           <Ic.Map size={11} color="#1d4ed8" /><span className="hidden lg:inline">GPS</span>
         </button>
-        <Ic.ChevronDown size={15} className="-rotate-90 text-gray-300 group-hover:text-[#0b315f] transition-colors" />
+        {/* La flecha PARECÍA el acceso al detalle y no lo era. Este contenedor corta el clic
+            para que pulsar GPS no abra además la ficha, y la flecha era un SVG suelto: se la
+            tragaba ese mismo corte. Quien la pulsaba no obtenía NADA y tenía que ir a buscar
+            el centro de la fila. Ahora es un botón de verdad, con su propio destino. */}
+        <button onClick={onOpen} title="Ver detalle del servicio" aria-label="Ver detalle del servicio"
+          className="p-1 -m-1 rounded-lg hover:bg-[#EFF6FF] transition-colors">
+          <Ic.ChevronDown size={15} className="-rotate-90 text-gray-300 group-hover:text-[#0b315f] transition-colors" />
+        </button>
       </div>
     </div>
   );
