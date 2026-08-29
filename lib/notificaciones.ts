@@ -761,8 +761,14 @@ export async function notificarReserva(
  * error y el aviso NO sale.
  */
 function unaLinea(s: string): string {
-  return s.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
+  // Se conservan hasta 4 espacios seguidos A PROPÓSITO: son el único recurso que queda
+  // para separar visualmente los servicios, ya que el salto de línea está prohibido.
+  // Sólo se recortan las rachas de 5+, que son las que Meta rechaza.
+  return s.replace(/[\r\n\t]+/g, " ").replace(/ {5,}/g, "    ").trim();
 }
+
+/** Separación entre servicios: 4 espacios, el máximo que Meta tolera. */
+const SEP_SERVICIOS = "    ";
 
 /** Numeración del listado de servicios. Sin emoji a partir del 11 (no existen). */
 const NUM_EMOJI = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
@@ -851,9 +857,9 @@ export async function notificarConductorAsignacionAgrupada(args: {
       nombreCorto(conductor.nombre ?? ""),
       String(ordenadas.length),
       fechaTexto,
-      // Separador ligero: el número emoji ya delimita cada servicio, un "•" encima
-      // recargaría la línea.
-      unaLinea(items.join(" · ")),
+      // Cada item se limpia POR SEPARADO y se unen después: si se limpiara la cadena ya
+      // unida, la propia regla de "máximo 4 espacios" se comería el separador.
+      items.map(unaLinea).join(SEP_SERVICIOS),
       telConting,
     ],
     canales,

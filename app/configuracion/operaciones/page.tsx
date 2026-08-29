@@ -193,7 +193,7 @@ export default function ConfigOperacionesPage() {
       "Peter",
       "4",
       "viernes 28 de agosto",
-      "1️⃣ 06:35 El Agustino → Punta Hermosa · 2️⃣ 10:35 Primero de Mayo → Villa El Salvador",
+      "1️⃣ 06:35 El Agustino → Punta Hermosa    2️⃣ 10:35 Primero de Mayo → Villa El Salvador",
       "+51 999 888 777",
     ],
     botonTexto: "",
