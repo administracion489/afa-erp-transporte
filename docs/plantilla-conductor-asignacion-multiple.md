@@ -24,7 +24,7 @@ el agrupado empieza a usarse solo, sin desplegar nada.
 | Idioma | Español (`es`) |
 | Encabezado | ninguno |
 | Botones | **ninguno** |
-| Pie | ninguno |
+| Pie de página | `AFA Notificaciones · Mensaje automático, no respondas aquí.` (59 de 60 caracteres) |
 
 Los botones de mapa se omiten a propósito: son por servicio, y aquí hay varios. El
 detalle de cada uno está en la app del conductor.
@@ -32,12 +32,18 @@ detalle de cada uno está en la app del conductor.
 ## Cuerpo
 
 ```
-Hola {{1}}, se te asignaron {{2}} servicios para el {{3}}:
+Hola {{1}} 👋
+
+📋 *{{2}} servicios asignados* para el {{3}}
 
 {{4}}
 
-Revisa el detalle de cada uno en la app. Ante cualquier duda: {{5}}
+📱 Ruta y detalle de cada servicio en la app del conductor
+☎️ Coordinador de Operaciones: {{5}}
 ```
+
+Los iconos van en el texto FIJO, uno por bloque, para que el conductor localice de un
+vistazo qué es cada parte. El listado (`{{4}}`) va numerado con emoji desde el código.
 
 ## Variables
 
@@ -46,8 +52,13 @@ Revisa el detalle de cada uno en la app. Ante cualquier duda: {{5}}
 | `{{1}}` | Nombre corto del conductor | `Peter` |
 | `{{2}}` | Cantidad de servicios | `4` |
 | `{{3}}` | Fecha, o `varias fechas` si no coinciden | `viernes 28 de agosto` |
-| `{{4}}` | Listado en UNA línea, separado por ` • ` | `06:35 El Agustino → Punta Hermosa • 10:35 Primero de Mayo → Villa` |
+| `{{4}}` | Listado en UNA línea, numerado con emoji y separado por ` · ` | `1️⃣ 06:35 El Agustino → Punta Hermosa · 2️⃣ 10:35 Primero de Mayo → Villa` |
 | `{{5}}` | Teléfono de contingencia (del directorio, `es_contingencia=true`) | `+51 999 888 777` |
+
+**Ojo con `{{5}}`:** el texto fijo lo presenta como *"Coordinador de Operaciones"*, pero el
+valor sale de `alerta_destinatarios` donde `es_contingencia = true`. Verifica que esa ficha
+del directorio sea esa persona; si la tabla está vacía, el código cae al respaldo fijo
+`+51 912 569 005` (`telefonoContingencia()` en `lib/alertas.ts`).
 
 ### Ejemplos que pide Meta al crear la plantilla
 
@@ -56,7 +67,7 @@ Meta exige valores de muestra para aprobar. Usa estos:
 - `{{1}}` → `Peter`
 - `{{2}}` → `4`
 - `{{3}}` → `viernes 28 de agosto`
-- `{{4}}` → `06:35 El Agustino → Punta Hermosa • 10:35 Primero de Mayo → Villa El Salvador`
+- `{{4}}` → `1️⃣ 06:35 El Agustino → Punta Hermosa · 2️⃣ 10:35 Primero de Mayo → Villa El Salvador`
 - `{{5}}` → `+51 999 888 777`
 
 ## Por qué `{{4}}` va en una sola línea
@@ -64,7 +75,9 @@ Meta exige valores de muestra para aprobar. Usa estos:
 **Meta rechaza los parámetros de plantilla que contengan saltos de línea, tabulaciones o
 más de 4 espacios seguidos.** No se puede maquetar la lista con `\n` desde el código: el
 envío fallaría entero. Por eso el listado viaja en una línea con ` • ` como separador
-(`unaLinea()` en `lib/notificaciones.ts` lo garantiza) y WhatsApp lo ajusta solo.
+(`unaLinea()` en `lib/notificaciones.ts` lo garantiza) y WhatsApp lo ajusta solo. La
+numeración con emoji (1️⃣ 2️⃣ 3️⃣…) es justamente para que esa línea corrida se siga
+leyendo como una lista; a partir del 11 no hay emoji de teclado y se cae a `11.`.
 
 Los saltos de línea que sí se ven en el mensaje son los del **texto fijo** de la
 plantilla, alrededor de `{{4}}` — esos sí están permitidos.

@@ -188,12 +188,12 @@ export default function ConfigOperacionesPage() {
   const PLANTILLA_ASIGNACION_MULTIPLE: NuevaPlantilla = {
     name: "conductor_asignacion_multiple",
     category: "UTILITY",
-    body: "Hola {{1}} 👋, se te asignaron *{{2}} servicios* para el {{3}}:\n\n{{4}}\n\nRevisa el detalle de cada uno en la app. Ante cualquier duda: {{5}}",
+    body: "Hola {{1}} 👋\n\n📋 *{{2}} servicios asignados* para el {{3}}\n\n{{4}}\n\n📱 Ruta y detalle de cada servicio en la app del conductor\n☎️ Coordinador de Operaciones: {{5}}",
     ejemplos: [
       "Peter",
       "4",
       "viernes 28 de agosto",
-      "06:35 El Agustino → Punta Hermosa • 10:35 Primero de Mayo → Villa El Salvador",
+      "1️⃣ 06:35 El Agustino → Punta Hermosa · 2️⃣ 10:35 Primero de Mayo → Villa El Salvador",
       "+51 999 888 777",
     ],
     botonTexto: "",

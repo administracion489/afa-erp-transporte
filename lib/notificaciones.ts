@@ -163,8 +163,10 @@ const PLANTILLA_CONDUCTOR_COMPLETO = "recordatorio_conductor_completo";
 //   {{1}} nombre del conductor
 //   {{2}} cantidad de servicios ("4")
 //   {{3}} fecha ("viernes 28 de agosto") o "varias fechas" si no coinciden
-//   {{4}} listado de servicios en UNA línea, separados por " • "
-//   {{5}} teléfono de contingencia
+//   {{4}} listado de servicios en UNA línea, numerado con emoji y separado por " · "
+//   {{5}} teléfono de contingencia (el marcado es_contingencia en alerta_destinatarios;
+//         el texto fijo de la plantilla lo presenta como "Coordinador de Operaciones",
+//         así que esa ficha del directorio debe ser esa persona)
 // SIN botones: los de mapa son por servicio y aquí hay varios; el detalle de cada uno
 // está en la app del conductor.
 //
@@ -762,6 +764,9 @@ function unaLinea(s: string): string {
   return s.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
 }
 
+/** Numeración del listado de servicios. Sin emoji a partir del 11 (no existen). */
+const NUM_EMOJI = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
+
 /**
  * UN solo aviso de asignación al conductor cubriendo VARIOS servicios.
  *
@@ -820,12 +825,16 @@ export async function notificarConductorAsignacionAgrupada(args: {
     (a.fecha_servicio ?? "").localeCompare(b.fecha_servicio ?? "") ||
     (a.hora_servicio ?? "").localeCompare(b.hora_servicio ?? ""));
 
-  const items = ordenadas.map((r) => {
+  const items = ordenadas.map((r, i) => {
     const ps = porReserva.get(r.id) ?? [];
     const origen = r.origen || ps[0]?.nombre || "Por confirmar";
     const ultima = ps[ps.length - 1];
     const destino = r.destino || (ultima && ultima !== ps[0] ? ultima.nombre : null) || "Por confirmar";
-    return `${r.hora_servicio?.slice(0, 5) ?? "-"} ${origen} → ${destino}`;
+    // Numerado con emoji: al ir todo en una línea (ver unaLinea), el número es lo que
+    // deja ver de un golpe cuántos servicios son y dónde empieza cada uno. Pasado el
+    // 10 no hay emoji de teclado, así que se cae a "11." — nunca queda un hueco.
+    const marca = NUM_EMOJI[i] ?? `${i + 1}.`;
+    return `${marca} ${r.hora_servicio?.slice(0, 5) ?? "-"} ${origen} → ${destino}`;
   });
 
   const fechas = new Set(ordenadas.map((r) => r.fecha_servicio).filter(Boolean) as string[]);
@@ -842,7 +851,9 @@ export async function notificarConductorAsignacionAgrupada(args: {
       nombreCorto(conductor.nombre ?? ""),
       String(ordenadas.length),
       fechaTexto,
-      unaLinea(items.join(" • ")),
+      // Separador ligero: el número emoji ya delimita cada servicio, un "•" encima
+      // recargaría la línea.
+      unaLinea(items.join(" · ")),
       telConting,
     ],
     canales,
