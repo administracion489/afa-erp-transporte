@@ -26,7 +26,7 @@ export default function AnularLecturaOdometro({
   placa: string;
   /**
    * Corrección ya deducida por el sistema con la que abrir el modal (motivo + km + explicación).
-   * La usa la bandeja de revisión cuando reconoce el patrón de la décima pegada al total: el
+   * La usa la bandeja de revisión cuando reconoce el patrón del dígito de más al final: el
    * operador solo confirma. Sigue siendo editable — nada se guarda sin su confirmación.
    */
   sugerencia?: { motivo: MotivoAnulacion; km: number; nota?: string } | null;

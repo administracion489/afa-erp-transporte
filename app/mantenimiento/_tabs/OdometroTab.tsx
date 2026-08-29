@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { paginarFilas } from "@/lib/huella";
 import { registrarLectura, aceptarLectura, marcarReinicio, type FuenteLectura, type MotivoAnulacion } from "@/lib/odometro";
-import { kmSinDecima } from "@/lib/odometro-seleccion";
+import { kmSinDigitoDeMas } from "@/lib/odometro-seleccion";
 import {
   analizarVehiculo, resumenPeriodo, claveVehiculo, hoyLima, sumarDias, horaLima, diasEntreFechas,
   type LecturaCruda, type DiaRecorrido, type Anomalia,
@@ -223,8 +223,8 @@ export default function OdometroTab() {
   const [fotoZoom, setFotoZoom]   = useState<{ url: string; titulo: string; lectura?: Lectura } | null>(null);
 
   // Anulación de una lectura (con motivo → alimenta el aprendizaje de la IA). `sugAnular` es
-  // la corrección que el sistema deduce y con la que se abre el modal ya rellenado (patrón de
-  // la décima pegada al total); null = el operador decide todo desde cero.
+  // la corrección que el sistema deduce y con la que se abre el modal ya rellenado (patrón del
+  // dígito de más al final); null = el operador decide todo desde cero.
   const [anular, setAnular]       = useState<Lectura | null>(null);
   const [sugAnular, setSugAnular] = useState<{ motivo: MotivoAnulacion; km: number; nota?: string } | null>(null);
 
@@ -607,21 +607,21 @@ export default function OdometroTab() {
   }, [lecturas, porRevisar]);
 
   /**
-   * Lecturas cuyo número es el del tablero con la DÉCIMA pegada al final (el kilometraje ×10).
-   * Se reconoce por la FORMA —un dígito más que la lectura viva anterior— y porque al quitarla
-   * el número encaja con el avance normal de la unidad (ver kmSinDecima).
+   * Lecturas que traen UN DÍGITO DE MÁS al final (el kilometraje ×10). Se reconoce por la FORMA
+   * —un dígito más que la lectura viva anterior— y porque al quitarlo el número encaja con el
+   * avance normal de la unidad (ver kmSinDigitoDeMas).
    *
    * Es el caso de CUP-435: la bandeja mostraba 230.056 km para una unidad que va por 23.005 y
    * la única acción verde era "Aceptar", que habría escrito ese número como km vigente. Aquí
    * se ofrece la corrección ya calculada, que además queda como lección para la IA.
    */
-  const decimaDeSospechosa = useMemo(() => {
+  const sobranteDeSospechosa = useMemo(() => {
     const m = new Map<string, number>();
     for (const s of porRevisar) {
       const ref = refDeSospechosa.get(s.id);
       if (!ref) continue;
       const dias = Math.max(1, (tsEfectivoDe(s) - tsEfectivoDe(ref)) / 86400000);
-      const km = kmSinDecima({
+      const km = kmSinDigitoDeMas({
         kmLeido: Number(s.km),
         kmBase: Number(ref.km),
         piso: Number(ref.km),
@@ -752,25 +752,26 @@ export default function OdometroTab() {
                     </td>
                     <td className="p-3">
                       <div className="flex gap-1.5 flex-wrap">
-                        {/* Atajo del caso conocido: el tablero muestra décimas y la lectura las
-                            pegó al final. Va primero y como acción principal porque aquí
-                            "Aceptar" grabaría un km vigente diez veces mayor que el real. */}
+                        {/* Atajo del caso conocido: la lectura trae un dígito de más al final. Va
+                            primero y como acción principal porque aquí "Aceptar" grabaría un km
+                            vigente diez veces mayor que el real. */}
                         {(() => {
-                          const kmDec = decimaDeSospechosa.get(l.id);
-                          if (kmDec == null) return null;
+                          const kmSobra = sobranteDeSospechosa.get(l.id);
+                          if (kmSobra == null) return null;
                           return (
                             <button
                               onClick={() => abrirCorreccion(l, {
                                 motivo: "ia_digito",
-                                km: kmDec,
-                                // La nota es lo que se le enseña a la IA: sin cifras (una cifra en
-                                // el prompt es una cifra copiable), solo dónde estuvo el error.
-                                nota: "El odómetro de esta unidad muestra el total con una décima: lee solo la parte entera, nunca pegues la décima al número.",
+                                km: kmSobra,
+                                // La nota es lo que se le enseña a la IA. Va sin cifras (una cifra en
+                                // el prompt es una cifra copiable) y sin inventar una causa: solo el
+                                // hecho comprobable, que es contar los dígitos del odómetro.
+                                nota: "Añadiste un dígito de más al final del odómetro (lo dejaste ×10). Cuenta los dígitos del tablero y transcribe solo esos, sin arrastrar ningún número vecino.",
                               })}
                               className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white hover:opacity-90"
                               style={{ background: "#0b315f" }}
-                              title="El número leído es el kilometraje con la décima del tablero pegada al final (×10). Se corrige y se le enseña a la IA.">
-                              ✓ Corregir a {fmtNum(kmDec)}
+                              title="El número leído es el kilometraje con un dígito de más al final (×10). Se corrige y se le enseña a la IA.">
+                              ✓ Corregir a {fmtNum(kmSobra)}
                             </button>
                           );
                         })()}

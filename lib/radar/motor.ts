@@ -349,14 +349,14 @@ function seleccionarMediaCluster(candidatos: any[], cap: number): any[] {
  * con pinta de combustible/foto (para no gastar la consulta en lotes sin eso).
  *
  * Entran TODAS las unidades con guía o con km vigente, no solo las que tienen guía escrita: la
- * cantidad de dígitos es la señal que atrapa el ×10 (la décima del tablero pegada al total) y
+ * cantidad de dígitos es la señal que atrapa el ×10 (un dígito de más al final del total) y
  * limitarla a las unidades con guía dejaba a casi toda la flota leyendo sin ancla.
  */
 async function cargarGuiasOdometro(sb: any): Promise<{ placa: string; guia: string | null; digitos: number | null }[]> {
   try {
     // `kilometraje_actual` viaja en la MISMA fila: de ahí sale cuántos dígitos tiene el odómetro
-    // de esa unidad, que es lo que distingue un parcial de 4 cifras de un total de 6 y delata la
-    // décima leída como un dígito más. Se manda la cantidad de dígitos, nunca el km exacto
+    // de esa unidad, que es lo que distingue un parcial de 4 cifras de un total de 6 y delata el
+    // dígito añadido al final. Se manda la cantidad de dígitos, nunca el km exacto
     // (ver ContextoPrompt.guiasOdometro).
     const [{ data: propios }, { data: terceros }] = await Promise.all([
       sb.from("vehiculos").select("placa, guia_odometro, kilometraje_actual"),

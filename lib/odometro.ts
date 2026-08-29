@@ -11,7 +11,7 @@
 //   - marcarReinicio() re-ancla el vigente cuando cambian el tablero (odómetro
 //     físico reemplazado), evitando que "el mayor gana" deje al bus ciego.
 
-import { kmSinDecima } from "./odometro-seleccion";
+import { kmSinDigitoDeMas } from "./odometro-seleccion";
 
 export type EstadoLectura = "aceptada" | "sospechosa" | "rechazada" | "reinicio" | "anulada";
 export type FuenteLectura =
@@ -211,15 +211,15 @@ export function evaluarLectura(opts: {
     if (retro <= tol) {
       return { estado: "sospechosa", motivo: `Retroceso leve (−${retro.toLocaleString("es-PE")} km) ${contra}: posible ruido de lectura` };
     }
-    // ¿Y si la mala es la ANTERIOR? Una lectura con la décima del tablero pegada al final (×10)
-    // que llegó a aceptarse deja el km vigente diez veces más alto, y desde ahí TODA lectura
-    // buena parece un retroceso enorme (caso B4N-968: 56.036 km acusados contra 560.287).
-    // Culpar a la lectura correcta manda al operador a rechazar justo la que hay que conservar.
-    const baseConDecima = kmSinDecima({
+    // ¿Y si la mala es la ANTERIOR? Una lectura con un dígito de más al final (×10) que llegó a
+    // aceptarse deja el km vigente diez veces más alto, y desde ahí TODA lectura buena parece un
+    // retroceso enorme (caso B4N-968: 56.036 km acusados contra 560.287). Culpar a la lectura
+    // correcta manda al operador a rechazar justo la que hay que conservar.
+    const baseSobrante = kmSinDigitoDeMas({
       kmLeido: kmBase, kmBase: kmNuevo, piso: kmNuevo - saltoMax, techo: kmNuevo + tol,
     });
-    const pista = baseConDecima != null
-      ? ` — ojo: la lectura anterior parece llevar una décima de más (serían ${baseConDecima.toLocaleString("es-PE")} km); si es así, la que hay que corregir es ESA, no esta`
+    const pista = baseSobrante != null
+      ? ` — ojo: la lectura anterior parece traer un dígito de más al final (serían ${baseSobrante.toLocaleString("es-PE")} km); si es así, la que hay que corregir es ESA, no esta`
       : "";
     return { estado: "sospechosa", motivo: `Retrocede ${retro.toLocaleString("es-PE")} km ${contra} (posible manipulación)${pista}` };
   }
@@ -254,12 +254,12 @@ export function evaluarLectura(opts: {
   //    falsos positivos sin perder el caso real (un dígito de más siempre deja el vigente alto).
   if (kmBase >= 5000 && kmNuevo >= kmBase * RATIO_DIGITO_DE_MAS) {
     const veces = Math.round(kmNuevo / kmBase);
-    // La causa más común del ×10 en esta flota es un tablero con DÉCIMAS leído sin el punto
-    // decimal. Si al quitarla el número encaja, se dice cuál sería: el operador de la bandeja
-    // ve la lectura buena sin tener que calcularla (y "Aceptar" deja de ser su única salida).
-    const conDecima = kmSinDecima({ kmLeido: kmNuevo, kmBase, piso: kmBase, techo: kmBase + saltoMax });
-    const pista = conDecima != null
-      ? ` — si el tablero muestra décimas, la lectura sería ${conDecima.toLocaleString("es-PE")} km`
+    // El ×10 de esta flota viene de un dígito añadido al FINAL. Si al quitarlo el número encaja,
+    // se dice cuál sería: el operador de la bandeja ve la lectura buena sin tener que calcularla
+    // (y "Aceptar" deja de ser su única salida).
+    const sinSobrante = kmSinDigitoDeMas({ kmLeido: kmNuevo, kmBase, piso: kmBase, techo: kmBase + saltoMax });
+    const pista = sinSobrante != null
+      ? ` — si sobra el último dígito, la lectura sería ${sinSobrante.toLocaleString("es-PE")} km`
       : "";
     return { estado: "sospechosa", motivo: `Salto ×${veces} (${kmNuevo.toLocaleString("es-PE")}): posible dígito de más${pista}` };
   }
