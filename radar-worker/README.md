@@ -57,6 +57,23 @@ npm start
 
 La sesión queda guardada en la carpeta `auth/`. Mientras exista y sea válida, el worker se reconecta solo (caídas de internet, reinicios): **no hay que volver a escanear**. Respaldar `auth/` = poder mover el worker de máquina sin re-escanear. Nunca subir esa carpeta a git (ya está en `.gitignore`).
 
+## Cambiar el número vinculado
+
+**`auth/` ES la sesión, y Baileys solo emite el QR cuando esa carpeta está vacía.** Todo lo que sigue es una forma de dejarla vacía:
+
+1. **Desde el ERP (lo normal):** /radar-ia → **"Generar QR nuevo"** (o "Vincular otro número" si está conectado). El worker desvincula el dispositivo si la sesión aún vive, borra `auth/` y publica un QR nuevo en la misma pantalla. Requiere el worker corriendo (versión **1.1.0+**).
+2. **A mano en el servidor**, si el worker está en una versión vieja o no responde:
+
+   ```bash
+   cd /root/radar-worker    # la carpeta donde corre
+   pm2 stop radar-worker
+   rm -rf auth
+   pm2 restart radar-worker
+   pm2 logs radar-worker    # el QR sale acá y también en /radar-ia
+   ```
+
+Después de escanear con el número nuevo hay que **agregarlo a los grupos** (el Radar solo ve lo que ve su número) y revisar /radar-ia > Grupos: los grupos que ya estaban activos siguen activos porque se identifican por `wa_group_id`, pero los que el número nuevo no vea dejan de llegar.
+
 ## Correr 24/7
 
 El worker debe quedar corriendo permanentemente. Dos opciones:
@@ -81,7 +98,9 @@ pm2 save
 
 | Síntoma | Qué revisar |
 |---|---|
-| El QR no aparece en /radar-ia | Ver la fila única de `radar_estado` en Supabase (columnas `estado`, `qr_data_url`, `detalle`, `ultimo_latido`). Si `ultimo_latido` está viejo, el worker no está corriendo o no llega a Supabase (revisar `.env` y la consola/`pm2 logs`). El QR también sale en la consola. |
+| El QR no aparece en /radar-ia | Ver la fila única de `radar_estado` en Supabase (columnas `estado`, `qr_data_url`, `detalle`, `ultimo_latido`). Si `ultimo_latido` está viejo, el worker no está corriendo o no llega a Supabase (revisar `.env` y la consola/`pm2 logs`). El QR también sale en la consola. Si el worker SÍ está vivo pero nunca llega un QR, ver la fila de abajo: Baileys solo emite el QR con `auth/` vacío. |
+| **WhatsApp bloqueó el número y no sale el QR para cambiarlo** | Es el caso del código **403** (`forbidden`). Baileys **solo emite el evento `qr` cuando NO hay credenciales guardadas**, así que mientras `auth/` conserve la sesión del número bloqueado el worker reintenta para siempre y el QR no aparece nunca. Desde el worker **1.1.0** el 403 (y el 401/405/411) borra `auth/` solo y pide QR; con una versión anterior hay que forzarlo a mano: `pm2 stop radar-worker && rm -rf auth && pm2 restart radar-worker`. Escanear el QR nuevo con **otro chip dedicado**: el bloqueado no vuelve. |
+| El botón "Generar QR nuevo" del ERP no hace nada | Hasta el worker 1.0.0 el botón dependía de que `sock.logout()` funcionara, y con el socket caído (justo el caso del número bloqueado) nunca completaba. Desde 1.1.0 el logout es best-effort con tope de 5 s y el QR se fuerza igual. Verificar la versión en /radar-ia → chip de conexión → "Versión del worker". Si el worker no está corriendo, nadie atiende la solicitud: encenderlo primero. |
 | Estado `esperando_qr` después de haber funcionado | La sesión fue revocada desde el teléfono (o WhatsApp la invalidó). El worker ya borró `auth/` solo; si no, borrarla a mano y volver a escanear el QR. |
 | Los mensajes no llegan a `radar_mensajes` | 1) El **número dedicado debe ser miembro** del grupo. 2) El grupo debe estar **activo** en /radar-ia > Grupos (los grupos nuevos entran desactivados). 3) `radar_estado.estado` debe ser `conectado`. |
 | Los mensajes quedan en `pendiente` y ELIA no los analiza | El aviso al ERP falla: revisar que `ERP_URL` apunte al deploy correcto y que `RADAR_WORKER_SECRET` coincida con el de Vercel. El cron del ERP igual barre los pendientes. |
