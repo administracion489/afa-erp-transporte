@@ -1100,6 +1100,29 @@ function TabAlertas({ alertas, onMarcarLeida, onMarcarTodas }: {
 // sostiene la sesión de WhatsApp del Radar ni cómo levantarlo cuando se cae.
 // El detalle largo vive en radar-worker/README.md; esto es el resumen operativo.
 
+/**
+ * Traduce el código de cierre que dejó el worker en `detalle` cuando significa
+ * "WhatsApp ya no acepta estas credenciales". Son los casos en que reintentar no
+ * sirve de nada: la única salida es borrar la sesión y escanear un QR nuevo.
+ * El worker 1.1.0+ lo hace solo; en versiones anteriores el 403 (número bloqueado)
+ * caía en el reintento genérico y el Radar se quedaba para siempre sin mostrar QR.
+ */
+function credencialesRechazadas(detalle: string | null | undefined): string | null {
+  const codigo = detalle ? /código\s+(\d{3})/i.exec(detalle)?.[1] : null;
+  switch (codigo) {
+    case "403":
+      return "WhatsApp bloqueó el número del Radar (403). Ese número no va a volver a conectar por más que se reintente: hay que vincular OTRO número dedicado con “Generar QR nuevo”.";
+    case "401":
+      return "La sesión se cerró desde el teléfono (401). Hay que volver a vincular con “Generar QR nuevo”.";
+    case "405":
+      return "WhatsApp rechazó las credenciales guardadas (405). Hay que volver a vincular con “Generar QR nuevo”.";
+    case "411":
+      return "El teléfono no tiene multi-dispositivo activo (411). Actualiza WhatsApp en el celular y vuelve a vincular.";
+    default:
+      return null;
+  }
+}
+
 function Cmd({ children }: { children: string }) {
   const [copiado, setCopiado] = useState(false);
   return (
@@ -1149,8 +1172,30 @@ function ModalServidor({ estado, onClose }: { estado: RadarEstado | null; onClos
           <div className="text-sm text-gray-600 space-y-1">
             <p><span className="font-bold text-[#0b315f]">Conexión:</span> {estado?.estado ?? "sin datos"}{estado?.detalle ? ` — ${estado.detalle}` : ""}</p>
             <p><span className="font-bold text-[#0b315f]">Último latido:</span> {estado?.ultimo_latido ? `${haceRelativo(estado.ultimo_latido)} (${new Date(estado.ultimo_latido).toLocaleString("es-PE")})` : "nunca"}</p>
+            <p><span className="font-bold text-[#0b315f]">Versión del worker:</span> {estado?.version_worker ?? "sin datos"}{" "}
+              <span className="text-xs text-gray-400">(el botón “Generar QR nuevo” necesita 1.1.0 o superior)</span>
+            </p>
             <p className="text-xs text-gray-400">El latido lo escribe el worker en la tabla <span className="font-mono">radar_estado</span>. Si está viejo, el proceso no está corriendo o no llega a Supabase.</p>
           </div>
+        </div>
+
+        <div className="bg-[#FFF6E5] border border-[#B07A0F]/25 rounded-xl p-4">
+          <p className="text-xs font-black text-[#8a5a00] uppercase tracking-wide mb-2">Cambiar de número (o si el QR no aparece)</p>
+          <p className="text-sm text-[#8a5a00]/90 font-medium mb-2">
+            Normalmente basta el botón <span className="font-black">“Generar QR nuevo”</span> de esta pantalla. Si el worker no lo
+            atiende (versión vieja, o el proceso no está corriendo), se fuerza a mano: la sesión de WhatsApp es la carpeta{" "}
+            <span className="font-mono text-xs">auth/</span>, y borrarla obliga a escanear un QR nuevo.
+          </p>
+          <Cmd>{`cd /root/radar-worker
+pm2 stop radar-worker
+rm -rf auth
+pm2 restart radar-worker
+pm2 logs radar-worker`}</Cmd>
+          <ul className="text-xs text-[#8a5a00]/80 mt-2 space-y-1 list-disc pl-4">
+            <li>El QR sale en <span className="font-mono">pm2 logs</span> y acá en pantalla. Escanearlo con el número NUEVO lo deja vinculado.</li>
+            <li>Si WhatsApp bloqueó el número (código 403), ese número no vuelve: hay que usar OTRO chip dedicado.</li>
+            <li>Para actualizar el código del worker: si la carpeta es un clon del repo, <span className="font-mono">git pull &amp;&amp; npm install</span> y reiniciar; si se copió a mano, volver a copiar <span className="font-mono">radar-worker/</span>.</li>
+          </ul>
         </div>
 
         <div className="bg-[#f4f9f0] border border-[#27AE60]/20 rounded-xl p-4">
@@ -1879,12 +1924,20 @@ export default function RadarIAPage() {
     return map;
   }, [mensajes]);
 
+  // ── Estado del worker ──
+  // El latido lo escribe el proceso del servidor cada 60 s. Si está viejo, el worker NO
+  // está corriendo: ni el QR que se vea en pantalla sirve (los códigos de WhatsApp caducan
+  // en segundos) ni el botón "Generar QR nuevo" va a ser atendido por nadie.
+  const latidoMs = estado?.ultimo_latido ? Date.now() - new Date(estado.ultimo_latido).getTime() : null;
+  const workerVivo = latidoMs !== null && latidoMs < 3 * 60 * 1000;
+  /** Desconexión que ningún reintento va a arreglar (la deja un worker anterior a 1.1.0). */
+  const motivoRechazo = credencialesRechazadas(estado?.detalle);
+
   // ── Chip de conexión ──
   const conexion = (() => {
     if (!estado) return { dot: "#EB5757", color: "#EB5757", texto: "Sin estado", sub: "Corre supabase/radar-ia.sql" as string | null };
-    const latidoMs = estado.ultimo_latido ? Date.now() - new Date(estado.ultimo_latido).getTime() : null;
     if (estado.estado === "conectado") {
-      if (latidoMs === null || latidoMs > 3 * 60 * 1000) {
+      if (!workerVivo) {
         return {
           dot: "#B07A0F", color: "#B07A0F", texto: "Worker sin señal",
           sub: estado.ultimo_latido ? `último latido ${haceRelativo(estado.ultimo_latido)}` : "sin latido registrado",
@@ -1897,7 +1950,10 @@ export default function RadarIAPage() {
       };
     }
     if (estado.estado === "esperando_qr") {
-      return { dot: "#B07A0F", color: "#B07A0F", texto: "Esperando QR", sub: "escanea el código para vincular" };
+      return {
+        dot: "#B07A0F", color: "#B07A0F", texto: "Esperando QR",
+        sub: workerVivo ? "escanea el código para vincular" : "el worker no responde: el QR no sirve",
+      };
     }
     return { dot: "#EB5757", color: "#EB5757", texto: "Desconectado", sub: estado.detalle };
   })();
@@ -1920,13 +1976,10 @@ export default function RadarIAPage() {
   }
 
   async function solicitarNuevoQr() {
-    if (
-      !window.confirm(
-        "Esto va a cerrar la sesión de WhatsApp que el Radar tiene activa ahora mismo y va a pedir escanear un QR nuevo. ¿Continuar?"
-      )
-    ) {
-      return;
-    }
+    const aviso = estado?.estado === "conectado"
+      ? `Esto va a desvincular el número que el Radar usa ahora mismo (${estado.numero ?? "sin número"}) y va a pedir escanear un QR nuevo. ¿Continuar?`
+      : "Esto va a borrar las credenciales de WhatsApp guardadas en el servidor y va a pedir un QR nuevo, para vincular el mismo número u otro. ¿Continuar?";
+    if (!window.confirm(aviso)) return;
     setSolicitandoQr(true);
     try {
       const { error } = await supabase.from("radar_estado").update({ solicitar_relink: true }).eq("id", 1);
@@ -1935,7 +1988,15 @@ export default function RadarIAPage() {
         showToast("No se pudo solicitar el QR nuevo", false);
         return;
       }
-      showToast("Solicitado — si el worker está corriendo, el QR nuevo aparece aquí en unos segundos");
+      setEstado((prev) => (prev ? { ...prev, solicitar_relink: true } : prev));
+      // La solicitud es solo una bandera en la BD: la atiende el worker. Si no está
+      // corriendo, no la va a ver nadie — decirlo acá evita esperar un QR que no viene.
+      showToast(
+        workerVivo
+          ? "Solicitado — el QR nuevo aparece acá en unos segundos"
+          : "Solicitado, pero el worker no está respondiendo: enciéndelo y lo atiende al arrancar",
+        workerVivo
+      );
     } finally {
       setSolicitandoQr(false);
     }
@@ -2285,14 +2346,19 @@ export default function RadarIAPage() {
               </span>
               <Ic.Servidor size={14} className="text-gray-300 ml-0.5" />
             </button>
-            {estado && estado.estado !== "esperando_qr" && (
+            {/* Siempre disponible: en `esperando_qr` también hace falta (un QR viejo de un
+                worker caído no sirve, y si el número quedó bloqueado hay que vincular otro). */}
+            {estado && (
               <button
                 onClick={solicitarNuevoQr}
                 disabled={solicitandoQr}
-                title="Cierra la sesión de WhatsApp actual y pide vincular un número (el mismo u otro) escaneando un QR nuevo"
+                title="Borra la sesión de WhatsApp guardada en el servidor y pide vincular un número (el mismo u otro) escaneando un QR nuevo"
                 className="flex items-center gap-1.5 bg-white border border-gray-100 shadow-sm rounded-xl px-3 py-2 text-xs font-bold text-gray-600 hover:border-gray-300 transition-colors disabled:opacity-50"
               >
-                <Ic.QrCode size={14} /> {solicitandoQr ? "Solicitando…" : "Generar QR nuevo"}
+                <Ic.QrCode size={14} />
+                {solicitandoQr
+                  ? "Solicitando…"
+                  : estado.estado === "conectado" ? "Vincular otro número" : "Generar QR nuevo"}
               </button>
             )}
             <div className="flex items-center gap-2.5 bg-white border border-gray-100 shadow-sm rounded-xl px-3.5 py-2">
@@ -2310,14 +2376,39 @@ export default function RadarIAPage() {
         ) : (
           <>
             {/* Vinculación / worker apagado */}
-            {estado?.estado === "esperando_qr" && estado.qr_data_url && (
+            {estado?.estado === "esperando_qr" && (
               <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8 flex flex-col items-center text-center">
                 <h2 className="font-black text-[#0b315f] text-lg mb-1">Vincula el WhatsApp del Radar</h2>
                 <p className="text-sm text-gray-500 max-w-md mb-4">
                   En el teléfono del número DEDICADO: WhatsApp → Ajustes → Dispositivos vinculados → Vincular un dispositivo → escanea este código. Solo se hace una vez.
                 </p>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={estado.qr_data_url} alt="Código QR para vincular el WhatsApp del Radar" className="w-64 h-64 rounded-xl border border-gray-100" />
+                {estado.detalle && (
+                  <div className="mb-4 max-w-md text-sm font-semibold text-[#8a5a00] bg-[#FFF6E5] border border-[#B07A0F]/25 rounded-xl px-4 py-3">
+                    {estado.detalle}
+                  </div>
+                )}
+                {!workerVivo ? (
+                  // Los QR de WhatsApp caducan en segundos y solo los renueva el worker
+                  // corriendo: mostrar uno viejo sería mandar a escanear algo que no sirve.
+                  <div className="max-w-md text-sm text-[#8f1f1f] bg-[#FDECEC] border border-[#EB5757]/30 rounded-xl px-4 py-3">
+                    <p className="font-black">Este código ya no sirve: el worker no está respondiendo</p>
+                    <p className="mt-1 font-medium">
+                      Último latido {estado.ultimo_latido ? haceRelativo(estado.ultimo_latido) : "nunca"}. Los QR de WhatsApp
+                      caducan en segundos y solo el worker corriendo genera uno nuevo — enciéndelo primero y el código aparece acá solo.
+                    </p>
+                    <button onClick={() => setVerServidor(true)} className="mt-2 inline-flex items-center gap-1.5 text-xs font-black text-[#1262bd] hover:underline">
+                      <Ic.Servidor size={13} /> ¿Cuál es el servidor y cómo lo enciendo?
+                    </button>
+                  </div>
+                ) : estado.qr_data_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={estado.qr_data_url} alt="Código QR para vincular el WhatsApp del Radar" className="w-64 h-64 rounded-xl border border-gray-100" />
+                ) : (
+                  <div className="w-64 h-64 rounded-xl border border-dashed border-gray-200 flex flex-col items-center justify-center gap-3 text-gray-400">
+                    <div className="w-7 h-7 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />
+                    <p className="text-xs font-bold">Generando el código…</p>
+                  </div>
+                )}
               </div>
             )}
             {estado?.estado === "desconectado" && (
@@ -2328,10 +2419,35 @@ export default function RadarIAPage() {
                   <p className="text-sm text-gray-500 mt-1">
                     El worker de WhatsApp está apagado o sin conexión{estado.detalle ? ` (${estado.detalle})` : ""}. Enciéndelo en el servidor.
                   </p>
+                  {/* Reintentar no arregla unas credenciales que WhatsApp ya rechazó: decir cuál es la salida. */}
+                  {motivoRechazo && (
+                    <div className="mt-2 text-sm text-[#8f1f1f] bg-[#FDECEC] border border-[#EB5757]/30 rounded-xl px-4 py-3">
+                      <p className="font-semibold">{motivoRechazo}</p>
+                      <button
+                        onClick={solicitarNuevoQr}
+                        disabled={solicitandoQr}
+                        className="mt-2 inline-flex items-center gap-1.5 text-xs font-black text-[#1262bd] hover:underline disabled:opacity-50"
+                      >
+                        <Ic.QrCode size={13} /> {solicitandoQr ? "Solicitando…" : "Generar QR nuevo"}
+                      </button>
+                    </div>
+                  )}
                   <button onClick={() => setVerServidor(true)} className="mt-2 inline-flex items-center gap-1.5 text-xs font-bold text-[#1262bd] hover:underline">
                     <Ic.Servidor size={13} /> ¿Cuál es el servidor y cómo lo enciendo?
                   </button>
                 </div>
+              </div>
+            )}
+            {/* La solicitud es una bandera en la BD: la atiende el worker cuando la ve. */}
+            {estado?.solicitar_relink && (
+              <div className="bg-[#FFF6E5] border border-[#B07A0F]/25 rounded-2xl p-4 flex items-start gap-3">
+                <span className="text-xl">⏳</span>
+                <p className="text-sm font-semibold text-[#8a5a00]">
+                  QR nuevo solicitado.{" "}
+                  {workerVivo
+                    ? "El worker lo va a atender en unos segundos: el código aparece acá solo."
+                    : "Pero el worker no está respondiendo, así que nadie va a atenderlo — enciéndelo y lo hace apenas arranque."}
+                </p>
               </div>
             )}
 
