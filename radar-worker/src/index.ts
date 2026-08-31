@@ -20,8 +20,8 @@ import {
   cargarMapaGruposActivos,
   insertarMensaje,
   subirMedia,
-  debeRelinkear,
-  limpiarSolicitudRelink,
+  leerSolicitudes,
+  limpiarSolicitud,
   type FilaMensaje,
   type InfoGrupoActivo,
 } from "./db.js";
@@ -153,20 +153,46 @@ async function refrescarCacheGrupos(): Promise<void> {
   gruposActivos = await cargarMapaGruposActivos();
 }
 
-/** Lee de WhatsApp todos los grupos donde participa el número y los upsertea en radar_grupos. */
-async function sincronizarListaGrupos(): Promise<void> {
-  if (!sock) return;
-  try {
-    const grupos = await sock.groupFetchAllParticipating();
-    const lista = Object.entries(grupos ?? {}).map(([jid, meta]: [string, any]) => ({
-      wa_group_id: jid,
-      nombre: String(meta?.subject ?? ""),
-      participantes: Array.isArray(meta?.participants) ? meta.participants.length : 0,
-    }));
-    await sincronizarGrupos(lista);
-  } catch (e: any) {
-    console.warn("[radar-worker] No se pudo sincronizar la lista de grupos:", e?.message ?? e);
+function esperar(ms: number): Promise<void> {
+  return new Promise((listo) => setTimeout(listo, ms));
+}
+
+/**
+ * Lee de WhatsApp todos los grupos donde participa el número y los vuelca en radar_grupos.
+ *
+ * REINTENTA: justo después de vincular, WhatsApp suele tardar en responder las consultas
+ * de inicialización (se ve como un 408 "Timed Out" en los logs). Antes esto se registraba
+ * con un warn y se abandonaba hasta el barrido siguiente —hasta 30 minutos después—, así
+ * que tras cambiar de número la pestaña Grupos seguía mostrando la lista del anterior sin
+ * ninguna señal de que la lectura había fallado.
+ *
+ * Devuelve true solo si WhatsApp respondió; el timestamp en radar_estado se escribe
+ * únicamente en ese caso, para que el dashboard pueda decir la verdad sobre la lista.
+ */
+async function sincronizarListaGrupos(intentos = 3): Promise<boolean> {
+  for (let intento = 1; intento <= intentos; intento++) {
+    if (!sock) return false;
+    try {
+      const grupos = await sock.groupFetchAllParticipating();
+      const lista = Object.entries(grupos ?? {}).map(([jid, meta]: [string, any]) => ({
+        wa_group_id: jid,
+        nombre: String(meta?.subject ?? ""),
+        participantes: Array.isArray(meta?.participants) ? meta.participants.length : 0,
+      }));
+      await sincronizarGrupos(lista);
+      await actualizarEstado({ grupos_sincronizados_en: ahoraIso() });
+      console.log(`[radar-worker] Lista de grupos sincronizada: el número ve ${lista.length} grupo(s).`);
+      return true;
+    } catch (e: any) {
+      console.warn(
+        `[radar-worker] No se pudo leer la lista de grupos (intento ${intento}/${intentos}):`,
+        e?.message ?? e
+      );
+      if (intento < intentos) await esperar(5_000 * intento);
+    }
   }
+  console.warn("[radar-worker] La lista de grupos quedó sin actualizar — se reintenta en el próximo barrido o desde /radar-ia.");
+  return false;
 }
 
 // ── Aviso al ERP (debounce 2 s tras insertar mensajes) ─────────────────────
@@ -527,37 +553,51 @@ function iniciarLatido(): void {
 }
 
 /**
- * Revisa cada pocos segundos si el ERP pidió un QR nuevo (botón "Generar QR nuevo"
- * en /radar-ia) y, si sí, deja al worker esperando un escaneo.
+ * Revisa cada pocos segundos qué pidió el ERP desde los botones de /radar-ia.
  *
- * El logout() es solo cortesía (desvincular el dispositivo en el teléfono cuando la
- * sesión todavía vive) y va con tope de tiempo: si el socket está caído — número
- * bloqueado, WhatsApp rechazando las credenciales — logout() no responde nunca, y
- * ESE es justo el caso en que más falta hace el QR. Antes todo el relink colgaba de
- * que ese logout funcionara, así que el botón no hacía nada y no quedaba más salida
- * que entrar al servidor a borrar auth/ a mano. Ahora el QR se fuerza igual.
+ * **QR nuevo**: el logout() es solo cortesía (desvincular el dispositivo en el teléfono
+ * cuando la sesión todavía vive) y va con tope de tiempo: si el socket está caído —número
+ * bloqueado, WhatsApp rechazando las credenciales— logout() no responde nunca, y ESE es
+ * justo el caso en que más falta hace el QR. Antes todo el relink colgaba de que ese
+ * logout funcionara, así que el botón no hacía nada y no quedaba más salida que entrar al
+ * servidor a borrar auth/ a mano. Ahora el QR se fuerza igual.
+ *
+ * **Resincronizar grupos**: la lista de grupos solo se releía al conectar y cada 30 min.
+ * Si esa lectura fallaba (WhatsApp responde 408 con frecuencia justo después de vincular)
+ * no había forma de forzarla sin reiniciar el proceso.
  */
-function iniciarPollRelink(): void {
+function iniciarPollSolicitudes(): void {
   setInterval(async () => {
     try {
-      if (!(await debeRelinkear())) return;
-      console.log("[radar-worker] Se pidió un QR nuevo desde el ERP — cerrando la sesión actual...");
-      await limpiarSolicitudRelink(); // primero baja la bandera, para no repetirlo en el próximo chequeo
-      if (sock) {
-        try {
-          await Promise.race([
-            sock.logout(),
-            new Promise((_, rechazar) =>
-              setTimeout(() => rechazar(new Error("logout sin respuesta en 5 s")), 5_000)
-            ),
-          ]);
-        } catch (e: any) {
-          console.warn("[radar-worker] No se pudo cerrar sesión limpiamente (se fuerza igual):", e?.message ?? e);
+      const solicitudes = await leerSolicitudes();
+
+      if (solicitudes.relink) {
+        console.log("[radar-worker] Se pidió un QR nuevo desde el ERP — cerrando la sesión actual...");
+        await limpiarSolicitud("solicitar_relink"); // primero baja la bandera, para no repetirlo en el próximo chequeo
+        if (sock) {
+          try {
+            await Promise.race([
+              sock.logout(),
+              new Promise((_, rechazar) =>
+                setTimeout(() => rechazar(new Error("logout sin respuesta en 5 s")), 5_000)
+              ),
+            ]);
+          } catch (e: any) {
+            console.warn("[radar-worker] No se pudo cerrar sesión limpiamente (se fuerza igual):", e?.message ?? e);
+          }
         }
+        await forzarQrNuevo("QR nuevo pedido desde el ERP — escanea el código para vincular el número");
+        return; // la sesión se está rehaciendo: cualquier otra solicitud espera al próximo ciclo
       }
-      await forzarQrNuevo("QR nuevo pedido desde el ERP — escanea el código para vincular el número");
+
+      if (solicitudes.syncGrupos) {
+        console.log("[radar-worker] Se pidió resincronizar la lista de grupos desde el ERP.");
+        await limpiarSolicitud("solicitar_sync_grupos");
+        await sincronizarListaGrupos();
+        await refrescarCacheGrupos();
+      }
     } catch (e: any) {
-      console.warn("[radar-worker] Error revisando solicitud de relink:", e?.message ?? e);
+      console.warn("[radar-worker] Error revisando las solicitudes del ERP:", e?.message ?? e);
     }
   }, 5_000);
 }
@@ -605,7 +645,7 @@ async function main(): Promise<void> {
     console.log("[radar-worker] Aún no hay grupos activos — actívalos en el ERP: /radar-ia > Grupos.");
   }
   iniciarLatido();
-  iniciarPollRelink();
+  iniciarPollSolicitudes();
   await conectar();
 }
 

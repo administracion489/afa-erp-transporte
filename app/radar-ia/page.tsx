@@ -1260,33 +1260,107 @@ pm2 save`}</Cmd>
 
 type PatchGrupo = { contexto: string | null; categorias_permitidas: CategoriaRadar[] | null };
 
-function TabGrupos({ grupos, onToggle, onGuardarContexto }: {
+/**
+ * `visible` no existe en las filas anteriores a supabase/radar-ia-grupos-vigencia.sql.
+ * `undefined` significa "no se sabe todavía", y hay que tratarlo como visible: dar por
+ * perdido todo lo antiguo llenaría la lista de advertencias falsas el día del despliegue.
+ */
+const grupoVisible = (g: RadarGrupo) => g.visible !== false;
+
+function TabGrupos({ grupos, estado, workerVivo, sincronizando, onToggle, onGuardarContexto, onSincronizar, onEliminar }: {
   grupos: RadarGrupo[];
+  estado: RadarEstado | null;
+  workerVivo: boolean;
+  sincronizando: boolean;
   onToggle: (g: RadarGrupo) => void;
   onGuardarContexto: (g: RadarGrupo, patch: PatchGrupo) => Promise<void>;
+  onSincronizar: () => void;
+  onEliminar: (g: RadarGrupo) => void;
 }) {
   const [busqueda, setBusqueda] = useState("");
-  const filtrados = grupos.filter((g) => !busqueda.trim() || norm(g.nombre).includes(norm(busqueda)));
+  const [ocultarPerdidos, setOcultarPerdidos] = useState(false);
+
+  const perdidos = grupos.filter((g) => !grupoVisible(g));
+  // Los peligrosos: siguen en "Monitorear" pero el número actual no es miembro, así que
+  // aparentan vigilancia sin que pueda llegar un solo mensaje.
+  const perdidosActivos = perdidos.filter((g) => g.activo);
+
+  const filtrados = grupos.filter(
+    (g) =>
+      (!busqueda.trim() || norm(g.nombre).includes(norm(busqueda))) &&
+      (!ocultarPerdidos || grupoVisible(g))
+  );
 
   return (
     <div className="space-y-4">
       <div className="bg-[#E8F1FB] border border-[#2f8ee9]/30 rounded-2xl p-4 flex items-start gap-3">
         <span className="text-xl">ℹ️</span>
         <p className="text-sm text-[#0b315f] font-semibold">
-          El número dedicado del Radar debe ser miembro del grupo. Los grupos se sincronizan solos al conectar el worker.
+          El Radar solo ve los grupos donde el número conectado{estado?.numero ? ` (${estado.numero})` : ""} es miembro.
           Si un grupo NO es de la operación de AFA (p.ej. una red de apoyo entre transportistas), abre la fila y cuéntale
           el contexto a ELIA para que no clasifique mal sus mensajes.
         </p>
       </div>
 
-      <div className="relative max-w-sm">
-        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-300"><Ic.Lupa size={15} /></span>
-        <input
-          value={busqueda}
-          onChange={(e) => setBusqueda(e.target.value)}
-          placeholder="Buscar grupo…"
-          className="w-full pl-9 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:border-[#0b315f] transition-colors bg-white"
-        />
+      {/* Cuándo se leyó esta lista de WhatsApp — y cómo forzar una lectura nueva. */}
+      <div className="bg-white border border-gray-100 rounded-2xl p-4 flex items-center justify-between gap-3 flex-wrap">
+        <div className="text-sm">
+          <p className="font-black text-[#0b315f]">Lista leída de WhatsApp</p>
+          <p className="text-gray-500 font-medium">
+            {estado?.grupos_sincronizados_en
+              ? `Última lectura correcta ${haceRelativo(estado.grupos_sincronizados_en)}.`
+              : "Todavía no hay ninguna lectura registrada con este worker."}
+            {!workerVivo && " El worker no responde: no se puede actualizar."}
+          </p>
+        </div>
+        <button
+          onClick={onSincronizar}
+          disabled={sincronizando}
+          title="Vuelve a preguntarle a WhatsApp en qué grupos está el número conectado"
+          className="flex items-center gap-1.5 bg-white border border-gray-200 shadow-sm rounded-xl px-3 py-2 text-xs font-bold text-gray-600 hover:border-gray-300 transition-colors disabled:opacity-50"
+        >
+          <Ic.Refresh size={14} /> {sincronizando ? "Solicitando…" : "Actualizar lista"}
+        </button>
+      </div>
+
+      {perdidos.length > 0 && (
+        <div className={`rounded-2xl p-4 flex items-start gap-3 border ${perdidosActivos.length > 0 ? "bg-[#FDECEC] border-[#EB5757]/30" : "bg-[#FFF6E5] border-[#B07A0F]/25"}`}>
+          <span className="text-xl">{perdidosActivos.length > 0 ? "⚠️" : "👻"}</span>
+          <div className="text-sm">
+            <p className={`font-black ${perdidosActivos.length > 0 ? "text-[#8f1f1f]" : "text-[#8a5a00]"}`}>
+              {perdidos.length} grupo{perdidos.length === 1 ? "" : "s"} que el número conectado ya no ve
+            </p>
+            <p className={`font-medium mt-0.5 ${perdidosActivos.length > 0 ? "text-[#8f1f1f]/90" : "text-[#8a5a00]/90"}`}>
+              Quedaron de un número anterior. No se borran solos: conservan el contexto que le escribiste a ELIA y los
+              mensajes ya capturados.{" "}
+              {perdidosActivos.length > 0 && (
+                <strong>
+                  {perdidosActivos.length} de ellos sigue{perdidosActivos.length === 1 ? "" : "n"} en “Monitorear”, así que
+                  parece{perdidosActivos.length === 1 ? "" : "n"} vigilado{perdidosActivos.length === 1 ? "" : "s"} sin
+                  serlo. Para recuperarlos, agrega el número nuevo a esos grupos de WhatsApp.
+                </strong>
+              )}
+            </p>
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="relative max-w-sm flex-1 min-w-[220px]">
+          <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-300"><Ic.Lupa size={15} /></span>
+          <input
+            value={busqueda}
+            onChange={(e) => setBusqueda(e.target.value)}
+            placeholder="Buscar grupo…"
+            className="w-full pl-9 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:border-[#0b315f] transition-colors bg-white"
+          />
+        </div>
+        {perdidos.length > 0 && (
+          <label className="flex items-center gap-2 text-xs font-bold text-gray-500 cursor-pointer select-none">
+            <input type="checkbox" checked={ocultarPerdidos} onChange={(e) => setOcultarPerdidos(e.target.checked)} />
+            Ocultar los que ya no se ven
+          </label>
+        )}
       </div>
 
       {filtrados.length === 0 ? (
@@ -1297,14 +1371,14 @@ function TabGrupos({ grupos, onToggle, onGuardarContexto }: {
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                  {["Grupo", "Participantes", "ID de WhatsApp", "Monitorear"].map((h) => (
-                    <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                  {["Grupo", "Participantes", "ID de WhatsApp", "Monitorear", ""].map((h, i) => (
+                    <th key={h || `col-${i}`} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {filtrados.map((g) => (
-                  <FilaGrupo key={g.id} g={g} onToggle={onToggle} onGuardar={onGuardarContexto} />
+                  <FilaGrupo key={g.id} g={g} onToggle={onToggle} onGuardar={onGuardarContexto} onEliminar={onEliminar} />
                 ))}
               </tbody>
             </table>
@@ -1315,10 +1389,11 @@ function TabGrupos({ grupos, onToggle, onGuardarContexto }: {
   );
 }
 
-function FilaGrupo({ g, onToggle, onGuardar }: {
+function FilaGrupo({ g, onToggle, onGuardar, onEliminar }: {
   g: RadarGrupo;
   onToggle: (g: RadarGrupo) => void;
   onGuardar: (g: RadarGrupo, patch: PatchGrupo) => Promise<void>;
+  onEliminar: (g: RadarGrupo) => void;
 }) {
   const [abierto, setAbierto] = useState(false);
   const [contexto, setContexto] = useState(g.contexto ?? "");
@@ -1343,26 +1418,55 @@ function FilaGrupo({ g, onToggle, onGuardar }: {
   };
 
   const personalizado = !!g.contexto || !!(g.categorias_permitidas && g.categorias_permitidas.length);
+  const visible = grupoVisible(g);
 
   return (
     <>
       <tr className="border-t hover:bg-gray-50 transition-colors" style={{ borderColor: "#f1f5f9" }}>
         <td className="p-3">
-          <button onClick={() => setAbierto((v) => !v)} className="flex items-center gap-2 font-bold text-[#0b315f] text-left">
+          <button onClick={() => setAbierto((v) => !v)} className="flex items-center gap-2 font-bold text-left">
             <Ic.Chevron size={13} className={`text-gray-300 transition-transform flex-shrink-0 ${abierto ? "rotate-180" : ""}`} />
-            <span>{g.nombre || "(sin nombre)"}</span>
+            <span className={visible ? "text-[#0b315f]" : "text-gray-400 line-through decoration-gray-300"}>
+              {g.nombre || "(sin nombre)"}
+            </span>
             {personalizado && (
               <span className="w-1.5 h-1.5 rounded-full bg-[#2f8ee9] flex-shrink-0" title="Tiene contexto o categorías personalizadas" />
+            )}
+            {!visible && (
+              <span
+                title={
+                  g.visto_en
+                    ? `El número conectado no es miembro de este grupo. Visto por última vez ${haceRelativo(g.visto_en)}.`
+                    : "El número conectado no es miembro de este grupo."
+                }
+                className={`px-2 py-0.5 rounded-full text-[10px] font-black whitespace-nowrap ${
+                  g.activo ? "bg-[#FDECEC] text-[#8f1f1f]" : "bg-gray-100 text-gray-500"
+                }`}
+              >
+                {g.activo ? "Activo pero sin acceso" : "Ya no se ve"}
+              </span>
             )}
           </button>
         </td>
         <td className="p-3 text-gray-600">{g.participantes}</td>
         <td className="p-3 font-mono text-xs text-gray-400">{g.wa_group_id}</td>
         <td className="p-3"><Switch on={g.activo} onClick={() => onToggle(g)} /></td>
+        <td className="p-3">
+          {/* Solo para los heredados: un grupo vigente se deja de monitorear con el switch, no se borra. */}
+          {!visible && (
+            <button
+              onClick={() => onEliminar(g)}
+              title="Quitar este grupo de la lista (no borra los mensajes ya capturados)"
+              className="text-[11px] font-bold text-gray-400 hover:text-[#EB5757] transition-colors whitespace-nowrap"
+            >
+              Quitar
+            </button>
+          )}
+        </td>
       </tr>
       {abierto && (
         <tr className="bg-blue-50/30 border-t" style={{ borderColor: "#f1f5f9" }}>
-          <td colSpan={4} className="p-4 space-y-3">
+          <td colSpan={5} className="p-4 space-y-3">
             <div>
               <label className="text-xs font-black text-gray-400 uppercase tracking-wide">Contexto para ELIA (opcional)</label>
               <textarea
@@ -1784,6 +1888,7 @@ export default function RadarIAPage() {
   const [registrandoComb, setRegistrandoComb] = useState<string | null>(null);
   const [guardandoConfig, setGuardandoConfig] = useState(false);
   const [solicitandoQr, setSolicitandoQr] = useState(false);
+  const [sincronizandoGrupos, setSincronizandoGrupos] = useState(false);
 
   const showToast = useCallback((msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -2252,6 +2357,51 @@ export default function RadarIAPage() {
     showToast(`Contexto de «${g.nombre}» guardado`);
   }
 
+  /**
+   * Pide al worker que vuelva a preguntarle a WhatsApp en qué grupos está el número.
+   * Es una bandera en la BD, igual que el relink: si el worker no corre, no la atiende nadie.
+   */
+  async function solicitarSyncGrupos() {
+    setSincronizandoGrupos(true);
+    try {
+      const { error } = await supabase.from("radar_estado").update({ solicitar_sync_grupos: true }).eq("id", 1);
+      if (error) {
+        console.warn("radar-ia: error solicitando sincronización de grupos", error);
+        // El caso típico: falta correr supabase/radar-ia-grupos-vigencia.sql.
+        showToast(
+          error.message?.includes("solicitar_sync_grupos")
+            ? "Falta correr supabase/radar-ia-grupos-vigencia.sql en Supabase"
+            : "No se pudo pedir la actualización de la lista",
+          false
+        );
+        return;
+      }
+      showToast(
+        workerVivo
+          ? "Solicitado — la lista se actualiza en unos segundos"
+          : "Solicitado, pero el worker no responde: lo hará cuando arranque",
+        workerVivo
+      );
+    } finally {
+      setSincronizandoGrupos(false);
+    }
+  }
+
+  /** Quita de la lista un grupo que el número actual ya no ve. Los mensajes ya capturados quedan. */
+  async function eliminarGrupo(g: RadarGrupo) {
+    if (!window.confirm(`¿Quitar «${g.nombre || g.wa_group_id}» de la lista?\n\nSolo desaparece de esta pantalla. Los mensajes que ya se capturaron de ese grupo NO se borran. Si el número vuelve a entrar al grupo, reaparece solo.`)) {
+      return;
+    }
+    const { error } = await supabase.from("radar_grupos").delete().eq("id", g.id);
+    if (error) {
+      console.warn("radar-ia: error eliminando grupo", error);
+      showToast("No se pudo quitar el grupo", false);
+      return;
+    }
+    setGrupos((prev) => prev.filter((x) => x.id !== g.id));
+    showToast(`«${g.nombre || g.wa_group_id}» quitado de la lista`);
+  }
+
   async function guardarGuiaOdometro(v: VehiculoGuiaOdometro, guia: string | null) {
     const tabla = v.tipo === "tercero" ? "vehiculos_tercero" : "vehiculos";
     const { error } = await supabase.from(tabla).update({ guia_odometro: guia }).eq("id", v.id);
@@ -2519,7 +2669,18 @@ export default function RadarIAPage() {
             {tab === "alertas" && (
               <TabAlertas alertas={alertas} onMarcarLeida={marcarAlertaLeida} onMarcarTodas={marcarTodasLeidas} />
             )}
-            {tab === "grupos" && <TabGrupos grupos={grupos} onToggle={toggleGrupo} onGuardarContexto={guardarContextoGrupo} />}
+            {tab === "grupos" && (
+              <TabGrupos
+                grupos={grupos}
+                estado={estado}
+                workerVivo={workerVivo}
+                sincronizando={sincronizandoGrupos}
+                onToggle={toggleGrupo}
+                onGuardarContexto={guardarContextoGrupo}
+                onSincronizar={solicitarSyncGrupos}
+                onEliminar={eliminarGrupo}
+              />
+            )}
             {tab === "configuracion" && (
               config ? (
                 <TabConfiguracion

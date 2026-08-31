@@ -27,6 +27,8 @@ export type PatchEstado = {
   version_worker?: string | null;
   conectado_desde?: string | null;
   ultimo_latido?: string | null;
+  /** Solo se escribe cuando la lectura de grupos SALIÓ BIEN (no cuando se intentó). */
+  grupos_sincronizados_en?: string | null;
 };
 
 export type GrupoDetectado = {
@@ -68,47 +70,108 @@ export async function actualizarEstado(patch: PatchEstado): Promise<void> {
   }
 }
 
-/** ¿El ERP pidió generar un QR nuevo? (botón "Generar QR nuevo" en /radar-ia). */
-export async function debeRelinkear(): Promise<boolean> {
+/** Banderas que el dashboard prende con sus botones y el worker atiende. */
+export type Solicitudes = { relink: boolean; syncGrupos: boolean };
+export type CampoSolicitud = "solicitar_relink" | "solicitar_sync_grupos";
+
+/**
+ * Lee de una sola consulta todo lo que el ERP puede haber pedido (botones de /radar-ia).
+ * Va junto a propósito: el poll corre cada 5 s y no tiene sentido pagar una consulta por
+ * bandera. Si la columna aún no existe (falta correr el SQL incremental), devuelve false
+ * en vez de romper el poll.
+ */
+export async function leerSolicitudes(): Promise<Solicitudes> {
   try {
-    const { data, error } = await supabase.from("radar_estado").select("solicitar_relink").eq("id", 1).maybeSingle();
-    if (error) return false;
-    return !!(data as any)?.solicitar_relink;
+    // select("*") y no la lista de columnas: si el SQL incremental todavía no se corrió,
+    // nombrar una columna inexistente haría fallar la consulta entera y se llevaría por
+    // delante el relink, que sí funciona desde antes.
+    const { data, error } = await supabase
+      .from("radar_estado")
+      .select("*")
+      .eq("id", 1)
+      .maybeSingle();
+    if (error) return { relink: false, syncGrupos: false };
+    return {
+      relink: !!(data as any)?.solicitar_relink,
+      syncGrupos: !!(data as any)?.solicitar_sync_grupos,
+    };
   } catch {
-    return false;
+    return { relink: false, syncGrupos: false };
   }
 }
 
-/** Baja la bandera de relink apenas se atiende, para no repetir el logout en cada chequeo. */
-export async function limpiarSolicitudRelink(): Promise<void> {
+/** Baja una bandera apenas se atiende, para no repetir la acción en el chequeo siguiente. */
+export async function limpiarSolicitud(campo: CampoSolicitud): Promise<void> {
   try {
-    const { error } = await supabase.from("radar_estado").update({ solicitar_relink: false }).eq("id", 1);
-    if (error) console.error("[radar-worker][db] limpiarSolicitudRelink:", error.message);
+    const { error } = await supabase.from("radar_estado").update({ [campo]: false }).eq("id", 1);
+    if (error) console.error(`[radar-worker][db] limpiarSolicitud(${campo}):`, error.message);
   } catch (e: any) {
-    console.error("[radar-worker][db] limpiarSolicitudRelink:", e?.message ?? e);
+    console.error(`[radar-worker][db] limpiarSolicitud(${campo}):`, e?.message ?? e);
   }
 }
 
 // ── radar_grupos ───────────────────────────────────────────────────────────
 
 /**
+ * ¿La BD ya tiene las columnas de vigencia (supabase/radar-ia-grupos-vigencia.sql)?
+ * Se comprueba una sola vez por proceso: si el SQL incremental no se corrió, el worker
+ * sigue sincronizando nombres y grupos nuevos como siempre, solo que sin poder marcar
+ * los que el número dejó de ver. Degradar es mejor que romper la sincronización entera.
+ */
+let soportaVigencia: boolean | null = null;
+
+async function detectarVigencia(): Promise<boolean> {
+  if (soportaVigencia !== null) return soportaVigencia;
+  const { error } = await supabase.from("radar_grupos").select("visible").limit(1);
+  soportaVigencia = !error;
+  if (!soportaVigencia) {
+    console.warn(
+      "[radar-worker][db] radar_grupos.visible no existe — corre supabase/radar-ia-grupos-vigencia.sql. " +
+        "Mientras tanto no se puede marcar qué grupos quedaron del número anterior."
+    );
+  }
+  return soportaVigencia;
+}
+
+/** Trocea una lista para no armar filtros `in(...)` de largo indefinido. */
+function enLotes<T>(lista: T[], tamano: number): T[][] {
+  const lotes: T[][] = [];
+  for (let i = 0; i < lista.length; i += tamano) lotes.push(lista.slice(i, i + tamano));
+  return lotes;
+}
+
+/**
  * Sincroniza la lista de grupos vista por WhatsApp con radar_grupos.
+ *
  * PRESERVA el flag `activo` (lo decide el usuario en /radar-ia > Grupos):
  *  - grupos nuevos → insert con activo: false (nadie se monitorea solo);
- *  - grupos existentes → solo update de nombre/participantes/updated_at.
+ *  - grupos que el número ve → update de nombre/participantes + marca de vigencia;
+ *  - grupos que el número YA NO ve → `visible = false`. **Nunca se borran**: conservan el
+ *    contexto escrito para ELIA, las categorías y los mensajes ya capturados. Sin esta
+ *    marca, al cambiar de número la lista quedaba mezclada con los grupos del anterior,
+ *    algunos en "Monitorear" y por lo tanto aparentando vigilancia que no existía.
  */
 export async function sincronizarGrupos(grupos: GrupoDetectado[]): Promise<void> {
-  if (grupos.length === 0) return;
+  // Una lista vacía NO se interpreta como "este número no está en ningún grupo": es
+  // también lo que devuelve una sesión a medio inicializar. Marcar todo como no visible
+  // por esa ambigüedad sería peor que no hacer nada.
+  if (grupos.length === 0) {
+    console.warn("[radar-worker][db] WhatsApp no devolvió ningún grupo — radar_grupos queda intacta.");
+    return;
+  }
   try {
-    const { data: existentes, error: errSel } = await supabase
-      .from("radar_grupos")
-      .select("wa_group_id");
+    const vigencia = await detectarVigencia();
+    // select("*") para no depender de columnas que quizá aún no existen.
+    const { data: existentes, error: errSel } = await supabase.from("radar_grupos").select("*");
     if (errSel) {
       console.error("[radar-worker][db] sincronizarGrupos (select):", errSel.message);
       return;
     }
-    const yaConocidos = new Set<string>((existentes ?? []).map((f: any) => f.wa_group_id));
+    const filasPrevias = (existentes ?? []) as { wa_group_id: string; visible?: boolean }[];
+    const yaConocidos = new Set<string>(filasPrevias.map((f) => f.wa_group_id));
+    const vistosAhora = new Set<string>(grupos.map((g) => g.wa_group_id));
     const ahora = new Date().toISOString();
+    const marcaVigente = vigencia ? { visible: true, visto_en: ahora } : {};
 
     const nuevos = grupos.filter((g) => !yaConocidos.has(g.wa_group_id));
     if (nuevos.length > 0) {
@@ -119,6 +182,7 @@ export async function sincronizarGrupos(grupos: GrupoDetectado[]): Promise<void>
           participantes: g.participantes,
           activo: false,
           updated_at: ahora,
+          ...marcaVigente,
         }))
       );
       if (errIns) console.error("[radar-worker][db] sincronizarGrupos (insert):", errIns.message);
@@ -128,9 +192,27 @@ export async function sincronizarGrupos(grupos: GrupoDetectado[]): Promise<void>
     for (const g of grupos.filter((x) => yaConocidos.has(x.wa_group_id))) {
       const { error: errUpd } = await supabase
         .from("radar_grupos")
-        .update({ nombre: g.nombre, participantes: g.participantes, updated_at: ahora })
+        .update({ nombre: g.nombre, participantes: g.participantes, updated_at: ahora, ...marcaVigente })
         .eq("wa_group_id", g.wa_group_id);
       if (errUpd) console.error(`[radar-worker][db] sincronizarGrupos (update ${g.wa_group_id}):`, errUpd.message);
+    }
+
+    if (vigencia) {
+      // Solo los que hoy figuran como visibles: así no se reescriben en cada barrido los
+      // que ya estaban marcados desde el cambio de número.
+      const perdidos = filasPrevias
+        .filter((f) => !vistosAhora.has(f.wa_group_id) && f.visible !== false)
+        .map((f) => f.wa_group_id);
+      for (const lote of enLotes(perdidos, 100)) {
+        const { error: errOculta } = await supabase
+          .from("radar_grupos")
+          .update({ visible: false, updated_at: ahora })
+          .in("wa_group_id", lote);
+        if (errOculta) console.error("[radar-worker][db] sincronizarGrupos (marcar perdidos):", errOculta.message);
+      }
+      if (perdidos.length > 0) {
+        console.log(`[radar-worker] ${perdidos.length} grupo(s) ya no son visibles para este número (quedaron marcados, no se borraron).`);
+      }
     }
   } catch (e: any) {
     console.error("[radar-worker][db] sincronizarGrupos:", e?.message ?? e);
