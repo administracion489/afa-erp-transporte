@@ -50,6 +50,10 @@ export type RadarEstado = {
   ultimo_latido: string | null;
   /** El dashboard la prende con el botón "Generar QR nuevo"; el worker la apaga apenas la atiende. */
   solicitar_relink: boolean;
+  /** Igual, para el botón "Actualizar lista" de la pestaña Grupos. */
+  solicitar_sync_grupos?: boolean;
+  /** Última lectura EXITOSA de la lista de grupos de WhatsApp (null si nunca se logró). */
+  grupos_sincronizados_en?: string | null;
   updated_at: string;
 };
 
@@ -63,6 +67,16 @@ export type RadarGrupo = {
   contexto: string | null;
   /** Restringe qué categorías aplican para ESTE grupo; null = usa las globales de radar_config. */
   categorias_permitidas: CategoriaRadar[] | null;
+  /**
+   * ¿El número conectado HOY ve este grupo? `false` = quedó de un número anterior, así que
+   * por más que esté `activo` no puede llegar ni un mensaje. Opcional porque las filas
+   * anteriores a supabase/radar-ia-grupos-vigencia.sql no la traen: **trátala siempre como
+   * `g.visible !== false`**, nunca como `!g.visible` (undefined significa "no se sabe", y
+   * dar por no visible todo lo antiguo pintaría la lista entera de advertencias).
+   */
+  visible?: boolean;
+  /** Última vez que el worker vio este grupo en la lista de WhatsApp. */
+  visto_en?: string | null;
   created_at: string;
   updated_at: string;
 };

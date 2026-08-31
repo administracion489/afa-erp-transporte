@@ -36,5 +36,5 @@ export const config = {
   authDir: process.env.AUTH_DIR?.trim() || "./auth",
   /** Versión del worker (se reporta a radar_estado.version_worker; /radar-ia la muestra
    *  para saber si el servidor ya tiene el código nuevo o quedó en una versión vieja). */
-  version: "1.1.0",
+  version: "1.2.0",
 };
