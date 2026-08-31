@@ -21,13 +21,14 @@ export type ContextoPrompt = {
   contextoGrupo?: string | null; // nota del operador sobre qué es este grupo (radar_grupos.contexto)
   guiaVoucher?: string | null;   // cómo leer los vouchers de grifo (radar_config.guia_voucher)
   /**
-   * Dónde está la lectura en el tablero de cada unidad + cuántos dígitos tiene su odómetro.
+   * Dónde está la lectura en el tablero de cada unidad (`guia`, opcional: la escribe el
+   * operador) + cuántos dígitos tiene su odómetro (`digitos`, para toda unidad con km vigente).
    * Se pasa la FORMA (nº de dígitos), nunca el km vigente exacto: un número exacto en el
    * prompt es un número que el modelo puede copiar cuando no logra leer la foto, y un eco así
-   * es indistinguible de una lectura buena. Los dígitos bastan para no confundir un parcial
-   * de 4 cifras con un total de 6, que es el error real que se quiere evitar.
+   * es indistinguible de una lectura buena. Los dígitos bastan para los dos errores reales:
+   * confundir un parcial de 4 cifras con un total de 6, y añadirle un dígito al total (×10).
    */
-  guiasOdometro?: { placa: string; guia: string; digitos: number | null }[];
+  guiasOdometro?: { placa: string; guia: string | null; digitos: number | null }[];
   leccionesOdometro?: string | null; // correcciones humanas previas de lectura de odómetro (para no repetir errores)
   leccionesCombustible?: string | null; // correcciones humanas previas de lectura de vouchers de grifo (grifo/cantidad/precio/monto)
 };
@@ -40,8 +41,10 @@ export type ContextoPrompt = {
 const CASO_ODOMETRO = `
 
 LECTURA DEL TABLERO (aplica a las categorías "odometro" y "combustible"): si ves una foto del tablero sin ningún dato de recarga (sin monto, sin grifo, sin galones/litros), la categoría es "odometro". Al leerlo:
-- El odómetro TOTAL es el número MAYOR de kilómetros de la pantalla y va sin decimales. El "Trip"/parcial es el MENOR y casi siempre lleva un decimal (p. ej. "1803.6").
+- ROTULADO: si el tablero rotula los contadores ("ODO", "ODOMETER", "TOTAL" / "TRIP", "TRIP A", "VIAJE"), manda el rótulo: el de ODO/TOTAL va en "kilometraje" y el de TRIP en "trip_km". Sin rótulos, el TOTAL es el número MAYOR de kilómetros de la pantalla y el parcial el MENOR.
+- NI UN DÍGITO DE MÁS: cuenta los dígitos del odómetro UNO POR UNO y transcribe solo esos. Un dígito de más multiplica el kilometraje por 10 y es el error más caro y más frecuente en esta flota. El fallo típico es REPETIR un dígito que aparece una sola vez —sobre todo ceros y dígitos consecutivos iguales: "23056" transcrito "230056"—; también arrastrar un dígito vecino de la pantalla (el trip, el reloj, la temperatura, el nivel de combustible, la marcha) o completar el número con lo que creas que falta. Antes de responder, cuenta los dígitos de tu propia respuesta y compáralos con los de la foto. Si el total aparece con una décima separada por punto o coma, en "kilometraje" va solo la parte entera; si NO hay separador, todos los dígitos que ves son el total y no sobra ninguno.
 - Nunca conviertas el parcial en el total ni al revés. Si dudas de cuál es cuál, pon los DOS: el mayor en "kilometraje" y el otro en "trip_km".
+- En "texto_leido" copia el odómetro EXACTAMENTE como se ve, con su rótulo y su separador si los tiene ("ODO 23056 km") y sin añadir ni quitar dígitos. Ese texto es lo que permite verificar el número, así que tiene que ser una transcripción, no un resumen.
 - "16.3 L/100km" es una tasa de consumo, y la temperatura ("28.0°C") y la hora ("20:25") no son kilómetros.`;
 
 /** Bloque de "errores que ya cometiste" para inyectar en la lectura de odómetro. */
@@ -231,11 +234,17 @@ Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.`;
 const FORMA_ODOMETRO = `{
   "placa": string|null,                 // normalizada AAA-123 en MAYÚSCULAS
   "unidad": string|null,                // referencia informal ("bus 45") si no hay placa
-  "kilometraje": number|null,           // odómetro TOTAL (número puro, sin puntos ni comas). Ignora el "Trip"/parcial.
-                                        // ANTI-INVERSIÓN: en un mismo tablero el TOTAL es SIEMPRE el número MAYOR y no
-                                        // lleva decimales; el parcial es el menor y suele llevar un decimal. Si el número
-                                        // que ibas a poner aquí es MENOR que otro número de kilómetros de la pantalla,
-                                        // los estás intercambiando: el mayor va aquí y el menor en "trip_km".
+  "kilometraje": number|null,           // odómetro TOTAL en km ENTEROS (número puro, sin puntos ni comas de miles).
+                                        // Ignora el "Trip"/parcial.
+                                        // NI UN DÍGITO DE MÁS: cuenta los dígitos del odómetro uno por uno y pon solo
+                                        // esos. Uno de más es el kilometraje ×10; el fallo típico es REPETIR un dígito
+                                        // ("23056" → "230056") o arrastrar uno vecino (trip, reloj, temperatura, nivel).
+                                        // Si el total lleva una décima separada por punto o coma, aquí va solo la parte
+                                        // entera; si no hay separador, no sobra ningún dígito.
+                                        // ANTI-INVERSIÓN: manda el rótulo (ODO/TOTAL aquí, TRIP en "trip_km"); sin
+                                        // rótulos, el TOTAL es el número MAYOR y el parcial el menor. Si el número que
+                                        // ibas a poner aquí es MENOR que otro número de kilómetros de la pantalla, los
+                                        // estás intercambiando.
   "trip_km": number|null,               // cuentakm PARCIAL del tablero. Si la pantalla muestra DOS contadores de km,
                                         // este campo NUNCA debe ser null: pon aquí el otro número que viste (así se puede
                                         // verificar cuál es cuál). null solo si de verdad hay un único contador.
@@ -244,7 +253,9 @@ const FORMA_ODOMETRO = `{
   "conductor": string|null,             // nombre del conductor si se menciona
   "calidad_imagen": "buena"|"regular"|"mala"|null,  // SOLO si viste una foto del tablero: "mala" = borrosa/reflejo/oscura/ilegible; null si es texto
   "confianza_lectura": number|null,     // 0..1 qué tan seguro estás del NÚMERO del odómetro (null si es texto claro)
-  "texto_leido": string|null,           // los dígitos crudos que leíste en el odómetro (para poder verificar)
+  "texto_leido": string|null,           // transcripción EXACTA del odómetro tal como se ve, con su rótulo y su separador
+                                        // si los tiene ("ODO 23056 km"), sin añadir ni quitar dígitos: es lo que permite
+                                        // verificar el número
   "observaciones": string|null          // cualquier detalle relevante adicional
 }`;
 
@@ -387,18 +398,29 @@ Responde únicamente el JSON.`;
 // Guías del operador para leer vouchers/odómetros (definidas en Radar IA > Configuración).
 // La de vouchers solo aplica a "combustible"; la de odómetro aplica a "combustible" Y a
 // "odometro" (una unidad puede reportar SOLO el kilometraje, sin ninguna recarga).
-/** Guías del operador por unidad: dónde mirar el odómetro en ESE tablero. */
+/**
+ * Qué sabe el ERP del tablero de cada unidad: la guía escrita por el operador (si la hay) y
+ * —siempre que se conozca— cuántos dígitos tiene su odómetro.
+ *
+ * La FORMA del número entra aunque no haya guía. Antes la lista solo incluía unidades con guía
+ * escrita, así que la mayoría de la flota leía sin ancla ninguna: es lo que dejaba pasar el ×10
+ * de CUP-435 (un odómetro de 5 dígitos transcrito con 6) foto tras foto.
+ */
 function bloqueGuiasOdometro(ctx: ContextoPrompt): string | null {
-  const guias = (ctx.guiasOdometro ?? []).filter((g) => g.guia?.trim());
+  const guias = (ctx.guiasOdometro ?? []).filter((g) => g.placa && (g.guia?.trim() || g.digitos));
   if (!guias.length) return null;
   return (
-    `Dónde está la lectura del odómetro en el tablero de cada unidad (cada vehículo es distinto; usa la que corresponda según la placa que identifiques en la imagen o el texto). Si la placa que identificas NO aparece en esta lista, IGNORA todas estas guías: son de otras unidades y describen tableros distintos.\n` +
+    `Qué sabemos del odómetro de cada unidad (cada vehículo es distinto; usa la que corresponda según la placa que identifiques en la imagen o el texto). Si la placa que identificas NO aparece en esta lista, IGNORA todas estas líneas: son de otras unidades y describen tableros distintos.\n` +
     guias
       .map((g) => {
-        // La forma del número es la señal que desambigua parcial vs total sin dar una
-        // cifra copiable: un trip de 4 dígitos no puede ser un total de 6.
-        const forma = g.digitos ? ` (en esta unidad el odómetro TOTAL es un número de ${g.digitos} dígitos)` : "";
-        return `- ${g.placa}${forma}: ${g.guia.trim()}`;
+        // La forma del número desambigua parcial vs total sin dar una cifra copiable (un trip
+        // de 4 dígitos no puede ser un total de 6) y delata el dígito añadido al final.
+        const forma = g.digitos
+          ? `el odómetro TOTAL es un número de ${g.digitos} dígitos (si transcribiste ${g.digitos + 1}, sobra uno: cuéntalos en la foto y mira si repetiste alguno)`
+          : "";
+        const guia = g.guia?.trim() ?? "";
+        const detalle = [forma, guia].filter(Boolean).join(". ");
+        return `- ${g.placa}: ${detalle}`;
       })
       .join("\n")
   );
@@ -413,7 +435,7 @@ function lineaGuiasCombustible(ctx: ContextoPrompt): string {
     );
   }
   const guiasOdo = bloqueGuiasOdometro(ctx);
-  if (guiasOdo) bloques.push(`Si lo que ves resulta ser de categoría "combustible" u "odometro", ${guiasOdo}`);
+  if (guiasOdo) bloques.push(`Si lo que ves resulta ser de categoría "combustible" u "odometro":\n${guiasOdo}`);
   return bloques.length ? `\n\n${bloques.join("\n\n")}` : "";
 }
 

@@ -20,16 +20,22 @@ export type LecturaAnulable = {
 };
 
 export default function AnularLecturaOdometro({
-  lectura, placa, onClose, onAnulada,
+  lectura, placa, sugerencia, onClose, onAnulada,
 }: {
   lectura: LecturaAnulable;
   placa: string;
+  /**
+   * Corrección ya deducida por el sistema con la que abrir el modal (motivo + km + explicación).
+   * La usa la bandeja de revisión cuando reconoce el patrón del dígito de más al final: el
+   * operador solo confirma. Sigue siendo editable — nada se guarda sin su confirmación.
+   */
+  sugerencia?: { motivo: MotivoAnulacion; km: number; nota?: string } | null;
   onClose: () => void;
   onAnulada: (kmVigente: number | null) => void;
 }) {
-  const [motivo, setMotivo]   = useState<MotivoAnulacion | "">("");
-  const [nota, setNota]       = useState("");
-  const [kmOk, setKmOk]       = useState("");
+  const [motivo, setMotivo]   = useState<MotivoAnulacion | "">(sugerencia?.motivo ?? "");
+  const [nota, setNota]       = useState(sugerencia?.nota ?? "");
+  const [kmOk, setKmOk]       = useState(sugerencia?.km ? String(sugerencia.km) : "");
   const [confirmar, setConfirmar] = useState(false);   // 2º paso: confirmación explícita
   const [guardando, setGuardando] = useState(false);
 
@@ -102,6 +108,14 @@ export default function AnularLecturaOdometro({
         </div>
 
         <div className="p-6 space-y-4">
+          {/* De dónde salió lo que ya viene marcado: el modal se abrió con una corrección
+              deducida, no tecleada. Se puede cambiar todo antes de confirmar. */}
+          {sugerencia && (
+            <p className="text-[11px] text-[#0b315f] bg-[#0b315f]/[0.06] rounded-xl p-3">
+              <b>Propuesta del sistema:</b> {sugerencia.nota || `corregir a ${Number(sugerencia.km).toLocaleString("es-PE")} km`}.
+              {" "}Compárala con la foto y confirma, o cámbiala.
+            </p>
+          )}
           {lectura.foto_url && (
             <a href={lectura.foto_url} target="_blank" rel="noreferrer" className="block">
               <img src={lectura.foto_url} alt="Tablero" className="w-full max-h-48 object-contain rounded-xl border bg-gray-50" />

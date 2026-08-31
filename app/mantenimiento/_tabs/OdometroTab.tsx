@@ -3,7 +3,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { paginarFilas } from "@/lib/huella";
-import { registrarLectura, aceptarLectura, marcarReinicio, type FuenteLectura } from "@/lib/odometro";
+import { registrarLectura, aceptarLectura, marcarReinicio, type FuenteLectura, type MotivoAnulacion } from "@/lib/odometro";
+import { kmSinDigitoDeMas } from "@/lib/odometro-seleccion";
 import {
   analizarVehiculo, resumenPeriodo, claveVehiculo, hoyLima, sumarDias, horaLima, diasEntreFechas,
   type LecturaCruda, type DiaRecorrido, type Anomalia,
@@ -221,8 +222,11 @@ export default function OdometroTab() {
   // asociada para ofrecer "Anular / avisar a la IA" desde el propio visor.
   const [fotoZoom, setFotoZoom]   = useState<{ url: string; titulo: string; lectura?: Lectura } | null>(null);
 
-  // Anulación de una lectura (con motivo → alimenta el aprendizaje de la IA)
+  // Anulación de una lectura (con motivo → alimenta el aprendizaje de la IA). `sugAnular` es
+  // la corrección que el sistema deduce y con la que se abre el modal ya rellenado (patrón del
+  // dígito de más al final); null = el operador decide todo desde cero.
   const [anular, setAnular]       = useState<Lectura | null>(null);
+  const [sugAnular, setSugAnular] = useState<{ motivo: MotivoAnulacion; km: number; nota?: string } | null>(null);
 
   // Completar una jornada PENDIENTE (solo tuvo check-in): ingresar el odómetro final a mano.
   // Solo se habilita desde las 00:00 del día siguiente a la jornada (ver botón en la tabla).
@@ -429,9 +433,13 @@ export default function OdometroTab() {
   // ── Acciones del panel de revisión ──────────────────────────────────────────────
 
   const aceptar = async (l: Lectura) => { await aceptarLectura(supabase, l.id); cargar(); };
-  // "Rechazar" ya no descarta a ciegas: abre el modal de corrección (setAnular) para
-  // corregir el km + enseñar a la IA, o descartar con un motivo tipificado. Así nunca
-  // se pierde la información de la lectura.
+  // "Rechazar" ya no descarta a ciegas: abre el modal de corrección para corregir el km +
+  // enseñar a la IA, o descartar con un motivo tipificado. Así nunca se pierde la información
+  // de la lectura. `sug` lo rellena por adelantado cuando el sistema ya sabe qué pasó.
+  const abrirCorreccion = (l: Lectura, sug: { motivo: MotivoAnulacion; km: number; nota?: string } | null = null) => {
+    setSugAnular(sug);
+    setAnular(l);
+  };
   const reiniciar = async (l: Lectura) => {
     if (!confirm(`¿Marcar ${Number(l.km).toLocaleString("es-PE")} km como REINICIO de odómetro para ${vehName(l)}? El km vigente se re-anclará a este valor.`)) return;
     const esTercero = l.vehiculo_tercero_id != null;
@@ -598,6 +606,34 @@ export default function OdometroTab() {
     return m;
   }, [lecturas, porRevisar]);
 
+  /**
+   * Lecturas que traen UN DÍGITO DE MÁS (el kilometraje ×10), con los kilometrajes que quedan
+   * al quitarlo. Se reconoce por la FORMA —un dígito más que la lectura viva anterior— y por
+   * que el candidato encaje con el avance normal de la unidad (ver kmSinDigitoDeMas).
+   *
+   * Es el caso de CUP-435: la bandeja mostraba 230.056 km para una unidad cuyo tablero marcaba
+   * `ODO 23056` y la única acción verde era "Aceptar", que habría escrito ese número como km
+   * vigente. Se ofrecen TODOS los posibles, no uno elegido por el sistema: el dígito que sobra
+   * puede estar en cualquier posición y quien tiene la foto delante es el operador. Su clic
+   * corrige la lectura y de paso queda como lección para la IA.
+   */
+  const sobrantesDeSospechosa = useMemo(() => {
+    const m = new Map<string, number[]>();
+    for (const s of porRevisar) {
+      const ref = refDeSospechosa.get(s.id);
+      if (!ref) continue;
+      const dias = Math.max(1, (tsEfectivoDe(s) - tsEfectivoDe(ref)) / 86400000);
+      const kms = kmSinDigitoDeMas({
+        kmLeido: Number(s.km),
+        kmBase: Number(ref.km),
+        piso: Number(ref.km),
+        techo: Number(ref.km) + kmDiaMax * dias,
+      });
+      if (kms.length) m.set(s.id, kms.slice(0, 4));
+    }
+    return m;
+  }, [porRevisar, refDeSospechosa, kmDiaMax]);
+
   // ─── RENDER ───────────────────────────────────────────────────────────────────
 
   return (
@@ -718,8 +754,33 @@ export default function OdometroTab() {
                     </td>
                     <td className="p-3">
                       <div className="flex gap-1.5 flex-wrap">
+                        {/* Atajo del caso conocido: a la lectura le sobra un dígito. Se ofrecen
+                            TODOS los kilometrajes posibles —el dígito de más puede estar en
+                            cualquier posición— para que el operador elija mirando la foto, que
+                            está a un clic en esta misma fila. Van primero y como acción principal
+                            porque aquí "Aceptar" grabaría un km vigente diez veces mayor. */}
+                        {(sobrantesDeSospechosa.get(l.id)?.length ?? 0) > 0 && (
+                          <span className="self-center text-[11px] font-bold text-[#0b315f]">Corregir a</span>
+                        )}
+                        {(sobrantesDeSospechosa.get(l.id) ?? []).map((kmSobra, i) => (
+                          <button
+                            key={kmSobra}
+                            onClick={() => abrirCorreccion(l, {
+                              motivo: "ia_digito",
+                              km: kmSobra,
+                              // La nota es lo que se le enseña a la IA. Va sin cifras (una cifra en
+                              // el prompt es una cifra copiable) y sin inventar una causa: solo el
+                              // hecho comprobable, que es contar los dígitos del odómetro.
+                              nota: "Añadiste un dígito de más al número del odómetro (lo dejaste ×10). Cuenta los dígitos del tablero, no repitas ninguno y no arrastres números vecinos.",
+                            })}
+                            className={`px-2.5 py-1.5 rounded-lg text-xs font-bold hover:opacity-90 ${i === 0 ? "text-white" : "text-[#0b315f] border border-[#0b315f]/30"}`}
+                            style={i === 0 ? { background: "#0b315f" } : undefined}
+                            title="Al número leído le sobra un dígito (quedó ×10). Compara con la foto y elige el que marca el tablero: se corrige la lectura y se le enseña a la IA.">
+                            ✓ {fmtNum(kmSobra)}
+                          </button>
+                        ))}
                         <button onClick={() => aceptar(l)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-green-700 border border-green-200 hover:bg-green-50">✓ Aceptar</button>
-                        <button onClick={() => setAnular(l)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50" title="Corregir el km o descartar con motivo (no se pierde la lectura)">✕ Rechazar</button>
+                        <button onClick={() => abrirCorreccion(l)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-red-500 border border-red-100 hover:bg-red-50" title="Corregir el km o descartar con motivo (no se pierde la lectura)">✕ Rechazar</button>
                         <button onClick={() => reiniciar(l)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-blue-700 border border-blue-200 hover:bg-blue-50">↻ Reinicio tablero</button>
                       </div>
                     </td>
@@ -961,7 +1022,7 @@ export default function OdometroTab() {
                       </td>
                       <td className="p-3 text-right whitespace-nowrap">
                         {l.estado !== "anulada" && (
-                          <button onClick={() => setAnular(l)} className="text-xs font-bold text-red-500 hover:underline mr-3"
+                          <button onClick={() => abrirCorreccion(l)} className="text-xs font-bold text-red-500 hover:underline mr-3"
                             title="Anular esta lectura indicando el error">🗑 Anular</button>
                         )}
                         <button onClick={() => abrirAnalitica(claveVehiculo(l))} className="text-xs font-bold text-[#0b315f] hover:underline">Analítica →</button>
@@ -981,9 +1042,11 @@ export default function OdometroTab() {
       {/* ANULAR LECTURA (con motivo que se le enseña a la IA) */}
       {anular && (
         <AnularLecturaOdometro
+          key={String(anular.id)}   // remonta al cambiar de lectura: el prefill es estado inicial
           lectura={{ id: String(anular.id), km: Number(anular.km), fecha: anular.fecha, fuente: anular.fuente, foto_url: anular.foto_url ?? null, estado: anular.estado }}
           placa={vehName(anular)}
-          onClose={() => setAnular(null)}
+          sugerencia={sugAnular}
+          onClose={() => { setAnular(null); setSugAnular(null); }}
           onAnulada={() => { cargar(); }}
         />
       )}
@@ -1144,7 +1207,7 @@ export default function OdometroTab() {
             <button onClick={() => setFotoZoom(null)}
               className="px-4 py-2 rounded-xl bg-white text-sm font-bold">Cerrar</button>
             {fotoZoom.lectura && fotoZoom.lectura.estado !== "anulada" && (
-              <button onClick={() => { const l = fotoZoom.lectura!; setFotoZoom(null); setAnular(l); }}
+              <button onClick={() => { const l = fotoZoom.lectura!; setFotoZoom(null); abrirCorreccion(l); }}
                 className="px-4 py-2 rounded-xl bg-red-600 text-white text-sm font-bold hover:opacity-90">
                 🗑 Anular / avisar a la IA
               </button>
