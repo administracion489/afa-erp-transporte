@@ -1088,9 +1088,42 @@ export async function aprobarLiquidacionProveedor(
  * Anula una liquidación y DEVUELVE sus servicios al pool de por liquidar. No se
  * permite si ya generó comprobante: para eso está la nota de crédito, no el borrado.
  */
+/**
+ * Devuelve al pool los servicios que una liquidación tenía reclamados.
+ *
+ * Vive aparte de `anularLiquidacion` para poder REINTENTARSE. Antes iba embebida y su
+ * error se descartaba, así que si el UPDATE fallaba —una columna que falta, RLS, lo que
+ * sea— la cabecera quedaba `anulada` y las reservas seguían con su FK apuntando a ella.
+ * Como el pool del cierre excluye toda reserva con FK, esos servicios desaparecían del
+ * mes ENTERO sin ningún mensaje, y la pantalla decía "✅ Anulada".
+ *
+ * Devuelve cuántas se liberaron de verdad: sin ese número nadie puede afirmar que
+ * volvieron.
+ */
+export async function liberarServicios(
+  sb: any, lado: Lado, id: number
+): Promise<{ ok: boolean; liberados?: number; error?: string }> {
+  try {
+    const t = T[lado];
+    const upd: any = { [t.fkReserva]: null, fecha_liquidacion: null };
+    upd[t.estadoReserva] = lado === "cliente" ? "por_liquidar" : "por_conciliar";
+
+    let { data, error } = await sb.from("reservas").update(upd).eq(t.fkReserva, id).select("id");
+    // `fecha_liquidacion` es accesoria: que falte no puede impedir devolver el servicio.
+    if (error && /fecha_liquidacion/i.test(String(error.message))) {
+      delete upd.fecha_liquidacion;
+      ({ data, error } = await sb.from("reservas").update(upd).eq(t.fkReserva, id).select("id"));
+    }
+    if (error) throw new Error(error.message);
+    return { ok: true, liberados: ((data as any[]) ?? []).length };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
 export async function anularLiquidacion(
   sb: any, lado: Lado, id: number, motivo: string, usuario?: string
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; liberados?: number; yaEstaba?: boolean; error?: string }> {
   try {
     if (!motivo?.trim()) throw new Error("Indica el motivo de la anulación.");
     const t = T[lado];
@@ -1108,15 +1141,28 @@ export async function anularLiquidacion(
       .select("id")
       .maybeSingle();
     if (error) throw new Error(error.message);
-    if (!data) throw new Error("La liquidación ya estaba anulada.");
 
-    // Los servicios vuelven al pool: sin esto quedarían fuera de toda liquidación.
-    const upd: any = { [t.fkReserva]: null, fecha_liquidacion: null };
-    upd[t.estadoReserva] = lado === "cliente" ? "por_liquidar" : "por_conciliar";
-    await sb.from("reservas").update(upd).eq(t.fkReserva, id);
+    // Que ya estuviera anulada NO es un error: es la forma natural de reintentar cuando
+    // la liberación falló la primera vez. Abortar aquí dejaba el peor estado posible
+    // —documento anulado con sus servicios secuestrados— como el único sin salida.
+    const yaEstaba = !data;
 
-    await registrarEvento(sb, lado, id, "anulada", { detalle: motivo, usuario });
-    return { ok: true };
+    const lib = await liberarServicios(sb, lado, id);
+    if (!lib.ok)
+      throw new Error(
+        `La liquidación quedó anulada, pero sus servicios SIGUEN retenidos y no volverán al ` +
+        `cierre: ${lib.error}. Vuelve a anularla para reintentar la liberación.`
+      );
+
+    // El orden importa y es deliberado: primero se anula el documento y después se
+    // sueltan los servicios. Al revés, si la anulación fallara quedarían servicios
+    // libres con el documento vivo, y eso es facturar el mismo mes dos veces. Este
+    // orden falla del lado recuperable.
+    if (!yaEstaba)
+      await registrarEvento(sb, lado, id, "anulada", {
+        detalle: `${motivo} · ${lib.liberados} servicio(s) devueltos al cierre`, usuario,
+      });
+    return { ok: true, liberados: lib.liberados, yaEstaba };
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) };
   }

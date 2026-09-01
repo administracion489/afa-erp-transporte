@@ -30,7 +30,7 @@ import ModalRutasContratadas, { type RutaDelPeriodo } from "./ModalRutasContrata
 import ModalPrecios, { type ReservaSinPrecio } from "./ModalPrecios";
 import {
   crearLiquidaciones, igvVigente, aprobarLiquidacionCliente, aprobarLiquidacionProveedor,
-  anularLiquidacion, volverABorrador, hoyLima,
+  anularLiquidacion, liberarServicios, volverABorrador, hoyLima,
 } from "@/lib/liquidaciones";
 import { cargarDocumentoLiquidacion } from "@/lib/liquidacion-datos";
 import { buildLiquidacionHtml } from "@/lib/liquidacion-doc";
@@ -645,7 +645,46 @@ export default function LiquidacionesPage() {
     if (!motivo) return;
     setTrabajando(true);
     const r = await anularLiquidacion(supabase, lado, l.id, motivo, usuario);
-    setMsg(r.ok ? "✅ Anulada. Sus servicios volvieron a estar por liquidar." : `⚠️ ${r.error}`);
+    // Se dice el NÚMERO. "Sus servicios volvieron" era una promesa que nadie verificaba:
+    // si la liberación fallaba, el mensaje salía igual de verde.
+    setMsg(r.ok
+      ? `✅ ${r.yaEstaba ? "Ya estaba anulada" : "Anulada"} · ${r.liberados ?? 0} servicio(s) ` +
+        `volvieron a estar ${lado === "cliente" ? "por liquidar" : "por conciliar"}.`
+      : `⚠️ ${r.error}`);
+    await cargar(); setTrabajando(false);
+  }
+
+  /**
+   * Servicios que quedaron con su FK apuntando a un documento ANULADO. No deberían
+   * existir —anular los devuelve al pool—, pero si la liberación falló alguna vez, el
+   * pool del cierre los excluye para siempre y en pantalla no se ve nada: el periodo
+   * simplemente sale con menos servicios de los que hubo.
+   */
+  const retenidos = useMemo(() => {
+    const anuladas = new Map<number, string>(
+      liquidaciones.filter((l) => l.estado === "anulada").map((l) => [Number(l.id), String(l.codigo ?? `#${l.id}`)])
+    );
+    if (!anuladas.size) return [] as { id: number; codigo: string; servicios: number }[];
+    const fk = lado === "cliente" ? "liquidacion_cliente_id" : "liquidacion_proveedor_id";
+    const cuenta = new Map<number, number>();
+    for (const r of reservas) {
+      const ref = Number((r as any)[fk] ?? 0);
+      if (ref && anuladas.has(ref)) cuenta.set(ref, (cuenta.get(ref) ?? 0) + 1);
+    }
+    return [...cuenta.entries()].map(([id, servicios]) => ({ id, codigo: anuladas.get(id)!, servicios }));
+  }, [reservas, liquidaciones, lado]);
+
+  const totalRetenidos = retenidos.reduce((a, x) => a + x.servicios, 0);
+
+  async function liberarRetenidos() {
+    setTrabajando(true); setMsg("");
+    let n = 0;
+    for (const x of retenidos) {
+      const r = await liberarServicios(supabase, lado, x.id);
+      if (!r.ok) { setMsg(`⚠️ ${x.codigo}: ${r.error}`); setTrabajando(false); return; }
+      n += r.liberados ?? 0;
+    }
+    setMsg(`✅ ${n} servicio(s) liberados. Ya vuelven a aparecer en el cierre.`);
     await cargar(); setTrabajando(false);
   }
 
@@ -693,6 +732,22 @@ export default function LiquidacionesPage() {
         </div>
       )}
       {msg && <div className="mb-4 px-4 py-3 rounded-xl bg-blue-50 border border-blue-200 text-sm text-blue-900">{msg}</div>}
+
+      {/* Servicios que quedaron atrapados en un documento anulado. Si el sistema puede
+          detectar el desastre, que lo diga — y que lo sepa deshacer. */}
+      {totalRetenidos > 0 && (
+        <div className="mb-4 px-4 py-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-900 flex flex-wrap items-center gap-3">
+          <span className="flex-1 min-w-[18rem]">
+            <b>{totalRetenidos} servicio(s) siguen retenidos por documentos anulados</b>{" "}
+            ({retenidos.map((x) => `${x.codigo}: ${x.servicios}`).join(" · ")}).
+            No aparecen en el cierre aunque su liquidación ya no exista.
+          </span>
+          <button onClick={liberarRetenidos} disabled={trabajando}
+            className="px-3 py-2 rounded-xl text-sm font-bold text-white bg-red-600 hover:bg-red-700 disabled:opacity-40">
+            {trabajando ? "Liberando…" : `Liberar ${totalRetenidos} servicio(s)`}
+          </button>
+        </div>
+      )}
 
       {/* Filtros de periodo */}
       <div className="bg-gray-50 border rounded-2xl p-3 mb-4 flex flex-wrap gap-2 items-center">
