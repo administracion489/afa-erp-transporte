@@ -131,8 +131,36 @@ function entraAlCierre(r: ReservaLiq, lado: LadoLiquidacion): boolean {
  */
 const claveContraparte = (id: number | null | undefined) => (id == null ? "sin" : String(id));
 
-/** Opción del desplegable de contraparte: se muestra con lo que cada una tiene en el periodo. */
+/** Opción del desplegable de contraparte. Ojo con las unidades: ver `diasDeServicio`. */
 type OpcionContraparte = { clave: string; nombre: string; servicios: number; documentos: number };
+
+/**
+ * Servicios de un conjunto de reservas contando el DÍA, no el tramo: la ida y su retorno
+ * son uno solo, igual que en la valorización.
+ *
+ * Contar `reservas.length` habría puesto "130 serv." en el desplegable justo encima de una
+ * tarjeta que dice "65 servicio(s)" — el mismo error de unidad que ya se corrigió una vez
+ * en la columna PROG./EJEC.
+ *
+ * Y no se cuenta sobre `pares`, que es lo que usa la tarjeta: una reserva BLOQUEADA nunca
+ * llega a ser par, así que un cliente con todo sin precio —justo el que hay que poder
+ * aislar para cargárselos— habría aparecido con cero.
+ */
+function diasDeServicio(rs: ReservaLiq[]): number {
+  const presentes = new Set(rs.map((r) => r.id));
+  const vistas = new Set<number>();
+  let n = 0;
+  for (const r of rs) {
+    if (vistas.has(r.id)) continue;
+    vistas.add(r.id);
+    // El par solo colapsa si el otro tramo está en el mismo periodo, que es la misma
+    // regla que aplica analizarServicios.
+    const otro = Number(r.reserva_vinculada_id ?? 0);
+    if (otro && presentes.has(otro)) vistas.add(otro);
+    n++;
+  }
+  return n;
+}
 
 export default function LiquidacionesPage() {
   const [lado, setLado] = useState<LadoLiquidacion>("cliente");
@@ -361,9 +389,14 @@ export default function LiquidacionesPage() {
   );
 
   /**
-   * Las contrapartes del periodo. Se arman con los grupos por cerrar Y con los documentos
-   * ya emitidos: un cliente cuyo mes ya está liquidado no tiene grupos, y sin él en la
-   * lista no habría manera de filtrar sus documentos.
+   * Las contrapartes que se pueden filtrar. Se arman con los grupos por cerrar Y con los
+   * documentos ya emitidos: un cliente cuyo mes ya está liquidado no tiene grupos, y sin
+   * él en la lista no habría manera de filtrar sus documentos.
+   *
+   * Las dos cifras NO son del mismo alcance y por eso se rotulan distinto: los servicios
+   * son del periodo, los documentos son todos los que lleva emitidos (cargarLiquidaciones
+   * trae los últimos 200 sin filtrar por fecha, a propósito: la vista Documentos es un
+   * histórico). Decir "N doc. en el periodo" sería falso.
    */
   const opcionesContraparte = useMemo<OpcionContraparte[]>(() => {
     const out = new Map<string, OpcionContraparte>();
@@ -375,7 +408,7 @@ export default function LiquidacionesPage() {
       return nuevo;
     };
     for (const g of grupos)
-      tocar(claveContraparte(g.contraparteId), g.contraparteNombre).servicios += g.reservas.length;
+      tocar(claveContraparte(g.contraparteId), g.contraparteNombre).servicios += diasDeServicio(g.reservas);
     for (const l of liquidaciones) {
       const id = (lado === "cliente" ? l.cliente_id : l.empresa_tercerizada_id) ?? null;
       const nombre = lado === "cliente"
@@ -518,6 +551,18 @@ export default function LiquidacionesPage() {
     return [...out.values()].sort((a, b) => b.servicios - a.servicios || a.ruta.localeCompare(b.ruta));
   }, [gruposVisibles]);
 
+  /**
+   * Mover el periodo INVALIDA la selección. `g.clave` es cliente|sede y no lleva fechas,
+   * así que un grupo marcado en agosto seguía marcado al cambiar a julio: visible, sin
+   * aviso —el contador de "fuera del filtro" no lo ve porque el filtro no tiene que ver—
+   * y "Liquidar" emitía el documento del mes equivocado. Es el único camino que quedaba
+   * para que saliera un documento inesperado sin que nadie lo dijera.
+   */
+  function cambiarPeriodo(p: { desde: string; hasta: string }) {
+    setPeriodo(p);
+    setSel(new Set());
+  }
+
   function toggle(clave: string) {
     setSel((s) => { const n = new Set(s); n.has(clave) ? n.delete(clave) : n.add(clave); return n; });
   }
@@ -652,13 +697,13 @@ export default function LiquidacionesPage() {
       {/* Filtros de periodo */}
       <div className="bg-gray-50 border rounded-2xl p-3 mb-4 flex flex-wrap gap-2 items-center">
         <span className="text-xs font-black text-gray-500 uppercase tracking-wide">Periodo</span>
-        <input type="date" value={periodo.desde} onChange={(e) => setPeriodo({ ...periodo, desde: e.target.value })}
+        <input type="date" value={periodo.desde} onChange={(e) => cambiarPeriodo({ ...periodo, desde: e.target.value })}
           className="px-3 py-1.5 rounded-xl border text-sm" />
         <span className="text-gray-400 text-sm">al</span>
-        <input type="date" value={periodo.hasta} onChange={(e) => setPeriodo({ ...periodo, hasta: e.target.value })}
+        <input type="date" value={periodo.hasta} onChange={(e) => cambiarPeriodo({ ...periodo, hasta: e.target.value })}
           className="px-3 py-1.5 rounded-xl border text-sm" />
-        <button onClick={() => setPeriodo(mesAnterior())} className="px-3 py-1.5 rounded-xl border bg-white text-xs font-bold hover:bg-gray-50">Mes pasado</button>
-        <button onClick={() => setPeriodo(quincena15())} className="px-3 py-1.5 rounded-xl border bg-white text-xs font-bold hover:bg-gray-50">Del 15 al 14</button>
+        <button onClick={() => cambiarPeriodo(mesAnterior())} className="px-3 py-1.5 rounded-xl border bg-white text-xs font-bold hover:bg-gray-50">Mes pasado</button>
+        <button onClick={() => cambiarPeriodo(quincena15())} className="px-3 py-1.5 rounded-xl border bg-white text-xs font-bold hover:bg-gray-50">Del 15 al 14</button>
 
         {/* Filtro por contraparte. Un cierre real tiene diez clientes y cuatrocientos
             servicios en la misma pantalla; sin esto, atender a uno obliga a leer los diez. */}
@@ -676,7 +721,7 @@ export default function LiquidacionesPage() {
             <option key={o.clave} value={o.clave}>
               {o.nombre}
               {o.servicios ? ` · ${o.servicios} serv.` : ""}
-              {o.documentos ? ` · ${o.documentos} doc.` : ""}
+              {o.documentos ? ` · ${o.documentos} doc. emitido(s)` : ""}
             </option>
           ))}
           {/* El filtro puede sobrevivir a un cambio de periodo en el que ese cliente no
@@ -867,8 +912,12 @@ export default function LiquidacionesPage() {
                     {g.avisos.length > 0 && (
                       <div className="px-4 py-3 bg-amber-50/60">
                         <p className="text-[11px] font-black text-amber-700 uppercase tracking-wide mb-1">Revisa antes de emitir</p>
-                        {g.avisos.slice(0, 6).map(({ r, mensaje }) => (
-                          <div key={r.id} className="text-[11px] text-amber-800 flex gap-2">
+                        {/* La clave lleva el índice porque una MISMA reserva puede traer dos
+                            avisos: desde que el par se cobra por día (lib/liquidacion-agrupacion),
+                            un tramo caído que además lleva el importe dispara los dos. Con
+                            key={r.id} eso era una clave duplicada en React. */}
+                        {g.avisos.slice(0, 6).map(({ r, mensaje }, i) => (
+                          <div key={`${r.id}-${i}`} className="text-[11px] text-amber-800 flex gap-2">
                             <span className="font-mono">{r.codigo ?? "#" + r.id}</span>
                             <span>{mensaje}</span>
                           </div>
