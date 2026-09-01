@@ -175,7 +175,7 @@ export default function LiquidacionesPage() {
   const [clientes, setClientes] = useState<Record<number, any>>({});
   const [terceros, setTerceros] = useState<Record<number, any>>({});
   const [sedes, setSedes] = useState<Sede[]>([]);
-  const [vehiculos, setVehiculos] = useState<Record<string, { placa: string; cap: number | null }>>({});
+  const [vehiculos, setVehiculos] = useState<Record<string, { placa: string; cap: number | null; categoria: string | null }>>({});
   const [conductores, setConductores] = useState<Record<string, string>>({});
   const [liquidaciones, setLiquidaciones] = useState<any[]>([]);
   const [igvPct, setIgvPct] = useState(18);
@@ -232,8 +232,8 @@ export default function LiquidacionesPage() {
       const [cl, te, ve, vt, co, ct, cfg] = await Promise.all([
         supabase.from("clientes").select("id,nombre,empresa,ruc,email,telefono,administrativo_nombre,administrativo_email,administrativo_celular"),
         supabase.from("empresas_tercerizadas").select("id,razon_social,ruc,email,telefono,contacto_nombre,contacto_telefono"),
-        supabase.from("vehiculos").select("id,placa,capacidad_pasajeros"),
-        supabase.from("vehiculos_tercero").select("id,placa,capacidad"),
+        supabase.from("vehiculos").select("id,placa,capacidad_pasajeros,categoria"),
+        supabase.from("vehiculos_tercero").select("id,placa,capacidad,categoria"),
         supabase.from("conductores").select("id,nombre"),
         supabase.from("conductores_tercero").select("id,nombre"),
         igvVigente(supabase),
@@ -241,8 +241,8 @@ export default function LiquidacionesPage() {
       const cmap: Record<number, any> = {}; for (const c of ((cl.data as any[]) ?? [])) cmap[c.id] = c;
       const tmap: Record<number, any> = {}; for (const t of ((te.data as any[]) ?? [])) tmap[t.id] = t;
       const vmap: Record<string, any> = {};
-      for (const v of ((ve.data as any[]) ?? [])) vmap["p" + v.id] = { placa: v.placa, cap: v.capacidad_pasajeros };
-      for (const v of ((vt.data as any[]) ?? [])) vmap["t" + v.id] = { placa: v.placa, cap: v.capacidad };
+      for (const v of ((ve.data as any[]) ?? [])) vmap["p" + v.id] = { placa: v.placa, cap: v.capacidad_pasajeros, categoria: v.categoria };
+      for (const v of ((vt.data as any[]) ?? [])) vmap["t" + v.id] = { placa: v.placa, cap: v.capacidad, categoria: v.categoria };
       const comap: Record<string, string> = {};
       for (const c of ((co.data as any[]) ?? [])) comap["p" + c.id] = c.nombre;
       for (const c of ((ct.data as any[]) ?? [])) comap["t" + c.id] = c.nombre;
@@ -299,6 +299,24 @@ export default function LiquidacionesPage() {
     capacidadDe: (r) => vehiculos[(r.vehiculo_tercero_id ? "t" : "p") + (r.vehiculo_tercero_id ?? r.vehiculo_id)]?.cap ?? null,
     conductorDe: (r) => conductores[(r.conductor_tercero_id ? "t" : "p") + (r.conductor_tercero_id ?? r.conductor_id)] ?? "",
   }), [vehiculos, conductores]);
+
+  /**
+   * "BUS 50 PAX", "CUSTER 25 PAX", "VAN 11 PAX": el TIPO de unidad que cubrió el
+   * servicio. La tarifa depende de esto, no de la ruta — una van de 11 no se cobra como
+   * un bus de 50—, así que sin este dato a la vista poner un precio es adivinar.
+   *
+   * Es la categoría del vehículo asignado. NO confundir con la capacidad contratada:
+   * esto es lo que salió, aquello lo que el cliente pidió.
+   */
+  // Se tipa por lo MÍNIMO que necesita, no por ReservaLiq: así sirve igual para las
+  // proyecciones más estrechas que usan los modales de carga (ReservaSinCosto no trae
+  // vehiculo_id, por ejemplo).
+  const unidadDe = useMemo(() => (r: { vehiculo_id?: number | null; vehiculo_tercero_id?: number | null }) => {
+    const v = vehiculos[(r.vehiculo_tercero_id ? "t" : "p") + (r.vehiculo_tercero_id ?? r.vehiculo_id)];
+    if (!v) return "";
+    const cat = String(v.categoria ?? "").trim().toUpperCase();
+    return [cat || "UNIDAD", v.cap ? `${v.cap} PAX` : ""].filter(Boolean).join(" ");
+  }, [vehiculos]);
 
   /**
    * Sede a la que pertenece un servicio. Prioriza lo escrito en la reserva; si no,
@@ -1102,12 +1120,12 @@ export default function LiquidacionesPage() {
           onEnviado={() => { setEnviar(null); cargarLiquidaciones(); }} />
       )}
       {modalCostos && (
-        <ModalCostos reservas={modalCostos} terceros={terceros}
+        <ModalCostos reservas={modalCostos} terceros={terceros} unidadDe={unidadDe}
           onCerrar={() => setModalCostos(null)}
           onGuardado={() => { setModalCostos(null); setMsg("Costos pactados. El bloque rojo se recalcula."); cargar(); }} />
       )}
       {modalPrecios && (
-        <ModalPrecios reservas={modalPrecios}
+        <ModalPrecios reservas={modalPrecios} unidadDe={unidadDe}
           onCerrar={() => setModalPrecios(null)}
           onGuardado={(n) => {
             setModalPrecios(null);

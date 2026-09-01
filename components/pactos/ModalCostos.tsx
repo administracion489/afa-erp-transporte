@@ -42,6 +42,12 @@ export type ReservaSinCosto = {
 type Props = {
   reservas: ReservaSinCosto[];
   terceros: Record<number, any>;
+  /**
+   * "BUS 50 PAX" · el tipo de unidad que cubrió el servicio. El costo del proveedor
+   * depende de esto, no solo de la ruta: sin verlo, teclear un importe es adivinar, y
+   * aquí el error se paga en efectivo. Opcional para no romper a quien no la pase.
+   */
+  unidadDe?: (r: ReservaSinCosto) => string;
   onCerrar: () => void;
   onGuardado: () => void;
 };
@@ -51,13 +57,15 @@ type Grupo = {
   empresaId: number | null;
   proveedor: string;
   ruta: string;
+  /** El tipo de unidad de TODAS las filas del grupo: por eso admite un costo único. */
+  unidad: string;
   afectacion: CodigoAfectacion;
   emiteFactura: boolean;
   filas: ReservaSinCosto[];
   sugerido?: { costo: number; base: string; dias: number; os: string } | null;
 };
 
-export default function ModalCostos({ reservas, terceros, onCerrar, onGuardado }: Props) {
+export default function ModalCostos({ reservas, terceros, unidadDe, onCerrar, onGuardado }: Props) {
   // Importe por servicio. La clave es el id; el valor, lo tecleado (string para no
   // pelear con el input vacío).
   const [montos, setMontos] = useState<Record<number, string>>({});
@@ -99,9 +107,12 @@ export default function ModalCostos({ reservas, terceros, onCerrar, onGuardado }
       const t = empresaId != null ? terceros[empresaId] : null;
       const proveedor = t?.razon_social ?? "Sin empresa tercerizada";
       const ruta = r.ruta_nombre ?? "Sin ruta";
-      const clave = `${empresaId ?? "x"}|${ruta}`;
+      // El TIPO DE UNIDAD entra en la clave: si en el mes rotaron un bus de 50 y una
+      // van de 11, un solo casillero de costo sería incorrecto para una de las dos.
+      const unidad = unidadDe?.(r) || "";
+      const clave = `${empresaId ?? "x"}|${ruta}|${unidad}`;
       const g: Grupo = m.get(clave) ?? {
-        clave, empresaId, proveedor, ruta,
+        clave, empresaId, proveedor, ruta, unidad,
         afectacion: (t?.afectacion_defecto ?? "10") as CodigoAfectacion,
         emiteFactura: t?.emite_factura !== false,
         filas: [] as ReservaSinCosto[],
@@ -110,7 +121,7 @@ export default function ModalCostos({ reservas, terceros, onCerrar, onGuardado }
       m.set(clave, g);
     }
     return [...m.values()].sort((a, b) => b.filas.length - a.filas.length);
-  }, [reservas, terceros]);
+  }, [reservas, terceros, unidadDe]);
 
   // ── Propuestas e historial ────────────────────────────────────────────────
   useEffect(() => {
@@ -272,6 +283,10 @@ export default function ModalCostos({ reservas, terceros, onCerrar, onGuardado }
                     <span className="font-black text-gray-800 text-sm">{g.proveedor}</span>
                     <span className="text-gray-400">·</span>
                     <span className="text-sm text-gray-600">{g.ruta}</span>
+                    {/* El tipo de unidad: de él depende el costo, no solo de la ruta. */}
+                    {g.unidad && (
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-700">{g.unidad}</span>
+                    )}
                     <span className="text-[11px] text-gray-500 bg-white border rounded-full px-2 py-0.5">
                       {g.filas.length} servicio(s)
                     </span>

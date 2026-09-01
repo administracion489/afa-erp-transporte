@@ -55,6 +55,8 @@ type GrupoRuta = {
   clave: string;
   cliente: string;
   ruta: string;
+  /** El tipo de unidad de TODAS las filas del grupo: por eso admite un precio único. */
+  unidad: string;
   /** Solo los tramos a los que se les va a escribir el importe. */
   filas: ReservaSinPrecio[];
   /** Tramos huérfanos a los que se les encontró su ida: van incluidos, no llevan importe. */
@@ -68,9 +70,11 @@ type GrupoRuta = {
 const LOTE = 200;
 
 export default function ModalPrecios({
-  reservas, onCerrar, onGuardado,
+  reservas, unidadDe, onCerrar, onGuardado,
 }: {
   reservas: ReservaSinPrecio[];
+  /** "BUS 50 PAX" · el tipo de unidad que cubrió el servicio. La tarifa depende de esto. */
+  unidadDe: (r: ReservaSinPrecio) => string;
   onCerrar: () => void;
   onGuardado: (servicios: number) => void;
 }) {
@@ -82,6 +86,8 @@ export default function ModalPrecios({
   /** Cuáles se van a enlazar al guardar. Arrancan marcadas: es lo que casi siempre toca. */
   const [enlazar, setEnlazar] = useState<Set<number>>(new Set());
   const [resuelto, setResuelto] = useState(false);
+  /** clave del grupo → último precio cobrado en esa ruta con esa misma unidad. */
+  const [ultimos, setUltimos] = useState<Map<string, { precio: number; dias: number; os: string }>>(new Map());
 
   /** Tramos sin par y el rango donde buscarlo. null = no hay nada que reparar. */
   const objetivo = useMemo(() => {
@@ -169,9 +175,13 @@ export default function ModalPrecios({
     for (const r of cobran) {
       const ruta = nombreRuta(r);
       const cliente = r.clienteNombre ?? "—";
-      const clave = `${cliente}|${ruta}`;
+      // El TIPO DE UNIDAD entra en la clave. Si en el mes rotaron un bus de 50 y una van
+      // de 11, un solo casillero de precio para las dos sería incorrecto para una de las
+      // dos: se separan y cada renglón admite el precio que de verdad le toca.
+      const unidad = unidadDe(r) || "SIN UNIDAD ASIGNADA";
+      const clave = `${cliente}|${ruta}|${unidad}`;
       const f = String(r.fecha_servicio ?? "");
-      const g = mapa.get(clave) ?? { clave, cliente, ruta, filas: [], conIda: [], cubiertos: 0, desde: f, hasta: f };
+      const g = mapa.get(clave) ?? { clave, cliente, ruta, unidad, filas: [], conIda: [], cubiertos: 0, desde: f, hasta: f };
       // Un tramo al que se le encontró su ida NO necesita tarifa: la lleva ella. Se
       // aparta para ofrecer el enlace en vez de un importe que cobraría el día dos veces.
       (candidatas.has(r.id) ? g.conIda : g.filas).push(r);
@@ -184,7 +194,54 @@ export default function ModalPrecios({
     // el número que importa al operador es "cuántos servicios voy a desbloquear".
     if (salida.length) salida[0].cubiertos = cubiertos;
     return salida;
-  }, [reservas, candidatas]);
+  }, [reservas, candidatas, unidadDe]);
+
+  /**
+   * El último precio que se le cobró a ese cliente por esa MISMA ruta con esa MISMA
+   * unidad. Es lo que de verdad evita el error: nadie tiene que acordarse de cuánto se
+   * cobró en julio. El lado proveedor ya tenía su equivalente (fn_costo_sugerido en
+   * ModalCostos); del lado cliente faltaba.
+   *
+   * Se propone, NO se rellena solo: un importe prellenado que nadie mira es el mismo
+   * error de siempre, nada más que más rápido.
+   */
+  useEffect(() => {
+    const clientes = [...new Set(reservas.map((r) => r.cliente_id).filter(Boolean))] as number[];
+    if (!clientes.length || !grupos.length) return;
+    let vivo = true;
+    (async () => {
+      const { data } = await supabase
+        .from("reservas")
+        .select("id,codigo,cliente_id,fecha_servicio,ruta_nombre,origen,destino,precio_cliente,vehiculo_id,vehiculo_tercero_id")
+        .in("cliente_id", clientes)
+        .gt("precio_cliente", 0)
+        .order("fecha_servicio", { ascending: false })
+        .limit(600);
+      if (!vivo) return;
+
+      const hoy = Date.now();
+      const out = new Map<string, { precio: number; dias: number; os: string }>();
+      for (const g of grupos) {
+        // Mismo cliente, misma ruta y misma unidad: si cambia cualquiera de los tres, el
+        // precio anterior no es comparable y es mejor no sugerir nada.
+        const previo = ((data as any[]) ?? []).find(
+          (x) =>
+            nombreRuta(x) === g.ruta &&
+            (unidadDe(x as ReservaSinPrecio) || "SIN UNIDAD ASIGNADA") === g.unidad &&
+            !g.filas.some((f) => f.id === Number(x.id))
+        );
+        if (!previo) continue;
+        const t = Date.parse(String(previo.fecha_servicio ?? ""));
+        out.set(g.clave, {
+          precio: Number(previo.precio_cliente ?? 0),
+          dias: Number.isFinite(t) ? Math.max(0, Math.round((hoy - t) / 86400000)) : 0,
+          os: String(previo.codigo ?? ""),
+        });
+      }
+      setUltimos(out);
+    })();
+    return () => { vivo = false; };
+  }, [grupos, reservas, unidadDe]);
 
   const totalAAplicar = grupos.reduce(
     (a, g) => a + (Number(montos[g.clave]) > 0 ? g.filas.length : 0), 0
@@ -267,6 +324,7 @@ export default function ModalPrecios({
                 const marcados = g.conIda.filter((f) => enlazar.has(f.id)).length;
                 const todosIncluidos = g.conIda.length > 0 && g.filas.length === 0;
                 const ejemplo = g.conIda.length ? candidatas.get(g.conIda[0].id) : null;
+                const ultimo = ultimos.get(g.clave);
                 return (
                   <tr key={g.clave} className={precio > 0 || marcados ? "bg-emerald-50/40" : ""}>
                     <td className="px-2 py-2">
@@ -274,6 +332,20 @@ export default function ModalPrecios({
                       <span className="block text-[10px] text-gray-400">
                         {g.cliente} · del {g.desde} al {g.hasta}
                       </span>
+                      {/* El TIPO DE UNIDAD que cubrió el servicio. La tarifa depende de
+                          esto —una van de 11 no se cobra como un bus de 50—, así que sin
+                          verlo poner un precio es adivinar. */}
+                      <span className="mt-0.5 inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-700">
+                        {g.unidad}
+                      </span>
+                      {ultimo && (
+                        <button type="button"
+                          onClick={() => setMontos((m) => ({ ...m, [g.clave]: String(ultimo.precio) }))}
+                          className="ml-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200 hover:bg-sky-100">
+                          última vez: {fmtMoneda(ultimo.precio)}
+                          {ultimo.dias ? ` · hace ${ultimo.dias} d` : ""} — usar
+                        </button>
+                      )}
                       {/* El "va incluido" que faltaba: en vez de exigir una tarifa que
                           cobraría el día dos veces, se repara el vínculo con su ida. */}
                       {g.conIda.length > 0 && (
