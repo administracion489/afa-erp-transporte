@@ -372,9 +372,18 @@ begin
        v_af_v_ant, v_af_v,
        ev.margen_pct_antes, ev.margen_pct_despues, ev.severidad, ev.veredicto,
        new.cambio_motivo, new.cambio_nota, v_usr,
+       -- Token del enlace público de conformidad. Dos UUID concatenados = 64 hex
+       -- (244 bits), MÁS entropía que los 192 bits del gen_random_bytes(24) que había
+       -- aquí, y sin depender de pgcrypto: `gen_random_bytes` es de esa extensión, que
+       -- en Supabase se instala en el esquema `extensions` — fuera del
+       -- `set search_path = public, pg_temp` de esta función. El trigger reventaba con
+       -- "function gen_random_bytes(integer) does not exist" y Postgres RECHAZABA el
+       -- UPDATE entero de la reserva: subir el precio al cliente era imposible.
+       -- `gen_random_uuid()` es núcleo desde PG13 y se resuelve por pg_catalog siempre.
+       -- Es además lo que ya usa liquidaciones-v2.sql para sus tokens.
        case when coalesce(new.precio_cliente,0) > coalesce(old.precio_cliente,0)
                  and coalesce(pol.exige_conformidad_cliente, true)
-            then encode(gen_random_bytes(24),'hex') end,
+            then replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '') end,
        case when coalesce(new.precio_cliente,0) > coalesce(old.precio_cliente,0)
                  and coalesce(pol.exige_conformidad_cliente, true)
             then 'pendiente' else 'no_aplica' end,
