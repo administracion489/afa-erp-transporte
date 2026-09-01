@@ -124,6 +124,16 @@ function entraAlCierre(r: ReservaLiq, lado: LadoLiquidacion): boolean {
   return !r.liquidacion_proveedor_id && (r.tipo_asignacion === "tercerizado" || !!r.empresa_tercerizada_id);
 }
 
+/**
+ * Clave del filtro por contraparte. Los grupos sin cliente / sin empresa también tienen la
+ * suya ("sin"): son justo los que hay que poder aislar para arreglarlos, no los que hay
+ * que dejar sin forma de encontrar.
+ */
+const claveContraparte = (id: number | null | undefined) => (id == null ? "sin" : String(id));
+
+/** Opción del desplegable de contraparte: se muestra con lo que cada una tiene en el periodo. */
+type OpcionContraparte = { clave: string; nombre: string; servicios: number; documentos: number };
+
 export default function LiquidacionesPage() {
   const [lado, setLado] = useState<LadoLiquidacion>("cliente");
   const [vista, setVista] = useState<"cierre" | "documentos">("cierre");
@@ -149,6 +159,13 @@ export default function LiquidacionesPage() {
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [abierto, setAbierto] = useState<Set<string>>(new Set());
   const [preciosConIgv, setPreciosConIgv] = useState(false);
+  /**
+   * Filtro por contraparte: el CLIENTE en la pestaña de facturar, la EMPRESA TERCERIZADA
+   * en la de pagar. Una sola caja para las dos porque en cada pestaña solo hay una
+   * contraparte posible; se limpia al cambiar de lado porque los ids salen de tablas
+   * distintas y un mismo número significaría otra empresa.
+   */
+  const [filtroContraparte, setFiltroContraparte] = useState("");
 
   const [editor, setEditor] = useState<number | null>(null);
   const [modalSede, setModalSede] = useState<{ sede: Sede; cliente: string } | null>(null);
@@ -243,7 +260,10 @@ export default function LiquidacionesPage() {
   }
 
   useEffect(() => { cargar(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [periodo.desde, periodo.hasta]);
-  useEffect(() => { cargarLiquidaciones(); setSel(new Set()); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [lado]);
+  useEffect(() => {
+    cargarLiquidaciones(); setSel(new Set()); setFiltroContraparte("");
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [lado]);
 
   // ── Catálogo para la agrupación ──────────────────────────────────────────
   const catalogo: CatalogoLiq = useMemo(() => ({
@@ -326,12 +346,69 @@ export default function LiquidacionesPage() {
   }, [reservas, lado, clientes, terceros, sedes, catalogo, igvPct, preciosConIgv, periodo.desde, periodo.hasta, rutas, paxCotizacion]);
 
   /**
+   * Lo que el filtro deja ver. Todo lo que se lee de la pantalla —el árbol, el bloque rojo
+   * de lo que no entra, los contadores de precios y costos faltantes, las rutas sin
+   * capacidad— se calcula sobre ESTO y no sobre `grupos`: cuando alguien filtra por un
+   * cliente quiere el trabajo de ese cliente, no un botón que sigue diciendo 399.
+   *
+   * La SELECCIÓN, en cambio, se sigue leyendo de `grupos` (ver `seleccionados`): filtrar
+   * es mirar, no deseleccionar. Si un grupo marcado queda fuera de la vista, la barra lo
+   * dice en vez de tirarlo en silencio.
+   */
+  const gruposVisibles = useMemo(
+    () => (filtroContraparte ? grupos.filter((g) => claveContraparte(g.contraparteId) === filtroContraparte) : grupos),
+    [grupos, filtroContraparte]
+  );
+
+  /**
+   * Las contrapartes del periodo. Se arman con los grupos por cerrar Y con los documentos
+   * ya emitidos: un cliente cuyo mes ya está liquidado no tiene grupos, y sin él en la
+   * lista no habría manera de filtrar sus documentos.
+   */
+  const opcionesContraparte = useMemo<OpcionContraparte[]>(() => {
+    const out = new Map<string, OpcionContraparte>();
+    const tocar = (clave: string, nombre: string) => {
+      const ya = out.get(clave);
+      if (ya) return ya;
+      const nuevo: OpcionContraparte = { clave, nombre, servicios: 0, documentos: 0 };
+      out.set(clave, nuevo);
+      return nuevo;
+    };
+    for (const g of grupos)
+      tocar(claveContraparte(g.contraparteId), g.contraparteNombre).servicios += g.reservas.length;
+    for (const l of liquidaciones) {
+      const id = (lado === "cliente" ? l.cliente_id : l.empresa_tercerizada_id) ?? null;
+      const nombre = lado === "cliente"
+        ? (id != null ? (clientes[id]?.empresa || clientes[id]?.nombre || `Cliente ${id}`) : "Sin cliente")
+        : (id != null ? (terceros[id]?.razon_social || `Empresa ${id}`) : "Sin empresa");
+      tocar(claveContraparte(id), nombre).documentos += 1;
+    }
+    return [...out.values()].sort((a, b) => a.nombre.localeCompare(b.nombre));
+  }, [grupos, liquidaciones, clientes, terceros, lado]);
+
+  /**
+   * El filtro apunta a alguien que no tiene nada en este periodo (se movió el rango de
+   * fechas con el filtro puesto). Se ignora mientras carga: ahí la lista está vacía por
+   * un instante y no porque el cliente no tenga servicios.
+   */
+  const filtroHuerfano =
+    !!filtroContraparte && !cargando && !opcionesContraparte.some((o) => o.clave === filtroContraparte);
+
+  /** Los documentos emitidos, pasados por el mismo filtro. */
+  const liquidacionesVisibles = useMemo(
+    () => (filtroContraparte
+      ? liquidaciones.filter((l) => claveContraparte((lado === "cliente" ? l.cliente_id : l.empresa_tercerizada_id) ?? null) === filtroContraparte)
+      : liquidaciones),
+    [liquidaciones, filtroContraparte, lado]
+  );
+
+  /**
    * Las rutas del periodo con su capacidad contratada. Alimenta el modal de fichas y el
    * contador de "sin capacidad contratada": son las que saldrán sin el "N PAX".
    */
   const rutasDelPeriodo = useMemo<RutaDelPeriodo[]>(() => {
     const out = new Map<string, RutaDelPeriodo>();
-    for (const g of grupos)
+    for (const g of gruposVisibles)
       for (const l of g.lineas) {
         const k = `${g.contraparteId ?? 0}|${g.sedeId ?? 0}|${l.nombre_ida ?? ""}|${l.nombre_retorno ?? ""}`;
         const ya = out.get(k);
@@ -350,7 +427,7 @@ export default function LiquidacionesPage() {
         });
       }
     return [...out.values()].sort((a, b) => String(a.nombreIda).localeCompare(String(b.nombreIda)));
-  }, [grupos]);
+  }, [gruposVisibles]);
 
   /** Rutas que van a imprimirse sin el "N PAX" porque ninguna fuente sabe cuánto se contrató. */
   const rutasSinPax = useMemo(
@@ -360,6 +437,15 @@ export default function LiquidacionesPage() {
 
   const seleccionados = grupos.filter((g) => sel.has(g.clave) && g.lineas.length);
   const totalSeleccionado = seleccionados.reduce((a, g) => a + g.total, 0);
+  /**
+   * Grupos marcados que el filtro dejó fuera de la vista. Se cuentan para poder decirlo:
+   * el botón liquida TODO lo marcado, y un grupo que se liquida sin verse es exactamente
+   * la sorpresa que este módulo existe para evitar.
+   */
+  const seleccionOculta = useMemo(() => {
+    const visibles = new Set(gruposVisibles.map((g) => g.clave));
+    return seleccionados.filter((g) => !visibles.has(g.clave)).length;
+  }, [seleccionados, gruposVisibles]);
 
   /**
    * Los servicios que el bloque rojo marca "Sin costo de proveedor". Antes solo se
@@ -370,7 +456,7 @@ export default function LiquidacionesPage() {
     if (lado !== "proveedor") return [];
     const vistos = new Set<number>();
     const out: ReservaSinCosto[] = [];
-    for (const g of grupos)
+    for (const g of gruposVisibles)
       for (const { r, motivos } of g.bloqueadas) {
         if (!motivos.some((m: string) => m.includes("Sin costo de proveedor"))) continue;
         if (vistos.has(r.id)) continue;
@@ -378,7 +464,7 @@ export default function LiquidacionesPage() {
         out.push(r as ReservaSinCosto);
       }
     return out;
-  }, [grupos, lado]);
+  }, [gruposVisibles, lado]);
 
   /**
    * Espejo del anterior para el lado CLIENTE. Faltaba, y esa asimetría es la que hizo
@@ -390,7 +476,7 @@ export default function LiquidacionesPage() {
     if (lado !== "cliente") return [];
     const vistos = new Set<number>();
     const out: ReservaSinPrecio[] = [];
-    for (const g of grupos)
+    for (const g of gruposVisibles)
       for (const { r, motivos } of g.bloqueadas) {
         if (!motivos.some((m: string) => m.includes("Sin precio de venta"))) continue;
         if (vistos.has(r.id)) continue;
@@ -398,7 +484,7 @@ export default function LiquidacionesPage() {
         out.push({ ...(r as ReservaSinPrecio), clienteNombre: g.contraparteNombre });
       }
     return out;
-  }, [grupos, lado]);
+  }, [gruposVisibles, lado]);
 
   /**
    * Lo que NO entra al cierre, agrupado POR RUTA y con su motivo.
@@ -410,26 +496,27 @@ export default function LiquidacionesPage() {
    * "y 52 más…" y no nombraba la ruta ni una vez.
    */
   const fueraDelCierre = useMemo(() => {
-    type Fila = { clave: string; grupo: string; ruta: string; motivo: string; servicios: number; ids: number[] };
+    type Fila = { clave: string; grupo: string; contraparte: string; ruta: string; motivo: string; servicios: number; ids: number[] };
     const out = new Map<string, Fila>();
-    const sumar = (grupo: string, ruta: string, motivo: string, id: number) => {
+    const sumar = (grupo: string, contraparte: string, ruta: string, motivo: string, id: number) => {
       const clave = `${grupo}|${ruta}|${motivo}`;
       const ya = out.get(clave);
       if (ya) { ya.servicios += 1; ya.ids.push(id); return; }
-      out.set(clave, { clave, grupo, ruta, motivo, servicios: 1, ids: [id] });
+      out.set(clave, { clave, grupo, contraparte, ruta, motivo, servicios: 1, ids: [id] });
     };
-    for (const g of grupos) {
+    for (const g of gruposVisibles) {
       const donde = g.sedeNombre && g.sedeNombre !== "Servicios tercerizados" ? `${g.contraparteNombre} · ${g.sedeNombre}` : g.contraparteNombre;
+      const quien = claveContraparte(g.contraparteId);
       for (const { r, motivos } of g.bloqueadas)
         // El motivo se despersonaliza (#1234 → #…) para que sesenta servicios con el
         // mismo problema sean UNA fila y no sesenta.
-        sumar(donde, etiquetaRuta(r), (motivos[0] ?? "Bloqueada").replace(/#\d+/g, "#…"), r.id);
+        sumar(donde, quien, etiquetaRuta(r), (motivos[0] ?? "Bloqueada").replace(/#\d+/g, "#…"), r.id);
       for (const l of g.sinEjecutar)
         for (const id of l.reservas_periodo)
-          sumar(donde, l.ruta, `Programada pero ningún servicio quedó finalizado (${l.cantidad_programada})`, id);
+          sumar(donde, quien, l.ruta, `Programada pero ningún servicio quedó finalizado (${l.cantidad_programada})`, id);
     }
     return [...out.values()].sort((a, b) => b.servicios - a.servicios || a.ruta.localeCompare(b.ruta));
-  }, [grupos]);
+  }, [gruposVisibles]);
 
   function toggle(clave: string) {
     setSel((s) => { const n = new Set(s); n.has(clave) ? n.delete(clave) : n.add(clave); return n; });
@@ -549,7 +636,7 @@ export default function LiquidacionesPage() {
         {(["cierre", "documentos"] as const).map((v) => (
           <button key={v} onClick={() => setVista(v)}
             className={`px-3 py-2 rounded-xl text-sm font-bold ${vista === v ? "bg-gray-900 text-white" : "bg-white text-gray-600 border hover:bg-gray-50"}`}>
-            {v === "cierre" ? "Cerrar periodo" : `Documentos (${liquidaciones.length})`}
+            {v === "cierre" ? "Cerrar periodo" : `Documentos (${liquidacionesVisibles.length})`}
           </button>
         ))}
         <button onClick={cargar} className="ml-auto px-3 py-2 rounded-xl text-sm font-semibold bg-white border hover:bg-gray-50">↻ Recargar</button>
@@ -572,6 +659,39 @@ export default function LiquidacionesPage() {
           className="px-3 py-1.5 rounded-xl border text-sm" />
         <button onClick={() => setPeriodo(mesAnterior())} className="px-3 py-1.5 rounded-xl border bg-white text-xs font-bold hover:bg-gray-50">Mes pasado</button>
         <button onClick={() => setPeriodo(quincena15())} className="px-3 py-1.5 rounded-xl border bg-white text-xs font-bold hover:bg-gray-50">Del 15 al 14</button>
+
+        {/* Filtro por contraparte. Un cierre real tiene diez clientes y cuatrocientos
+            servicios en la misma pantalla; sin esto, atender a uno obliga a leer los diez. */}
+        <div className="w-px h-6 bg-gray-200 mx-1" />
+        <span className="text-xs font-black text-gray-500 uppercase tracking-wide">
+          {lado === "cliente" ? "Cliente" : "Proveedor"}
+        </span>
+        <select value={filtroContraparte} onChange={(e) => setFiltroContraparte(e.target.value)}
+          className={`px-3 py-1.5 rounded-xl border text-sm max-w-[22rem] ${filtroContraparte ? "font-bold bg-white" : "text-gray-600"}`}
+          style={filtroContraparte ? { borderColor: cp, color: cp } : {}}>
+          <option value="">
+            {lado === "cliente" ? "Todos los clientes" : "Todos los proveedores"}
+          </option>
+          {opcionesContraparte.map((o) => (
+            <option key={o.clave} value={o.clave}>
+              {o.nombre}
+              {o.servicios ? ` · ${o.servicios} serv.` : ""}
+              {o.documentos ? ` · ${o.documentos} doc.` : ""}
+            </option>
+          ))}
+          {/* El filtro puede sobrevivir a un cambio de periodo en el que ese cliente no
+              tiene nada: sin esta opción el desplegable se vería en blanco y la pantalla
+              vacía no tendría explicación. */}
+          {filtroHuerfano && (
+            <option value={filtroContraparte}>Sin servicios ni documentos en este periodo</option>
+          )}
+        </select>
+        {filtroContraparte && (
+          <button onClick={() => setFiltroContraparte("")}
+            className="px-2.5 py-1.5 rounded-xl border bg-white text-xs font-bold text-gray-500 hover:bg-gray-50"
+            title="Quitar el filtro">✕</button>
+        )}
+
         <label className="ml-auto flex items-center gap-2 text-xs text-gray-600">
           <input type="checkbox" checked={preciosConIgv} onChange={(e) => setPreciosConIgv(e.target.checked)} />
           Los precios del ERP ya incluyen IGV
@@ -585,7 +705,12 @@ export default function LiquidacionesPage() {
           {/* Barra de acción masiva */}
           <div className="sticky top-0 z-20 bg-white/95 backdrop-blur border rounded-2xl p-3 mb-3 flex flex-wrap items-center gap-3 shadow-sm">
             <span className="text-sm text-gray-600">
-              <b>{grupos.length}</b> grupo(s) en el periodo · <b>{seleccionados.length}</b> seleccionado(s)
+              <b>{gruposVisibles.length}</b> grupo(s)
+              {filtroContraparte ? ` de ${grupos.length} en el periodo` : " en el periodo"} ·{" "}
+              <b>{seleccionados.length}</b> seleccionado(s)
+              {seleccionOculta > 0 && (
+                <span className="text-amber-700 font-semibold"> ({seleccionOculta} fuera del filtro)</span>
+              )}
             </span>
             <span className="font-black" style={{ color: cp }}>{fmtMoneda(totalSeleccionado)}</span>
             {sinCosto.length > 0 && (
@@ -633,7 +758,15 @@ export default function LiquidacionesPage() {
                   {fueraDelCierre.map((f) => (
                     <tr key={f.clave}>
                       <td className="px-4 py-1.5 font-medium text-gray-800 w-48">{f.ruta}</td>
-                      <td className="px-2 py-1.5 text-xs text-gray-400">{f.grupo}</td>
+                      {/* El nombre filtra: con diez clientes en la lista, "¿por qué no sale
+                          la RUTA A?" se responde aislando al que la contrató. */}
+                      <td className="px-2 py-1.5 text-xs text-gray-400">
+                        <button onClick={() => setFiltroContraparte(f.contraparte)}
+                          className="text-left hover:text-gray-700 hover:underline"
+                          title={`Filtrar por ${lado === "cliente" ? "este cliente" : "este proveedor"}`}>
+                          {f.grupo}
+                        </button>
+                      </td>
                       <td className="px-2 py-1.5 text-xs text-right text-gray-500 w-24">{f.servicios} serv.</td>
                       <td className="px-4 py-1.5 text-xs text-red-700">{f.motivo}</td>
                     </tr>
@@ -643,11 +776,23 @@ export default function LiquidacionesPage() {
             </div>
           )}
 
-          {grupos.length === 0 ? (
+          {gruposVisibles.length === 0 ? (
             <div className="bg-white rounded-2xl border p-10 text-center text-gray-400">
-              No hay servicios {lado === "cliente" ? "por liquidar" : "tercerizados por conciliar"} en este periodo. 🎉
+              {filtroContraparte ? (
+                <>
+                  {lado === "cliente" ? "Ese cliente" : "Ese proveedor"} no tiene servicios{" "}
+                  {lado === "cliente" ? "por liquidar" : "por conciliar"} en este periodo.
+                  {grupos.length > 0 && (
+                    <button onClick={() => setFiltroContraparte("")} className="ml-2 underline font-semibold text-gray-500 hover:text-gray-700">
+                      Ver los {grupos.length} grupo(s) del periodo
+                    </button>
+                  )}
+                </>
+              ) : (
+                <>No hay servicios {lado === "cliente" ? "por liquidar" : "tercerizados por conciliar"} en este periodo. 🎉</>
+              )}
             </div>
-          ) : grupos.map((g) => {
+          ) : gruposVisibles.map((g) => {
             const abiertoG = abierto.has(g.clave);
             const listo = g.lineas.length > 0;
             return (
@@ -754,8 +899,19 @@ export default function LiquidacionesPage() {
       ) : (
         /* ── Documentos emitidos ─────────────────────────────────────────── */
         <div className="bg-white rounded-2xl border shadow-sm overflow-hidden">
-          {liquidaciones.length === 0 ? (
-            <div className="p-10 text-center text-gray-400 text-sm">Todavía no hay liquidaciones.</div>
+          {liquidacionesVisibles.length === 0 ? (
+            <div className="p-10 text-center text-gray-400 text-sm">
+              {filtroContraparte && liquidaciones.length > 0 ? (
+                <>
+                  {lado === "cliente" ? "Ese cliente" : "Ese proveedor"} no tiene liquidaciones emitidas.
+                  <button onClick={() => setFiltroContraparte("")} className="ml-2 underline font-semibold text-gray-500 hover:text-gray-700">
+                    Ver las {liquidaciones.length}
+                  </button>
+                </>
+              ) : (
+                "Todavía no hay liquidaciones."
+              )}
+            </div>
           ) : (
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-gray-400 text-[11px] uppercase">
@@ -770,7 +926,7 @@ export default function LiquidacionesPage() {
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {liquidaciones.map((l) => {
+                {liquidacionesVisibles.map((l) => {
                   const nombre = lado === "cliente"
                     ? (clientes[l.cliente_id]?.empresa || clientes[l.cliente_id]?.nombre || "—")
                     : (terceros[l.empresa_tercerizada_id]?.razon_social || "—");
