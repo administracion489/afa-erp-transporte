@@ -96,15 +96,35 @@ export function sentidoDeReserva(r: ReservaLiq): "IDA" | "RETORNO" {
 }
 
 /**
+ * De dónde salió la etiqueta de la ruta. Importa porque solo `nombre` produce el
+ * "RUTA A" que el cliente busca en el formato: con `tramo` o `ninguna` el servicio SÍ
+ * se liquida, pero sale rotulado de otra forma y en otro lugar de la lista (que se
+ * ordena alfabéticamente) — el operador lo lee como "esa ruta no salió".
+ */
+export type FuenteEtiqueta = "nombre" | "tramo" | "ninguna";
+
+/**
+ * Separador entre "RUTA" y su letra. Con `\s+` a secas, "RUTA-A" y "RUTA:A" —que se
+ * escriben a mano en tres pantallas distintas— no calzaban y el servicio salía rotulado
+ * con su tramo. El `+` es deliberado: sin él "RUTAS" produciría "RUTA S".
+ */
+const RE_ETIQUETA_RUTA = /\bRUTA[\s:.\-–—]+([A-Z0-9]{1,3})\b/i;
+
+/** Etiqueta + por qué es esa, para poder avisar cuando NO salió del nombre de la ruta. */
+export function etiquetaRutaDetalle(r: ReservaLiq): { etiqueta: string; fuente: FuenteEtiqueta } {
+  const m = RE_ETIQUETA_RUTA.exec(String(r.ruta_nombre ?? ""));
+  if (m) return { etiqueta: `RUTA ${m[1].toUpperCase()}`, fuente: "nombre" };
+  const tramo = [r.origen, r.destino].filter(Boolean).join(" → ").toUpperCase();
+  return tramo ? { etiqueta: tramo, fuente: "tramo" } : { etiqueta: "RUTA ÚNICA", fuente: "ninguna" };
+}
+
+/**
  * Etiqueta corta de la ruta para la descripción: "RUTA 1", "RUTA B"…
  * El nombre completo trae hora y extremos ("RUTA B/ ENTRADA 05:10/ CHILCA→…") y esos
  * ya se muestran aparte; aquí solo interesa el identificador que el cliente reconoce.
  */
 export function etiquetaRuta(r: ReservaLiq): string {
-  const m = /\bRUTA\s+([A-Z0-9]{1,3})\b/i.exec(String(r.ruta_nombre ?? ""));
-  if (m) return `RUTA ${m[1].toUpperCase()}`;
-  const tramo = [r.origen, r.destino].filter(Boolean).join(" → ").toUpperCase();
-  return tramo || "RUTA ÚNICA";
+  return etiquetaRutaDetalle(r).etiqueta;
 }
 
 // ── Servicio facturable: el par IDA + RETORNO ───────────────────────────────
@@ -129,6 +149,13 @@ export type ParServicio = {
    * un "25 / 25" que esconde el servicio caído.
    */
   ejecutado: boolean;
+  /**
+   * Lo que CUBRE la tarifa, no lo que se prestó ese día. Se decide aquí, donde se sabe
+   * si la reserva viaja enlazada, y no en la agrupación: allí solo se veía `adjuntas`,
+   * que queda vacía cuando el retorno no se ejecutó, y el mismo servicio se partía en
+   * dos líneas ("IDA" y "IDA Y RETORNO") a idéntica ruta, turno y tarifa.
+   */
+  sentido: "IDA" | "RETORNO" | "IDA Y RETORNO";
 };
 
 /** Importe de una reserva según el lado que se esté liquidando. */
@@ -235,7 +262,7 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
       }
       const motivos = trabas(r);
       if (motivos.length) bloquear(r, motivos);
-      else res.pares.push({ cabeza: r, adjuntas: [], ejecutado: hecho(r) });
+      else res.pares.push({ cabeza: r, adjuntas: [], ejecutado: hecho(r), sentido: sentidoDeReserva(r) });
       continue;
     }
 
@@ -249,7 +276,7 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
       for (const x of [r, par]) {
         const motivos = trabas(x);
         if (motivos.length) bloquear(x, motivos);
-        else res.pares.push({ cabeza: x, adjuntas: [], ejecutado: hecho(x) });
+        else res.pares.push({ cabeza: x, adjuntas: [], ejecutado: hecho(x), sentido: sentidoDeReserva(x) });
       }
       continue;
     }
@@ -280,7 +307,7 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
         r: adjunta,
         mensaje: `${adjunta.direccion_servicio === "retorno" ? "Retorno" : "Tramo"} del ${adjunta.fecha_servicio ?? ""}: ${motivosAdjunta.join(" · ")}`,
       });
-      res.pares.push({ cabeza, adjuntas: [], ejecutado: hecho(cabeza) });
+      res.pares.push({ cabeza, adjuntas: [], ejecutado: hecho(cabeza), sentido: "IDA Y RETORNO" });
       continue;
     }
 
@@ -291,7 +318,7 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
         r: adjunta,
         mensaje: `El retorno del ${adjunta.fecha_servicio ?? ""} no se ejecutó, pero la tarifa del día se cobra completa`,
       });
-      res.pares.push({ cabeza, adjuntas: [], ejecutado: true });
+      res.pares.push({ cabeza, adjuntas: [], ejecutado: true, sentido: "IDA Y RETORNO" });
       continue;
     }
 
@@ -299,6 +326,7 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
       cabeza,
       adjuntas: hecho(adjunta) ? [adjunta] : [],
       ejecutado: hecho(cabeza),
+      sentido: "IDA Y RETORNO",
     });
   }
 
@@ -346,9 +374,17 @@ export type LineaAgrupada = {
   total_linea: number;
   /** ids de las reservas EJECUTADAS que sustentan la línea (van al Anexo 1). */
   reservas: number[];
+  /**
+   * ids de las reservas que ENCABEZAN cada servicio ejecutado — una por servicio, sin
+   * los tramos incluidos. `reservas` trae ida y retorno, así que contar sobre ella
+   * duplica: es lo que imprimía "19 / 38" en la columna PROG./EJEC.
+   */
+  servicios: number[];
   /** ids de todas las del periodo, ejecutadas o no (para el contraste programado/ejecutado). */
   reservas_periodo: number[];
   ruta: string;
+  /** Por qué la etiqueta es la que es: con `tramo`/`ninguna` el cliente no leerá "RUTA A". */
+  fuente_ruta: FuenteEtiqueta;
   turno: string;
   sentido: string;
   movil: number;
@@ -413,6 +449,7 @@ export function agruparServicios(
   type Bucket = {
     clave: string;
     ruta: string;
+    fuenteRuta: FuenteEtiqueta;
     turno: string;
     sentido: string;
     precio: number;
@@ -426,12 +463,14 @@ export function agruparServicios(
       preciosIncluyenIgv: opts.preciosIncluyenIgv,
       igvPct: opts.igvPct,
     });
-    const ruta = etiquetaRuta(r);
+    const { etiqueta: ruta, fuente: fuenteRuta } = etiquetaRutaDetalle(r);
     const turno = turnoDeReserva(r);
-    // Un par cubre los dos tramos: el sentido de la cabeza no debe partir la línea.
-    const sentido = p.adjuntas.length ? "IDA Y RETORNO" : sentidoDeReserva(r);
+    // Un par cubre los dos tramos: el sentido de la cabeza no debe partir la línea. Lo
+    // decide `analizarServicios`, que es quien sabe si la reserva viaja enlazada —
+    // mirar `adjuntas` aquí partía la línea los días en que el retorno no se ejecutó.
+    const sentido = p.sentido ?? (p.adjuntas.length ? "IDA Y RETORNO" : sentidoDeReserva(r));
     const clave = [norm(ruta), turno, sentido, precio.toFixed(2)].join("|");
-    const b = buckets.get(clave) ?? { clave, ruta, turno, sentido, precio, filas: [] };
+    const b = buckets.get(clave) ?? { clave, ruta, fuenteRuta, turno, sentido, precio, filas: [] };
     b.filas.push(p);
     buckets.set(clave, b);
   }
@@ -529,8 +568,10 @@ export function agruparServicios(
       // Al puente van AMBOS tramos del servicio prestado: los dos quedan liquidados y
       // los dos se ven en el Anexo 1 (el retorno, con importe incluido).
       reservas: ejecutados.flatMap((p) => [p.cabeza.id, ...p.adjuntas.map((a) => a.id)]),
+      servicios: ejecutados.map((p) => p.cabeza.id),
       reservas_periodo: todas.map((r) => r.id),
       ruta: b.ruta,
+      fuente_ruta: b.fuenteRuta,
       turno: b.turno,
       sentido: b.sentido,
       movil,

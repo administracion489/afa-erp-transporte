@@ -98,6 +98,17 @@ type Grupo = {
   total: number;
 };
 
+/**
+ * ¿Esta reserva entra a la cola del cierre? Fuente ÚNICA de la regla: la usan el árbol
+ * de grupos y el panel de "rutas que no entran". Si cada uno la escribiera por su lado,
+ * el panel diría que una ruta sí entró justo cuando el árbol la está dejando fuera.
+ */
+function entraAlCierre(r: ReservaLiq, lado: LadoLiquidacion): boolean {
+  if (lado === "cliente")
+    return !r.liquidacion_cliente_id && (r.estado_admin === "por_liquidar" || !r.estado_admin);
+  return !r.liquidacion_proveedor_id && (r.tipo_asignacion === "tercerizado" || !!r.empresa_tercerizada_id);
+}
+
 export default function LiquidacionesPage() {
   const [lado, setLado] = useState<LadoLiquidacion>("cliente");
   const [vista, setVista] = useState<"cierre" | "documentos">("cierre");
@@ -138,6 +149,12 @@ export default function LiquidacionesPage() {
         supabase.from("reservas").select(COLS_RESERVA)
           .gte("fecha_servicio", periodo.desde).lte("fecha_servicio", periodo.hasta)
           .order("fecha_servicio", { ascending: true })
+          // Desempate por id = ORDEN TOTAL. Sin él, `fecha_servicio` empata cientos de
+          // veces por página y Postgres puede devolver los empates en distinto orden en
+          // cada `range()`: la página 2 repite filas de la 1 y SALTA otras. Un mes con
+          // más de 1000 reservas perdía servicios sin ningún error. Es el mismo
+          // desempate que ya usan app/programacion y lib/ficha-servicio-datos.
+          .order("id", { ascending: true })
       );
       setReservas(rs as ReservaLiq[]);
 
@@ -217,10 +234,7 @@ export default function LiquidacionesPage() {
 
   // ── Árbol de grupos ──────────────────────────────────────────────────────
   const grupos: Grupo[] = useMemo(() => {
-    const candidatas = reservas.filter((r) => {
-      if (lado === "cliente") return !r.liquidacion_cliente_id && (r.estado_admin === "por_liquidar" || !r.estado_admin);
-      return !r.liquidacion_proveedor_id && (r.tipo_asignacion === "tercerizado" || !!r.empresa_tercerizada_id);
-    });
+    const candidatas = reservas.filter((r) => entraAlCierre(r, lado));
 
     const mapa = new Map<string, Grupo>();
     for (const r of candidatas) {

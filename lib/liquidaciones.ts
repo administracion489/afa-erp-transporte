@@ -337,7 +337,18 @@ export async function crearLiquidaciones(
         const suyas = l.reservas.filter((rid) => reclamadas.has(rid));
         if (!suyas.length) continue;   // otro operador se llevó todos los de esta línea
         item += 1;
-        const cantidad = l.cantidad === l.reservas.length ? suyas.length : l.cantidad;
+
+        // SERVICIOS ejecutados, no reservas: `suyas` trae los dos tramos del día (la
+        // ida que cobra y el retorno incluido), así que contar sobre ella duplicaba —
+        // 19 servicios se imprimían "19 / 38" en la columna PROG./EJEC. del formato que
+        // firma el cliente, y como la cantidad (19) ya no coincidía con la ejecutada
+        // (38), el editor exigía un "motivo del ajuste" en TODAS las líneas de un
+        // documento que no tenía ningún ajuste.
+        const ejecutadas = (l.servicios ?? l.reservas).filter((rid) => reclamadas.has(rid)).length;
+        // Si quien llama no tocó la cantidad, se cobra lo efectivamente reclamado; si la
+        // ajustó a mano, manda su número.
+        const cantidad = Number(l.cantidad) === Number(l.cantidad_ejecutada) ? ejecutadas : l.cantidad;
+
         const { data: lin, error: eL } = await sb.from(t.linea).insert({
           liquidacion_id: id,
           item,
@@ -345,7 +356,7 @@ export async function crearLiquidaciones(
           descripcion: l.descripcion,
           unidad_medida: l.unidad_medida,
           cantidad_programada: l.cantidad_programada,
-          cantidad_ejecutada: suyas.length,
+          cantidad_ejecutada: ejecutadas,
           cantidad,
           precio_unitario: l.precio_unitario,
           orden_compra: cab.orden_compra ?? null,
