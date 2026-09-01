@@ -199,7 +199,9 @@ table{width:100%;border-collapse:collapse}
 .datos td.v{color:#0f172a;font-weight:600}
 .val thead th{background:${cp};color:#fff;font-size:7.4px;font-weight:800;padding:5px 4px;border:1px solid ${cp};text-transform:uppercase}
 .val td{border:1px solid #cbd5e1;padding:4.5px 5px;font-size:8.5px;vertical-align:top}
-.val .desc{font-weight:600;color:#0f172a;line-height:1.35}
+/* pre-line: la descripción trae un renglón por tramo (ida, retorno, móvil) y sin esto
+   el HTML colapsa los saltos y el nombre de la ruta queda pegado al del retorno. */
+.val .desc{font-weight:600;color:#0f172a;line-height:1.35;white-space:pre-line}
 .val .meta{color:#64748b;font-size:7.2px;margin-top:2px}
 .val tr.adicional td{background:#fffbeb}
 .val tr.negativo td{background:#fef2f2}

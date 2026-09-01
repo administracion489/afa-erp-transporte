@@ -13,6 +13,8 @@ type ItemCot = {
   descuento_pct: number;
   vehiculo_flota_id?:   number | null;  // flota propia  → reservas.vehiculo_id
   vehiculo_tercero_id?: number | null;  // vehículo ter. → reservas.vehiculo_tercero_id + empresa_tercerizada_id
+  /** Asientos CONTRATADOS del ítem → reservas.capacidad_contratada. Ver el Slot. */
+  pax_contratado?:      number | null;
 };
 
 type CotizacionFija = {
@@ -50,9 +52,38 @@ type Slot = {
   empresa_tercerizada_id: number | null;   // empresa del tercero
   placa:                  string;          // para mostrar en UI
   descripcion:            string;
+  /**
+   * Asientos que el cliente contrató para este móvil. Viaja hasta
+   * `reservas.capacidad_contratada` y de ahí lo lee la liquidación.
+   *
+   * NO es la capacidad del vehículo asignado: AFA asigna por disponibilidad, así que
+   * una ruta contratada para 15 puede cubrirse con un bus de 17 o de 20. Copiar la
+   * capacidad del bus es lo que hacía que el formato le declarara al cliente un número
+   * que nadie pactó (ver supabase/liquidaciones-03-ruta-contratada.sql).
+   */
+  pax_contratado:         number | null;
 };
 
 type Cliente = { id: number; nombre: string; empresa?: string; };
+
+/**
+ * Inserta reservas tolerando que falte `capacidad_contratada` (la agrega
+ * supabase/liquidaciones-03-ruta-contratada.sql). Sin la migración, PostgREST rechaza
+ * el lote entero por una columna desconocida: antes que dejar sin programar el mes, se
+ * reintenta sin ese campo y la liquidación resuelve el pax por los otros escalones de
+ * su cascada.
+ */
+async function insertarReservas(filas: any[], devolverIds = false): Promise<{ data: any[] | null; error: any }> {
+  const meter = (f: any[]) => {
+    const q = supabase.from("reservas").insert(f);
+    return devolverIds ? q.select("id") : q;
+  };
+  const r = await meter(filas);
+  if (r.error && /capacidad_contratada/i.test(String(r.error.message)))
+    return await meter(filas.map(({ capacidad_contratada, ...resto }) => resto));
+  return r as { data: any[] | null; error: any };
+}
+
 
 const DIAS_SEMANA  = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
 const UI_TO_JS_DAY = [1, 2, 3, 4, 5, 6, 0];
@@ -167,6 +198,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
         empresa_tercerizada_id: null,
         placa:                  "",
         descripcion:            "",
+        pax_contratado:         null,
       }];
     }
 
@@ -182,6 +214,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
           empresa_tercerizada_id: veh?.empresa_id || null,
           placa:                  veh?.placa || `VT-${it.vehiculo_tercero_id}`,
           descripcion:            it.descripcion,
+          pax_contratado:         Number(it.pax_contratado) > 0 ? Number(it.pax_contratado) : null,
         };
       }
       // Vehículo propio
@@ -193,6 +226,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
         empresa_tercerizada_id: null,
         placa:                  "",    // se mostrará la placa real al mostrar en programacion
         descripcion:            it.descripcion,
+        pax_contratado:         Number(it.pax_contratado) > 0 ? Number(it.pax_contratado) : null,
       };
     });
   }, [cot, vehTercero]);
@@ -251,6 +285,9 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
       const camposBase = {
         cotizacion_id:         cot.id,
         cliente_id:            cot.cliente_id,
+        // Snapshot de lo CONTRATADO: es lo que imprimirá la liquidación, y tiene que
+        // sobrevivir a que el contrato se renegocie más adelante.
+        capacidad_contratada:  slot.pax_contratado,
         hora_servicio:         hora,
         estado:                "pendiente",
         costo_proveedor:       0,
@@ -272,7 +309,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
         }));
 
         for (let i = 0; i < filas.length; i += BATCH) {
-          const { error } = await supabase.from("reservas").insert(filas.slice(i, i + BATCH));
+          const { error } = await insertarReservas(filas.slice(i, i + BATCH));
           if (error) {
             alert("Error al generar servicios: " + error.message);
             setGenerando(false);
@@ -294,10 +331,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
 
         const idasIds: number[] = [];
         for (let i = 0; i < filasIda.length; i += BATCH) {
-          const { data, error } = await supabase
-            .from("reservas")
-            .insert(filasIda.slice(i, i + BATCH))
-            .select("id");
+          const { data, error } = await insertarReservas(filasIda.slice(i, i + BATCH), true);
           if (error) {
             alert("Error al generar servicios de IDA: " + error.message);
             setGenerando(false);
@@ -332,10 +366,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
 
         const retornosIds: number[] = [];
         for (let i = 0; i < filasRetorno.length; i += BATCH) {
-          const { data, error } = await supabase
-            .from("reservas")
-            .insert(filasRetorno.slice(i, i + BATCH))
-            .select("id");
+          const { data, error } = await insertarReservas(filasRetorno.slice(i, i + BATCH), true);
           if (error) {
             alert("Error al generar servicios de RETORNO: " + error.message);
             setGenerando(false);

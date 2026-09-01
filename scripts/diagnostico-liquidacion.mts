@@ -48,7 +48,7 @@ const COLS =
   "reserva_vinculada_id,liquidacion_cliente_id,liquidacion_proveedor_id";
 
 const [reservas, clientes, terceros, vehiculos, vehTercero, sedes] = await Promise.all([
-  traer(`reservas?select=${COLS}&fecha_servicio=gte.${DESDE}&fecha_servicio=lte.${HASTA}&order=fecha_servicio.asc`),
+  traer(`reservas?select=${COLS}&fecha_servicio=gte.${DESDE}&fecha_servicio=lte.${HASTA}&order=fecha_servicio.asc,id.asc`),
   traer("clientes?select=id,nombre,empresa"),
   traer("empresas_tercerizadas?select=id,razon_social"),
   traer("vehiculos?select=id,placa,capacidad_pasajeros"),
@@ -126,7 +126,8 @@ for (const [, g] of [...grupos].sort((a, b) => b[1].filas.length - a[1].filas.le
   if (lineas.length) {
     console.log("");
     for (const l of lineas)
-      console.log(`   ${String(l.cantidad).padStart(3)} × ${fmtMoneda(l.precio_unitario).padStart(11)} = ${fmtMoneda(l.total_linea).padStart(12)}   ${l.descripcion.slice(0, 68)}`);
+      // La descripción trae un renglón por tramo: se aplana para la consola.
+      console.log(`   ${String(l.cantidad).padStart(3)} × ${fmtMoneda(l.precio_unitario).padStart(11)} = ${fmtMoneda(l.total_linea).padStart(12)}   ${l.descripcion.replace(/\n/g, " · ").slice(0, 90)}`);
     console.log(`   ${" ".repeat(20)}TOTAL SIN IGV = ${fmtMoneda(total).padStart(12)}`);
   } else {
     console.log("   (nada liquidable)");

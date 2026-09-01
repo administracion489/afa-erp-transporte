@@ -2,12 +2,20 @@
 // lib/liquidacion-agrupacion.ts — De servicios sueltos a las líneas del formato.
 //
 // El "Formato de Liquidación y Conformidad del Servicio" (AFA-FL-07) NO lista un
-// renglón por viaje: lista una línea por combinación de ruta + turno + móvil + tarifa,
-// con la CANTIDAD de servicios del periodo. Eso es lo que este módulo calcula, para
-// que nadie vuelva a contar "26.00" a mano:
+// renglón por viaje: lista una línea por RUTA CONTRATADA (su par ida+retorno) a una
+// tarifa, con la CANTIDAD de servicios del periodo. Eso es lo que este módulo calcula,
+// para que nadie vuelva a contar "26.00" a mano:
 //
-//   TRANSPORTE DE PERSONAL CD CALLAO / 50 PAX / DEL 15-06-2026 AL 14-07-2026 /
-//   RUTA 1 / TURNO NOCHE / MÓVIL 1        SERV.  26.00  ×  S/ 790.00
+//   TRANSPORTE DE PERSONAL CD CALLAO · 50 PAX · DEL 15-06-2026 AL 14-07-2026
+//   IDA · RUTA B/ ENTRADA 05:10/ CHILCA→BSF PUNTA HERMOSA
+//   RETORNO · RUTA B/ RETORNO 15:00/ BSF→CHILCA (incluido en la misma tarifa)
+//                                         SERV.  26.00  ×  S/ 790.00
+//
+// TODO lo que se imprime es un dato que alguien escribió. La versión anterior componía
+// la descripción con "RUTA B / TURNO DÍA / MÓVIL 1", donde el turno se deducía de la
+// hora, el móvil era un índice calculado y el "N PAX" era la capacidad del bus que
+// tocó ese día. Ninguno de los tres existía como dato, y el del pax además mentía: con
+// una ruta contratada para 15, mandar un bus de 20 hacía que el formato declarara 20.
 //
 // Es CÓDIGO PURO (sin Supabase, sin React): recibe las reservas ya leídas y devuelve
 // las líneas. Así se puede probar de verdad y reusar desde la página, la API y el
@@ -55,37 +63,34 @@ export type ReservaLiq = {
   tipo_servicio_detalle?: string | null;
   liquidacion_cliente_id?: number | null;
   liquidacion_proveedor_id?: number | null;
+  /** Cotización de la que nació el servicio: una de las fuentes del pax contratado. */
+  cotizacion_id?: number | null;
+  /**
+   * Asientos CONTRATADOS, NO la capacidad del bus asignado. Ver `paxContratadoDe`:
+   * mandar un bus de 20 a una ruta contratada para 15 no cambia lo que se factura.
+   */
+  capacidad_contratada?: number | null;
 };
 
 /** Datos de apoyo que la página resuelve una sola vez (placas, capacidades, nombres). */
 export type CatalogoLiq = {
   placaDe: (r: ReservaLiq) => string;
+  /** Capacidad del VEHÍCULO asignado. Sirve para detectar unidades por debajo de lo contratado — nunca para el "N PAX" del formato. */
   capacidadDe: (r: ReservaLiq) => number | null;
   conductorDe: (r: ReservaLiq) => string;
   sedeNombre?: string | null;
+  /**
+   * Asientos contratados del servicio, resuelto en cascada por quien tenga acceso a
+   * la base (lib/liquidacion-rutas.ts). Devuelve null cuando ninguna fuente lo sabe,
+   * y entonces el formato sale SIN el "N PAX": entre un dato de menos y un dato
+   * falso, el que se puede defender frente al cliente es el de menos.
+   */
+  paxContratadoDe?: (par: ParServicio) => number | null;
 };
 
 export type LadoLiquidacion = "cliente" | "proveedor";
 
-// ── Turno, sentido y ruta ───────────────────────────────────────────────────
-
-/**
- * Turno del servicio. Se lee del texto si la operación ya lo escribió (nombre de ruta
- * u observaciones dicen "TURNO NOCHE"); si no, se deriva de la hora programada.
- * Nunca queda vacío: el formato del cliente siempre nombra un turno.
- */
-export function turnoDeReserva(r: ReservaLiq): "DÍA" | "NOCHE" | "TARDE" {
-  const txt = `${r.ruta_nombre ?? ""}`.toUpperCase();
-  if (/TURNO\s*NOCHE|\bNOCHE\b/.test(txt)) return "NOCHE";
-  if (/TURNO\s*TARDE|\bTARDE\b/.test(txt)) return "TARDE";
-  if (/TURNO\s*D[ÍI]A|\bD[ÍI]A\b/.test(txt)) return "DÍA";
-
-  const h = Number(String(r.hora_servicio ?? "").slice(0, 2));
-  if (!Number.isFinite(h)) return "DÍA";
-  if (h >= 18 || h < 5) return "NOCHE";
-  if (h >= 13) return "TARDE";
-  return "DÍA";
-}
+// ── Sentido y nombre de ruta ────────────────────────────────────────────────
 
 /** 'IDA' | 'RETORNO'. Prioriza el campo canónico; cae al nombre de ruta. */
 export function sentidoDeReserva(r: ReservaLiq): "IDA" | "RETORNO" {
@@ -96,12 +101,34 @@ export function sentidoDeReserva(r: ReservaLiq): "IDA" | "RETORNO" {
 }
 
 /**
- * De dónde salió la etiqueta de la ruta. Importa porque solo `nombre` produce el
- * "RUTA A" que el cliente busca en el formato: con `tramo` o `ninguna` el servicio SÍ
- * se liquida, pero sale rotulado de otra forma y en otro lugar de la lista (que se
- * ordena alfabéticamente) — el operador lo lee como "esa ruta no salió".
+ * De dónde salió el rótulo de la ruta. Importa porque solo `nombre` produce el texto
+ * que el cliente reconoce: con `tramo` o `ninguna` el servicio SÍ se liquida, pero
+ * sale rotulado de otra forma y en otro lugar de la lista (que se ordena
+ * alfabéticamente) — el operador lo lee como "esa ruta no salió".
  */
 export type FuenteEtiqueta = "nombre" | "tramo" | "ninguna";
+
+/**
+ * El nombre COMPLETO de la ruta, tal como lo escribió la operación:
+ *
+ *     RUTA B/ ENTRADA 05:10/ CHILCA→BSF PUNTA HERMOSA
+ *
+ * Es lo que va al formato. Antes se imprimía solo el recorte "RUTA B" y con eso se
+ * perdían la hora y los extremos, que es justo lo que distingue una ruta de otra:
+ * dos rutas distintas de la misma letra salían como dos renglones de texto idéntico.
+ *
+ * Solo se normalizan los espacios. Ni mayúsculas ni acentos se tocan: este texto lo
+ * lee el cliente y también el pasajero en su app, y tiene que decir lo mismo.
+ */
+export function nombreRutaDetalle(r: ReservaLiq | null | undefined): { nombre: string; fuente: FuenteEtiqueta } {
+  const n = String(r?.ruta_nombre ?? "").trim().replace(/\s+/g, " ");
+  if (n) return { nombre: n, fuente: "nombre" };
+  const tramo = [r?.origen, r?.destino].filter(Boolean).join(" → ").toUpperCase();
+  return tramo ? { nombre: tramo, fuente: "tramo" } : { nombre: "SIN NOMBRE DE RUTA", fuente: "ninguna" };
+}
+
+/** Atajo cuando solo hace falta el texto. */
+export const nombreRuta = (r: ReservaLiq | null | undefined) => nombreRutaDetalle(r).nombre;
 
 /**
  * Separador entre "RUTA" y su letra. Con `\s+` a secas, "RUTA-A" y "RUTA:A" —que se
@@ -153,10 +180,29 @@ export type ParServicio = {
    * Lo que CUBRE la tarifa, no lo que se prestó ese día. Se decide aquí, donde se sabe
    * si la reserva viaja enlazada, y no en la agrupación: allí solo se veía `adjuntas`,
    * que queda vacía cuando el retorno no se ejecutó, y el mismo servicio se partía en
-   * dos líneas ("IDA" y "IDA Y RETORNO") a idéntica ruta, turno y tarifa.
+   * dos líneas ("IDA" y "IDA Y RETORNO") a idéntica ruta y tarifa.
    */
   sentido: "IDA" | "RETORNO" | "IDA Y RETORNO";
+  /**
+   * Los dos tramos del servicio, identificados por su SENTIDO y no por cuál lleva el
+   * importe. La distinción no es cosmética: la ida y el retorno tienen dos
+   * `ruta_nombre` independientes (se teclean en dos campos distintos al generar el
+   * programa), y como la tarifa va en uno solo, el formato terminaba rotulando la
+   * línea con el nombre del tramo que cobraba. Si ese era el retorno, una RUTA A
+   * podía salir impresa con el nombre de la RUTA B sin que nadie lo notara.
+   */
+  ida: ReservaLiq | null;
+  retorno: ReservaLiq | null;
 };
+
+/** Reparte un par en (ida, retorno) por el sentido de cada tramo, no por quién cobra. */
+function tramosDelPar(a: ReservaLiq, b?: ReservaLiq | null): { ida: ReservaLiq | null; retorno: ReservaLiq | null } {
+  if (!b) return sentidoDeReserva(a) === "RETORNO" ? { ida: null, retorno: a } : { ida: a, retorno: null };
+  const sa = sentidoDeReserva(a);
+  const sb = sentidoDeReserva(b);
+  if (sa === sb) return { ida: a, retorno: b };   // dato contradictorio: se respeta el orden recibido
+  return sa === "IDA" ? { ida: a, retorno: b } : { ida: b, retorno: a };
+}
 
 /** Importe de una reserva según el lado que se esté liquidando. */
 function montoDe(r: ReservaLiq, lado: LadoLiquidacion): number {
@@ -262,7 +308,7 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
       }
       const motivos = trabas(r);
       if (motivos.length) bloquear(r, motivos);
-      else res.pares.push({ cabeza: r, adjuntas: [], ejecutado: hecho(r), sentido: sentidoDeReserva(r) });
+      else res.pares.push({ cabeza: r, adjuntas: [], ejecutado: hecho(r), sentido: sentidoDeReserva(r), ...tramosDelPar(r) });
       continue;
     }
 
@@ -276,7 +322,7 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
       for (const x of [r, par]) {
         const motivos = trabas(x);
         if (motivos.length) bloquear(x, motivos);
-        else res.pares.push({ cabeza: x, adjuntas: [], ejecutado: hecho(x), sentido: sentidoDeReserva(x) });
+        else res.pares.push({ cabeza: x, adjuntas: [], ejecutado: hecho(x), sentido: sentidoDeReserva(x), ...tramosDelPar(x) });
       }
       continue;
     }
@@ -307,7 +353,7 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
         r: adjunta,
         mensaje: `${adjunta.direccion_servicio === "retorno" ? "Retorno" : "Tramo"} del ${adjunta.fecha_servicio ?? ""}: ${motivosAdjunta.join(" · ")}`,
       });
-      res.pares.push({ cabeza, adjuntas: [], ejecutado: hecho(cabeza), sentido: "IDA Y RETORNO" });
+      res.pares.push({ cabeza, adjuntas: [], ejecutado: hecho(cabeza), sentido: "IDA Y RETORNO", ...tramosDelPar(cabeza, adjunta) });
       continue;
     }
 
@@ -318,7 +364,7 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
         r: adjunta,
         mensaje: `El retorno del ${adjunta.fecha_servicio ?? ""} no se ejecutó, pero la tarifa del día se cobra completa`,
       });
-      res.pares.push({ cabeza, adjuntas: [], ejecutado: true, sentido: "IDA Y RETORNO" });
+      res.pares.push({ cabeza, adjuntas: [], ejecutado: true, sentido: "IDA Y RETORNO", ...tramosDelPar(cabeza, adjunta) });
       continue;
     }
 
@@ -327,6 +373,7 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
       adjuntas: hecho(adjunta) ? [adjunta] : [],
       ejecutado: hecho(cabeza),
       sentido: "IDA Y RETORNO",
+      ...tramosDelPar(cabeza, adjunta),
     });
   }
 
@@ -382,14 +429,28 @@ export type LineaAgrupada = {
   servicios: number[];
   /** ids de todas las del periodo, ejecutadas o no (para el contraste programado/ejecutado). */
   reservas_periodo: number[];
+  /** Etiqueta corta ("RUTA B") para las listas compactas de la app. NO es lo que se imprime. */
   ruta: string;
   /** Por qué la etiqueta es la que es: con `tramo`/`ninguna` el cliente no leerá "RUTA A". */
   fuente_ruta: FuenteEtiqueta;
-  turno: string;
+  /** Nombre COMPLETO de cada tramo, tal como lo escribió la operación. Esto es lo que se imprime. */
+  nombre_ida: string | null;
+  nombre_retorno: string | null;
   sentido: string;
+  /** Posición dentro del día cuando la ruta necesita más de una unidad a la misma hora. */
   movil: number;
+  /** Cuántas unidades simultáneas tiene la ruta. 1 = no se imprime ningún "MÓVIL". */
+  moviles: number;
+  /** Todas las placas que cubrieron la ruta en el periodo. Van al detalle, nunca parten la línea. */
   placas: string[];
-  pax: number | null;
+  /** Asientos CONTRATADOS. null = ninguna fuente lo sabe y el formato sale sin el "N PAX". */
+  pax_contratado: number | null;
+  /**
+   * La capacidad más chica que se asignó en el periodo. No se imprime: sirve para avisar
+   * en pantalla cuando se mandó una unidad por debajo de lo contratado, que es un
+   * incumplimiento que hoy no se detecta porque no había contra qué compararlo.
+   */
+  capacidad_minima_asignada: number | null;
   referencia: string;
 };
 
@@ -434,11 +495,19 @@ export type OpcionesAgrupacion = {
  * Recibe PARES (ida+retorno = un servicio), no reservas sueltas: así la cantidad que
  * lee el cliente es la que pactó. Ver `analizarServicios`.
  *
- * Clave primaria de agrupación: ruta + turno + sentido + tarifa. La placa NO entra:
- * el cliente contrata "MÓVIL 1", no una unidad, y un reemplazo por avería no debe
- * partir la línea en dos. Pero si dentro de un mismo grupo hay dos servicios el MISMO
- * día (señal de que son dos móviles a la misma tarifa), ahí sí se separa por placa —
- * que es exactamente como el Excel distingue MÓVIL 1 de MÓVIL 2.
+ * CLAVE DE AGRUPACIÓN: nombre de la ida + nombre del retorno + tarifa. Es decir, la
+ * identidad de la RUTA CONTRATADA, que es exactamente lo que se imprime. Antes la
+ * clave era `letra + turno + sentido + tarifa`, con dos ejes —el turno y el sentido—
+ * que NO se imprimían: cuatro rutas distintas de la letra B salían como cuatro
+ * renglones con el texto idéntico "RUTA B", y el operador no tenía forma de saber
+ * cuál era cuál. Agrupar por el nombre completo no pierde precisión, la gana: la hora
+ * que el turno aplastaba ("ENTRADA 05:10" y "ENTRADA 06:35" eran los dos "TURNO DÍA")
+ * ya viene dentro del nombre.
+ *
+ * LA PLACA NO ENTRA NUNCA. En 30 días de servicio pueden rotar cinco unidades por la
+ * misma ruta, y el cliente contrató una ruta, no cinco. La versión anterior cortaba
+ * por placa en cuanto detectaba un día con dos servicios, y ese único día partía el
+ * mes entero en un renglón por unidad.
  */
 export function agruparServicios(
   pares: ParServicio[],
@@ -450,9 +519,12 @@ export function agruparServicios(
     clave: string;
     ruta: string;
     fuenteRuta: FuenteEtiqueta;
-    turno: string;
+    nombreIda: string | null;
+    nombreRetorno: string | null;
     sentido: string;
     precio: number;
+    movil: number;
+    moviles: number;
     filas: ParServicio[];
   };
   const buckets = new Map<string, Bucket>();
@@ -463,63 +535,67 @@ export function agruparServicios(
       preciosIncluyenIgv: opts.preciosIncluyenIgv,
       igvPct: opts.igvPct,
     });
-    const { etiqueta: ruta, fuente: fuenteRuta } = etiquetaRutaDetalle(r);
-    const turno = turnoDeReserva(r);
-    // Un par cubre los dos tramos: el sentido de la cabeza no debe partir la línea. Lo
-    // decide `analizarServicios`, que es quien sabe si la reserva viaja enlazada —
-    // mirar `adjuntas` aquí partía la línea los días en que el retorno no se ejecutó.
+    // Los nombres salen de CADA TRAMO por su sentido, no de la cabeza: la cabeza es
+    // el tramo que lleva el importe, y cuando la tarifa se cargó en el retorno la
+    // línea terminaba rotulada con el nombre del retorno.
+    const nombreIda = p.ida ? nombreRuta(p.ida) : null;
+    const nombreRetorno = p.retorno ? nombreRuta(p.retorno) : null;
+    const { etiqueta: ruta, fuente: fuenteRuta } = etiquetaRutaDetalle(p.ida ?? r);
     const sentido = p.sentido ?? (p.adjuntas.length ? "IDA Y RETORNO" : sentidoDeReserva(r));
-    const clave = [norm(ruta), turno, sentido, precio.toFixed(2)].join("|");
-    const b = buckets.get(clave) ?? { clave, ruta, fuenteRuta, turno, sentido, precio, filas: [] };
+    const clave = [norm(nombreIda ?? ""), norm(nombreRetorno ?? ""), precio.toFixed(2)].join("|");
+    const b = buckets.get(clave)
+      ?? { clave, ruta, fuenteRuta, nombreIda, nombreRetorno, sentido, precio, movil: 1, moviles: 1, filas: [] };
     b.filas.push(p);
     buckets.set(clave, b);
   }
 
-  // Segunda pasada: separar por placa los grupos con servicios simultáneos.
+  // ── Móviles: solo cuando la ruta necesita DOS UNIDADES A LA MISMA HORA ──────
+  //
+  // La simultaneidad se mide por (fecha, HORA), no por fecha: dos vueltas del mismo
+  // bus el mismo día —una de mañana y otra de tarde— no son dos móviles, y medirlo
+  // solo por fecha las contaba como tales.
+  //
+  // El reparto es por POSICIÓN dentro de cada salida, no por placa: "móvil 1" es el
+  // mismo puesto todos los días, lo cubra la unidad que lo cubra. Así una ruta de un
+  // solo bus con cinco placas rotando queda en UN renglón, y una ruta que de verdad
+  // sale con dos buses a las 05:10 queda en dos, que es como el cliente ya la firma.
   const finales: Bucket[] = [];
   for (const b of buckets.values()) {
-    const porFecha = new Map<string, number>();
+    const porSalida = new Map<string, ParServicio[]>();
     for (const p of b.filas) {
-      const f = String(p.cabeza.fecha_servicio ?? "");
-      porFecha.set(f, (porFecha.get(f) ?? 0) + 1);
+      const k = `${p.cabeza.fecha_servicio ?? ""}|${String(p.cabeza.hora_servicio ?? "").slice(0, 5)}`;
+      (porSalida.get(k) ?? porSalida.set(k, []).get(k)!).push(p);
     }
-    const haySimultaneos = [...porFecha.values()].some((n) => n > 1);
-    if (!haySimultaneos) {
+    const moviles = Math.max(1, ...[...porSalida.values()].map((v) => v.length));
+    if (moviles === 1) {
       finales.push(b);
       continue;
     }
-    const porPlaca = new Map<string, ParServicio[]>();
-    for (const p of b.filas) {
-      const placa = catalogo.placaDe(p.cabeza) || "SIN UNIDAD";
-      (porPlaca.get(placa) ?? porPlaca.set(placa, []).get(placa)!).push(p);
+    const porPosicion = new Map<number, ParServicio[]>();
+    for (const salida of porSalida.values()) {
+      // La unidad más grande es el móvil 1, como en los formatos que AFA ya emite.
+      // El id desempata para que la numeración no baile entre recargas.
+      const orden = [...salida].sort(
+        (x, y) =>
+          Number(catalogo.capacidadDe(y.cabeza) ?? 0) - Number(catalogo.capacidadDe(x.cabeza) ?? 0) ||
+          x.cabeza.id - y.cabeza.id
+      );
+      orden.forEach((p, i) => {
+        const pos = i + 1;
+        (porPosicion.get(pos) ?? porPosicion.set(pos, []).get(pos)!).push(p);
+      });
     }
-    for (const [placa, filas] of porPlaca)
-      finales.push({ ...b, clave: `${b.clave}|${placa}`, filas });
-  }
-
-  // Numerar los móviles dentro de cada ruta+turno: móvil 1 es el de mayor capacidad
-  // (y a igual capacidad, el de mayor tarifa), igual que en los formatos actuales.
-  const porRutaTurno = new Map<string, Bucket[]>();
-  for (const b of finales) {
-    const k = `${norm(b.ruta)}|${b.turno}|${b.sentido}`;
-    (porRutaTurno.get(k) ?? porRutaTurno.set(k, []).get(k)!).push(b);
-  }
-  const movilDe = new Map<string, number>();
-  for (const grupo of porRutaTurno.values()) {
-    const conCap = grupo.map((b) => ({
-      b,
-      cap: Math.max(0, ...b.filas.map((p) => Number(catalogo.capacidadDe(p.cabeza) ?? 0))),
-    }));
-    conCap.sort((x, y) => y.cap - x.cap || y.b.precio - x.b.precio || x.b.clave.localeCompare(y.b.clave));
-    conCap.forEach((x, i) => movilDe.set(x.b.clave, i + 1));
+    for (const [pos, filas] of [...porPosicion].sort((x, y) => x[0] - y[0]))
+      finales.push({ ...b, clave: `${b.clave}|M${pos}`, filas, movil: pos, moviles });
   }
 
   const lineas: LineaAgrupada[] = [];
   const ordenados = [...finales].sort(
     (a, b) =>
-      a.ruta.localeCompare(b.ruta) ||
-      a.turno.localeCompare(b.turno) ||
-      (movilDe.get(a.clave) ?? 0) - (movilDe.get(b.clave) ?? 0)
+      String(a.nombreIda ?? a.ruta).localeCompare(String(b.nombreIda ?? b.ruta)) ||
+      String(a.nombreRetorno ?? "").localeCompare(String(b.nombreRetorno ?? "")) ||
+      a.precio - b.precio ||
+      a.movil - b.movil
   );
 
   ordenados.forEach((b, idx) => {
@@ -528,19 +604,17 @@ export function agruparServicios(
     // placas, los pasajeros y el detalle del Anexo 1.
     const todas = b.filas.flatMap((p) => [p.cabeza, ...p.adjuntas]);
 
+    // El "N PAX" del formato es el personal que el cliente CONTRATÓ, y sale de la
+    // cascada de `paxContratadoDe`. Antes salía del máximo embarcado o, si no había
+    // manifiestos, de la capacidad del bus asignado: con una ruta contratada para 15,
+    // mandar un bus de 20 hacía que el formato declarara 20 PAX. Si ninguna fuente lo
+    // sabe queda en null y la descripción sale sin ese dato — nunca inventado.
+    const pax = catalogo.paxContratadoDe?.(b.filas[0]) ?? null;
+    // La capacidad asignada NO se imprime: solo sirve para avisar cuando se mandó una
+    // unidad más chica que lo contratado.
     const capacidades = todas.map((r) => Number(catalogo.capacidadDe(r) ?? 0)).filter((n) => n > 0);
-    // El "50 PAX / 10 PAX" del formato es el personal que el cliente contrató por móvil,
-    // no la capacidad del bus (un bus de 50 puede estar cubriendo una ruta de 10). El
-    // máximo embarcado en el periodo es la mejor evidencia de ese número; la capacidad
-    // solo entra si todavía no hay manifiestos.
-    const embarcados = todas.map((r) => Number(r.pasajeros_abordados ?? 0)).filter((n) => n > 0);
-    const pax = embarcados.length
-      ? Math.max(...embarcados)
-      : capacidades.length
-      ? Math.max(...capacidades)
-      : null;
+    const capacidadMinima = capacidades.length ? Math.min(...capacidades) : null;
     const placas = [...new Set(todas.map((r) => catalogo.placaDe(r)).filter(Boolean))];
-    const movil = movilDe.get(b.clave) ?? idx + 1;
     const serie = serieAnexo(idx + 1);
     const cantidad = ejecutados.length;
 
@@ -553,11 +627,10 @@ export function agruparServicios(
         pax,
         desde: opts.desde ?? null,
         hasta: opts.hasta ?? null,
-        ruta: b.ruta,
-        turno: b.turno,
-        sentido: b.sentido,
-        movil,
-        totalMoviles: (porRutaTurno.get(`${norm(b.ruta)}|${b.turno}|${b.sentido}`) ?? []).length,
+        nombreIda: b.nombreIda,
+        nombreRetorno: b.nombreRetorno,
+        movil: b.movil,
+        totalMoviles: b.moviles,
       }),
       unidad_medida: "SERV.",
       cantidad_programada: b.filas.length,
@@ -572,11 +645,14 @@ export function agruparServicios(
       reservas_periodo: todas.map((r) => r.id),
       ruta: b.ruta,
       fuente_ruta: b.fuenteRuta,
-      turno: b.turno,
+      nombre_ida: b.nombreIda,
+      nombre_retorno: b.nombreRetorno,
       sentido: b.sentido,
-      movil,
+      movil: b.movil,
+      moviles: b.moviles,
       placas,
-      pax,
+      pax_contratado: pax,
+      capacidad_minima_asignada: capacidadMinima,
       referencia: cantidad
         ? `${serie}-01 a ${serie}-${String(cantidad).padStart(2, "0")}`
         : "—",
@@ -586,31 +662,47 @@ export function agruparServicios(
   return lineas;
 }
 
-/** Arma la descripción con la misma redacción que el cliente ya está acostumbrado a leer. */
+/**
+ * La descripción del ítem. TODO lo que aparece aquí es un dato que alguien escribió:
+ *
+ *     TRANSPORTE DE PERSONAL CD CALLAO · 15 PAX · DEL 01-08-2026 AL 31-08-2026
+ *     IDA · RUTA A/ ENTRADA 06:35/ SANTA ANITA→BSF PUNTA HERMOSA
+ *     RETORNO · RUTA A/ RETORNO 17:00/ BSF PUNTA HERMOSA→SANTA ANITA (incluido en la misma tarifa)
+ *     MÓVIL 1 DE 2
+ *
+ * Los dos nombres se imprimen aunque la tarifa vaya en uno solo: es la única forma de
+ * que se vea a simple vista cuando la ida dice RUTA A y el retorno dice RUTA B, que
+ * antes hacía que la línea entera se rotulara con la ruta equivocada.
+ *
+ * Se separa con saltos de línea, no con " / ": el nombre de ruta ya trae barras dentro
+ * ("RUTA A/ ENTRADA 06:35/ …") y encadenarlo con más barras lo vuelve ilegible. El PDF
+ * y el editor renderizan estos saltos (`white-space: pre-line`).
+ */
 export function descripcionLinea(p: {
   concepto?: string;
   sede?: string | null;
   pax?: number | null;
   desde?: string | null;
   hasta?: string | null;
-  ruta: string;
-  turno: string;
-  sentido?: string;
+  nombreIda?: string | null;
+  nombreRetorno?: string | null;
   movil?: number;
   totalMoviles?: number;
 }): string {
-  const partes = [
+  const cabecera = [
     `${p.concepto || "TRANSPORTE DE PERSONAL"}${p.sede ? " " + norm(p.sede) : ""}`,
+    // Sin capacidad contratada NO se escribe nada: ver `paxContratadoDe`.
     p.pax ? `${p.pax} PAX` : null,
     p.desde && p.hasta ? `DEL ${fechaFormato(p.desde)} AL ${fechaFormato(p.hasta)}` : null,
-    p.ruta,
-    `TURNO ${p.turno}`,
-    // El sentido solo aporta cuando el servicio tiene ida y retorno separados.
-    p.sentido === "RETORNO" ? "RETORNO" : null,
-    // "MÓVIL 1" solo tiene sentido si hay más de un móvil en esa ruta/turno.
-    (p.totalMoviles ?? 1) > 1 && p.movil ? `MÓVIL ${p.movil}` : null,
-  ].filter(Boolean);
-  return partes.join(" / ");
+  ].filter(Boolean).join(" · ");
+
+  const filas = [cabecera];
+  if (p.nombreIda) filas.push(`IDA · ${p.nombreIda}`);
+  if (p.nombreRetorno)
+    filas.push(`RETORNO · ${p.nombreRetorno}${p.nombreIda ? " (incluido en la misma tarifa)" : ""}`);
+  // "MÓVIL 1 DE 2" solo cuando la ruta de verdad sale con más de una unidad a la vez.
+  if ((p.totalMoviles ?? 1) > 1 && p.movil) filas.push(`MÓVIL ${p.movil} DE ${p.totalMoviles}`);
+  return filas.join("\n");
 }
 
 // ── Totales de la valorización ──────────────────────────────────────────────

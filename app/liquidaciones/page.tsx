@@ -23,6 +23,11 @@ import {
   type ReservaLiq, type CatalogoLiq, type LineaAgrupada, type LadoLiquidacion, type ParServicio,
 } from "@/lib/liquidacion-agrupacion";
 import {
+  cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxContratado,
+  type CatalogoRutas,
+} from "@/lib/liquidacion-rutas";
+import ModalRutasContratadas, { type RutaDelPeriodo } from "./ModalRutasContratadas";
+import {
   crearLiquidaciones, igvVigente, aprobarLiquidacionCliente, aprobarLiquidacionProveedor,
   anularLiquidacion, volverABorrador, hoyLima,
 } from "@/lib/liquidaciones";
@@ -37,8 +42,11 @@ const COLS_RESERVA =
   "id,codigo,fecha_servicio,hora_servicio,estado,estado_admin,estado_proveedor,cliente_id,cliente_sede_id," +
   "ruta_nombre,direccion_servicio,origen,destino,precio_cliente,costo_proveedor,tipo_asignacion," +
   "vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,empresa_tercerizada_id," +
-  "pasajeros_abordados,hora_real_inicio,hora_real_fin,tipo_servicio_detalle," +
+  "pasajeros_abordados,hora_real_inicio,hora_real_fin,tipo_servicio_detalle,cotizacion_id," +
   "reserva_vinculada_id,liquidacion_cliente_id,liquidacion_proveedor_id";
+
+/** La añade supabase/liquidaciones-03: se pide aparte para no tumbar la pantalla si falta. */
+const COL_PAX_CONTRATADO = "capacidad_contratada";
 
 /** Paginación defensiva: PostgREST corta en 1000 filas y un mes de operación pasa de eso. */
 async function traerTodo(query: () => any): Promise<any[]> {
@@ -127,6 +135,9 @@ export default function LiquidacionesPage() {
   const [liquidaciones, setLiquidaciones] = useState<any[]>([]);
   const [igvPct, setIgvPct] = useState(18);
   const [usuario, setUsuario] = useState("");
+  /** Fichas de rutas contratadas y pax por cotización: los escalones de la cascada del PAX. */
+  const [rutas, setRutas] = useState<CatalogoRutas>({ porClave: new Map(), filas: [], disponible: false });
+  const [paxCotizacion, setPaxCotizacion] = useState<Map<number, number>>(new Map());
 
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [abierto, setAbierto] = useState<Set<string>>(new Set());
@@ -136,6 +147,7 @@ export default function LiquidacionesPage() {
   const [modalSede, setModalSede] = useState<{ sede: Sede; cliente: string } | null>(null);
   const [enviar, setEnviar] = useState<any | null>(null);
   const [modalCostos, setModalCostos] = useState<ReservaSinCosto[] | null>(null);
+  const [modalRutas, setModalRutas] = useState<RutaDelPeriodo[] | null>(null);
 
   // ── Carga ────────────────────────────────────────────────────────────────
   async function cargar() {
@@ -145,17 +157,23 @@ export default function LiquidacionesPage() {
       const correo = sesion?.session?.user?.email ?? "";
       setUsuario(correo);
 
-      const rs = await traerTodo(() =>
-        supabase.from("reservas").select(COLS_RESERVA)
-          .gte("fecha_servicio", periodo.desde).lte("fecha_servicio", periodo.hasta)
-          .order("fecha_servicio", { ascending: true })
-          // Desempate por id = ORDEN TOTAL. Sin él, `fecha_servicio` empata cientos de
-          // veces por página y Postgres puede devolver los empates en distinto orden en
-          // cada `range()`: la página 2 repite filas de la 1 y SALTA otras. Un mes con
-          // más de 1000 reservas perdía servicios sin ningún error. Es el mismo
-          // desempate que ya usan app/programacion y lib/ficha-servicio-datos.
-          .order("id", { ascending: true })
-      );
+      // El desempate por id da ORDEN TOTAL. Sin él, `fecha_servicio` empata cientos de
+      // veces por página y Postgres puede devolver los empates en distinto orden en cada
+      // `range()`: la página 2 repite filas de la 1 y SALTA otras. Un mes con más de
+      // 1000 reservas perdía servicios sin ningún error. Es el mismo desempate que ya
+      // usan app/programacion y lib/ficha-servicio-datos.
+      const traerReservas = (cols: string) =>
+        traerTodo(() =>
+          supabase.from("reservas").select(cols)
+            .gte("fecha_servicio", periodo.desde).lte("fecha_servicio", periodo.hasta)
+            .order("fecha_servicio", { ascending: true })
+            .order("id", { ascending: true })
+        );
+      // La capacidad contratada es de supabase/liquidaciones-03. Si esa migración
+      // todavía no se corrió, PostgREST rechaza el select entero: se reintenta sin ella
+      // y la cascada del pax se queda sin su primer escalón, nada más.
+      const rs = await traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO}`)
+        .catch(() => traerReservas(COLS_RESERVA));
       setReservas(rs as ReservaLiq[]);
 
       const [cl, te, ve, vt, co, ct, cfg] = await Promise.all([
@@ -187,6 +205,15 @@ export default function LiquidacionesPage() {
           if (tmap[t.id]) Object.assign(tmap[t.id], { afectacion_defecto: t.afectacion_defecto, emite_factura: t.emite_factura });
 
       setClientes(cmap); setTerceros(tmap); setVehiculos(vmap); setConductores(comap); setIgvPct(cfg);
+
+      // Escalones de la cascada del pax contratado (lib/liquidacion-rutas.ts). Los dos
+      // son tolerantes: sin la tabla o sin el campo en la cotización devuelven vacío y
+      // el formato simplemente sale sin el "N PAX".
+      const [cat, paxCot] = await Promise.all([
+        cargarRutasContratadas(supabase),
+        cargarPaxDeCotizaciones(supabase, (rs as any[]).map((r) => Number(r.cotizacion_id ?? 0))),
+      ]);
+      setRutas(cat); setPaxCotizacion(paxCot);
 
       // Las tablas nuevas pueden no existir todavía: se avisa y la pantalla sigue viva.
       const sd = await supabase.from("cliente_sedes").select("*").eq("activo", true).order("nombre");
@@ -265,7 +292,16 @@ export default function LiquidacionesPage() {
       g.avisos = analisis.avisos;
 
       g.lineas = agruparServicios(g.pares, {
-        lado, catalogo, preciosIncluyenIgv: preciosConIgv, igvPct,
+        lado,
+        // La sede del grupo entra en la resolución del pax: las fichas de ruta se
+        // guardan por cliente + sede, y aquí la sede puede venir de un patrón y no
+        // estar escrita en la reserva.
+        catalogo: {
+          ...catalogo,
+          paxContratadoDe: (par) =>
+            resolverPaxContratado(par, { catalogo: rutas, paxCotizacion, sedeId: g.sedeId }),
+        },
+        preciosIncluyenIgv: preciosConIgv, igvPct,
         sede: g.sede?.nombre ?? null, desde: periodo.desde, hasta: periodo.hasta,
         concepto: g.sede?.servicio_contratado?.replace(/^SERVICIO DE /i, "") || "TRANSPORTE DE PERSONAL",
       })
@@ -277,7 +313,40 @@ export default function LiquidacionesPage() {
     }
 
     return [...mapa.values()].sort((a, b) => b.total - a.total || a.contraparteNombre.localeCompare(b.contraparteNombre));
-  }, [reservas, lado, clientes, terceros, sedes, catalogo, igvPct, preciosConIgv, periodo.desde, periodo.hasta]);
+  }, [reservas, lado, clientes, terceros, sedes, catalogo, igvPct, preciosConIgv, periodo.desde, periodo.hasta, rutas, paxCotizacion]);
+
+  /**
+   * Las rutas del periodo con su capacidad contratada. Alimenta el modal de fichas y el
+   * contador de "sin capacidad contratada": son las que saldrán sin el "N PAX".
+   */
+  const rutasDelPeriodo = useMemo<RutaDelPeriodo[]>(() => {
+    const out = new Map<string, RutaDelPeriodo>();
+    for (const g of grupos)
+      for (const l of g.lineas) {
+        const k = `${g.contraparteId ?? 0}|${g.sedeId ?? 0}|${l.nombre_ida ?? ""}|${l.nombre_retorno ?? ""}`;
+        const ya = out.get(k);
+        if (ya) { ya.servicios += l.cantidad; continue; }
+        out.set(k, {
+          clave: k,
+          clienteId: g.contraparteId,
+          clienteNombre: g.contraparteNombre,
+          sedeId: g.sedeId,
+          sedeNombre: g.sedeNombre,
+          nombreIda: l.nombre_ida,
+          nombreRetorno: l.nombre_retorno,
+          paxContratado: l.pax_contratado,
+          capacidadMinimaAsignada: l.capacidad_minima_asignada,
+          servicios: l.cantidad,
+        });
+      }
+    return [...out.values()].sort((a, b) => String(a.nombreIda).localeCompare(String(b.nombreIda)));
+  }, [grupos]);
+
+  /** Rutas que van a imprimirse sin el "N PAX" porque ninguna fuente sabe cuánto se contrató. */
+  const rutasSinPax = useMemo(
+    () => (lado === "cliente" ? rutasDelPeriodo.filter((r) => !r.paxContratado) : []),
+    [rutasDelPeriodo, lado]
+  );
 
   const seleccionados = grupos.filter((g) => sel.has(g.clave) && g.lineas.length);
   const totalSeleccionado = seleccionados.reduce((a, g) => a + g.total, 0);
@@ -464,6 +533,18 @@ export default function LiquidacionesPage() {
                 Cargar {sinCosto.length} costo(s) faltante(s)
               </button>
             )}
+            {lado === "cliente" && rutasDelPeriodo.length > 0 && (
+              <button onClick={() => setModalRutas(rutasDelPeriodo)}
+                className={`px-3 py-2 rounded-xl text-sm font-bold border ${
+                  rutasSinPax.length
+                    ? "text-amber-800 bg-amber-50 border-amber-200 hover:bg-amber-100"
+                    : "text-gray-600 bg-white hover:bg-gray-50"
+                }`}>
+                {rutasSinPax.length
+                  ? `${rutasSinPax.length} ruta(s) sin capacidad contratada`
+                  : "Rutas contratadas"}
+              </button>
+            )}
             <button disabled={trabajando || !seleccionados.length} onClick={liquidarSeleccion}
               className="ml-auto px-4 py-2 rounded-xl text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40">
               {trabajando ? "Generando…" : `Liquidar ${seleccionados.length || ""} grupo(s) → ${seleccionados.length || 0} documento(s)`}
@@ -512,18 +593,40 @@ export default function LiquidacionesPage() {
 
                 {abiertoG && (
                   <div className="divide-y">
-                    {g.lineas.map((l) => (
-                      <div key={l.clave} className="flex items-center gap-3 px-4 py-2 text-sm">
-                        <span className="flex-1 text-gray-700">
-                          {l.ruta} · Turno {l.turno}{l.movil ? ` · Móvil ${l.movil}` : ""}
-                          <span className="text-gray-400 ml-2">{l.placas.join(", ")}</span>
-                        </span>
-                        <span className="text-xs text-gray-500">
-                          {l.cantidad_ejecutada}/{l.cantidad_programada} serv. × {fmtMoneda(l.precio_unitario)}
-                        </span>
-                        <span className="w-28 text-right font-bold text-gray-700">{fmtMoneda(l.total_linea)}</span>
-                      </div>
-                    ))}
+                    {g.lineas.map((l) => {
+                      // La unidad más chica del periodo por debajo de lo contratado es un
+                      // incumplimiento que hasta ahora no se veía: no había capacidad
+                      // contratada contra la cual compararla.
+                      const unidadCorta =
+                        l.pax_contratado != null &&
+                        l.capacidad_minima_asignada != null &&
+                        l.capacidad_minima_asignada < l.pax_contratado;
+                      return (
+                        <div key={l.clave} className="flex items-start gap-3 px-4 py-2 text-sm">
+                          <span className="flex-1 text-gray-700">
+                            {/* El nombre completo de cada tramo, que es lo que se imprime. */}
+                            <span className="block">{l.nombre_ida ?? l.ruta}</span>
+                            {l.nombre_retorno && (
+                              <span className="block text-gray-500">↩ {l.nombre_retorno}</span>
+                            )}
+                            <span className="block text-[11px] text-gray-400">
+                              {l.pax_contratado ? `${l.pax_contratado} PAX contratados` : "sin capacidad contratada"}
+                              {l.moviles > 1 ? ` · Móvil ${l.movil} de ${l.moviles}` : ""}
+                              {l.placas.length ? ` · ${l.placas.join(", ")}` : ""}
+                            </span>
+                            {unidadCorta && (
+                              <span className="block text-[11px] text-amber-700">
+                                ⚠ Se asignó una unidad de {l.capacidad_minima_asignada} asientos, por debajo de los {l.pax_contratado} contratados.
+                              </span>
+                            )}
+                          </span>
+                          <span className="text-xs text-gray-500 whitespace-nowrap">
+                            {l.cantidad_ejecutada}/{l.cantidad_programada} serv. × {fmtMoneda(l.precio_unitario)}
+                          </span>
+                          <span className="w-28 text-right font-bold text-gray-700">{fmtMoneda(l.total_linea)}</span>
+                        </div>
+                      );
+                    })}
                     {g.avisos.length > 0 && (
                       <div className="px-4 py-3 bg-amber-50/60">
                         <p className="text-[11px] font-black text-amber-700 uppercase tracking-wide mb-1">Revisa antes de emitir</p>
@@ -650,6 +753,15 @@ export default function LiquidacionesPage() {
         <ModalCostos reservas={modalCostos} terceros={terceros}
           onCerrar={() => setModalCostos(null)}
           onGuardado={() => { setModalCostos(null); setMsg("Costos pactados. El bloque rojo se recalcula."); cargar(); }} />
+      )}
+      {modalRutas && (
+        <ModalRutasContratadas rutas={modalRutas} catalogoDisponible={rutas.disponible}
+          onCerrar={() => setModalRutas(null)}
+          onGuardado={(n) => {
+            setModalRutas(null);
+            setMsg(`✅ ${n} ruta(s) fichada(s). Las liquidaciones nuevas ya imprimen su capacidad contratada.`);
+            cargar();
+          }} />
       )}
     </div>
   );

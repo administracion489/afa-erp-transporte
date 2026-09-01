@@ -184,7 +184,8 @@ lineasAgrupadas.forEach((l, gi) => {
       fecha: fechaFormato(r.fecha_servicio).slice(0, 5),
       codigo: r.codigo!,
       ruta: `CD Callao → ${l.ruta} (${r.direccion_servicio === "retorno" ? "Retorno" : "Ida"})`,
-      turno: l.turno === "NOCHE" ? "Noche" : "Día",
+      // El Anexo 1 lleva la HORA del servicio, no un turno deducido.
+      turno: String(r.hora_servicio ?? "").slice(0, 5) || "—",
       placa: catalogo.placaDe(r),
       conductor: catalogo.conductorDe(r),
       pax: r.pasajeros_abordados ?? null,
@@ -367,7 +368,7 @@ console.log(`  bloqueadas                : ${analisis.bloqueadas.length}`);
 console.log(`  avisos                    : ${analisis.avisos.length}`);
 console.log("── Agrupación ───────────────────────────────");
 for (const l of lineasAgrupadas)
-  console.log(`  móvil ${l.movil} · ${l.ruta} · ${l.turno} · ${l.placas.join("/")} → ${l.cantidad_ejecutada}/${l.cantidad_programada} × S/ ${l.precio_unitario} = S/ ${l.total_linea}  (${l.reservas.length} tramos)`);
+  console.log(`  ${l.moviles > 1 ? `móvil ${l.movil}/${l.moviles} · ` : ""}${l.nombre_ida ?? l.ruta}${l.nombre_retorno ? ` ↩ ${l.nombre_retorno}` : ""} · ${l.pax_contratado ?? "sin pax"} · ${l.placas.join("/")} → ${l.cantidad_ejecutada}/${l.cantidad_programada} × S/ ${l.precio_unitario} = S/ ${l.total_linea}  (${l.reservas.length} tramos)`);
 console.log("── Totales cliente ──────────────────────────");
 console.log(`  servicios   S/ ${totales.servicios}`);
 console.log(`  adicionales S/ ${totales.adicionales}`);

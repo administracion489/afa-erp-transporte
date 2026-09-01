@@ -871,6 +871,21 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
           "Porque así es como se factura en transporte de personal: el precio pactado cubre el traslado completo (llevar y traer), no cada tramo por separado.\n\nEl ERP los empareja solo y te lo indica en el rótulo del grupo (“…servicio(s) (ida y retorno)”). Si contara los dos tramos, estarías facturando el doble.",
       },
       {
+        pregunta: "¿De dónde sale el texto de cada ítem de la valorización?",
+        respuesta:
+          "Del **nombre completo de la ruta**, tal como lo escribió la operación, y de nada más:\n\n**TRANSPORTE DE PERSONAL · 15 PAX · DEL 01-08-2026 AL 31-08-2026**\n**IDA ·** RUTA A/ ENTRADA 06:35/ SANTA ANITA→BSF PUNTA HERMOSA\n**RETORNO ·** RUTA A/ RETORNO 17:00/ BSF PUNTA HERMOSA→SANTA ANITA (incluido en la misma tarifa)\n\nSe imprimen **los dos tramos** aunque la tarifa esté cargada en uno solo. Eso es a propósito: la ida y el retorno tienen dos nombres independientes, y si no se vieran los dos, un ítem podría salir rotulado con la ruta equivocada sin que nadie lo notara.\n\nDos servicios van al mismo ítem cuando coinciden **la ida, el retorno y la tarifa** — o sea, cuando son la misma ruta contratada. Por eso el nombre de ruta no es decorativo: si a mitad de mes alguien lo reescribe, esa ruta sale partida en dos renglones.\n\nSi el documento es anterior a este formato, ábrelo con **✎ Revisar** y pulsa **↻ Recalcular descripciones**: reescribe el texto con los datos de hoy sin tocar cantidades, precios ni totales. Solo funciona en borrador.",
+      },
+      {
+        pregunta: "¿De dónde sale el “15 PAX”? A veces no aparece.",
+        respuesta:
+          "De la **capacidad contratada**, que es lo que el cliente pidió — no la del bus que salió ese día.\n\nLa distinción importa: si el cliente contrató 15 asientos y AFA, por disponibilidad, manda un lunes uno de 17, un martes uno de 20 y un jueves uno de 16, el formato tiene que seguir diciendo **15**. Antes decía el número del bus, y ese es un dato con el que se puede observar una factura.\n\nEl ERP lo busca en este orden: lo que corregiste a mano en la línea → lo que el servicio trae de cuando se programó → el ítem de la cotización → la ficha de la ruta. **Si ninguno lo sabe, el ítem sale sin el “N PAX”**, a propósito: mejor un dato de menos que uno inventado.\n\nPara cargarlo, en “Cerrar periodo” tienes el botón **Rutas contratadas** (se pone ámbar y te dice cuántas rutas están sin capacidad). Se llena una vez por ruta y desde el mes siguiente sale solo.",
+      },
+      {
+        pregunta: "¿Cuándo aparece “MÓVIL 1 DE 2” en un ítem?",
+        respuesta:
+          "**Solo cuando la ruta sale de verdad con dos unidades a la misma hora**, porque una sola no da abasto. Ahí el cliente contrató dos móviles y el formato los lista por separado, como en el Excel que ya firma.\n\nNo aparece por que roten las placas: si en 30 días de servicio pasaron cinco unidades distintas por la misma ruta, sigue siendo **un solo ítem** con 30 servicios. Las placas se listan en el detalle y en el Anexo 1, que es donde son un hecho comprobable — nunca parten la línea.\n\nTampoco aparece cuando el mismo bus da dos vueltas el mismo día a distinta hora: eso son dos servicios de un móvil, no dos móviles.",
+      },
+      {
         pregunta: "Arriba hay una casilla que dice “Los precios del ERP ya incluyen IGV”. ¿La marco o no?",
         respuesta:
           "Depende de cómo tengas cargados tus precios en Programación, y cambia el resultado:\n\n• **Marcada** — el precio de S/ 1,120 que tienes cargado ya trae el IGV dentro. El ERP lo separa: S/ 949.15 de base + S/ 170.85 de IGV.\n• **Sin marcar** — S/ 1,120 es la base, y el IGV se suma encima: el total sería S/ 1,321.60.\n\nElige mal y toda la liquidación sale con un 18 % de diferencia. **Confirma con tu contador o con quien carga los precios** cómo están registrados, y no lo cambies de mes a mes.",

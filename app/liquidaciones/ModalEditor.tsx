@@ -10,7 +10,7 @@ import { fmtMoneda } from "@/lib/finanzas/dinero";
 import { totalesValorizacion } from "@/lib/liquidacion-agrupacion";
 import {
   actualizarCantidad, agregarLineaManual, eliminarLinea, recalcularTotales,
-  emitirLiquidacion, totalesProveedorExt, detraccionDe, type Lado,
+  emitirLiquidacion, recalcularDescripciones, totalesProveedorExt, detraccionDe, type Lado,
 } from "@/lib/liquidaciones";
 
 type Linea = {
@@ -19,6 +19,8 @@ type Linea = {
   cantidad_programada: number | null; cantidad_ejecutada: number | null;
   cantidad: number; cantidad_motivo: string | null;
   precio_unitario: number; total_linea: number; referencia: string | null;
+  /** Asientos contratados. null = el ítem se imprime sin el "N PAX". */
+  pax_contratado: number | null;
 };
 
 const campo = "w-full px-2.5 py-1.5 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-[#2a5298]/30";
@@ -153,6 +155,25 @@ export default function ModalEditor({
     await cargar(); onCambio(); setTrabajando(false);
   }
 
+  /**
+   * Reescribe las descripciones con los datos de hoy. Hace falta porque la descripción
+   * es un snapshot: un documento creado antes del cambio de formato conserva el
+   * "RUTA B / TURNO DÍA / MÓVIL 1" con el que nació, y sin esto la única forma de verlo
+   * con el nombre real de la ruta sería anularlo y volver a cerrar el periodo.
+   * No toca cantidades, precios ni totales.
+   */
+  async function recalcular() {
+    setTrabajando(true); setMsg("");
+    const r = await recalcularDescripciones(supabase, lado, liquidacionId, { usuario });
+    setMsg(
+      r.ok
+        ? `✅ ${r.actualizadas} descripción(es) actualizada(s).` +
+          (r.sinPax ? ` ${r.sinPax} ruta(s) salen sin el "N PAX": fíchalas en Liquidaciones → Rutas contratadas.` : "")
+        : "⚠️ " + r.error
+    );
+    await cargar(); onCambio(); setTrabajando(false);
+  }
+
   if (cargando || !cab)
     return (
       <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
@@ -173,6 +194,13 @@ export default function ModalEditor({
           </div>
           <div className="ml-auto flex items-center gap-2">
             <button onClick={() => onVerPdf(liquidacionId)} className="px-3 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50">📄 Ver PDF</button>
+            {editable && (
+              <button onClick={recalcular} disabled={trabajando}
+                title="Reescribe las descripciones con el nombre real de cada ruta y la capacidad contratada. No toca cantidades ni precios."
+                className="px-3 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 disabled:opacity-50">
+                ↻ Recalcular descripciones
+              </button>
+            )}
             {editable && (
               <button onClick={emitir} disabled={trabajando} className="px-3 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-50" style={{ background: cp }}>
                 Emitir documento
@@ -253,6 +281,7 @@ export default function ModalEditor({
                   <tr>
                     <th className="px-2 py-2 text-left w-8">#</th>
                     <th className="px-2 py-2 text-left">Descripción</th>
+                    <th className="px-2 py-2 w-20">PAX</th>
                     <th className="px-2 py-2 w-24">Prog./Ejec.</th>
                     <th className="px-2 py-2 w-20">Cant.</th>
                     <th className="px-2 py-2 w-24">P. unit.</th>
@@ -268,7 +297,10 @@ export default function ModalEditor({
                       <tr key={l.id} className={l.tipo === "adicional" ? "bg-amber-50/60" : negativo ? "bg-red-50/60" : ""}>
                         <td className="px-2 py-2 text-gray-400">{l.item}</td>
                         <td className="px-2 py-2">
-                          <input disabled={!editable} className="w-full bg-transparent text-[13px] font-medium focus:outline-none"
+                          {/* La descripción trae varios renglones (concepto, ida, retorno, móvil):
+                              un <input> de una línea solo dejaba ver el primero. */}
+                          <textarea disabled={!editable} rows={l.tipo === "servicio" ? 3 : 1}
+                            className="w-full bg-transparent text-[13px] font-medium focus:outline-none resize-y leading-snug"
                             value={l.descripcion} onChange={(e) => setLinea(l.id, { descripcion: e.target.value })} />
                           {difiere && (
                             <input disabled={!editable} className="w-full mt-1 px-2 py-1 rounded border border-amber-300 bg-amber-50 text-[11px]"
@@ -276,6 +308,13 @@ export default function ModalEditor({
                               value={l.cantidad_motivo ?? ""} onChange={(e) => setLinea(l.id, { cantidad_motivo: e.target.value })} />
                           )}
                           {l.referencia && <p className="text-[10px] text-gray-400 mt-0.5">Anexo 1 · ítems {l.referencia}</p>}
+                        </td>
+                        <td className="px-2 py-2 text-center text-xs">
+                          {l.tipo === "servicio"
+                            ? (l.pax_contratado != null
+                                ? <span className="text-gray-500">{l.pax_contratado}</span>
+                                : <span className="text-amber-600" title="Ninguna fuente sabe cuántos asientos se contrataron: el ítem se imprime sin el «N PAX». Fíchalo en Liquidaciones → Rutas contratadas.">sin dato</span>)
+                            : "—"}
                         </td>
                         <td className="px-2 py-2 text-center text-xs text-gray-500">
                           {l.tipo === "servicio" ? `${l.cantidad_programada ?? "—"} / ${l.cantidad_ejecutada ?? "—"}` : "—"}
