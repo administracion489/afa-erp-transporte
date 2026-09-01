@@ -88,6 +88,8 @@ The actual data model lives in Supabase (Postgres). Tables referenced across the
 - `normalizarNombreRuta` (TS) debe producir **lo mismo** que `public.fn_norm_ruta` (SQL), que es la expresión del índice único del catálogo.
 - La descripción es un **snapshot** en `liquidacion_*_linea.descripcion`: los documentos ya creados no cambian solos. `recalcularDescripciones()` (botón "↻ Recalcular descripciones", solo en borrador) las reescribe desde las reservas de **cada línea**, sin tocar cantidades ni precios. El texto lleva saltos de línea → `white-space: pre-line` en el PDF y `<textarea>` en el editor.
 - Todo lo que toca columnas de la fase 03 reintenta sin ellas si la migración no se corrió (cerrar el periodo no puede bloquearse por un dato accesorio del formato).
+- **Lo que NO entra al cierre se muestra agrupado POR RUTA y siempre visible** (`fueraDelCierre` en `page.tsx`), no dentro de la tarjeta plegada y recortado a 8 filas de códigos sueltos: con 60 servicios bloqueados eso se leía "y 52 más…" y no nombraba la ruta ni una vez, así que "¿por qué no sale la RUTA A?" solo se podía contestar con una consulta SQL. Incluye las líneas con `cantidad === 0` (`g.sinEjecutar`), que antes se filtraban en silencio.
+- **`ModalPrecios` es el espejo, del lado cliente, de `components/pactos/ModalCostos`.** Esa asimetría costó un cierre: un "Sin precio de venta" obligaba a ir a Programación servicio por servicio. Carga la tarifa **por ruta** y solo sobre la **IDA** — el retorno se queda en S/ 0.00 porque la tarifa del par cubre los dos tramos, y escribirla en ambos facturaría el doble.
 
 ### Ayuda contextual (`lib/ayuda/*`, `app/_components/AyudaModulo.tsx`)
 

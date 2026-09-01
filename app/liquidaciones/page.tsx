@@ -19,7 +19,7 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { fmtMoneda } from "@/lib/finanzas/dinero";
 import {
-  agruparServicios, analizarServicios,
+  agruparServicios, analizarServicios, etiquetaRuta,
   type ReservaLiq, type CatalogoLiq, type LineaAgrupada, type LadoLiquidacion, type ParServicio,
 } from "@/lib/liquidacion-agrupacion";
 import {
@@ -27,6 +27,7 @@ import {
   type CatalogoRutas,
 } from "@/lib/liquidacion-rutas";
 import ModalRutasContratadas, { type RutaDelPeriodo } from "./ModalRutasContratadas";
+import ModalPrecios, { type ReservaSinPrecio } from "./ModalPrecios";
 import {
   crearLiquidaciones, igvVigente, aprobarLiquidacionCliente, aprobarLiquidacionProveedor,
   anularLiquidacion, volverABorrador, hoyLima,
@@ -97,6 +98,12 @@ type Grupo = {
   sedeNombre: string;
   sede: Sede | null;
   lineas: LineaAgrupada[];
+  /**
+   * Líneas calculadas que NO van al documento porque ninguno de sus servicios llegó a
+   * 'finalizada'. Antes se descartaban en silencio: una ruta programada y no cerrada
+   * desaparecía del cierre sin aparecer ni en rojo ni en ámbar.
+   */
+  sinEjecutar: LineaAgrupada[];
   /** Todas las reservas del grupo en el periodo, antes de emparejar ida+retorno. */
   reservas: ReservaLiq[];
   /** Servicios facturables (el par ida+retorno cuenta como uno). */
@@ -148,6 +155,7 @@ export default function LiquidacionesPage() {
   const [enviar, setEnviar] = useState<any | null>(null);
   const [modalCostos, setModalCostos] = useState<ReservaSinCosto[] | null>(null);
   const [modalRutas, setModalRutas] = useState<RutaDelPeriodo[] | null>(null);
+  const [modalPrecios, setModalPrecios] = useState<ReservaSinPrecio[] | null>(null);
 
   // ── Carga ────────────────────────────────────────────────────────────────
   async function cargar() {
@@ -274,7 +282,7 @@ export default function LiquidacionesPage() {
       const g: Grupo = mapa.get(clave) ?? {
         clave, contraparteId, contraparteNombre: nombre,
         sedeId: sede?.id ?? null, sedeNombre: sede?.nombre ?? (lado === "cliente" ? "Sin sede asignada" : "Servicios tercerizados"),
-        sede, lineas: [] as LineaAgrupada[], reservas: [] as ReservaLiq[],
+        sede, lineas: [] as LineaAgrupada[], sinEjecutar: [] as LineaAgrupada[], reservas: [] as ReservaLiq[],
         pares: [] as ParServicio[],
         bloqueadas: [] as { r: ReservaLiq; motivos: string[] }[],
         avisos: [] as { r: ReservaLiq; mensaje: string }[], total: 0,
@@ -291,7 +299,7 @@ export default function LiquidacionesPage() {
       g.bloqueadas = analisis.bloqueadas;
       g.avisos = analisis.avisos;
 
-      g.lineas = agruparServicios(g.pares, {
+      const todas = agruparServicios(g.pares, {
         lado,
         // La sede del grupo entra en la resolución del pax: las fichas de ruta se
         // guardan por cliente + sede, y aquí la sede puede venir de un patrón y no
@@ -304,11 +312,13 @@ export default function LiquidacionesPage() {
         preciosIncluyenIgv: preciosConIgv, igvPct,
         sede: g.sede?.nombre ?? null, desde: periodo.desde, hasta: periodo.hasta,
         concepto: g.sede?.servicio_contratado?.replace(/^SERVICIO DE /i, "") || "TRANSPORTE DE PERSONAL",
-      })
-        // Una línea sin servicios ejecutados no va al documento: solo aportaría un
-        // renglón de 0 × S/ 0.00. Lo programado y no prestado se sigue viendo en la
-        // columna PROG./EJEC. de las demás líneas y en los avisos del grupo.
-        .filter((l) => l.cantidad > 0);
+      });
+      // Una línea sin servicios ejecutados no va al documento: solo aportaría un
+      // renglón de 0 × S/ 0.00. Pero NO se descarta en silencio — se guarda aparte y
+      // se muestra: descartarla sin decir nada era una de las formas de que una ruta
+      // entera desapareciera del cierre sin que nadie pudiera decir por qué.
+      g.lineas = todas.filter((l) => l.cantidad > 0);
+      g.sinEjecutar = todas.filter((l) => l.cantidad === 0);
       g.total = g.lineas.reduce((a, l) => a + l.total_linea, 0);
     }
 
@@ -369,6 +379,57 @@ export default function LiquidacionesPage() {
       }
     return out;
   }, [grupos, lado]);
+
+  /**
+   * Espejo del anterior para el lado CLIENTE. Faltaba, y esa asimetría es la que hizo
+   * que una ruta entera se quedara fuera de un cierre sin forma cómoda de arreglarlo:
+   * el bloque rojo decía "Sin precio de venta" y había que ir a Programación servicio
+   * por servicio, sesenta veces.
+   */
+  const sinPrecio = useMemo<ReservaSinPrecio[]>(() => {
+    if (lado !== "cliente") return [];
+    const vistos = new Set<number>();
+    const out: ReservaSinPrecio[] = [];
+    for (const g of grupos)
+      for (const { r, motivos } of g.bloqueadas) {
+        if (!motivos.some((m: string) => m.includes("Sin precio de venta"))) continue;
+        if (vistos.has(r.id)) continue;
+        vistos.add(r.id);
+        out.push({ ...(r as ReservaSinPrecio), clienteNombre: g.contraparteNombre });
+      }
+    return out;
+  }, [grupos, lado]);
+
+  /**
+   * Lo que NO entra al cierre, agrupado POR RUTA y con su motivo.
+   *
+   * Es la pregunta que de verdad se hace quien cierra el mes ("¿por qué no sale la
+   * RUTA A?") y la que la pantalla no sabía contestar: el detalle existía, pero como
+   * una lista de códigos de servicio sueltos, recortada a ocho filas y escondida
+   * dentro de una tarjeta plegada. Con sesenta servicios bloqueados eso se leía como
+   * "y 52 más…" y no nombraba la ruta ni una vez.
+   */
+  const fueraDelCierre = useMemo(() => {
+    type Fila = { clave: string; grupo: string; ruta: string; motivo: string; servicios: number; ids: number[] };
+    const out = new Map<string, Fila>();
+    const sumar = (grupo: string, ruta: string, motivo: string, id: number) => {
+      const clave = `${grupo}|${ruta}|${motivo}`;
+      const ya = out.get(clave);
+      if (ya) { ya.servicios += 1; ya.ids.push(id); return; }
+      out.set(clave, { clave, grupo, ruta, motivo, servicios: 1, ids: [id] });
+    };
+    for (const g of grupos) {
+      const donde = g.sedeNombre && g.sedeNombre !== "Servicios tercerizados" ? `${g.contraparteNombre} · ${g.sedeNombre}` : g.contraparteNombre;
+      for (const { r, motivos } of g.bloqueadas)
+        // El motivo se despersonaliza (#1234 → #…) para que sesenta servicios con el
+        // mismo problema sean UNA fila y no sesenta.
+        sumar(donde, etiquetaRuta(r), (motivos[0] ?? "Bloqueada").replace(/#\d+/g, "#…"), r.id);
+      for (const l of g.sinEjecutar)
+        for (const id of l.reservas_periodo)
+          sumar(donde, l.ruta, `Programada pero ningún servicio quedó finalizado (${l.cantidad_programada})`, id);
+    }
+    return [...out.values()].sort((a, b) => b.servicios - a.servicios || a.ruta.localeCompare(b.ruta));
+  }, [grupos]);
 
   function toggle(clave: string) {
     setSel((s) => { const n = new Set(s); n.has(clave) ? n.delete(clave) : n.add(clave); return n; });
@@ -533,6 +594,12 @@ export default function LiquidacionesPage() {
                 Cargar {sinCosto.length} costo(s) faltante(s)
               </button>
             )}
+            {sinPrecio.length > 0 && (
+              <button onClick={() => setModalPrecios(sinPrecio)}
+                className="px-3 py-2 rounded-xl text-sm font-bold text-red-700 bg-red-50 border border-red-200 hover:bg-red-100">
+                Cargar {sinPrecio.length} precio(s) de venta faltante(s)
+              </button>
+            )}
             {lado === "cliente" && rutasDelPeriodo.length > 0 && (
               <button onClick={() => setModalRutas(rutasDelPeriodo)}
                 className={`px-3 py-2 rounded-xl text-sm font-bold border ${
@@ -550,6 +617,31 @@ export default function LiquidacionesPage() {
               {trabajando ? "Generando…" : `Liquidar ${seleccionados.length || ""} grupo(s) → ${seleccionados.length || 0} documento(s)`}
             </button>
           </div>
+
+          {/* Qué NO va a salir en la liquidación, y por qué. Agrupado por ruta y visible
+              siempre: es la primera pregunta de quien cierra el mes, y antes había que
+              desplegar la tarjeta para encontrar la respuesta partida en códigos sueltos. */}
+          {fueraDelCierre.length > 0 && (
+            <div className="bg-white rounded-2xl border border-red-200 shadow-sm mb-3 overflow-hidden">
+              <div className="px-4 py-2 bg-red-50 border-b">
+                <p className="text-[11px] font-black text-red-700 uppercase tracking-wide">
+                  No entran a la liquidación ({fueraDelCierre.reduce((a, f) => a + f.servicios, 0)} servicios)
+                </p>
+              </div>
+              <table className="w-full text-sm">
+                <tbody className="divide-y">
+                  {fueraDelCierre.map((f) => (
+                    <tr key={f.clave}>
+                      <td className="px-4 py-1.5 font-medium text-gray-800 w-48">{f.ruta}</td>
+                      <td className="px-2 py-1.5 text-xs text-gray-400">{f.grupo}</td>
+                      <td className="px-2 py-1.5 text-xs text-right text-gray-500 w-24">{f.servicios} serv.</td>
+                      <td className="px-4 py-1.5 text-xs text-red-700">{f.motivo}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           {grupos.length === 0 ? (
             <div className="bg-white rounded-2xl border p-10 text-center text-gray-400">
@@ -753,6 +845,15 @@ export default function LiquidacionesPage() {
         <ModalCostos reservas={modalCostos} terceros={terceros}
           onCerrar={() => setModalCostos(null)}
           onGuardado={() => { setModalCostos(null); setMsg("Costos pactados. El bloque rojo se recalcula."); cargar(); }} />
+      )}
+      {modalPrecios && (
+        <ModalPrecios reservas={modalPrecios}
+          onCerrar={() => setModalPrecios(null)}
+          onGuardado={(n) => {
+            setModalPrecios(null);
+            setMsg(`✅ Precio cargado en ${n} servicio(s). Sus rutas ya entran a la valorización.`);
+            cargar();
+          }} />
       )}
       {modalRutas && (
         <ModalRutasContratadas rutas={modalRutas} catalogoDisponible={rutas.disponible}
