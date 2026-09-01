@@ -530,6 +530,7 @@ export async function recalcularDescripciones(
         cabeza,
         adjuntas: [],
         ejecutado: true,
+        ejecutados: [cabeza],
         sentido: idas.length && retornos.length ? "IDA Y RETORNO" : sentidoDeReserva(cabeza),
         ida: idas[0] ?? null,
         retorno: retornos[0] ?? null,

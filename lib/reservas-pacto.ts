@@ -96,22 +96,97 @@ export function normalizarAsignacion(
 export type AvisoPacto = { nivel: "alerta" | "info"; texto: string };
 
 /**
+ * El OTRO tramo del día: la ida de este retorno, o el retorno de esta ida.
+ * `reservas.reserva_vinculada_id` los enlaza.
+ */
+export type TramoHermano = {
+  id?: number | null;
+  codigo?: string | null;
+  direccion_servicio?: string | null;
+  estado?: string | null;
+  precio_cliente?: number | null;
+  costo_proveedor?: number | null;
+} | null;
+
+const esRetorno = (d?: string | null) => String(d ?? "").toLowerCase() === "retorno";
+const nombreTramo = (h?: TramoHermano) => (esRetorno(h?.direccion_servicio) ? "el retorno" : "la ida");
+const refTramo = (h?: TramoHermano) => h?.codigo ?? (h?.id != null ? `#${h.id}` : "el otro tramo");
+const sePresto = (estado?: string | null) => String(estado ?? "").toLowerCase() === "finalizada";
+const seCayo = (estado?: string | null) =>
+  ["cancelada", "anulada"].includes(String(estado ?? "").toLowerCase());
+
+/**
  * Lo que conviene decirle al operador ANTES de guardar. No bloquea nada: en esta fase
  * la política está en modo `observa` y el bus tiene que salir igual. Es información
  * para que decida, no un peaje.
+ *
+ * `hermano` es el otro tramo del día, y sin él los avisos MIENTEN. AFA cobra una sola
+ * tarifa por la ida y el retorno: el importe va en un tramo y el otro queda en S/ 0.00
+ * a propósito. Juzgando cada reserva aislada, todo retorno disparaba "sin costo
+ * pactado" — un rojo permanente y falso que además enseñaba a ignorar los rojos de
+ * verdad, y que invitaba a "arreglarlo" cargando el importe dos veces.
  */
 export function avisosDe(
   patch: Record<string, any>,
-  anterior?: { precio_cliente?: number | null; costo_proveedor?: number | null } | null
+  anterior?: { precio_cliente?: number | null; costo_proveedor?: number | null } | null,
+  hermano?: TramoHermano
 ): AvisoPacto[] {
   const avisos: AvisoPacto[] = [];
   const esTercero = patch.tipo_asignacion === "tercerizado";
   const costo = Number(patch.costo_proveedor ?? 0);
+  const precio = Number(patch.precio_cliente ?? 0);
+  const costoHermano = Number(hermano?.costo_proveedor ?? 0);
+  const precioHermano = Number(hermano?.precio_cliente ?? 0);
+  const yo = esRetorno(patch.direccion_servicio) ? "Este retorno" : "Esta ida";
 
-  if (esTercero && costo <= 0)
+  // ── El importe del día: quién lo lleva ────────────────────────────────────
+  const importeDelDia = (
+    mio: number, suyo: number, etiqueta: "costo" | "precio", moneda: string
+  ) => {
+    if (mio > 0 && suyo > 0)
+      avisos.push({
+        nivel: "alerta",
+        texto: `¡Ojo! ${nombreTramo(hermano)} (${refTramo(hermano)}) ya tiene ${etiqueta} por ${moneda} ${suyo.toFixed(2)}. ` +
+               `Si dejas los dos, el día se cobra DOS VECES. La tarifa cubre ida y retorno: ponla en un solo tramo.`,
+      });
+    else if (mio <= 0 && suyo > 0)
+      avisos.push({
+        nivel: "info",
+        texto: `Incluido en ${nombreTramo(hermano)} (${refTramo(hermano)}), que lleva el ${etiqueta} del día: ${moneda} ${suyo.toFixed(2)}. ` +
+               `Este tramo va en 0 a propósito.`,
+      });
+    else if (mio <= 0 && suyo <= 0)
+      avisos.push({
+        nivel: "alerta",
+        texto: `Ni este tramo ni ${nombreTramo(hermano)} (${refTramo(hermano)}) tienen ${etiqueta}: ` +
+               `el día entero no se podrá liquidar al cierre.`,
+      });
+    else if (mio > 0 && seCayo(patch.estado) && sePresto(hermano?.estado))
+      // El caso que rompe la regla "el importe va en la ida": si la ida se cancela y el
+      // retorno sí se presta, el importe tiene que estar donde hubo servicio.
+      avisos.push({
+        nivel: "alerta",
+        texto: `${yo} está ${String(patch.estado).toLowerCase()} pero lleva el ${etiqueta} del día, y ${nombreTramo(hermano)} ` +
+               `(${refTramo(hermano)}) sí se prestó. Mueve el importe al tramo que se ejecutó, o ajústalo a lo que corresponda cobrar.`,
+      });
+  };
+
+  if (esTercero) {
+    if (hermano) importeDelDia(costo, costoHermano, "costo", "S/");
+    else if (costo <= 0)
+      avisos.push({
+        nivel: "alerta",
+        texto: "Servicio tercerizado sin costo pactado. Si se queda así, Finanzas no podrá liquidarlo al cierre.",
+      });
+  }
+
+  // Simétrico para la venta: un servicio sin precio no se puede facturar, y hasta ahora
+  // eso solo se descubría al cerrar el mes, cuando la ruta entera no salía en el formato.
+  if (hermano) importeDelDia(precio, precioHermano, "precio", "S/");
+  else if (precio <= 0)
     avisos.push({
       nivel: "alerta",
-      texto: "Servicio tercerizado sin costo pactado. Si se queda así, Finanzas no podrá liquidarlo al cierre.",
+      texto: "Servicio sin precio de venta. Si se queda así, no entrará a la liquidación del cliente.",
     });
 
   const costoAntes = Number(anterior?.costo_proveedor ?? 0);
@@ -121,7 +196,6 @@ export function avisosDe(
       texto: "Cambió el costo pactado. Elige el motivo para que quede sustentado.",
     });
 
-  const precio = Number(patch.precio_cliente ?? 0);
   const precioAntes = Number(anterior?.precio_cliente ?? 0);
   if (precioAntes > 0 && precio > precioAntes)
     avisos.push({

@@ -171,11 +171,18 @@ export type ParServicio = {
   /** Tramos incluidos en esa misma tarifa (el RETORNO). Van al Anexo 1 en S/ 0.00. */
   adjuntas: ReservaLiq[];
   /**
-   * false = estaba programado pero no se prestó. Suma a la cantidad PROGRAMADA del
-   * formato y no a la cobrada: así el cliente lee "26 / 25" y ve qué pasó, en vez de
-   * un "25 / 25" que esconde el servicio caído.
+   * false = estaba programado pero no se prestó NINGUNO de sus tramos. Suma a la
+   * cantidad PROGRAMADA del formato y no a la cobrada: así el cliente lee "26 / 25" y
+   * ve qué pasó, en vez de un "25 / 25" que esconde el servicio caído.
+   *
+   * Mira el PAR entero, no la cabeza. La cabeza es el tramo que lleva el importe, y
+   * mirarla a ella daba una fuga de dinero real: si el cliente cancelaba la ida —que es
+   * donde vive la tarifa— y el retorno sí se prestaba, el día quedaba como no ejecutado
+   * y no se facturaba. Sin bloqueo y sin aviso: el servicio se daba y nadie lo cobraba.
    */
   ejecutado: boolean;
+  /** Los tramos que realmente se prestaron. Vacío = el día entero se cayó. */
+  ejecutados: ReservaLiq[];
   /**
    * Lo que CUBRE la tarifa, no lo que se prestó ese día. Se decide aquí, donde se sabe
    * si la reserva viaja enlazada, y no en la agrupación: allí solo se veía `adjuntas`,
@@ -203,6 +210,10 @@ function tramosDelPar(a: ReservaLiq, b?: ReservaLiq | null): { ida: ReservaLiq |
   if (sa === sb) return { ida: a, retorno: b };   // dato contradictorio: se respeta el orden recibido
   return sa === "IDA" ? { ida: a, retorno: b } : { ida: b, retorno: a };
 }
+
+/** Cómo se nombra un tramo en los avisos: "La ida del 03-08-2026". */
+const rotuloTramo = (r: ReservaLiq) =>
+  `${sentidoDeReserva(r) === "RETORNO" ? "El retorno" : "La ida"} del ${fechaFormato(r.fecha_servicio) || r.fecha_servicio || ""}`;
 
 /** Importe de una reserva según el lado que se esté liquidando. */
 function montoDe(r: ReservaLiq, lado: LadoLiquidacion): number {
@@ -308,7 +319,10 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
       }
       const motivos = trabas(r);
       if (motivos.length) bloquear(r, motivos);
-      else res.pares.push({ cabeza: r, adjuntas: [], ejecutado: hecho(r), sentido: sentidoDeReserva(r), ...tramosDelPar(r) });
+      else res.pares.push({
+        cabeza: r, adjuntas: [], ejecutado: hecho(r), ejecutados: hecho(r) ? [r] : [],
+        sentido: sentidoDeReserva(r), ...tramosDelPar(r),
+      });
       continue;
     }
 
@@ -322,7 +336,10 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
       for (const x of [r, par]) {
         const motivos = trabas(x);
         if (motivos.length) bloquear(x, motivos);
-        else res.pares.push({ cabeza: x, adjuntas: [], ejecutado: hecho(x), sentido: sentidoDeReserva(x), ...tramosDelPar(x) });
+        else res.pares.push({
+          cabeza: x, adjuntas: [], ejecutado: hecho(x), ejecutados: hecho(x) ? [x] : [],
+          sentido: sentidoDeReserva(x), ...tramosDelPar(x),
+        });
       }
       continue;
     }
@@ -345,33 +362,57 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
       continue;
     }
 
+    // Un día se cobra si se prestó CUALQUIERA de sus dos tramos. Mirar solo la cabeza
+    // —el tramo que lleva el importe— era una fuga de dinero: con la ida cancelada por
+    // el cliente y el retorno prestado, el día se daba por no ejecutado y no se
+    // facturaba, sin bloqueo y sin aviso.
+    const ejecutados = [cabeza, adjunta].filter(hecho);
+    const ejecutado = ejecutados.length > 0;
+
     const motivosAdjunta = trabas(adjunta, cabeza);
     if (motivosAdjunta.length) {
       // El tramo incluido tiene su propio problema (p. ej. ya entró en otra
       // liquidación): la tarifa se cobra igual, pero queda el aviso.
       res.avisos.push({
         r: adjunta,
-        mensaje: `${adjunta.direccion_servicio === "retorno" ? "Retorno" : "Tramo"} del ${adjunta.fecha_servicio ?? ""}: ${motivosAdjunta.join(" · ")}`,
+        mensaje: `${rotuloTramo(adjunta)}: ${motivosAdjunta.join(" · ")}`,
       });
-      res.pares.push({ cabeza, adjuntas: [], ejecutado: hecho(cabeza), sentido: "IDA Y RETORNO", ...tramosDelPar(cabeza, adjunta) });
+      res.pares.push({
+        cabeza, adjuntas: [], ejecutado, ejecutados,
+        sentido: "IDA Y RETORNO", ...tramosDelPar(cabeza, adjunta),
+      });
       continue;
     }
 
-    // Solo van al puente los tramos realmente prestados: marcar como liquidado algo
-    // que no se ejecutó ensuciaría el ciclo del servicio.
-    if (!hecho(adjunta) && hecho(cabeza)) {
-      res.avisos.push({
-        r: adjunta,
-        mensaje: `El retorno del ${adjunta.fecha_servicio ?? ""} no se ejecutó, pero la tarifa del día se cobra completa`,
-      });
-      res.pares.push({ cabeza, adjuntas: [], ejecutado: true, sentido: "IDA Y RETORNO", ...tramosDelPar(cabeza, adjunta) });
-      continue;
+    // Un tramo caído no invalida el día, pero hay que verlo antes de emitir. El texto
+    // nombra el tramo REAL: antes decía siempre "el retorno", y con la ida cancelada
+    // el aviso señalaba al tramo equivocado.
+    const caidos = [cabeza, adjunta].filter((x) => !hecho(x));
+    if (ejecutado && caidos.length) {
+      for (const x of caidos)
+        res.avisos.push({
+          r: x,
+          mensaje: `${rotuloTramo(x)} no se ejecutó (${x.estado ?? "sin estado"}), pero la tarifa del día se cobra completa`,
+        });
     }
+
+    // El importe vive en un tramo que NO se prestó mientras el otro sí: el día se cobra
+    // igual, pero conviene revisar si corresponde cobrarlo completo o mover el importe.
+    if (ejecutado && !hecho(cabeza))
+      res.avisos.push({
+        r: cabeza,
+        mensaje: `El importe está en ${rotuloTramo(cabeza).toLowerCase()}, que no se prestó. Se cobra el día porque sí se prestó ${
+          sentidoDeReserva(ejecutados[0]) === "RETORNO" ? "el retorno" : "la ida"
+        } — revisa si el importe debe moverse o ajustarse.`,
+      });
 
     res.pares.push({
       cabeza,
+      // Al puente solo van los tramos realmente prestados: marcar como liquidado algo
+      // que no se ejecutó ensuciaría el ciclo del servicio.
       adjuntas: hecho(adjunta) ? [adjunta] : [],
-      ejecutado: hecho(cabeza),
+      ejecutado,
+      ejecutados,
       sentido: "IDA Y RETORNO",
       ...tramosDelPar(cabeza, adjunta),
     });
@@ -638,10 +679,16 @@ export function agruparServicios(
       cantidad,
       precio_unitario: b.precio,
       total_linea: redondear(cantidad * b.precio),
-      // Al puente van AMBOS tramos del servicio prestado: los dos quedan liquidados y
-      // los dos se ven en el Anexo 1 (el retorno, con importe incluido).
-      reservas: ejecutados.flatMap((p) => [p.cabeza.id, ...p.adjuntas.map((a) => a.id)]),
-      servicios: ejecutados.map((p) => p.cabeza.id),
+      // Al puente van los tramos REALMENTE PRESTADOS del servicio: los dos del día
+      // normal (los dos quedan liquidados y los dos se ven en el Anexo 1, el segundo
+      // con importe incluido), y solo uno cuando el otro se canceló. Marcar como
+      // liquidado un tramo que no se prestó ensuciaría el ciclo del servicio.
+      reservas: ejecutados.flatMap((p) =>
+        p.ejecutados?.length ? p.ejecutados.map((t) => t.id) : [p.cabeza.id, ...p.adjuntas.map((a) => a.id)]
+      ),
+      // Uno por servicio, y tiene que ser un id que SÍ esté en `reservas`: al crear la
+      // liquidación se cuentan los que se lograron reclamar, y un id ausente restaría.
+      servicios: ejecutados.map((p) => (p.ejecutados?.[0] ?? p.cabeza).id),
       reservas_periodo: todas.map((r) => r.id),
       ruta: b.ruta,
       fuente_ruta: b.fuenteRuta,
