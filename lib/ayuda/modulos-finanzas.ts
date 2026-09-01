@@ -823,6 +823,7 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       "Aquí se cierra el periodo: se valoriza todo lo que se ejecutó, se emite el formato de liquidación y conformidad, y recién con el visto bueno se factura al cliente o se le paga al tercerizado.",
     paraQueSirve: [
       "Cerrar un mes o una quincena completa de una pasada, en vez de servicio por servicio.",
+      "Aislar a un cliente o a un proveedor con el filtro de arriba, para atenderlo sin leer los otros nueve.",
       "Mandarle al cliente un documento con el detalle de lo que se ejecutó, para que dé su conformidad antes de facturar.",
       "Convertir los servicios que hizo un tercerizado en una cuenta por pagar con su detalle.",
       "Ver en rojo, antes de emitir, qué servicios están mal (sin precio, sin unidad, sin finalizar).",
@@ -906,6 +907,11 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
           "Depende de hasta dónde llegó:\n\n• Si está **emitida u observada**, usa **↩ Reabrir** para volverla a borrador, corrígela con **✎ Revisar** y vuelve a emitirla.\n• Mientras **no haya generado todavía la factura de venta (ni la cuenta por pagar)**, el botón **🗑** te deja anularla y los servicios vuelven a quedar disponibles para liquidar. En cuanto genera el comprobante, ese botón desaparece.\n• Si ya generó la factura al cliente, la corrección ya no es aquí: se hace **emitiendo una nota de crédito** en /facturacion. Una factura emitida no se edita.",
       },
       {
+        pregunta: "Son diez clientes y cuatrocientos servicios en la misma pantalla. ¿Cómo trabajo con uno solo?",
+        respuesta:
+          "Con el desplegable que está al lado de las fechas. Dice **Cliente** en la pestaña de facturar y **Proveedor** en la de pagar, y filtra toda la pantalla de una vez: los grupos, el bloque rojo de “No entran a la liquidación”, los botones de precios y costos faltantes, las rutas sin capacidad contratada y también los documentos ya emitidos.\n\nEn el bloque rojo puedes además pulsar directamente el nombre del cliente de una fila para aislarlo.\n\nCada opción trae dos cifras, y **no son del mismo alcance**:\n\n• **“· 65 serv.”** son los servicios de ese cliente **en el periodo** que tienes puesto. Cuentan por día: la ida y el retorno del mismo día son **un** servicio, igual que en la valorización.\n• **“· 2 doc. emitido(s)”** son las liquidaciones que lleva emitidas **en total**, no las del periodo. Por eso un cliente que ya cerró meses anteriores aparece en la lista aunque este mes no tenga nada: es lo que te deja filtrar sus documentos viejos.\n\nDos detalles más que conviene saber:\n\n• **Filtrar es mirar, no desmarcar.** Si ya habías marcado grupos de otro cliente, siguen marcados y el botón verde los va a liquidar igual. Por eso la barra te avisa entre paréntesis cuántos seleccionados quedaron **fuera del filtro**.\n• El filtro **se limpia solo** al cambiar de pestaña, porque los clientes y los proveedores son listas distintas. Y si **mueves las fechas**, se borra la selección de grupos: lo marcado era del periodo anterior.",
+      },
+      {
         pregunta: "¿Qué es el botón “Del 15 al 14”?",
         respuesta:
           "Un atajo de periodo. Varios clientes corporativos de AFA no cierran de fin de mes a fin de mes, sino **del día 15 al 14 del mes siguiente**. El botón te pone ese rango de una vez.\n\nAl lado tienes “Mes pasado” para el cierre mensual normal. También puedes poner las dos fechas a mano.",
@@ -922,6 +928,7 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
         pasos: [
           "Entra a Liquidaciones, pestaña “Al Cliente (facturar)” y vista “Cerrar periodo”.",
           "Fija el periodo: “Mes pasado” o “Del 15 al 14”, según cómo cierre ese cliente.",
+          "Si vas a cerrar cliente por cliente, elígelo en el desplegable “Cliente” que está junto a las fechas: la pantalla entera se queda solo con lo suyo.",
           "Revisa los grupos. Abre los que estén en rojo y corrige en Programación lo que dice el bloque “No se pueden liquidar todavía”.",
           "Comprueba que cada grupo tenga sede. Si no la tiene, pulsa “+ Crear sede” y cárgala.",
           "Verifica arriba la casilla “Los precios del ERP ya incluyen IGV” — que esté como corresponde a cómo cargas tus precios.",
@@ -939,7 +946,8 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
         pasos: [
           "Cambia a la pestaña “Al Proveedor (pagar)”, misma vista “Cerrar periodo”.",
           "Fija el mismo periodo que usaste para el cliente, para que los dos lados cuadren.",
-          "Los grupos ahora son por empresa tercerizada (GRIJALVA TOURS, ALVAREZ FARFAN…). Ábrelos y revisa las líneas al costo pactado.",
+          "Los grupos ahora son por empresa tercerizada (GRIJALVA TOURS, ALVAREZ FARFAN…). Con el desplegable “Proveedor” te quedas con uno solo si vas a cerrar de a uno.",
+          "Ábrelos y revisa las líneas al costo pactado.",
           "Marca los grupos correctos y pulsa “Liquidar N grupo(s)”.",
           "En la vista “Documentos”, revisa el detalle con “✎ Revisar” y mándaselo al proveedor con “✉ Enviar” para que coteje antes de emitirte su factura.",
           "Cuando esté conforme, pulsa el botón verde “→ CxP” de esa fila: se crea la cuenta por pagar en Tesorería.",
