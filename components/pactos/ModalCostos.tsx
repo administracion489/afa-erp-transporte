@@ -30,6 +30,9 @@ export type ReservaSinCosto = {
   fecha_servicio?: string | null;
   hora_servicio?: string | null;
   direccion_servicio?: string | null;
+  /** Enlaza la ida con su retorno: de ese par se paga un solo tramo. */
+  reserva_vinculada_id?: number | null;
+  estado?: string | null;
   ruta_nombre?: string | null;
   empresa_tercerizada_id?: number | null;
   vehiculo_tercero_id?: number | null;
@@ -66,8 +69,32 @@ export default function ModalCostos({ reservas, terceros, onCerrar, onGuardado }
   const [aviso, setAviso] = useState("");
 
   const grupos = useMemo<Grupo[]>(() => {
+    // De cada par ida+retorno se paga UN tramo: el proveedor cobra una tarifa por el
+    // día completo y el otro tramo queda en S/ 0.00. Listar los dos invitaba a teclear
+    // el importe dos veces, y eso es pagarle al proveedor el doble.
+    //
+    // Cuál lleva el importe NO es siempre la ida: si la ida se canceló y el retorno sí
+    // se prestó, va en el retorno, que es donde hubo servicio.
+    const porId = new Map(reservas.map((x) => [x.id, x]));
+    const hecho = (x?: ReservaSinCosto | null) => String((x as any)?.estado ?? "").toLowerCase() === "finalizada";
+    const esRetorno = (x?: ReservaSinCosto | null) => String(x?.direccion_servicio ?? "").toLowerCase() === "retorno";
+    const tramoQuePaga = (a: ReservaSinCosto, b?: ReservaSinCosto | null): ReservaSinCosto => {
+      if (!b) return a;
+      if (hecho(a) !== hecho(b)) return hecho(a) ? a : b;
+      return esRetorno(a) ? b : a;
+    };
+    const vistos = new Set<number>();
+    const pagables: ReservaSinCosto[] = [];
+    for (const x of reservas) {
+      if (vistos.has(x.id)) continue;
+      const par = (x as any).reserva_vinculada_id ? porId.get(Number((x as any).reserva_vinculada_id)) : undefined;
+      vistos.add(x.id);
+      if (par) vistos.add(par.id);
+      pagables.push(tramoQuePaga(x, par));
+    }
+
     const m = new Map<string, Grupo>();
-    for (const r of reservas) {
+    for (const r of pagables) {
       const empresaId = r.empresa_tercerizada_id ?? null;
       const t = empresaId != null ? terceros[empresaId] : null;
       const proveedor = t?.razon_social ?? "Sin empresa tercerizada";

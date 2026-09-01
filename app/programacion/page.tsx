@@ -11,7 +11,7 @@ import {
 import type { EstadoReserva, EstadoAdmin } from "@/lib/estados";
 import { idAfa } from "@/lib/folio";
 import {
-  guardarReservas, normalizarAsignacion, avisosDe, margenEnVivo, sugerirCosto,
+  guardarReservas, normalizarAsignacion, avisosDe, margenEnVivo, sugerirCosto, type TramoHermano,
   describirResultado,
 } from "@/lib/reservas-pacto";
 import { AFECTACIONES, afectacionDe, type CodigoAfectacion } from "@/lib/finanzas/afectacion";
@@ -1464,6 +1464,75 @@ export default function ReservasPage() {
     return { antes, ahora, afectacion: (emp?.afectacion_defecto ?? "10") as CodigoAfectacion };
   }, [form.precio_cliente, form.costo_proveedor, form.empresa_tercerizada_id, editandoId, reservas, empresasTer]);
 
+  /**
+   * El OTRO tramo del día del servicio que se está editando.
+   *
+   * Sin él, los avisos mienten: AFA cobra UNA tarifa por la ida y el retorno, así que el
+   * tramo que no la lleva va en S/ 0.00 a propósito. Juzgando la reserva aislada, todo
+   * retorno disparaba "sin costo pactado" — un rojo permanente y falso que invitaba a
+   * "arreglarlo" cargando el importe dos veces, que es cobrar el día dos veces.
+   *
+   * Se busca primero en lo ya cargado; si el filtro de la pantalla lo dejó fuera, se
+   * pide esa sola fila.
+   */
+  /** El id del otro tramo del servicio en edición. */
+  const hermanoId = useMemo(() => {
+    const r = reservas.find((x) => x.id === editandoId);
+    return (r as any)?.reserva_vinculada_id ?? null;
+  }, [editandoId, reservas]);
+
+  /** Si ya está en la tabla cargada, se DERIVA: no hace falta estado ni una consulta. */
+  const hermanoLocal = useMemo<TramoHermano>(() => {
+    if (!hermanoId) return null;
+    const l = reservas.find((x) => x.id === Number(hermanoId));
+    return l
+      ? {
+          id: l.id, codigo: idAfa(l), direccion_servicio: (l as any).direccion_servicio,
+          estado: l.estado, precio_cliente: l.precio_cliente, costo_proveedor: l.costo_proveedor,
+        }
+      : null;
+  }, [hermanoId, reservas]);
+
+  /** Solo cuando el filtro de la pantalla lo dejó fuera se pide esa única fila. */
+  const [hermanoRemoto, setHermanoRemoto] = useState<TramoHermano>(null);
+  useEffect(() => {
+    if (!hermanoId || hermanoLocal) return;
+    let vivo = true;
+    supabase.from("reservas")
+      .select("id,codigo,direccion_servicio,estado,precio_cliente,costo_proveedor,fecha_servicio")
+      .eq("id", hermanoId).maybeSingle()
+      .then(({ data }: any) => { if (vivo) setHermanoRemoto(data ?? null); });
+    return () => { vivo = false; };
+  }, [hermanoId, hermanoLocal]);
+
+  // El id se compara al derivar: así, al saltar de un servicio a otro, nunca se muestra
+  // por un instante el hermano del anterior.
+  const hermano: TramoHermano =
+    hermanoLocal ?? (hermanoRemoto && Number(hermanoRemoto.id) === Number(hermanoId) ? hermanoRemoto : null);
+
+  const porIdReserva = useMemo(() => new Map(reservas.map((r) => [r.id, r])), [reservas]);
+
+  /**
+   * El estado ECONÓMICO del día, no del tramo. Devuelve null cuando está todo bien: un
+   * chip en cada fila sería el mismo ruido permanente que este cambio viene a quitar, y
+   * un aviso que sale siempre se aprende a no leer.
+   */
+  function problemaDelDia(r: Reserva): { texto: string; tono: string } | null {
+    const parId = (r as any).reserva_vinculada_id;
+    const par = parId ? porIdReserva.get(Number(parId)) : null;
+    if (!par) return null;
+    const cMio = Number(r.costo_proveedor || 0), cPar = Number(par.costo_proveedor || 0);
+    const pMio = Number(r.precio_cliente || 0), pPar = Number(par.precio_cliente || 0);
+    const esTer = r.tipo === "tercerizada";
+    if ((esTer && cMio > 0 && cPar > 0) || (pMio > 0 && pPar > 0))
+      return { texto: "DÍA 2×", tono: "background:#fee2e2;color:#b91c1c" };
+    if (pMio <= 0 && pPar <= 0)
+      return { texto: "DÍA SIN PRECIO", tono: "background:#fef3c7;color:#92400e" };
+    if (esTer && cMio <= 0 && cPar <= 0)
+      return { texto: "DÍA SIN COSTO", tono: "background:#fef3c7;color:#92400e" };
+    return null;
+  }
+
   const guardarReserva = async () => {
     if (!editandoId) return;
     if (!form.fecha_servicio || !form.hora_servicio) { alert("Ingresa fecha y hora"); return; }
@@ -1478,14 +1547,42 @@ export default function ReservasPage() {
       if (!ok) return;
     }
 
+    // CANDADO DEL DOBLE COBRO. La tarifa del día cubre la ida y el retorno, así que el
+    // importe va en UN solo tramo. Si se pone en los dos, la liquidación los lee como dos
+    // servicios independientes y el día se cobra —o se paga al proveedor— dos veces. Eso
+    // es plata real, así que aquí sí se pregunta en lugar de dejarlo pasar.
+    const costoHermano = Number(hermano?.costo_proveedor ?? 0);
+    const precioHermano = Number(hermano?.precio_cliente ?? 0);
+    const dobles: string[] = [];
+    if (form.tipo_asignacion === "tercerizado" && Number(form.costo_proveedor) > 0 && costoHermano > 0)
+      dobles.push(`costo: ${fmtSoles(Number(form.costo_proveedor))} aquí + ${fmtSoles(costoHermano)} en ${hermano?.codigo ?? "el otro tramo"}`);
+    if (Number(form.precio_cliente) > 0 && precioHermano > 0)
+      dobles.push(`precio: ${fmtSoles(Number(form.precio_cliente))} aquí + ${fmtSoles(precioHermano)} en ${hermano?.codigo ?? "el otro tramo"}`);
+    if (dobles.length) {
+      const ok = confirm(
+        "OJO: los DOS tramos del día van a quedar con importe.\n\n" +
+        dobles.map((d) => "  · " + d).join("\n") +
+        "\n\nLa tarifa cubre ida y retorno, así que el cierre lo va a liquidar como DOS " +
+        "servicios y el día se cobrará dos veces.\n\n" +
+        "Solo continúa si de verdad son dos cobros distintos.\n\n¿Guardar así?"
+      );
+      if (!ok) return;
+    }
+
     // El campo dice "Costo S/ *" con asterisco desde siempre, pero nada lo exigía:
     // guardar con el campo vacío escribía 0 en silencio y el problema aparecía 30 días
     // después, en el bloque rojo de /liquidaciones. Ahora se avisa aquí. NO se bloquea:
     // a las 5 a.m. el bus tiene que salir igual, y una regla que impide despachar se
     // esquiva el primer día. Lo que se gobierna es la plata, no la operación.
-    if (form.tipo_asignacion === "tercerizado" && !(Number(form.costo_proveedor) > 0)) {
+    //
+    // Y NO se pregunta cuando el otro tramo ya lleva el costo del día: ese 0 es correcto.
+    // Preguntarlo en cada retorno era un rojo permanente y falso, del que se aprende a
+    // hacer clic sin leer — y así el aviso deja de servir cuando el problema es real.
+    if (form.tipo_asignacion === "tercerizado" && !(Number(form.costo_proveedor) > 0) && costoHermano <= 0) {
       const ok = confirm(
-        "Este servicio tercerizado se va a guardar SIN COSTO PACTADO.\n\n" +
+        (hermano
+          ? "Ni este tramo ni el otro del mismo día tienen COSTO PACTADO.\n\n"
+          : "Este servicio tercerizado se va a guardar SIN COSTO PACTADO.\n\n") +
         "Finanzas no podrá liquidarlo al cierre del mes y va a quedar en la bandeja de " +
         "pendientes hasta que alguien lo cargue.\n\n¿Guardar así de todos modos?"
       );
@@ -3044,6 +3141,25 @@ export default function ReservasPage() {
                   )}
                 </div>
 
+                {/* El otro tramo del día, a la vista. Sin esto no hay forma de saber, desde
+                    esta pantalla, que el 0.00 de un retorno es correcto porque su ida ya
+                    lleva la tarifa — y ese desconocimiento es lo que lleva a cargarla dos
+                    veces. */}
+                {hermano && (
+                  <div className="rounded-xl border bg-gray-50 px-3 py-2 text-[11px] text-gray-600 flex flex-wrap gap-x-3 gap-y-1 items-center">
+                    <span className="font-bold text-gray-700">
+                      {String((hermano as any).direccion_servicio).toLowerCase() === "retorno" ? "↩ Su retorno" : "↪ Su ida"}
+                    </span>
+                    <span className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</span>
+                    <span className={["cancelada", "anulada"].includes(String(hermano.estado ?? "").toLowerCase()) ? "text-red-600 font-bold" : ""}>
+                      {hermano.estado}
+                    </span>
+                    <span>costo {fmtSoles(Number(hermano.costo_proveedor ?? 0))}</span>
+                    <span>precio {fmtSoles(Number(hermano.precio_cliente ?? 0))}</span>
+                    <span className="text-gray-400">· la tarifa del día cubre los dos tramos</span>
+                  </div>
+                )}
+
                 {/* Lo que va a pasar al guardar, dicho antes de guardar. No bloquea nada:
                     en esta fase la política está en modo observa y el bus sale igual. */}
                 {(() => {
@@ -3053,7 +3169,9 @@ export default function ReservasPage() {
                     costo_proveedor: Number(form.costo_proveedor || 0),
                     precio_cliente: form.precio_cliente !== "" ? Number(form.precio_cliente) : Number(r?.precio_cliente ?? 0),
                     cambio_motivo: form.cambio_motivo || null,
-                  }, r ? { precio_cliente: r.precio_cliente, costo_proveedor: r.costo_proveedor } : null);
+                    direccion_servicio: (r as any)?.direccion_servicio ?? null,
+                    estado: form.estado ?? r?.estado ?? null,
+                  }, r ? { precio_cliente: r.precio_cliente, costo_proveedor: r.costo_proveedor } : null, hermano);
                   if (!avisos.length) return null;
                   return (
                     <div className="space-y-1.5">
@@ -3706,6 +3824,22 @@ export default function ReservasPage() {
                           {sentido === "retorno" && (
                             <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: "#ede9fe", color: "#6d28d9" }}>RETORNO</span>
                           )}
+                          {/* El dinero se pacta por DÍA (ida + retorno = una tarifa), así que
+                              el aviso mira el par, no el tramo. Solo aparece cuando hay algo
+                              que corregir: falta el importe en los dos, o está en los dos. */}
+                          {(() => {
+                            const p = problemaDelDia(r);
+                            if (!p) return null;
+                            return (
+                              <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full"
+                                title={p.texto === "DÍA 2×"
+                                  ? "Los dos tramos del día llevan importe: el cierre lo liquidará dos veces."
+                                  : "Ni la ida ni el retorno de este día tienen importe: no se podrá liquidar."}
+                                style={Object.fromEntries(p.tono.split(";").map((x) => x.split(":"))) as any}>
+                                {p.texto}
+                              </span>
+                            );
+                          })()}
                         </div>
                       </td>
 

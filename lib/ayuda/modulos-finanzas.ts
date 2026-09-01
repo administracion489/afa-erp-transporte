@@ -872,6 +872,16 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
           "Porque así es como se factura en transporte de personal: el precio pactado cubre el traslado completo (llevar y traer), no cada tramo por separado.\n\nEl ERP los empareja solo y te lo indica en el rótulo del grupo (“…servicio(s) (ida y retorno)”). Si contara los dos tramos, estarías facturando el doble.",
       },
       {
+        pregunta: "El cliente canceló la ida pero el retorno sí se hizo. ¿Cómo lo cobro?",
+        respuesta:
+          "**Ponle el precio al retorno**, que es el tramo donde hubo servicio, y deja la ida cancelada en S/ 0.00. El día se liquida igual: el ERP cobra un día cuando se prestó **cualquiera** de sus dos tramos, no solo el que suele llevar la tarifa.\n\nSi el precio se quedó cargado en la ida cancelada, el día **también** se cobra —no se pierde—, pero la pantalla de cierre te avisa: *«el importe está en la ida, que no se prestó»*. Ese aviso está para que decidas si corresponde cobrar el día completo o ajustar el importe a lo que realmente se hizo.\n\nEn el Anexo 1 el cliente ve el detalle del día: el tramo prestado como **Conforme** y el caído como **No ejecutado**. No hay nada que esconder ahí — al contrario, es lo que sustenta el cobro.",
+      },
+      {
+        pregunta: "¿Por qué el retorno sale en S/ 0.00 y me avisaba que “no se podrá liquidar”?",
+        respuesta:
+          "El S/ 0.00 del retorno es **correcto**: AFA cobra una sola tarifa por los dos tramos del día, y esa tarifa vive en un solo servicio (normalmente la ida). El retorno viaja incluido.\n\nEse aviso miraba cada servicio por separado, sin saber que tenía par, así que salía en **todos** los retornos. Ya no: ahora el formulario de Programación te muestra el otro tramo con su importe y solo avisa cuando de verdad hay algo mal — que **ninguno** de los dos tenga importe, o que lo tengan **los dos**.\n\nLo de «los dos» es lo caro: si cargas la tarifa en la ida y en el retorno, el cierre lo liquida como **dos servicios** y el día se cobra dos veces. Por eso ahora se pide confirmación expresa antes de guardarlo así, y en la lista de Programación el día sale marcado **DÍA 2×**.",
+      },
+      {
         pregunta: "¿De dónde sale el texto de cada ítem de la valorización?",
         respuesta:
           "Del **nombre completo de la ruta**, tal como lo escribió la operación, y de nada más:\n\n**TRANSPORTE DE PERSONAL · 15 PAX · DEL 01-08-2026 AL 31-08-2026**\n**IDA ·** RUTA A/ ENTRADA 06:35/ SANTA ANITA→BSF PUNTA HERMOSA\n**RETORNO ·** RUTA A/ RETORNO 17:00/ BSF PUNTA HERMOSA→SANTA ANITA (incluido en la misma tarifa)\n\nSe imprimen **los dos tramos** aunque la tarifa esté cargada en uno solo. Eso es a propósito: la ida y el retorno tienen dos nombres independientes, y si no se vieran los dos, un ítem podría salir rotulado con la ruta equivocada sin que nadie lo notara.\n\nDos servicios van al mismo ítem cuando coinciden **la ida, el retorno y la tarifa** — o sea, cuando son la misma ruta contratada. Por eso el nombre de ruta no es decorativo: si a mitad de mes alguien lo reescribe, esa ruta sale partida en dos renglones.\n\nSi el documento es anterior a este formato, ábrelo con **✎ Revisar** y pulsa **↻ Recalcular descripciones**: reescribe el texto con los datos de hoy sin tocar cantidades, precios ni totales. Solo funciona en borrador.",

@@ -50,13 +50,26 @@ export default function ModalPrecios({
   const [msg, setMsg] = useState("");
 
   const grupos = useMemo<GrupoRuta[]>(() => {
-    // Los retornos que viajan con una ida presente en la lista NO reciben importe:
-    // los cubre la tarifa del par.
-    const ids = new Set(reservas.map((r) => r.id));
-    const conPar = (r: ReservaSinPrecio) =>
-      !!r.reserva_vinculada_id && ids.has(Number(r.reserva_vinculada_id));
+    // De cada par se cobra UN tramo; el otro queda en S/ 0.00 cubierto por la tarifa.
+    // Cuál lo lleva NO es siempre la ida: si el cliente canceló la ida y el retorno sí
+    // se prestó, el importe tiene que ir donde hubo servicio, o el día no se factura.
+    const porId = new Map(reservas.map((r) => [r.id, r]));
+    const hecho = (r?: ReservaSinPrecio | null) => String(r?.estado ?? "").toLowerCase() === "finalizada";
+    const tramoQueCobra = (a: ReservaSinPrecio, b?: ReservaSinPrecio | null): ReservaSinPrecio => {
+      if (!b) return a;
+      if (hecho(a) !== hecho(b)) return hecho(a) ? a : b;      // manda el que se prestó
+      return sentidoDeReserva(a) === "IDA" ? a : b;            // a igualdad, la ida
+    };
 
-    const cobran = reservas.filter((r) => sentidoDeReserva(r) === "IDA" || !conPar(r));
+    const vistos = new Set<number>();
+    const cobran: ReservaSinPrecio[] = [];
+    for (const r of reservas) {
+      if (vistos.has(r.id)) continue;
+      const par = r.reserva_vinculada_id ? porId.get(Number(r.reserva_vinculada_id)) : undefined;
+      vistos.add(r.id);
+      if (par) vistos.add(par.id);
+      cobran.push(tramoQueCobra(r, par));
+    }
     const cubiertos = reservas.length - cobran.length;
 
     const mapa = new Map<string, GrupoRuta>();
@@ -165,9 +178,10 @@ export default function ModalPrecios({
           </table>
 
           <p className="mt-3 text-[11px] text-gray-500">
-            El importe se escribe en la <b>ida</b> de cada día. El retorno se queda en S/ 0.00 a
-            propósito: AFA cobra <b>una sola tarifa por los dos tramos</b>, y cargarla en ambos
-            facturaría el doble.
+            El importe se escribe en <b>un solo tramo</b> de cada día — normalmente la ida, y el
+            retorno se queda en S/ 0.00 a propósito: AFA cobra <b>una sola tarifa por los dos
+            tramos</b>, y cargarla en ambos facturaría el doble. Si un día la ida se canceló y el
+            retorno sí se prestó, el importe va al <b>retorno</b>, que es donde hubo servicio.
             {grupos[0]?.cubiertos ? ` En este lote hay ${grupos[0].cubiertos} retorno(s) que quedan cubiertos así.` : ""}
             {" "}Comprueba el precio con la cotización antes de guardar: es el que va a la factura.
           </p>
