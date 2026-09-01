@@ -12,17 +12,44 @@
 //
 //   · Se cobra POR RUTA, no por servicio. Un mes son 20 o 30 viajes de la misma ruta
 //     a la misma tarifa, así que se teclea un importe y se aplica a todos.
-//   · La tarifa va en la IDA y el RETORNO queda en S/ 0.00. AFA cobra un solo importe
-//     por los dos tramos del día (ver lib/liquidacion-agrupacion.ts): cargar el precio
-//     en los dos facturaría el doble. Por eso aquí solo se listan las idas — y los
-//     tramos sueltos que no tienen par en el periodo.
+//   · De cada par se cobra UN tramo y el otro queda en S/ 0.00. AFA cobra un solo
+//     importe por los dos tramos del día (ver lib/liquidacion-agrupacion.ts): cargar el
+//     precio en los dos facturaría el doble. Cuál lo lleva no es siempre la ida — si el
+//     cliente canceló la ida y el retorno sí se prestó, va en el retorno.
+//
+// Y el caso que obligó a lo de "va incluido": hay retornos SIN `reserva_vinculada_id`.
+// Sin ese enlace el ERP no puede saber qué ida los cubre, así que los pedía como
+// servicios sueltos — y ponerles precio habría cobrado el día dos veces. Este modal les
+// busca su ida (mismo cliente, misma fecha, ruta contraria, la que lleva la tarifa) y
+// ofrece REPARAR el vínculo en vez de un flag nuevo de "incluido": ese flag sería un
+// segundo sitio donde vive "estos dos tramos son el mismo día", y el problema es
+// justamente que al primero le faltan filas.
 // ──────────────────────────────────────────────────────────────────────────────
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { fmtMoneda } from "@/lib/finanzas/dinero";
-import { nombreRuta, sentidoDeReserva, type ReservaLiq } from "@/lib/liquidacion-agrupacion";
+import { nombreRuta, etiquetaRuta, sentidoDeReserva, type ReservaLiq } from "@/lib/liquidacion-agrupacion";
 
 export type ReservaSinPrecio = ReservaLiq & { clienteNombre?: string };
+
+/**
+ * La ida que cubre a un retorno huérfano.
+ *
+ * Un retorno sin `reserva_vinculada_id` es invisible como "tramo incluido": el ERP no
+ * tiene con qué saber qué ida lleva su tarifa, así que lo pide como si fuera un servicio
+ * suelto. Y cargarle un precio sería cobrarle al cliente dos veces el mismo día.
+ *
+ * La solución no es un campo nuevo de "va incluido" —sería un segundo sitio donde vive
+ * "estos dos tramos son el mismo día", y ya hay uno— sino REPARAR el vínculo que falta.
+ * Con eso el retorno deja de pedir precio en este cierre y en todos los siguientes, y
+ * de paso se arreglan el aviso de Programación y el conteo del par.
+ */
+type IdaCandidata = {
+  id: number;
+  codigo: string | null;
+  hora: string | null;
+  precio: number;
+};
 
 type GrupoRuta = {
   clave: string;
@@ -30,6 +57,8 @@ type GrupoRuta = {
   ruta: string;
   /** Solo los tramos a los que se les va a escribir el importe. */
   filas: ReservaSinPrecio[];
+  /** Tramos huérfanos a los que se les encontró su ida: van incluidos, no llevan importe. */
+  conIda: ReservaSinPrecio[];
   /** Los retornos que quedan cubiertos por esa misma tarifa, para poder decirlo. */
   cubiertos: number;
   desde: string;
@@ -48,6 +77,70 @@ export default function ModalPrecios({
   const [montos, setMontos] = useState<Record<string, string>>({});
   const [guardando, setGuardando] = useState(false);
   const [msg, setMsg] = useState("");
+  /** reserva huérfana → la ida que la cubre, cuando se encontró UNA sola. */
+  const [candidatas, setCandidatas] = useState<Map<number, IdaCandidata>>(new Map());
+  /** Cuáles se van a enlazar al guardar. Arrancan marcadas: es lo que casi siempre toca. */
+  const [enlazar, setEnlazar] = useState<Set<number>>(new Set());
+  const [resuelto, setResuelto] = useState(false);
+
+  /** Tramos sin par y el rango donde buscarlo. null = no hay nada que reparar. */
+  const objetivo = useMemo(() => {
+    const huerfanos = reservas.filter((r) => !r.reserva_vinculada_id);
+    const clientes = [...new Set(huerfanos.map((r) => r.cliente_id).filter(Boolean))] as number[];
+    const fechas = [...new Set(huerfanos.map((r) => String(r.fecha_servicio ?? "")).filter(Boolean))];
+    return huerfanos.length && clientes.length && fechas.length ? { huerfanos, clientes, fechas } : null;
+  }, [reservas]);
+
+  const buscando = !!objetivo && !resuelto;
+
+  // ── Buscar la ida de cada tramo huérfano ──────────────────────────────────
+  useEffect(() => {
+    if (!objetivo) return;
+    const { huerfanos, clientes, fechas } = objetivo;
+    let vivo = true;
+    (async () => {
+      const { data } = await supabase
+        .from("reservas")
+        .select("id,codigo,cliente_id,fecha_servicio,hora_servicio,ruta_nombre,direccion_servicio,precio_cliente,reserva_vinculada_id")
+        .in("cliente_id", clientes)
+        .in("fecha_servicio", fechas);
+      if (!vivo) return;
+
+      // Solo sirve una pareja LIBRE: si esa ida ya tiene su retorno, enlazarla aquí
+      // rompería el par existente.
+      const libres = ((data as any[]) ?? []).filter((x) => !x.reserva_vinculada_id);
+      const hallado = new Map<number, IdaCandidata>();
+      const yaTomadas = new Set<number>();
+
+      for (const h of huerfanos) {
+        const sentidoH = sentidoDeReserva(h);
+        const posibles = libres.filter(
+          (x) =>
+            x.id !== h.id &&
+            !yaTomadas.has(x.id) &&
+            Number(x.cliente_id) === Number(h.cliente_id) &&
+            String(x.fecha_servicio) === String(h.fecha_servicio) &&
+            sentidoDeReserva(x) !== sentidoH &&                       // el tramo contrario
+            etiquetaRuta(x) === etiquetaRuta(h) &&                    // la misma ruta
+            Number(x.precio_cliente ?? 0) > 0                         // y es la que cobra
+        );
+        // Con dos móviles el mismo día hay dos idas posibles y no se puede elegir sin
+        // adivinar: se deja para que un humano lo enlace desde Programación.
+        if (posibles.length !== 1) continue;
+        const ida = posibles[0];
+        yaTomadas.add(ida.id);
+        hallado.set(h.id, {
+          id: ida.id, codigo: ida.codigo ?? null,
+          hora: String(ida.hora_servicio ?? "").slice(0, 5),
+          precio: Number(ida.precio_cliente ?? 0),
+        });
+      }
+      setCandidatas(hallado);
+      setEnlazar(new Set(hallado.keys()));
+      setResuelto(true);
+    })();
+    return () => { vivo = false; };
+  }, [objetivo]);
 
   const grupos = useMemo<GrupoRuta[]>(() => {
     // De cada par se cobra UN tramo; el otro queda en S/ 0.00 cubierto por la tarifa.
@@ -78,8 +171,10 @@ export default function ModalPrecios({
       const cliente = r.clienteNombre ?? "—";
       const clave = `${cliente}|${ruta}`;
       const f = String(r.fecha_servicio ?? "");
-      const g = mapa.get(clave) ?? { clave, cliente, ruta, filas: [], cubiertos: 0, desde: f, hasta: f };
-      g.filas.push(r);
+      const g = mapa.get(clave) ?? { clave, cliente, ruta, filas: [], conIda: [], cubiertos: 0, desde: f, hasta: f };
+      // Un tramo al que se le encontró su ida NO necesita tarifa: la lleva ella. Se
+      // aparta para ofrecer el enlace en vez de un importe que cobraría el día dos veces.
+      (candidatas.has(r.id) ? g.conIda : g.filas).push(r);
       if (f && (!g.desde || f < g.desde)) g.desde = f;
       if (f && (!g.hasta || f > g.hasta)) g.hasta = f;
       mapa.set(clave, g);
@@ -89,7 +184,7 @@ export default function ModalPrecios({
     // el número que importa al operador es "cuántos servicios voy a desbloquear".
     if (salida.length) salida[0].cubiertos = cubiertos;
     return salida;
-  }, [reservas]);
+  }, [reservas, candidatas]);
 
   const totalAAplicar = grupos.reduce(
     (a, g) => a + (Number(montos[g.clave]) > 0 ? g.filas.length : 0), 0
@@ -99,11 +194,28 @@ export default function ModalPrecios({
   );
 
   async function guardar() {
-    const conImporte = grupos.filter((g) => Number(montos[g.clave]) > 0);
-    if (!conImporte.length) { setMsg("⚠️ Escribe el importe de al menos una ruta."); return; }
+    const conImporte = grupos.filter((g) => Number(montos[g.clave]) > 0 && g.filas.length);
+    const aEnlazar = [...enlazar].filter((id) => candidatas.has(id));
+    if (!conImporte.length && !aEnlazar.length) {
+      setMsg("⚠️ Escribe el importe de al menos una ruta, o marca las que van incluidas en su ida.");
+      return;
+    }
     setGuardando(true); setMsg("");
     let hechos = 0;
     try {
+      // 1) Reparar los vínculos. Se escribe en LOS DOS lados: `reserva_vinculada_id` es
+      //    bidireccional en el resto del ERP (analizarServicios comprueba `sonPar`), y
+      //    dejarlo a medias daría un par que unos sitios ven y otros no.
+      for (const id of aEnlazar) {
+        const ida = candidatas.get(id)!;
+        const a = await supabase.from("reservas").update({ reserva_vinculada_id: ida.id }).eq("id", id);
+        if (a.error) throw new Error(`enlace ${id}: ${a.error.message} (se enlazaron ${hechos})`);
+        const b = await supabase.from("reservas").update({ reserva_vinculada_id: id }).eq("id", ida.id);
+        if (b.error) throw new Error(`enlace ${ida.id}: ${b.error.message} (se enlazaron ${hechos})`);
+        hechos += 1;
+      }
+
+      // 2) Y recién ahora los importes, sobre los tramos que de verdad cobran.
       for (const g of conImporte) {
         const precio = Number(montos[g.clave]);
         const ids = g.filas.map((r) => r.id);
@@ -152,24 +264,52 @@ export default function ModalPrecios({
             <tbody className="divide-y">
               {grupos.map((g) => {
                 const precio = Number(montos[g.clave]) || 0;
+                const marcados = g.conIda.filter((f) => enlazar.has(f.id)).length;
+                const todosIncluidos = g.conIda.length > 0 && g.filas.length === 0;
+                const ejemplo = g.conIda.length ? candidatas.get(g.conIda[0].id) : null;
                 return (
-                  <tr key={g.clave} className={precio > 0 ? "bg-emerald-50/40" : ""}>
+                  <tr key={g.clave} className={precio > 0 || marcados ? "bg-emerald-50/40" : ""}>
                     <td className="px-2 py-2">
                       <span className="block font-medium text-gray-800">{g.ruta}</span>
                       <span className="block text-[10px] text-gray-400">
                         {g.cliente} · del {g.desde} al {g.hasta}
                       </span>
+                      {/* El "va incluido" que faltaba: en vez de exigir una tarifa que
+                          cobraría el día dos veces, se repara el vínculo con su ida. */}
+                      {g.conIda.length > 0 && (
+                        <label className="mt-1 flex items-start gap-2 text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2 py-1.5 cursor-pointer">
+                          <input type="checkbox" className="mt-0.5"
+                            checked={marcados === g.conIda.length}
+                            onChange={(e) => setEnlazar((s) => {
+                              const n = new Set(s);
+                              for (const f of g.conIda) e.target.checked ? n.add(f.id) : n.delete(f.id);
+                              return n;
+                            })} />
+                          <span>
+                            <b>{g.conIda.length} van incluidos en su ida</b>
+                            {ejemplo && <> — p. ej. {ejemplo.codigo ?? `#${ejemplo.id}`} ({ejemplo.hora}, {fmtMoneda(ejemplo.precio)})</>}
+                            . Les falta el enlace ida↔retorno y por eso se pedían aparte;
+                            al marcarlo se enlazan y dejan de pedir tarifa.
+                          </span>
+                        </label>
+                      )}
                     </td>
-                    <td className="px-2 py-2 text-center text-xs text-gray-500">{g.filas.length}</td>
+                    <td className="px-2 py-2 text-center text-xs text-gray-500">
+                      {g.filas.length || "—"}
+                    </td>
                     <td className="px-2 py-2">
-                      <input type="number" min="0" step="0.01"
-                        className="w-full px-2 py-1 rounded border text-sm text-right"
-                        placeholder="0.00"
-                        value={montos[g.clave] ?? ""}
-                        onChange={(e) => setMontos((m) => ({ ...m, [g.clave]: e.target.value }))} />
+                      {todosIncluidos ? (
+                        <span className="block text-center text-[11px] text-emerald-700">incluido</span>
+                      ) : (
+                        <input type="number" min="0" step="0.01"
+                          className="w-full px-2 py-1 rounded border text-sm text-right"
+                          placeholder="0.00"
+                          value={montos[g.clave] ?? ""}
+                          onChange={(e) => setMontos((m) => ({ ...m, [g.clave]: e.target.value }))} />
+                      )}
                     </td>
                     <td className="px-2 py-2 text-right font-bold text-gray-700">
-                      {precio > 0 ? fmtMoneda(precio * g.filas.length) : "—"}
+                      {todosIncluidos ? "S/ 0.00" : precio > 0 ? fmtMoneda(precio * g.filas.length) : "—"}
                     </td>
                   </tr>
                 );
@@ -189,12 +329,16 @@ export default function ModalPrecios({
 
         <div className="px-5 py-4 border-t flex gap-2 justify-end sticky bottom-0 bg-white rounded-b-2xl">
           <span className="mr-auto text-xs text-gray-500 self-center">
-            {totalAAplicar
-              ? <>Se aplicará a <b>{totalAAplicar}</b> servicio(s) · {fmtMoneda(importeTotal)} sin IGV</>
-              : "Escribe el importe de al menos una ruta"}
+            {buscando ? "Buscando la ida de cada tramo…" : (
+              <>
+                {enlazar.size > 0 && <><b>{enlazar.size}</b> se enlazan con su ida{totalAAplicar ? " · " : ""}</>}
+                {totalAAplicar > 0 && <>importe a <b>{totalAAplicar}</b> servicio(s) · {fmtMoneda(importeTotal)} sin IGV</>}
+                {!enlazar.size && !totalAAplicar && "Escribe el importe de al menos una ruta"}
+              </>
+            )}
           </span>
           <button onClick={onCerrar} className="px-4 py-2 rounded-xl border text-sm font-bold text-gray-600 hover:bg-gray-50">Cerrar</button>
-          <button onClick={guardar} disabled={guardando || !totalAAplicar}
+          <button onClick={guardar} disabled={guardando || buscando || (!totalAAplicar && !enlazar.size)}
             className="px-4 py-2 rounded-xl text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40">
             {guardando ? "Guardando…" : "Aplicar precios"}
           </button>
