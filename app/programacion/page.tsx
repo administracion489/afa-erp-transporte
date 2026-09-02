@@ -3,7 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { Calendar, FileText, Pencil, Trash2, X } from "lucide-react";
+import { Calendar, FileText, Pencil, Sparkles, Trash2, X } from "lucide-react";
 import {
   ESTADOS_RESERVA, ESTADOS_RESERVA_LISTA, ORDEN_ESTADO,
   ESTADOS_ADMIN, ESTADOS_ADMIN_LISTA, aplicaAdmin, ESTADO_ADMIN_INICIAL, etiquetaAdmin, siguienteAdmin,
@@ -16,7 +16,7 @@ import {
 } from "@/lib/reservas-pacto";
 import { AFECTACIONES, afectacionDe, type CodigoAfectacion } from "@/lib/finanzas/afectacion";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
-import ModalGenerarPrograma from "@/components/programacion/ModalGenerarPrograma";
+import ModalGenerarPrograma, { type ModoPrograma } from "@/components/programacion/ModalGenerarPrograma";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
 
 // ── Google Maps Places para el formulario inline de paradas ──────────────
@@ -185,6 +185,16 @@ type Reserva = {
   direccion_servicio?: string | null;
   lote_generacion?: string | null;
   ruta_nombre?: string | null;
+  /**
+   * contrato | adicional | contingencia. Sin esta marca, la salida extra que el
+   * cliente pidió a S/ 480 se fundía con las líneas del contrato en la liquidación y
+   * dejaba de existir como concepto (supabase/reservas-04-servicios-adicionales.sql).
+   * Opcional: si esa migración no se corrió, la columna no llega y se lee como
+   * 'contrato', que es el default de la base.
+   */
+  origen_contractual?: string | null;
+  /** De cuánto se partió al generarlo. Solo para poder mostrar la diferencia. */
+  precio_cotizado?: number | null;
 };
 
 type Ocupacion = {
@@ -243,7 +253,24 @@ const COLS_LISTA =
   "tipo_asignacion,empresa_tercerizada_id,vehiculo_tercero_id,conductor_tercero_id," +
   "tipo_servicio_detalle,sincronizado_app,fecha_sincronizacion,token_seguimiento," +
   "token_conductor_tercero,token_expira_at,reserva_vinculada_id,direccion_servicio," +
-  "lote_generacion,origen,destino,ruta_nombre";
+  "lote_generacion,origen,destino,ruta_nombre,origen_contractual,precio_cotizado";
+
+// Columnas de `reservas` cuya migración es OPCIONAL. PostgREST rechaza el select
+// entero por una columna desconocida, así que pedirlas sin red dejaría la pantalla
+// de Reservas en blanco en cualquier entorno donde el SQL todavía no se corrió.
+// Se reintenta sin ellas: la lista se pinta igual, solo sin el chip de origen.
+const COLS_OPCIONALES = ["origen_contractual", "precio_cotizado"];
+
+const quitarColumna = (cols: string, col: string) =>
+  cols.split(",").map(c => c.trim()).filter(c => c !== col).join(",");
+
+const columnaFaltante = (msg: string) =>
+  COLS_OPCIONALES.find(c => new RegExp(`\\b${c}\\b`, "i").test(msg)) ?? null;
+
+/** 'contrato' cuando la columna no existe o viene vacía: es el default de la base. */
+const origenDe = (r: { origen_contractual?: string | null }) =>
+  String(r.origen_contractual || "contrato");
+const esAdicional = (r: { origen_contractual?: string | null }) => origenDe(r) !== "contrato";
 
 // Proyección ultraligera para los agregados globales (KPIs, flujo de estados, sumas).
 const COLS_RESUMEN = "id,estado,estado_admin,fecha_servicio,precio_cliente,costo_proveedor,margen,sincronizado_app";
@@ -463,9 +490,11 @@ export default function ReservasPage() {
   const [filtroTipo,   setFiltroTipo]   = useState("todos");
   const [filtroServicio, setFiltroServicio] = useState<"todos" | "fijo" | "eventual">("todos");
   const [filtroSentido, setFiltroSentido] = useState<"todos" | "ida" | "retorno">("todos");
+  const [filtroOrigen,  setFiltroOrigen]  = useState<"todos" | "contrato" | "adicional">("todos");
   const [form, setForm] = useState(FORM_VACIO);
   const [modalReservaId,       setModalReservaId]       = useState<number | null>(null);
-  const [mostrarModalPrograma, setMostrarModalPrograma] = useState(false);
+  // El mismo modal en dos modos. null = cerrado. Ver ModalGenerarPrograma.Props.modo.
+  const [modoPrograma, setModoPrograma] = useState<ModoPrograma | null>(null);
   const [expandidoContrato,    setExpandidoContrato]    = useState<string | null>(null);
   const [modalLinksId,         setModalLinksId]         = useState<number | null>(null);
   const [confirmEliminarId,    setConfirmEliminarId]    = useState<number | null>(null);
@@ -1135,13 +1164,22 @@ export default function ReservasPage() {
   // filtros (rango de fechas, cotización…). El orden fecha desc + id desc es determinista,
   // así el paginado no repite ni se salta filas.
   const fetchReservasCols = async (cols: string, aplica: (q: any) => any): Promise<any[]> => {
+    // `colsUso` puede encogerse: ver COLS_OPCIONALES. Se reintenta la PRIMERA página
+    // hasta que el select sea aceptable, y el resto ya se pide con esas columnas.
+    let colsUso = cols;
     const base = (withCount: boolean) => aplica(
       supabase.from("reservas")
-        .select(cols, withCount ? { count: "exact" } : undefined)
+        .select(colsUso, withCount ? { count: "exact" } : undefined)
         .order("fecha_servicio", { ascending: false })
         .order("id", { ascending: false })
     );
-    const first = await base(true).range(0, PAGE_SUPABASE - 1);
+    let first = await base(true).range(0, PAGE_SUPABASE - 1);
+    for (let i = 0; first.error && i < COLS_OPCIONALES.length; i++) {
+      const falta = columnaFaltante(String(first.error.message));
+      if (!falta || !colsUso.split(",").some(c => c.trim() === falta)) break;
+      colsUso = quitarColumna(colsUso, falta);
+      first = await base(true).range(0, PAGE_SUPABASE - 1);
+    }
     if (first.error || !first.data) return [];
     const all: any[] = [...first.data];
     if (first.count != null) {
@@ -1201,8 +1239,16 @@ export default function ReservasPage() {
     if (ids.length === 0) return [];
     const out: any[] = [];
     for (let i = 0; i < ids.length; i += 300) {
-      const { data } = await supabase.from("reservas").select(COLS_LISTA).in("id", ids.slice(i, i + 300));
-      if (data) out.push(...data);
+      const trozo = ids.slice(i, i + 300);
+      let colsUso = COLS_LISTA;
+      let r = await supabase.from("reservas").select(colsUso).in("id", trozo);
+      for (let j = 0; r.error && j < COLS_OPCIONALES.length; j++) {
+        const falta = columnaFaltante(String(r.error.message));
+        if (!falta) break;
+        colsUso = quitarColumna(colsUso, falta);
+        r = await supabase.from("reservas").select(colsUso).in("id", trozo);
+      }
+      if (r.data) out.push(...r.data);
     }
     return out as Reserva[];
   };
@@ -1347,7 +1393,7 @@ export default function ReservasPage() {
 
   // Al cambiar cualquier filtro de cliente (búsqueda, estado, tipo…) se vuelve a mostrar
   // desde las primeras 100 filas, para que "Cargar más" no arrastre el conteo anterior.
-  useEffect(() => { setLimiteVista(100); }, [busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroPorAsignar]);
+  useEffect(() => { setLimiteVista(100); }, [busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroOrigen, filtroPorAsignar]);
 
   const nombreCliente    = (id: number | null) => { const c = clientes.find(c => c.id === id); return c ? (c.empresa || c.nombre) : "Sin cliente"; };
   const nombreVehiculo   = (id: number | null) => vehiculos.find(v => v.id === id)?.placa || "-";
@@ -2005,8 +2051,11 @@ export default function ReservasPage() {
       const txt = (r.id + " " + numCot + " " + nombreCliente(r.cliente_id) + " " + ((r as any).origen || "") + " " + ((r as any).destino || "")).toLowerCase();
       const passServicio    = filtroServicio === "todos" || (filtroServicio === "fijo" ? !esEventual(r) : esEventual(r));
       const passSentido     = filtroSentido === "todos" || sentidoServicio(r) === filtroSentido;
+      const passOrigen      = filtroOrigen === "todos"
+        || (filtroOrigen === "adicional" ? esAdicional(r) : !esAdicional(r));
       const passPorAsignar  = !filtroPorAsignar || (r.estado === "pendiente" && !r.vehiculo_id && !r.empresa_tercerizada_id);
       return txt.includes(q) &&
+        passOrigen &&
         (filtroEstado === "todos" || r.estado === filtroEstado) &&
         (filtroTipo === "todos" || r.tipo === filtroTipo) &&
         passServicio &&
@@ -2037,7 +2086,7 @@ export default function ReservasPage() {
       }
       return aFut ? -1 : 1;
     });
-  }, [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, cotMapNum, filtroDesde, filtroHasta, filtroPorAsignar, clientes, hoy]);
+  }, [reservas, busqueda, filtroEstado, filtroTipo, filtroServicio, filtroSentido, filtroOrigen, cotMapNum, filtroDesde, filtroHasta, filtroPorAsignar, clientes, hoy]);
 
   // Agrupación de servicios fijos por contrato (cotizacion_id)
   const gruposContratos = useMemo(() => {
@@ -2092,11 +2141,20 @@ export default function ReservasPage() {
   return (
     <main className="p-6 space-y-5 max-w-7xl mx-auto">
 
-      {mostrarModalPrograma && (
+      {modoPrograma && (
         <ModalGenerarPrograma
           clientes={clientes}
-          onClose={() => setMostrarModalPrograma(false)}
-          onGenerado={({ lote, cantidad }) => { cargarDatos(); setFiltroServicio("fijo"); setUltimoLote({ lote, cantidad }); }}
+          modo={modoPrograma}
+          onClose={() => setModoPrograma(null)}
+          onGenerado={({ lote, cantidad }) => {
+            const adicional = modoPrograma === "adicional";
+            cargarDatos();
+            setFiltroServicio("fijo");
+            // Un adicional nace entre cientos de servicios de contrato del mismo
+            // cliente y la misma ruta: sin este filtro habría que ir a buscarlo.
+            if (adicional) setFiltroOrigen("adicional");
+            setUltimoLote({ lote, cantidad });
+          }}
         />
       )}
 
@@ -2831,11 +2889,24 @@ export default function ReservasPage() {
         </div>
         <div className="flex gap-2 flex-wrap">
           <button
-            onClick={() => setMostrarModalPrograma(true)}
+            onClick={() => setModoPrograma("fijo")}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm text-white transition-colors hover:opacity-90"
             style={{ background: "#0b315f" }}
           >
             <Calendar size={15} /> Programa fijo
+          </button>
+          {/* El adicional se registra desde el MISMO sitio y con el mismo modal: se
+              elige la cotización que ya tiene los paraderos, y lo único que cambia es
+              que las fechas son sueltas, el sentido se elige y el precio se puede
+              escribir. Antes había que generarlo como programa fijo y corregir el
+              precio servicio por servicio. */}
+          <button
+            onClick={() => setModoPrograma("adicional")}
+            title="Servicio que el cliente pide por encima de lo contratado, con su propio precio"
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm text-white transition-colors hover:opacity-90"
+            style={{ background: "#b45309" }}
+          >
+            <Sparkles size={15} /> Adicional
           </button>
           {editandoId && (
             <button onClick={limpiar} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
@@ -3293,6 +3364,25 @@ export default function ReservasPage() {
               </button>
             ))}
           </div>
+          {/* Origen contractual. "¿Cuántos adicionales le hicimos a este cliente en
+              agosto?" no se podía responder desde el ERP: había que abrir la
+              liquidación y leer renglón por renglón. */}
+          <div className="flex gap-1 rounded-xl p-1" style={{ background: "#f1f5f9" }} title="Filtrar entre lo contratado y lo que el cliente pidió por encima del contrato">
+            {(["todos", "contrato", "adicional"] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => setFiltroOrigen(t)}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+                style={{
+                  background: filtroOrigen === t ? "white" : "transparent",
+                  color: filtroOrigen === t ? (t === "adicional" ? "#b45309" : "#0b315f") : "#9ca3af",
+                  boxShadow: filtroOrigen === t ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+                }}
+              >
+                {t === "todos" ? "Todo origen" : t === "contrato" ? "Contrato" : "Adicionales"}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Fila 2: rango de fechas + atajos + toggles */}
@@ -3532,6 +3622,15 @@ export default function ReservasPage() {
                                       )}
                                       {r.direccion_servicio === "retorno" && (
                                         <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: "#ede9fe", color: "#6d28d9" }}>RETORNO</span>
+                                      )}
+                                      {esAdicional(r) && (
+                                        <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full uppercase"
+                                              title={r.precio_cotizado != null
+                                                ? `Fuera del contrato. Cotizado S/ ${Number(r.precio_cotizado).toFixed(2)} · cobrado S/ ${Number(r.precio_cliente ?? 0).toFixed(2)}`
+                                                : "Servicio fuera de lo contratado"}
+                                              style={{ background: "#fef3c7", color: "#b45309" }}>
+                                          {origenDe(r)}
+                                        </span>
                                       )}
                                     </div>
                                   </td>
@@ -3818,6 +3917,17 @@ export default function ReservasPage() {
                           <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: esFijo ? "#eef3f8" : "#ede9fe", color: esFijo ? "#0b315f" : "#6d28d9" }}>
                             {esFijo ? "Fijo" : "Eventual"}
                           </span>
+                          {/* Fuera del contrato. Con la diferencia contra lo cotizado en el
+                              tooltip: es la respuesta a "¿por qué esta salida costó S/ 480?". */}
+                          {esAdicional(r) && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full uppercase"
+                                  title={r.precio_cotizado != null
+                                    ? `Fuera del contrato. Cotizado S/ ${Number(r.precio_cotizado).toFixed(2)} · cobrado S/ ${Number(r.precio_cliente ?? 0).toFixed(2)}`
+                                    : "Servicio fuera de lo contratado"}
+                                  style={{ background: "#fef3c7", color: "#b45309" }}>
+                              {origenDe(r)}
+                            </span>
+                          )}
                           {sentido === "ida" && (
                             <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: "#dbeafe", color: "#1d4ed8" }}>IDA</span>
                           )}

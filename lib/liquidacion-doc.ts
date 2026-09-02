@@ -306,9 +306,15 @@ function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
   const filas = d.lineas.map((l) => {
     const clase = l.tipo === "adicional" ? "adicional" : (l.tipo === "penalidad" || l.tipo === "descuento") ? "negativo" : "";
     const negativo = l.total_linea < 0;
+    // Un adicional puede venir de dos sitios y no se informan igual: el que se generó
+    // en Programación TIENE programado y ejecutado (se pidieron 3 salidas, se
+    // prestaron 2) y esconderlo tras un guion perdería justo lo que el cliente
+    // pregunta; el que se escribió a mano en el editor no tiene contra qué comparar.
+    const conProgramado = Number(l.cantidad_programada ?? 0) > 0;
     const cumplimiento =
-      l.tipo === "servicio"
+      l.tipo === "servicio" || (l.tipo === "adicional" && conProgramado)
         ? `${num(l.cantidad_programada, 0)} / <b>${num(l.cantidad_ejecutada, 0)}</b> ${chipCumplimiento(l.cantidad_programada, l.cantidad_ejecutada)}`
+          + (l.tipo === "adicional" ? ` ${chip("ADICIONAL", "warn")}` : "")
         : l.tipo === "adicional"
         ? `— / <b>${num(l.cantidad, 0)}</b> ${chip("ADICIONAL", "warn")}`
         : "—";

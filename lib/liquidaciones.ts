@@ -27,7 +27,7 @@
 
 import { redondear, calcularDetraccion } from "@/lib/finanzas/dinero";
 import {
-  totalesValorizacion, descripcionLinea, sentidoDeReserva, nombreRuta,
+  totalesValorizacion, descripcionLinea, sentidoDeReserva, nombreRuta, origenContractual,
   type LineaAgrupada, type ParServicio, type ReservaLiq,
 } from "@/lib/liquidacion-agrupacion";
 import {
@@ -261,8 +261,11 @@ export async function crearLiquidaciones(
       const periodoLabel =
         opts.periodoLabel || `${opts.periodoDesde} al ${opts.periodoHasta}`;
 
+      // El tipo sale de la línea, no se fuerza a "servicio": lo que el cliente pidió
+      // por encima del contrato tiene que caer en el subtotal de adicionales del
+      // formato, no en el de servicios contratados.
       const filasMonto = g.lineas.map((l) => ({
-        tipo: "servicio" as const, cantidad: l.cantidad, precio_unitario: l.precio_unitario,
+        tipo: l.tipo, cantidad: l.cantidad, precio_unitario: l.precio_unitario,
       }));
 
       const base: any = {
@@ -358,7 +361,7 @@ export async function crearLiquidaciones(
         const fila: any = {
           liquidacion_id: id,
           item,
-          tipo: "servicio",
+          tipo: l.tipo,
           descripcion: l.descripcion,
           unidad_medida: l.unidad_medida,
           cantidad_programada: l.cantidad_programada,
@@ -430,6 +433,9 @@ const COLS_RECALCULO =
   "direccion_servicio,origen,destino,reserva_vinculada_id,cotizacion_id,capacidad_contratada," +
   "precio_cliente,costo_proveedor,vehiculo_id,vehiculo_tercero_id";
 
+/** La agrega supabase/reservas-04: se pide aparte para no romper el recálculo si falta. */
+const COL_ORIGEN_CONTRACTUAL = "origen_contractual";
+
 /** El nombre de ruta que más veces aparece en un conjunto de tramos. */
 function nombreMasFrecuente(filas: ReservaLiq[]): string | null {
   const cuenta = new Map<string, number>();
@@ -477,7 +483,13 @@ export async function recalcularDescripciones(
       .select("id,item,tipo,descripcion,agrupacion_clave")
       .eq("liquidacion_id", id)
       .order("item");
-    const lineas = ((lineasRaw as any[]) ?? []).filter((l) => l.tipo === "servicio");
+    // Las líneas que salieron de la AGRUPACIÓN, que son las que tienen reservas detrás
+    // y por lo tanto se pueden recalcular. Una adicional generada desde Programación es
+    // una de ellas (lleva `agrupacion_clave`); una adicional escrita a mano en el editor
+    // no lo es, y reescribirle la descripción borraría lo que alguien tecleó.
+    const lineas = ((lineasRaw as any[]) ?? []).filter(
+      (l) => l.tipo === "servicio" || (l.tipo === "adicional" && l.agrupacion_clave)
+    );
     if (!lineas.length) return { ok: true, actualizadas: 0, sinPax: 0 };
 
     // Puente línea ↔ reserva, por lotes: un periodo largo pasa del corte de PostgREST.
@@ -490,8 +502,10 @@ export async function recalcularDescripciones(
     const reservaIds = [...new Set(puente.map((p) => Number(p.reserva_id)))];
     const reservas: any[] = [];
     for (let i = 0; i < reservaIds.length; i += 300) {
-      const { data } = await sb.from("reservas").select(COLS_RECALCULO).in("id", reservaIds.slice(i, i + 300));
-      reservas.push(...((data as any[]) ?? []));
+      const trozo = reservaIds.slice(i, i + 300);
+      let r = await sb.from("reservas").select(`${COLS_RECALCULO},${COL_ORIGEN_CONTRACTUAL}`).in("id", trozo);
+      if (r.error) r = await sb.from("reservas").select(COLS_RECALCULO).in("id", trozo);
+      reservas.push(...((r.data as any[]) ?? []));
     }
     const porId = new Map<number, ReservaLiq>(reservas.map((r) => [Number(r.id), r as ReservaLiq]));
 
@@ -563,6 +577,9 @@ export async function recalcularDescripciones(
         nombreRetorno,
         movil,
         totalMoviles: moviles,
+        // Sobre TODOS los tramos de la línea, no solo la cabeza: basta con que uno esté
+        // marcado para que el día no sea contratado.
+        origen: filas.map(origenContractual).find((o) => o !== "contrato") ?? "contrato",
       });
       if (descripcion === l.descripcion) continue;
 
@@ -665,6 +682,17 @@ export async function eliminarLinea(sb: any, lado: Lado, lineaId: number): Promi
     if (!linea) throw new Error("La línea no existe.");
     if (linea.tipo === "servicio")
       throw new Error("Una línea de servicios no se borra: ajusta su cantidad o quita los servicios del periodo.");
+    // Un ADICIONAL puede ser de dos clases y solo una es borrable: la escrita a mano en
+    // el editor. La que salió de la agrupación tiene reservas reclamadas detrás, y
+    // borrar la línea las dejaría marcadas como liquidadas sin nada que las cobre —
+    // servicios prestados que no vuelven a aparecer en ningún cierre.
+    const { count } = await sb.from(t.puente)
+      .select("reserva_id", { count: "exact", head: true }).eq("linea_id", lineaId);
+    if (Number(count ?? 0) > 0)
+      throw new Error(
+        `Esta línea tiene ${count} servicio(s) liquidados detrás: no se borra. ` +
+        `Quita esos servicios del periodo o anula la liquidación.`
+      );
     const { error } = await sb.from(t.linea).delete().eq("id", lineaId);
     if (error) throw new Error(error.message);
     await recalcularTotales(sb, lado, Number(linea.liquidacion_id));

@@ -839,8 +839,14 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       "cuentas_por_cobrar",
       "cuentas_por_pagar",
       "estado_admin",
+      "servicio_adicional",
     ],
     faqs: [
+      {
+        pregunta: "En la valorización veo un renglón naranja que dice ADICIONAL. ¿Qué es?",
+        respuesta:
+          "Es un servicio que el cliente pidió **por encima de lo contratado** y que se registró como tal en Reservas (botón *Adicional*).\n\nNo se mezcla con las líneas del contrato a propósito, aunque sea la misma ruta:\n\n• Va en **su propio renglón**, aunque coincida la ruta y hasta el precio.\n• Se suma aparte, en **“Adicionales autorizados”**, debajo de *Servicios del periodo*.\n• Sale al **final** del bloque de líneas, no intercalado, para que el cliente lo lea contra los servicios contratados.\n• La descripción arranca con **SERVICIO ADICIONAL**, porque esa descripción se copia a correos y a órdenes de compra, y ahí el color del renglón se pierde.\n\nSi el mes tuvo 22 servicios contratados y 3 adicionales, el formato dice 22 y 3, no 25. Ese es todo el punto.",
+      },
       {
         pregunta: "¿Qué diferencia hay entre liquidar al cliente y liquidar al proveedor?",
         respuesta:

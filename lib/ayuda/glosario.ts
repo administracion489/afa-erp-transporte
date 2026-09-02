@@ -815,4 +815,16 @@ export const GLOSARIO: Record<string, Concepto> = {
       "Un cambio que MEJORA el margen nunca pide visado, y es a propósito: si conseguir un proveedor más barato costara el mismo trámite que uno más caro, el operador aprende a esconder los dos. Y visar no deshace nada —el servicio ya se prestó—: autoriza la plata, no la operación.",
     verTambien: ["pacto_servicio", "estado_aprobacion", "margen_real"],
   },
+
+  servicio_adicional: {
+    clave: "servicio_adicional",
+    termino: "Servicio adicional (fuera del contrato)",
+    definicion:
+      "Es **un servicio que el cliente pide por encima de lo contratado** y que se cobra aparte: una salida extra un viernes, una unidad más para una fecha puntual.\nSe registra con el botón **Adicional** de Reservas, al lado de “Programa fijo”. Se elige la misma cotización —de ahí salen los paraderos y la ruta—, se marcan las fechas sueltas, se elige si es ida, salida o las dos, y **se escribe el precio**, que puede ser distinto al del contrato.",
+    ejemplo:
+      "COMPAÑÍA HARD pide una salida extra el 12, el 14 y el 22 de agosto. La RUTA A está contratada a S/ 350, pero esas salidas necesitan una unidad mayor y se acuerdan en S/ 480. Se registran las tres fechas con precio S/ 480 y motivo “el cliente pidió una unidad de mayor capacidad”. En la liquidación de agosto salen en su propio renglón, con el rótulo ADICIONAL y sumadas en “Adicionales autorizados”, no mezcladas con los 22 servicios del contrato.",
+    ojo:
+      "Registrarlo como adicional no es un detalle de forma. Un adicional **nace** con su precio, así que no dispara el enlace de conformidad del cliente (ese salta cuando a un servicio ya creado se le SUBE el precio) — por eso el motivo se pide en el momento de crearlo: es el único sitio donde queda escrito por qué esa salida costó S/ 480. Y por eso el precio del adicional tampoco se propone después como referencia de la tarifa contractual.",
+    verTambien: ["pacto_servicio", "liquidacion_cliente", "conformidad", "adenda"],
+  },
 };

@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { X, Calendar, RefreshCw, ArrowRight, ArrowLeftRight, Layers, Signpost } from "lucide-react";
+import { X, Calendar, RefreshCw, ArrowRight, ArrowLeftRight, Layers, Signpost, Plus, Sparkles } from "lucide-react";
 import { sugerirNombreRuta } from "@/lib/nombre-ruta";
 
 type ItemCot = {
@@ -66,27 +66,73 @@ type Slot = {
 
 type Cliente = { id: number; nombre: string; empresa?: string; };
 
+/** Modo de trabajo del modal. Ver el bloque de comentarios de `Props`. */
+export type ModoPrograma = "fijo" | "adicional";
+
 /**
- * Inserta reservas tolerando que falte `capacidad_contratada` (la agrega
- * supabase/liquidaciones-03-ruta-contratada.sql). Sin la migración, PostgREST rechaza
- * el lote entero por una columna desconocida: antes que dejar sin programar el mes, se
- * reintenta sin ese campo y la liquidación resuelve el pax por los otros escalones de
- * su cascada.
+ * Columnas que pueden NO existir todavía en `reservas` porque su migración es
+ * opcional. PostgREST rechaza el lote ENTERO por una columna desconocida, así que
+ * antes que dejar sin programar el mes se reintenta sin ella.
+ *
+ * El orden importa poco, pero el efecto de perder cada una no es el mismo:
+ *   · capacidad_contratada → la liquidación resuelve el pax por otros escalones.
+ *   · origen_contractual   → el adicional queda indistinguible del contrato. Eso SÍ
+ *     hay que decirlo en pantalla, no tragárselo: por eso se devuelve `omitidas`.
  */
-async function insertarReservas(filas: any[], devolverIds = false): Promise<{ data: any[] | null; error: any }> {
+const COLUMNAS_OPCIONALES = [
+  "capacidad_contratada",
+  "origen_contractual",
+  "precio_cotizado",
+  "adicional_motivo",
+  "adicional_nota",
+] as const;
+
+type ResultadoInsert = { data: any[] | null; error: any; omitidas: string[] };
+
+async function insertarReservas(filas: any[], devolverIds = false): Promise<ResultadoInsert> {
   const meter = (f: any[]) => {
     const q = supabase.from("reservas").insert(f);
     return devolverIds ? q.select("id") : q;
   };
-  const r = await meter(filas);
-  if (r.error && /capacidad_contratada/i.test(String(r.error.message)))
-    return await meter(filas.map(({ capacidad_contratada, ...resto }) => resto));
-  return r as { data: any[] | null; error: any };
+  let actuales = filas;
+  const omitidas: string[] = [];
+
+  // Un intento por columna opcional como mucho: cada reintento quita exactamente la
+  // que el error nombró, así que el bucle no puede girar más veces que columnas hay.
+  for (let i = 0; i <= COLUMNAS_OPCIONALES.length; i++) {
+    const r = await meter(actuales);
+    if (!r.error) return { data: (r as any).data ?? null, error: null, omitidas };
+    const falta = COLUMNAS_OPCIONALES.find(
+      (c) => !omitidas.includes(c) && new RegExp(`\\b${c}\\b`, "i").test(String(r.error.message))
+    );
+    if (!falta) return { data: null, error: r.error, omitidas };
+    omitidas.push(falta);
+    actuales = actuales.map((f) => {
+      const copia = { ...f };
+      delete copia[falta];
+      return copia;
+    });
+  }
+  return { data: null, error: { message: "No se pudo insertar" }, omitidas };
 }
 
 
 const DIAS_SEMANA  = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
 const UI_TO_JS_DAY = [1, 2, 3, 4, 5, 6, 0];
+
+/**
+ * Motivos por los que un adicional se cobra distinto a la tarifa del contrato.
+ * Son las mismas claves de `pacto_motivo` que ya usa Programación al cambiar un
+ * precio: si aquí se inventara otra lista, el mismo hecho quedaría archivado con
+ * dos nombres y ningún reporte podría cruzarlos.
+ */
+const MOTIVOS_ADICIONAL = [
+  { clave: "cliente_unidad_mayor", nombre: "El cliente pidió una unidad de mayor capacidad" },
+  { clave: "cliente_unidad_menor", nombre: "El cliente pidió una unidad menor" },
+  { clave: "cliente_cambio_ruta",  nombre: "Cambio de ruta, horario o paradero" },
+  { clave: "precio_renegociado",   nombre: "Importe acordado aparte con el cliente" },
+  { clave: "correccion_carga",     nombre: "Corrección de un dato" },
+];
 
 function generarFechas(inicio: string, fin: string, diasUI: boolean[]): string[] {
   if (!inicio || !fin) return [];
@@ -111,6 +157,16 @@ function nombreRuta(paradas: any[] | null): string {
   return (inicio?.nombre || "-") + " → " + (destino?.nombre || "-");
 }
 
+/** 'AAAA-MM-DD' → 'vie 12/08'. Para los chips de fechas sueltas del adicional. */
+function fechaChip(iso: string): string {
+  const d = new Date(iso + "T12:00:00");
+  if (isNaN(d.getTime())) return iso;
+  const dia = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"][d.getDay()];
+  return `${dia} ${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+const dosDecimales = (n: number) => Math.round(Number(n || 0) * 100) / 100;
+
 function inputCls() {
   return "w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0b315f]/20 focus:border-[#0b315f] transition-all";
 }
@@ -119,9 +175,23 @@ interface Props {
   clientes: Cliente[];
   onClose: () => void;
   onGenerado: (info: { lote: string; cantidad: number }) => void;
+  /**
+   * `fijo`      → el programa del mes: rango de fechas × días de la semana, precio
+   *               tomado de la cotización, y el retorno lo decide el contrato.
+   * `adicional` → lo que el cliente pide POR ENCIMA de lo contratado: fechas sueltas,
+   *               sentido a elección y precio editable.
+   *
+   * Es el MISMO modal a propósito. Los paraderos, el nombre de ruta, el vínculo
+   * ida↔retorno y la herencia del vehículo son idénticos en los dos casos; tener
+   * dos pantallas que generan servicios desde una cotización sería tener la misma
+   * regla en dos sitios, y terminarían diciendo cosas distintas.
+   */
+  modo?: ModoPrograma;
 }
 
-export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: Props) {
+export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, modo = "fijo" }: Props) {
+  const esAdicional = modo === "adicional";
+
   const [cotizaciones,     setCotizaciones]     = useState<CotizacionFija[]>([]);
   const [vehTercero,       setVehTercero]       = useState<VehiculoTercero[]>([]);
   const [empresasTer,      setEmpresasTer]      = useState<EmpresaTercerizada[]>([]);
@@ -140,6 +210,19 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
   const [nombreRetorno,    setNombreRetorno]    = useState("");
   const [nombreTocado,     setNombreTocado]     = useState(false);
 
+  // ── Estado exclusivo del modo ADICIONAL ────────────────────────────────
+  // Fechas SUELTAS: un adicional son tres salidas de días distintos, no un rango
+  // con días de la semana. Forzarlo al rango obligaba a generar de más y cancelar.
+  const [fechasSueltas,    setFechasSueltas]    = useState<string[]>([]);
+  const [fechaNueva,       setFechaNueva]       = useState<string>("");
+  const [sentidoAdic,      setSentidoAdic]      = useState<"ida" | "retorno" | "ambos">("ida");
+  const [horaRetorno,      setHoraRetorno]      = useState<string>("");
+  const [slotIdx,          setSlotIdx]          = useState(0);
+  const [precioAdic,       setPrecioAdic]       = useState<string>("");
+  const [precioTocado,     setPrecioTocado]     = useState(false);
+  const [motivoAdic,       setMotivoAdic]       = useState<string>("");
+  const [notaAdic,         setNotaAdic]         = useState<string>("");
+
   useEffect(() => {
     Promise.all([
       supabase
@@ -157,7 +240,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
     });
   }, []);
 
-  const fechasGeneradas = useMemo(
+  const fechasRango = useMemo(
     () => generarFechas(fechaInicio, fechaFin, diasUI),
     [fechaInicio, fechaFin, diasUI]
   );
@@ -175,14 +258,6 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
     if (!ini && !des) return null;
     return [{ tipo: "inicio", nombre: des }, { tipo: "destino", nombre: ini }];
   }, [cot]);
-
-  useEffect(() => {
-    if (nombreTocado) return;
-    setNombreIda(cot ? sugerirNombreRuta({ asunto: cot.asunto, paradas: cot.paradas_json, hora, sentido: "ida" }) : "");
-    setNombreRetorno(cot && tieneRetorno
-      ? sugerirNombreRuta({ asunto: cot.asunto, paradas: paradasRetornoNombre, hora: cot.hora_retorno, sentido: "retorno" })
-      : "");
-  }, [cot, hora, tieneRetorno, paradasRetornoNombre, nombreTocado]);
 
   // ── Construir slots: un slot por ítem de la cotización ──────────────────
   const slots = useMemo<Slot[]>(() => {
@@ -231,7 +306,54 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
     });
   }, [cot, vehTercero]);
 
-  const numItems       = slots.length;
+  // ── Qué se va a generar, ya resuelto por modo ───────────────────────────
+  //
+  // Un adicional es UN móvil, no el programa entero: si la cotización tiene tres
+  // ítems, generar los tres crearía tres servicios donde el cliente pidió uno. Se
+  // elige el ítem, y de él salen la tarifa de referencia, el vehículo heredado y el
+  // pax contratado.
+  const slotAdicional = slots[Math.min(slotIdx, Math.max(0, slots.length - 1))] ?? slots[0];
+  const precioReferencia = dosDecimales(slotAdicional?.precio ?? 0);
+
+  // El precio del adicional ARRANCA en el cotizado y se puede cambiar. Se DERIVA en vez
+  // de sincronizarse con un efecto: mientras nadie lo toque manda la tarifa del ítem, y
+  // así elegir otra cotización o otro móvil ya lo actualiza sin un render extra.
+  // Dejarlo en blanco haría que el caso normal —cobrar lo mismo que el contrato— exigiera
+  // teclear una cifra que el sistema ya conoce, y ahí es donde se teclea mal.
+  const precioAdicVal = precioTocado ? precioAdic : (precioReferencia ? precioReferencia.toFixed(2) : "");
+  const precioAdicNum = dosDecimales(Number(precioAdicVal.replace(",", ".")) || 0);
+  const difierePrecio = esAdicional && precioAdicNum !== precioReferencia;
+
+  const slotsAGenerar = useMemo<Slot[]>(() => {
+    if (!esAdicional) return slots;
+    if (!slotAdicional) return [];
+    return [{ ...slotAdicional, precio: precioAdicNum }];
+  }, [esAdicional, slots, slotAdicional, precioAdicNum]);
+
+  const fechas = esAdicional ? fechasSueltas : fechasRango;
+
+  // Sentido de los tramos a crear. En `fijo` lo decide el contrato; en `adicional` lo
+  // decide el operador, que es lo que hoy no se podía: pedir SOLO la salida obligaba
+  // a que el sistema creara también la entrada para cancelarla después.
+  const generaIda     = esAdicional ? sentidoAdic !== "retorno" : true;
+  const generaRetorno = esAdicional ? sentidoAdic !== "ida"     : tieneRetorno;
+  const horaRetornoEfectiva = esAdicional ? horaRetorno : (cot?.hora_retorno ?? "");
+  const tramosPorDia  = (generaIda ? 1 : 0) + (generaRetorno ? 1 : 0);
+
+  // Al puente del precio va UN solo tramo: el que existe, y si existen los dos, la
+  // IDA. Escribir el importe en ambos factura el día dos veces (ver la regla del par
+  // en lib/liquidacion-agrupacion.ts).
+  const tramoQueCobra: "ida" | "retorno" = generaIda ? "ida" : "retorno";
+
+  useEffect(() => {
+    if (nombreTocado) return;
+    setNombreIda(cot ? sugerirNombreRuta({ asunto: cot.asunto, paradas: cot.paradas_json, hora, sentido: "ida" }) : "");
+    setNombreRetorno(cot && generaRetorno
+      ? sugerirNombreRuta({ asunto: cot.asunto, paradas: paradasRetornoNombre, hora: horaRetornoEfectiva, sentido: "retorno" })
+      : "");
+  }, [cot, hora, generaRetorno, horaRetornoEfectiva, paradasRetornoNombre, nombreTocado]);
+
+  const numItems       = slotsAGenerar.length;
   const esMultiVehiculo = numItems > 1;
 
   const clienteNombre = (id: number | null) => {
@@ -240,24 +362,52 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
     return c ? (c.empresa || c.nombre) : "Cliente #" + id;
   };
 
-  const precioDiaTotal   = slots.reduce((acc, s) => acc + s.precio, 0);
-  const totalServicios   = fechasGeneradas.length * numItems * (tieneRetorno ? 2 : 1);
-  const puedeGenerar     = !!cotizacionId && !!fechaInicio && !!fechaFin && diasUI.some(Boolean) && fechasGeneradas.length > 0;
+  const precioDiaTotal = slotsAGenerar.reduce((acc, s) => acc + s.precio, 0);
+  const totalServicios = fechas.length * numItems * Math.max(1, tramosPorDia);
+
+  // Qué falta para poder generar. Se devuelve el MOTIVO, no un booleano: el botón
+  // deshabilitado sin explicación es la forma más rápida de que alguien crea que el
+  // ERP está roto.
+  const faltaPara: string | null = (() => {
+    if (!cotizacionId) return "Elige la cotización de la que salen los paraderos.";
+    if (esAdicional) {
+      if (fechasSueltas.length === 0) return "Agrega al menos una fecha.";
+      if (generaRetorno && !horaRetornoEfectiva) return "Falta la hora del retorno.";
+      if (difierePrecio && !motivoAdic)
+        return "El precio no es el de la cotización: elige el motivo.";
+      return null;
+    }
+    if (!fechaInicio || !fechaFin) return "Falta el rango de fechas.";
+    if (!diasUI.some(Boolean)) return "Selecciona al menos un día de la semana.";
+    if (fechasRango.length === 0) return "El rango no produce ninguna fecha.";
+    return null;
+  })();
+  const puedeGenerar = faltaPara === null;
+
+  const agregarFecha = (f: string) => {
+    // El picker dispara onChange con años a medio teclear ("0002-08-12"). Sin este
+    // filtro, la lista se llena de fechas imposibles que después hay que quitar.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(f) || Number(f.slice(0, 4)) < 2000) return;
+    setFechasSueltas(prev => prev.includes(f) ? prev : [...prev, f].sort());
+    setFechaNueva("");
+  };
 
   // ── Generación ───────────────────────────────────────────────────────────
   const confirmar = async () => {
     if (!puedeGenerar || !cot) return;
 
     const lineasMsg = esMultiVehiculo
-      ? `${numItems} vehículos × ${fechasGeneradas.length} días`
-      : `${fechasGeneradas.length} días`;
-    const retMsg = tieneRetorno ? " × IDA+RETORNO" : "";
-    if (!confirm(`¿Generar ${lineasMsg}${retMsg} = ${totalServicios} servicios en total?`)) return;
+      ? `${numItems} vehículos × ${fechas.length} días`
+      : `${fechas.length} ${esAdicional ? "fecha(s)" : "días"}`;
+    const retMsg = tramosPorDia === 2 ? " × IDA+RETORNO" : generaRetorno ? " (solo RETORNO)" : "";
+    const encabezado = esAdicional ? "¿Generar el ADICIONAL?" : "";
+    if (!confirm(`${encabezado}\n${lineasMsg}${retMsg} = ${totalServicios} servicios en total.`)) return;
 
     setGenerando(true);
 
     const lote = crypto.randomUUID();
     let totalInsertados = 0;
+    const omitidasTotal = new Set<string>();
 
     const origenIda      = cot.paradas_json?.find((p: any) => p.tipo === "inicio")?.nombre  || "Sin especificar";
     const destinoIda     = cot.paradas_json?.find((p: any) => p.tipo === "destino")?.nombre || "Sin especificar";
@@ -265,9 +415,37 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
     const origenRetorno  = cot.paradas_retorno_json?.find((p: any) => p.tipo === "inicio")?.nombre  || destinoIda;
     const destinoRetorno = cot.paradas_retorno_json?.find((p: any) => p.tipo === "destino")?.nombre || origenIda;
 
-    const BATCH = 50;
+    // Marca de origen. En `fijo` no se escribe NADA: la columna tiene default
+    // 'contrato' y mandarlo explícito solo agregaría una columna más que puede faltar
+    // y hacer reintentar el lote entero de un programa de 600 servicios.
+    const camposOrigen = esAdicional
+      ? {
+          origen_contractual: "adicional",
+          // De cuánto se partió, congelado hoy: si el contrato se renegocia, la
+          // diferencia tiene que seguir midiéndose contra lo que regía este día.
+          precio_cotizado:    precioReferencia || null,
+          adicional_motivo:   difierePrecio ? (motivoAdic || null) : null,
+          adicional_nota:     notaAdic.trim() || null,
+        }
+      : {};
 
-    for (const slot of slots) {
+    const BATCH = 50;
+    const meter = async (filas: any[], devolverIds: boolean, etiqueta: string): Promise<number[] | null> => {
+      const ids: number[] = [];
+      for (let i = 0; i < filas.length; i += BATCH) {
+        const { data, error, omitidas } = await insertarReservas(filas.slice(i, i + BATCH), devolverIds);
+        omitidas.forEach(c => omitidasTotal.add(c));
+        if (error) {
+          alert(`Error al generar servicios${etiqueta ? " de " + etiqueta : ""}: ` + error.message);
+          setGenerando(false);
+          return null;
+        }
+        if (devolverIds) ids.push(...(data || []).map((r: any) => r.id));
+      }
+      return ids;
+    };
+
+    for (const slot of slotsAGenerar) {
       // Campos de vehículo según tipo de asignación
       const camposVehiculo = slot.tipo === "tercerizada"
         ? {
@@ -282,98 +460,75 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
             ...(slot.vehiculo_id ? { vehiculo_id: slot.vehiculo_id } : {}),
           };
 
-      const camposBase = {
+      const camposComunes = {
         cotizacion_id:         cot.id,
         cliente_id:            cot.cliente_id,
+        estado:                "pendiente",
+        costo_proveedor:       0,
+        tipo_servicio_detalle: cot.tipo_servicio || "transporte_personal",
+        lote_generacion:       lote,
+        ...camposVehiculo,
+        ...camposOrigen,
+      };
+
+      const camposIda = {
+        ...camposComunes,
         // Snapshot de lo CONTRATADO: es lo que imprimirá la liquidación, y tiene que
         // sobrevivir a que el contrato se renegocie más adelante.
         capacidad_contratada:  slot.pax_contratado,
         hora_servicio:         hora,
-        estado:                "pendiente",
-        costo_proveedor:       0,
-        tipo_servicio_detalle: cot.tipo_servicio || "transporte_personal",
         paradas_json:          cot.paradas_json,
         origen:                origenIda,
         destino:               destinoIda,
         ruta_nombre:           nombreIda.trim() || null,
-        lote_generacion:       lote,
-        ...camposVehiculo,
+        // En `fijo` sin retorno se omitía el sentido y la liquidación lo deducía del
+        // nombre de la ruta. Se mantiene ese comportamiento tal cual; en `adicional`
+        // el sentido es una decisión explícita del operador y se guarda como tal.
+        ...(generaRetorno || esAdicional ? { direccion_servicio: "ida" } : {}),
+        precio_cliente:        tramoQueCobra === "ida" ? slot.precio : 0,
       };
 
-      if (!tieneRetorno) {
-        // ── Solo IDA ────────────────────────────────────────────────────
-        const filas = fechasGeneradas.map(fecha => ({
-          ...camposBase,
-          fecha_servicio: fecha,
-          precio_cliente: slot.precio,
-        }));
+      const camposRet = {
+        ...camposComunes,
+        // El retorno solo lleva la capacidad contratada cuando ES el servicio (el
+        // adicional de solo salida). En un par la lleva la ida, que es la cabeza que
+        // lee la liquidación.
+        ...(generaIda ? {} : { capacidad_contratada: slot.pax_contratado }),
+        hora_servicio:         horaRetornoEfectiva,
+        paradas_json:          paradasRetorno,
+        origen:                origenRetorno,
+        destino:               destinoRetorno,
+        ruta_nombre:           nombreRetorno.trim() || null,
+        direccion_servicio:    "retorno",
+        precio_cliente:        tramoQueCobra === "retorno" ? slot.precio : 0,
+        // El precio de referencia acompaña SOLO al tramo que cobra: en el otro, un
+        // "cotizado S/ 350 · cobrado S/ 0" se leería como un descuento del 100 %.
+        ...(esAdicional && tramoQueCobra !== "retorno" ? { precio_cotizado: null } : {}),
+      };
 
-        for (let i = 0; i < filas.length; i += BATCH) {
-          const { error } = await insertarReservas(filas.slice(i, i + BATCH));
-          if (error) {
-            alert("Error al generar servicios: " + error.message);
-            setGenerando(false);
-            return;
-          }
-        }
+      // ── Un solo tramo ───────────────────────────────────────────────────
+      if (tramosPorDia === 1) {
+        const base = generaIda ? camposIda : camposRet;
+        const filas = fechas.map(fecha => ({ ...base, fecha_servicio: fecha }));
+        const ids = await meter(filas, false, "");
+        if (ids === null) return;
         totalInsertados += filas.length;
 
       } else {
         // ── Par IDA + RETORNO vinculados ────────────────────────────────
 
         // 1. Insertar IDAs y obtener sus IDs
-        const filasIda = fechasGeneradas.map(fecha => ({
-          ...camposBase,
-          fecha_servicio:     fecha,
-          precio_cliente:     slot.precio,
-          direccion_servicio: "ida",
-        }));
-
-        const idasIds: number[] = [];
-        for (let i = 0; i < filasIda.length; i += BATCH) {
-          const { data, error } = await insertarReservas(filasIda.slice(i, i + BATCH), true);
-          if (error) {
-            alert("Error al generar servicios de IDA: " + error.message);
-            setGenerando(false);
-            return;
-          }
-          idasIds.push(...(data || []).map((r: any) => r.id));
-        }
+        const idasIds = await meter(
+          fechas.map(fecha => ({ ...camposIda, fecha_servicio: fecha })), true, "IDA"
+        );
+        if (idasIds === null) return;
 
         // 2. Insertar RETORNOs con referencia a cada IDA
-        const camposBaseRetorno = {
-          cotizacion_id:         cot.id,
-          cliente_id:            cot.cliente_id,
-          hora_servicio:         cot.hora_retorno,
-          estado:                "pendiente",
-          precio_cliente:        0,           // El precio del par va en la IDA
-          costo_proveedor:       0,
-          tipo_servicio_detalle: cot.tipo_servicio || "transporte_personal",
-          paradas_json:          paradasRetorno,
-          origen:                origenRetorno,
-          destino:               destinoRetorno,
-          ruta_nombre:           nombreRetorno.trim() || null,
-          direccion_servicio:    "retorno",
-          lote_generacion:       lote,
-          ...camposVehiculo,
-        };
-
-        const filasRetorno = fechasGeneradas.map((fecha, idx) => ({
-          ...camposBaseRetorno,
-          fecha_servicio:       fecha,
-          reserva_vinculada_id: idasIds[idx],
-        }));
-
-        const retornosIds: number[] = [];
-        for (let i = 0; i < filasRetorno.length; i += BATCH) {
-          const { data, error } = await insertarReservas(filasRetorno.slice(i, i + BATCH), true);
-          if (error) {
-            alert("Error al generar servicios de RETORNO: " + error.message);
-            setGenerando(false);
-            return;
-          }
-          retornosIds.push(...(data || []).map((r: any) => r.id));
-        }
+        const retornosIds = await meter(
+          fechas.map((fecha, idx) => ({ ...camposRet, fecha_servicio: fecha, reserva_vinculada_id: idasIds[idx] })),
+          true, "RETORNO"
+        );
+        if (retornosIds === null) return;
 
         // 3. Enlace bidireccional: actualizar IDAs con ID del RETORNO
         await Promise.all(
@@ -390,6 +545,19 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
     }
 
     setGenerando(false);
+
+    // Si la base todavía no tiene la columna de origen, los servicios SÍ se crearon
+    // pero nacieron indistinguibles de los del contrato. Callarlo dejaría al operador
+    // buscando en la liquidación un subtotal de adicionales que nunca va a aparecer.
+    if (esAdicional && omitidasTotal.has("origen_contractual")) {
+      alert(
+        `Se crearon ${totalInsertados} servicio(s), pero NO quedaron marcados como ADICIONAL: ` +
+        `la base todavía no tiene esa columna.\n\n` +
+        `Corre supabase/reservas-04-servicios-adicionales.sql en Supabase y vuelve a marcarlos, ` +
+        `o la liquidación los cobrará junto a los del contrato.`
+      );
+    }
+
     onGenerado({ lote, cantidad: totalInsertados });
     onClose();
   };
@@ -408,49 +576,52 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
 
   // ── Preview ───────────────────────────────────────────────────────────
   const previewLabel = () => {
-    if (fechasGeneradas.length === 0) return null;
-    const diasStr = `${fechasGeneradas.length} día${fechasGeneradas.length !== 1 ? "s" : ""}`;
+    if (fechas.length === 0) return null;
+    const diasStr = `${fechas.length} ${esAdicional ? (fechas.length === 1 ? "fecha" : "fechas") : `día${fechas.length !== 1 ? "s" : ""}`}`;
+    const importe = precioDiaTotal > 0
+      ? <span className="opacity-70"> · S/ {(fechas.length * precioDiaTotal).toLocaleString("es-PE", { minimumFractionDigits: 2 })} total est.</span>
+      : null;
 
-    if (tieneRetorno && esMultiVehiculo) {
+    if (tramosPorDia === 2 && esMultiVehiculo) {
       return (
         <><b>{diasStr} × {numItems} vehículos × IDA+RETORNO</b>
-          <span className="opacity-70"> = {totalServicios} servicios</span>
-          {precioDiaTotal > 0 && <span className="opacity-70"> · S/ {(fechasGeneradas.length * precioDiaTotal).toLocaleString("es-PE", { minimumFractionDigits: 2 })} total est.</span>}
+          <span className="opacity-70"> = {totalServicios} servicios</span>{importe}
         </>
       );
     }
-    if (tieneRetorno) {
+    if (tramosPorDia === 2) {
       return (
-        <><b>{fechasGeneradas.length} pares IDA+RETORNO</b>
-          <span className="opacity-70"> ({fechasGeneradas.length * 2} servicios)</span>
-          {precioDiaTotal > 0 && <span className="opacity-70"> · S/ {(fechasGeneradas.length * precioDiaTotal).toLocaleString("es-PE", { minimumFractionDigits: 2 })} total est.</span>}
+        <><b>{fechas.length} pares IDA+RETORNO</b>
+          <span className="opacity-70"> ({fechas.length * 2} servicios)</span>{importe}
         </>
       );
     }
     if (esMultiVehiculo) {
       return (
         <><b>{diasStr} × {numItems} vehículos</b>
-          <span className="opacity-70"> = {totalServicios} servicios</span>
-          {precioDiaTotal > 0 && <span className="opacity-70"> · S/ {(fechasGeneradas.length * precioDiaTotal).toLocaleString("es-PE", { minimumFractionDigits: 2 })} total est.</span>}
+          <span className="opacity-70"> = {totalServicios} servicios</span>{importe}
         </>
       );
     }
     return (
-      <><b>{fechasGeneradas.length} servicios</b> a generar
-        {precioDiaTotal > 0 && <span className="ml-2 opacity-70">· S/ {(fechasGeneradas.length * precioDiaTotal).toLocaleString("es-PE", { minimumFractionDigits: 2 })} total est.</span>}
+      <><b>{totalServicios} servicio{totalServicios !== 1 ? "s" : ""}</b>
+        {generaRetorno && !generaIda ? " de RETORNO" : ""} a generar{importe}
       </>
     );
   };
 
   const botonLabel = () => {
-    if (generando)   return "Generando...";
-    if (!puedeGenerar) return "Generar programa";
-    return `Generar ${totalServicios} servicio${totalServicios !== 1 ? "s" : ""}`;
+    if (generando)     return "Generando...";
+    if (!puedeGenerar) return esAdicional ? "Registrar adicional" : "Generar programa";
+    return `${esAdicional ? "Registrar" : "Generar"} ${totalServicios} servicio${totalServicios !== 1 ? "s" : ""}`;
   };
 
-  const previewColor = tieneRetorno || esMultiVehiculo
-    ? { bg: "#ede9fe", text: "#5b21b6" }
-    : { bg: "#dcfce7", text: "#166534" };
+  const acento = esAdicional ? "#b45309" : "#0b315f";
+  const previewColor = esAdicional
+    ? { bg: "#fef3c7", text: "#854d0e" }
+    : tramosPorDia === 2 || esMultiVehiculo
+      ? { bg: "#ede9fe", text: "#5b21b6" }
+      : { bg: "#dcfce7", text: "#166534" };
 
   // ── Render ───────────────────────────────────────────────────────────────
   return (
@@ -461,12 +632,18 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
         {/* Header — fijo, nunca se desplaza */}
         <div className="flex items-center justify-between px-6 py-4 border-b shrink-0" style={{ borderColor: "#e2e8f0" }}>
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white shrink-0" style={{ background: "#0b315f" }}>
-              <Calendar size={18} />
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white shrink-0" style={{ background: acento }}>
+              {esAdicional ? <Sparkles size={18} /> : <Calendar size={18} />}
             </div>
             <div>
-              <h2 className="text-lg font-bold text-gray-900">Generar programa fijo</h2>
-              <p className="text-xs text-gray-400">Crea múltiples servicios desde una cotización</p>
+              <h2 className="text-lg font-bold text-gray-900">
+                {esAdicional ? "Servicio adicional" : "Generar programa fijo"}
+              </h2>
+              <p className="text-xs text-gray-400">
+                {esAdicional
+                  ? "Lo que el cliente pide por encima de lo contratado, con su propio precio"
+                  : "Crea múltiples servicios desde una cotización"}
+              </p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 rounded-xl hover:bg-gray-100 transition-colors shrink-0">
@@ -479,7 +656,9 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
 
           {/* Selector de cotización */}
           <div>
-            <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Cotización fija *</label>
+            <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+              {esAdicional ? "Cotización · de aquí salen los paraderos *" : "Cotización fija *"}
+            </label>
             {cargando ? (
               <p className="text-sm text-gray-400 py-2">Cargando cotizaciones...</p>
             ) : cotizaciones.length === 0 ? (
@@ -488,11 +667,14 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
               <select className={inputCls()} value={cotizacionId} onChange={e => {
                 setCotizacionId(e.target.value);
                 setNombreTocado(false); // otra cotización ⇒ otra ruta: vuelve a sugerir
+                setPrecioTocado(false); // …y otra tarifa de referencia
+                setSlotIdx(0);
                 // La hora arranca en la del contrato (primer paradero → hora_ida). Tipearla a mano
                 // es lo que deja reservas.hora_servicio desfasada de los paraderos reales.
                 const c = cotizaciones.find(c => c.id === Number(e.target.value));
                 const h = String(c?.paradas_json?.find(p => p.tipo === "inicio")?.hora || c?.hora_ida || "").slice(0, 5);
                 if (h) setHora(h);
+                setHoraRetorno(String(c?.hora_retorno || "").slice(0, 5));
               }}>
                 <option value="">Seleccionar cotización...</option>
                 {cotizaciones.map(c => (
@@ -510,7 +692,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
               <div className="mt-2 rounded-xl px-4 py-3 text-xs space-y-1.5" style={{ background: "#eef3f8", color: "#0b315f" }}>
                 <p><b>Cliente:</b> {clienteNombre(cot.cliente_id)}</p>
                 <p><b>Ruta IDA:</b> {nombreRuta(cot.paradas_json)}</p>
-                {tieneRetorno && (
+                {(tieneRetorno || generaRetorno) && (
                   <p>
                     <b>Ruta RETORNO:</b>{" "}
                     {cot.paradas_retorno_json?.length
@@ -519,14 +701,14 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
                   </p>
                 )}
 
-                {/* Lista de slots/vehículos */}
-                {esMultiVehiculo && (
+                {/* Lista de slots/vehículos (solo en el programa fijo: el adicional elige uno) */}
+                {!esAdicional && esMultiVehiculo && (
                   <div className="pt-1.5 mt-0.5 border-t" style={{ borderColor: "#0b315f22" }}>
                     <div className="flex items-center gap-1.5 mb-1 font-bold">
                       <Layers size={11} className="shrink-0" />
                       {numItems} vehículos detectados:
                     </div>
-                    {slots.map((s, idx) => (
+                    {slotsAGenerar.map((s, idx) => (
                       <p key={idx} className="pl-3 opacity-80">
                         {idx + 1}. {s.descripcion || `Vehículo ${idx + 1}`}
                         {s.placa ? <span className="font-semibold ml-1">· {s.placa}</span> : ""}
@@ -543,21 +725,21 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
 
                 {/* Resumen de lo que se generará */}
                 <div className="pt-1.5 mt-0.5 border-t flex items-start gap-2" style={{ borderColor: "#0b315f22" }}>
-                  {tieneRetorno ? <ArrowLeftRight size={13} className="shrink-0 mt-0.5" /> : <Layers size={13} className="shrink-0 mt-0.5" />}
+                  {tramosPorDia === 2 ? <ArrowLeftRight size={13} className="shrink-0 mt-0.5" /> : <Layers size={13} className="shrink-0 mt-0.5" />}
                   <div>
-                    {tieneRetorno && esMultiVehiculo && (
-                      <p><b>Por día:</b> {numItems} IDA + {numItems} RETORNO ({cot.hora_retorno}) = <b>{numItems * 2} servicios</b></p>
+                    {tramosPorDia === 2 && esMultiVehiculo && (
+                      <p><b>Por día:</b> {numItems} IDA + {numItems} RETORNO ({horaRetornoEfectiva}) = <b>{numItems * 2} servicios</b></p>
                     )}
-                    {tieneRetorno && !esMultiVehiculo && (
-                      <p><b>Por día:</b> 1 IDA + 1 RETORNO ({cot.hora_retorno}) enlazados</p>
+                    {tramosPorDia === 2 && !esMultiVehiculo && (
+                      <p><b>Por día:</b> 1 IDA + 1 RETORNO ({horaRetornoEfectiva}) enlazados</p>
                     )}
-                    {!tieneRetorno && esMultiVehiculo && (
+                    {tramosPorDia === 1 && esMultiVehiculo && (
                       <p><b>Por día:</b> {numItems} servicios (uno por vehículo)</p>
                     )}
-                    {!tieneRetorno && !esMultiVehiculo && (
-                      <p><b>Por día:</b> 1 servicio — S/ {precioDiaTotal.toFixed(2)}</p>
+                    {tramosPorDia === 1 && !esMultiVehiculo && (
+                      <p><b>Por día:</b> 1 {generaIda ? "IDA" : "RETORNO"} — S/ {precioDiaTotal.toFixed(2)}</p>
                     )}
-                    {tieneRetorno && (
+                    {tramosPorDia === 2 && (
                       <p className="opacity-60 text-[10px]">Precio en IDA · RETORNO = S/ 0.00 (par = un solo cobro)</p>
                     )}
                   </div>
@@ -566,78 +748,247 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
             )}
           </div>
 
-          {/* Rango de fechas */}
-          <div className="grid grid-cols-2 gap-4">
+          {/* ── ADICIONAL: qué móvil de la cotización se toma como referencia ── */}
+          {esAdicional && cot && slots.length > 1 && (
             <div>
-              <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Fecha inicio *</label>
-              <input type="date" className={inputCls()} value={fechaInicio} onChange={e => setFechaInicio(e.target.value)} />
+              <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                Móvil de la cotización *
+              </label>
+              <select className={inputCls()} value={slotIdx} onChange={e => { setSlotIdx(Number(e.target.value)); setPrecioTocado(false); }}>
+                {slots.map((s, idx) => (
+                  <option key={idx} value={idx}>
+                    {idx + 1}. {s.descripcion || `Vehículo ${idx + 1}`} — S/ {Number(s.precio).toFixed(2)}
+                    {s.pax_contratado ? ` · ${s.pax_contratado} pax` : ""}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[10px] text-gray-400 mt-1 leading-snug">
+                Un adicional es UN móvil: de aquí salen la tarifa de referencia, el vehículo
+                heredado y el pax contratado. {slotRecursoLabel(slotAdicional)}
+              </p>
             </div>
-            <div>
-              <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Fecha fin *</label>
-              <input type="date" className={inputCls()} value={fechaFin} onChange={e => setFechaFin(e.target.value)} />
-            </div>
-          </div>
+          )}
 
-          {/* Días de semana */}
-          <div>
-            <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-2">Días de la semana *</label>
-            <div className="flex gap-2">
-              {DIAS_SEMANA.map((dia, i) => (
+          {/* ── Fechas ─────────────────────────────────────────────────── */}
+          {esAdicional ? (
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                Fechas del adicional *
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="date"
+                  className={inputCls()}
+                  value={fechaNueva}
+                  onChange={e => setFechaNueva(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); agregarFecha(fechaNueva); } }}
+                />
                 <button
-                  key={dia}
                   type="button"
-                  onClick={() => toggleDia(i)}
-                  className="flex-1 py-2 rounded-xl text-xs font-bold transition-all border-2"
-                  style={{
-                    background:  diasUI[i] ? "#0b315f" : "white",
-                    color:       diasUI[i] ? "white"   : "#9ca3af",
-                    borderColor: diasUI[i] ? "#0b315f" : "#e5e7eb",
-                  }}
+                  onClick={() => agregarFecha(fechaNueva)}
+                  disabled={!fechaNueva}
+                  className="px-4 rounded-xl font-bold text-sm text-white disabled:opacity-40 shrink-0 flex items-center gap-1"
+                  style={{ background: acento }}
                 >
-                  {dia}
+                  <Plus size={14} /> Agregar
                 </button>
-              ))}
+              </div>
+              {fechasSueltas.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {fechasSueltas.map(f => (
+                    <span key={f} className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold"
+                          style={{ background: "#fef3c7", color: "#854d0e" }}>
+                      {fechaChip(f)}
+                      <button type="button" onClick={() => setFechasSueltas(prev => prev.filter(x => x !== f))}
+                              className="opacity-60 hover:opacity-100">
+                        <X size={11} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <p className="text-[10px] text-gray-400 mt-1 leading-snug">
+                Fechas sueltas, no un rango: un adicional son tres salidas de días distintos.
+              </p>
             </div>
-          </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Fecha inicio *</label>
+                  <input type="date" className={inputCls()} value={fechaInicio} onChange={e => setFechaInicio(e.target.value)} />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Fecha fin *</label>
+                  <input type="date" className={inputCls()} value={fechaFin} onChange={e => setFechaFin(e.target.value)} />
+                </div>
+              </div>
+
+              {/* Días de semana */}
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-2">Días de la semana *</label>
+                <div className="flex gap-2">
+                  {DIAS_SEMANA.map((dia, i) => (
+                    <button
+                      key={dia}
+                      type="button"
+                      onClick={() => toggleDia(i)}
+                      className="flex-1 py-2 rounded-xl text-xs font-bold transition-all border-2"
+                      style={{
+                        background:  diasUI[i] ? "#0b315f" : "white",
+                        color:       diasUI[i] ? "white"   : "#9ca3af",
+                        borderColor: diasUI[i] ? "#0b315f" : "#e5e7eb",
+                      }}
+                    >
+                      {dia}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* ── ADICIONAL: sentido ─────────────────────────────────────── */}
+          {esAdicional && (
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-2">Sentido *</label>
+              <div className="flex gap-2">
+                {([
+                  { v: "ida",     t: "Solo ida" },
+                  { v: "retorno", t: "Solo salida" },
+                  { v: "ambos",   t: "Ida y salida" },
+                ] as const).map(o => (
+                  <button
+                    key={o.v}
+                    type="button"
+                    onClick={() => { setSentidoAdic(o.v); setNombreTocado(false); }}
+                    className="flex-1 py-2 rounded-xl text-xs font-bold transition-all border-2"
+                    style={{
+                      background:  sentidoAdic === o.v ? acento : "white",
+                      color:       sentidoAdic === o.v ? "white" : "#9ca3af",
+                      borderColor: sentidoAdic === o.v ? acento : "#e5e7eb",
+                    }}
+                  >
+                    {o.t}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-gray-400 mt-1 leading-snug">
+                El programa fijo crea siempre los dos tramos. Aquí se elige: pedir solo la
+                salida ya no obliga a crear la entrada para cancelarla después.
+              </p>
+            </div>
+          )}
 
           {/* Horas */}
           <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
-                {tieneRetorno ? "Hora salida IDA" : "Hora de salida"}
-              </label>
-              <input type="time" className={inputCls()} value={hora} onChange={e => setHora(e.target.value)} />
-            </div>
-            {tieneRetorno && (
+            {generaIda && (
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
-                  Hora salida RETORNO
+                  {tramosPorDia === 2 ? "Hora salida IDA" : "Hora de salida"}
                 </label>
-                <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50">
-                  <ArrowRight size={14} className="text-gray-400 shrink-0" style={{ transform: "scaleX(-1)" }} />
-                  <span className="text-sm font-bold text-gray-700">{cot?.hora_retorno}</span>
-                  <span className="text-[10px] text-gray-400 ml-auto">desde cotización</span>
-                </div>
+                <input type="time" className={inputCls()} value={hora} onChange={e => setHora(e.target.value)} />
+              </div>
+            )}
+            {generaRetorno && (
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                  {generaIda ? "Hora salida RETORNO" : "Hora de la salida"}
+                </label>
+                {esAdicional ? (
+                  // Editable: el adicional puede salir a otra hora que el contrato, y ahí
+                  // está justo la razón de que sea adicional.
+                  <input type="time" className={inputCls()} value={horaRetorno} onChange={e => setHoraRetorno(e.target.value)} />
+                ) : (
+                  <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50">
+                    <ArrowRight size={14} className="text-gray-400 shrink-0" style={{ transform: "scaleX(-1)" }} />
+                    <span className="text-sm font-bold text-gray-700">{cot?.hora_retorno}</span>
+                    <span className="text-[10px] text-gray-400 ml-auto">desde cotización</span>
+                  </div>
+                )}
               </div>
             )}
           </div>
+
+          {/* ── ADICIONAL: precio y motivo ─────────────────────────────── */}
+          {esAdicional && cot && (
+            <div className="rounded-xl border-2 p-4 space-y-3" style={{ borderColor: "#fde68a", background: "#fffbeb" }}>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wide mb-1" style={{ color: "#854d0e" }}>
+                  Precio por servicio *
+                </label>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-bold" style={{ color: "#854d0e" }}>S/</span>
+                  <input
+                    type="number" step="0.01" min="0"
+                    className={inputCls()}
+                    value={precioAdicVal}
+                    onChange={e => { setPrecioTocado(true); setPrecioAdic(e.target.value); }}
+                    placeholder="0.00"
+                  />
+                </div>
+                <p className="text-[11px] mt-1.5" style={{ color: difierePrecio ? "#b45309" : "#78716c" }}>
+                  {precioReferencia > 0
+                    ? <>Cotizado: <b>S/ {precioReferencia.toFixed(2)}</b>
+                        {difierePrecio && (
+                          <> · lo estás cobrando <b>S/ {Math.abs(precioAdicNum - precioReferencia).toFixed(2)} {precioAdicNum > precioReferencia ? "más" : "menos"}</b></>
+                        )}
+                      </>
+                    : "La cotización no tiene precio para este móvil: escribe el del adicional."}
+                </p>
+              </div>
+
+              {/* El motivo solo aparece cuando hace falta. Pedirlo siempre lo convierte en
+                  un campo que se rellena con lo primero de la lista. */}
+              {difierePrecio && (
+                <>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wide mb-1" style={{ color: "#854d0e" }}>
+                      Motivo del precio distinto *
+                    </label>
+                    <select className={inputCls()} value={motivoAdic} onChange={e => setMotivoAdic(e.target.value)}>
+                      <option value="">Seleccionar motivo...</option>
+                      {MOTIVOS_ADICIONAL.map(m => <option key={m.clave} value={m.clave}>{m.nombre}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wide mb-1" style={{ color: "#854d0e" }}>
+                      Nota (opcional)
+                    </label>
+                    <input
+                      className={inputCls()}
+                      value={notaAdic}
+                      onChange={e => setNotaAdic(e.target.value)}
+                      placeholder="Quién lo pidió, por qué correo, qué se acordó…"
+                    />
+                    <p className="text-[10px] mt-1 leading-snug" style={{ color: "#92400e" }}>
+                      Es el único sitio donde queda escrito el porqué: un adicional nace con su
+                      precio, así que no dispara el acta de conformidad del cliente.
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Nombre de ruta — lo que verá el pasajero al elegir su bus */}
           {cot && (
             <div>
               <label className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
                 <Signpost size={12} className="shrink-0" />
-                Nombre de ruta {tieneRetorno ? "(IDA)" : ""}
+                Nombre de ruta {tramosPorDia === 2 ? "(IDA)" : generaIda ? "" : "(RETORNO)"}
               </label>
-              <input
-                className={inputCls()}
-                value={nombreIda}
-                onChange={e => { setNombreTocado(true); setNombreIda(e.target.value); }}
-                placeholder="Ej. RUTA B/ ENTRADA 05:10/ CHILCA→BSF PUNTA HERMOSA"
-              />
-              {tieneRetorno && (
+              {generaIda && (
                 <input
-                  className={inputCls() + " mt-2"}
+                  className={inputCls()}
+                  value={nombreIda}
+                  onChange={e => { setNombreTocado(true); setNombreIda(e.target.value); }}
+                  placeholder="Ej. RUTA B/ ENTRADA 05:10/ CHILCA→BSF PUNTA HERMOSA"
+                />
+              )}
+              {generaRetorno && (
+                <input
+                  className={inputCls() + (generaIda ? " mt-2" : "")}
                   value={nombreRetorno}
                   onChange={e => { setNombreTocado(true); setNombreRetorno(e.target.value); }}
                   placeholder="Nombre de ruta (RETORNO)"
@@ -646,13 +997,13 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
               <p className="text-[10px] text-gray-400 mt-1 leading-snug">
                 Así lo verá el pasajero al elegir su bus. Sugerido desde la cotización;
                 corrígelo aquí y se aplica a los {totalServicios || 0} servicios de una vez.
-                {!nombreIda && " Si lo dejas vacío habrá que ponerlo servicio por servicio."}
+                {generaIda && !nombreIda && " Si lo dejas vacío habrá que ponerlo servicio por servicio."}
               </p>
             </div>
           )}
 
           {/* Preview */}
-          {fechasGeneradas.length > 0 && (
+          {fechas.length > 0 && (
             <div
               className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm"
               style={{ background: previewColor.bg, color: previewColor.text }}
@@ -661,12 +1012,12 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
               <div>{previewLabel()}</div>
             </div>
           )}
-          {fechaInicio && fechaFin && !diasUI.some(Boolean) && (
+          {!esAdicional && fechaInicio && fechaFin && !diasUI.some(Boolean) && (
             <div className="rounded-xl px-4 py-3 text-sm" style={{ background: "#fef9c3", color: "#854d0e" }}>
               Selecciona al menos un día de la semana.
             </div>
           )}
-          {fechaInicio && fechaFin && new Date(fechaInicio) > new Date(fechaFin) && (
+          {!esAdicional && fechaInicio && fechaFin && new Date(fechaInicio) > new Date(fechaFin) && (
             <div className="rounded-xl px-4 py-3 text-sm" style={{ background: "#fee2e2", color: "#991b1b" }}>
               La fecha de inicio debe ser anterior a la fecha de fin.
             </div>
@@ -675,18 +1026,25 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado }: 
         </div>
 
         {/* Footer — fijo, siempre visible */}
-        <div className="flex gap-3 px-6 py-4 border-t shrink-0" style={{ borderColor: "#e2e8f0" }}>
-          <button
-            onClick={confirmar}
-            disabled={!puedeGenerar || generando}
-            className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-40 transition-all"
-            style={{ background: "#0b315f" }}
-          >
-            {botonLabel()}
-          </button>
-          <button onClick={onClose} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
-            Cancelar
-          </button>
+        <div className="px-6 py-4 border-t shrink-0 space-y-2" style={{ borderColor: "#e2e8f0" }}>
+          {/* Por qué no se puede generar todavía. Un botón apagado y mudo se lee como
+              "el sistema está roto". */}
+          {faltaPara && cotizacionId && (
+            <p className="text-xs text-center" style={{ color: "#b45309" }}>{faltaPara}</p>
+          )}
+          <div className="flex gap-3">
+            <button
+              onClick={confirmar}
+              disabled={!puedeGenerar || generando}
+              className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-40 transition-all"
+              style={{ background: acento }}
+            >
+              {botonLabel()}
+            </button>
+            <button onClick={onClose} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
+              Cancelar
+            </button>
+          </div>
         </div>
 
       </div>

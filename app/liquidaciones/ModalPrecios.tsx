@@ -210,13 +210,21 @@ export default function ModalPrecios({
     if (!clientes.length || !grupos.length) return;
     let vivo = true;
     (async () => {
-      const { data } = await supabase
+      const COLS = "id,codigo,cliente_id,fecha_servicio,ruta_nombre,origen,destino,precio_cliente,vehiculo_id,vehiculo_tercero_id";
+      const pedir = (cols: string) => supabase
         .from("reservas")
-        .select("id,codigo,cliente_id,fecha_servicio,ruta_nombre,origen,destino,precio_cliente,vehiculo_id,vehiculo_tercero_id")
+        .select(cols)
         .in("cliente_id", clientes)
         .gt("precio_cliente", 0)
         .order("fecha_servicio", { ascending: false })
         .limit(600);
+      // `origen_contractual` es de supabase/reservas-04 y aquí NO es decorativo: un
+      // adicional que se cobró S/ 480 por una unidad mayor no puede proponerse como
+      // referencia del precio contractual. Si la migración no está, se sugiere igual
+      // (es lo que se hacía hasta ahora) en vez de quedarse sin sugerencia.
+      let res = await pedir(`${COLS},origen_contractual`);
+      if (res.error) res = await pedir(COLS);
+      const data = res.data;
       if (!vivo) return;
 
       const hoy = Date.now();
@@ -226,6 +234,7 @@ export default function ModalPrecios({
         // precio anterior no es comparable y es mejor no sugerir nada.
         const previo = ((data as any[]) ?? []).find(
           (x) =>
+            String(x.origen_contractual || "contrato") === "contrato" &&
             nombreRuta(x) === g.ruta &&
             (unidadDe(x as ReservaSinPrecio) || "SIN UNIDAD ASIGNADA") === g.unidad &&
             !g.filas.some((f) => f.id === Number(x.id))

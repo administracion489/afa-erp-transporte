@@ -70,7 +70,31 @@ export type ReservaLiq = {
    * mandar un bus de 20 a una ruta contratada para 15 no cambia lo que se factura.
    */
   capacidad_contratada?: number | null;
+  /**
+   * contrato | adicional | contingencia. Lo que el cliente pidió POR ENCIMA del
+   * contrato no puede fundirse con lo contratado: entra en la clave de agrupación y
+   * la línea sale marcada como adicional, con su propio subtotal en el formato.
+   * Ausente (migración sin correr) se lee como 'contrato', el default de la base.
+   */
+  origen_contractual?: string | null;
 };
+
+/** 'contrato' cuando la columna no existe o viene vacía. */
+export const origenContractual = (r: ReservaLiq | null | undefined): string =>
+  String(r?.origen_contractual || "contrato");
+
+/**
+ * El origen del SERVICIO, no del tramo. Basta con que uno de los dos tramos esté
+ * marcado: los dos nacen del mismo lote, y si alguna vez difieren, lo que no se puede
+ * hacer es cobrar como contratado un día que se pidió aparte.
+ */
+export function origenDelPar(p: ParServicio): string {
+  for (const r of [p.cabeza, ...p.adjuntas]) {
+    const o = origenContractual(r);
+    if (o !== "contrato") return o;
+  }
+  return "contrato";
+}
 
 /** Datos de apoyo que la página resuelve una sola vez (placas, capacidades, nombres). */
 export type CatalogoLiq = {
@@ -452,7 +476,15 @@ export function precioUnitario(
 
 export type LineaAgrupada = {
   clave: string;
-  tipo: "servicio";
+  /**
+   * 'adicional' cuando el servicio no venía en el contrato. No es cosmético: el
+   * formato AFA-FL-07 pinta esas líneas aparte y las suma en su propio subtotal
+   * ("Adicionales autorizados"), que hasta ahora solo se podía llenar escribiendo el
+   * importe a mano en el editor.
+   */
+  tipo: "servicio" | "adicional";
+  /** contrato | adicional | contingencia — el valor crudo, para poder rotularlo. */
+  origen_contractual: string;
   descripcion: string;
   unidad_medida: string;
   cantidad_programada: number;
@@ -563,6 +595,7 @@ export function agruparServicios(
     nombreIda: string | null;
     nombreRetorno: string | null;
     sentido: string;
+    origen: string;
     precio: number;
     movil: number;
     moviles: number;
@@ -583,9 +616,14 @@ export function agruparServicios(
     const nombreRetorno = p.retorno ? nombreRuta(p.retorno) : null;
     const { etiqueta: ruta, fuente: fuenteRuta } = etiquetaRutaDetalle(p.ida ?? r);
     const sentido = p.sentido ?? (p.adjuntas.length ? "IDA Y RETORNO" : sentidoDeReserva(r));
-    const clave = [norm(nombreIda ?? ""), norm(nombreRetorno ?? ""), precio.toFixed(2)].join("|");
+    // El ORIGEN entra en la clave. Sin él, una salida adicional de la RUTA A cobrada a
+    // la misma tarifa del contrato se sumaba a la línea del contrato y dejaba de
+    // existir como concepto: el cliente leía "23 servicios" donde había 22 contratados
+    // y 1 pedido aparte, y el subtotal de adicionales del formato salía en cero.
+    const origen = origenDelPar(p);
+    const clave = [norm(nombreIda ?? ""), norm(nombreRetorno ?? ""), precio.toFixed(2), origen].join("|");
     const b = buckets.get(clave)
-      ?? { clave, ruta, fuenteRuta, nombreIda, nombreRetorno, sentido, precio, movil: 1, moviles: 1, filas: [] };
+      ?? { clave, ruta, fuenteRuta, nombreIda, nombreRetorno, sentido, origen, precio, movil: 1, moviles: 1, filas: [] };
     b.filas.push(p);
     buckets.set(clave, b);
   }
@@ -633,6 +671,9 @@ export function agruparServicios(
   const lineas: LineaAgrupada[] = [];
   const ordenados = [...finales].sort(
     (a, b) =>
+      // Primero lo contratado y al final lo pedido aparte, como en el formato: los
+      // adicionales se leen contra el bloque de servicios, no mezclados entre ellos.
+      Number(a.origen !== "contrato") - Number(b.origen !== "contrato") ||
       String(a.nombreIda ?? a.ruta).localeCompare(String(b.nombreIda ?? b.ruta)) ||
       String(a.nombreRetorno ?? "").localeCompare(String(b.nombreRetorno ?? "")) ||
       a.precio - b.precio ||
@@ -661,7 +702,8 @@ export function agruparServicios(
 
     lineas.push({
       clave: b.clave,
-      tipo: "servicio",
+      tipo: b.origen === "contrato" ? "servicio" : "adicional",
+      origen_contractual: b.origen,
       descripcion: descripcionLinea({
         concepto: opts.concepto,
         sede: opts.sede ?? catalogo.sedeNombre ?? null,
@@ -672,6 +714,7 @@ export function agruparServicios(
         nombreRetorno: b.nombreRetorno,
         movil: b.movil,
         totalMoviles: b.moviles,
+        origen: b.origen,
       }),
       unidad_medida: "SERV.",
       cantidad_programada: b.filas.length,
@@ -735,8 +778,16 @@ export function descripcionLinea(p: {
   nombreRetorno?: string | null;
   movil?: number;
   totalMoviles?: number;
+  /** contrato | adicional | contingencia. Solo lo distinto del contrato se rotula. */
+  origen?: string | null;
 }): string {
+  // El rótulo va ADELANTE del concepto y en la primera línea. El formato ya pinta la
+  // fila de otro color y la suma aparte, pero eso se pierde en cuanto alguien copia la
+  // descripción a un correo o a la orden de compra del cliente — que es exactamente lo
+  // que pasa con un adicional, porque es el ítem que el cliente pregunta.
+  const rotuloOrigen = p.origen && p.origen !== "contrato" ? `SERVICIO ${norm(p.origen)}` : null;
   const cabecera = [
+    rotuloOrigen,
     `${p.concepto || "TRANSPORTE DE PERSONAL"}${p.sede ? " " + norm(p.sede) : ""}`,
     // Sin capacidad contratada NO se escribe nada: ver `paxContratadoDe`.
     p.pax ? `${p.pax} PAX` : null,

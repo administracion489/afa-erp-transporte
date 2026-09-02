@@ -49,6 +49,9 @@ const COLS_RESERVA =
 /** La añade supabase/liquidaciones-03: se pide aparte para no tumbar la pantalla si falta. */
 const COL_PAX_CONTRATADO = "capacidad_contratada";
 
+/** La añade supabase/reservas-04 (servicios adicionales). Misma prudencia. */
+const COL_ORIGEN = "origen_contractual";
+
 /** Paginación defensiva: PostgREST corta en 1000 filas y un mes de operación pasa de eso. */
 async function traerTodo(query: () => any): Promise<any[]> {
   const paso = 1000; let desde = 0; const acc: any[] = [];
@@ -222,10 +225,14 @@ export default function LiquidacionesPage() {
             .order("fecha_servicio", { ascending: true })
             .order("id", { ascending: true })
         );
-      // La capacidad contratada es de supabase/liquidaciones-03. Si esa migración
-      // todavía no se corrió, PostgREST rechaza el select entero: se reintenta sin ella
-      // y la cascada del pax se queda sin su primer escalón, nada más.
-      const rs = await traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO}`)
+      // Dos columnas de migraciones opcionales (liquidaciones-03 y reservas-04). Si esas
+      // migraciones no se corrieron, PostgREST rechaza el select ENTERO, así que se
+      // reintenta quitándolas de a una: sin el pax la cascada pierde su primer escalón,
+      // y sin el origen todo se lee como contratado. Ninguna de las dos puede impedir
+      // cerrar el periodo.
+      const rs = await traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN}`)
+        .catch(() => traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO}`))
+        .catch(() => traerReservas(`${COLS_RESERVA},${COL_ORIGEN}`))
         .catch(() => traerReservas(COLS_RESERVA));
       setReservas(rs as ReservaLiq[]);
 
@@ -957,10 +964,20 @@ export default function LiquidacionesPage() {
                         l.capacidad_minima_asignada != null &&
                         l.capacidad_minima_asignada < l.pax_contratado;
                       return (
-                        <div key={l.clave} className="flex items-start gap-3 px-4 py-2 text-sm">
+                        <div key={l.clave} className="flex items-start gap-3 px-4 py-2 text-sm"
+                             style={l.tipo === "adicional" ? { background: "#fffbeb" } : undefined}>
                           <span className="flex-1 text-gray-700">
                             {/* El nombre completo de cada tramo, que es lo que se imprime. */}
-                            <span className="block">{l.nombre_ida ?? l.ruta}</span>
+                            <span className="block">
+                              {l.tipo === "adicional" && (
+                                <span className="mr-1.5 text-[9px] font-black px-1.5 py-0.5 rounded-full uppercase align-middle"
+                                      title="Fuera del contrato: va en el subtotal de adicionales del formato"
+                                      style={{ background: "#fef3c7", color: "#b45309" }}>
+                                  {l.origen_contractual}
+                                </span>
+                              )}
+                              {l.nombre_ida ?? l.ruta}
+                            </span>
                             {l.nombre_retorno && (
                               <span className="block text-gray-500">↩ {l.nombre_retorno}</span>
                             )}

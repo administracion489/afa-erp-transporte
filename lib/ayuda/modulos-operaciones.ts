@@ -80,11 +80,12 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
     paraQueSirve: [
       "Asignar unidad y conductor a los servicios pendientes, uno por uno o en bloque.",
       "Generar de golpe todos los servicios de un contrato fijo desde una cotización aprobada.",
+      "Registrar un servicio ADICIONAL: lo que el cliente pide por encima del contrato, con sus fechas sueltas y su propio precio.",
       "Cargar el manifiesto (los pasajeros y sus paraderos) y mandárselo al conductor y a los pasajeros.",
       "Ver en qué estado está cada servicio y qué le falta para cerrarse administrativamente.",
       "Vigilar el sobrecupo: más pasajeros que asientos.",
     ],
-    conceptos: ["estado_admin", "estado_proveedor", "tercerizado", "margen", "liquidacion_cliente"],
+    conceptos: ["estado_admin", "estado_proveedor", "tercerizado", "margen", "liquidacion_cliente", "servicio_adicional"],
     faqs: [
       {
         pregunta: "¿Qué significa cada estado y cómo avanza un servicio?",
@@ -105,6 +106,16 @@ export const MODULOS_OPERACIONES: AyudaModulo[] = [
         pregunta: "¿Qué es el bloque violeta “Cierre administrativo”?",
         respuesta:
           "Es el **segundo ciclo** del servicio, el del dinero, y solo aplica a los que ya están *Finalizados*. Va aparte y en otro color justamente para que no se confunda con el ciclo operativo.\n\n**Un servicio finalizado arranca automáticamente en “Por liquidar”**: el viaje se hizo, pero todavía no se cerró cuánto se cobra ni se emitió nada. De ahí sigue a *Liquidada* → *Facturada* → *Cobrada*.\n\nEse contador de “Por liquidar” es tu cola de trabajo pendiente: cada número ahí es un viaje hecho que todavía no te ha pagado nadie. Se trabaja desde **Liquidaciones**.\n\nSi el servicio fue **tercerizado**, además corre el ciclo del proveedor (por conciliar → conciliada → por pagar → pagada). Que el cliente ya te haya pagado no significa que tú ya le pagaste a GRIJALVA TOURS.",
+      },
+      {
+        pregunta: "El cliente me pide una salida extra que no está en el contrato. ¿Cómo la cargo?",
+        respuesta:
+          "Con el botón **Adicional**, el que está al lado de *Programa fijo*. Abre el mismo modal, pero preparado para eso:\n\n• **La cotización sigue siendo la del contrato** — de ahí salen los paraderos y el nombre de la ruta, que es justo lo que no quieres volver a teclear.\n• **Las fechas son sueltas**, no un rango con días de la semana: marcas el 12, el 14 y el 22 y listo.\n• **Eliges el sentido**: solo ida, solo salida, o las dos. Antes esto no se podía — si la cotización tenía hora de retorno, el sistema creaba siempre los dos tramos y había que cancelar a mano el que no ibas a hacer.\n• **El precio se escribe.** Arranca con el del contrato y al lado ves cuál era y cuánto estás cobrando de más o de menos. Si lo cambias, te pide el motivo.\n\nAntes esto se hacía generando un programa fijo y **corrigiendo el precio servicio por servicio**. Eso ya no hace falta.",
+      },
+      {
+        pregunta: "¿Por qué es distinto marcarlo como adicional en vez de cargarlo como un servicio más?",
+        respuesta:
+          "Por tres cosas concretas:\n\n1. **En la liquidación sale en su propio renglón**, con el rótulo ADICIONAL y sumado en *Adicionales autorizados*. Si va sin marcar, se funde con las líneas del contrato: el cliente lee “23 servicios” donde hay 22 contratados y uno pedido aparte, y el subtotal de adicionales sale en cero.\n2. **Queda escrito el porqué.** Un adicional nace con su precio, así que no dispara el enlace de conformidad del cliente (ese salta cuando a un servicio ya creado se le SUBE el precio). El motivo que escribes al crearlo es el único registro de por qué esa salida costó distinto.\n3. **No ensucia la referencia de precios.** El ERP propone “la última vez que cobraste esta ruta: S/ …”. Un adicional de S/ 480 por una unidad mayor no se propone nunca como tarifa del contrato.\n\nEn la lista los reconoces por el chip naranja **ADICIONAL**, y arriba tienes el filtro *Todo origen / Contrato / Adicionales*.",
       },
       {
         pregunta: "No encuentro un servicio de hace tres meses. ¿Se borró?",

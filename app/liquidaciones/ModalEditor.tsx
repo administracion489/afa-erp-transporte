@@ -21,7 +21,19 @@ type Linea = {
   precio_unitario: number; total_linea: number; referencia: string | null;
   /** Asientos contratados. null = el ítem se imprime sin el "N PAX". */
   pax_contratado: number | null;
+  /** La escribe la agrupación. Presente ⇒ la línea tiene reservas detrás. */
+  agrupacion_clave: string | null;
 };
+
+/**
+ * ¿La línea salió de servicios reales o la escribió alguien a mano en este editor?
+ *
+ * No basta con `tipo === "servicio"`: desde que los adicionales se registran en
+ * Programación, una línea de tipo `adicional` también puede venir de reservas —con su
+ * pax contratado, su programado/ejecutado y su descripción de varios renglones— y
+ * tratarla como una línea manual la mostraba vacía ("—") y con botón de borrar.
+ */
+const deReservas = (l: Linea) => l.tipo === "servicio" || !!l.agrupacion_clave;
 
 const campo = "w-full px-2.5 py-1.5 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-[#2a5298]/30";
 const label = "text-[10px] font-bold text-gray-500 uppercase tracking-wide";
@@ -299,7 +311,7 @@ export default function ModalEditor({
                         <td className="px-2 py-2">
                           {/* La descripción trae varios renglones (concepto, ida, retorno, móvil):
                               un <input> de una línea solo dejaba ver el primero. */}
-                          <textarea disabled={!editable} rows={l.tipo === "servicio" ? 3 : 1}
+                          <textarea disabled={!editable} rows={deReservas(l) ? 3 : 1}
                             className="w-full bg-transparent text-[13px] font-medium focus:outline-none resize-y leading-snug"
                             value={l.descripcion} onChange={(e) => setLinea(l.id, { descripcion: e.target.value })} />
                           {difiere && (
@@ -310,14 +322,14 @@ export default function ModalEditor({
                           {l.referencia && <p className="text-[10px] text-gray-400 mt-0.5">Anexo 1 · ítems {l.referencia}</p>}
                         </td>
                         <td className="px-2 py-2 text-center text-xs">
-                          {l.tipo === "servicio"
+                          {deReservas(l)
                             ? (l.pax_contratado != null
                                 ? <span className="text-gray-500">{l.pax_contratado}</span>
                                 : <span className="text-amber-600" title="Ninguna fuente sabe cuántos asientos se contrataron: el ítem se imprime sin el «N PAX». Fíchalo en Liquidaciones → Rutas contratadas.">sin dato</span>)
                             : "—"}
                         </td>
                         <td className="px-2 py-2 text-center text-xs text-gray-500">
-                          {l.tipo === "servicio" ? `${l.cantidad_programada ?? "—"} / ${l.cantidad_ejecutada ?? "—"}` : "—"}
+                          {deReservas(l) ? `${l.cantidad_programada ?? "—"} / ${l.cantidad_ejecutada ?? "—"}` : "—"}
                         </td>
                         <td className="px-2 py-2">
                           <input disabled={!editable} type="number" step="0.01" className="w-full px-1.5 py-1 rounded border text-sm text-center"
@@ -335,7 +347,7 @@ export default function ModalEditor({
                             <div className="flex gap-1 justify-end">
                               <button onClick={() => guardarLinea(l)} disabled={trabajando} title="Guardar"
                                 className="px-2 py-1 rounded text-[11px] font-bold bg-emerald-600 text-white disabled:opacity-50">✓</button>
-                              {l.tipo !== "servicio" && (
+                              {!deReservas(l) && (
                                 <button onClick={() => borrar(l.id)} disabled={trabajando} title="Eliminar"
                                   className="px-2 py-1 rounded text-[11px] font-bold border text-red-600 border-red-200">✕</button>
                               )}
