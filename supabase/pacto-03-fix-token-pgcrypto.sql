@@ -168,7 +168,22 @@ end $$;
 -- ── Verificacion ────────────────────────────────────────────────────────────
 -- Debe devolver 0 filas: ninguna funcion del ERP depende ya de pgcrypto.
 --
---   select p.proname
+-- Dos detalles que rompen la consulta obvia:
+--   · pg_get_functiondef() LANZA ERROR sobre funciones agregadas ("array_agg is an
+--     aggregate function"), asi que hay que acotar a prokind = 'f'.
+--   · El filtro y la llamada van en pasos separados (CTE MATERIALIZED). Sin eso el
+--     planificador puede evaluar pg_get_functiondef ANTES del filtro y reventar igual.
+--
+--   with fns as materialized (
+--     select p.oid, p.proname
+--       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+--      where n.nspname = 'public' and p.prokind = 'f'
+--   )
+--   select proname from fns where pg_get_functiondef(oid) ilike '%gen_random_bytes%';
+--
+-- Version acotada, si solo interesa esta funcion (no puede tocar un agregado):
+--
+--   select count(*)
 --     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
---    where n.nspname = 'public'
---      and pg_get_functiondef(p.oid) ilike '%gen_random_bytes%';
+--    where n.nspname = 'public' and p.proname = 'fn_reservas_pacto_acta'
+--      and pg_get_functiondef(p.oid) ilike '%gen_random_bytes%';   -- 0 = parche aplicado
