@@ -2165,7 +2165,16 @@ export default function ReservasPage() {
     const base = reservas.filter(r => {
       const q     = busqueda.toLowerCase();
       const numCot = r.cotizacion_id != null ? (cotMapNum[r.cotizacion_id] || String(r.cotizacion_id).padStart(5, "0")) : "";
-      const txt = (r.id + " " + numCot + " " + nombreCliente(r.cliente_id) + " " + ((r as any).origen || "") + " " + ((r as any).destino || "")).toLowerCase();
+      // El CÓDIGO va primero y es el que faltaba: la columna ID muestra "OS-2026-006532"
+      // y el operador nombra los servicios así, pero la búsqueda solo miraba `r.id`
+      // (la llave interna, que no se enseña en ninguna parte). Buscar el folio que
+      // acabas de leer en pantalla no devolvía nada. Igual con `ruta_nombre`: el
+      // recuadro dice "cliente, ruta o ID" y la ruta que se pinta es esa, no
+      // origen/destino.
+      const txt = (
+        (r.codigo || "") + " " + r.id + " " + numCot + " " + nombreCliente(r.cliente_id) + " " +
+        (r.ruta_nombre || "") + " " + ((r as any).origen || "") + " " + ((r as any).destino || "")
+      ).toLowerCase();
       const passServicio    = filtroServicio === "todos" || (filtroServicio === "fijo" ? !esEventual(r) : esEventual(r));
       const passSentido     = filtroSentido === "todos" || sentidoServicio(r) === filtroSentido;
       const passOrigen      = filtroOrigen === "todos"
