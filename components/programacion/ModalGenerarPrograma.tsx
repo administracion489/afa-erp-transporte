@@ -322,7 +322,21 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
   // teclear una cifra que el sistema ya conoce, y ahí es donde se teclea mal.
   const precioAdicVal = precioTocado ? precioAdic : (precioReferencia ? precioReferencia.toFixed(2) : "");
   const precioAdicNum = dosDecimales(Number(precioAdicVal.replace(",", ".")) || 0);
-  const difierePrecio = esAdicional && precioAdicNum !== precioReferencia;
+
+  /**
+   * La cotización no trae tarifa para este móvil (ni `precio_unit` en el ítem, ni
+   * `precio_dia`/`precio_cliente` en la cabecera). Pasa de verdad: hay cotizaciones que
+   * solo fijan los paraderos.
+   *
+   * Sin referencia NO hay diferencia que explicar, y exigir el motivo obligaba a elegir
+   * uno para justificar una diferencia inexistente — el operador marca el primero de la
+   * lista y el dato queda mintiendo. El motivo se sigue OFRECIENDO (el precio salió de
+   * algún acuerdo y conviene anotarlo), pero no se exige.
+   */
+  const sinReferencia = esAdicional && precioReferencia <= 0;
+  const difierePrecio = esAdicional && !sinReferencia && precioAdicNum !== precioReferencia;
+  /** Cuándo tiene sentido pedir el porqué. Obligatorio solo si hay contra qué comparar. */
+  const pedirMotivo = difierePrecio || sinReferencia;
 
   const slotsAGenerar = useMemo<Slot[]>(() => {
     if (!esAdicional) return slots;
@@ -424,7 +438,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
           // De cuánto se partió, congelado hoy: si el contrato se renegocia, la
           // diferencia tiene que seguir midiéndose contra lo que regía este día.
           precio_cotizado:    precioReferencia || null,
-          adicional_motivo:   difierePrecio ? (motivoAdic || null) : null,
+          adicional_motivo:   pedirMotivo ? (motivoAdic || null) : null,
           adicional_nota:     notaAdic.trim() || null,
         }
       : {};
@@ -928,23 +942,23 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
                   />
                 </div>
                 <p className="text-[11px] mt-1.5" style={{ color: difierePrecio ? "#b45309" : "#78716c" }}>
-                  {precioReferencia > 0
-                    ? <>Cotizado: <b>S/ {precioReferencia.toFixed(2)}</b>
+                  {sinReferencia
+                    ? "La cotización no fija tarifa para este móvil, así que no hay contra qué comparar: escribe el precio acordado."
+                    : <>Cotizado: <b>S/ {precioReferencia.toFixed(2)}</b>
                         {difierePrecio && (
                           <> · lo estás cobrando <b>S/ {Math.abs(precioAdicNum - precioReferencia).toFixed(2)} {precioAdicNum > precioReferencia ? "más" : "menos"}</b></>
                         )}
-                      </>
-                    : "La cotización no tiene precio para este móvil: escribe el del adicional."}
+                      </>}
                 </p>
               </div>
 
               {/* El motivo solo aparece cuando hace falta. Pedirlo siempre lo convierte en
                   un campo que se rellena con lo primero de la lista. */}
-              {difierePrecio && (
+              {pedirMotivo && (
                 <>
                   <div>
                     <label className="block text-[11px] font-bold uppercase tracking-wide mb-1" style={{ color: "#854d0e" }}>
-                      Motivo del precio distinto *
+                      {difierePrecio ? "Motivo del precio distinto *" : "Motivo (opcional)"}
                     </label>
                     <select className={inputCls()} value={motivoAdic} onChange={e => setMotivoAdic(e.target.value)}>
                       <option value="">Seleccionar motivo...</option>
