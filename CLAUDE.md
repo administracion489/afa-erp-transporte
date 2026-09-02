@@ -118,6 +118,20 @@ La fórmula del costo de mover un bus propio —combustible por km/galón con ur
 - **`precioConMargen` es sobre el PRECIO, no sobre el costo**: con 20 % el precio es `costo/0.8`, no `costo × 1.2`. Es la diferencia entre ganar 20 % y ganar 16.7 %.
 - Todo divisor que venía de un parámetro sin llenar (`rendimiento_1`, `vida_neumatico_km`, `km_anio`) se protege: antes producía `Infinity`/`NaN` que se propagaba al precio.
 
+### Presupuesto del servicio y utilidad antes de impuestos
+
+`supabase/costeo-01-planilla-y-presupuesto.sql` + `lib/costeo-conductor.ts` + `lib/costeo-servicio.ts` + `components/programacion/ModalCostear.tsx`.
+
+- **El estimado NUNCA va en `reservas.costo_proveedor`.** Tres razones duras: `v_costo_servicio` ya toma ese campo como costo del tercero cuando no hay factura **y además** suma los egresos reales (los mismos soles dos veces, contra la regla de oro); `fn_reservas_pacto_nacimiento` le pone `costo_estado='no_aplica'` a los propios —"no hay proveedor a quien pagarle"—; y cada cambio suyo levanta un acta `PSC-` contra un proveedor inexistente. El presupuesto vive en `servicio_costo_estimado` (+ líneas), versionado, con `parametros_json` congelado.
+- **La fórmula del costo empresa vive SOLO en `lib/costeo-conductor.ts`.** En SQL, `v_conductor_planilla` publica los INSUMOS (sueldo, factores del régimen vigente, SCTR del período) y no calcula nada — si calculara, habría dos motores que discrepan. Mismo criterio que `lib/costeo-propio.ts`.
+- **Los tres regímenes peruanos están cargados**, no el de AFA: `config_laboral_regimen` trae micro, pequeña y general con **fecha de vigencia**, y `config_laboral` dice cuál usa la empresa. El ERP puede venderse. Cambiar de régimen en noviembre NO debe mover los márgenes de agosto: por eso la vigencia. Factores: pequeña = grati 1 sueldo/año + CTS 0.5 (15 remuneraciones diarias) → **1.24× el básico**; general = grati 2 + CTS 1.1667 → **1.38×**. **AFP/ONP no entra: es descuento del trabajador**, y meterlo infla el costo ~13 %.
+- **El sueldo es del PERÍODO, no del servicio.** Se prorratea por días con servicio (de `v_conductor_dias_servicio`) y el día se **reparte** entre los servicios de esa jornada. Con honorarios no se prorratea nada: el importe del recibo es del servicio.
+- **Se prefiere lo medido a lo parametrizado**, y cada dato declara su fuente: rendimiento real de la placa (**mediana**, no promedio — un tanque a medio llenar mueve la media) sobre `parametros_costos.rendimiento_1`; precio de la última carga sobre el de referencia; depreciación de `activos_fijos` (cuenta 6811) sobre la del parámetro. Sin fuente no se inventa: el renglón sale vacío y la pantalla dice por qué.
+- **Lo que se amortiza no tiene columna «real»** (`cat_concepto_costo.amortiza`): neumáticos y depreciación no se gastan en un viaje. `v_utilidad_servicio` los publica como `costo_imputado`, separado del `costo_directo_real`, y marca `sin_presupuesto` — un servicio sin presupuesto muestra el imputado en cero y **parece dejar más de lo que deja**.
+- **Al sumar conductor y desgaste, el margen de los propios BAJA.** No es un fallo: hasta ahora esos costos no se contaban.
+- **La siembra de gastos previstos NO crea filas en `gastos`.** Sembrar el presupuesto ahí lo contaría como egreso real en `v_egresos`. Seguimiento lee `servicio_costo_estimado_linea` y solo ofrece rellenar el formulario.
+- Pruebas: `npx tsx scripts/prueba-costeo.mts` (la extracción, al sexto decimal) y `npx tsx scripts/prueba-conductor.mts` (los tres regímenes, el prorrateo y los divisores en cero).
+
 ### Ayuda contextual (`lib/ayuda/*`, `app/_components/AyudaModulo.tsx`)
 
 Botón "?" global, montado en `app/layout.tsx` junto a `<EliaPanel>` (ELIA vive en `bottom-5 right-5`; la ayuda en `right-24` — no las solapes). `ayudaDeRuta(pathname)` resuelve la ficha por **prefijo más largo**, así que `/crm/campanas` gana sobre `/crm` sin depender del orden de declaración; si una ruta no tiene ficha el botón no se pinta.

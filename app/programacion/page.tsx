@@ -3,7 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { Calendar, FileText, Pencil, Sparkles, Trash2, X } from "lucide-react";
+import { Calculator, Calendar, FileText, Pencil, Sparkles, Trash2, X } from "lucide-react";
 import {
   ESTADOS_RESERVA, ESTADOS_RESERVA_LISTA, ORDEN_ESTADO,
   ESTADOS_ADMIN, ESTADOS_ADMIN_LISTA, aplicaAdmin, ESTADO_ADMIN_INICIAL, etiquetaAdmin, siguienteAdmin,
@@ -17,6 +17,7 @@ import {
 import { AFECTACIONES, afectacionDe, type CodigoAfectacion } from "@/lib/finanzas/afectacion";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
 import ModalGenerarPrograma, { type ModoPrograma } from "@/components/programacion/ModalGenerarPrograma";
+import ModalCostear from "@/components/programacion/ModalCostear";
 import TimelineParadasEditable from "@/components/programacion/TimelineParadasEditable";
 
 // ── Google Maps Places para el formulario inline de paradas ──────────────
@@ -495,6 +496,9 @@ export default function ReservasPage() {
   const [modalReservaId,       setModalReservaId]       = useState<number | null>(null);
   // El mismo modal en dos modos. null = cerrado. Ver ModalGenerarPrograma.Props.modo.
   const [modoPrograma, setModoPrograma] = useState<ModoPrograma | null>(null);
+  // Costear un servicio de flota propia. En tercerizado no aplica: ahí el costo es
+  // el importe pactado con el proveedor, que ya tiene su campo.
+  const [costearId, setCostearId] = useState<number | null>(null);
   const [expandidoContrato,    setExpandidoContrato]    = useState<string | null>(null);
   const [modalLinksId,         setModalLinksId]         = useState<number | null>(null);
   const [confirmEliminarId,    setConfirmEliminarId]    = useState<number | null>(null);
@@ -2270,6 +2274,21 @@ export default function ReservasPage() {
   return (
     <main className="p-6 space-y-5 max-w-7xl mx-auto">
 
+      {costearId != null && (() => {
+        const r = reservas.find(x => x.id === costearId);
+        if (!r) return null;
+        return (
+          <ModalCostear
+            reserva={{
+              id: r.id, codigo: r.codigo ?? null, fecha_servicio: r.fecha_servicio,
+              ruta_nombre: r.ruta_nombre ?? null, vehiculo_id: r.vehiculo_id,
+              conductor_id: r.conductor_id, precio_cliente: r.precio_cliente, estado: r.estado,
+            }}
+            onCerrar={() => setCostearId(null)}
+          />
+        );
+      })()}
+
       {modoPrograma && (
         <ModalGenerarPrograma
           clientes={clientes}
@@ -3335,6 +3354,25 @@ export default function ReservasPage() {
                 <Campo label="Observaciones">
                   <input className={inputCls()} placeholder="Notas del servicio..." value={form.observaciones} onChange={f("observaciones")} />
                 </Campo>
+                {/* Costear solo tiene sentido con la unidad ya elegida y el servicio
+                    guardado: el presupuesto se ata a una reserva, no a un formulario. */}
+                {editandoId && (
+                  <div className="md:col-span-3">
+                    <button
+                      type="button"
+                      onClick={() => setCostearId(editandoId)}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm text-white transition-colors hover:opacity-90"
+                      style={{ background: "#0f5257" }}
+                    >
+                      <Calculator size={15} /> Costear este servicio
+                    </button>
+                    <p className="text-[10px] text-gray-400 mt-1.5 leading-snug">
+                      Combustible según el rendimiento medido de esta placa, conductor a
+                      costo empresa y desgaste de la unidad. Se compara contra lo que se
+                      gastó de verdad.
+                    </p>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="space-y-4">

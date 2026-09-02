@@ -14,6 +14,12 @@ type Conductor = {
   fecha_ingreso: string | null; tipo_contrato: string | null;
   fecha_venc_contrato: string | null;
   sistema_pensionario: string | null; afp_nombre: string | null;
+  // Lo que hace falta para calcular su COSTO EMPRESA por día (gratificaciones, CTS,
+  // EsSalud y SCTR según el régimen). Sin sueldo, el costeo de un servicio propio no
+  // puede imputar el conductor y lo dice en pantalla. Ver lib/costeo-conductor.ts.
+  sueldo_basico?: number | null;
+  asignacion_familiar?: boolean | null;
+  honorario_dia?: number | null;
   essalud_numero: string | null;
   sctr_salud_venc: string | null; sctr_pension_venc: string | null;
   examen_medico_venc: string | null; psicosometrico_venc: string | null;
@@ -67,6 +73,7 @@ const FORM_VACIO = {
   telefono: "", direccion: "", fecha_ingreso: "",
   tipo_contrato: "planilla", fecha_venc_contrato: "",
   sistema_pensionario: "afp", afp_nombre: "Integra", essalud_numero: "",
+  sueldo_basico: "", asignacion_familiar: false, honorario_dia: "",
   sctr_salud_venc: "", sctr_pension_venc: "",
   examen_medico_venc: "", psicosometrico_venc: "", antecedentes_venc: "",
   vida_ley: false, vida_ley_venc: "",
@@ -210,6 +217,9 @@ export default function ConductoresPage() {
       sistema_pensionario: form.sistema_pensionario || null,
       afp_nombre: form.sistema_pensionario === "afp" ? form.afp_nombre : null,
       essalud_numero: form.essalud_numero.trim() || null,
+      sueldo_basico: form.sueldo_basico !== "" ? Number(form.sueldo_basico) : null,
+      asignacion_familiar: form.asignacion_familiar,
+      honorario_dia: form.honorario_dia !== "" ? Number(form.honorario_dia) : null,
       sctr_salud_venc: form.sctr_salud_venc || null,
       sctr_pension_venc: form.sctr_pension_venc || null,
       examen_medico_venc: form.examen_medico_venc || null,
@@ -240,6 +250,9 @@ export default function ConductoresPage() {
       fecha_venc_contrato: c.fecha_venc_contrato || "",
       sistema_pensionario: c.sistema_pensionario || "afp",
       afp_nombre: c.afp_nombre || "Integra", essalud_numero: c.essalud_numero || "",
+      sueldo_basico: c.sueldo_basico != null ? String(c.sueldo_basico) : "",
+      asignacion_familiar: !!c.asignacion_familiar,
+      honorario_dia: c.honorario_dia != null ? String(c.honorario_dia) : "",
       sctr_salud_venc: c.sctr_salud_venc || "", sctr_pension_venc: c.sctr_pension_venc || "",
       examen_medico_venc: c.examen_medico_venc || "", psicosometrico_venc: c.psicosometrico_venc || "",
       antecedentes_venc: c.antecedentes_venc || "",
@@ -400,6 +413,45 @@ export default function ConductoresPage() {
                   <option value="de_baja">De baja</option>
                 </select>
               </Campo>
+
+              {/* ── Lo que hace falta para costear un servicio ──────────────────
+                  El costo de un día de conductor no es el sueldo entre 30: es el
+                  COSTO EMPRESA (con gratificaciones, CTS, EsSalud y SCTR según el
+                  régimen) dividido entre los días que trabajó de verdad. Sin estos
+                  campos, el costeo de un servicio de flota propia no puede imputar
+                  el conductor y lo dice en pantalla. */}
+              {form.tipo_contrato === "honorarios" ? (
+                <Campo label="Honorario por día S/">
+                  <input type="number" min="0" step="10" className={inputCls()}
+                    value={form.honorario_dia} onChange={f("honorario_dia")} placeholder="0.00" />
+                  <p className="text-[10px] text-gray-400 mt-1 leading-snug">
+                    Se contrata para el servicio, así que su importe va completo: no se
+                    prorratea nada.
+                  </p>
+                </Campo>
+              ) : (
+                <>
+                  <Campo label="Sueldo básico mensual S/">
+                    <input type="number" min="0" step="50" className={inputCls()}
+                      value={form.sueldo_basico} onChange={f("sueldo_basico")} placeholder="0.00" />
+                    <p className="text-[10px] text-gray-400 mt-1 leading-snug">
+                      De aquí sale el costo empresa. El sueldo a secas lo subestima entre
+                      24 % y 38 %, según el régimen.
+                    </p>
+                  </Campo>
+                  <Campo label="Asignación familiar">
+                    <label className="flex items-center gap-2 text-sm text-gray-700 py-2.5">
+                      <input type="checkbox" checked={form.asignacion_familiar}
+                        onChange={e => setForm(p => ({ ...p, asignacion_familiar: e.target.checked }))} />
+                      Le corresponde (10 % de la RMV)
+                    </label>
+                    <p className="text-[10px] text-gray-400 leading-snug">
+                      Depende de tener hijos menores, no de la empresa. Entra en la base de
+                      EsSalud, de la gratificación y de la CTS.
+                    </p>
+                  </Campo>
+                </>
+              )}
             </div>
           </div>
 

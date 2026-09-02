@@ -64,11 +64,39 @@ export function ModalGastos({ reservaId, vehiculoId, cliente, onClose, onSaved }
   const [nuevoCategoria,setNuevoCategoria]= useState("peajes");
   const [cargando,      setCargando]      = useState(true);
   const [guardando,     setGuardando]     = useState(false);
+  // Lo que se PRESUPUESTÓ para este servicio y todavía no se cargó como gasto real.
+  // No son filas de `gastos`: sembrar el presupuesto en esa tabla lo contaría como
+  // egreso real en v_egresos y en el costo del servicio, que es justo lo contrario
+  // de lo que se quiere. Aquí solo se muestran para que el operador CONFIRME.
+  const [previstos,     setPrevistos]     = useState<{concepto:string;monto:number;base:string}[]>([]);
 
   const cargar = useCallback(async () => {
     setCargando(true);
-    const { data } = await supabase.from("gastos").select("id,descripcion,monto,categoria").eq("reserva_id", reservaId).order("created_at");
+    const [{ data }, prev] = await Promise.all([
+      supabase.from("gastos").select("id,descripcion,monto,categoria").eq("reserva_id", reservaId).order("created_at"),
+      // La tabla es de supabase/costeo-01: si esa migración no se corrió, no hay
+      // presupuesto que mostrar y el modal funciona igual que antes.
+      (async () => {
+        const { data: cab } = await supabase
+          .from("v_servicio_costo_estimado").select("id").eq("reserva_id", reservaId).maybeSingle();
+        if (!cab?.id) return [];
+        const { data: ls } = await supabase
+          .from("servicio_costo_estimado_linea")
+          .select("concepto,monto,base")
+          .eq("estimado_id", cab.id).order("orden");
+        return (ls ?? []) as { concepto: string; monto: number; base: string | null }[];
+      })().catch(() => []),
+    ]);
     setGastos(data || []);
+    // Solo los conceptos que SÍ pueden tener comprobante y que aún no lo tienen.
+    // El conductor y el desgaste se amortizan: no hay nada que confirmar en campo.
+    const yaCargados = new Set((data || []).map((g: { categoria: string }) => String(g.categoria)));
+    const CONFIRMABLES = new Set(["peajes", "viaticos", "estacionamiento", "pernocte", "otro"]);
+    setPrevistos(
+      prev
+        .filter((l) => CONFIRMABLES.has(String(l.concepto)) && !yaCargados.has(String(l.concepto)) && Number(l.monto) > 0)
+        .map((l) => ({ concepto: String(l.concepto), monto: Number(l.monto), base: String(l.base ?? "") }))
+    );
     setCargando(false);
   }, [reservaId]);
 
@@ -123,6 +151,39 @@ export function ModalGastos({ reservaId, vehiculoId, cliente, onClose, onSaved }
                 </div>
               ))}
           </div>
+          {/* Lo previsto al costear el servicio, esperando confirmación. Se toca y
+              rellena el formulario de abajo: el operador corrige un número en vez de
+              escribir el concepto y el importe desde cero. */}
+          {previstos.length > 0 && (
+            <div className="border rounded-xl p-3 space-y-2" style={{ borderColor: "#fde68a", background: "#fffbeb" }}>
+              <p className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "#b45309" }}>
+                Previsto al costear · falta confirmar
+              </p>
+              {previstos.map(p => (
+                <button
+                  key={p.concepto}
+                  type="button"
+                  onClick={() => {
+                    setNuevoCategoria(p.concepto === "pernocte" ? "otro" : p.concepto);
+                    setNuevoConcepto(CATS_GASTO.find(c => c.valor === p.concepto)?.label.replace(/^\S+\s/, "") || p.concepto);
+                    setNuevoMonto(String(p.monto));
+                  }}
+                  className="w-full flex items-center justify-between rounded-lg px-3 py-2 text-left hover:bg-amber-100/60 transition-colors"
+                >
+                  <span className="min-w-0">
+                    <span className="block text-[13px] font-semibold" style={{ color: "#92400e" }}>
+                      {CATS_GASTO.find(c => c.valor === p.concepto)?.label || p.concepto}
+                    </span>
+                    {p.base && <span className="block text-[10px] truncate" style={{ color: "#b45309" }}>{p.base}</span>}
+                  </span>
+                  <span className="font-black text-[13px] shrink-0 ml-2" style={{ color: "#b45309" }}>
+                    S/ {p.monto.toFixed(2)} →
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
           <div className="flex items-center justify-between bg-[#0b315f] rounded-xl px-4 py-3">
             <span className="text-white/70 text-sm font-semibold">Total gastado</span>
             <span className="text-white font-black text-lg">S/ {total.toFixed(2)}</span>

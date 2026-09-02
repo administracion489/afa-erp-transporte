@@ -827,4 +827,40 @@ export const GLOSARIO: Record<string, Concepto> = {
       "Registrarlo como adicional no es un detalle de forma. Un adicional **nace** con su precio, así que no dispara el enlace de conformidad del cliente (ese salta cuando a un servicio ya creado se le SUBE el precio) — por eso el motivo se pide en el momento de crearlo: es el único sitio donde queda escrito por qué esa salida costó S/ 480. Y por eso el precio del adicional tampoco se propone después como referencia de la tarifa contractual.",
     verTambien: ["pacto_servicio", "liquidacion_cliente", "conformidad", "adenda"],
   },
+
+  costo_empresa: {
+    clave: "costo_empresa",
+    termino: "Costo empresa de un conductor",
+    definicion:
+      "Es **lo que de verdad te cuesta un trabajador**, que no es su sueldo. Al básico hay que sumarle lo que la ley te obliga a pagar por él: EsSalud, SCTR (el transporte es actividad de riesgo), la parte proporcional de las gratificaciones y la de la CTS.\nY el costo de un DÍA no es eso entre 30: es el costo del mes dividido entre los días que esa persona **de verdad trabajó**.",
+    ejemplo:
+      "Un conductor de S/ 1,600 en pequeña empresa te cuesta **S/ 1,976 al mes** — 1.24 veces su sueldo. Si ese mes tuvo servicio 24 días, cada día cuesta **S/ 82.33**. Y si un día hizo dos vueltas, cada servicio carga S/ 41.17, no S/ 82.33.",
+    ojo:
+      "Tres errores que cuestan dinero. **Uno:** la AFP y la ONP NO son costo de la empresa, son descuento del trabajador — meterlas infla el costo un 13 %. **Dos:** el régimen cambia la cuenta; en MYPE pequeña empresa la gratificación es medio sueldo y la CTS son 15 remuneraciones diarias, así que el factor es 1.24 y no el 1.38 del régimen general. **Tres:** el sueldo es un costo del MES, no del servicio; imputarle el mes entero a cada viaje multiplica el costo por la cantidad de viajes y hace que todos parezcan pérdida.",
+    verTambien: ["margen_real", "costo_real_comparable", "utilidad_servicio"],
+  },
+
+  utilidad_servicio: {
+    clave: "utilidad_servicio",
+    termino: "Utilidad de un servicio (antes de impuestos)",
+    definicion:
+      "Es **lo que deja un servicio** una vez descontado todo lo que costó: el ingreso sin IGV menos el costo real sin IGV.\nSe llama «antes de impuestos» porque todavía no se le descontó el Impuesto a la Renta. El IGV ya quedó fuera al usar los importes netos.",
+    ejemplo:
+      "Un servicio de S/ 365 con IGV son S/ 309.32 de ingreso. Si costó S/ 198.40 entre combustible, peajes, conductor y desgaste, la utilidad es **S/ 110.92**, o sea 35.9 %.",
+    ojo:
+      "El costo se publica en dos partes y no da lo mismo confundirlas. El **costo directo real** es lo que tiene comprobante atado al servicio. El **imputado** —conductor, depreciación, neumáticos— no tiene comprobante por viaje: se reparte, y sale del presupuesto. Un servicio sin presupuesto muestra el imputado en cero y **parece dejar más de lo que deja**; por eso la vista marca cuáles están así.",
+    verTambien: ["costo_empresa", "margen_real", "presupuesto_servicio"],
+  },
+
+  presupuesto_servicio: {
+    clave: "presupuesto_servicio",
+    termino: "Presupuesto de un servicio",
+    definicion:
+      "Es **lo que planeaste gastar** en un servicio con unidad propia, renglón por renglón: combustible según el rendimiento medido de esa placa, peajes, viáticos, conductor y desgaste.\nSe guarda aparte del gasto real, y la diferencia entre los dos es lo que enseña.",
+    ejemplo:
+      "Presupuestaste S/ 42.85 de combustible con 24.5 km/gal y gastaste S/ 51.20. Ese +S/ 8.35 repetido mes tras mes en la misma ruta significa algo: o el rendimiento configurado está mal, o esa unidad necesita taller, o alguien está cargando de más.",
+    ojo:
+      "El presupuesto **nunca se escribe en el costo del proveedor**. Ese campo es lo que le debes a un tercero, y en flota propia no hay tercero: ponerlo ahí contaría los mismos soles dos veces y levantaría actas de compra contra un proveedor que no existe. Y el presupuesto **no es un asiento contable**: no hay obligación ni comprobante que registrar. Lo que va a Contabilidad es el gasto real.",
+    verTambien: ["utilidad_servicio", "costo_empresa", "regla_oro"],
+  },
 };
