@@ -1954,8 +1954,11 @@ export default function ReservasPage() {
   // Y no dispara nada: el WHEN de trg_reservas_pacto_acta solo cubre costo, precio,
   // proveedor y vehículo, así que reclasificar no levanta actas ni enlaces de
   // conformidad. Por eso el motivo vive en `adicional_motivo` y no en `cambio_motivo`.
-  const prepararCambioOrigen = async (destino: "adicional" | "contrato") => {
-    const base = Array.from(seleccionados);
+  const prepararCambioOrigen = async (destino: "adicional" | "contrato", idsBase?: number[]) => {
+    // Los ids se pasan EXPLÍCITOS desde el botón de una fila. Apoyarse en
+    // `seleccionados` ahí no funciona: setSeleccionados no ha llegado todavía cuando
+    // esta función corre, y el modal se abriría con la selección anterior.
+    const base = idsBase ?? Array.from(seleccionados);
     if (base.length === 0) return;
     setOrigenMotivo(""); setOrigenNota("");
     setModalOrigen({ destino, ids: base, todos: base, liquidadas: [], cargando: true });
@@ -4333,6 +4336,21 @@ export default function ReservasPage() {
                           <button onClick={() => setModalLinksId(r.id)} className="flex items-center gap-1.5 bg-amber-50 hover:bg-amber-100 text-amber-700 text-xs font-bold px-3 py-2 rounded-xl transition-colors">
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                             Links
+                          </button>
+                          {/* Cambiar el origen de ESTE servicio. La acción en lote solo
+                              aparece al seleccionar filas, y eso no se adivina: quien mira
+                              una fila y quiere marcarla la busca aquí. Abre el mismo modal
+                              —con el arrastre del hermano y el aviso de lo ya liquidado—,
+                              no una segunda regla que diga otra cosa. */}
+                          <button
+                            onClick={() => prepararCambioOrigen(esAdicional(r) ? "contrato" : "adicional", [r.id])}
+                            title={esAdicional(r) ? "Devolver este servicio al contrato" : "Marcar este servicio como adicional"}
+                            className="flex items-center justify-center p-2 rounded-xl transition-colors border"
+                            style={esAdicional(r)
+                              ? { background: "#fef3c7", color: "#b45309", borderColor: "#fde68a" }
+                              : { background: "#f8fafc", color: "#94a3b8", borderColor: "#e2e8f0" }}
+                          >
+                            <Sparkles size={14} />
                           </button>
                           <button onClick={() => editarReserva(r)} title="Editar" className="flex items-center justify-center bg-gray-50 hover:bg-gray-100 text-gray-600 p-2 rounded-xl transition-colors border border-gray-200">
                             <Pencil size={14} />
