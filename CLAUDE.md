@@ -107,6 +107,17 @@ The actual data model lives in Supabase (Postgres). Tables referenced across the
 - **Todo lo que toca estas columnas reintenta sin ellas** (`COLUMNAS_OPCIONALES` en el modal, `COLS_OPCIONALES` en `/programacion`, la cascada de `.catch()` en `/liquidaciones`). Con una diferencia: si al generar un adicional se cae `origen_contractual`, **se avisa en pantalla** — los servicios se crearon pero nacieron indistinguibles del contrato, y callarlo dejaría al operador buscando un subtotal que nunca va a aparecer.
 - Matriz: `npx tsx scripts/prueba-adicionales.mts`. Vista para reportes: `v_adicionales` (no agrega nada; los cortes los hace quien consulta).
 
+### Costeo de la unidad propia (`lib/costeo-propio.ts`)
+
+La fórmula del costo de mover un bus propio —combustible por km/galón con urea, neumáticos por vida útil, mantenimiento en S/km, depreciación, fijos anuales prorrateados, conductor por día, peajes, otros, más reserva 5 % y overhead 10 %— vivía **dentro** de `app/cotizador/page.tsx`, así que no la podía usar nadie más. Está extraída, y `calcular()` en el cotizador es ahora un adaptador que arma el `Resultado` con la forma que esa pantalla espera.
+
+- **Se extrajo, no se reescribió.** `npx tsx scripts/prueba-costeo.mts` corre la versión original (copiada literal en el propio script) y la nueva sobre los mismos casos y compara al **sexto decimal**. Si algún día esa prueba falla, el motor cambió y todas las cotizaciones emitidas dejan de ser reproducibles.
+- **El módulo no lee la base.** Recibe los parámetros resueltos y devuelve números; de dónde salen es cascada de quien tiene acceso a los datos, igual que `paxContratadoDe` en la liquidación.
+- **Dos entradas mandan sobre `parametros_costos`** y declaran su fuente en `CostoUnidad.fuentes`: `costoConductorDia` (el costo EMPRESA real, con gratificaciones/CTS/EsSalud/SCTR según el régimen laboral) y `deprecKm` (la depreciación contable de esa placa, de `activos_fijos`). Un cero explícito es un dato, no la ausencia de uno — una unidad ya depreciada aporta 0.
+- **Pernocte y viáticos entran DESPUÉS del overhead**: son reembolsos de bolsillo, no actividad que consuma estructura.
+- **`precioConMargen` es sobre el PRECIO, no sobre el costo**: con 20 % el precio es `costo/0.8`, no `costo × 1.2`. Es la diferencia entre ganar 20 % y ganar 16.7 %.
+- Todo divisor que venía de un parámetro sin llenar (`rendimiento_1`, `vida_neumatico_km`, `km_anio`) se protege: antes producía `Infinity`/`NaN` que se propagaba al precio.
+
 ### Ayuda contextual (`lib/ayuda/*`, `app/_components/AyudaModulo.tsx`)
 
 Botón "?" global, montado en `app/layout.tsx` junto a `<EliaPanel>` (ELIA vive en `bottom-5 right-5`; la ayuda en `right-24` — no las solapes). `ayudaDeRuta(pathname)` resuelve la ficha por **prefijo más largo**, así que `/crm/campanas` gana sobre `/crm` sin depender del orden de declaración; si una ruta no tiene ficha el botón no se pinta.

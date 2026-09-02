@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { calcularCostoUnidad, escenariosPrecio, type ParametrosUnidad } from "@/lib/costeo-propio";
 
 // ══════════════════════════════════════════════════════════════════
 // TIPOS
@@ -52,30 +53,37 @@ type DiaPlan = {
 
 // ══════════════════════════════════════════════════════════════════
 // MOTOR DE CÁLCULO
+//
+// La fórmula ya no vive aquí: está en lib/costeo-propio.ts, porque el costeo de un
+// servicio de flota propia necesita exactamente la misma cuenta. Dos copias de la
+// misma fórmula divergen, y el día que divergen nadie sabe cuál de los dos números
+// creer. Esta función queda como ADAPTADOR: arma el `Resultado` con la forma que
+// espera el resto de esta pantalla, sin tocar nada más.
+//
+// Que los números no cambiaron lo prueba scripts/prueba-costeo.mts, que corre la
+// versión anterior y la nueva sobre los mismos casos y las compara al sexto decimal.
 // ══════════════════════════════════════════════════════════════════
 
-const IGV=0.18, OVERHEAD=0.10, RESERVA=0.05;
+const MESES_DIAS = 26;   // días facturables de un mes de servicio fijo
 
 function calcular(p:ParamCosto, pr:Record<string,number>, km:number, dias:number, peajes:number, otros:number, pernocte:number, viaticos:number):Resultado|null {
-  if(!p||km<=0)return null;
-  const pc1=pr[p.tipo_combustible_1]||0;
-  const combKm=(pc1/p.rendimiento_1)*p.pct_uso_1+(p.tipo_combustible_2&&p.rendimiento_2&&p.pct_uso_2?((pr[p.tipo_combustible_2]||0)/p.rendimiento_2)*p.pct_uso_2:0);
-  const ureaRate=p.usa_urea&&p.tipo_combustible_1==="Diésel"?(1/p.rendimiento_1)*3.785*(p.consumo_urea_pct||0.04)*(pr["UREA"]||0):0;
-  const costoCombustible=(combKm+ureaRate)*km; const costoUrea=ureaRate*km;
-  const costoNeumaticos=((p.n_neumaticos*p.costo_neumatico)/p.vida_neumatico_km)*km;
-  const costoMantenimiento=p.mantenimiento_km*km;
-  const costoDeprec=((p.valor_compra*(1-p.residual_pct))/(p.vida_util_anios*p.km_anio))*km;
-  const costoFijosKm=((p.seguro_anual+p.soat_anual+p.revision_semestral*2+p.permisos_anual+p.otros_fijos_mensual*12)/p.km_anio)*km;
-  const sub=costoCombustible+costoNeumaticos+costoMantenimiento+costoDeprec+costoFijosKm;
-  const reserva=sub*RESERVA; const costoVehiculo=sub+reserva;
-  const costoConductor=p.conductor_dia*dias;
-  const costoDirectos=peajes+otros;
-  const costoDirectoTotal=costoVehiculo+costoConductor+costoDirectos;
-  const overhead=costoDirectoTotal*OVERHEAD;
-  const baseCosto=costoDirectoTotal+overhead+pernocte+viaticos;
-  const costoKm=costoDirectoTotal/Math.max(km,1);
-  const pF=(m:number)=>baseCosto/(1-m); const fF=(m:number)=>pF(m)*(1+IGV);
-  return{costoCombustible,costoNeumaticos,costoMantenimiento,costoDeprec,costoFijosKm,costoUrea,reserva,costoVehiculo,costoConductor,costoDirectos,costoDirectoTotal,overhead,baseCosto,costoKm,totalMin15:fF(0.15),totalEst20:fF(0.20),totalAlto25:fF(0.25),sinIGV15:pF(0.15),sinIGV20:pF(0.20),sinIGV25:pF(0.25),precioPax20:fF(0.20)/(p.capacidad||1),diaEst:pF(0.20),diaEstIGV:fF(0.20),diaMinIGV:fF(0.15),diaAltoIGV:fF(0.25),mesEstIGV:fF(0.20)*26};
+  const c = calcularCostoUnidad(p as ParametrosUnidad, pr, { km, dias, peajes, otros, pernocte, viaticos });
+  if (!c) return null;
+  const e = escenariosPrecio(c.baseCosto, p.capacidad);
+  return {
+    costoCombustible:c.costoCombustible, costoNeumaticos:c.costoNeumaticos,
+    costoMantenimiento:c.costoMantenimiento, costoDeprec:c.costoDeprec,
+    costoFijosKm:c.costoFijosKm, costoUrea:c.costoUrea, reserva:c.reserva,
+    costoVehiculo:c.costoVehiculo, costoConductor:c.costoConductor,
+    costoDirectos:c.costoDirectos, costoDirectoTotal:c.costoDirectoTotal,
+    overhead:c.overhead, baseCosto:c.baseCosto, costoKm:c.costoKm,
+    totalMin15:e.conIgv.min, totalEst20:e.conIgv.est, totalAlto25:e.conIgv.alto,
+    sinIGV15:e.sinIgv.min,  sinIGV20:e.sinIgv.est,  sinIGV25:e.sinIgv.alto,
+    precioPax20:e.precioPax,
+    diaEst:e.sinIgv.est, diaEstIGV:e.conIgv.est,
+    diaMinIGV:e.conIgv.min, diaAltoIGV:e.conIgv.alto,
+    mesEstIGV:e.conIgv.est * MESES_DIAS,
+  };
 }
 
 // ══════════════════════════════════════════════════════════════════
