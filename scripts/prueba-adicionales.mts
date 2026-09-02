@@ -12,7 +12,7 @@ import {
   analizarServicios, agruparServicios, totalesValorizacion,
   type ReservaLiq, type CatalogoLiq,
 } from "../lib/liquidacion-agrupacion";
-import { planDeCanje, notaDeCanje } from "../lib/reservas-canje";
+import { planDeCanje, notaDeCanje, efectoDeMarcarTramo } from "../lib/reservas-canje";
 
 const cat: CatalogoLiq = {
   placaDe: (r) => (r.vehiculo_id ? `P-${r.vehiculo_id}` : ""),
@@ -190,6 +190,70 @@ const opts = {
         === "Cambio por avería · Canje de origen con OS-2026-008155");
   chk("sin nota escrita queda igual el rastro del canje",
       notaDeCanje("  ", ["A", "B"]) === "Canje de origen con A, B");
+}
+
+// ── 8. Par MIXTO: clasifica el tramo que lleva el importe, y se avisa ─────
+//
+// La regla que reemplazó al contagio. Antes bastaba con marcar el retorno —que va en
+// S/ 0.00 a propósito— para que el día entero saltara al subtotal de adicionales sin
+// que nadie moviera una tarifa. Ahora quien cobra, clasifica.
+{
+  const par = (over: { ida?: string; ret?: string }) => [
+    base(80, { id: 80, reserva_vinculada_id: 81, precio_cliente: 350, origen_contractual: over.ida }),
+    base(81, {
+      id: 81, reserva_vinculada_id: 80, precio_cliente: 0, direccion_servicio: "retorno",
+      hora_servicio: "17:00", origen_contractual: over.ret,
+      ruta_nombre: "RUTA A/ RETORNO 17:00/ BSF→SANTA ANITA",
+    }),
+  ];
+
+  // El retorno marcado, la ida (que lleva la tarifa) de contrato → se cobra CONTRATO.
+  const a = analizarServicios(par({ ret: "adicional" }), "cliente");
+  const la = agruparServicios(a.pares, opts);
+  chk("marcar el tramo mudo NO mueve el día de subtotal",
+      la.length === 1 && la[0].tipo === "servicio", `${la[0]?.tipo}`);
+  chk("el importe sigue en servicios del periodo",
+      totalesValorizacion(la, 18).adicionales === 0);
+  chk("pero el par mixto AVISA",
+      a.avisos.some(v => /marcado como ADICIONAL/.test(v.mensaje)),
+      a.avisos.map(v => v.mensaje).join(" | ") || "sin avisos");
+
+  // La ida (la que lleva la tarifa) marcada → el día entero es adicional.
+  const b = analizarServicios(par({ ida: "adicional" }), "cliente");
+  const lb = agruparServicios(b.pares, opts);
+  chk("marcar el tramo que lleva la tarifa SÍ mueve el día",
+      lb.length === 1 && lb[0].tipo === "adicional", `${lb[0]?.tipo}`);
+  chk("y entra al subtotal de adicionales",
+      totalesValorizacion(lb, 18).adicionales === 350);
+
+  // Los dos del mismo lado: ni aviso ni sorpresa.
+  const c = analizarServicios(par({ ida: "adicional", ret: "adicional" }), "cliente");
+  chk("par coherente no avisa de orígenes distintos",
+      !c.avisos.some(v => /marcado como/.test(v.mensaje)));
+}
+
+// ── 9. El efecto de marcar medio par, tal como lo anuncia la pantalla ─────
+{
+  const ida = { id: 90, codigo: "OS-2026-008161", precio_cliente: 350, origen_contractual: "contrato" };
+  const ret = { id: 91, codigo: "OS-2026-008162", precio_cliente: 0, origen_contractual: "contrato" };
+
+  const mudo = efectoDeMarcarTramo([ida, ret], [ret.id], "adicional");
+  chk("marcar el tramo en S/ 0.00 no mueve la valorización", !mudo.mueveValorizacion);
+  chk("y el aviso nombra dónde está la tarifa",
+      /OS-2026-008161/.test(mudo.aviso) && /NO se mueve/.test(mudo.aviso), mudo.aviso);
+  chk("el portador es la ida", mudo.portador?.id === ida.id);
+  chk("el importe del día es 350", mudo.importe === 350);
+
+  const conPlata = efectoDeMarcarTramo([ida, ret], [ida.id], "adicional");
+  chk("marcar el tramo con la tarifa sí mueve el día", conPlata.mueveValorizacion);
+  chk("y lo dice con el destino y el importe",
+      /ADICIONAL/.test(conPlata.aviso) && /350/.test(conPlata.aviso), conPlata.aviso);
+
+  const sinTarifa = efectoDeMarcarTramo(
+    [{ ...ida, precio_cliente: 0 }, ret], [ret.id], "adicional");
+  chk("sin tarifa en ningún tramo lo dice en vez de inventar un efecto",
+      !sinTarifa.mueveValorizacion && /no entra a ninguna liquidación/.test(sinTarifa.aviso),
+      sinTarifa.aviso);
 }
 
 console.log(fallos === 0 ? "\nTODO OK" : `\n${fallos} FALLO(S)`);

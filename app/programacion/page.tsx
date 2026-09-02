@@ -15,7 +15,7 @@ import {
   describirResultado,
 } from "@/lib/reservas-pacto";
 import { AFECTACIONES, afectacionDe, type CodigoAfectacion } from "@/lib/finanzas/afectacion";
-import { planDeCanje, notaDeCanje, opuesto } from "@/lib/reservas-canje";
+import { planDeCanje, notaDeCanje, opuesto, efectoDeMarcarTramo } from "@/lib/reservas-canje";
 import { sumarDias } from "@/lib/odometro-analitica";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
 import ModalGenerarPrograma, { type ModoPrograma } from "@/components/programacion/ModalGenerarPrograma";
@@ -279,6 +279,16 @@ const columnaFaltante = (msg: string) =>
 const origenDe = (r: { origen_contractual?: string | null }) =>
   String(r.origen_contractual || "contrato");
 const esAdicional = (r: { origen_contractual?: string | null }) => origenDe(r) !== "contrato";
+
+// ── Qué se cambia de cada lado al reclasificar el origen ────────────────────
+// El día entero (por defecto) o solo el tramo que el operador marcó. Todo lo que
+// escribe o calcula pasa por aquí: si `todos` se usara en un sitio y `ids` en otro,
+// la pantalla mostraría un plan y la base recibiría otro. Fuera del componente para
+// que su identidad sea estable y los useMemo del modal no dependan de ellas.
+const ladoPropio = (m: { soloTramo: boolean; ids: number[]; todos: number[] }) =>
+  m.soloTramo ? m.ids : m.todos;
+const ladoContraparte = (m: { soloTramo: boolean; elegido: number | null; contraparte: number[] }) =>
+  m.soloTramo ? (m.elegido != null ? [m.elegido] : []) : m.contraparte;
 
 // Proyección ultraligera para los agregados globales (KPIs, flujo de estados, sumas).
 const COLS_RESUMEN = "id,estado,estado_admin,fecha_servicio,precio_cliente,costo_proveedor,margen,sincronizado_app";
@@ -544,6 +554,12 @@ export default function ReservasPage() {
     todos: number[];    // …más los tramos hermanos: el día entero, no medio día
     liquidadas: { id: number; codigo: string | null; estado: string; cuantas: number }[];
     cargando: boolean;
+    /**
+     * No arrastrar al hermano: cambiar SOLO el tramo marcado. Apagado por defecto,
+     * porque la unidad que se cobra es el día. Encendido es el caso fino: lo que
+     * cambió de manos fue un tramo, y marcar los dos diría más de lo que pasó.
+     */
+    soloTramo: boolean;
     // ── Canje ───────────────────────────────────────────────────────────────
     canje: boolean;                 // el operador pidió intercambiar, no solo marcar
     candidatos: Reserva[] | null;   // null = todavía no se buscaron
@@ -1965,26 +1981,28 @@ export default function ReservasPage() {
   // los servicios que el cliente pidió por encima de lo pactado. Quién sabe cuáles son
   // es el operador; el sistema no puede adivinarlo y no lo intenta.
   //
-  // Dos reglas que hacen esto seguro:
+  // Tres reglas que hacen esto seguro:
   //
-  //   1. ARRASTRA AL HERMANO. La unidad que se cobra es el DÍA (ida + retorno = una
-  //      tarifa). Marcar un solo tramo dejaría medio servicio en cada categoría, y
-  //      v_adicionales mostraría un retorno suelto sin su ida.
+  //   1. ARRASTRA AL HERMANO POR DEFECTO. La unidad que se cobra es el DÍA (ida +
+  //      retorno = una tarifa), así que lo normal es que los dos tramos queden del
+  //      mismo lado. Se puede apagar con "Cambiar solo el tramo marcado" cuando lo
+  //      que cambió de manos fue un tramo — y entonces la pantalla dice ANTES qué
+  //      pasa con la valorización (`efectoDeMarcarTramo`), porque quien clasifica el
+  //      día es el tramo que LLEVA EL IMPORTE: marcar el que va en S/ 0.00 deja la
+  //      valorización intacta, y marcar el que lleva la tarifa mueve el día entero.
   //   2. NO INVENTA `precio_cotizado`. De un servicio de agosto no se sabe cuál era la
   //      tarifa de referencia ENTONCES; leerla hoy de la cotización daría una
   //      comparación falsa si el contrato se renegoció. Se queda en null, que dice la
   //      verdad: "se marcó después, sin referencia registrada".
-  //
-  // Y no dispara nada: el WHEN de trg_reservas_pacto_acta solo cubre costo, precio,
-  // proveedor y vehículo, así que reclasificar no levanta actas ni enlaces de
-  // conformidad. Por eso el motivo vive en `adicional_motivo` y no en `cambio_motivo`.
+  //   3. NO DISPARA NADA: el WHEN de trg_reservas_pacto_acta solo cubre costo, precio,
+  //      proveedor y vehículo, así que reclasificar no levanta actas ni enlaces de
+  //      conformidad. Por eso el motivo vive en `adicional_motivo`, no en
+  //      `cambio_motivo`.
   //
   // Y hay un segundo camino, el CANJE: cuando la etiqueta no sobra sino que está en
-  // el servicio equivocado (dos servicios del mismo día que se intercambiaron las
-  // unidades por una contingencia), marcar uno solo mueve un día entero de subtotal
-  // —`origenDelPar` contagia el origen al par completo— y deja la pantalla diciendo
-  // "Contrato" sobre una fila que el AFA-FL-07 va a imprimir como adicional. Lo
-  // correcto es cambiar los dos a la vez. Ver lib/reservas-canje.ts.
+  // el servicio equivocado (dos servicios que se intercambiaron las unidades por una
+  // contingencia), lo correcto es cambiar los dos a la vez, para que la cuenta de días
+  // contratados y adicionales no se mueva. Ver lib/reservas-canje.ts.
 
   /** Expande ids con sus tramos hermanos por las DOS direcciones del vínculo: si solo
    *  se marcó el retorno y su ida no lo referencia de vuelta, mirar un solo lado se
@@ -2036,7 +2054,7 @@ export default function ReservasPage() {
     if (base.length === 0) return;
     setOrigenMotivo(""); setOrigenNota("");
     setModalOrigen({
-      destino, ids: base, todos: base, liquidadas: [], cargando: true,
+      destino, ids: base, todos: base, liquidadas: [], cargando: true, soloTramo: false,
       canje: false, candidatos: null, cargandoCandidatos: false, sinColumna: false,
       elegido: null, contraparte: [], filas: {},
     });
@@ -2132,7 +2150,15 @@ export default function ReservasPage() {
   const planCanje = useMemo(() => {
     if (!modalOrigen?.canje || !modalOrigen.contraparte.length) return null;
     const de = (ids: number[]) => ids.map(id => modalOrigen.filas[id]).filter(Boolean);
-    return planDeCanje(de(modalOrigen.todos), de(modalOrigen.contraparte), modalOrigen.destino);
+    return planDeCanje(de(ladoPropio(modalOrigen)), de(ladoContraparte(modalOrigen)), modalOrigen.destino);
+  }, [modalOrigen]);
+
+  /** Qué le pasa a la valorización al marcar medio par. Null cuando no aplica. */
+  const efectoTramo = useMemo(() => {
+    if (!modalOrigen?.soloTramo) return null;
+    const par = modalOrigen.todos.map(id => modalOrigen.filas[id]).filter(Boolean);
+    if (par.length < 2) return null;
+    return efectoDeMarcarTramo(par, modalOrigen.ids, modalOrigen.destino);
   }, [modalOrigen]);
 
   const aplicarCambioOrigen = async () => {
@@ -2151,12 +2177,14 @@ export default function ReservasPage() {
     // Volver a 'contrato' limpia el motivo y la nota: describían un adicional que ya
     // no existe, y dejarlos pegados haría que el próximo reporte contara una historia
     // que la fila ya no sostiene.
+    const propio = ladoPropio(m);
+    const contra = ladoContraparte(m);
     const grupos = plan
       ? [
-          { ids: m.todos,       destino: m.destino,           otros: codigosDe(m.contraparte) },
-          { ids: m.contraparte, destino: opuesto(m.destino),  otros: codigosDe(m.todos) },
+          { ids: propio, destino: m.destino,          otros: codigosDe(contra) },
+          { ids: contra, destino: opuesto(m.destino), otros: codigosDe(propio) },
         ]
-      : [{ ids: m.todos, destino: m.destino, otros: [] as string[] }];
+      : [{ ids: propio, destino: m.destino, otros: [] as string[] }];
 
     let hechos = 0;
     let error = "";
@@ -2187,15 +2215,15 @@ export default function ReservasPage() {
       // y borrarlos sería peor. Se dice exactamente qué quedó hecho.
       const medias = !plan || hechos === 0
         ? ""
-        : gruposHechos === 1 && hechos === m.todos.length
+        : gruposHechos === 1 && hechos === propio.length
           // El fallo cayó justo entre los dos lados: se puede nombrar cuál es cuál.
-          ? `\n\nOJO: el canje quedó A MEDIAS. ${codigosDe(m.todos).join(", ")} ya cambió; ` +
-            `${codigosDe(m.contraparte).join(", ")} no. Los dos están del mismo lado: ` +
+          ? `\n\nOJO: el canje quedó A MEDIAS. ${codigosDe(propio).join(", ")} ya cambió; ` +
+            `${codigosDe(contra).join(", ")} no. Los dos están del mismo lado: ` +
             `corrige el que falta antes de liquidar.`
           // Se cortó dentro de un lado: no se sabe cuáles pasaron, así que se pide
           // revisar los dos en vez de afirmar algo que no consta.
           : `\n\nOJO: el canje quedó A MEDIAS (${hechos} servicio(s) alcanzaron a cambiar). ` +
-            `Revisa el origen de ${[...codigosDe(m.todos), ...codigosDe(m.contraparte)].join(", ")} ` +
+            `Revisa el origen de ${[...codigosDe(propio), ...codigosDe(contra)].join(", ")} ` +
             `antes de liquidar.`;
       alert(
         (/origen_contractual|adicional_motivo|adicional_nota/i.test(error)
@@ -2515,25 +2543,49 @@ export default function ReservasPage() {
                 ) : (
                   <>
                     <div className="rounded-xl px-4 py-3 text-sm" style={{ background: esAdic ? "#fffbeb" : "#eef3f8", color: esAdic ? "#854d0e" : "#0b315f" }}>
-                      <b>{modalOrigen.todos.length} servicio(s)</b> pasarán a{" "}
+                      <b>{ladoPropio(modalOrigen).length} servicio(s)</b> pasarán a{" "}
                       <b>{esAdic ? "ADICIONAL" : "CONTRATO"}</b>.
-                      {arrastrados > 0 && (
-                        <>
-                          <p className="mt-1.5 text-[12px] leading-snug">
-                            Marcaste {modalOrigen.ids.length} y se suman {arrastrados} por el tramo
-                            hermano: <b>lo que se cobra es el día completo</b> (ida + retorno = una
-                            tarifa), así que los dos tramos tienen que quedar del mismo lado.
-                          </p>
-                          {/* La pregunta que el operador se hace justo aquí, contestada aquí. */}
-                          <p className="mt-1.5 text-[12px] leading-snug opacity-80">
-                            <b>¿Y marcar solo uno?</b> No cambiaría nada: la liquidación contagia el
-                            origen al par y cobraría el día entero como adicional igual, pero esta
-                            pantalla diría lo contrario. Si lo que hubo fue un <b>intercambio</b> con
-                            otro servicio, cámbialos a la vez.
-                          </p>
-                        </>
+                      {arrastrados > 0 && !modalOrigen.soloTramo && (
+                        <p className="mt-1.5 text-[12px] leading-snug">
+                          Marcaste {modalOrigen.ids.length} y se suman {arrastrados} por el tramo
+                          hermano: <b>lo que se cobra es el día completo</b> (ida + retorno = una
+                          tarifa), así que por defecto los dos tramos quedan del mismo lado.
+                        </p>
                       )}
                     </div>
+
+                    {/* ── SOLO ESTE TRAMO ────────────────────────────────────────────
+                        El día es la unidad que se cobra, pero a veces lo que cambió de
+                        manos fue un tramo. Se puede, y la consecuencia se enseña ANTES:
+                        el origen del día lo declara el tramo que lleva el importe. */}
+                    {arrastrados > 0 && (
+                      <div className="rounded-xl border px-4 py-3" style={{ borderColor: "#e2e8f0" }}>
+                        <label className="flex items-start gap-2.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={modalOrigen.soloTramo}
+                            onChange={e => setModalOrigen(p => p ? { ...p, soloTramo: e.target.checked } : p)}
+                            className="mt-0.5 w-4 h-4 shrink-0"
+                          />
+                          <span>
+                            <span className="text-sm font-bold text-gray-800">
+                              Cambiar solo el tramo marcado
+                            </span>
+                            <span className="block text-[11px] text-gray-500 leading-snug mt-0.5">
+                              No tocar {arrastrados === 1 ? "su tramo hermano" : "sus tramos hermanos"}
+                              {" "}({modalOrigen.todos.filter(id => !modalOrigen.ids.includes(id))
+                                      .map(id => modalOrigen.filas[id]?.codigo ?? `#${id}`).join(", ")}).
+                            </span>
+                          </span>
+                        </label>
+                        {efectoTramo && (
+                          <p className="text-[12px] leading-snug mt-2.5 pl-6"
+                             style={{ color: efectoTramo.mueveValorizacion ? "#854d0e" : "#0b315f" }}>
+                            {efectoTramo.aviso}
+                          </p>
+                        )}
+                      </div>
+                    )}
 
                     {/* ── CANJE ──────────────────────────────────────────────────────
                         El caso en que la etiqueta no sobra: está en el servicio
@@ -2698,7 +2750,7 @@ export default function ReservasPage() {
                               </>
                             ) : (
                               <>
-                                Se escribe en los {modalOrigen.todos.length} servicios. El
+                                Se escribe en los {ladoPropio(modalOrigen).length} servicios. El
                                 <b> precio de referencia se deja vacío</b> a propósito: de un servicio
                                 pasado no se sabe cuál era la tarifa de entonces, y leerla hoy de la
                                 cotización daría una comparación falsa si el contrato se renegoció.
@@ -2726,7 +2778,7 @@ export default function ReservasPage() {
                     ? "Aplicando…"
                     : planCanje
                       ? `Intercambiar ${planCanje.a.ids.length} ⇄ ${planCanje.b.ids.length} servicio(s)`
-                      : `Cambiar ${modalOrigen.todos.length} servicio(s)`}
+                      : `Cambiar ${ladoPropio(modalOrigen).length} servicio(s)`}
                 </button>
                 <button onClick={() => setModalOrigen(null)} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
                   Cancelar

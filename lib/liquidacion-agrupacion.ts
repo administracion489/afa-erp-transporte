@@ -84,16 +84,28 @@ export const origenContractual = (r: ReservaLiq | null | undefined): string =>
   String(r?.origen_contractual || "contrato");
 
 /**
- * El origen del SERVICIO, no del tramo. Basta con que uno de los dos tramos esté
- * marcado: los dos nacen del mismo lote, y si alguna vez difieren, lo que no se puede
- * hacer es cobrar como contratado un día que se pidió aparte.
+ * El origen del SERVICIO lo declara EL TRAMO QUE LLEVA EL IMPORTE.
+ *
+ * Es la regla de oro del proyecto aplicada al origen: el monto tiene una fila
+ * autoritativa y el resto la DERIVA. La cabeza es, por construcción de
+ * `analizarServicios`, el tramo que lleva la tarifa del día (con los dos en 0 el par
+ * ni siquiera llega aquí: queda bloqueado). Así que quien cobra, clasifica.
+ *
+ * Antes esto CONTAGIABA: bastaba con que un tramo estuviera marcado para que el día
+ * entero se cobrara como adicional. La intención era no cobrar como contratado un día
+ * pedido aparte, pero el precio era alto y salía a la luz en cuanto alguien quería
+ * marcar un tramo suelto —el retorno que cubrió otra unidad por una contingencia—:
+ * la marca movía la tarifa completa de subtotal sin que nadie lo pidiera, y la
+ * pantalla seguía diciendo "Contrato" sobre la ida. Un día no cambia de bolsillo
+ * porque se anote algo en el tramo que va en S/ 0.00.
+ *
+ * Marcar el tramo que SÍ lleva el importe sigue moviendo el día entero, que es lo
+ * correcto y lo que hace por defecto Programación (arrastra al hermano). Y cuando los
+ * dos tramos difieren, `analizarServicios` levanta un aviso: la marca del tramo mudo
+ * no se pierde en silencio.
  */
 export function origenDelPar(p: ParServicio): string {
-  for (const r of [p.cabeza, ...p.adjuntas]) {
-    const o = origenContractual(r);
-    if (o !== "contrato") return o;
-  }
-  return "contrato";
+  return origenContractual(p.cabeza);
 }
 
 /** Datos de apoyo que la página resuelve una sola vez (placas, capacidades, nombres). */
@@ -392,6 +404,23 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
     // facturaba, sin bloqueo y sin aviso.
     const ejecutados = [cabeza, adjunta].filter(hecho);
     const ejecutado = ejecutados.length > 0;
+
+    // Los dos tramos declaran orígenes distintos. Manda el de la cabeza —quien lleva el
+    // importe, clasifica—, pero la marca del otro tramo no se traga en silencio: o el
+    // día entero iba aparte y falta marcar este lado, o es el registro de que solo ese
+    // tramo cambió de manos. Lo primero mueve dinero; lo segundo, no. Quien emite tiene
+    // que poder distinguirlo antes de firmar.
+    const origenCabeza = origenContractual(cabeza);
+    const origenAdjunta = origenContractual(adjunta);
+    if (origenCabeza !== origenAdjunta)
+      res.avisos.push({
+        r: adjunta,
+        mensaje:
+          `${rotuloTramo(adjunta)} está marcado como ${origenAdjunta.toUpperCase()} y ` +
+          `${rotuloTramo(cabeza).toLowerCase()} como ${origenCabeza.toUpperCase()}. El día se cobra ` +
+          `como ${origenCabeza.toUpperCase()} porque el importe está en ${rotuloTramo(cabeza).toLowerCase()} ` +
+          `— si el día entero iba aparte, marca los dos tramos.`,
+      });
 
     const motivosAdjunta = trabas(adjunta, cabeza);
     if (motivosAdjunta.length) {
