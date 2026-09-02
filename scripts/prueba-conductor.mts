@@ -109,6 +109,27 @@ console.log("\n── Honorarios: va completo, no se prorratea ──");
   ok(dos.porServicio === 90, "si ese día cubrió dos servicios, también se reparte", `S/ ${dos.porServicio.toFixed(2)}`);
 }
 
+console.log("\n── El vínculo decide cómo se imputa ──");
+{
+  // Un EVENTUAL se contrata por día, igual que un recibo por honorarios. Mandarlo por
+  // el camino de planilla le pediría un sueldo mensual para prorratearlo, que es
+  // inventar una relación laboral que no existe.
+  const ev: DatosConductor = { ...BASE, tipo_contrato: "eventual", sueldo_basico: null, honorario_dia: 150 };
+  const c = costoConductorServicio(ev, PEQUENA, { diasConServicio: 5, serviciosDelDia: 1, diasLaborablesMes: 26 });
+  ok(c.porDia === 150 && !c.falta, "eventual · se imputa por día, no se prorratea", `S/ ${c.porDia.toFixed(2)}`);
+  ok(/eventual/.test(c.base), "…y la base lo dice con su nombre", c.base);
+
+  // El plazo fijo SÍ es planilla: mismos derechos, mismo costo empresa.
+  const pf = costoConductorServicio({ ...BASE, tipo_contrato: "plazo_fijo" }, PEQUENA,
+    { diasConServicio: 24, serviciosDelDia: 1, diasLaborablesMes: 26 });
+  ok(cerca(pf.costoMes, 1976), "plazo fijo · es planilla, mismo costo empresa", `S/ ${pf.costoMes.toFixed(2)}`);
+
+  // Un conductor de service ya viene cobrado dentro de la factura del proveedor.
+  const sv = costoConductorServicio({ ...BASE, tipo_contrato: "service" }, PEQUENA,
+    { diasConServicio: 24, serviciosDelDia: 1, diasLaborablesMes: 26 });
+  ok(sv.porServicio === 0 && !sv.falta, "service · no se imputa y no reclama datos", sv.base);
+}
+
 console.log("\n── Faltantes y divisores en cero ──");
 {
   const sinSueldo = costoConductorServicio({ ...BASE, sueldo_basico: null }, PEQUENA,
@@ -117,7 +138,8 @@ console.log("\n── Faltantes y divisores en cero ──");
 
   const sinHonorario = costoConductorServicio({ ...BASE, tipo_contrato: "honorarios", honorario_dia: null }, PEQUENA,
     { diasConServicio: 1, serviciosDelDia: 1, diasLaborablesMes: 26 });
-  ok(!!sinHonorario.falta, "lo mismo con el honorario por día", sinHonorario.falta ?? "");
+  ok(!!sinHonorario.falta, "lo mismo con el importe por día", sinHonorario.falta ?? "");
+  ok(/por día/.test(sinHonorario.falta ?? ""), "…y pide el campo correcto, no el sueldo mensual");
 
   const sinDias = costoConductorServicio(BASE, PEQUENA, { diasConServicio: 0, serviciosDelDia: 1, diasLaborablesMes: 26 });
   ok(Number.isFinite(sinDias.porDia) && sinDias.porDia > 0,

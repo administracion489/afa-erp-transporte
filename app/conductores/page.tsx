@@ -420,13 +420,28 @@ export default function ConductoresPage() {
                   régimen) dividido entre los días que trabajó de verdad. Sin estos
                   campos, el costeo de un servicio de flota propia no puede imputar
                   el conductor y lo dice en pantalla. */}
-              {form.tipo_contrato === "honorarios" ? (
-                <Campo label="Honorario por día S/">
+              {/* Qué campo se pide depende del VÍNCULO, no del gusto:
+                    · honorarios y eventual → se contratan por día, su importe es del
+                      servicio y va completo.
+                    · service → su costo está dentro de la factura del proveedor;
+                      imputarlo aquí lo cobraría dos veces.
+                    · planilla y plazo fijo → sueldo mensual, del que sale el costo
+                      empresa que después se prorratea. */}
+              {form.tipo_contrato === "service" ? (
+                <div className="md:col-span-2 flex items-end">
+                  <p className="text-[11px] text-gray-500 leading-snug bg-gray-50 border rounded-xl px-3 py-2.5">
+                    Conductor de <b>service</b>: su costo va dentro de la factura de la
+                    empresa que lo pone. El costeo de un servicio no lo imputa aparte,
+                    porque sería cobrarlo dos veces.
+                  </p>
+                </div>
+              ) : (form.tipo_contrato === "honorarios" || form.tipo_contrato === "eventual") ? (
+                <Campo label={form.tipo_contrato === "eventual" ? "Pago por día S/" : "Honorario por día S/"}>
                   <input type="number" min="0" step="10" className={inputCls()}
                     value={form.honorario_dia} onChange={f("honorario_dia")} placeholder="0.00" />
                   <p className="text-[10px] text-gray-400 mt-1 leading-snug">
                     Se contrata para el servicio, así que su importe va completo: no se
-                    prorratea nada.
+                    prorratea nada ni se le calculan beneficios.
                   </p>
                 </Campo>
               ) : (

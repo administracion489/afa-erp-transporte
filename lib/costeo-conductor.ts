@@ -105,6 +105,30 @@ export function costoEmpresaMes(c: DatosConductor, r: RegimenLaboral): CostoEmpr
   };
 }
 
+/**
+ * Cómo se imputa el costo de un conductor, según su vínculo. El ERP maneja cinco
+ * tipos de contrato y NO todos se costean igual:
+ *
+ *   planilla | plazo_fijo → PLANILLA. Sueldo mensual con beneficios; se prorratea.
+ *                           El plazo fijo es planilla con fecha de fin: mismos
+ *                           derechos, mismo costo empresa.
+ *   honorarios | eventual → POR DÍA. Se contrata PARA el servicio, así que su
+ *                           importe es del servicio y va completo. Pedirle un
+ *                           sueldo mensual y prorratearlo sería inventar una
+ *                           relación laboral que no existe.
+ *   service               → NO SE IMPUTA. Viene de una empresa tercera y su costo
+ *                           está dentro de la factura de ese proveedor. Contarlo
+ *                           aquí además sería cobrarlo dos veces.
+ */
+export type ModoConductor = "planilla" | "por_dia" | "no_imputa";
+
+export function modoCostoConductor(tipoContrato: string | null | undefined): ModoConductor {
+  const t = String(tipoContrato ?? "").toLowerCase();
+  if (t === "honorarios" || t === "eventual") return "por_dia";
+  if (t === "service") return "no_imputa";
+  return "planilla";   // planilla, plazo_fijo y cualquier valor no previsto
+}
+
 export type CostoDia = {
   /** Costo empresa del mes. 0 cuando va por honorarios. */
   costoMes: number;
@@ -144,21 +168,32 @@ export function costoConductorServicio(
 ): CostoDia {
   const serviciosDelDia = Math.max(1, Math.round(opts.serviciosDelDia || 1));
 
-  if (String(c.tipo_contrato ?? "") === "honorarios") {
+  const modo = modoCostoConductor(c.tipo_contrato);
+
+  if (modo === "no_imputa") {
+    return {
+      costoMes: 0, diasConServicio: 0, porDia: 0, porDiaLaborable: 0, porServicio: 0,
+      base: "conductor de service: su costo va en la factura del proveedor, no se imputa aquí",
+      falta: null,
+    };
+  }
+
+  if (modo === "por_dia") {
     const dia = Number(c.honorario_dia ?? 0);
     if (!(dia > 0)) {
       return {
         costoMes: 0, diasConServicio: 0, porDia: 0, porDiaLaborable: 0, porServicio: 0,
-        base: "", falta: "Falta el honorario por día en la ficha del conductor.",
+        base: "", falta: "Falta el importe por día en la ficha del conductor (se contrata por servicio, no por mes).",
       };
     }
+    const etq = String(c.tipo_contrato ?? "") === "eventual" ? "conductor eventual" : "recibo por honorarios";
     return {
       costoMes: 0,
       diasConServicio: 0,
       porDia: dia,
       porDiaLaborable: dia,
       porServicio: dia / serviciosDelDia,
-      base: `recibo por honorarios · S/ ${dia.toFixed(2)} por día` +
+      base: `${etq} · S/ ${dia.toFixed(2)} por día` +
             (serviciosDelDia > 1 ? ` · repartido entre ${serviciosDelDia} servicios` : ""),
       falta: null,
     };
