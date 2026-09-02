@@ -3367,6 +3367,65 @@ export default function ReservasPage() {
                   </Campo>
                 </div>
 
+                {empSelId && riesgoEmpSel === "alto" && (
+                  <div className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-800">
+                    ATENCION: Esta empresa tiene documentos obligatorios vencidos. Revisar modulo de Tercerizadas antes de confirmar.
+                  </div>
+                )}
+
+                {empSelId && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <Campo label={"Vehiculo del tercero (" + vehEmpSel.length + " disponibles)"}>
+                      <select className={inputCls()} value={form.vehiculo_tercero_id} onChange={f("vehiculo_tercero_id")}>
+                        <option value="">Sin especificar</option>
+                        {vehEmpSel.map(v => (
+                          <option key={v.id} value={v.id}>{v.placa} · {v.categoria}{v.capacidad ? " · " + v.capacidad + " pax" : ""}</option>
+                        ))}
+                      </select>
+                    </Campo>
+                    <Campo label={"Conductor del tercero (" + condEmpSel.length + ")"}>
+                      <select className={inputCls()} value={form.conductor_tercero_id} onChange={f("conductor_tercero_id")}>
+                        <option value="">Sin especificar</option>
+                        {condEmpSel.map(c => {
+                          const licOk = !c.vencimiento_licencia || diasPara(c.vencimiento_licencia)! >= 0;
+                          return <option key={c.id} value={c.id}>{!licOk ? "VENC. " : ""}{c.nombre}{c.licencia ? " · " + c.licencia : ""}</option>;
+                        })}
+                      </select>
+                    </Campo>
+                    <Campo label="Observaciones">
+                      <input className={inputCls()} placeholder="Notas del servicio..." value={form.observaciones} onChange={f("observaciones")} />
+                    </Campo>
+                  </div>
+                )}
+
+                {empSelId && (() => {
+                  const emp = empresasTer.find(e => e.id === empSelId);
+                  if (!emp) return null;
+                  return (
+                    <div className="rounded-xl px-4 py-3 text-xs bg-gray-50 flex gap-6 flex-wrap">
+                      <div><span className="text-gray-400">Empresa:</span> <b>{emp.razon_social}</b></div>
+                      {emp.telefono && <div><span className="text-gray-400">Tel:</span> {emp.telefono}</div>}
+                      <div><span className="text-gray-400">Flota disponible:</span> <b>{vehEmpSel.length} vehiculos</b></div>
+                      <div><span className="text-gray-400">Conductores:</span> <b>{condEmpSel.length}</b></div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+
+          {/* ── DINERO DEL SERVICIO ─────────────────────────────────────────
+              Vale para las DOS asignaciones. Estaba dentro de la rama de tercerizados,
+              así que un servicio de flota propia no tenía dónde ponerle precio de venta:
+              se creaba, se prestaba y llegaba al cierre sin importe, y ahí el bloque rojo
+              decía "Sin precio de venta" sin que existiera ninguna pantalla para cargarlo.
+              El precio, el motivo del cambio, el tramo hermano y los avisos son del
+              SERVICIO; lo único que es del tercero es el costo del proveedor. */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">
+              Dinero del servicio
+            </p>
+            <div className="space-y-4">
                 {/* ── Precio de venta ─────────────────────────────────────────
                     Este campo NO existía en ninguna pantalla del ERP: una vez creado
                     el servicio, su precio era inmodificable (los únicos updates de
@@ -3387,6 +3446,18 @@ export default function ReservasPage() {
                       muestra en el momento de decidir. */}
                   <div className="md:col-span-2">
                     <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">Margen</p>
+                    {form.tipo_asignacion === "propio" ? (
+                      // Con costo_proveedor en cero el margen daría 100 %, y en flota propia
+                      // eso no es "todavía no se sabe": es FALSO. El costo de una unidad
+                      // propia no es un importe pactado con nadie — sale de los egresos
+                      // reales del servicio, que ya suma v_costo_servicio.
+                      <div className="rounded-xl border bg-gray-50 px-4 py-3 text-[11px] text-gray-500 leading-snug">
+                        En flota propia no hay costo pactado con nadie, así que aquí no se
+                        muestra margen: con el costo en cero saldría <b>100 %</b>, que es falso.
+                        El costo real de este servicio sale de sus egresos —combustible,
+                        peajes, caja chica— y se ve en <b>Gastos → Costo del servicio</b>.
+                      </div>
+                    ) : (
                     <div className="rounded-xl border bg-gray-50 px-4 py-3 flex flex-wrap items-center gap-4">
                       <div>
                         <span className="block text-[10px] uppercase text-gray-400">Antes</span>
@@ -3416,6 +3487,7 @@ export default function ReservasPage() {
                         exonerado se comparan de verdad.
                       </p>
                     </div>
+                    )}
                   </div>
                 </div>
 
@@ -3492,51 +3564,7 @@ export default function ReservasPage() {
                   );
                 })()}
 
-                {empSelId && riesgoEmpSel === "alto" && (
-                  <div className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-800">
-                    ATENCION: Esta empresa tiene documentos obligatorios vencidos. Revisar modulo de Tercerizadas antes de confirmar.
-                  </div>
-                )}
-
-                {empSelId && (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <Campo label={"Vehiculo del tercero (" + vehEmpSel.length + " disponibles)"}>
-                      <select className={inputCls()} value={form.vehiculo_tercero_id} onChange={f("vehiculo_tercero_id")}>
-                        <option value="">Sin especificar</option>
-                        {vehEmpSel.map(v => (
-                          <option key={v.id} value={v.id}>{v.placa} · {v.categoria}{v.capacidad ? " · " + v.capacidad + " pax" : ""}</option>
-                        ))}
-                      </select>
-                    </Campo>
-                    <Campo label={"Conductor del tercero (" + condEmpSel.length + ")"}>
-                      <select className={inputCls()} value={form.conductor_tercero_id} onChange={f("conductor_tercero_id")}>
-                        <option value="">Sin especificar</option>
-                        {condEmpSel.map(c => {
-                          const licOk = !c.vencimiento_licencia || diasPara(c.vencimiento_licencia)! >= 0;
-                          return <option key={c.id} value={c.id}>{!licOk ? "VENC. " : ""}{c.nombre}{c.licencia ? " · " + c.licencia : ""}</option>;
-                        })}
-                      </select>
-                    </Campo>
-                    <Campo label="Observaciones">
-                      <input className={inputCls()} placeholder="Notas del servicio..." value={form.observaciones} onChange={f("observaciones")} />
-                    </Campo>
-                  </div>
-                )}
-
-                {empSelId && (() => {
-                  const emp = empresasTer.find(e => e.id === empSelId);
-                  if (!emp) return null;
-                  return (
-                    <div className="rounded-xl px-4 py-3 text-xs bg-gray-50 flex gap-6 flex-wrap">
-                      <div><span className="text-gray-400">Empresa:</span> <b>{emp.razon_social}</b></div>
-                      {emp.telefono && <div><span className="text-gray-400">Tel:</span> {emp.telefono}</div>}
-                      <div><span className="text-gray-400">Flota disponible:</span> <b>{vehEmpSel.length} vehiculos</b></div>
-                      <div><span className="text-gray-400">Conductores:</span> <b>{condEmpSel.length}</b></div>
-                    </div>
-                  );
-                })()}
-              </div>
-            )}
+            </div>
           </div>
 
           <div className="flex gap-3">
