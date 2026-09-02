@@ -28,6 +28,7 @@
 import { redondear, calcularDetraccion } from "@/lib/finanzas/dinero";
 import {
   totalesValorizacion, descripcionLinea, sentidoDeReserva, nombreRuta, origenContractual,
+  analizarServicios, precioUnitario,
   type LineaAgrupada, type ParServicio, type ReservaLiq,
 } from "@/lib/liquidacion-agrupacion";
 import {
@@ -600,6 +601,170 @@ export async function recalcularDescripciones(
       usuario: opts?.usuario ?? undefined,
     });
     return { ok: true, actualizadas, sinPax };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
+// ── Volver a derivar los importes de un borrador ────────────────────────────
+
+/**
+ * Columnas que necesita `analizarServicios` para rehacer los pares de UNA línea.
+ *
+ * A propósito NO se piden `liquidacion_cliente_id` ni `liquidacion_proveedor_id`: estas
+ * reservas están, por definición, dentro de esta misma liquidación, y `bloqueosDe` trata
+ * ese FK como "ya está en otra liquidación". Pidiéndolas, el análisis bloquearía las
+ * filas y la línea quedaría en cero servicios. `empresa_tercerizada_id` sí va, porque sin
+ * ella el lado proveedor bloquearía todo por "Sin empresa tercerizada".
+ */
+const COLS_RESINCRONIZAR =
+  "id,codigo,fecha_servicio,hora_servicio,estado,cliente_id,ruta_nombre,direccion_servicio," +
+  "origen,destino,reserva_vinculada_id,precio_cliente,costo_proveedor," +
+  "empresa_tercerizada_id,tipo_asignacion";
+
+export type ResultadoResincronizacion = {
+  ok: boolean;
+  /** Líneas que se volvieron a derivar. */
+  lineas?: number;
+  /** De ésas, cuántas cambiaron de importe o de cantidad. */
+  cambiadas?: number;
+  /** Líneas cuya cantidad está fijada a mano con motivo: se respetó. */
+  cantidadFijada?: number;
+  /** Líneas cuyos servicios ya no tienen un mismo precio: se tomó el más repetido. */
+  preciosDispares?: number;
+  error?: string;
+};
+
+/**
+ * Vuelve a DERIVAR los importes de un borrador desde sus reservas.
+ *
+ * Es la mitad que faltaba para poder corregir un precio desde Liquidaciones. La regla de
+ * oro dice que el monto autoritativo es UNO —aquí, `reservas.precio_cliente`— y que el
+ * resto lo referencia y lo deriva; pero la línea del documento es un SNAPSHOT tomado al
+ * cerrar el periodo. Sin esta función, arreglar el precio en la reserva dejaba el
+ * documento diciendo el número viejo, que es justo la divergencia que la regla existe
+ * para impedir.
+ *
+ * Solo sobre BORRADORES: un documento emitido ya lo vio el cliente, y cambiarle el
+ * importe por detrás es exactamente lo que no puede pasar. Para eso está "↩ Reabrir".
+ *
+ * Cada línea se rehace con SUS PROPIAS reservas (las del puente), nunca re-agrupando el
+ * periodo: el documento conserva los mismos renglones y el mismo Anexo 1, y solo cambian
+ * los números que las reservas ahora dicen. Dos cosas que NO se tocan:
+ *
+ *   · `cantidad_programada` — el puente solo guarda los tramos ejecutados, así que desde
+ *     aquí no se puede saber cuántos había programados. Reescribirla con lo que se ve
+ *     sería inventar un "26/26" donde hubo 26 programados y 25 prestados.
+ *   · `cantidad` cuando lleva `cantidad_motivo` — alguien la fijó a mano y dejó escrito
+ *     por qué. Pisarla borraría esa decisión sin decirlo.
+ */
+export async function resincronizarImportes(
+  sb: any,
+  lado: Lado,
+  id: number,
+  opts?: { usuario?: string | null }
+): Promise<ResultadoResincronizacion> {
+  try {
+    const t = T[lado];
+    const { data: cab } = await sb.from(t.cab).select("*").eq("id", id).maybeSingle();
+    if (!cab) throw new Error("La liquidación no existe.");
+    if (cab.estado !== "borrador")
+      throw new Error(
+        `${cab.codigo ?? "#" + id} está en estado "${cab.estado}": los importes de un documento emitido no se tocan por detrás. Reábrelo como borrador primero.`
+      );
+
+    const { data: lineasRaw } = await sb
+      .from(t.linea)
+      .select("id,item,tipo,descripcion,agrupacion_clave,cantidad,cantidad_ejecutada,cantidad_motivo,precio_unitario")
+      .eq("liquidacion_id", id)
+      .order("item");
+    // Mismo discriminante que `recalcularDescripciones`: `agrupacion_clave` es lo que
+    // dice "esta línea tiene reservas detrás". Una adicional escrita a mano en el editor
+    // no las tiene y no se deriva de nada.
+    const lineas = ((lineasRaw as any[]) ?? []).filter((l) => !!l.agrupacion_clave);
+    if (!lineas.length) return { ok: true, lineas: 0, cambiadas: 0 };
+
+    const lineaIds = lineas.map((l) => Number(l.id));
+    const puente: any[] = [];
+    for (let i = 0; i < lineaIds.length; i += 100) {
+      const { data } = await sb.from(t.puente).select("linea_id,reserva_id").in("linea_id", lineaIds.slice(i, i + 100));
+      puente.push(...((data as any[]) ?? []));
+    }
+    const reservaIds = [...new Set(puente.map((p) => Number(p.reserva_id)))];
+    const reservas: any[] = [];
+    for (let i = 0; i < reservaIds.length; i += 300) {
+      const { data } = await sb.from("reservas").select(COLS_RESINCRONIZAR).in("id", reservaIds.slice(i, i + 300));
+      reservas.push(...((data as any[]) ?? []));
+    }
+    const porId = new Map<number, ReservaLiq>(reservas.map((r) => [Number(r.id), r as ReservaLiq]));
+
+    const opcionesPrecio = {
+      preciosIncluyenIgv: !!cab.precios_incluyen_igv,
+      igvPct: Number(cab.igv_pct ?? 18),
+    };
+
+    let cambiadas = 0;
+    let cantidadFijada = 0;
+    let preciosDispares = 0;
+
+    for (const l of lineas) {
+      const filas = puente
+        .filter((p) => Number(p.linea_id) === Number(l.id))
+        .map((p) => porId.get(Number(p.reserva_id)))
+        .filter(Boolean) as ReservaLiq[];
+      if (!filas.length) continue;
+
+      const pares = analizarServicios(filas, lado).pares;
+      const ejecutados = pares.filter((p) => p.ejecutado);
+      // Sin ningún par valorizable (alguien puso los dos tramos en 0) no se escribe: una
+      // línea que se pone sola en S/ 0.00 es una fuga silenciosa. Se deja como está y el
+      // bloque rojo del cierre ya reclama el precio que falta.
+      if (!ejecutados.length) continue;
+
+      // Todos los servicios de una línea comparten tarifa —es parte de la clave de
+      // agrupación—, así que normalmente hay un solo precio. Si ya no lo comparten es
+      // que alguien cambió unos y no otros: se toma el más repetido y se DICE.
+      const cuenta = new Map<number, number>();
+      for (const p of ejecutados) {
+        const v = precioUnitario(p.cabeza, lado, opcionesPrecio);
+        cuenta.set(v, (cuenta.get(v) ?? 0) + 1);
+      }
+      if (cuenta.size > 1) preciosDispares += 1;
+      const precio = [...cuenta].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
+
+      const ejecutada = ejecutados.length;
+      const fijada = !!String(l.cantidad_motivo ?? "").trim();
+      if (fijada) cantidadFijada += 1;
+      const cantidad = fijada ? Number(l.cantidad ?? 0) : ejecutada;
+
+      const igual =
+        Number(l.precio_unitario ?? 0) === precio &&
+        Number(l.cantidad_ejecutada ?? 0) === ejecutada &&
+        Number(l.cantidad ?? 0) === cantidad;
+      if (igual) continue;
+
+      const { error } = await sb.from(t.linea).update({
+        precio_unitario: precio,
+        cantidad_ejecutada: ejecutada,
+        cantidad,
+        total_linea: redondear(cantidad * precio),
+      }).eq("id", l.id);
+      if (error) throw new Error(`línea ${l.item ?? l.id}: ${error.message}`);
+      cambiadas += 1;
+    }
+
+    if (cambiadas) {
+      await recalcularTotales(sb, lado, id);
+      await registrarEvento(sb, lado, id, "importes_resincronizados", {
+        detalle:
+          `${cambiadas} de ${lineas.length} línea(s) vueltas a derivar de sus servicios` +
+          (cantidadFijada ? ` · ${cantidadFijada} con cantidad fijada a mano: respetada` : "") +
+          (preciosDispares ? ` · ${preciosDispares} con precios distintos entre sus servicios` : ""),
+        usuario: opts?.usuario ?? undefined,
+      });
+    }
+
+    return { ok: true, lineas: lineas.length, cambiadas, cantidadFijada, preciosDispares };
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) };
   }

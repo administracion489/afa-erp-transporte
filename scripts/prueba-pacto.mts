@@ -49,6 +49,25 @@ const av2 = avisosDe({ tipo_asignacion: "tercerizado", costo_proveedor: 550, pre
 ok(av2.some(x => x.texto.includes("motivo")), "costo cambiado sin motivo lo pide");
 ok(av2.some(x => x.texto.includes("conformidad")), "precio al alza anuncia la conformidad");
 
+// El modal de servicios de /liquidaciones edita UNA sola cara del dinero: en la pestaña
+// del cliente el precio, en la del proveedor el costo. Sin acotarlo, corregir un precio
+// sacaba en rojo los avisos del costo del proveedor —ciertos, pero imposibles de atender
+// desde ahí—, y un rojo que no se puede arreglar enseña a ignorar los rojos.
+const soloPrecio = avisosDe({ tipo_asignacion: "tercerizado", costo_proveedor: 0, precio_cliente: 0 },
+                            null, undefined, "precio");
+ok(soloPrecio.length === 1 && soloPrecio[0].texto.includes("precio de venta"),
+   "acotado a 'precio': no saca el aviso del costo", soloPrecio.map(x => x.texto).join(" | "));
+const soloCosto = avisosDe({ tipo_asignacion: "tercerizado", costo_proveedor: 0, precio_cliente: 0 },
+                           null, undefined, "costo");
+ok(soloCosto.length === 1 && soloCosto[0].texto.includes("sin costo pactado"),
+   "acotado a 'costo': no saca el aviso del precio", soloCosto.map(x => x.texto).join(" | "));
+const ambos = avisosDe({ tipo_asignacion: "tercerizado", costo_proveedor: 0, precio_cliente: 0 });
+ok(ambos.length === 2, "sin acotar sigue avisando de los dos, como Programación", String(ambos.length));
+// Y el aviso del par no se pierde al acotar: es el que impide cobrar el día dos veces.
+const doble = avisosDe({ direccion_servicio: "retorno", precio_cliente: 790 }, null,
+                       { id: 9, codigo: "OS-1", direccion_servicio: "ida", precio_cliente: 790 }, "precio");
+ok(doble.some(x => x.texto.includes("DOS VECES")), "acotado, el par sigue avisando del doble cobro");
+
 console.log("\n── guardarReservas: rechazos con nombre ──");
 // Supabase falso: el lote entero falla, pero fila por fila solo falla el id 2.
 const sbFalso = {

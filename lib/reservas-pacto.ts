@@ -129,7 +129,15 @@ const seCayo = (estado?: string | null) =>
 export function avisosDe(
   patch: Record<string, any>,
   anterior?: { precio_cliente?: number | null; costo_proveedor?: number | null } | null,
-  hermano?: TramoHermano
+  hermano?: TramoHermano,
+  /**
+   * Qué cara del dinero juzgar. Programación edita las dos y no pasa nada, que es el
+   * comportamiento de siempre. Una pantalla que solo edita una —el modal de servicios
+   * de Liquidaciones, que del lado cliente escribe el precio y del lado proveedor el
+   * costo— pide solo la suya: si no, al corregir un precio salían en rojo los avisos
+   * del costo, que ahí ni se ven ni se pueden arreglar.
+   */
+  soloJuzgar?: "costo" | "precio"
 ): AvisoPacto[] {
   const avisos: AvisoPacto[] = [];
   const esTercero = patch.tipo_asignacion === "tercerizado";
@@ -171,7 +179,10 @@ export function avisosDe(
       });
   };
 
-  if (esTercero) {
+  const juzgaCosto = soloJuzgar !== "precio";
+  const juzgaPrecio = soloJuzgar !== "costo";
+
+  if (esTercero && juzgaCosto) {
     if (hermano) importeDelDia(costo, costoHermano, "costo", "S/");
     else if (costo <= 0)
       avisos.push({
@@ -182,22 +193,24 @@ export function avisosDe(
 
   // Simétrico para la venta: un servicio sin precio no se puede facturar, y hasta ahora
   // eso solo se descubría al cerrar el mes, cuando la ruta entera no salía en el formato.
-  if (hermano) importeDelDia(precio, precioHermano, "precio", "S/");
-  else if (precio <= 0)
-    avisos.push({
-      nivel: "alerta",
-      texto: "Servicio sin precio de venta. Si se queda así, no entrará a la liquidación del cliente.",
-    });
+  if (juzgaPrecio) {
+    if (hermano) importeDelDia(precio, precioHermano, "precio", "S/");
+    else if (precio <= 0)
+      avisos.push({
+        nivel: "alerta",
+        texto: "Servicio sin precio de venta. Si se queda así, no entrará a la liquidación del cliente.",
+      });
+  }
 
   const costoAntes = Number(anterior?.costo_proveedor ?? 0);
-  if (costoAntes > 0 && costo > 0 && costo !== costoAntes && !patch.cambio_motivo)
+  if (juzgaCosto && costoAntes > 0 && costo > 0 && costo !== costoAntes && !patch.cambio_motivo)
     avisos.push({
       nivel: "info",
       texto: "Cambió el costo pactado. Elige el motivo para que quede sustentado.",
     });
 
   const precioAntes = Number(anterior?.precio_cliente ?? 0);
-  if (precioAntes > 0 && precio > precioAntes)
+  if (juzgaPrecio && precioAntes > 0 && precio > precioAntes)
     avisos.push({
       nivel: "info",
       texto: "Subió el precio de venta: se generará un enlace de conformidad para que el cliente lo acepte.",

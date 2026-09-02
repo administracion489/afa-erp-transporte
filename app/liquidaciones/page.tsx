@@ -28,6 +28,7 @@ import {
 } from "@/lib/liquidacion-rutas";
 import ModalRutasContratadas, { type RutaDelPeriodo } from "./ModalRutasContratadas";
 import ModalPrecios, { type ReservaSinPrecio } from "./ModalPrecios";
+import ModalServicios from "./ModalServicios";
 import {
   crearLiquidaciones, igvVigente, aprobarLiquidacionCliente, aprobarLiquidacionProveedor,
   anularLiquidacion, liberarServicios, volverABorrador, hoyLima,
@@ -204,6 +205,24 @@ export default function LiquidacionesPage() {
   const [modalCostos, setModalCostos] = useState<ReservaSinCosto[] | null>(null);
   const [modalRutas, setModalRutas] = useState<RutaDelPeriodo[] | null>(null);
   const [modalPrecios, setModalPrecios] = useState<ReservaSinPrecio[] | null>(null);
+  /**
+   * El detalle detrás de un contador. Los tres números de esta pantalla —el "N serv."
+   * del bloque rojo, el "N/N serv." de cada línea y el "N servicio(s)" de la cabecera—
+   * eran solo texto: cuando uno estaba mal había que ir a Programación a buscar el
+   * servicio por código. Ahora se abren y se corrigen aquí.
+   */
+  const [modalServicios, setModalServicios] = useState<{ titulo: string; subtitulo: string; ids: number[] } | null>(null);
+
+  /** Las reservas del periodo por id: los tres contadores guardan ids, no filas. */
+  const reservasPorId = useMemo(() => new Map(reservas.map((r) => [r.id, r])), [reservas]);
+
+  /**
+   * Abre el detalle. Recibe ids y no reservas para que los tres orígenes no tengan que
+   * cargar lo mismo de tres formas distintas; los ids que ya no estén en el periodo
+   * (una fecha editada fuera del rango) simplemente no se listan.
+   */
+  const verServicios = (titulo: string, subtitulo: string, ids: number[]) =>
+    setModalServicios({ titulo, subtitulo, ids: [...new Set(ids)] });
 
   // ── Carga ────────────────────────────────────────────────────────────────
   async function cargar() {
@@ -897,7 +916,15 @@ export default function LiquidacionesPage() {
                           {f.grupo}
                         </button>
                       </td>
-                      <td className="px-2 py-1.5 text-xs text-right text-gray-500 w-24">{f.servicios} serv.</td>
+                      {/* El contador abre el detalle: es el sitio donde de verdad se
+                          arregla el motivo por el que esos servicios no entran. */}
+                      <td className="px-2 py-1.5 text-xs text-right w-24">
+                        <button onClick={() => verServicios(f.ruta, `${f.grupo} · ${f.motivo}`, f.ids)}
+                          className="font-bold text-red-700 underline decoration-dotted hover:text-red-900"
+                          title="Ver y corregir estos servicios">
+                          {f.servicios} serv.
+                        </button>
+                      </td>
                       <td className="px-4 py-1.5 text-xs text-red-700">{f.motivo}</td>
                     </tr>
                   ))}
@@ -932,11 +959,17 @@ export default function LiquidacionesPage() {
                   <button onClick={() => toggleAbierto(g.clave)} className="text-left flex-1">
                     <span className="font-bold" style={{ color: listo ? cp : "#991b1b" }}>{g.contraparteNombre}</span>
                     <span className="text-xs text-gray-500 ml-2">{g.sedeNombre}</span>
-                    <span className="text-xs text-gray-400 ml-2">
-                      {g.pares.filter((p) => p.ejecutado).length} servicio(s)
-                      {g.pares.some((p) => p.adjuntas.length) ? " (ida y retorno)" : ""}
-                      {g.bloqueadas.length ? ` · ${g.bloqueadas.length} con problema` : ""}
-                    </span>
+                  </button>
+                  {/* El contador del grupo abre TODOS sus tramos del periodo —incluidos
+                      los bloqueados y los que no se ejecutaron—, que es lo que hay que
+                      poder revisar cuando el número no cuadra. */}
+                  <button
+                    onClick={() => verServicios(g.contraparteNombre, g.sedeNombre, g.reservas.map((r) => r.id))}
+                    className="text-xs text-gray-400 underline decoration-dotted hover:text-gray-700"
+                    title="Ver el detalle de estos servicios">
+                    {g.pares.filter((p) => p.ejecutado).length} servicio(s)
+                    {g.pares.some((p) => p.adjuntas.length) ? " (ida y retorno)" : ""}
+                    {g.bloqueadas.length ? ` · ${g.bloqueadas.length} con problema` : ""}
                   </button>
                   {lado === "cliente" && (
                     <button
@@ -997,8 +1030,21 @@ export default function LiquidacionesPage() {
                               </span>
                             )}
                           </span>
+                          {/* Se abren las reservas DEL PERIODO, no solo las cobradas: si
+                              la línea dice 4/5, el servicio que falta es justo el que hay
+                              que ver, y `reservas` (las ejecutadas) no lo trae. */}
                           <span className="text-xs text-gray-500 whitespace-nowrap">
-                            {l.cantidad_ejecutada}/{l.cantidad_programada} serv. × {fmtMoneda(l.precio_unitario)}
+                            <button
+                              onClick={() => verServicios(
+                                l.nombre_ida ?? l.ruta,
+                                [g.contraparteNombre, l.nombre_retorno ? `↩ ${l.nombre_retorno}` : "", l.moviles > 1 ? `Móvil ${l.movil} de ${l.moviles}` : ""].filter(Boolean).join(" · "),
+                                l.reservas_periodo
+                              )}
+                              className="underline decoration-dotted hover:text-gray-800 font-semibold"
+                              title="Ver y editar estos servicios">
+                              {l.cantidad_ejecutada}/{l.cantidad_programada} serv.
+                            </button>
+                            {" × "}{fmtMoneda(l.precio_unitario)}
                           </span>
                           <span className="w-28 text-right font-bold text-gray-700">{fmtMoneda(l.total_linea)}</span>
                         </div>
@@ -1152,6 +1198,22 @@ export default function LiquidacionesPage() {
           onGuardado={(n) => {
             setModalPrecios(null);
             setMsg(`✅ Precio cargado en ${n} servicio(s). Sus rutas ya entran a la valorización.`);
+            cargar();
+          }} />
+      )}
+      {modalServicios && (
+        <ModalServicios
+          titulo={modalServicios.titulo} subtitulo={modalServicios.subtitulo} lado={lado}
+          reservas={modalServicios.ids.map((id) => reservasPorId.get(id)).filter(Boolean) as ReservaLiq[]}
+          universo={reservas} catalogo={catalogo} unidadDe={unidadDe} usuario={usuario}
+          onCerrar={() => setModalServicios(null)}
+          onGuardado={(n, resinc) => {
+            setModalServicios(null);
+            setMsg(
+              `✅ ${n} servicio(s) corregido(s) en su origen.` +
+              (resinc ? ` ${resinc} borrador(es) volvieron a derivar sus líneas.` : "") +
+              " La valorización del periodo se recalcula."
+            );
             cargar();
           }} />
       )}
