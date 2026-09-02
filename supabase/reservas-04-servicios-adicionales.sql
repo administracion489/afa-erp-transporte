@@ -48,9 +48,13 @@
 -- modo_servicio='fijo', y el adicional queda amarrado a ella por el
 -- cotizacion_id que la reserva ya guarda.
 --
--- Requiere: nada. Es aditivo y las columnas son opcionales — la app reintenta
--- sin ellas si este archivo no se corrió (ver `insertarReservas` y
--- `fetchReservasCols`), así que se puede desplegar antes o después del código.
+-- Requiere: supabase/liquidaciones-03-ruta-contratada.sql, y solo por el punto 5
+-- (v_adicionales publica reservas.capacidad_contratada, que la agrega ese archivo).
+-- Los puntos 1 a 4 son independientes de todo.
+--
+-- Del lado de la app las columnas son OPCIONALES: si este archivo no se corrió, se
+-- reintenta sin ellas (ver `insertarReservas` y `fetchReservasCols`), así que se
+-- puede desplegar antes o después del código.
 -- ────────────────────────────────────────────────────────────────────────────
 
 -- ────────────────────────────────────────────────────────────────────────────
