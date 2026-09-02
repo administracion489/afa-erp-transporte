@@ -15,6 +15,8 @@ import {
   describirResultado,
 } from "@/lib/reservas-pacto";
 import { AFECTACIONES, afectacionDe, type CodigoAfectacion } from "@/lib/finanzas/afectacion";
+import { planDeCanje, notaDeCanje, opuesto } from "@/lib/reservas-canje";
+import { sumarDias } from "@/lib/odometro-analitica";
 import ModalManifiesto from "@/components/programacion/ModalManifiesto";
 import ModalGenerarPrograma, { type ModoPrograma } from "@/components/programacion/ModalGenerarPrograma";
 import ModalCostear from "@/components/programacion/ModalCostear";
@@ -235,6 +237,11 @@ const MOTIVOS_CAMBIO = [
   { clave: "precio_renegociado",     nombre: "Importe renegociado",         lado: "compra" },
   { clave: "averia_unidad",          nombre: "Avería de la unidad",         lado: "compra" },
   { clave: "correccion_carga",       nombre: "Corrección de un dato",       lado: "ambos"  },
+  // `lado: "venta"` lo deja SOLO en el modal de origen: el modal de edición filtra
+  // los de venta. No es un motivo de cambio de importe —no hay importe que mover en
+  // un canje—, es el porqué de que la etiqueta de contrato estuviera en el servicio
+  // equivocado. Sin FK contra pacto_motivo, igual que el resto (ver reservas-04).
+  { clave: "intercambio_contingencia", nombre: "Intercambio de unidad por contingencia", lado: "venta" },
 ];
 
 // ─── CARGA ACOTADA (rendimiento) ────────────────────────────────────────────
@@ -526,12 +533,25 @@ export default function ReservasPage() {
   // Los adicionales de meses pasados nacieron como 'contrato' porque la opción no
   // existía. Quien sabe cuáles son es el operador, no el sistema: esto es la forma
   // de que lo declare sin tocar la base a mano.
+  //
+  // El modo CANJE es el otro camino del mismo modal: cuando la etiqueta no está de
+  // más sino en el servicio equivocado (dos servicios del mismo día que se
+  // intercambiaron las unidades por una contingencia), lo correcto es que los dos se
+  // cambien a la vez. Ver lib/reservas-canje.ts.
   const [modalOrigen, setModalOrigen] = useState<{
     destino: "adicional" | "contrato";
     ids: number[];      // lo que el operador marcó
     todos: number[];    // …más los tramos hermanos: el día entero, no medio día
     liquidadas: { id: number; codigo: string | null; estado: string; cuantas: number }[];
     cargando: boolean;
+    // ── Canje ───────────────────────────────────────────────────────────────
+    canje: boolean;                 // el operador pidió intercambiar, no solo marcar
+    candidatos: Reserva[] | null;   // null = todavía no se buscaron
+    cargandoCandidatos: boolean;
+    sinColumna: boolean;            // la migración de reservas-04 no está corrida
+    elegido: number | null;         // la contraparte que marcó
+    contraparte: number[];          // …con sus tramos hermanos
+    filas: Record<number, Reserva>; // datos de todos los implicados (código, importe)
   } | null>(null);
   const [origenMotivo,    setOrigenMotivo]    = useState("");
   const [origenNota,      setOrigenNota]      = useState("");
@@ -1958,21 +1978,21 @@ export default function ReservasPage() {
   // Y no dispara nada: el WHEN de trg_reservas_pacto_acta solo cubre costo, precio,
   // proveedor y vehículo, así que reclasificar no levanta actas ni enlaces de
   // conformidad. Por eso el motivo vive en `adicional_motivo` y no en `cambio_motivo`.
-  const prepararCambioOrigen = async (destino: "adicional" | "contrato", idsBase?: number[]) => {
-    // Los ids se pasan EXPLÍCITOS desde el botón de una fila. Apoyarse en
-    // `seleccionados` ahí no funciona: setSeleccionados no ha llegado todavía cuando
-    // esta función corre, y el modal se abriría con la selección anterior.
-    const base = idsBase ?? Array.from(seleccionados);
-    if (base.length === 0) return;
-    setOrigenMotivo(""); setOrigenNota("");
-    setModalOrigen({ destino, ids: base, todos: base, liquidadas: [], cargando: true });
+  //
+  // Y hay un segundo camino, el CANJE: cuando la etiqueta no sobra sino que está en
+  // el servicio equivocado (dos servicios del mismo día que se intercambiaron las
+  // unidades por una contingencia), marcar uno solo mueve un día entero de subtotal
+  // —`origenDelPar` contagia el origen al par completo— y deja la pantalla diciendo
+  // "Contrato" sobre una fila que el AFA-FL-07 va a imprimir como adicional. Lo
+  // correcto es cambiar los dos a la vez. Ver lib/reservas-canje.ts.
 
-    // Hermanos por las DOS direcciones del vínculo: si solo se marcó el retorno y su
-    // ida no lo referencia de vuelta, mirar un solo lado se dejaría la mitad.
+  /** Expande ids con sus tramos hermanos por las DOS direcciones del vínculo: si solo
+   *  se marcó el retorno y su ida no lo referencia de vuelta, mirar un solo lado se
+   *  dejaría la mitad. */
+  const expandirHermanos = async (base: number[]): Promise<number[]> => {
     const ids = new Set(base);
-    const CHUNK = 200;
-    for (let i = 0; i < base.length; i += CHUNK) {
-      const trozo = base.slice(i, i + CHUNK);
+    for (let i = 0; i < base.length; i += 200) {
+      const trozo = base.slice(i, i + 200);
       const [ida, vuelta] = await Promise.all([
         supabase.from("reservas").select("reserva_vinculada_id").in("id", trozo),
         supabase.from("reservas").select("id").in("reserva_vinculada_id", trozo),
@@ -1980,69 +2000,221 @@ export default function ReservasPage() {
       for (const r of (ida.data ?? [])) if (r.reserva_vinculada_id) ids.add(Number(r.reserva_vinculada_id));
       for (const r of (vuelta.data ?? [])) ids.add(Number(r.id));
     }
-    const todos = Array.from(ids);
+    return Array.from(ids);
+  };
 
-    // Qué documentos ya emitidos contienen alguno de estos servicios. No bloquea: el
-    // papel que el cliente firmó no cambia, y hay que decirlo antes, no después.
+  /** Qué documentos ya emitidos contienen alguno de estos servicios. No bloquea: el
+   *  papel que el cliente firmó no cambia, y hay que decirlo antes, no después. */
+  const buscarLiquidadas = async (todos: number[]) => {
     const conteo = new Map<number, number>();
-    for (let i = 0; i < todos.length; i += CHUNK) {
+    for (let i = 0; i < todos.length; i += 200) {
       const { data } = await supabase.from("reservas")
-        .select("liquidacion_cliente_id").in("id", todos.slice(i, i + CHUNK))
+        .select("liquidacion_cliente_id").in("id", todos.slice(i, i + 200))
         .not("liquidacion_cliente_id", "is", null);
       for (const r of (data ?? [])) {
         const k = Number(r.liquidacion_cliente_id);
         conteo.set(k, (conteo.get(k) ?? 0) + 1);
       }
     }
-    let liquidadas: { id: number; codigo: string | null; estado: string; cuantas: number }[] = [];
-    if (conteo.size) {
-      const { data } = await supabase.from("liquidacion_cliente")
-        .select("id,codigo,estado").in("id", [...conteo.keys()]);
-      liquidadas = (data ?? []).map((l: { id: number; codigo: string | null; estado: string }) => ({
-        id: Number(l.id), codigo: l.codigo ?? null, estado: String(l.estado),
-        cuantas: conteo.get(Number(l.id)) ?? 0,
-      }));
-    }
-    setModalOrigen(prev => prev ? { ...prev, todos, liquidadas, cargando: false } : prev);
+    if (!conteo.size) return [];
+    const { data } = await supabase.from("liquidacion_cliente")
+      .select("id,codigo,estado").in("id", [...conteo.keys()]);
+    return (data ?? []).map((l: { id: number; codigo: string | null; estado: string }) => ({
+      id: Number(l.id), codigo: l.codigo ?? null, estado: String(l.estado),
+      cuantas: conteo.get(Number(l.id)) ?? 0,
+    }));
   };
+
+  const indexarFilas = (rs: Reserva[]): Record<number, Reserva> =>
+    Object.fromEntries(rs.map(r => [r.id, r]));
+
+  const prepararCambioOrigen = async (destino: "adicional" | "contrato", idsBase?: number[]) => {
+    // Los ids se pasan EXPLÍCITOS desde el botón de una fila. Apoyarse en
+    // `seleccionados` ahí no funciona: setSeleccionados no ha llegado todavía cuando
+    // esta función corre, y el modal se abriría con la selección anterior.
+    const base = idsBase ?? Array.from(seleccionados);
+    if (base.length === 0) return;
+    setOrigenMotivo(""); setOrigenNota("");
+    setModalOrigen({
+      destino, ids: base, todos: base, liquidadas: [], cargando: true,
+      canje: false, candidatos: null, cargandoCandidatos: false, sinColumna: false,
+      elegido: null, contraparte: [], filas: {},
+    });
+
+    const todos = await expandirHermanos(base);
+    const [filas, liquidadas] = await Promise.all([
+      fetchReservasPorIds(todos).then(indexarFilas),
+      buscarLiquidadas(todos),
+    ]);
+    // Si mientras tanto se cerró el modal o se abrió otro, no pisar el que está a la
+    // vista con datos de una selección anterior.
+    setModalOrigen(prev =>
+      prev && prev.destino === destino && prev.ids.join() === base.join()
+        ? { ...prev, todos, filas, liquidadas, cargando: false }
+        : prev);
+  };
+
+  // ── Canje: buscar la contraparte ─────────────────────────────────────────
+  //
+  // La contraparte es un servicio DEL MISMO CLIENTE con el origen contrario y cerca
+  // en el calendario: el intercambio de unidades pasa el mismo día, y la ventana de
+  // ±3 días solo cubre el servicio nocturno que retorna al día siguiente y la carga
+  // hecha con un día de desfase.
+  const CANJE_DIAS = 3;
+
+  const cargarCandidatosCanje = async () => {
+    const m = modalOrigen;
+    if (!m || m.cargando) return;
+    if (!origenMotivo) setOrigenMotivo("intercambio_contingencia");
+    setModalOrigen(p => p ? { ...p, canje: true, cargandoCandidatos: true, sinColumna: false } : p);
+
+    const propias = m.todos.map(id => m.filas[id]).filter(Boolean);
+    const cliente = propias.find(r => r.cliente_id)?.cliente_id ?? null;
+    const fechas = propias.map(r => r.fecha_servicio).filter(Boolean).sort() as string[];
+    if (!cliente || !fechas.length) {
+      setModalOrigen(p => p ? { ...p, candidatos: [], cargandoCandidatos: false } : p);
+      return;
+    }
+    const desde = sumarDias(fechas[0], -CANJE_DIAS);
+    const hasta = sumarDias(fechas[fechas.length - 1], CANJE_DIAS);
+    const buscado = opuesto(m.destino); // el origen que la contraparte tiene HOY
+
+    let colsUso = COLS_LISTA;
+    const pedir = () => supabase.from("reservas").select(colsUso)
+      .eq("cliente_id", cliente)
+      .eq("origen_contractual", buscado)
+      .gte("fecha_servicio", desde).lte("fecha_servicio", hasta)
+      .order("fecha_servicio").order("hora_servicio").limit(80);
+    let r = await pedir();
+    for (let i = 0; r.error && i < COLS_OPCIONALES.length; i++) {
+      const falta = columnaFaltante(String(r.error.message));
+      // Si lo que falta es `origen_contractual` no hay nada que reintentar: es la
+      // columna por la que se FILTRA, y sin ella no existen los dos lados del canje.
+      if (!falta || falta === "origen_contractual") break;
+      colsUso = quitarColumna(colsUso, falta);
+      r = await pedir();
+    }
+    if (r.error) {
+      setModalOrigen(p => p ? {
+        ...p, candidatos: [], cargandoCandidatos: false,
+        sinColumna: /origen_contractual/i.test(String(r.error?.message)),
+      } : p);
+      return;
+    }
+    const propios = new Set(m.todos);
+    const candidatos = ((r.data ?? []) as Reserva[]).filter(x => !propios.has(x.id));
+    setModalOrigen(p => p ? { ...p, candidatos, cargandoCandidatos: false } : p);
+  };
+
+  const elegirContraparte = async (id: number) => {
+    const m = modalOrigen;
+    if (!m) return;
+    if (m.elegido === id) {
+      // Deseleccionar: los avisos de liquidación vuelven a ser solo los del lado propio.
+      setModalOrigen(p => p ? { ...p, elegido: null, contraparte: [] } : p);
+      buscarLiquidadas(m.todos).then(liq =>
+        setModalOrigen(p => p && p.elegido === null ? { ...p, liquidadas: liq } : p));
+      return;
+    }
+    setModalOrigen(p => p ? { ...p, elegido: id, cargandoCandidatos: true } : p);
+    const contraparte = await expandirHermanos([id]);
+    const faltan = contraparte.filter(x => !m.filas[x]);
+    const [nuevas, liquidadas] = await Promise.all([
+      fetchReservasPorIds(faltan).then(indexarFilas),
+      buscarLiquidadas([...m.todos, ...contraparte]),
+    ]);
+    setModalOrigen(p => p && p.elegido === id
+      ? { ...p, contraparte, liquidadas, filas: { ...p.filas, ...nuevas }, cargandoCandidatos: false }
+      : p);
+  };
+
+  /** El plan del canje con los datos ya cargados, o null cuando no es un canje. */
+  const planCanje = useMemo(() => {
+    if (!modalOrigen?.canje || !modalOrigen.contraparte.length) return null;
+    const de = (ids: number[]) => ids.map(id => modalOrigen.filas[id]).filter(Boolean);
+    return planDeCanje(de(modalOrigen.todos), de(modalOrigen.contraparte), modalOrigen.destino);
+  }, [modalOrigen]);
 
   const aplicarCambioOrigen = async () => {
     if (!modalOrigen || modalOrigen.cargando) return;
-    const esAdic = modalOrigen.destino === "adicional";
+    const m = modalOrigen;
+    const plan = planCanje;
+    if (m.canje && (!plan || !plan.aplicable)) return;
+    // En un canje el porqué es obligatorio: es un movimiento excepcional y esta nota
+    // es el ÚNICO rastro que queda (el lado que vuelve a contrato limpia sus campos).
+    if (plan && (!origenMotivo || !origenNota.trim())) return;
     setAplicandoOrigen(true);
+
+    const codigosDe = (ids: number[]) =>
+      ids.map(id => m.filas[id]?.codigo ?? `#${id}`);
 
     // Volver a 'contrato' limpia el motivo y la nota: describían un adicional que ya
     // no existe, y dejarlos pegados haría que el próximo reporte contara una historia
     // que la fila ya no sostiene.
-    const campos = {
-      origen_contractual: modalOrigen.destino,
-      adicional_motivo: esAdic ? (origenMotivo || null) : null,
-      adicional_nota:   esAdic ? (origenNota.trim() || null) : null,
-    };
+    const grupos = plan
+      ? [
+          { ids: m.todos,       destino: m.destino,           otros: codigosDe(m.contraparte) },
+          { ids: m.contraparte, destino: opuesto(m.destino),  otros: codigosDe(m.todos) },
+        ]
+      : [{ ids: m.todos, destino: m.destino, otros: [] as string[] }];
 
     let hechos = 0;
     let error = "";
-    for (let i = 0; i < modalOrigen.todos.length; i += 200) {
-      const trozo = modalOrigen.todos.slice(i, i + 200);
-      const r = await supabase.from("reservas").update(campos).in("id", trozo).select("id");
-      if (r.error) { error = r.error.message; break; }
-      hechos += (r.data ?? []).length;
+    let gruposHechos = 0;
+    for (const g of grupos) {
+      const esAdic = g.destino === "adicional";
+      const campos = {
+        origen_contractual: g.destino,
+        adicional_motivo: esAdic ? (origenMotivo || null) : null,
+        adicional_nota: esAdic
+          ? ((plan ? notaDeCanje(origenNota, g.otros) : origenNota.trim()) || null)
+          : null,
+      };
+      for (let i = 0; i < g.ids.length; i += 200) {
+        const trozo = g.ids.slice(i, i + 200);
+        const r = await supabase.from("reservas").update(campos).in("id", trozo).select("id");
+        if (r.error) { error = r.error.message; break; }
+        hechos += (r.data ?? []).length;
+      }
+      if (error) break;
+      gruposHechos++;
     }
 
     setAplicandoOrigen(false);
     if (error) {
+      // Un canje a medias deja los dos servicios del MISMO lado. No se revierte solo:
+      // el rollback tendría que restaurar un motivo y una nota que la lista no trae,
+      // y borrarlos sería peor. Se dice exactamente qué quedó hecho.
+      const medias = !plan || hechos === 0
+        ? ""
+        : gruposHechos === 1 && hechos === m.todos.length
+          // El fallo cayó justo entre los dos lados: se puede nombrar cuál es cuál.
+          ? `\n\nOJO: el canje quedó A MEDIAS. ${codigosDe(m.todos).join(", ")} ya cambió; ` +
+            `${codigosDe(m.contraparte).join(", ")} no. Los dos están del mismo lado: ` +
+            `corrige el que falta antes de liquidar.`
+          // Se cortó dentro de un lado: no se sabe cuáles pasaron, así que se pide
+          // revisar los dos en vez de afirmar algo que no consta.
+          : `\n\nOJO: el canje quedó A MEDIAS (${hechos} servicio(s) alcanzaron a cambiar). ` +
+            `Revisa el origen de ${[...codigosDe(m.todos), ...codigosDe(m.contraparte)].join(", ")} ` +
+            `antes de liquidar.`;
       alert(
-        /origen_contractual|adicional_motivo|adicional_nota/i.test(error)
+        (/origen_contractual|adicional_motivo|adicional_nota/i.test(error)
           ? "Falta correr supabase/reservas-04-servicios-adicionales.sql en Supabase: la base todavía no tiene la columna de origen."
-          : "No se pudo cambiar el origen: " + error
+          : "No se pudo cambiar el origen: " + error) + medias
       );
+      if (medias) { setModalOrigen(null); limpiarSeleccion(); await cargarDatos(); }
       return;
     }
     setModalOrigen(null);
     limpiarSeleccion();
-    setFiltroOrigen(esAdic ? "adicional" : "todos");
+    // Tras el canje siempre al filtro de adicionales: uno de los dos lados acaba de
+    // entrar ahí y es lo que el operador va a querer verificar.
+    setFiltroOrigen(plan || m.destino === "adicional" ? "adicional" : "todos");
     await cargarDatos();
-    alert(`${hechos} servicio(s) quedaron como ${esAdic ? "ADICIONAL" : "CONTRATO"}.`);
+    alert(plan
+      ? `Canje aplicado: ${plan.a.ids.length} servicio(s) a ${plan.a.destino.toUpperCase()} ` +
+        `y ${plan.b.ids.length} a ${plan.b.destino.toUpperCase()}.`
+      : `${hechos} servicio(s) quedaron como ${m.destino === "adicional" ? "ADICIONAL" : "CONTRATO"}.`);
   };
 
   // Prepara el modal de borrado en grupo: expande la pareja IDA/RETORNO vinculada
@@ -2321,9 +2493,15 @@ export default function ReservasPage() {
                   </div>
                   <div>
                     <h2 className="text-lg font-bold text-gray-900">
-                      {esAdic ? "Marcar como ADICIONAL" : "Devolver a CONTRATO"}
+                      {modalOrigen.canje
+                        ? "Intercambiar el origen"
+                        : esAdic ? "Marcar como ADICIONAL" : "Devolver a CONTRATO"}
                     </h2>
-                    <p className="text-xs text-gray-400">Corrige el origen de servicios ya creados</p>
+                    <p className="text-xs text-gray-400">
+                      {modalOrigen.canje
+                        ? "Dos servicios que se cambiaron el lado del contrato"
+                        : "Corrige el origen de servicios ya creados"}
+                    </p>
                   </div>
                 </div>
                 <button onClick={() => setModalOrigen(null)} className="p-2 rounded-xl hover:bg-gray-100">
@@ -2340,13 +2518,136 @@ export default function ReservasPage() {
                       <b>{modalOrigen.todos.length} servicio(s)</b> pasarán a{" "}
                       <b>{esAdic ? "ADICIONAL" : "CONTRATO"}</b>.
                       {arrastrados > 0 && (
-                        <p className="mt-1.5 text-[12px] leading-snug">
-                          Marcaste {modalOrigen.ids.length} y se suman {arrastrados} por el tramo
-                          hermano: <b>lo que se cobra es el día completo</b> (ida + retorno = una
-                          tarifa), así que los dos tramos tienen que quedar del mismo lado.
-                        </p>
+                        <>
+                          <p className="mt-1.5 text-[12px] leading-snug">
+                            Marcaste {modalOrigen.ids.length} y se suman {arrastrados} por el tramo
+                            hermano: <b>lo que se cobra es el día completo</b> (ida + retorno = una
+                            tarifa), así que los dos tramos tienen que quedar del mismo lado.
+                          </p>
+                          {/* La pregunta que el operador se hace justo aquí, contestada aquí. */}
+                          <p className="mt-1.5 text-[12px] leading-snug opacity-80">
+                            <b>¿Y marcar solo uno?</b> No cambiaría nada: la liquidación contagia el
+                            origen al par y cobraría el día entero como adicional igual, pero esta
+                            pantalla diría lo contrario. Si lo que hubo fue un <b>intercambio</b> con
+                            otro servicio, cámbialos a la vez.
+                          </p>
+                        </>
                       )}
                     </div>
+
+                    {/* ── CANJE ──────────────────────────────────────────────────────
+                        El caso en que la etiqueta no sobra: está en el servicio
+                        equivocado porque dos unidades se intercambiaron el trabajo. */}
+                    {!modalOrigen.canje ? (
+                      <button
+                        onClick={cargarCandidatosCanje}
+                        className="w-full text-left rounded-xl border px-4 py-3 hover:bg-gray-50 transition-colors"
+                        style={{ borderColor: "#e2e8f0" }}
+                      >
+                        <span className="text-sm font-bold text-gray-800">
+                          ⇄ Fue un intercambio con otro servicio
+                        </span>
+                        <span className="block text-[11px] text-gray-500 leading-snug mt-0.5">
+                          Los dos cambian de lado a la vez: este pasa a{" "}
+                          {esAdic ? "adicional" : "contrato"} y el otro vuelve a{" "}
+                          {esAdic ? "contrato" : "adicional"}. Los totales no se mueven, solo se
+                          corrige cuál era cuál.
+                        </span>
+                      </button>
+                    ) : (
+                      <div className="rounded-xl border p-4 space-y-3" style={{ borderColor: "#c7d7ea", background: "#f8fafc" }}>
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-bold" style={{ color: "#0b315f" }}>
+                            ⇄ Intercambio con otro servicio
+                          </span>
+                          <button
+                            onClick={() => setModalOrigen(p => p ? { ...p, canje: false, elegido: null, contraparte: [] } : p)}
+                            className="text-[11px] font-bold text-gray-500 hover:text-gray-700"
+                          >
+                            Quitar
+                          </button>
+                        </div>
+
+                        {modalOrigen.sinColumna ? (
+                          <p className="text-[12px] leading-snug" style={{ color: "#b45309" }}>
+                            Falta correr <b>supabase/reservas-04-servicios-adicionales.sql</b>: sin la
+                            columna de origen no existen los dos lados del canje.
+                          </p>
+                        ) : modalOrigen.cargandoCandidatos && modalOrigen.candidatos === null ? (
+                          <p className="text-[12px] text-gray-400">Buscando la contraparte…</p>
+                        ) : (modalOrigen.candidatos ?? []).length === 0 ? (
+                          <p className="text-[12px] leading-snug text-gray-500">
+                            No hay servicios <b>{opuesto(modalOrigen.destino)}</b> de este cliente
+                            dentro de los ±{CANJE_DIAS} días. Un canje necesita los dos lados: si la
+                            contraparte no está marcada todavía, márcala primero desde su propia fila.
+                          </p>
+                        ) : (
+                          <>
+                            <p className="text-[11px] text-gray-500 leading-snug">
+                              Elige el servicio que hoy está como{" "}
+                              <b>{opuesto(modalOrigen.destino)}</b> y que en realidad era el otro:
+                            </p>
+                            <div className="max-h-44 overflow-y-auto space-y-1.5 pr-1">
+                              {(modalOrigen.candidatos ?? []).map(c => {
+                                const sel = modalOrigen.elegido === c.id;
+                                return (
+                                  <button
+                                    key={c.id}
+                                    onClick={() => elegirContraparte(c.id)}
+                                    className="w-full text-left rounded-lg border px-3 py-2 transition-colors"
+                                    style={sel
+                                      ? { borderColor: "#0b315f", background: "#eef3f8" }
+                                      : { borderColor: "#e2e8f0", background: "#fff" }}
+                                  >
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="font-mono text-[12px] font-bold text-gray-800">
+                                        {c.codigo ?? `#${c.id}`}
+                                      </span>
+                                      <span className="text-[11px] text-gray-500">
+                                        {c.fecha_servicio} · {String(c.hora_servicio ?? "").slice(0, 5)}
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center justify-between gap-2 mt-0.5">
+                                      <span className="text-[11px] text-gray-500 truncate">
+                                        {c.ruta_nombre || rutaDe(c).o}
+                                      </span>
+                                      <span className="text-[11px] font-bold text-gray-700 shrink-0">
+                                        {fmtSoles(Number(c.precio_cliente ?? 0))}
+                                      </span>
+                                    </div>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </>
+                        )}
+
+                        {planCanje && (
+                          <div className="rounded-lg bg-white border p-3 space-y-2" style={{ borderColor: "#e2e8f0" }}>
+                            {[planCanje.a, planCanje.b].map((l, i) => (
+                              <div key={i} className="flex items-start justify-between gap-3 text-[12px]">
+                                <span className="font-mono text-gray-700 leading-snug">
+                                  {l.codigos.join(", ")}
+                                </span>
+                                <span className="shrink-0 font-bold" style={{ color: l.destino === "adicional" ? "#b45309" : "#0b315f" }}>
+                                  → {l.destino.toUpperCase()} · {fmtSoles(l.importe)}
+                                </span>
+                              </div>
+                            ))}
+                            {planCanje.netoAdicionales === 0 && planCanje.aplicable && (
+                              <p className="text-[11px] leading-snug" style={{ color: "#166534" }}>
+                                Neto sobre la valorización: <b>cero</b>. Solo se corrige la etiqueta.
+                              </p>
+                            )}
+                            {planCanje.avisos.map((a, i) => (
+                              <p key={i} className="text-[11px] leading-snug" style={{ color: planCanje.aplicable ? "#854d0e" : "#b91c1c" }}>
+                                {a}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {modalOrigen.liquidadas.length > 0 && (
                       <div className="rounded-xl px-4 py-3 text-[12px] leading-snug" style={{ background: "#fef9c3", color: "#854d0e" }}>
@@ -2363,11 +2664,13 @@ export default function ReservasPage() {
                       </div>
                     )}
 
-                    {esAdic && (
+                    {/* En un canje SIEMPRE hay un lado que queda como adicional, aunque el
+                        botón hubiera sido "Devolver a CONTRATO": el motivo se pide igual. */}
+                    {(esAdic || planCanje) && (
                       <>
                         <div>
                           <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
-                            Motivo (opcional)
+                            Motivo {planCanje ? "(obligatorio)" : "(opcional)"}
                           </label>
                           <select className="w-full border rounded-xl px-3 py-2.5 text-sm" value={origenMotivo} onChange={e => setOrigenMotivo(e.target.value)}>
                             <option value="">Sin motivo declarado</option>
@@ -2378,16 +2681,29 @@ export default function ReservasPage() {
                         </div>
                         <div>
                           <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
-                            Nota (opcional)
+                            Nota {planCanje ? "(obligatoria)" : "(opcional)"}
                           </label>
                           <input className="w-full border rounded-xl px-3 py-2.5 text-sm" value={origenNota}
                                  onChange={e => setOrigenNota(e.target.value)}
-                                 placeholder="Ej. Salidas extra pedidas por correo en agosto" />
+                                 placeholder={planCanje
+                                   ? "Ej. La unidad del adicional cubrió el retorno del contrato por avería"
+                                   : "Ej. Salidas extra pedidas por correo en agosto"} />
                           <p className="text-[10px] text-gray-400 mt-1 leading-snug">
-                            Se escribe en los {modalOrigen.todos.length} servicios. El
-                            <b> precio de referencia se deja vacío</b> a propósito: de un servicio
-                            pasado no se sabe cuál era la tarifa de entonces, y leerla hoy de la
-                            cotización daría una comparación falsa si el contrato se renegoció.
+                            {planCanje ? (
+                              <>
+                                Se escribe en el lado que queda como <b>adicional</b>, nombrando a su
+                                contraparte. Es el <b>único rastro</b> del intercambio: el lado que
+                                vuelve a contrato limpia sus campos, porque describirían un adicional
+                                que ya no existe.
+                              </>
+                            ) : (
+                              <>
+                                Se escribe en los {modalOrigen.todos.length} servicios. El
+                                <b> precio de referencia se deja vacío</b> a propósito: de un servicio
+                                pasado no se sabe cuál era la tarifa de entonces, y leerla hoy de la
+                                cotización daría una comparación falsa si el contrato se renegoció.
+                              </>
+                            )}
                           </p>
                         </div>
                       </>
@@ -2397,10 +2713,20 @@ export default function ReservasPage() {
               </div>
 
               <div className="flex gap-3 px-6 py-4 border-t shrink-0" style={{ borderColor: "#e2e8f0" }}>
-                <button onClick={aplicarCambioOrigen} disabled={modalOrigen.cargando || aplicandoOrigen}
+                <button onClick={aplicarCambioOrigen}
+                        disabled={
+                          modalOrigen.cargando || aplicandoOrigen ||
+                          // En modo canje no se puede aplicar a medias: sin contraparte
+                          // elegida, con tramos compartidos, o sin el porqué escrito.
+                          (modalOrigen.canje && (!planCanje || !planCanje.aplicable || !origenMotivo || !origenNota.trim()))
+                        }
                         className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-40"
                         style={{ background: esAdic ? "#b45309" : "#0b315f" }}>
-                  {aplicandoOrigen ? "Aplicando…" : `Cambiar ${modalOrigen.todos.length} servicio(s)`}
+                  {aplicandoOrigen
+                    ? "Aplicando…"
+                    : planCanje
+                      ? `Intercambiar ${planCanje.a.ids.length} ⇄ ${planCanje.b.ids.length} servicio(s)`
+                      : `Cambiar ${modalOrigen.todos.length} servicio(s)`}
                 </button>
                 <button onClick={() => setModalOrigen(null)} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
                   Cancelar

@@ -12,6 +12,7 @@ import {
   analizarServicios, agruparServicios, totalesValorizacion,
   type ReservaLiq, type CatalogoLiq,
 } from "../lib/liquidacion-agrupacion";
+import { planDeCanje, notaDeCanje } from "../lib/reservas-canje";
 
 const cat: CatalogoLiq = {
   placaDe: (r) => (r.vehiculo_id ? `P-${r.vehiculo_id}` : ""),
@@ -141,6 +142,54 @@ const opts = {
       `${bloqueadas.length} bloqueada(s)`);
   const lineas = agruparServicios(pares, opts);
   chk("solo entra el contratado", lineas.length === 1 && lineas[0].tipo === "servicio");
+}
+
+// ── 7. CANJE de origen: los dos servicios cambian de lado a la vez ────────
+//
+// El caso real: un día de contrato (ida + retorno, la tarifa en la ida) y una salida
+// adicional que se intercambiaron las unidades por una contingencia. Marcar uno solo
+// movería el día entero de subtotal; el canje corrige la etiqueta sin mover un sol.
+{
+  const contrato = [
+    { id: 60, codigo: "OS-2026-008161", precio_cliente: 350 },
+    { id: 61, codigo: "OS-2026-008162", precio_cliente: 0 },
+  ];
+  const adicional = [{ id: 70, codigo: "OS-2026-008155", precio_cliente: 350 }];
+
+  const p = planDeCanje(contrato, adicional, "adicional");
+  chk("el lado marcado va a adicional", p.a.destino === "adicional" && p.b.destino === "contrato");
+  chk("el importe del día es la suma de sus tramos", p.a.importe === 350, String(p.a.importe));
+  chk("a misma tarifa el neto es cero", p.netoAdicionales === 0, String(p.netoAdicionales));
+  chk("aplicable", p.aplicable);
+  chk("avisa que no es simétrico (2 tramos contra 1)",
+      p.avisos.some(a => /simétrico/i.test(a)));
+  chk("a neto cero no habla de subir ni bajar el subtotal",
+      !p.avisos.some(a => /sube|baja/i.test(a)));
+
+  // Tarifas distintas: el subtotal de adicionales SÍ se mueve y hay que decirlo.
+  const caro = planDeCanje(contrato, [{ id: 70, codigo: "X", precio_cliente: 480 }], "adicional");
+  chk("neto = lo que entra menos lo que sale", caro.netoAdicionales === -130,
+      String(caro.netoAdicionales));
+  chk("avisa que el subtotal baja", caro.avisos.some(a => /baja/i.test(a)));
+
+  // Al revés: el botón fue "Devolver a CONTRATO" y el canje manda el otro a adicional.
+  const alReves = planDeCanje(adicional, contrato, "contrato");
+  chk("el destino del lado marcado manda", alReves.a.destino === "contrato" && alReves.b.destino === "adicional");
+  chk("el neto se mide siempre sobre los adicionales", alReves.netoAdicionales === 0);
+
+  // Dos tramos del MISMO día no son un intercambio: escribirían valores opuestos
+  // sobre la misma fila.
+  const solapado = planDeCanje(contrato, [contrato[1]], "adicional");
+  chk("con tramos compartidos no es aplicable", !solapado.aplicable && solapado.solapados.length === 1);
+
+  const sinLado = planDeCanje(contrato, [], "adicional");
+  chk("sin contraparte no es aplicable", !sinLado.aplicable);
+
+  chk("la nota nombra a la contraparte",
+      notaDeCanje("Cambio por avería", ["OS-2026-008155"])
+        === "Cambio por avería · Canje de origen con OS-2026-008155");
+  chk("sin nota escrita queda igual el rastro del canje",
+      notaDeCanje("  ", ["A", "B"]) === "Canje de origen con A, B");
 }
 
 console.log(fallos === 0 ? "\nTODO OK" : `\n${fallos} FALLO(S)`);
