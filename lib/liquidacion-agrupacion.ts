@@ -256,10 +256,9 @@ function montoDe(r: ReservaLiq, lado: LadoLiquidacion): number {
   return Number((lado === "cliente" ? r.precio_cliente : r.costo_proveedor) ?? 0);
 }
 
-/** ¿Están enlazadas como ida/retorno del mismo servicio? */
-function sonPar(a: ReservaLiq, b: ReservaLiq): boolean {
-  return a.reserva_vinculada_id === b.id || b.reserva_vinculada_id === a.id;
-}
+// El enlace ida↔retorno se lee por los DOS sentidos: ver `hermanoAqui` dentro de
+// `analizarServicios` y lib/liquidacion-hermanos.ts. Seguirlo solo hacia adelante era lo
+// que partía el día en dos cuando `reserva_vinculada_id` quedaba escrito en un solo lado.
 
 // ── Bloqueos: qué NO se puede liquidar todavía ──────────────────────────────
 
@@ -303,14 +302,136 @@ export function bloqueosDe(
   return b;
 }
 
+/** Una reserva que no entra al cierre, con el porqué en texto y en código. */
+export type ReservaBloqueada = {
+  r: ReservaLiq;
+  motivos: string[];
+  /**
+   * Los mismos motivos como CÓDIGO. La pantalla decide con esto a qué modal mandar cada
+   * fila; antes lo decidía olfateando el texto (`m.includes("Sin precio de venta")`), y
+   * bastaba retocar una palabra del mensaje para que el botón de cargar precios dejara
+   * de ver servicios sin que nadie se enterara.
+   */
+  codigos: string[];
+};
+
 export type AnalisisServicios = {
   /** Servicios facturables listos para valorizar. */
   pares: ParServicio[];
   /** Lo que no puede liquidarse todavía, con el motivo para mostrarlo en rojo. */
-  bloqueadas: { r: ReservaLiq; motivos: string[] }[];
+  bloqueadas: ReservaBloqueada[];
   /** Tramos incluidos que no se ejecutaron: no bloquean, pero hay que verlos. */
   avisos: { r: ReservaLiq; mensaje: string }[];
 };
+
+/**
+ * Cómo encontrar el OTRO tramo del día cuando no está en el conjunto que se analiza.
+ *
+ * `analizarServicios` recibe las reservas de UN grupo (un cliente y su sede) ya filtradas
+ * por "entra al cierre", y ahí el hermano puede faltar por dos motivos que no son el
+ * mismo y que hasta ahora se contestaban igual —"Sin precio de venta"—, mandando a cargar
+ * una tarifa para un día que ya está cobrado:
+ *
+ *   · quedó FUERA del cierre (ya liquidado en otro documento, o en otra sede);
+ *   · o el enlace `reserva_vinculada_id` no existe y nadie sabe que son el mismo día.
+ *
+ * Los dos resolvedores los pone quien tiene el periodo entero delante (lib/liquidacion-
+ * hermanos.ts). Sin ellos el análisis funciona igual que siempre, solo que sin poder
+ * explicar esos dos casos.
+ */
+export type OpcionesAnalisis = {
+  /** El hermano por el ENLACE ESCRITO, buscado en todo el periodo y en los dos sentidos. */
+  hermanoDe?: (r: ReservaLiq) => ReservaLiq | null;
+  /** El hermano DEDUCIDO cuando no hay enlace. Solo para explicar y ofrecer el arreglo. */
+  hermanoProbableDe?: (r: ReservaLiq) => ReservaLiq | null;
+};
+
+/**
+ * El motivo REAL de un tramo que va en S/ 0.00 y no encontró a su hermano en el conjunto.
+ *
+ * Es el corazón del arreglo. "Sin precio de venta" es la respuesta correcta para un
+ * servicio suelto al que nadie le cargó la tarifa, y la respuesta EQUIVOCADA —y cara—
+ * para un retorno cuyo día ya se cobra en su ida: manda a cargar un importe que factura
+ * el día dos veces. Los cuatro casos que se confundían en ese único mensaje:
+ *
+ *   · el enlace apunta a un tramo que ya se emparejó con un tercero (enlace cruzado);
+ *   · el hermano existe pero quedó FUERA del cierre (ya liquidado, otra sede…);
+ *   · el hermano quedó fuera del PERIODO (el nocturno que retorna al día siguiente);
+ *   · no hay enlace, pero el par se deduce sin ambigüedad y falta escribirlo.
+ *
+ * Devuelve null cuando de verdad no hay nada que cubra este tramo: ahí sí falta el dato y
+ * el bloqueo normal ("Sin precio de venta" / "Sin costo de proveedor") es el correcto.
+ */
+function tramoSinImporteCubierto(
+  r: ReservaLiq,
+  ctx: {
+    lado: LadoLiquidacion;
+    /** "tarifa" | "costo": el sustantivo, para decir "Su tarifa va en…". */
+    plata: string;
+    /** "la tarifa" | "el costo": con artículo, para el medio de la frase. */
+    laPlata: string;
+    ref: (x: ReservaLiq) => string;
+    /** Hermano que está en el conjunto pero ya lo tomó otro par. */
+    ocupado: ReservaLiq | null;
+    /** Hermano por enlace escrito, buscado en todo el periodo. */
+    fuera: ReservaLiq | null;
+    /** Hermano deducido, cuando no hay enlace por ningún lado. */
+    probable: ReservaLiq | null;
+    enElConjunto: (x: ReservaLiq) => boolean;
+  }
+): Bloqueo | null {
+  const { lado, plata, laPlata, ref, ocupado, fuera, probable, enElConjunto } = ctx;
+  const cuando = (x: ReservaLiq) => fechaFormato(x.fecha_servicio) || String(x.fecha_servicio ?? "");
+
+  if (ocupado || (fuera && enElConjunto(fuera))) {
+    const x = (ocupado ?? fuera)!;
+    return {
+      codigo: "enlace_cruzado",
+      mensaje:
+        `Su ${plata} va en ${ref(x)}, que ya quedó emparejado con otro tramo: ` +
+        `el enlace ida↔retorno está cruzado y hay que arreglarlo en Programación`,
+    };
+  }
+
+  if (fuera) {
+    // El hermano existe en el periodo pero no entró a este cierre. Si lleva el importe,
+    // este tramo NO necesita tarifa: necesita que se diga dónde quedó la suya.
+    if (montoDe(fuera, lado) > 0) {
+      const doc = Number((lado === "cliente" ? fuera.liquidacion_cliente_id : fuera.liquidacion_proveedor_id) ?? 0);
+      return {
+        codigo: "tarifa_fuera_del_cierre",
+        mensaje:
+          `Su ${plata} va en ${ref(fuera)} (${cuando(fuera)}), que no entra a este cierre` +
+          (doc ? ` — ya está en la liquidación #${doc}` : "") +
+          `. Este tramo va en S/ 0.00 a propósito: no le cargues un importe`,
+      };
+    }
+    // Ninguno de los dos lleva importe: eso sí es un dato que falta, y el bloqueo normal
+    // lo dice mejor. Se deja caer.
+    return null;
+  }
+
+  // Sin precio y con un enlace que apunta fuera del periodo (típico del servicio nocturno
+  // que retorna al día siguiente): decirlo explícitamente, porque "sin precio de venta"
+  // mandaría a buscar un dato que no falta.
+  if (r.reserva_vinculada_id)
+    return {
+      codigo: "tarifa_fuera_del_periodo",
+      mensaje: `Su ${plata} va en el servicio #${r.reserva_vinculada_id}, que no está en este periodo`,
+    };
+
+  // No hay enlace por ningún lado, pero el par se deduce sin ambigüedad y el otro tramo
+  // lleva el importe del día. El dato que falta NO es la tarifa: es el enlace.
+  if (probable && montoDe(probable, lado) > 0)
+    return {
+      codigo: "falta_enlace",
+      mensaje:
+        `Le falta el enlace ida↔retorno con ${ref(probable)}, que lleva ${laPlata} del día ` +
+        `(S/ ${montoDe(probable, lado).toFixed(2)}). No necesita importe propio: enlázalos`,
+    };
+
+  return null;
+}
 
 /**
  * Separa un conjunto de servicios en unidades facturables y bloqueos.
@@ -323,35 +444,77 @@ export type AnalisisServicios = {
  * Si la cabeza está bloqueada (ya liquidada, sin cliente…), su par también: no tiene
  * sentido cobrar medio servicio.
  */
-export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion): AnalisisServicios {
+export function analizarServicios(
+  reservas: ReservaLiq[],
+  lado: LadoLiquidacion,
+  opts?: OpcionesAnalisis
+): AnalisisServicios {
   const porId = new Map<number, ReservaLiq>(reservas.map((r) => [r.id, r]));
   const usadas = new Set<number>();
   const res: AnalisisServicios = { pares: [], bloqueadas: [], avisos: [] };
+
+  // ── El enlace ida↔retorno se lee por los DOS sentidos ─────────────────────
+  //
+  // `reserva_vinculada_id` se escribe en los dos lados, pero en dos pasos, y cuando el
+  // segundo no llega —o alguien borra y regenera un tramo— queda escrito en uno solo.
+  // Siguiéndolo solo hacia adelante, el tramo que no lo lleva no encontraba a su hermano
+  // y el retorno en S/ 0.00 salía del cierre como "Sin precio de venta": el ERP pedía
+  // cobrar otra vez un día que su ida ya cobra. Este índice es la mitad que faltaba.
+  const apuntanA = new Map<number, ReservaLiq[]>();
+  for (const r of reservas) {
+    const otro = Number(r.reserva_vinculada_id ?? 0);
+    if (!otro) continue;
+    const ya = apuntanA.get(otro);
+    if (ya) ya.push(r);
+    else apuntanA.set(otro, [r]);
+  }
+  /** El otro tramo DENTRO de este conjunto, por cualquiera de los dos sentidos del enlace. */
+  const hermanoAqui = (r: ReservaLiq): ReservaLiq | null => {
+    const adelante = r.reserva_vinculada_id ? porId.get(Number(r.reserva_vinculada_id)) : undefined;
+    if (adelante) return adelante;
+    // Hacia atrás solo si es inequívoco: con dos filas apuntando a la misma, el enlace
+    // está roto de otra forma y elegir una sería adivinar.
+    const quienes = apuntanA.get(r.id) ?? [];
+    return quienes.length === 1 ? quienes[0] : null;
+  };
 
   const hecho = (r: ReservaLiq) => r.estado === "finalizada";
   // "No finalizado" no es un bloqueo: es un servicio programado que no se prestó, y el
   // formato tiene que mostrarlo en la columna PROG./EJEC. El resto sí impide liquidar.
   const trabas = (r: ReservaLiq, cubiertaPor?: ReservaLiq | null) =>
-    bloqueosDe(r, lado, cubiertaPor).filter((b) => b.codigo !== "no_finalizada").map((b) => b.mensaje);
-  const bloquear = (r: ReservaLiq, motivos: string[]) => {
-    if (motivos.length) res.bloqueadas.push({ r, motivos });
+    bloqueosDe(r, lado, cubiertaPor).filter((b) => b.codigo !== "no_finalizada");
+  const bloquear = (r: ReservaLiq, motivos: Bloqueo[]) => {
+    if (motivos.length)
+      res.bloqueadas.push({ r, motivos: motivos.map((b) => b.mensaje), codigos: motivos.map((b) => b.codigo) });
   };
+  const ref = (x: ReservaLiq) => x.codigo ?? `#${x.id}`;
+  const plata = lado === "cliente" ? "tarifa" : "costo";
+  const laPlata = lado === "cliente" ? "la tarifa" : "el costo";
 
   for (const r of reservas) {
     if (usadas.has(r.id)) continue;
 
     // El par solo cuenta si está en el mismo conjunto (mismo cliente y periodo).
-    const posible = r.reserva_vinculada_id ? porId.get(r.reserva_vinculada_id) : undefined;
-    const par = posible && !usadas.has(posible.id) && sonPar(r, posible) ? posible : null;
+    const posible = hermanoAqui(r);
+    const par = posible && !usadas.has(posible.id) ? posible : null;
 
     if (!par) {
       usadas.add(r.id);
-      // Sin precio y con un par que quedó fuera del periodo (típico del servicio
-      // nocturno que retorna al día siguiente): decirlo explícitamente, porque
-      // "sin precio de venta" mandaría a buscar un dato que no falta.
-      if (montoDe(r, lado) <= 0 && r.reserva_vinculada_id) {
-        bloquear(r, [`Su tarifa va en el servicio #${r.reserva_vinculada_id}, que no está en este periodo`]);
-        continue;
+      // Un tramo en S/ 0.00 con hermano NO es un dato que falta: es el tramo incluido en
+      // la tarifa del día. Antes eso solo se sabía si el hermano estaba en este mismo
+      // conjunto y el enlace apuntaba hacia él; en cualquier otro caso salía "Sin precio
+      // de venta", que manda a cobrar por segunda vez un día ya cobrado.
+      if (montoDe(r, lado) <= 0) {
+        const traba = tramoSinImporteCubierto(r, {
+          lado, plata, laPlata, ref,
+          // `posible` acá está tomado por otro par: el enlace apunta a algo que ya se
+          // emparejó con un tercero.
+          ocupado: posible ?? null,
+          fuera: opts?.hermanoDe?.(r) ?? null,
+          probable: opts?.hermanoProbableDe?.(r) ?? null,
+          enElConjunto: (x) => porId.has(x.id),
+        });
+        if (traba) { bloquear(r, [traba]); continue; }
       }
       const motivos = trabas(r);
       if (motivos.length) bloquear(r, motivos);
@@ -364,6 +527,25 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
 
     usadas.add(r.id);
     usadas.add(par.id);
+
+    // El enlace quedó escrito en un solo lado. El par se arma igual —para eso se mira en
+    // los dos sentidos—, pero el dato sigue roto, y el resto del ERP lo lee hacia
+    // adelante: en Programación ese tramo se ve suelto y sus avisos vuelven a mentir. Se
+    // dice acá porque es el único sitio donde la pareja se ve entera.
+    const vinculoR = Number(r.reserva_vinculada_id ?? 0);
+    const vinculoPar = Number(par.reserva_vinculada_id ?? 0);
+    if (vinculoR !== par.id || vinculoPar !== r.id) {
+      const suelto = vinculoR === par.id ? par : r;
+      const apunta = suelto === r ? par : r;
+      res.avisos.push({
+        r: suelto,
+        mensaje:
+          `El enlace ida↔retorno está escrito en un solo lado: ${ref(apunta)} apunta a este tramo, ` +
+          `pero ${ref(suelto)} no apunta de vuelta. El cierre los cobra como un solo día igual, ` +
+          `pero en Programación se ve suelto — repáralo con "Enlazar ida↔retorno".`,
+      });
+    }
+
     const mA = montoDe(r, lado);
     const mB = montoDe(par, lado);
 
@@ -394,7 +576,10 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
     const motivosCabeza = trabas(cabeza);
     if (motivosCabeza.length) {
       bloquear(cabeza, motivosCabeza);
-      bloquear(adjunta, [`Va con el servicio ${cabeza.codigo ?? "#" + cabeza.id}, que está bloqueado`]);
+      bloquear(adjunta, [{
+        codigo: "cabeza_bloqueada",
+        mensaje: `Va con el servicio ${ref(cabeza)}, que está bloqueado`,
+      }]);
       continue;
     }
 
@@ -428,7 +613,7 @@ export function analizarServicios(reservas: ReservaLiq[], lado: LadoLiquidacion)
       // liquidación): la tarifa se cobra igual, pero queda el aviso.
       res.avisos.push({
         r: adjunta,
-        mensaje: `${rotuloTramo(adjunta)}: ${motivosAdjunta.join(" · ")}`,
+        mensaje: `${rotuloTramo(adjunta)}: ${motivosAdjunta.map((b) => b.mensaje).join(" · ")}`,
       });
       res.pares.push({
         cabeza, adjuntas: [], ejecutado, ejecutados,

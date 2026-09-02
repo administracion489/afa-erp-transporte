@@ -45,6 +45,7 @@ import {
   nombreRuta, sentidoDeReserva, origenContractual,
   type ReservaLiq, type LadoLiquidacion,
 } from "@/lib/liquidacion-agrupacion";
+import { indiceHermanos } from "@/lib/liquidacion-hermanos";
 import { guardarReservas, avisosDe, describirResultado, type AvisoPacto } from "@/lib/reservas-pacto";
 import { resincronizarImportes } from "@/lib/liquidaciones";
 import { ESTADOS_EDITABLES_MANUAL, etiquetaEstado, configEstado } from "@/lib/estados";
@@ -153,11 +154,17 @@ export default function ModalServicios({
     [reservas]
   );
 
-  /** El otro tramo del día. Se busca en TODO el periodo, no solo entre las filas listadas. */
-  const hermanoDe = useMemo(() => {
-    const porId = new Map(universo.map((r) => [r.id, r]));
-    return (r: ReservaLiq) => (r.reserva_vinculada_id ? porId.get(Number(r.reserva_vinculada_id)) ?? null : null);
-  }, [universo]);
+  /**
+   * El otro tramo del día. Se busca en TODO el periodo, no solo entre las filas listadas,
+   * y por los DOS sentidos del enlace (lib/liquidacion-hermanos.ts).
+   *
+   * Seguir `reserva_vinculada_id` solo hacia adelante era lo que hacía que un retorno con
+   * el enlace escrito únicamente en su ida apareciera acá como un servicio suelto en
+   * S/ 0.00, sin el "incluido en OS-…" — y quien abría este modal justamente a arreglar
+   * ese cero terminaba escribiéndole una tarifa que cobra el día dos veces.
+   */
+  const hermanos = useMemo(() => indiceHermanos(universo), [universo]);
+  const hermanoDe = useMemo(() => (r: ReservaLiq) => hermanos.de(r), [hermanos]);
 
   // ── Qué documento reclama a cada fila ─────────────────────────────────────
   const idsDoc = useMemo(() => [...new Set(filas.map(refDoc).filter(Boolean))], [filas, refDoc]);
@@ -245,7 +252,7 @@ export default function ModalServicios({
     const out: { r: ReservaLiq; avisos: AvisoPacto[] }[] = [];
     for (const r of pendientes) {
       const c = campos(r);
-      const hermano = hermanoDe(r);
+      const hermano = hermanoDe(r)?.tramo ?? null;
       // El hermano se juzga con lo que va a quedar guardado, no con lo que hay en la
       // base: si en esta misma tanda se le está poniendo importe a los dos tramos, el
       // aviso de "el día se cobra DOS VECES" tiene que salir ANTES de guardar.
@@ -443,7 +450,8 @@ export default function ModalServicios({
                 const candado = candadoDe(r);
                 const cambiada = candado.editable && patchDe(r) !== null;
                 const cfg = configEstado(c.estado);
-                const hermano = hermanoDe(r);
+                const vinculo = hermanoDe(r);
+                const hermano = vinculo?.tramo ?? null;
                 const alertas = avisos.find((a) => a.r.id === r.id)?.avisos ?? [];
                 return (
                   <tr key={r.id} className={cambiada ? "bg-emerald-50/50" : !candado.editable ? "bg-gray-50/60" : ""}>
@@ -462,6 +470,18 @@ export default function ModalServicios({
                         {sentidoDeReserva(r) === "RETORNO" ? "↩ retorno" : "→ ida"}
                         {hermano && <> · con {hermano.codigo ?? `#${hermano.id}`}</>}
                       </span>
+                      {/* De dónde salió ese hermano. Un par unido por un enlace a medias
+                          o deducido se cobra bien acá, pero el dato de la base está roto
+                          y en Programación ese tramo se sigue viendo suelto: decirlo es
+                          la diferencia entre arreglarlo y volver a tropezar el mes que
+                          viene. Se repara desde "Enlazar ida↔retorno" en el cierre. */}
+                      {vinculo && vinculo.procedencia !== "enlace" && (
+                        <span className="block text-[10px] mt-0.5 text-amber-700">
+                          {vinculo.procedencia === "enlace_a_medias"
+                            ? "El enlace ida↔retorno está escrito en un solo lado."
+                            : "Sin enlace en la base: el par está deducido por cliente, día y ruta."}
+                        </span>
+                      )}
                       {candado.motivo && (
                         <span className={`block text-[10px] mt-0.5 ${candado.editable ? "text-emerald-700" : "text-amber-700"}`}>
                           {candado.motivo}
