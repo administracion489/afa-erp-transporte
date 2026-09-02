@@ -469,8 +469,12 @@ export default function LiquidacionesPage() {
     for (const g of gruposVisibles)
       for (const l of g.lineas) {
         const k = `${g.contraparteId ?? 0}|${g.sedeId ?? 0}|${l.nombre_ida ?? ""}|${l.nombre_retorno ?? ""}`;
+        // La ficha NO se parte por origen: la capacidad contratada es de la RUTA, y
+        // `cliente_ruta` la identifica por el par de nombres. Pero se cuenta cuántos de
+        // esos servicios fueron adicionales, para poder decirlo en la fila.
+        const adics = l.tipo === "adicional" ? l.cantidad : 0;
         const ya = out.get(k);
-        if (ya) { ya.servicios += l.cantidad; continue; }
+        if (ya) { ya.servicios += l.cantidad; ya.adicionales += adics; continue; }
         out.set(k, {
           clave: k,
           clienteId: g.contraparteId,
@@ -482,6 +486,7 @@ export default function LiquidacionesPage() {
           paxContratado: l.pax_contratado,
           capacidadMinimaAsignada: l.capacidad_minima_asignada,
           servicios: l.cantidad,
+          adicionales: adics,
         });
       }
     return [...out.values()].sort((a, b) => String(a.nombreIda).localeCompare(String(b.nombreIda)));

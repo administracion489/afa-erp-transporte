@@ -28,7 +28,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { fmtMoneda } from "@/lib/finanzas/dinero";
-import { nombreRuta, etiquetaRuta, sentidoDeReserva, type ReservaLiq } from "@/lib/liquidacion-agrupacion";
+import { nombreRuta, etiquetaRuta, sentidoDeReserva, origenContractual, type ReservaLiq } from "@/lib/liquidacion-agrupacion";
 
 export type ReservaSinPrecio = ReservaLiq & { clienteNombre?: string };
 
@@ -57,6 +57,8 @@ type GrupoRuta = {
   ruta: string;
   /** El tipo de unidad de TODAS las filas del grupo: por eso admite un precio único. */
   unidad: string;
+  /** contrato | adicional | contingencia. Un adicional NO se cobra a la tarifa del contrato. */
+  origen: string;
   /** Solo los tramos a los que se les va a escribir el importe. */
   filas: ReservaSinPrecio[];
   /** Tramos huérfanos a los que se les encontró su ida: van incluidos, no llevan importe. */
@@ -179,9 +181,14 @@ export default function ModalPrecios({
       // de 11, un solo casillero de precio para las dos sería incorrecto para una de las
       // dos: se separan y cada renglón admite el precio que de verdad le toca.
       const unidad = unidadDe(r) || "SIN UNIDAD ASIGNADA";
-      const clave = `${cliente}|${ruta}|${unidad}`;
+      // El ORIGEN también parte el grupo, y no es cosmética: un adicional de la misma
+      // ruta y la misma unidad compartía casillero con los servicios del contrato, así
+      // que escribir un precio le aplicaba la tarifa contractual a lo que se acordó
+      // aparte — exactamente lo que este módulo existe para impedir.
+      const origen = origenContractual(r);
+      const clave = `${cliente}|${ruta}|${unidad}|${origen}`;
       const f = String(r.fecha_servicio ?? "");
-      const g = mapa.get(clave) ?? { clave, cliente, ruta, unidad, filas: [], conIda: [], cubiertos: 0, desde: f, hasta: f };
+      const g = mapa.get(clave) ?? { clave, cliente, ruta, unidad, origen, filas: [], conIda: [], cubiertos: 0, desde: f, hasta: f };
       // Un tramo al que se le encontró su ida NO necesita tarifa: la lleva ella. Se
       // aparta para ofrecer el enlace en vez de un importe que cobraría el día dos veces.
       (candidatas.has(r.id) ? g.conIda : g.filas).push(r);
@@ -230,6 +237,9 @@ export default function ModalPrecios({
       const hoy = Date.now();
       const out = new Map<string, { precio: number; dias: number; os: string }>();
       for (const g of grupos) {
+        // A un ADICIONAL no se le propone la tarifa del contrato: se acordó aparte, y
+        // un importe prellenado que nadie mira es el error de siempre, más rápido.
+        if (g.origen !== "contrato") continue;
         // Mismo cliente, misma ruta y misma unidad: si cambia cualquiera de los tres, el
         // precio anterior no es comparable y es mejor no sugerir nada.
         const previo = ((data as any[]) ?? []).find(
@@ -347,6 +357,13 @@ export default function ModalPrecios({
                       <span className="mt-0.5 inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-700">
                         {g.unidad}
                       </span>
+                      {g.origen !== "contrato" && (
+                        <span className="ml-1 inline-block text-[10px] font-black px-1.5 py-0.5 rounded-full uppercase"
+                              title="Pedido por encima del contrato: el precio se acordó aparte, no es la tarifa contractual."
+                              style={{ background: "#fef3c7", color: "#b45309" }}>
+                          {g.origen}
+                        </span>
+                      )}
                       {ultimo && (
                         <button type="button"
                           onClick={() => setMontos((m) => ({ ...m, [g.clave]: String(ultimo.precio) }))}

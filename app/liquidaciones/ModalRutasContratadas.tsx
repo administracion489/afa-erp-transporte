@@ -29,6 +29,15 @@ export type RutaDelPeriodo = {
   /** La unidad más chica que se asignó en el periodo. Solo referencia, nunca se copia sola. */
   capacidadMinimaAsignada: number | null;
   servicios: number;
+  /**
+   * Cuántos de esos servicios se pidieron POR ENCIMA del contrato.
+   *
+   * La ficha NO se parte por eso —la capacidad contratada es de la RUTA, y `cliente_ruta`
+   * la identifica por el par de nombres, sin el origen—, pero sí se dice: si de 24
+   * servicios 5 fueron adicionales, el operador tiene que saberlo antes de declarar
+   * cuántos asientos "contrató" el cliente en esa ruta.
+   */
+  adicionales: number;
 };
 
 export default function ModalRutasContratadas({
@@ -114,6 +123,13 @@ export default function ModalRutasContratadas({
                       <span className="block font-medium text-gray-800">{r.nombreIda ?? "(sin nombre de ruta)"}</span>
                       {r.nombreRetorno && <span className="block text-[11px] text-gray-500">↩ {r.nombreRetorno}</span>}
                       <span className="block text-[10px] text-gray-400">{r.clienteNombre} · {r.sedeNombre}</span>
+                      {r.adicionales > 0 && (
+                        <span className="mt-0.5 inline-block text-[10px] font-black px-1.5 py-0.5 rounded-full uppercase"
+                              title="Parte de estos servicios se pidieron por encima del contrato. La capacidad que declares aquí es la de la ruta contratada."
+                              style={{ background: "#fef3c7", color: "#b45309" }}>
+                          {r.adicionales} adicional{r.adicionales !== 1 ? "es" : ""}
+                        </span>
+                      )}
                     </td>
                     <td className="px-2 py-2 text-center text-xs text-gray-500">{r.servicios}</td>
                     <td className="px-2 py-2 text-center text-xs text-gray-400">
