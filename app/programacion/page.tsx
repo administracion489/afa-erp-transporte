@@ -518,6 +518,20 @@ export default function ReservasPage() {
   const [textoConfirmLote, setTextoConfirmLote] = useState("");
   const [eliminandoLote,  setEliminandoLote]  = useState(false);
   const [ultimoLote,      setUltimoLote]      = useState<{ lote: string; cantidad: number } | null>(null);
+  // ── Reclasificar el origen de servicios ya creados ───────────────────────
+  // Los adicionales de meses pasados nacieron como 'contrato' porque la opción no
+  // existía. Quien sabe cuáles son es el operador, no el sistema: esto es la forma
+  // de que lo declare sin tocar la base a mano.
+  const [modalOrigen, setModalOrigen] = useState<{
+    destino: "adicional" | "contrato";
+    ids: number[];      // lo que el operador marcó
+    todos: number[];    // …más los tramos hermanos: el día entero, no medio día
+    liquidadas: { id: number; codigo: string | null; estado: string; cuantas: number }[];
+    cargando: boolean;
+  } | null>(null);
+  const [origenMotivo,    setOrigenMotivo]    = useState("");
+  const [origenNota,      setOrigenNota]      = useState("");
+  const [aplicandoOrigen, setAplicandoOrigen] = useState(false);
   // ── Paradas inline ──────────────────────────────────────────────────────
   const mapsLoaded = useGoogleMapsLoaded();
   const [nuevoParNombre,       setNuevoParNombre]       = useState<Record<number, string>>({});
@@ -1921,6 +1935,109 @@ export default function ReservasPage() {
     cargarDatos();
   };
 
+  // ── Reclasificar el ORIGEN de servicios ya creados ───────────────────────
+  //
+  // Antes de que existiera el botón "Adicional", TODO nacía como contrato, incluidos
+  // los servicios que el cliente pidió por encima de lo pactado. Quién sabe cuáles son
+  // es el operador; el sistema no puede adivinarlo y no lo intenta.
+  //
+  // Dos reglas que hacen esto seguro:
+  //
+  //   1. ARRASTRA AL HERMANO. La unidad que se cobra es el DÍA (ida + retorno = una
+  //      tarifa). Marcar un solo tramo dejaría medio servicio en cada categoría, y
+  //      v_adicionales mostraría un retorno suelto sin su ida.
+  //   2. NO INVENTA `precio_cotizado`. De un servicio de agosto no se sabe cuál era la
+  //      tarifa de referencia ENTONCES; leerla hoy de la cotización daría una
+  //      comparación falsa si el contrato se renegoció. Se queda en null, que dice la
+  //      verdad: "se marcó después, sin referencia registrada".
+  //
+  // Y no dispara nada: el WHEN de trg_reservas_pacto_acta solo cubre costo, precio,
+  // proveedor y vehículo, así que reclasificar no levanta actas ni enlaces de
+  // conformidad. Por eso el motivo vive en `adicional_motivo` y no en `cambio_motivo`.
+  const prepararCambioOrigen = async (destino: "adicional" | "contrato") => {
+    const base = Array.from(seleccionados);
+    if (base.length === 0) return;
+    setOrigenMotivo(""); setOrigenNota("");
+    setModalOrigen({ destino, ids: base, todos: base, liquidadas: [], cargando: true });
+
+    // Hermanos por las DOS direcciones del vínculo: si solo se marcó el retorno y su
+    // ida no lo referencia de vuelta, mirar un solo lado se dejaría la mitad.
+    const ids = new Set(base);
+    const CHUNK = 200;
+    for (let i = 0; i < base.length; i += CHUNK) {
+      const trozo = base.slice(i, i + CHUNK);
+      const [ida, vuelta] = await Promise.all([
+        supabase.from("reservas").select("reserva_vinculada_id").in("id", trozo),
+        supabase.from("reservas").select("id").in("reserva_vinculada_id", trozo),
+      ]);
+      for (const r of (ida.data ?? [])) if (r.reserva_vinculada_id) ids.add(Number(r.reserva_vinculada_id));
+      for (const r of (vuelta.data ?? [])) ids.add(Number(r.id));
+    }
+    const todos = Array.from(ids);
+
+    // Qué documentos ya emitidos contienen alguno de estos servicios. No bloquea: el
+    // papel que el cliente firmó no cambia, y hay que decirlo antes, no después.
+    const conteo = new Map<number, number>();
+    for (let i = 0; i < todos.length; i += CHUNK) {
+      const { data } = await supabase.from("reservas")
+        .select("liquidacion_cliente_id").in("id", todos.slice(i, i + CHUNK))
+        .not("liquidacion_cliente_id", "is", null);
+      for (const r of (data ?? [])) {
+        const k = Number(r.liquidacion_cliente_id);
+        conteo.set(k, (conteo.get(k) ?? 0) + 1);
+      }
+    }
+    let liquidadas: { id: number; codigo: string | null; estado: string; cuantas: number }[] = [];
+    if (conteo.size) {
+      const { data } = await supabase.from("liquidacion_cliente")
+        .select("id,codigo,estado").in("id", [...conteo.keys()]);
+      liquidadas = (data ?? []).map((l: { id: number; codigo: string | null; estado: string }) => ({
+        id: Number(l.id), codigo: l.codigo ?? null, estado: String(l.estado),
+        cuantas: conteo.get(Number(l.id)) ?? 0,
+      }));
+    }
+    setModalOrigen(prev => prev ? { ...prev, todos, liquidadas, cargando: false } : prev);
+  };
+
+  const aplicarCambioOrigen = async () => {
+    if (!modalOrigen || modalOrigen.cargando) return;
+    const esAdic = modalOrigen.destino === "adicional";
+    setAplicandoOrigen(true);
+
+    // Volver a 'contrato' limpia el motivo y la nota: describían un adicional que ya
+    // no existe, y dejarlos pegados haría que el próximo reporte contara una historia
+    // que la fila ya no sostiene.
+    const campos = {
+      origen_contractual: modalOrigen.destino,
+      adicional_motivo: esAdic ? (origenMotivo || null) : null,
+      adicional_nota:   esAdic ? (origenNota.trim() || null) : null,
+    };
+
+    let hechos = 0;
+    let error = "";
+    for (let i = 0; i < modalOrigen.todos.length; i += 200) {
+      const trozo = modalOrigen.todos.slice(i, i + 200);
+      const r = await supabase.from("reservas").update(campos).in("id", trozo).select("id");
+      if (r.error) { error = r.error.message; break; }
+      hechos += (r.data ?? []).length;
+    }
+
+    setAplicandoOrigen(false);
+    if (error) {
+      alert(
+        /origen_contractual|adicional_motivo|adicional_nota/i.test(error)
+          ? "Falta correr supabase/reservas-04-servicios-adicionales.sql en Supabase: la base todavía no tiene la columna de origen."
+          : "No se pudo cambiar el origen: " + error
+      );
+      return;
+    }
+    setModalOrigen(null);
+    limpiarSeleccion();
+    setFiltroOrigen(esAdic ? "adicional" : "todos");
+    await cargarDatos();
+    alert(`${hechos} servicio(s) quedaron como ${esAdic ? "ADICIONAL" : "CONTRATO"}.`);
+  };
+
   // Prepara el modal de borrado en grupo: expande la pareja IDA/RETORNO vinculada
   // no seleccionada, y separa las reservas facturadas/cobradas (no se eliminan solas).
   const prepararEliminacionLote = async (idsBase: number[]) => {
@@ -2157,6 +2274,111 @@ export default function ReservasPage() {
           }}
         />
       )}
+
+      {/* MODAL · reclasificar el origen de servicios ya creados */}
+      {modalOrigen && (() => {
+        const esAdic = modalOrigen.destino === "adicional";
+        const arrastrados = modalOrigen.todos.length - modalOrigen.ids.length;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.45)" }}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col" style={{ maxHeight: "calc(100vh - 32px)" }}>
+              <div className="flex items-center justify-between px-6 py-4 border-b shrink-0" style={{ borderColor: "#e2e8f0" }}>
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white shrink-0"
+                       style={{ background: esAdic ? "#b45309" : "#0b315f" }}>
+                    <Sparkles size={18} />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-bold text-gray-900">
+                      {esAdic ? "Marcar como ADICIONAL" : "Devolver a CONTRATO"}
+                    </h2>
+                    <p className="text-xs text-gray-400">Corrige el origen de servicios ya creados</p>
+                  </div>
+                </div>
+                <button onClick={() => setModalOrigen(null)} className="p-2 rounded-xl hover:bg-gray-100">
+                  <X size={18} className="text-gray-500" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4 overflow-y-auto flex-1">
+                {modalOrigen.cargando ? (
+                  <p className="text-sm text-gray-400">Revisando los servicios…</p>
+                ) : (
+                  <>
+                    <div className="rounded-xl px-4 py-3 text-sm" style={{ background: esAdic ? "#fffbeb" : "#eef3f8", color: esAdic ? "#854d0e" : "#0b315f" }}>
+                      <b>{modalOrigen.todos.length} servicio(s)</b> pasarán a{" "}
+                      <b>{esAdic ? "ADICIONAL" : "CONTRATO"}</b>.
+                      {arrastrados > 0 && (
+                        <p className="mt-1.5 text-[12px] leading-snug">
+                          Marcaste {modalOrigen.ids.length} y se suman {arrastrados} por el tramo
+                          hermano: <b>lo que se cobra es el día completo</b> (ida + retorno = una
+                          tarifa), así que los dos tramos tienen que quedar del mismo lado.
+                        </p>
+                      )}
+                    </div>
+
+                    {modalOrigen.liquidadas.length > 0 && (
+                      <div className="rounded-xl px-4 py-3 text-[12px] leading-snug" style={{ background: "#fef9c3", color: "#854d0e" }}>
+                        <p className="font-bold mb-1">Ojo: hay servicios que ya están liquidados</p>
+                        {modalOrigen.liquidadas.map(l => (
+                          <p key={l.id}>· {l.codigo ?? "#" + l.id} ({l.estado}) — {l.cuantas} servicio(s)</p>
+                        ))}
+                        <p className="mt-1.5">
+                          El documento ya emitido <b>no cambia</b>: es una foto de lo que el cliente
+                          recibió. Esto corrige el registro operativo, para que los reportes y los
+                          próximos cierres digan la verdad. Si alguna está en <b>borrador</b>, ábrela
+                          y usa <b>↻ Recalcular descripciones</b> para que la línea se rearme.
+                        </p>
+                      </div>
+                    )}
+
+                    {esAdic && (
+                      <>
+                        <div>
+                          <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                            Motivo (opcional)
+                          </label>
+                          <select className="w-full border rounded-xl px-3 py-2.5 text-sm" value={origenMotivo} onChange={e => setOrigenMotivo(e.target.value)}>
+                            <option value="">Sin motivo declarado</option>
+                            {MOTIVOS_CAMBIO.filter(m => m.lado !== "compra").map(m => (
+                              <option key={m.clave} value={m.clave}>{m.nombre}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                            Nota (opcional)
+                          </label>
+                          <input className="w-full border rounded-xl px-3 py-2.5 text-sm" value={origenNota}
+                                 onChange={e => setOrigenNota(e.target.value)}
+                                 placeholder="Ej. Salidas extra pedidas por correo en agosto" />
+                          <p className="text-[10px] text-gray-400 mt-1 leading-snug">
+                            Se escribe en los {modalOrigen.todos.length} servicios. El
+                            <b> precio de referencia se deja vacío</b> a propósito: de un servicio
+                            pasado no se sabe cuál era la tarifa de entonces, y leerla hoy de la
+                            cotización daría una comparación falsa si el contrato se renegoció.
+                          </p>
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+
+              <div className="flex gap-3 px-6 py-4 border-t shrink-0" style={{ borderColor: "#e2e8f0" }}>
+                <button onClick={aplicarCambioOrigen} disabled={modalOrigen.cargando || aplicandoOrigen}
+                        className="flex-1 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-40"
+                        style={{ background: esAdic ? "#b45309" : "#0b315f" }}>
+                  {aplicandoOrigen ? "Aplicando…" : `Cambiar ${modalOrigen.todos.length} servicio(s)`}
+                </button>
+                <button onClick={() => setModalOrigen(null)} className="px-5 py-2.5 rounded-xl font-bold text-sm border text-gray-600 hover:bg-gray-50">
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Banner "Deshacer generación" tras usar Programa fijo */}
       {ultimoLote && (
@@ -3808,9 +4030,33 @@ export default function ReservasPage() {
           <button onClick={limpiarSeleccion} className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white hover:bg-gray-50 transition-colors" style={{ borderColor: "#c7d7ea", color: "#0b315f" }}>
             Ninguno
           </button>
+          {/* Reclasificar el origen. Va aquí y no en cada fila porque lo normal es
+              corregir un mes entero de una ruta: fila por fila son sesenta clics y
+              sesenta oportunidades de saltarse uno. */}
+          <button
+            onClick={() => prepararCambioOrigen("adicional")}
+            title="Marcar lo seleccionado como servicio pedido por encima del contrato"
+            className="ml-auto flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg text-white transition-colors hover:opacity-90"
+            style={{ background: "#b45309" }}
+          >
+            <Sparkles size={13} /> Marcar como Adicional
+          </button>
+          {Array.from(seleccionados).some(id => {
+            const r = reservas.find(x => x.id === id);
+            return r ? esAdicional(r) : false;
+          }) && (
+            <button
+              onClick={() => prepararCambioOrigen("contrato")}
+              title="Devolver lo seleccionado a servicios del contrato"
+              className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border bg-white hover:bg-gray-50 transition-colors"
+              style={{ borderColor: "#c7d7ea", color: "#0b315f" }}
+            >
+              Devolver a Contrato
+            </button>
+          )}
           <button
             onClick={() => prepararEliminacionLote(Array.from(seleccionados))}
-            className="ml-auto flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors"
+            className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors"
           >
             <Trash2 size={13} /> Eliminar seleccionados
           </button>
