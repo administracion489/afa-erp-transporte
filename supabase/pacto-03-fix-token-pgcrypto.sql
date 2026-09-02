@@ -24,6 +24,15 @@
 -- Solo reemplaza la funcion: NO toca tablas, datos, vistas ni los demas triggers, y los
 -- tokens ya emitidos siguen siendo validos. El trigger que la usa no se recrea porque
 -- apunta a la funcion por nombre.
+--
+-- POR QUE ESTA EXPLICACION ESTA AQUI Y NO DENTRO DEL CUERPO
+--
+-- pg_get_functiondef() devuelve el cuerpo CON sus comentarios. Si el comentario que
+-- explica el arreglo vive dentro de la funcion y nombra `gen_random_bytes`, entonces
+-- la verificacion obvia —buscar esa palabra en la definicion— da POSITIVO para siempre,
+-- incluso sobre una funcion ya parcheada, y no hay forma de saber si el parche entro.
+-- Eso paso de verdad: la verificacion de este mismo archivo era inutilizable.
+-- La explicacion se queda fuera del cuerpo; dentro solo va una nota corta.
 -- ────────────────────────────────────────────────────────────────────────────
 
 create or replace function public.fn_reservas_pacto_acta()
@@ -129,15 +138,8 @@ begin
        v_af_v_ant, v_af_v,
        ev.margen_pct_antes, ev.margen_pct_despues, ev.severidad, ev.veredicto,
        new.cambio_motivo, new.cambio_nota, v_usr,
-       -- Token del enlace público de conformidad. Dos UUID concatenados = 64 hex
-       -- (244 bits), MÁS entropía que los 192 bits del gen_random_bytes(24) que había
-       -- aquí, y sin depender de pgcrypto: `gen_random_bytes` es de esa extensión, que
-       -- en Supabase se instala en el esquema `extensions` — fuera del
-       -- `set search_path = public, pg_temp` de esta función. El trigger reventaba con
-       -- "function gen_random_bytes(integer) does not exist" y Postgres RECHAZABA el
-       -- UPDATE entero de la reserva: subir el precio al cliente era imposible.
-       -- `gen_random_uuid()` es núcleo desde PG13 y se resuelve por pg_catalog siempre.
-       -- Es además lo que ya usa liquidaciones-v2.sql para sus tokens.
+       -- Token del enlace público de conformidad. Dos UUID = 64 hex (244 bits).
+       -- El porqué está en la cabecera de este archivo, FUERA del cuerpo a propósito.
        case when coalesce(new.precio_cliente,0) > coalesce(old.precio_cliente,0)
                  and coalesce(pol.exige_conformidad_cliente, true)
             then replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '') end,
@@ -166,24 +168,41 @@ begin
 end $$;
 
 -- ── Verificacion ────────────────────────────────────────────────────────────
--- Debe devolver 0 filas: ninguna funcion del ERP depende ya de pgcrypto.
+-- Debe decir 'PARCHEADA — ok'.
 --
--- Dos detalles que rompen la consulta obvia:
---   · pg_get_functiondef() LANZA ERROR sobre funciones agregadas ("array_agg is an
---     aggregate function"), asi que hay que acotar a prokind = 'f'.
---   · El filtro y la llamada van en pasos separados (CTE MATERIALIZED). Sin eso el
---     planificador puede evaluar pg_get_functiondef ANTES del filtro y reventar igual.
---
---   with fns as materialized (
---     select p.oid, p.proname
---       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
---      where n.nspname = 'public' and p.prokind = 'f'
---   )
---   select proname from fns where pg_get_functiondef(oid) ilike '%gen_random_bytes%';
---
--- Version acotada, si solo interesa esta funcion (no puede tocar un agregado):
---
---   select count(*)
+--   select case
+--       when pg_get_functiondef(p.oid) ilike '%gen_random_bytes%' then 'VIEJA — sin parchear'
+--       when pg_get_functiondef(p.oid) ilike '%gen_random_uuid%'  then 'PARCHEADA — ok'
+--       else 'sin token' end as version_funcion
 --     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
---    where n.nspname = 'public' and p.proname = 'fn_reservas_pacto_acta'
---      and pg_get_functiondef(p.oid) ilike '%gen_random_bytes%';   -- 0 = parche aplicado
+--    where n.nspname = 'public' and p.proname = 'fn_reservas_pacto_acta';
+--
+-- TRES TRAMPAS que ya costaron un diagnostico equivocado cada una:
+--
+--  1) pg_get_functiondef() devuelve el cuerpo CON los comentarios. Una version ya
+--     parcheada cuyo comentario nombre `gen_random_bytes` da POSITIVO para siempre.
+--     Por eso la explicacion de este arreglo vive en la cabecera y no dentro de la
+--     funcion. Si tu base tiene una version con ese comentario dentro, usa la consulta
+--     que ignora comentarios:
+--
+--       with def as (
+--         select pg_get_functiondef(p.oid) as t
+--           from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+--          where n.nspname='public' and p.proname='fn_reservas_pacto_acta'),
+--       lineas as (
+--         select regexp_replace(linea, '--.*$', '') as codigo
+--           from def, lateral unnest(string_to_array(def.t, E'\n')) as u(linea))
+--       select case
+--           when bool_or(codigo ilike '%gen_random_bytes%') then 'VIEJA — sin parchear'
+--           when bool_or(codigo ilike '%gen_random_uuid%')  then 'PARCHEADA — ok'
+--           else 'sin token' end
+--         from lineas;
+--
+--  2) NO barras todas las funciones de `public`: pg_get_functiondef() LANZA ERROR
+--     sobre las agregadas ("array_agg is an aggregate function"). Si aun asi quieres
+--     el barrido, acota a prokind = 'f' y separa el filtro de la llamada con un CTE
+--     MATERIALIZED (sin eso el planificador puede evaluar la funcion antes del filtro).
+--
+--  3) Un parche automatico que busque la llamada por regex tiene que ABORTAR si no la
+--     encuentra, nunca "arreglar" a medias: sobre una funcion ya parcheada, lo unico
+--     que queda de `gen_random_bytes` es texto de un comentario.

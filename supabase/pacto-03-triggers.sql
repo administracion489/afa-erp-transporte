@@ -268,6 +268,23 @@ create trigger trg_reservas_pacto_alta
 --
 --    El WHEN del trigger filtra en el motor: un update de estado, de hora o de GPS no
 --    entra siquiera a la función. Solo lo económico y el recurso.
+--
+--    EL TOKEN DEL ENLACE DE CONFORMIDAD, y por qué esto se explica AQUÍ.
+--
+--    Se arma con dos gen_random_uuid() concatenados: 64 hex = 244 bits. Antes usaba
+--    encode(gen_random_bytes(24),'hex'), que son 192 bits y —lo grave— depende de
+--    pgcrypto. En Supabase las extensiones viven en el esquema `extensions`, fuera del
+--    `set search_path = public, pg_temp` de esta función, así que NUNCA la resolvía:
+--    el trigger lanzaba 42883 y Postgres rechazaba el UPDATE entero de la reserva.
+--    Subir el precio al cliente era imposible. Instalar pgcrypto no lo arregla, por ese
+--    mismo search_path. gen_random_uuid() es núcleo desde PG13 y se resuelve por
+--    pg_catalog pase lo que pase; es lo que ya usa liquidaciones-v2.sql.
+--
+--    La explicación va aquí ARRIBA y no dentro del cuerpo porque pg_get_functiondef()
+--    devuelve el cuerpo CON sus comentarios: un comentario interno que nombrara
+--    `gen_random_bytes` haría que la verificación del parche (buscar esa palabra en la
+--    definición) diera positivo para siempre sobre una función ya corregida. Eso pasó
+--    de verdad y costó un diagnóstico equivocado. Ver supabase/pacto-03-fix-token-pgcrypto.sql.
 -- ────────────────────────────────────────────────────────────────────────────
 create or replace function public.fn_reservas_pacto_acta()
 returns trigger language plpgsql security definer set search_path = public, pg_temp as $$
@@ -372,15 +389,8 @@ begin
        v_af_v_ant, v_af_v,
        ev.margen_pct_antes, ev.margen_pct_despues, ev.severidad, ev.veredicto,
        new.cambio_motivo, new.cambio_nota, v_usr,
-       -- Token del enlace público de conformidad. Dos UUID concatenados = 64 hex
-       -- (244 bits), MÁS entropía que los 192 bits del gen_random_bytes(24) que había
-       -- aquí, y sin depender de pgcrypto: `gen_random_bytes` es de esa extensión, que
-       -- en Supabase se instala en el esquema `extensions` — fuera del
-       -- `set search_path = public, pg_temp` de esta función. El trigger reventaba con
-       -- "function gen_random_bytes(integer) does not exist" y Postgres RECHAZABA el
-       -- UPDATE entero de la reserva: subir el precio al cliente era imposible.
-       -- `gen_random_uuid()` es núcleo desde PG13 y se resuelve por pg_catalog siempre.
-       -- Es además lo que ya usa liquidaciones-v2.sql para sus tokens.
+       -- Token del enlace público de conformidad. Dos UUID = 64 hex (244 bits).
+       -- El porqué está encima de la función, FUERA del cuerpo a propósito.
        case when coalesce(new.precio_cliente,0) > coalesce(old.precio_cliente,0)
                  and coalesce(pol.exige_conformidad_cliente, true)
             then replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '') end,
