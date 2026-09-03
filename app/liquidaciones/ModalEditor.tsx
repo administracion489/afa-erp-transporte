@@ -11,7 +11,7 @@ import { totalesValorizacion } from "@/lib/liquidacion-agrupacion";
 import {
   actualizarCantidad, agregarLineaManual, eliminarLinea, recalcularTotales,
   emitirLiquidacion, recalcularDescripciones, actualizarPaxContratado,
-  totalesProveedorExt, detraccionDe, type Lado,
+  contarServiciosDeLinea, totalesProveedorExt, detraccionDe, type Lado,
 } from "@/lib/liquidaciones";
 
 type Linea = {
@@ -132,10 +132,30 @@ export default function ModalEditor({
       let extra = "";
       const paxAhora = l.pax_contratado ?? null;
       if (deReservas(l) && paxAhora !== (paxOriginal[l.id] ?? null)) {
+        // VACIARLO no es corregirlo: borra el snapshot contractual de todos los servicios
+        // de la línea y es irreversible. Además puede no verse — si la cotización o la
+        // ficha de la ruta siguen sabiendo el número, el ítem lo sigue imprimiendo y la
+        // celda vuelve a mostrarlo, así que parecería que no pasó nada. Se pregunta.
+        if (paxAhora == null) {
+          const n = await contarServiciosDeLinea(supabase, lado, l.id);
+          const ok = window.confirm(
+            `Vas a BORRAR la capacidad contratada de ${n} servicio(s) de esta línea.\n\n` +
+            "No es lo mismo que dejar el ítem sin «N PAX»: si la cotización o la ficha de la " +
+            "ruta lo saben, el documento lo va a seguir imprimiendo y lo único que se pierde " +
+            "es el dato guardado en los servicios.\n\n¿Borrarlo igual?"
+          );
+          if (!ok) { setTrabajando(false); return; }
+        }
         const rp = await actualizarPaxContratado(supabase, lado, l.id, paxAhora, { usuario });
         if (!rp.ok) throw new Error(rp.error);
-        extra = ` ${paxAhora ?? "Sin"} PAX contratados escritos en ${rp.reservas} servicio(s);`
-              + " se reescribió la descripción de este ítem."
+        // Lo que pasó DE VERDAD, no lo que se pidió: la descripción solo se reescribe si
+        // el texto cambió, y el ítem puede quedar con otro número que el tecleado.
+        extra = ` ${paxAhora ?? "Sin"} PAX escritos en ${rp.reservas} servicio(s).`
+              + (rp.descripciones ? " Se reescribió la descripción del ítem." : "")
+              + (rp.paxResultante !== paxAhora
+                  ? ` El ítem queda con ${rp.paxResultante ?? "sin «N PAX»"}: lo aporta la `
+                    + "cotización o la ficha de la ruta. Para cambiarlo ahí, usa Rutas contratadas."
+                  : "")
               + (rp.aviso ? ` ${rp.aviso}` : "");
       }
 

@@ -620,6 +620,23 @@ export async function recalcularDescripciones(
 // ── Corregir los PAX contratados desde el editor de la liquidación ──────────
 
 /**
+ * Cuántos servicios hay detrás de una línea. Lo pide la pantalla ANTES de vaciar el pax:
+ * "vas a borrar la capacidad contratada de 52 servicios" es una advertencia; "vas a
+ * borrarla" no lo es, y la diferencia entre corregir un número y borrar el snapshot
+ * contractual de un periodo entero se juega justo ahí.
+ */
+export async function contarServiciosDeLinea(
+  sb: any, lado: Lado, lineaId: number
+): Promise<number> {
+  try {
+    const { data } = await sb.from(T[lado].puente).select("reserva_id").eq("linea_id", lineaId);
+    return new Set(((data as any[]) ?? []).map((p) => Number(p.reserva_id))).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Escribe los asientos CONTRATADOS de una línea del documento.
  *
  * Y los escribe donde son verdad: en `reservas.capacidad_contratada` de los servicios
@@ -650,7 +667,16 @@ export async function actualizarPaxContratado(
   lineaId: number,
   pax: number | null,
   opts?: { usuario?: string | null }
-): Promise<{ ok: boolean; reservas?: number; aviso?: string; error?: string }> {
+): Promise<{
+  ok: boolean;
+  reservas?: number;
+  /** Descripciones realmente reescritas (0 = el texto no cambió). */
+  descripciones?: number;
+  /** Con qué PAX queda imprimiéndose el ítem, ya resuelto por la cascada. */
+  paxResultante?: number | null;
+  aviso?: string;
+  error?: string;
+}> {
   try {
     const t = T[lado];
     const limpio = pax != null && Number(pax) > 0 ? Math.round(Number(pax)) : null;
@@ -671,6 +697,15 @@ export async function actualizarPaxContratado(
     if (!ids.length)
       throw new Error("Esta línea no tiene servicios detrás: no hay dónde escribir la capacidad contratada.");
 
+    // Lo que decían ANTES, para la bitácora. Vaciar la capacidad de 52 servicios sin
+    // dejar rastro del número anterior es irreversible, y el evento solo guardaba el
+    // valor nuevo. No es crítico (si la columna no existe se sigue igual), pero es la
+    // única forma de reconstruir un borrado hecho por error.
+    let antes: (number | null)[] = [];
+    const prev = await sb.from("reservas").select("capacidad_contratada").in("id", ids);
+    if (!prev.error)
+      antes = [...new Set(((prev.data as any[]) ?? []).map((x) => x.capacidad_contratada ?? null))];
+
     // Por la ÚNICA puerta de escritura de reservas, igual que Programación: trae de
     // regalo el reintento sin la columna cuando falta la migración liquidaciones-03, el
     // troceo en lotes y el "cuál falló" fila por fila. Sin `cambio`: no dispara actas
@@ -688,11 +723,24 @@ export async function actualizarPaxContratado(
     });
     if (!rd.ok) throw new Error(rd.error);
 
+    // Con qué número queda el ítem DE VERDAD, que no siempre es el que se escribió:
+    // borrar la capacidad de los servicios no deja el ítem sin PAX si la cotización o la
+    // ficha de la ruta lo siguen sabiendo — la cascada sigue de largo hasta el escalón 3.
+    // Devolverlo es lo que permite que la pantalla diga lo que pasó en vez de suponerlo.
+    let paxResultante: number | null | undefined;
+    const rl = await sb.from(t.linea).select("pax_contratado").eq("id", lineaId).maybeSingle();
+    if (!rl.error) paxResultante = rl.data?.pax_contratado ?? null;
+
     await registrarEvento(sb, lado, Number(linea.liquidacion_id), "pax_contratado_corregido", {
-      detalle: `Ítem #${lineaId}: ${limpio ?? "sin dato"} PAX contratados, escritos en ${ids.length} servicio(s).`,
+      detalle: `Ítem #${lineaId}: ${limpio ?? "sin dato"} PAX contratados, escritos en ${ids.length} `
+             + `servicio(s) (antes: ${antes.map((v) => v ?? "sin dato").join(", ") || "—"}). `
+             + `El ítem queda con ${paxResultante ?? "sin dato"}.`,
       usuario: opts?.usuario ?? undefined,
     });
-    return { ok: true, reservas: ids.length, aviso: res.aviso };
+    return {
+      ok: true, reservas: ids.length, descripciones: rd.actualizadas ?? 0,
+      paxResultante, aviso: res.aviso,
+    };
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) };
   }

@@ -16,7 +16,7 @@ import {
 } from "@/lib/reservas-pacto";
 import {
   cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxDeServicio,
-  type CatalogoRutas, type PaxResuelto,
+  normalizarNombreRuta, type CatalogoRutas, type PaxResuelto,
 } from "@/lib/liquidacion-rutas";
 import { AFECTACIONES, afectacionDe, type CodigoAfectacion } from "@/lib/finanzas/afectacion";
 import { planDeCanje, notaDeCanje, opuesto, efectoDeMarcarTramo } from "@/lib/reservas-canje";
@@ -490,6 +490,16 @@ export default function ReservasPage() {
   const [vehTercero,   setVehTercero]   = useState<VehiculoTercero[]>([]);
   /** Aviso de las migraciones del Pacto pendientes. No bloquea: informa. */
   const [msgPacto, setMsgPacto] = useState("");
+  /**
+   * Avisos que SOBREVIVEN al cierre del formulario. `msgPacto` se pinta dentro de
+   * `{mostrarForm && editandoId && …}`, y todos los caminos de guardado llaman a
+   * `limpiar()` justo después de emitirlo: el aviso no llegaba a verse nunca —incluido
+   * el de "los PAX no llegaron a su tramo hermano", que es el único reporte de un día
+   * escrito a medias— y encima quedaba pegado en el estado, así que reaparecía sobre el
+   * SIGUIENTE servicio acusándolo de un fallo ajeno. Este se pinta a nivel de página.
+   */
+  const [avisoPagina, setAvisoPagina] = useState("");
+  const avisar = (t: string) => setAvisoPagina(t);
   /** Último costo pactado con el proveedor elegido — el tarifario de compra ya existe. */
   const [costoSug, setCostoSug] = useState<{ costo: number; base: string; dias: number } | null>(null);
   const [condTercero,  setCondTercero]  = useState<ConductorTercero[]>([]);
@@ -618,6 +628,12 @@ export default function ReservasPage() {
      * tres ítems con pax distinto, y el masivo no filtra por móvil. Ver `aceptaPax`.
      */
     paxAntes: number | null;
+    /**
+     * Los nombres de ruta del día editado (los dos tramos), normalizados. Acotan la
+     * propagación del pax a SU ruta: una cotización puede tener varias, y las de un
+     * contrato viejo tienen todas la capacidad en NULL. Vacío = no hay con qué comparar.
+     */
+    rutasObjetivo: string[];
   } | null>(null);
   const [aplicarScope,         setAplicarScope]         = useState<"todos" | "rango">("todos");
   const [aplicarDesde,         setAplicarDesde]         = useState("");
@@ -1504,7 +1520,9 @@ export default function ReservasPage() {
   const condEmpSel   = empSelId ? condTercero.filter(c => c.empresa_id === empSelId) : [];
   const riesgoEmpSel = empSelId ? riesgoEmpresa(docsTercero, empSelId) : "ok";
 
-  const limpiar = () => { setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); };
+  // `msgPacto` es del servicio que se está editando: si no se borra, el banner ámbar del
+  // anterior aparece sobre el siguiente, acusándolo de un problema que no es suyo.
+  const limpiar = () => { setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); setMsgPacto(""); };
 
   const setRangoRapido = (tipo: "hoy" | "semana" | "7dias" | "mes" | "limpiar") => {
     if (tipo === "limpiar") { setFiltroDesde(""); setFiltroHasta(""); return; }
@@ -1555,6 +1573,7 @@ export default function ReservasPage() {
       cambio_motivo: "", cambio_nota: "",
     });
     setCostoSug(null);
+    setMsgPacto("");
     setEditandoId(r.id); setMostrarForm(true);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
   };
@@ -1970,7 +1989,7 @@ export default function ReservasPage() {
     }, { motivo: form.cambio_motivo || null, nota: form.cambio_nota.trim() || null });
 
     if (!res.ok) { alert(describirResultado(res)); setGuardando(false); return; }
-    if (res.aviso) setMsgPacto(res.aviso);
+    if (res.aviso) avisar(res.aviso);
 
     // ── El pax es del DÍA, no del tramo ───────────────────────────────────────
     // A diferencia del importe —que va en un tramo y en el otro queda en S/ 0.00 a
@@ -1985,26 +2004,32 @@ export default function ReservasPage() {
     // Y SIN el motivo del cambio: no dispara acta (el trigger solo mira costo, precio,
     // empresa y unidad), y dejar un motivo pegado en esa fila contaminaría el acta que
     // sí escriba el próximo cambio de dinero.
-    if (paxTocado) {
-      // El memo del hermano se llena con una consulta ASÍNCRONA: guardar antes de que
-      // resuelva dejaría el otro tramo sin el número y sin que nadie se entere. Se
-      // vuelve a preguntar, por los dos sentidos del enlace, antes de darlo por escrito.
-      const destino = hermano?.id
-        ? { id: Number(hermano.id), codigo: hermano.codigo ?? null, pax: hermano.capacidad_contratada ?? null }
-        : await resolverHermanoAhora(editandoId, reservaActual?.reserva_vinculada_id ?? null);
+    //
+    // Se propaga el NÚMERO, nunca el borrado. Vaciar el campo de la ida y arrastrar al
+    // hermano borraría justo lo que la pantalla acababa de prometer que iba a aportar
+    // ("la liquidación tomará 15 PAX · escrito en su tramo hermano"), y con la cotización
+    // y la ficha también en blanco el ítem saldría sin el «N PAX». Quien quiera dejar el
+    // día entero sin dato abre los dos tramos: son dos gestos distintos.
+    if (paxTocado && paxEscrito != null) {
+      // El hermano se pregunta a la BASE aunque el memo ya tenga uno. Dos razones: el memo
+      // se llena con una consulta asíncrona (guardar antes de que resuelva dejaría el otro
+      // tramo sin el número y sin que nadie se entere), y su búsqueda inversa mira solo la
+      // ventana de fechas cargada — con dos filas apuntando acá y una fuera del filtro,
+      // ahí parece inequívoco y no lo es. `resolverHermanoAhora` ve las dos y no adivina.
+      const destino = await resolverHermanoAhora(editandoId, reservaActual?.reserva_vinculada_id ?? null);
 
       if (destino && destino.pax !== paxEscrito) {
         const resH = await guardarReservas(supabase, [destino.id], { capacidad_contratada: paxEscrito });
         if (!resH.ok)
-          setMsgPacto(`Se guardó este servicio, pero los PAX no llegaron a su tramo hermano `
-                    + `${destino.codigo ?? `#${destino.id}`}: ${resH.rechazos[0]?.motivo ?? "error desconocido"}. `
-                    + `Corrígelo abriendo ese servicio.`);
-        else if (resH.aviso) setMsgPacto(resH.aviso);
+          avisar(`Se guardó este servicio, pero los PAX no llegaron a su tramo hermano `
+               + `${destino.codigo ?? `#${destino.id}`}: ${resH.rechazos[0]?.motivo ?? "error desconocido"}. `
+               + `Corrígelo abriendo ese servicio.`);
+        else if (resH.aviso) avisar(resH.aviso);
       } else if (!destino && reservaActual?.reserva_vinculada_id) {
         // El enlace existe pero el otro tramo no aparece (o hay dos apuntando acá, que es
         // un enlace roto de otra forma). Se escribió medio día: hay que decirlo.
-        setMsgPacto("Se escribieron los PAX solo en este tramo: no se pudo identificar su "
-                  + "hermano. Revisa el enlace ida↔retorno en Liquidaciones → Enlazar tramos.");
+        avisar("Se escribieron los PAX solo en este tramo: no se pudo identificar su "
+             + "hermano. Revisa el enlace ida↔retorno en Liquidaciones → Enlazar tramos.");
       }
     }
 
@@ -2054,6 +2079,10 @@ export default function ReservasPage() {
           cotizacion_id: reservaActual.cotizacion_id, payload: asignPayload, otrasReservas,
           horaOriginal, resumen, pax: paxEscrito, paxTocado,
           paxAntes: reservaActual.capacidad_contratada ?? null,
+          rutasObjetivo: [
+            normalizarNombreRuta(reservaActual.ruta_nombre),
+            normalizarNombreRuta(hermano?.ruta_nombre),
+          ].filter(Boolean),
         });
         cargarDatos();
         return;
@@ -2078,16 +2107,66 @@ export default function ReservasPage() {
   };
 
   /**
+   * Los hermanos DENTRO del contrato, por los dos sentidos del enlace. Se arma una sola
+   * vez porque `aceptaPax` lo consulta por cada fila y por cada render del modal.
+   *
+   * Sin esto, la regla de abajo miraba un retorno —que nace en NULL, porque el generador
+   * escribe la capacidad solo en la ida— y lo tomaba por "sin dato". En un contrato de
+   * tres móviles eso significaba escribir la capacidad del móvil 1 sobre los retornos de
+   * los otros dos: un número que nadie pactó, invisible (la liquidación mira la ida
+   * primero) y sin vuelta atrás, porque el valor anterior era NULL.
+   */
+  const hermanosDelContrato = useMemo(() => {
+    const filas = modalAplicarMasivo?.otrasReservas ?? [];
+    const porId = new Map(filas.map(r => [r.id, r]));
+    // Índice inverso solo con los INEQUÍVOCOS: con dos filas apuntando a la misma, el
+    // enlace está roto de otra forma y elegir una sería adivinar (misma regla que
+    // `hermanoId` y que lib/liquidacion-hermanos.ts).
+    const cuantos = new Map<number, number>();
+    for (const r of filas) {
+      const v = Number(r.reserva_vinculada_id ?? 0);
+      if (v) cuantos.set(v, (cuantos.get(v) ?? 0) + 1);
+    }
+    const inverso = new Map<number, Reserva>();
+    for (const r of filas) {
+      const v = Number(r.reserva_vinculada_id ?? 0);
+      if (v && cuantos.get(v) === 1) inverso.set(v, r);
+    }
+    const de = (r: Reserva): Reserva | undefined =>
+      (r.reserva_vinculada_id ? porId.get(Number(r.reserva_vinculada_id)) : undefined) ?? inverso.get(r.id);
+    return {
+      /** La capacidad que este servicio declara, suya o de su hermano: el pax es del día. */
+      pax: (r: Reserva) => r.capacidad_contratada ?? de(r)?.capacidad_contratada ?? null,
+      /** Los nombres de ruta del día (los dos tramos), normalizados como el catálogo. */
+      rutas: (r: Reserva) => [
+        normalizarNombreRuta(r.ruta_nombre),
+        normalizarNombreRuta(de(r)?.ruta_nombre),
+      ].filter(Boolean),
+    };
+  }, [modalAplicarMasivo]);
+
+  /**
    * ¿Este servicio acepta la capacidad que se está propagando?
    *
    * Una misma cotización puede tener varios ítems con pax distinto (tres móviles, uno de
    * 15 y dos de 25) y el masivo no filtra por móvil: sin esta regla, corregir un ítem
-   * pisaría la capacidad —correcta— de los otros dos. Se propaga solo a quien no tiene
-   * nada escrito o a quien venía diciendo lo mismo que decía este servicio antes: esos
-   * son la cohorte que se está corrigiendo. Los que dicen otra cosa la dicen a propósito.
+   * pisaría la capacidad —correcta— de los otros dos. Dos filtros, y hacen falta los dos:
+   *
+   *   · La RUTA. Un contrato generado antes de que existiera la columna tiene TODAS sus
+   *     capacidades en NULL, así que sin esto una corrección se derramaría sobre las
+   *     otras rutas de la misma cotización. Si no hay nombre de ruta con qué comparar no
+   *     se filtra: es el caso de una sola ruta, y excluir a todos sería peor.
+   *   · La CAPACIDAD, leída del día y no del tramo: se propaga a quien no tiene nada
+   *     escrito ni en su tramo ni en su hermano, o a quien venía diciendo lo mismo que
+   *     decía este servicio antes. Esos son la cohorte que se está corrigiendo; los que
+   *     dicen otra cosa la dicen a propósito.
    */
   const aceptaPax = (r: Reserva, m: NonNullable<typeof modalAplicarMasivo>) => {
-    const actual = r.capacidad_contratada ?? null;
+    if (m.rutasObjetivo.length) {
+      const suyas = hermanosDelContrato.rutas(r);
+      if (suyas.length && !suyas.some(e => m.rutasObjetivo.includes(e))) return false;
+    }
+    const actual = hermanosDelContrato.pax(r);
     return actual === null || actual === m.paxAntes || actual === m.pax;
   };
 
@@ -2212,7 +2291,7 @@ export default function ReservasPage() {
     );
     const rechazos = results.flatMap(r => r.rechazos);
     const aviso = results.find(r => r.aviso)?.aviso;
-    if (aviso) setMsgPacto(aviso);
+    if (aviso) avisar(aviso);
     if (rechazos.length > 0)
       alert(`${rechazos.length} servicio(s) no se pudieron actualizar:\n` +
             rechazos.slice(0, 5).map(x => `#${x.id}: ${x.motivo}`).join("\n"));
@@ -3126,6 +3205,19 @@ export default function ReservasPage() {
           </div>
         );
       })()}
+
+      {/* Avisos que sobreviven al cierre del formulario: lo que quedó a medias al
+          guardar. Va acá, a nivel de página, porque el formulario se cierra en el mismo
+          gesto que los produce. No se cierra solo: un día escrito a medias hay que
+          leerlo. */}
+      {avisoPagina && (
+        <div className="flex items-start gap-3 px-5 py-3 rounded-2xl border text-sm"
+             style={{ background: "#fffbeb", borderColor: "#fcd34d", color: "#92400e" }}>
+          <span className="flex-1">{avisoPagina}</span>
+          <button onClick={() => setAvisoPagina("")}
+                  className="text-amber-600 hover:text-amber-800 font-bold">×</button>
+        </div>
+      )}
 
       {/* Banner "Deshacer generación" tras usar Programa fijo */}
       {ultimoLote && (
@@ -4142,19 +4234,33 @@ export default function ReservasPage() {
                   </p>
                 )}
                 {/* Que la escritura al hermano no sea una sorpresa: el operador ve UN
-                    servicio y se van a tocar dos. */}
-                {paxTocadoForm && hermano?.id && (hermano.capacidad_contratada ?? null) !== paxDelForm && (
+                    servicio y se van a tocar dos. Solo cuando hay número que propagar: el
+                    borrado NO se arrastra, porque borraría justo lo que la cascada acaba
+                    de anunciar que el hermano aporta. */}
+                {paxTocadoForm && paxDelForm != null && hermano?.id
+                  && (hermano.capacidad_contratada ?? null) !== paxDelForm && (
                   <p className="text-[10px] mt-1 text-gray-500 leading-snug">
                     Se escribirá también en <b className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</b>:
                     los asientos son del <b>día</b>, no del tramo.
                   </p>
                 )}
+                {paxTocadoForm && paxDelForm == null && hermano?.capacidad_contratada != null && (
+                  <p className="text-[10px] mt-1 text-gray-500 leading-snug">
+                    Se borra <b>solo acá</b>: <b className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</b>{" "}
+                    conserva sus {hermano.capacidad_contratada} y la liquidación los seguirá
+                    imprimiendo. Para dejar el día sin dato, vacíalo también en ese tramo.
+                  </p>
+                )}
                 {/* La discrepancia que YA existe. Sin esto no se ve: la pantalla muestra
-                    este tramo y el formato imprime el de la ida, y nadie los compara. */}
+                    este tramo y el formato imprime el de la ida, y nadie los compara. Solo
+                    cuando los DOS declaran un número: un null frente a un 15 no es un
+                    conflicto —es el reparto normal, y la cascada lo resuelve bien—, y
+                    avisarlo sería el rojo permanente que enseña a no leer los avisos. */}
                 {!paxTocadoForm && hermano?.capacidad_contratada != null
-                  && hermano.capacidad_contratada !== (reservaEditada?.capacidad_contratada ?? null) && (
+                  && reservaEditada?.capacidad_contratada != null
+                  && hermano.capacidad_contratada !== reservaEditada.capacidad_contratada && (
                   <p className="text-[10px] mt-1 text-amber-700 leading-snug">
-                    Este tramo dice <b>{reservaEditada?.capacidad_contratada ?? "sin dato"}</b> y{" "}
+                    Este tramo dice <b>{reservaEditada.capacidad_contratada}</b> y{" "}
                     <b className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</b> dice{" "}
                     <b>{hermano.capacidad_contratada}</b>. La liquidación imprime <b>uno solo</b>
                     {" "}(mira la ida primero), así que uno de los dos se está descartando en
