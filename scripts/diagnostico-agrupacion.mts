@@ -87,22 +87,44 @@ async function traer(ruta: string): Promise<any[]> {
 const COLS_BASE =
   "id,codigo,fecha_servicio,hora_servicio,estado,estado_admin,cliente_id,cliente_sede_id," +
   "ruta_nombre,direccion_servicio,origen,destino,precio_cliente,costo_proveedor,tipo_asignacion," +
-  "empresa_tercerizada_id,reserva_vinculada_id,liquidacion_cliente_id,liquidacion_proveedor_id," +
-  "paradas_json";
+  "empresa_tercerizada_id,reserva_vinculada_id,liquidacion_cliente_id,liquidacion_proveedor_id";
+
+/** Columnas que pueden faltar y por qué. Se van soltando de a una, de la menos a la más grave. */
+const OPCIONALES = ["origen_contractual", "capacidad_contratada", "cotizacion_id"];
+
+/** Qué se pudo leer de verdad. Lo consulta el informe: sin `paradas_json` no hay criterio C. */
+const disponible = { paradasJson: false, opcionales: false };
 
 /**
+ * Baja las reservas soltando columnas hasta que la consulta pase.
+ *
  * `origen_contractual` la agrega supabase/reservas-04 y `capacidad_contratada` la
- * liquidaciones-03. Se piden aparte y se reintenta sin ellas: un diagnóstico no puede
- * quedarse mudo porque falte una migración accesoria.
+ * liquidaciones-03; `paradas_json` puede no existir en instalaciones viejas. Un
+ * diagnóstico que se cae porque falta una columna es justamente el que no sirve: la
+ * ausencia de `paradas_json` NO es un error a esquivar, es el hallazgo principal —
+ * significa que unir por mapa es imposible y que lo que el texto no una habrá que
+ * declararlo a mano. Así que se reporta, no se revienta.
  */
 async function traerReservas(): Promise<any[]> {
   const rango = `&fecha_servicio=gte.${DESDE}&fecha_servicio=lte.${HASTA}&order=fecha_servicio.asc,id.asc`;
-  const extras = ["origen_contractual", "capacidad_contratada", "cotizacion_id"];
-  try {
-    return await traer(`reservas?select=${COLS_BASE},${extras.join(",")}${rango}`);
-  } catch {
-    return await traer(`reservas?select=${COLS_BASE}${rango}`);
+  const intentos: { cols: string; paradas: boolean; opcionales: boolean }[] = [
+    { cols: `${COLS_BASE},${OPCIONALES.join(",")},paradas_json`, paradas: true, opcionales: true },
+    { cols: `${COLS_BASE},paradas_json`, paradas: true, opcionales: false },
+    { cols: `${COLS_BASE},${OPCIONALES.join(",")}`, paradas: false, opcionales: true },
+    { cols: COLS_BASE, paradas: false, opcionales: false },
+  ];
+  let ultimo = "";
+  for (const i of intentos) {
+    try {
+      const filas = await traer(`reservas?select=${i.cols}${rango}`);
+      disponible.paradasJson = i.paradas;
+      disponible.opcionales = i.opcionales;
+      return filas;
+    } catch (e: any) {
+      ultimo = String(e?.message ?? e);
+    }
   }
+  throw new Error(`No se pudieron leer las reservas ni con el mínimo de columnas.\n  Último error: ${ultimo}`);
 }
 
 // ── Los extremos de un tramo, tal como los guarda el snapshot ────────────────
@@ -251,12 +273,22 @@ console.log(`DIAGNÓSTICO DE AGRUPACIÓN · ${DESDE} → ${HASTA} · lado ${LADO
 console.log("═".repeat(84));
 console.log(`Reservas del periodo: ${reservas.length}  ·  candidatas al cierre: ${candidatas.length}\n`);
 console.log("COBERTURA DEL DATO — ¿se pueden comparar los extremos en el mapa?");
-console.log(`  con paradas_json         ${String(conParadas.length).padStart(5)}  (${pct(conParadas.length)}%)`);
-console.log(`  con inicio Y destino     ${String(conExtremos.length).padStart(5)}  (${pct(conExtremos.length)}%)`);
-console.log(`  con lat/lng en los dos   ${String(conCoords.length).padStart(5)}  (${pct(conCoords.length)}%)   ← sin esto, el criterio C no aplica`);
-if (!conCoords.length)
-  console.log("\n  ⚠ NINGUNA reserva trae coordenadas en sus extremos: unir por mapa es imposible\n" +
-              "    con estos datos. Lo que el texto no una tendrá que declararlo un humano.");
+if (!disponible.paradasJson) {
+  console.log("  ⚠ La columna `reservas.paradas_json` NO existe en esta base.");
+  console.log("    El criterio C (extremos en el mapa) es IMPOSIBLE con estos datos: lo que el");
+  console.log("    texto no una tendrá que declararlo una persona una vez, en la ficha de la ruta.");
+} else {
+  console.log(`  con paradas_json         ${String(conParadas.length).padStart(5)}  (${pct(conParadas.length)}%)`);
+  console.log(`  con inicio Y destino     ${String(conExtremos.length).padStart(5)}  (${pct(conExtremos.length)}%)`);
+  console.log(`  con lat/lng en los dos   ${String(conCoords.length).padStart(5)}  (${pct(conCoords.length)}%)   ← sin esto, el criterio C no aplica`);
+  if (!conCoords.length)
+    console.log("\n  ⚠ NINGUNA reserva trae coordenadas en sus extremos: unir por mapa es imposible\n" +
+                "    con estos datos. Lo que el texto no una tendrá que declararlo un humano.");
+}
+if (!disponible.opcionales)
+  console.log("\n  Nota: falta alguna de origen_contractual / capacidad_contratada / cotizacion_id\n" +
+              "  (migraciones reservas-04 o liquidaciones-03 sin correr). Todo lo demás vale igual;\n" +
+              "  los adicionales se leerán como contrato.");
 console.log("");
 
 // ── 2) Los cuatro criterios, por grupo del cierre ────────────────────────────
