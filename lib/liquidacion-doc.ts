@@ -60,7 +60,7 @@ export type LineaDoc = {
 };
 
 export type FilaAnexo = {
-  ref: string;             // 'A-01'
+  ref: string;             // 'A-01' — el ítem de la valorización que sustenta esta fila
   fecha: string;           // '15/06'
   codigo: string;          // 'AFA-2026-004612'
   ruta: string;
@@ -68,9 +68,6 @@ export type FilaAnexo = {
   placa: string;
   conductor: string;
   pax: number | null;
-  salida: string;
-  llegada: string;
-  km: number | null;
   estado: string;          // 'Conforme' | 'Tardío' | 'Adicional' | 'No ejecutado'
   importe: number;
   alerta?: boolean;
@@ -248,6 +245,50 @@ table{width:100%;border-collapse:collapse}
 .aviso{margin-top:10px;border:1px solid #fed7aa;background:#fff7ed;color:#9a3412;border-radius:6px;padding:6px 9px;font-size:8px;font-weight:700}
 `;
 
+// ── Cómo se corta el documento entre hoja y hoja ────────────────────────────
+//
+// El documento se imprime desde el navegador (window.print), así que el corte de
+// página lo decide Chrome y hay que decírselo. Cuatro cosas, y las cuatro se ven solo
+// a partir de la SEGUNDA hoja — la primera siempre salió bien y por eso el problema
+// pasó desapercibido:
+//
+//   1. El margen tiene que estar en `@page`, no en el padding del body: el padding
+//      solo reserva aire arriba de la primera hoja y abajo de la última, así que las
+//      intermedias arrancaban y terminaban al filo del papel.
+//   2. El pie tiene que RESERVAR su sitio, no solo repetirse. `position:fixed` se
+//      repite en cada hoja pero no ocupa flujo: se imprimía encima del contenido.
+//   3. Ninguna fila se parte por la mitad: `break-inside` en las filas y en los
+//      bloques que se leen como una unidad (firmas, sello, totales, KPIs).
+//   4. Una cabecera de sección o de tabla no puede quedar sola al pie de una hoja:
+//      `break-after:avoid` en las bandas de sección y `table-header-group` para que
+//      la cabecera de la tabla se repita arriba de cada hoja que la continúa.
+const CSS_IMPRESION = `
+@page{size:A4;margin:12mm 11mm 12mm}
+body{padding:0}
+@media screen{body{padding:12mm 11mm 0}}
+.hoja{width:100%;border-collapse:collapse}
+.hoja>tbody>tr>td,.hoja>tfoot>tr>td{padding:0;border:0;vertical-align:top}
+/* La fila que envuelve TODO el documento sí se parte: es la que pagina. */
+.hoja>tbody>tr,.hoja>tbody>tr>td{break-inside:auto;page-break-inside:auto}
+/* El pie deja de ser fijo: va dentro del <tfoot>, que el navegador repite al pie de
+   cada hoja RESERVÁNDOLE el sitio. Fijo se pintaba encima del último renglón, y con
+   un hueco de alto fijo no bastaba: la banda envuelve a dos líneas según lo largo
+   que sea el domicilio de la empresa. */
+.pdf-footer{position:static;margin-top:16px;padding:7px 14px !important}
+/* La banda ya no ocupa el ancho del papel sino el del área imprimible, y el membrete
+   entero no entra en un renglón a 8.5px: sin esto parte "www…" a una segunda línea y
+   deja un separador "|" colgando al final de la primera. El !important es porque
+   buildFooterPDFHtml trae los tamaños en el atributo style. */
+.pdf-footer span{font-size:7.4px !important}
+thead{display:table-header-group}
+/* La cabecera SÍ se repite arriba de cada hoja; el pie del anexo NO: dice "TOTALES DEL
+   PERIODO" y repetirlo al pie de cada hoja se lee como un subtotal de la hoja. */
+.anx tfoot{display:table-row-group}
+.val tr,.anx tr,.docs tr,.datos tr,.tot tr{break-inside:avoid;page-break-inside:avoid}
+.sec,.titulo-anexo,.sub-anexo{break-after:avoid;page-break-after:avoid}
+.ctrl,.folio,.conf,.sello,.firmas,.firma,.kpis,.kpi,.tot,.nota,.coment,.aviso{break-inside:avoid;page-break-inside:avoid}
+`;
+
 // ── Bloques ─────────────────────────────────────────────────────────────────
 
 function bloqueControl(d: DocLiquidacion, cp: string): string {
@@ -422,38 +463,34 @@ function bloqueAnexo1(d: DocLiquidacion, cp: string): string {
     <td class="c">${esc(f.ref)}</td><td class="c">${esc(f.fecha)}</td><td class="c nw">${esc(f.codigo)}</td>
     <td>${esc(f.ruta)}</td><td class="c">${esc(f.turno)}</td><td class="c">${esc(f.placa || "—")}</td>
     <td>${esc(f.conductor || "—")}</td><td class="c">${f.pax ?? "—"}</td>
-    <td class="c">${esc(f.salida || "—")}</td><td class="c">${esc(f.llegada || "—")}</td>
-    <td class="c">${f.km != null ? num(f.km, 1) : "—"}</td>
     <td class="c">${chip(f.estado, f.alerta ? "bad" : /adicional/i.test(f.estado) ? "warn" : /incluido/i.test(f.estado) ? "info" : "ok")}</td>
     <td class="r">${/incluido/i.test(f.estado) ? '<span style="color:#64748b">incl.</span>' : num(f.importe)}</td>
   </tr>`).join("");
 
   const totPax = d.anexo1.reduce((a, f) => a + (f.pax ?? 0), 0);
-  const totKm = d.anexo1.reduce((a, f) => a + (f.km ?? 0), 0);
   const totImp = d.anexo1.reduce((a, f) => a + f.importe, 0);
 
   return `<div class="page-break"></div>
   <div style="padding-top:6px">
     <p class="titulo-anexo">ANEXO 1 — DETALLE DE SERVICIOS EJECUTADOS</p>
-    <p class="sub-anexo">Respaldo línea por línea de la cantidad valorizada. Cada fila es un servicio finalizado en el sistema, con sus horas reales.</p>
+    <p class="sub-anexo">Respaldo día por día de la cantidad valorizada, en orden de fecha. Cada fila es un servicio finalizado en el sistema.</p>
     <table class="anx">
       <thead><tr>
-        <th style="width:26px">#</th><th style="width:42px">FECHA</th><th style="width:74px">N° AFA</th>
-        <th>RUTA / SENTIDO</th><th style="width:38px">TURNO</th><th style="width:40px">PLACA</th>
-        <th style="width:82px">CONDUCTOR</th><th style="width:24px">PAX</th>
-        <th style="width:34px">SALIDA</th><th style="width:36px">LLEGADA</th><th style="width:34px">KM</th>
-        <th style="width:48px">ESTADO</th><th style="width:50px">IMPORTE</th>
+        <th style="width:34px">ÍTEM</th><th style="width:42px">FECHA</th><th style="width:74px">N° AFA</th>
+        <th>RUTA / SENTIDO</th><th style="width:38px">TURNO</th><th style="width:46px">PLACA</th>
+        <th style="width:110px">CONDUCTOR</th><th style="width:28px">PAX</th>
+        <th style="width:56px">ESTADO</th><th style="width:60px">IMPORTE</th>
       </tr></thead>
       <tbody>${filas}</tbody>
       <tfoot><tr>
         <td colspan="7" class="r">TOTALES DEL PERIODO</td>
-        <td class="c">${totPax || "—"}</td><td colspan="2" class="c">—</td>
-        <td class="c">${totKm ? num(totKm, 0) : "—"}</td>
+        <td class="c">${totPax || "—"}</td>
         <td class="c">${d.anexo1.length} serv.</td>
         <td class="r">${num(totImp)}</td>
       </tr></tfoot>
     </table>
-    <div class="nota"><b>Cómo leer este anexo:</b> las horas de salida y llegada son las <b>reales registradas por el sistema</b>, no las programadas.
+    <div class="nota"><b>Cómo leer este anexo:</b> las filas van en <b>orden de fecha</b>, del primer al último día del periodo; los dos tramos de un mismo día se listan juntos.
+    La columna <b>ÍTEM</b> es el número con el que la fila se rastrea en la valorización, y <b>TURNO</b> es la hora programada de salida.
     Los pasajeros son los efectivamente embarcados según el manifiesto digital. Cualquier fila puede rastrearse con su N° AFA.
     ${d.anexo1.some((f) => /incluido/i.test(f.estado))
       ? "Los tramos marcados <b>incl.</b> corresponden al retorno del mismo servicio: una sola tarifa cubre ida y retorno, por eso comparten el número de ítem y el importe se cobra una vez. "
@@ -546,11 +583,18 @@ export function buildLiquidacionHtml(d: DocLiquidacion): string {
     ${bloqueAnexo2(d)}
   `;
 
-  // El pie va fijo (se repite en cada página); la cabecera controlada va en el flujo
-  // porque cada anexo trae la suya propia y repetirla completa robaría media hoja.
-  const css = sharedCSS(CSS_DOC(cp)) + `body{padding:14mm 12mm 24mm}`;
+  // Todo el documento va dentro de una tabla de una sola celda para poder colgar el
+  // pie de un <tfoot>: el navegador lo repite al pie de CADA hoja impresa y —esto es
+  // lo que no hacía `position:fixed`— le reserva el sitio, así que el contenido nunca
+  // más pasa por debajo de la banda. La cabecera controlada, en cambio, va en el flujo
+  // y sale una sola vez: cada anexo trae la suya propia y repetirla robaría media hoja.
+  const cuerpoImpreso = `<table class="hoja">
+    <tfoot><tr><td>${pie}</td></tr></tfoot>
+    <tbody><tr><td>${cuerpo}</td></tr></tbody>
+  </table>`;
+  const css = sharedCSS(CSS_DOC(cp)) + CSS_IMPRESION;
   return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/>
     <title>${esc(d.control.titulo)} ${esc(d.codigo)}</title>
     <style>${css}</style></head>
-    <body>${cuerpo}${pie}</body></html>`;
+    <body>${cuerpoImpreso}</body></html>`;
 }

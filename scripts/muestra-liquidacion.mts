@@ -166,7 +166,10 @@ const totales = totalesValorizacion(
 // El anexo lista los DOS tramos del servicio con el mismo número de ítem: el retorno
 // va como "Incluido" en S/ 0.00, igual que lo arma lib/liquidacion-datos.ts.
 const SERIES = ["A", "B"];
-const anexo1: FilaAnexo[] = [];
+// El anexo se imprime en orden de fecha sobre todo el periodo, no por línea:
+// se arma con su clave cronológica y se ordena al final, igual que el loader real.
+const pendientes: { fila: FilaAnexo; clave: string }[] = [];
+let kmMuestra = 0;
 lineasAgrupadas.forEach((l, gi) => {
   let n = 0;
   const vistos = new Set<number>();
@@ -179,31 +182,41 @@ lineasAgrupadas.forEach((l, gi) => {
     }
     const tarde = r.hora_real_inicio === "22:35";
     const incluida = !Number(r.precio_cliente);
-    anexo1.push({
-      ref: `${SERIES[gi] ?? "X"}-${String(n).padStart(2, "0")}`,
-      fecha: fechaFormato(r.fecha_servicio).slice(0, 5),
-      codigo: r.codigo!,
-      ruta: `CD Callao → ${l.ruta} (${r.direccion_servicio === "retorno" ? "Retorno" : "Ida"})`,
-      // El Anexo 1 lleva la HORA del servicio, no un turno deducido.
-      turno: String(r.hora_servicio ?? "").slice(0, 5) || "—",
-      placa: catalogo.placaDe(r),
-      conductor: catalogo.conductorDe(r),
-      pax: r.pasajeros_abordados ?? null,
-      salida: r.hora_real_inicio ?? "",
-      llegada: r.hora_real_fin ?? "",
-      km: l.movil === 1 ? 42.1 + (n % 5) / 10 : 28.2 + (n % 4) / 10,
-      estado: tarde ? "Tardío" : incluida ? "Incluido" : "Conforme",
-      importe: incluida ? 0 : l.precio_unitario,
-      alerta: tarde,
+    const ref = `${SERIES[gi] ?? "X"}-${String(n).padStart(2, "0")}`;
+    kmMuestra += l.movil === 1 ? 42.1 + (n % 5) / 10 : 28.2 + (n % 4) / 10;
+    pendientes.push({
+      // El par ida↔retorno viaja junto: se ubica en la fecha de la ida.
+      clave: `${String(r.fecha_servicio).slice(0, 10)}|${ref}|${String(r.hora_servicio ?? "")}`,
+      fila: {
+        ref,
+        fecha: fechaFormato(r.fecha_servicio).slice(0, 5),
+        codigo: r.codigo!,
+        ruta: `CD Callao → ${l.ruta} (${r.direccion_servicio === "retorno" ? "Retorno" : "Ida"})`,
+        // El Anexo 1 lleva la HORA del servicio, no un turno deducido.
+        turno: String(r.hora_servicio ?? "").slice(0, 5) || "—",
+        placa: catalogo.placaDe(r),
+        conductor: catalogo.conductorDe(r),
+        pax: r.pasajeros_abordados ?? null,
+        estado: tarde ? "Tardío" : incluida ? "Incluido" : "Conforme",
+        importe: incluida ? 0 : l.precio_unitario,
+        alerta: tarde,
+      },
     });
   }
 });
-anexo1.push({
-  ref: "C-01", fecha: "28/06", codigo: adicional.codigo!,
-  ruta: "CD Callao → RUTA 1 (Ida) · adicional", turno: "Noche",
-  placa: "AYL-789", conductor: "Sergio Sánchez", pax: 44,
-  salida: "22:04", llegada: "23:18", km: 42.8, estado: "Adicional", importe: 790,
+kmMuestra += 42.8;
+pendientes.push({
+  clave: "2026-06-28|C-01|22:00",
+  fila: {
+    ref: "C-01", fecha: "28/06", codigo: adicional.codigo!,
+    ruta: "CD Callao → RUTA 1 (Ida) · adicional", turno: "22:00",
+    placa: "AYL-789", conductor: "Sergio Sánchez", pax: 44,
+    estado: "Adicional", importe: 790,
+  },
 });
+const anexo1: FilaAnexo[] = pendientes
+  .sort((a, b) => (a.clave < b.clave ? -1 : a.clave > b.clave ? 1 : 0))
+  .map((p) => p.fila);
 
 // ── Documento ───────────────────────────────────────────────────────────────
 
@@ -266,7 +279,7 @@ const docCliente: DocLiquidacion = {
     serviciosProgramados: reservas.length,
     puntualidadPct: 96.2,
     pasajeros: anexo1.reduce((a, f) => a + (f.pax ?? 0), 0),
-    km: Math.round(anexo1.reduce((a, f) => a + (f.km ?? 0), 0)),
+    km: Math.round(kmMuestra),
     incidencias: [
       { fecha: "28/06", codigo: adicional.codigo!, tipo: "Adicional", descripcion: "Sobredemanda del turno noche: se despachó una unidad extra (AYL-789) a solicitud del área.", accion: "Autorizado por correo del cliente", efecto: 790 },
       { fecha: "03/07", codigo: "AFA-2026-004823", tipo: "Demora", descripcion: "Unidad AXP-940 se presentó 35 min tarde en el punto de embarque (congestión Av. Argentina).", accion: "Penalidad cláusula 8.2", efecto: -210 },
