@@ -216,7 +216,12 @@ export default function LiquidacionesPage() {
   const [modalSede, setModalSede] = useState<{ sede: Sede; cliente: string } | null>(null);
   const [enviar, setEnviar] = useState<any | null>(null);
   const [modalCostos, setModalCostos] = useState<ReservaSinCosto[] | null>(null);
-  const [modalRutas, setModalRutas] = useState<RutaDelPeriodo[] | null>(null);
+  /**
+   * Las fichas de capacidad contratada. Es una BANDERA y no la lista congelada al abrir:
+   * desde ahí se abre el detalle de los servicios y se corrigen (el nombre de una ruta,
+   * por ejemplo), y al recargar la página la tabla del modal tiene que rearmarse sola.
+   */
+  const [modalRutas, setModalRutas] = useState(false);
   const [modalPrecios, setModalPrecios] = useState<ReservaSinPrecio[] | null>(null);
   /** Los pares ida↔retorno que la base perdió y hay que volver a escribir. */
   const [modalEnlaces, setModalEnlaces] = useState<EnlacePendiente[] | null>(null);
@@ -525,7 +530,18 @@ export default function LiquidacionesPage() {
         // esos servicios fueron adicionales, para poder decirlo en la fila.
         const adics = l.tipo === "adicional" ? l.cantidad : 0;
         const ya = out.get(k);
-        if (ya) { ya.servicios += l.cantidad; ya.adicionales += adics; continue; }
+        if (ya) {
+          ya.servicios += l.cantidad;
+          ya.adicionales += adics;
+          // Los tramos y el dinero de TODAS las líneas que caen en la misma ficha: la
+          // ficha no se parte por móvil ni por origen, así que su detalle tampoco. Las
+          // tarifas se acumulan DISTINTAS, no promediadas: con un adicional a otro precio,
+          // un promedio mostraría un importe que no se le cobró a nadie.
+          ya.reservasPeriodo.push(...l.reservas_periodo);
+          if (!ya.precios.includes(l.precio_unitario)) ya.precios.push(l.precio_unitario);
+          ya.total += l.total_linea;
+          continue;
+        }
         out.set(k, {
           clave: k,
           clienteId: g.contraparteId,
@@ -537,10 +553,17 @@ export default function LiquidacionesPage() {
           paxContratado: l.pax_contratado,
           capacidadMinimaAsignada: l.capacidad_minima_asignada,
           servicios: l.cantidad,
+          reservasPeriodo: [...l.reservas_periodo],
+          precios: [l.precio_unitario],
+          total: l.total_linea,
           adicionales: adics,
         });
       }
-    return [...out.values()].sort((a, b) => String(a.nombreIda).localeCompare(String(b.nombreIda)));
+    return [...out.values()]
+      // Las tarifas ordenadas: la fila muestra el rango, y un rango al revés se lee como
+      // un error de la pantalla y no como las dos tarifas que de verdad tiene la ruta.
+      .map((r) => ({ ...r, precios: [...r.precios].sort((a, b) => a - b) }))
+      .sort((a, b) => String(a.nombreIda).localeCompare(String(b.nombreIda)));
   }, [gruposVisibles]);
 
   /** Rutas que van a imprimirse sin el "N PAX" porque ninguna fuente sabe cuánto se contrató. */
@@ -948,7 +971,7 @@ export default function LiquidacionesPage() {
               );
             })()}
             {lado === "cliente" && rutasDelPeriodo.length > 0 && (
-              <button onClick={() => setModalRutas(rutasDelPeriodo)}
+              <button onClick={() => setModalRutas(true)}
                 className={`px-3 py-2 rounded-xl text-sm font-bold border ${
                   rutasSinPax.length
                     ? "text-amber-800 bg-amber-50 border-amber-200 hover:bg-amber-100"
@@ -1303,11 +1326,27 @@ export default function LiquidacionesPage() {
             cargar();
           }} />
       )}
-      {modalRutas && (
-        <ModalRutasContratadas rutas={modalRutas} catalogoDisponible={rutas.disponible}
-          onCerrar={() => setModalRutas(null)}
+      {/* Solo del lado cliente. La capacidad contratada y la columna "Precio cliente" son
+          de esa cara: en la pestaña del proveedor, `precio_unitario` es el COSTO, y la
+          tabla estaría rotulando como precio de venta lo que se le paga al tercero. El
+          botón ya está gateado, pero la bandera no se apaga sola al cambiar de pestaña. */}
+      {modalRutas && lado === "cliente" && (
+        <ModalRutasContratadas rutas={rutasDelPeriodo} catalogoDisponible={rutas.disponible}
+          onCerrar={() => setModalRutas(false)}
+          /* El detalle se abre ENCIMA y este modal se queda debajo: cerrarlo perdería los
+             PAX ya tecleados, y volver a la ficha después de mirar los servicios es
+             justamente el motivo por el que se miran. */
+          onVerServicios={(r) => verServicios(
+            r.nombreIda ?? "(sin nombre de ruta)",
+            [
+              r.clienteNombre, r.sedeNombre,
+              r.nombreRetorno ? `↩ ${r.nombreRetorno}` : "",
+              `${r.servicios} día(s) cobrado(s) en el periodo`,
+            ].filter(Boolean).join(" · "),
+            r.reservasPeriodo
+          )}
           onGuardado={(n) => {
-            setModalRutas(null);
+            setModalRutas(false);
             setMsg(`✅ ${n} ruta(s) fichada(s). Las liquidaciones nuevas ya imprimen su capacidad contratada.`);
             cargar();
           }} />
