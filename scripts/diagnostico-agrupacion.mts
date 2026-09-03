@@ -47,30 +47,44 @@
 //   ej: npx tsx scripts/diagnostico-agrupacion.mts 2026-08-01 2026-08-31 cliente
 import fs from "node:fs";
 import path from "node:path";
-// OJO al importar de lib/ desde un script: SOLO se pueden traer símbolos declarados como
-// `export function`. Node carga estos .mts como ESM, tsx transpila el .ts a CommonJS, y
-// los named exports se detectan con un lexer estático que NO ve una arrow declarada con
-// `export const`. En lib/liquidacion-agrupacion.ts hay exactamente dos —`origenContractual`
-// (línea 83) y `nombreRuta` (202)— y pedirlas revienta en el arranque con
-// "does not provide an export named 'nombreRuta'", sin haber leído todavía una sola fila.
-// Por eso aquí se usan sus equivalentes declarados como función:
-//   nombreRuta(r)          → nombreRutaDetalle(r).nombre
-//   origenContractual(cab) → origenDelPar(par), que además es la abstracción correcta:
-//                            el origen del día lo declara el tramo que lleva el importe.
-import {
-  analizarServicios,
-  etiquetaRuta,
-  nombreRutaDetalle,
-  origenDelPar,
-  precioUnitario,
-  type LadoLiquidacion,
-  type ParServicio,
-  type ReservaLiq,
-} from "../lib/liquidacion-agrupacion";
-import { fmtMoneda } from "../lib/finanzas/dinero";
+// LA LIBRERÍA SE CARGA CON `require`, NO CON `import`. No es capricho ni estilo viejo:
+//
+// Node ejecuta estos .mts como ESM, tsx transpila los .ts de lib/ a CommonJS, y para saber
+// qué nombres exporta un módulo CJS visto desde ESM, Node lo analiza con un lexer estático.
+// Ese lexer NO ejecuta el módulo: reconoce ciertas formas del código generado y falla en
+// otras, y lo que reconoce CAMBIA ENTRE VERSIONES DE NODE. Con `import { … }` eso se paga
+// en el arranque y con el peor error posible:
+//
+//     SyntaxError: The requested module '../lib/liquidacion-agrupacion'
+//                  does not provide an export named 'nombreRutaDetalle'
+//
+// diciendo que no existe algo que está exportado en la línea 194. El mismo archivo, con el
+// mismo tsx, arranca sin problema en Node 22 y muere en Node 24 — así que "funciona en mi
+// máquina" aquí no prueba nada, y perseguir qué formas tolera cada versión es tiempo tirado.
+//
+// `createRequire` se salta el análisis entero: devuelve el `module.exports` de verdad, el
+// que resulta de EJECUTAR el módulo. Los tipos no se pierden —`typeof import(...)` es una
+// anotación, se borra al compilar y no genera ninguna importación en tiempo de ejecución—,
+// así que el editor y `tsc` siguen viendo todo con nombre y firma.
+//
+// Si escribes otro script que use lib/, cópiate este patrón. Los que ya existen usan
+// `import { … }` y hoy funcionan por suerte, no por diseño: importan pocos símbolos y les
+// tocó una forma que el lexer reconoce.
+import { createRequire } from "node:module";
 
-/** Atajo local: el `nombreRuta` de la librería es `export const` y no se puede importar aquí. */
-const nombreRuta = (r: ReservaLiq | null | undefined) => nombreRutaDetalle(r).nombre;
+const requerir = createRequire(import.meta.url);
+const LIQ = requerir("../lib/liquidacion-agrupacion") as typeof import("../lib/liquidacion-agrupacion");
+const DINERO = requerir("../lib/finanzas/dinero") as typeof import("../lib/finanzas/dinero");
+
+const { analizarServicios, etiquetaRuta, origenDelPar, precioUnitario } = LIQ;
+const { fmtMoneda } = DINERO;
+
+type LadoLiquidacion = import("../lib/liquidacion-agrupacion").LadoLiquidacion;
+type ParServicio = import("../lib/liquidacion-agrupacion").ParServicio;
+type ReservaLiq = import("../lib/liquidacion-agrupacion").ReservaLiq;
+
+/** El nombre de la ruta tal como se escribió. `nombreRuta` de la librería hace justo esto. */
+const nombreRuta = (r: ReservaLiq | null | undefined) => LIQ.nombreRutaDetalle(r).nombre;
 
 const RAIZ = process.cwd();
 const env = fs.readFileSync(path.join(RAIZ, ".env.local"), "utf8");
