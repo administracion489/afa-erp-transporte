@@ -106,6 +106,15 @@ export type TramoHermano = {
   estado?: string | null;
   precio_cliente?: number | null;
   costo_proveedor?: number | null;
+  /**
+   * Los asientos CONTRATADOS del día. A diferencia del importe —que va en un tramo y
+   * en el otro queda en S/ 0.00 a propósito— este número es el MISMO para los dos: el
+   * cliente contrató una ruta de N asientos, no una ida de 15 y un retorno de 20. El
+   * generador lo escribe solo en la ida (ver ModalGenerarPrograma), así que sin mirar
+   * al hermano un retorno parece no tenerlo. Ver `lib/liquidacion-rutas.ts`.
+   */
+  capacidad_contratada?: number | null;
+  ruta_nombre?: string | null;
 } | null;
 
 const esRetorno = (d?: string | null) => String(d ?? "").toLowerCase() === "retorno";
@@ -253,14 +262,50 @@ export async function sugerirCosto(
   return { costo: Number(fila.costo), base: String(fila.base ?? ""), dias: Number(fila.dias ?? 0), os: String(fila.os ?? "") };
 }
 
-const faltaColumnaPacto = (msg: string) =>
-  COLUMNAS_PACTO.some((c) => msg.includes(c)) || /column .* does not exist/i.test(msg);
-
-const sinColumnasPacto = (patch: Record<string, any>) => {
-  const p = { ...patch };
-  for (const c of COLUMNAS_PACTO) delete p[c];
-  return p;
+/**
+ * Columnas de `reservas` que solo existen con una migración ACCESORIA corrida, con el
+ * archivo que las crea y el nombre de lo que se pierde al soltarlas.
+ *
+ * PostgREST rechaza el UPDATE ENTERO por una sola columna desconocida. Sin esta red, a
+ * un ERP al que le falte un SQL accesorio no se le podría ni reprogramar un bus: el
+ * cambio de unidad de las 5 a.m. moriría por un dato del formato de liquidación.
+ *
+ * Se suelta SOLO la columna que el error nombra, y se dice cuál. El mensaje fijo de
+ * antes acusaba siempre a las dos migraciones del Pacto, aunque la que faltara fuera
+ * otra — y `sinColumnasPacto` solo quitaba esas cuatro, así que cualquier OTRA columna
+ * opcional en el patch reventaba el guardado entero, fila por fila, sin arreglo posible
+ * desde la pantalla.
+ */
+const COLUMNAS_OPCIONALES: Record<string, { sql: string; que: string }> = {
+  cambio_motivo:        { sql: "supabase/pacto-02-acta.sql",       que: "el motivo del cambio" },
+  cambio_nota:          { sql: "supabase/pacto-02-acta.sql",       que: "la nota del cambio" },
+  compra_afectacion:    { sql: "supabase/pacto-00-tributario.sql", que: "la afectación de compra" },
+  venta_afectacion:     { sql: "supabase/pacto-00-tributario.sql", que: "la afectación de venta" },
+  capacidad_contratada: {
+    sql: "supabase/liquidaciones-03-ruta-contratada.sql",
+    que: "los PAX contratados",
+  },
 };
+
+/**
+ * La columna opcional que el error nombra Y que además está en el payload. Las dos
+ * condiciones importan: soltar una columna que el error no nombra es tirar el dato del
+ * operador por una causa que no era esa.
+ */
+const columnaCaida = (msg: string, payload: Record<string, any>): string | null => {
+  const enPayload = Object.keys(COLUMNAS_OPCIONALES).filter((c) => c in payload);
+  const nombrada = enPayload.find((c) => new RegExp(`\\b${c}\\b`, "i").test(msg));
+  if (nombrada) return nombrada;
+  // PostgREST casi siempre nombra la columna. Cuando no, el mensaje genérico basta para
+  // soltar las del Pacto, que es exactamente como se comportaba antes.
+  if (/column .* does not exist|schema cache/i.test(msg))
+    return enPayload.find((c) => (COLUMNAS_PACTO as readonly string[]).includes(c)) ?? null;
+  return null;
+};
+
+/** "a, b y c" — el aviso nombra lo que se perdió, no una lista de columnas SQL. */
+const enumerar = (xs: string[]) =>
+  xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} ni ${xs[xs.length - 1]}`;
 
 /**
  * Escribe un patch sobre N reservas. ES LA ÚNICA FUNCIÓN QUE DEBE USARSE para guardar
@@ -278,16 +323,21 @@ export async function guardarReservas(
 ): Promise<ResultadoGuardado> {
   if (!ids.length) return { ok: true, guardados: [], rechazos: [] };
 
-  let payload: Record<string, any> = { ...patch };
+  // Copia propia: las columnas que la base no tenga se van soltando de acá.
+  const payload: Record<string, any> = { ...patch };
   if (cambio?.motivo) payload.cambio_motivo = cambio.motivo;
   if (cambio?.nota) payload.cambio_nota = cambio.nota;
 
   const guardados: number[] = [];
   const rechazos: { id: number; motivo: string }[] = [];
   let aviso: string | undefined;
-  let degradado = false;
+  /** Columnas opcionales que hubo que soltar por no existir todavía en la base. */
+  const caidas: string[] = [];
 
   const escribir = async (lote: number[]): Promise<string | null> => {
+    // Todo el patch se cayó por columnas inexistentes: no hay nada que escribir, y un
+    // update vacío es un 400 que se leería como "no se pudo guardar el servicio".
+    if (Object.keys(payload).length === 0) return null;
     const { error } = await sb.from("reservas").update(payload).in("id", lote);
     return error ? String(error.message ?? error) : null;
   };
@@ -296,12 +346,13 @@ export async function guardarReservas(
     const lote = ids.slice(i, i + 200);
     let err = await escribir(lote);
 
-    // Las migraciones del Pacto todavía no corrieron: se guarda igual, sin el rastro.
-    if (err && !degradado && faltaColumnaPacto(err)) {
-      payload = sinColumnasPacto(payload);
-      degradado = true;
-      aviso = "Se guardó el cambio, pero no el motivo ni la afectación: "
-            + "faltan correr supabase/pacto-00-tributario.sql y supabase/pacto-02-acta.sql.";
+    // Una migración accesoria no corrió: se guarda lo demás y se DICE qué se perdió.
+    // Una por vuelta, porque el error nombra una sola.
+    for (let intento = 0; err && intento < Object.keys(COLUMNAS_OPCIONALES).length; intento++) {
+      const col = columnaCaida(err, payload);
+      if (!col) break;
+      delete payload[col];
+      if (!caidas.includes(col)) caidas.push(col);
       err = await escribir(lote);
     }
 
@@ -314,6 +365,12 @@ export async function guardarReservas(
       if (error) rechazos.push({ id, motivo: String(error.message ?? error) });
       else guardados.push(id);
     }
+  }
+
+  if (caidas.length) {
+    const sqls = [...new Set(caidas.map((c) => COLUMNAS_OPCIONALES[c].sql))];
+    aviso = `Se guardó el cambio, pero no ${enumerar(caidas.map((c) => COLUMNAS_OPCIONALES[c].que))}: `
+          + `falta${sqls.length > 1 ? "n" : ""} correr ${sqls.join(" y ")}.`;
   }
 
   return { ok: rechazos.length === 0, guardados, rechazos, aviso };

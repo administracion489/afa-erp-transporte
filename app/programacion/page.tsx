@@ -14,6 +14,10 @@ import {
   guardarReservas, normalizarAsignacion, avisosDe, margenEnVivo, sugerirCosto, type TramoHermano,
   describirResultado,
 } from "@/lib/reservas-pacto";
+import {
+  cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxDeServicio,
+  type CatalogoRutas, type PaxResuelto,
+} from "@/lib/liquidacion-rutas";
 import { AFECTACIONES, afectacionDe, type CodigoAfectacion } from "@/lib/finanzas/afectacion";
 import { planDeCanje, notaDeCanje, opuesto, efectoDeMarcarTramo } from "@/lib/reservas-canje";
 import { sumarDias } from "@/lib/odometro-analitica";
@@ -198,6 +202,14 @@ type Reserva = {
   origen_contractual?: string | null;
   /** De cuánto se partió al generarlo. Solo para poder mostrar la diferencia. */
   precio_cotizado?: number | null;
+  /**
+   * Asientos que el cliente CONTRATÓ para este servicio. NO es la capacidad del bus que
+   * se le asignó: AFA asigna por disponibilidad, así que una ruta contratada para 15
+   * puede cubrirse un lunes con una unidad de 17 y el jueves con una de 20. Es lo que
+   * imprime la liquidación (el «N PAX» del AFA-FL-07).
+   * Opcional: la agrega supabase/liquidaciones-03-ruta-contratada.sql.
+   */
+  capacidad_contratada?: number | null;
 };
 
 type Ocupacion = {
@@ -223,6 +235,11 @@ const FORM_VACIO = {
   // servicio, su precio era inmodificable. Por eso "el cliente pidió una unidad mayor"
   // era literalmente irrepresentable y el operador solo podía cambiar el bus y callarse.
   precio_cliente: "",
+  // Los asientos que el cliente CONTRATÓ. Tampoco existía en ninguna pantalla: se podía
+  // escribir al generar el programa y después solo desde el borrador de la liquidación,
+  // que es la última pantalla del mes y ya no vuelve al servicio. Vacío = "no lo sé",
+  // que NO es lo mismo que cero: el CHECK de la base rechaza el cero por eso.
+  capacidad_contratada: "",
   cambio_motivo: "", cambio_nota: "",
 };
 
@@ -261,13 +278,14 @@ const COLS_LISTA =
   "tipo_asignacion,empresa_tercerizada_id,vehiculo_tercero_id,conductor_tercero_id," +
   "tipo_servicio_detalle,sincronizado_app,fecha_sincronizacion,token_seguimiento," +
   "token_conductor_tercero,token_expira_at,reserva_vinculada_id,direccion_servicio," +
-  "lote_generacion,origen,destino,ruta_nombre,origen_contractual,precio_cotizado";
+  "lote_generacion,origen,destino,ruta_nombre,origen_contractual,precio_cotizado," +
+  "capacidad_contratada";
 
 // Columnas de `reservas` cuya migración es OPCIONAL. PostgREST rechaza el select
 // entero por una columna desconocida, así que pedirlas sin red dejaría la pantalla
 // de Reservas en blanco en cualquier entorno donde el SQL todavía no se corrió.
 // Se reintenta sin ellas: la lista se pinta igual, solo sin el chip de origen.
-const COLS_OPCIONALES = ["origen_contractual", "precio_cotizado"];
+const COLS_OPCIONALES = ["origen_contractual", "precio_cotizado", "capacidad_contratada"];
 
 const quitarColumna = (cols: string, col: string) =>
   cols.split(",").map(c => c.trim()).filter(c => c !== col).join(",");
@@ -586,11 +604,31 @@ export default function ReservasPage() {
     otrasReservas: Reserva[];   // todos los servicios activos del contrato (sin filtrar)
     horaOriginal: string;       // hora del servicio editado, antes de guardar
     resumen: string;            // "Vehículo · Conductor" para mostrar en el modal
+    /**
+     * PAX contratados, SOLO si el operador acaba de cambiarlos. null cuando no los tocó:
+     * propagarlos siempre pisaría en 30 servicios una capacidad que alguien corrigió día
+     * por día. Cuando sí los tocó es al revés — el pax es del CONTRATO, y corregirlo de a
+     * uno en 30 fechas es lo que hace que nadie lo corrija.
+     */
+    pax: number | null;
+    paxTocado: boolean;
+    /**
+     * Lo que este servicio decía ANTES. Es lo que distingue "corregir la capacidad de
+     * esta ruta" de "pisarle la suya a otro móvil": una misma cotización puede tener
+     * tres ítems con pax distinto, y el masivo no filtra por móvil. Ver `aceptaPax`.
+     */
+    paxAntes: number | null;
   } | null>(null);
   const [aplicarScope,         setAplicarScope]         = useState<"todos" | "rango">("todos");
   const [aplicarDesde,         setAplicarDesde]         = useState("");
   const [aplicarHasta,         setAplicarHasta]         = useState("");
-  const [aplicarCampos,        setAplicarCampos]        = useState<"todo" | "conductor">("todo");
+  /**
+   * "pax" es su propio modo, y no una casilla más sobre "todo": quien viene solo a
+   * corregir los asientos contratados no quiere de paso reescribir el vehículo y el
+   * conductor de 30 fechas. Solo se ofrece cuando el pax se acaba de tocar.
+   */
+  const [aplicarCampos,        setAplicarCampos]        = useState<"todo" | "conductor" | "pax">("todo");
+  const [aplicarPax,           setAplicarPax]           = useState(true);
   const [aplicarOtraHora,      setAplicarOtraHora]      = useState(false);
   const [aplicarOtraUnidad,    setAplicarOtraUnidad]    = useState(false);
   const [aplicando,            setAplicando]            = useState(false);
@@ -1506,6 +1544,12 @@ export default function ReservasPage() {
       costo_proveedor:        r.costo_proveedor           ? String(r.costo_proveedor)           : "",
       observaciones:          r.observaciones             || "",
       precio_cliente:         r.precio_cliente            ? String(r.precio_cliente)            : "",
+      // Solo lo ESCRITO en esta fila. Lo que resuelve la cascada (el hermano, la
+      // cotización, la ficha de la ruta) se muestra al lado como referencia, pero no se
+      // precarga: precargarlo lo convertiría en un dato escrito a mano en cuanto el
+      // operador guarde cualquier otra cosa, y entonces corregir el contrato en la ficha
+      // ya no arreglaría este servicio.
+      capacidad_contratada:   r.capacidad_contratada != null ? String(r.capacidad_contratada)   : "",
       // El motivo es de CADA cambio: se arranca en blanco para que no quede pegado el
       // de la edición anterior y termine sustentando algo que no ocurrió.
       cambio_motivo: "", cambio_nota: "",
@@ -1604,6 +1648,12 @@ export default function ReservasPage() {
       ? {
           id: l.id, codigo: idAfa(l), direccion_servicio: (l as any).direccion_servicio,
           estado: l.estado, precio_cliente: l.precio_cliente, costo_proveedor: l.costo_proveedor,
+          // El generador escribe la capacidad contratada SOLO en la ida: sin traerla de
+          // aquí, todo retorno se abriría diciendo "sin dato" y el operador la volvería a
+          // teclear —o teclearía otra, que la liquidación descarta en silencio porque
+          // mira la ida primero.
+          capacidad_contratada: l.capacidad_contratada ?? null,
+          ruta_nombre: l.ruta_nombre ?? null,
         }
       : null;
   }, [hermanoId, reservas]);
@@ -1617,17 +1667,29 @@ export default function ReservasPage() {
   useEffect(() => {
     if (!editandoId || hermanoLocal) return;
     let vivo = true;
-    const cols = "id,codigo,direccion_servicio,estado,precio_cliente,costo_proveedor,fecha_servicio";
-    const q = supabase.from("reservas").select(cols);
-    // Con dos filas apuntando a este servicio el enlace está roto de otra forma: no se
-    // elige ninguna, porque adivinar acá es escribir dinero en el tramo equivocado.
-    (hermanoId ? q.eq("id", hermanoId) : q.eq("reserva_vinculada_id", editandoId))
-      .limit(2)
-      .then((res: { data: TramoHermano[] | null }) => {
-        if (!vivo) return;
-        const filas = res.data ?? [];
-        setHermanoRemoto({ para: Number(editandoId), tramo: filas.length === 1 ? filas[0] : null });
-      });
+    (async () => {
+      let cols = "id,codigo,direccion_servicio,estado,precio_cliente,costo_proveedor," +
+                 "fecha_servicio,ruta_nombre,capacidad_contratada";
+      // Con dos filas apuntando a este servicio el enlace está roto de otra forma: no se
+      // elige ninguna, porque adivinar acá es escribir dinero en el tramo equivocado.
+      const pedir = () => {
+        const q = supabase.from("reservas").select(cols);
+        return (hermanoId ? q.eq("id", hermanoId) : q.eq("reserva_vinculada_id", editandoId)).limit(2);
+      };
+      let res = await pedir();
+      // `capacidad_contratada` es de una migración opcional, y PostgREST rechaza el select
+      // ENTERO por una columna que no existe: sin este reintento, el chip del hermano
+      // —que es lo que impide cobrar el día dos veces— desaparecería de la pantalla.
+      for (let i = 0; res.error && i < COLS_OPCIONALES.length; i++) {
+        const falta = columnaFaltante(String(res.error.message));
+        if (!falta || !cols.split(",").some(c => c.trim() === falta)) break;
+        cols = quitarColumna(cols, falta);
+        res = await pedir();
+      }
+      if (!vivo) return;
+      const filas = (res.data ?? []) as TramoHermano[];
+      setHermanoRemoto({ para: Number(editandoId), tramo: filas.length === 1 ? filas[0] : null });
+    })();
     return () => { vivo = false; };
   }, [editandoId, hermanoId, hermanoLocal]);
 
@@ -1635,6 +1697,129 @@ export default function ReservasPage() {
   // muestra por un instante el hermano del anterior.
   const hermano: TramoHermano =
     hermanoLocal ?? (hermanoRemoto?.para === Number(editandoId) ? hermanoRemoto.tramo : null);
+
+  // ── PAX CONTRATADOS ────────────────────────────────────────────────────────
+  // De dónde sale el número cuando este servicio no lo trae escrito. Es la MISMA
+  // cascada que aplica la liquidación (lib/liquidacion-rutas.ts), resuelta para un
+  // servicio suelto. Sin ella el campo diría "vacío" sobre un contrato que sí declara
+  // sus 15 asientos en la cotización, y el operador escribiría a mano un dato que ya
+  // existe — o, peor, uno distinto.
+  const reservaEditada = useMemo(
+    () => reservas.find(x => x.id === editandoId) ?? null,
+    [reservas, editandoId]
+  );
+  const [ctxPax, setCtxPax] = useState<{
+    para: number;
+    paxCotizacion: Map<number, number>;
+    catalogo: CatalogoRutas | null;
+  } | null>(null);
+
+  useEffect(() => {
+    const cot = reservaEditada?.cotizacion_id ?? null;
+    const cli = reservaEditada?.cliente_id ?? null;
+    // No se limpia el contexto anterior: se compara contra QUÉ servicio se pidió (`para`),
+    // igual que con el hermano, así al saltar de un servicio a otro nunca se muestra por
+    // un instante el pax del anterior.
+    if (!editandoId) return;
+    let vivo = true;
+    (async () => {
+      // Ninguna de las dos lanza: son escalones OPCIONALES de la cascada (la tabla
+      // cliente_ruta puede no existir todavía) y su ausencia solo la acorta.
+      const [paxCotizacion, catalogo] = await Promise.all([
+        cot ? cargarPaxDeCotizaciones(supabase, [cot]) : Promise.resolve(new Map<number, number>()),
+        cli ? cargarRutasContratadas(supabase, [cli]) : Promise.resolve(null),
+      ]);
+      if (!vivo) return;
+      setCtxPax({ para: Number(editandoId), paxCotizacion, catalogo });
+    })();
+    return () => { vivo = false; };
+  }, [editandoId, reservaEditada?.cotizacion_id, reservaEditada?.cliente_id]);
+
+  /**
+   * Lo que el campo va a mandar. null = "no lo sé", que NO es cero: el CHECK de la base
+   * rechaza el cero justamente para que no se confundan las dos cosas.
+   */
+  const paxDelForm = useMemo(() => {
+    const t = form.capacidad_contratada.trim();
+    if (t === "") return null;
+    const n = Number(t);
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+  }, [form.capacidad_contratada]);
+
+  /** Solo se manda si cambió: escribirlo siempre pisaría el dato en cada guardado. */
+  const paxTocadoForm = paxDelForm !== (reservaEditada?.capacidad_contratada ?? null);
+
+  /** Lo que va a quedar: lo tecleado manda sobre lo guardado, y sobre la cascada. */
+  const paxResuelto: PaxResuelto = useMemo(() => {
+    if (!reservaEditada) return { pax: null, fuente: null };
+    const escrito = form.capacidad_contratada.trim();
+    if (escrito !== "") {
+      const n = Number(escrito);
+      return Number.isFinite(n) && n > 0
+        ? { pax: Math.round(n), fuente: "servicio" }
+        : { pax: null, fuente: null };
+    }
+    const vigente = ctxPax?.para === Number(editandoId) ? ctxPax : null;
+    return resolverPaxDeServicio(
+      // Vacío es vacío: se pregunta por lo que quedaría si se guarda así.
+      { ...reservaEditada, capacidad_contratada: null },
+      hermano,
+      { paxCotizacion: vigente?.paxCotizacion, catalogo: vigente?.catalogo ?? undefined }
+    );
+  }, [reservaEditada, form.capacidad_contratada, hermano, ctxPax, editandoId]);
+
+  /**
+   * La capacidad de la unidad ASIGNADA. Está a la vista para poder compararla, nunca
+   * para copiarse sola: es un dato de la flota, no del contrato, y confundirlos es lo
+   * que hacía que el formato le declarara al cliente asientos que nadie pactó.
+   */
+  const capacidadUnidad = useMemo(() => {
+    if (form.tipo_asignacion === "propio") {
+      const v = vehiculos.find(x => x.id === Number(form.vehiculo_id));
+      return v ? { placa: v.placa, cap: v.capacidad_pasajeros ?? null } : null;
+    }
+    const v = vehTercero.find(x => x.id === Number(form.vehiculo_tercero_id));
+    return v ? { placa: v.placa, cap: v.capacidad ?? null } : null;
+  }, [form.tipo_asignacion, form.vehiculo_id, form.vehiculo_tercero_id, vehiculos, vehTercero]);
+
+  /**
+   * El hermano, preguntado AHORA y no leído del memo. Misma regla que `hermanoId` y que
+   * el efecto: se sigue el enlace hacia adelante y, si no lo hay, hacia atrás — y solo
+   * cuando es inequívoco, porque con dos filas apuntando a la misma, elegir sería
+   * adivinar. Devuelve null si no se puede identificar, y quien llama lo dice en pantalla
+   * en vez de escribir medio día en silencio.
+   */
+  const resolverHermanoAhora = async (
+    id: number, vinculadaId: number | null
+  ): Promise<{ id: number; codigo: string | null; pax: number | null } | null> => {
+    let cols = "id,codigo,fecha_servicio,capacidad_contratada";
+    const pedir = () => {
+      const q = supabase.from("reservas").select(cols);
+      return (vinculadaId ? q.eq("id", vinculadaId) : q.eq("reserva_vinculada_id", id)).limit(2);
+    };
+    let res = await pedir();
+    for (let i = 0; res.error && i < COLS_OPCIONALES.length; i++) {
+      const falta = columnaFaltante(String(res.error.message));
+      if (!falta || !cols.split(",").some(c => c.trim() === falta)) break;
+      cols = quitarColumna(cols, falta);
+      res = await pedir();
+    }
+    const filas = (res.data ?? []) as { id: number; codigo?: string | null; capacidad_contratada?: number | null }[];
+    if (filas.length !== 1) return null;
+    return {
+      id: Number(filas[0].id),
+      codigo: idAfa(filas[0]),
+      pax: filas[0].capacidad_contratada ?? null,
+    };
+  };
+
+  /** De dónde salió el número, dicho en la pantalla: cada fuente se corrige en otro sitio. */
+  const FUENTE_PAX: Record<string, string> = {
+    servicio:   "escrito en este servicio",
+    hermano:    "escrito en su tramo hermano",
+    cotizacion: "del ítem de la cotización",
+    ficha:      "de la ficha de la ruta contratada",
+  };
 
   const porIdReserva = useMemo(() => new Map(reservas.map((r) => [r.id, r])), [reservas]);
 
@@ -1767,10 +1952,17 @@ export default function ReservasPage() {
     const precioTocado = form.precio_cliente !== ""
       && Number(form.precio_cliente) !== Number(reservaActual?.precio_cliente ?? 0);
 
+    // Los PAX contratados: igual que el precio, solo si el operador los tocó. Se leen de
+    // los mismos memos que pinta la pantalla, para que lo que se guarda sea exactamente
+    // lo que el aviso de "se escribirá también en …" prometió.
+    const paxEscrito = paxDelForm;
+    const paxTocado = paxTocadoForm;
+
     const res = await guardarReservas(supabase, [editandoId], {
       ...asignPayload,
       ...adminPayload,
       ...(precioTocado ? { precio_cliente: Number(form.precio_cliente) } : {}),
+      ...(paxTocado ? { capacidad_contratada: paxEscrito } : {}),
       fecha_servicio:  form.fecha_servicio,
       hora_servicio:   form.hora_servicio,
       estado:          nuevoEstado,
@@ -1779,6 +1971,42 @@ export default function ReservasPage() {
 
     if (!res.ok) { alert(describirResultado(res)); setGuardando(false); return; }
     if (res.aviso) setMsgPacto(res.aviso);
+
+    // ── El pax es del DÍA, no del tramo ───────────────────────────────────────
+    // A diferencia del importe —que va en un tramo y en el otro queda en S/ 0.00 a
+    // propósito— los asientos contratados son los MISMOS para la ida y el retorno: el
+    // cliente contrató una ruta de N asientos. Y la liquidación imprime UN «N PAX» por
+    // día, tomando el primer tramo que lo traiga con la ida por delante, así que dejar
+    // 15 en el retorno y 20 en la ida no representa dos cantidades: hace que una de las
+    // dos se descarte en silencio. Se escriben las dos.
+    //
+    // Va en su propia llamada porque el patch de arriba lleva fecha, hora, estado y
+    // asignación: mandárselo también al hermano le cambiaría el horario y la unidad.
+    // Y SIN el motivo del cambio: no dispara acta (el trigger solo mira costo, precio,
+    // empresa y unidad), y dejar un motivo pegado en esa fila contaminaría el acta que
+    // sí escriba el próximo cambio de dinero.
+    if (paxTocado) {
+      // El memo del hermano se llena con una consulta ASÍNCRONA: guardar antes de que
+      // resuelva dejaría el otro tramo sin el número y sin que nadie se entere. Se
+      // vuelve a preguntar, por los dos sentidos del enlace, antes de darlo por escrito.
+      const destino = hermano?.id
+        ? { id: Number(hermano.id), codigo: hermano.codigo ?? null, pax: hermano.capacidad_contratada ?? null }
+        : await resolverHermanoAhora(editandoId, reservaActual?.reserva_vinculada_id ?? null);
+
+      if (destino && destino.pax !== paxEscrito) {
+        const resH = await guardarReservas(supabase, [destino.id], { capacidad_contratada: paxEscrito });
+        if (!resH.ok)
+          setMsgPacto(`Se guardó este servicio, pero los PAX no llegaron a su tramo hermano `
+                    + `${destino.codigo ?? `#${destino.id}`}: ${resH.rechazos[0]?.motivo ?? "error desconocido"}. `
+                    + `Corrígelo abriendo ese servicio.`);
+        else if (resH.aviso) setMsgPacto(resH.aviso);
+      } else if (!destino && reservaActual?.reserva_vinculada_id) {
+        // El enlace existe pero el otro tramo no aparece (o hay dos apuntando acá, que es
+        // un enlace roto de otra forma). Se escribió medio día: hay que decirlo.
+        setMsgPacto("Se escribieron los PAX solo en este tramo: no se pudo identificar su "
+                  + "hermano. Revisa el enlace ida↔retorno en Liquidaciones → Enlazar tramos.");
+      }
+    }
 
     // ── Si es servicio FIJO con contrato, ofrecer aplicar a otros días ──
     if (reservaActual && !esEventual(reservaActual) && reservaActual.cotizacion_id) {
@@ -1819,7 +2047,14 @@ export default function ReservasPage() {
         setAplicarCampos("todo");
         setAplicarOtraHora(false);
         setAplicarOtraUnidad(false);
-        setModalAplicarMasivo({ cotizacion_id: reservaActual.cotizacion_id, payload: asignPayload, otrasReservas, horaOriginal, resumen });
+        // Marcado por defecto solo cuando hay un número que propagar: con el campo
+        // vaciado, el default estaría BORRANDO la capacidad de 30 servicios.
+        setAplicarPax(paxEscrito != null);
+        setModalAplicarMasivo({
+          cotizacion_id: reservaActual.cotizacion_id, payload: asignPayload, otrasReservas,
+          horaOriginal, resumen, pax: paxEscrito, paxTocado,
+          paxAntes: reservaActual.capacidad_contratada ?? null,
+        });
         cargarDatos();
         return;
       }
@@ -1842,12 +2077,43 @@ export default function ReservasPage() {
         && !pisa(r.vehiculo_tercero_id,    payload.vehiculo_tercero_id);
   };
 
+  /**
+   * ¿Este servicio acepta la capacidad que se está propagando?
+   *
+   * Una misma cotización puede tener varios ítems con pax distinto (tres móviles, uno de
+   * 15 y dos de 25) y el masivo no filtra por móvil: sin esta regla, corregir un ítem
+   * pisaría la capacidad —correcta— de los otros dos. Se propaga solo a quien no tiene
+   * nada escrito o a quien venía diciendo lo mismo que decía este servicio antes: esos
+   * son la cohorte que se está corrigiendo. Los que dicen otra cosa la dicen a propósito.
+   */
+  const aceptaPax = (r: Reserva, m: NonNullable<typeof modalAplicarMasivo>) => {
+    const actual = r.capacidad_contratada ?? null;
+    return actual === null || actual === m.paxAntes || actual === m.pax;
+  };
+
   // Los servicios que recibirán la asignación, según los filtros elegidos en el modal.
   // Misma lógica en el render (contador) y en el update, para que el número que se ve
   // sea exactamente el que se escribe.
   const targetsAplicar = (m: NonNullable<typeof modalAplicarMasivo>) => {
     const soloConductor = aplicarCampos === "conductor";
+    const soloPax       = aplicarCampos === "pax";
     return m.otrasReservas.filter(r => {
+      // Los PAX contratados NO se filtran por hora ni por unidad: esos dos filtros
+      // existen para proteger la ASIGNACIÓN (no mandarle el bus de la ida al retorno,
+      // no pisarle la placa a quien ya tiene una), y los asientos no son de la unidad
+      // sino del contrato. Filtrarlos igual dejaría a los retornos sin el número salvo
+      // que el operador marcara "incluir otro horario", que es una casilla puesta ahí
+      // para otra cosa.
+      if (soloPax) {
+        if (aplicarScope === "rango") {
+          if (!r.fecha_servicio) return false;
+          if (aplicarDesde && r.fecha_servicio < aplicarDesde) return false;
+          if (aplicarHasta && r.fecha_servicio > aplicarHasta) return false;
+        }
+        // El que ya declara OTRA capacidad queda fuera del conteo, no solo del update:
+        // el número que se ve tiene que ser el que se escribe.
+        return aceptaPax(r, m);
+      }
       if (!aplicarOtraHora && (r.hora_servicio?.slice(0, 5) || "") !== m.horaOriginal) return false;
       if (soloConductor) {
         // No se toca la unidad, así que da igual qué placa tenga; pero no mezclamos
@@ -1875,14 +2141,35 @@ export default function ReservasPage() {
 
     setAplicando(true);
     const soloConductor = aplicarCampos === "conductor";
+    const soloPax       = aplicarCampos === "pax";
 
     // "Solo el conductor": no se escribe vehículo, empresa, tipo ni hora — cada servicio
-    // conserva su unidad y su horario.
-    const base: Record<string, any> = soloConductor
-      ? (payload.tipo_asignacion === "propio"
-          ? { conductor_id: payload.conductor_id }
-          : { conductor_tercero_id: payload.conductor_tercero_id })
-      : payload;
+    // conserva su unidad y su horario. "Solo los PAX": no se escribe NADA de la
+    // asignación, ni el estado.
+    const baseAsignacion = soloPax
+      ? {}
+      : soloConductor
+        ? (payload.tipo_asignacion === "propio"
+            ? { conductor_id: payload.conductor_id }
+            : { conductor_tercero_id: payload.conductor_tercero_id })
+        : payload;
+
+    // Los PAX contratados viajan aparte de la asignación: son del CONTRATO, no de la
+    // unidad. Por eso se propagan también en "solo el conductor", y son lo único que NO
+    // se le quita a los servicios de otro horario cuando el operador los incluye: la hora
+    // y el costo son de cada tramo, los asientos son del día.
+    const propagaPax = modalAplicarMasivo.paxTocado && (aplicarPax || soloPax);
+    const base: Record<string, any> = propagaPax
+      ? { ...baseAsignacion, capacidad_contratada: modalAplicarMasivo.pax }
+      : baseAsignacion;
+
+    // Nada que escribir (el modo pax con la casilla apagada no debería llegar acá, pero
+    // un update vacío sería un error que se leería como "no se pudo guardar").
+    if (Object.keys(base).length === 0) {
+      setModalAplicarMasivo(null);
+      setAplicando(false);
+      return;
+    }
 
     const propioCompleto      = payload.tipo_asignacion === "propio" && !!payload.vehiculo_id && !!payload.conductor_id;
     const tercerizadoCompleto = payload.tipo_asignacion === "tercerizado" && !!payload.empresa_tercerizada_id && !!payload.vehiculo_tercero_id && !!payload.conductor_tercero_id;
@@ -1896,13 +2183,19 @@ export default function ReservasPage() {
       // la hora los reescribiría con la de la ida, y la ida y el retorno se le pagan distinto
       // al proveedor. La hora sí se propaga entre los de la misma hora, que es como se cambia
       // el horario de todo el contrato.
-      if (!soloConductor && (r.hora_servicio?.slice(0, 5) || "") !== horaOriginal) {
+      if (!soloConductor && !soloPax && (r.hora_servicio?.slice(0, 5) || "") !== horaOriginal) {
         delete patch.hora_servicio;
         delete patch.costo_proveedor;
       }
+      // El que ya declara OTRA capacidad contratada la declara a propósito (otro móvil
+      // del mismo contrato): recibe la asignación, no el pax. En el modo "solo los PAX"
+      // ni siquiera llega acá, porque `targetsAplicar` ya lo dejó fuera del conteo.
+      if (propagaPax && !aceptaPax(r, modalAplicarMasivo)) delete patch.capacidad_contratada;
       // Un pendiente que queda completamente asignado se confirma. En "solo conductor" no:
-      // el servicio puede seguir sin unidad.
-      if (!soloConductor && r.estado === "pendiente") patch.estado = estadoPendientes;
+      // el servicio puede seguir sin unidad. Y en "solo los PAX" tampoco: corregir cuántos
+      // asientos se contrataron no programa nada, y confirmar 30 servicios sin unidad
+      // asignada sería mentirle al tablero.
+      if (!soloConductor && !soloPax && r.estado === "pendiente") patch.estado = estadoPendientes;
       const key = JSON.stringify(patch);
       const lote = lotes.get(key) || { patch, ids: [] };
       lote.ids.push(r.id);
@@ -2864,6 +3157,7 @@ export default function ReservasPage() {
         const { otrasReservas, resumen, cotizacion_id, payload, horaOriginal } = modalAplicarMasivo;
         const targets = targetsAplicar(modalAplicarMasivo);
         const soloConductor = aplicarCampos === "conductor";
+        const soloPax       = aplicarCampos === "pax";
 
         // El calendario se abre a TODO el contrato: limitarlo a las fechas de los
         // candidatos ya filtrados hacía que se vieran casi todos los días bloqueados.
@@ -2886,7 +3180,10 @@ export default function ReservasPage() {
         // Si se cambió la hora del servicio editado, el masivo la propaga a los de su mismo
         // horario original: hay que decirlo, no es lo que el operador cree estar aplicando.
         const horaNueva  = payload.hora_servicio?.slice(0, 5) || "";
-        const cambiaHora = !soloConductor && !!horaNueva && horaNueva !== horaOriginal;
+        const cambiaHora = !soloConductor && !soloPax && !!horaNueva && horaNueva !== horaOriginal;
+        // Los que declaran OTRA capacidad: se nombran, no se tocan en silencio.
+        const paxAjenos = modalAplicarMasivo.paxTocado
+          ? candidatos.filter(r => !aceptaPax(r, modalAplicarMasivo)).length : 0;
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
@@ -2907,25 +3204,89 @@ export default function ReservasPage() {
                   <p className="font-bold text-green-800">{resumen || "—"}</p>
                 </div>
 
+                {/* ── PAX contratados ────────────────────────────────────────────
+                    El pax es del CONTRATO: si cambió, cambió para todos los días de la
+                    misma ruta, y corregirlo de a uno en 30 fechas es lo que hace que
+                    nadie lo corrija. Pero es una escritura sobre 30 filas, así que se
+                    ofrece marcado y a la vista, nunca en silencio. */}
+                {modalAplicarMasivo.paxTocado && !soloPax && (
+                  <label className="flex items-start gap-2.5 cursor-pointer rounded-xl px-4 py-3"
+                         style={{ background: "#eff6ff", border: "1px solid #bfdbfe" }}>
+                    <input type="checkbox" checked={aplicarPax}
+                           onChange={e => setAplicarPax(e.target.checked)}
+                           className="mt-0.5 accent-[#0b315f]" />
+                    <span className="text-xs text-blue-900">
+                      Aplicar también los <b>PAX contratados</b>{" "}
+                      {modalAplicarMasivo.pax != null
+                        ? <>(<b>{modalAplicarMasivo.pax}</b> asientos)</>
+                        : <>(<b>vacío</b>: se borra la capacidad escrita en esos servicios)</>}.
+                      <span className="block text-blue-700/70 mt-0.5">
+                        Los asientos son del contrato, no de la unidad: se escriben aunque
+                        elijas «solo el conductor». Acá viajan pegados a la asignación, así
+                        que los retornos solo los reciben si marcas abajo los de otro horario
+                        — para alcanzarlos a todos, usa <b>«Solo los PAX contratados»</b>.
+                        {paxAjenos > 0 && (
+                          <> <b>{paxAjenos} servicio(s) ya declaran otra capacidad y no se
+                          tocan</b>: son otro móvil del mismo contrato.</>
+                        )}
+                      </span>
+                    </span>
+                  </label>
+                )}
+                {soloPax && (
+                  <div className="rounded-xl px-4 py-3 text-xs" style={{ background: "#eff6ff", border: "1px solid #bfdbfe", color: "#0b315f" }}>
+                    Se escribirán{" "}
+                    {modalAplicarMasivo.pax != null
+                      ? <><b>{modalAplicarMasivo.pax} PAX contratados</b></>
+                      : <><b>los PAX en blanco</b> (se borra la capacidad escrita en esos servicios)</>}
+                    {" "}y nada más. Entran las idas <b>y</b> los retornos del rango: los
+                    asientos son del día completo.
+                    {paxAjenos > 0 && (
+                      <span className="block mt-1">
+                        Quedan fuera <b>{paxAjenos} servicio(s)</b> que ya declaran otra
+                        capacidad: son otro móvil del mismo contrato y la suya es correcta.
+                        Para cambiarlos, abre uno de ellos.
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 {/* Qué campos aplicar */}
-                {hayConductor && (
+                {(hayConductor || modalAplicarMasivo.paxTocado) && (
                   <div className="space-y-2">
                     <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">¿Qué aplicar?</p>
                     <div className="grid grid-cols-2 gap-2">
-                      <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${!soloConductor ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
+                      <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${aplicarCampos === "todo" ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
                         <div className="flex items-center gap-2">
-                          <input type="radio" name="campos" checked={!soloConductor} onChange={() => setAplicarCampos("todo")} className="accent-[#0b315f]" />
+                          <input type="radio" name="campos" checked={aplicarCampos === "todo"} onChange={() => setAplicarCampos("todo")} className="accent-[#0b315f]" />
                           <p className="font-bold text-sm text-gray-800">{payload.tipo_asignacion === "propio" ? "Vehículo y conductor" : "Empresa y unidad"}</p>
                         </div>
                         <p className="text-[11px] text-gray-500 mt-1 ml-6">Reemplaza la asignación completa.</p>
                       </label>
-                      <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${soloConductor ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
-                        <div className="flex items-center gap-2">
-                          <input type="radio" name="campos" checked={soloConductor} onChange={() => setAplicarCampos("conductor")} className="accent-[#0b315f]" />
-                          <p className="font-bold text-sm text-gray-800">Solo el conductor</p>
-                        </div>
-                        <p className="text-[11px] text-gray-500 mt-1 ml-6">Cada servicio conserva su unidad.</p>
-                      </label>
+                      {hayConductor && (
+                        <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${soloConductor ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
+                          <div className="flex items-center gap-2">
+                            <input type="radio" name="campos" checked={soloConductor} onChange={() => setAplicarCampos("conductor")} className="accent-[#0b315f]" />
+                            <p className="font-bold text-sm text-gray-800">Solo el conductor</p>
+                          </div>
+                          <p className="text-[11px] text-gray-500 mt-1 ml-6">Cada servicio conserva su unidad.</p>
+                        </label>
+                      )}
+                      {/* Su propio modo, no una casilla sobre "todo": quien vino a corregir
+                          los asientos contratados no quiere de paso reescribirle el
+                          vehículo y el conductor a 30 fechas. */}
+                      {modalAplicarMasivo.paxTocado && (
+                        <label className={`p-3 rounded-xl cursor-pointer border-2 transition-all ${soloPax ? "border-[#0b315f] bg-blue-50" : "border-gray-200"}`}>
+                          <div className="flex items-center gap-2">
+                            <input type="radio" name="campos" checked={soloPax} onChange={() => setAplicarCampos("pax")} className="accent-[#0b315f]" />
+                            <p className="font-bold text-sm text-gray-800">Solo los PAX contratados</p>
+                          </div>
+                          <p className="text-[11px] text-gray-500 mt-1 ml-6">
+                            No toca unidad, conductor, hora ni estado. Alcanza a los dos tramos
+                            del día.
+                          </p>
+                        </label>
+                      )}
                     </div>
                   </div>
                 )}
@@ -2963,8 +3324,9 @@ export default function ReservasPage() {
                   </label>
                 </div>
 
-                {/* Qué se incluye / qué se está dejando fuera */}
-                {(otraHora.length > 0 || otraUnidad.length > 0 || soloConductor) && (
+                {/* Qué se incluye / qué se está dejando fuera. En "solo los PAX" no
+                    aplica: esos filtros protegen la asignación, y ahí no se escribe. */}
+                {!soloPax && (otraHora.length > 0 || otraUnidad.length > 0 || soloConductor) && (
                   <div className="space-y-1.5 rounded-xl border border-gray-200 px-4 py-3">
                     <p className="text-[11px] font-black uppercase tracking-widest text-gray-400">Incluir también</p>
 
@@ -3740,7 +4102,96 @@ export default function ReservasPage() {
                   <option value="cancelada">Cancelada</option>
                 </select>
               </Campo>
+
+              {/* ── PAX CONTRATADOS ───────────────────────────────────────────
+                  Los asientos que el cliente CONTRATÓ, que no son los del bus que salió.
+                  Hasta ahora este campo solo se podía escribir al generar el programa y
+                  después corregir desde el borrador de la liquidación —la última pantalla
+                  del mes, y que ya no vuelve al servicio—, así que desde Programación el
+                  dato era invisible: se veía "17 pax" en el selector de la unidad y se
+                  daba por bueno para el contrato. Va acá, y no en la sección de la
+                  asignación, porque el contrato es del SERVICIO: la asignación está
+                  duplicada en dos ramas (propia / tercerizada) y ponerlo ahí lo dejaría
+                  fuera de una de las dos, que es exactamente lo que le pasó al precio. */}
+              <Campo label="PAX contratados por el cliente" span={2}>
+                <input
+                  type="number" min="1" step="1" className={inputCls()}
+                  placeholder={paxResuelto.pax != null && paxResuelto.fuente !== "servicio"
+                    ? String(paxResuelto.pax) : "—"}
+                  value={form.capacidad_contratada}
+                  onChange={f("capacidad_contratada")}
+                />
+                {form.capacidad_contratada.trim() === "" ? (
+                  paxResuelto.pax != null ? (
+                    <p className="text-[10px] mt-1 text-gray-500 leading-snug">
+                      Sin dato propio: la liquidación tomará <b>{paxResuelto.pax} PAX</b>{" "}
+                      ({FUENTE_PAX[String(paxResuelto.fuente)]}). Escríbelo acá solo si para
+                      este servicio se contrató otra cantidad.
+                    </p>
+                  ) : (
+                    <p className="text-[10px] mt-1 text-amber-700 leading-snug">
+                      Ninguna fuente sabe cuántos asientos se contrataron: el ítem de la
+                      liquidación saldrá <b>sin el «N PAX»</b>. Se corrige acá, o de una vez
+                      para toda la ruta en <b>Liquidaciones → Rutas contratadas</b>.
+                    </p>
+                  )
+                ) : (
+                  <p className="text-[10px] mt-1 text-gray-400 leading-snug">
+                    Queda escrito en este servicio y manda sobre la cotización y la ficha de
+                    la ruta. Vacío no es cero: vacío es «no lo sé».
+                  </p>
+                )}
+                {/* Que la escritura al hermano no sea una sorpresa: el operador ve UN
+                    servicio y se van a tocar dos. */}
+                {paxTocadoForm && hermano?.id && (hermano.capacidad_contratada ?? null) !== paxDelForm && (
+                  <p className="text-[10px] mt-1 text-gray-500 leading-snug">
+                    Se escribirá también en <b className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</b>:
+                    los asientos son del <b>día</b>, no del tramo.
+                  </p>
+                )}
+                {/* La discrepancia que YA existe. Sin esto no se ve: la pantalla muestra
+                    este tramo y el formato imprime el de la ida, y nadie los compara. */}
+                {!paxTocadoForm && hermano?.capacidad_contratada != null
+                  && hermano.capacidad_contratada !== (reservaEditada?.capacidad_contratada ?? null) && (
+                  <p className="text-[10px] mt-1 text-amber-700 leading-snug">
+                    Este tramo dice <b>{reservaEditada?.capacidad_contratada ?? "sin dato"}</b> y{" "}
+                    <b className="font-mono">{hermano.codigo ?? `#${hermano.id}`}</b> dice{" "}
+                    <b>{hermano.capacidad_contratada}</b>. La liquidación imprime <b>uno solo</b>
+                    {" "}(mira la ida primero), así que uno de los dos se está descartando en
+                    silencio. Escribe el correcto: se guarda en los dos.
+                  </p>
+                )}
+              </Campo>
+
+              <Campo label="Capacidad de la unidad asignada" span={2}>
+                <div className="border rounded-xl px-4 py-2.5 text-sm bg-gray-50 text-gray-600">
+                  {capacidadUnidad
+                    ? <>
+                        <b className="font-mono text-gray-800">{capacidadUnidad.placa}</b>
+                        {capacidadUnidad.cap != null
+                          ? <> · {capacidadUnidad.cap} asientos</>
+                          : <span className="text-gray-400"> · sin capacidad registrada</span>}
+                      </>
+                    : <span className="text-gray-400">Sin unidad asignada todavía</span>}
+                </div>
+                <p className="text-[10px] mt-1 text-gray-400 leading-snug">
+                  Dato de la <b>flota</b>, no del contrato, y <b>no se copia solo</b>: mandar
+                  un bus de 20 a una ruta contratada para 15 no cambia lo que se factura.
+                </p>
+              </Campo>
             </div>
+
+            {/* La unidad no alcanza para lo contratado. Es un problema de OPERACIÓN, no de
+                facturación: no bloquea (a las 5 a.m. el bus sale igual), pero es mejor
+                enterarse acá que en el paradero. */}
+            {capacidadUnidad?.cap != null && paxResuelto.pax != null && capacidadUnidad.cap < paxResuelto.pax && (
+              <div className="mt-3 rounded-xl px-4 py-2.5 text-xs bg-amber-50 border border-amber-200 text-amber-800">
+                La unidad <b className="font-mono">{capacidadUnidad.placa}</b> tiene{" "}
+                <b>{capacidadUnidad.cap} asientos</b> y el contrato son <b>{paxResuelto.pax} PAX</b>:
+                no entran todos. Revisa la asignación o confirma con el cliente que se
+                contrató esa cantidad.
+              </div>
+            )}
           </div>
 
           <div>

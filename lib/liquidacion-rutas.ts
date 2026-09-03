@@ -285,3 +285,100 @@ function clavesCandidatas(par: ParServicio, ctx: ContextoPax): string[] {
   }
   return claves;
 }
+
+// ── La misma cascada, para UN servicio suelto ───────────────────────────────
+//
+// `resolverPaxContratado` razona sobre un `ParServicio`, que solo existe cuando ya se
+// agruparon los servicios de un periodo. Programación edita un servicio a la vez y no
+// tiene ese armado — pero necesita responder la MISMA pregunta, con el mismo orden y
+// las mismas negativas, o las dos pantallas dirían números distintos sobre el mismo
+// contrato. Por eso vive acá y no en la página: si mañana la cascada gana un escalón,
+// se ve de un vistazo que hay dos sitios que actualizar.
+//
+// Dos diferencias, y las dos son por lo que Programación SÍ sabe y la liquidación no:
+//
+//   · El HERMANO es un escalón explícito. El generador escribe la capacidad solo en la
+//     ida (ver ModalGenerarPrograma), así que al abrir un retorno el campo estaría
+//     vacío y el operador escribiría el número otra vez — o uno distinto, que la
+//     liquidación descartaría en silencio porque `paxDeLosTramos` mira la ida primero.
+//
+//   · La ficha se busca por NOMBRE de ruta, no por la clave completa: un servicio suelto
+//     no siempre trae su sede, y la sede de la clave se adivina por patrones recién al
+//     liquidar. Con más de un pax distinto entre las fichas que calzan se devuelve null,
+//     igual que hace `cargarPaxDeCotizaciones` con los ítems ambiguos: acá adivinar sería
+//     volver justo al problema que este módulo vino a resolver.
+
+export type FuentePax = "servicio" | "hermano" | "cotizacion" | "ficha";
+
+export type PaxResuelto = {
+  /** null = ninguna fuente lo sabe. El ítem se imprime SIN el «N PAX». */
+  pax: number | null;
+  fuente: FuentePax | null;
+};
+
+/** Servicio suelto, con lo mínimo que hace falta para resolver su pax. */
+export type ServicioPax = {
+  capacidad_contratada?: number | null;
+  cotizacion_id?: number | null;
+  cliente_id?: number | null;
+  ruta_nombre?: string | null;
+};
+
+const paxValido = (v: unknown): number | null => {
+  const n = Number(v ?? 0);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+};
+
+/**
+ * Pax de las fichas del cliente que calzan por NOMBRE con alguno de los tramos, sin
+ * mirar la sede. Ambiguo (dos fichas con capacidades distintas) → null.
+ */
+export function paxDeFichaPorNombre(
+  catalogo: CatalogoRutas,
+  clienteId: number | null | undefined,
+  nombres: (string | null | undefined)[]
+): number | null {
+  const buscados = new Set(
+    nombres.map((n) => normalizarNombreRuta(n)).filter((n) => n.length > 0)
+  );
+  if (!buscados.size) return null;
+  const paxes = new Set<number>();
+  for (const f of catalogo.filas) {
+    if (clienteId != null && f.cliente_id != null && Number(f.cliente_id) !== Number(clienteId)) continue;
+    const calza =
+      buscados.has(normalizarNombreRuta(f.nombre_ida)) ||
+      buscados.has(normalizarNombreRuta(f.nombre_retorno));
+    const p = paxValido(f.pax_contratado);
+    if (calza && p) paxes.add(p);
+  }
+  return paxes.size === 1 ? [...paxes][0] : null;
+}
+
+/**
+ * Los asientos contratados de UN servicio, y de dónde salió el número. La `fuente` no es
+ * decoración: "15, escrito en este servicio" y "15, de la ficha de la ruta" se corrigen
+ * en sitios distintos, y el operador no puede saber cuál sin que se lo digan.
+ */
+export function resolverPaxDeServicio(
+  servicio: ServicioPax,
+  hermano: { capacidad_contratada?: number | null; ruta_nombre?: string | null } | null,
+  ctx: { paxCotizacion?: Map<number, number>; catalogo?: CatalogoRutas }
+): PaxResuelto {
+  const propio = paxValido(servicio.capacidad_contratada);
+  if (propio) return { pax: propio, fuente: "servicio" };
+
+  const delHermano = paxValido(hermano?.capacidad_contratada);
+  if (delHermano) return { pax: delHermano, fuente: "hermano" };
+
+  const cot = Number(servicio.cotizacion_id ?? 0);
+  const deCotizacion = cot ? paxValido(ctx.paxCotizacion?.get(cot)) : null;
+  if (deCotizacion) return { pax: deCotizacion, fuente: "cotizacion" };
+
+  const deFicha = ctx.catalogo
+    ? paxDeFichaPorNombre(ctx.catalogo, servicio.cliente_id, [servicio.ruta_nombre, hermano?.ruta_nombre])
+    : null;
+  if (deFicha) return { pax: deFicha, fuente: "ficha" };
+
+  // Igual que en la cascada del par: NUNCA se cae a la capacidad del vehículo.
+  return { pax: null, fuente: null };
+}

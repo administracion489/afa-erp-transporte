@@ -34,6 +34,7 @@ import {
 import {
   cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxContratado,
 } from "@/lib/liquidacion-rutas";
+import { guardarReservas } from "@/lib/reservas-pacto";
 
 export type Lado = "cliente" | "proveedor";
 
@@ -465,12 +466,16 @@ function nombreMasFrecuente(filas: ReservaLiq[]): string | null {
  * a la vista para juntarlos a mano.
  *
  * Solo sobre borradores: un documento emitido ya lo vio el cliente.
+ *
+ * `opts.lineas` la acota a esas líneas. Lo usa `actualizarPaxContratado`: al cambiar el
+ * pax de UN renglón hay que rehacer SU texto (lleva el «N PAX» adentro) sin pisar las
+ * descripciones que alguien haya ajustado a mano en los otros.
  */
 export async function recalcularDescripciones(
   sb: any,
   lado: Lado,
   id: number,
-  opts?: { usuario?: string | null }
+  opts?: { usuario?: string | null; lineas?: number[] }
 ): Promise<{ ok: boolean; actualizadas?: number; sinPax?: number; error?: string }> {
   try {
     const t = T[lado];
@@ -488,8 +493,10 @@ export async function recalcularDescripciones(
     // y por lo tanto se pueden recalcular. Una adicional generada desde Programación es
     // una de ellas (lleva `agrupacion_clave`); una adicional escrita a mano en el editor
     // no lo es, y reescribirle la descripción borraría lo que alguien tecleó.
+    const soloEstas = opts?.lineas?.length ? new Set(opts.lineas.map(Number)) : null;
     const lineas = ((lineasRaw as any[]) ?? []).filter(
-      (l) => l.tipo === "servicio" || (l.tipo === "adicional" && l.agrupacion_clave)
+      (l) => (l.tipo === "servicio" || (l.tipo === "adicional" && l.agrupacion_clave))
+          && (!soloEstas || soloEstas.has(Number(l.id)))
     );
     if (!lineas.length) return { ok: true, actualizadas: 0, sinPax: 0 };
 
@@ -605,6 +612,87 @@ export async function recalcularDescripciones(
       usuario: opts?.usuario ?? undefined,
     });
     return { ok: true, actualizadas, sinPax };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
+// ── Corregir los PAX contratados desde el editor de la liquidación ──────────
+
+/**
+ * Escribe los asientos CONTRATADOS de una línea del documento.
+ *
+ * Y los escribe donde son verdad: en `reservas.capacidad_contratada` de los servicios
+ * que hay detrás de esa línea, no solo en el renglón. La misma regla de oro que aplica
+ * `ModalServicios` con el precio — **una fila autoritativa, el resto se DERIVA**. Si se
+ * guardara únicamente en `liquidacion_*_linea.pax_contratado`:
+ *
+ *   · «↻ Recalcular descripciones» lo borraría, porque reconstruye el texto desde la
+ *     cascada y la cascada no sabe nada de ese renglón (el escalón "línea editada" solo
+ *     se consulta al reconstruir un documento ya emitido);
+ *   · Programación seguiría mostrando el número viejo, o ninguno;
+ *   · y el mes siguiente el periodo se cerraría otra vez mal, porque nada cambió en el
+ *     origen del dato. Corregirlo una vez tiene que servir para siempre.
+ *
+ * Con la fila autoritativa escrita, recalcular es idempotente: la cascada vuelve a leer
+ * el mismo número por el escalón 2. Por eso al final se rehace SOLO el texto de esta
+ * línea, que lleva el «N PAX» adentro.
+ *
+ * `pax` en null borra el dato ("no lo sé"), que NO es lo mismo que cero: el CHECK de la
+ * base rechaza el cero justamente por eso.
+ *
+ * Solo sobre borradores: en un documento emitido el importe y el texto ya los vio el
+ * cliente. El camino escrito es reabrirlo.
+ */
+export async function actualizarPaxContratado(
+  sb: any,
+  lado: Lado,
+  lineaId: number,
+  pax: number | null,
+  opts?: { usuario?: string | null }
+): Promise<{ ok: boolean; reservas?: number; aviso?: string; error?: string }> {
+  try {
+    const t = T[lado];
+    const limpio = pax != null && Number(pax) > 0 ? Math.round(Number(pax)) : null;
+
+    const { data: linea } = await sb
+      .from(t.linea).select("id,liquidacion_id,descripcion").eq("id", lineaId).maybeSingle();
+    if (!linea) throw new Error("La línea no existe.");
+
+    const { data: cab } = await sb
+      .from(t.cab).select("id,estado").eq("id", linea.liquidacion_id).maybeSingle();
+    if (!cab) throw new Error("La liquidación no existe.");
+    if (cab.estado !== "borrador")
+      throw new Error("Solo se corrige sobre un borrador: este documento ya salió de la casa. Reábrelo primero.");
+
+    const { data: puente } = await sb
+      .from(t.puente).select("reserva_id").eq("linea_id", lineaId);
+    const ids = [...new Set(((puente as any[]) ?? []).map((p) => Number(p.reserva_id)))];
+    if (!ids.length)
+      throw new Error("Esta línea no tiene servicios detrás: no hay dónde escribir la capacidad contratada.");
+
+    // Por la ÚNICA puerta de escritura de reservas, igual que Programación: trae de
+    // regalo el reintento sin la columna cuando falta la migración liquidaciones-03, el
+    // troceo en lotes y el "cuál falló" fila por fila. Sin `cambio`: no dispara actas
+    // (el trigger solo mira costo, precio, empresa y unidad) y un motivo pegado en esas
+    // filas contaminaría el acta del próximo cambio de dinero.
+    const res = await guardarReservas(sb, ids, { capacidad_contratada: limpio });
+    if (!res.ok)
+      throw new Error(`${res.rechazos.length} servicio(s) no aceptaron la capacidad: `
+                    + (res.rechazos[0]?.motivo ?? "error desconocido"));
+
+    // El renglón se rehace desde la cascada, que ahora lee lo recién escrito. Se pide
+    // solo esta línea para no pisar las descripciones ajustadas a mano en las otras.
+    const rd = await recalcularDescripciones(sb, lado, Number(linea.liquidacion_id), {
+      usuario: opts?.usuario, lineas: [Number(lineaId)],
+    });
+    if (!rd.ok) throw new Error(rd.error);
+
+    await registrarEvento(sb, lado, Number(linea.liquidacion_id), "pax_contratado_corregido", {
+      detalle: `Ítem #${lineaId}: ${limpio ?? "sin dato"} PAX contratados, escritos en ${ids.length} servicio(s).`,
+      usuario: opts?.usuario ?? undefined,
+    });
+    return { ok: true, reservas: ids.length, aviso: res.aviso };
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) };
   }
