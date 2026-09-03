@@ -216,7 +216,12 @@ export default function LiquidacionesPage() {
   const [modalSede, setModalSede] = useState<{ sede: Sede; cliente: string } | null>(null);
   const [enviar, setEnviar] = useState<any | null>(null);
   const [modalCostos, setModalCostos] = useState<ReservaSinCosto[] | null>(null);
-  const [modalRutas, setModalRutas] = useState<RutaDelPeriodo[] | null>(null);
+  /**
+   * Las fichas de capacidad contratada. Es una BANDERA y no la lista congelada al abrir:
+   * desde ahí se abre el detalle de los servicios y se corrigen (el nombre de una ruta,
+   * por ejemplo), y al recargar la página la tabla del modal tiene que rearmarse sola.
+   */
+  const [modalRutas, setModalRutas] = useState(false);
   const [modalPrecios, setModalPrecios] = useState<ReservaSinPrecio[] | null>(null);
   /** Los pares ida↔retorno que la base perdió y hay que volver a escribir. */
   const [modalEnlaces, setModalEnlaces] = useState<EnlacePendiente[] | null>(null);
@@ -519,13 +524,36 @@ export default function LiquidacionesPage() {
     const out = new Map<string, RutaDelPeriodo>();
     for (const g of gruposVisibles)
       for (const l of g.lineas) {
-        const k = `${g.contraparteId ?? 0}|${g.sedeId ?? 0}|${l.nombre_ida ?? ""}|${l.nombre_retorno ?? ""}`;
-        // La ficha NO se parte por origen: la capacidad contratada es de la RUTA, y
-        // `cliente_ruta` la identifica por el par de nombres. Pero se cuenta cuántos de
-        // esos servicios fueron adicionales, para poder decirlo en la fila.
+        // La fila del modal es UN ÍTEM del formato, no una ruta entera. Antes se agrupaba
+        // solo por el par de nombres —porque `cliente_ruta` se identifica así— y eso metía
+        // en un mismo renglón servicios a tarifas distintas: en producción la RUTA C de
+        // retorno juntó tres adicionales a S/ 100 y S/ 320, con un único campo de PAX para
+        // los tres, y uno de ellos estaba contratado por 4 asientos y los otros por 10.
+        // Con un solo input no había forma de escribirlo.
+        //
+        // Ahora la fila se parte por lo mismo que parte el ítem —tarifa, origen y PAX— así
+        // que lo que se teclea aquí es exactamente lo que va a imprimir ese renglón. El
+        // guardado sabe distinguir los dos casos: ver `guardar()` en ModalRutasContratadas.
+        const k = [
+          g.contraparteId ?? 0, g.sedeId ?? 0,
+          l.nombre_ida ?? "", l.nombre_retorno ?? "",
+          l.precio_unitario.toFixed(2), l.origen_contractual, l.pax_contratado ?? "",
+        ].join("|");
         const adics = l.tipo === "adicional" ? l.cantidad : 0;
         const ya = out.get(k);
-        if (ya) { ya.servicios += l.cantidad; ya.adicionales += adics; continue; }
+        if (ya) {
+          ya.servicios += l.cantidad;
+          ya.adicionales += adics;
+          // Lo único que sigue cayendo en la misma fila son los MÓVILES de una ruta que
+          // sale con dos unidades a la vez: comparten tarifa, origen y PAX, así que
+          // comparten ficha. Las tarifas se acumulan DISTINTAS y nunca promediadas — con
+          // la clave de arriba debería haber siempre una, y si apareciera una segunda es
+          // que algo se coló: se muestra en vez de esconderse detrás de un promedio.
+          ya.reservasPeriodo.push(...l.reservas_periodo);
+          if (!ya.precios.includes(l.precio_unitario)) ya.precios.push(l.precio_unitario);
+          ya.total += l.total_linea;
+          continue;
+        }
         out.set(k, {
           clave: k,
           clienteId: g.contraparteId,
@@ -537,10 +565,17 @@ export default function LiquidacionesPage() {
           paxContratado: l.pax_contratado,
           capacidadMinimaAsignada: l.capacidad_minima_asignada,
           servicios: l.cantidad,
+          reservasPeriodo: [...l.reservas_periodo],
+          precios: [l.precio_unitario],
+          total: l.total_linea,
           adicionales: adics,
         });
       }
-    return [...out.values()].sort((a, b) => String(a.nombreIda).localeCompare(String(b.nombreIda)));
+    return [...out.values()]
+      // Las tarifas ordenadas: la fila muestra el rango, y un rango al revés se lee como
+      // un error de la pantalla y no como las dos tarifas que de verdad tiene la ruta.
+      .map((r) => ({ ...r, precios: [...r.precios].sort((a, b) => a - b) }))
+      .sort((a, b) => String(a.nombreIda).localeCompare(String(b.nombreIda)));
   }, [gruposVisibles]);
 
   /** Rutas que van a imprimirse sin el "N PAX" porque ninguna fuente sabe cuánto se contrató. */
@@ -948,7 +983,7 @@ export default function LiquidacionesPage() {
               );
             })()}
             {lado === "cliente" && rutasDelPeriodo.length > 0 && (
-              <button onClick={() => setModalRutas(rutasDelPeriodo)}
+              <button onClick={() => setModalRutas(true)}
                 className={`px-3 py-2 rounded-xl text-sm font-bold border ${
                   rutasSinPax.length
                     ? "text-amber-800 bg-amber-50 border-amber-200 hover:bg-amber-100"
@@ -1303,11 +1338,27 @@ export default function LiquidacionesPage() {
             cargar();
           }} />
       )}
-      {modalRutas && (
-        <ModalRutasContratadas rutas={modalRutas} catalogoDisponible={rutas.disponible}
-          onCerrar={() => setModalRutas(null)}
+      {/* Solo del lado cliente. La capacidad contratada y la columna "Precio cliente" son
+          de esa cara: en la pestaña del proveedor, `precio_unitario` es el COSTO, y la
+          tabla estaría rotulando como precio de venta lo que se le paga al tercero. El
+          botón ya está gateado, pero la bandera no se apaga sola al cambiar de pestaña. */}
+      {modalRutas && lado === "cliente" && (
+        <ModalRutasContratadas rutas={rutasDelPeriodo} catalogoDisponible={rutas.disponible}
+          onCerrar={() => setModalRutas(false)}
+          /* El detalle se abre ENCIMA y este modal se queda debajo: cerrarlo perdería los
+             PAX ya tecleados, y volver a la ficha después de mirar los servicios es
+             justamente el motivo por el que se miran. */
+          onVerServicios={(r) => verServicios(
+            r.nombreIda ?? "(sin nombre de ruta)",
+            [
+              r.clienteNombre, r.sedeNombre,
+              r.nombreRetorno ? `↩ ${r.nombreRetorno}` : "",
+              `${r.servicios} día(s) cobrado(s) en el periodo`,
+            ].filter(Boolean).join(" · "),
+            r.reservasPeriodo
+          )}
           onGuardado={(n) => {
-            setModalRutas(null);
+            setModalRutas(false);
             setMsg(`✅ ${n} ruta(s) fichada(s). Las liquidaciones nuevas ya imprimen su capacidad contratada.`);
             cargar();
           }} />

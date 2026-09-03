@@ -382,7 +382,10 @@ export default function ModalServicios({
   const cp = lado === "cliente" ? "#0b315f" : "#6d28d9";
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-3" onClick={onCerrar}>
+    /* z-[60], una capa por encima del resto: es el único modal de la pantalla que se abre
+       DESDE otro (las fichas de «Rutas contratadas», que se quedan debajo con los PAX que
+       el operador ya tecleó). Con el z-50 de todos, quedaba tapado por el que lo abrió. */
+    <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-3" onClick={onCerrar}>
       <div className="bg-white rounded-2xl w-full max-w-[80rem] max-h-[94vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="px-5 py-3 border-b rounded-t-2xl">
           <h3 className="font-black" style={{ color: cp }}>{titulo}</h3>

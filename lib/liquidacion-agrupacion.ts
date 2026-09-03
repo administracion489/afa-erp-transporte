@@ -868,7 +868,7 @@ function serieAnexo(n: number): string {
 // tecleó distinto. Los dos ejes fallan en sitios diferentes, así que se unen por
 // CUALQUIERA de los dos y se resuelve con conjuntos disjuntos.
 //
-// LA TARIFA NUNCA ENTRA EN LA UNIÓN
+// LA TARIFA Y EL PAX CONTRATADO NUNCA ENTRAN EN LA UNIÓN
 //
 // Regla dura del negocio: dos ítems con precio unitario distinto no se unen jamás. El
 // formato imprime CANT × P. UNITARIO = TOTAL, y promediar dos tarifas daría un unitario
@@ -983,7 +983,21 @@ type SenasRuta = {
 export function agruparPorRutaContratada(
   pares: ParServicio[],
   lado: LadoLiquidacion,
-  opts: { preciosIncluyenIgv: boolean; igvPct: number }
+  opts: {
+    preciosIncluyenIgv: boolean;
+    igvPct: number;
+    /**
+     * Los asientos CONTRATADOS que se imprimirían para este servicio. Separa ítems igual
+     * que la tarifa, y por el mismo motivo: el formato imprime UN "N PAX" por ítem, así
+     * que reunir servicios contratados a 4 y a 10 asientos obliga a imprimir un número
+     * que es falso para unos u otros. Y era peor que un empate: `agruparServicios` tomaba
+     * el pax del PRIMER par del bucket, de modo que el número que salía en el papel
+     * dependía del orden en que se hubieran leído las reservas.
+     *
+     * Sin esta función el eje no separa, que es como se comportaba antes.
+     */
+    paxDe?: (p: ParServicio) => number | null;
+  }
 ): ParServicio[][] {
   if (pares.length < 2) return pares.map((p) => [p]);
 
@@ -1007,8 +1021,9 @@ export function agruparPorRutaContratada(
   const senas = new Map<ParServicio, SenasRuta>();
   for (const p of pares) {
     const precio = precioUnitario(p.cabeza, lado, opts).toFixed(2);
+    const pax = opts.paxDe?.(p) ?? null;
     senas.set(p, {
-      dinero: `${precio}|${origenDelPar(p)}`,
+      dinero: `${precio}|${origenDelPar(p)}|pax:${pax ?? ""}`,
       idaNombre: sinHoraRuta(p.ida ? nombreRuta(p.ida) : ""),
       retNombre: sinHoraRuta(p.retorno ? nombreRuta(p.retorno) : ""),
       idaMapa: extremos(p.ida),
@@ -1030,8 +1045,10 @@ export function agruparPorRutaContratada(
     if (ra !== rb) padre.set(ra, rb);
   };
 
-  // Cubos por tarifa + origen contractual. TODA la unión ocurre dentro de un cubo, así
-  // que ninguna cadena puede cruzar precios: la regla dura es estructural.
+  // Cubos por tarifa + origen contractual + PAX contratado. TODA la unión ocurre dentro
+  // de un cubo, así que ninguna cadena puede cruzar ninguno de los tres: las dos reglas
+  // duras —ni dos tarifas ni dos capacidades contratadas en el mismo ítem— son
+  // estructurales, no algo que haya que recordar respetar.
   const cubos = new Map<string, ParServicio[]>();
   for (const p of pares) {
     const k = senas.get(p)!.dinero;
@@ -1196,7 +1213,7 @@ export function agruparServicios(
     moviles: number;
     filas: ParServicio[];
   };
-  const buckets = new Map<string, Bucket>();
+  const buckets: Bucket[] = [];
 
   // Un bucket por RUTA CONTRATADA: ya no una por redacción del nombre. Ver
   // `agruparPorRutaContratada` — une por el nombre sin la hora O por los extremos en el
@@ -1204,6 +1221,8 @@ export function agruparServicios(
   for (const componente of agruparPorRutaContratada(pares, lado, {
     preciosIncluyenIgv: opts.preciosIncluyenIgv,
     igvPct: opts.igvPct,
+    // El pax contratado separa ítems, igual que la tarifa: ver `agruparPorRutaContratada`.
+    paxDe: (p) => catalogo.paxContratadoDe?.(p) ?? null,
   })) {
     const p = componente[0];
     const r = p.cabeza;
@@ -1233,11 +1252,32 @@ export function agruparServicios(
     // La clave conserva la forma de siempre —nombres, tarifa, origen— porque es lo que se
     // guarda en `agrupacion_clave` y lo que lee el editor. Lo que cambió es de dónde salen
     // los nombres: ahora son los del ítem entero, no los de una de sus redacciones.
+    //
+    // CADA COMPONENTE ES UN BUCKET, sin fusionar por clave. Antes esto era un Map y el
+    // bucket se buscaba por su clave antes de crearlo, lo que DESHACÍA en silencio lo que
+    // la unión había separado: dos ítems con el mismo nombre dominante y la misma tarifa
+    // que `agruparPorRutaContratada` había dejado aparte —porque su PAX contratado no
+    // coincidía— volvían a caer juntos al fusionarse por clave. Salió en producción: tres
+    // adicionales de la RUTA C, uno contratado por 4 asientos y dos por 10, reunidos en un
+    // renglón que solo puede imprimir un número. La unión ya decidió qué va junto; volver a
+    // agrupar aquí solo puede estropearlo.
     const clave = [norm(nombreIda ?? ""), norm(nombreRetorno ?? ""), precio.toFixed(2), origen].join("|");
-    const b = buckets.get(clave)
-      ?? { clave, ruta, fuenteRuta, nombreIda, nombreRetorno, sentido, origen, precio, movil: 1, moviles: 1, filas: [] };
-    b.filas.push(...componente);
-    buckets.set(clave, b);
+    buckets.push({ clave, ruta, fuenteRuta, nombreIda, nombreRetorno, sentido, origen, precio, movil: 1, moviles: 1, filas: [...componente] });
+  }
+
+  // Dos ítems distintos pueden llegar a la misma clave —mismo nombre dominante, misma
+  // tarifa y mismo origen, separados por el PAX contratado—, y `agrupacion_clave` se guarda
+  // en la base y se usa para reencontrar la línea. Se desempata con el dato que los separa,
+  // y SOLO cuando de verdad chocan: así la clave de siempre no cambia de forma en el 99 %
+  // de los casos, que es lo que leen los documentos ya emitidos.
+  {
+    const cuantos = new Map<string, number>();
+    for (const b of buckets) cuantos.set(b.clave, (cuantos.get(b.clave) ?? 0) + 1);
+    for (const b of buckets) {
+      if ((cuantos.get(b.clave) ?? 0) < 2) continue;
+      const pax = catalogo.paxContratadoDe?.(b.filas[0]) ?? null;
+      b.clave = `${b.clave}|PAX${pax ?? "?"}`;
+    }
   }
 
   // ── Móviles: solo cuando la ruta necesita DOS UNIDADES A LA MISMA HORA ──────
@@ -1251,7 +1291,7 @@ export function agruparServicios(
   // solo bus con cinco placas rotando queda en UN renglón, y una ruta que de verdad
   // sale con dos buses a las 05:10 queda en dos, que es como el cliente ya la firma.
   const finales: Bucket[] = [];
-  for (const b of buckets.values()) {
+  for (const b of buckets) {
     const porSalida = new Map<string, ParServicio[]>();
     for (const p of b.filas) {
       const k = `${p.cabeza.fecha_servicio ?? ""}|${String(p.cabeza.hora_servicio ?? "").slice(0, 5)}`;
@@ -1383,6 +1423,17 @@ export function agruparServicios(
         `Agrupación inválida: el ítem "${b.nombreIda ?? b.ruta}" reuniría ${tarifas.size} tarifas ` +
         `distintas (${[...tarifas].join(", ")}). Dos servicios a distinto precio unitario nunca ` +
         `pueden compartir ítem. Es un fallo del ERP: repórtalo en vez de emitir el documento.`
+      );
+
+    // Y lo mismo con los asientos contratados. El formato imprime UN "N PAX" por ítem: si
+    // el renglón reuniera servicios contratados a 4 y a 10, ese número sería falso para
+    // unos u otros, y el cliente lo compara contra su contrato.
+    const paxes = new Set(b.filas.map((p) => catalogo.paxContratadoDe?.(p) ?? null));
+    if (paxes.size > 1)
+      throw new Error(
+        `Agrupación inválida: el ítem "${b.nombreIda ?? b.ruta}" reuniría ${paxes.size} capacidades ` +
+        `contratadas distintas (${[...paxes].map((n) => n ?? "sin dato").join(", ")}). El formato ` +
+        `imprime un solo "N PAX" por ítem. Es un fallo del ERP: repórtalo en vez de emitir el documento.`
       );
   }
 
