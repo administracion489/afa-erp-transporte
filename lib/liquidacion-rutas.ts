@@ -140,6 +140,20 @@ export async function guardarPaxContratado(
       throw new Error("La ruta no tiene nombre: no hay contra qué guardar la capacidad.");
     const pax = ruta.pax != null && Number(ruta.pax) > 0 ? Math.round(Number(ruta.pax)) : null;
 
+    // EL PAR CANÓNICO SE CALCULA UNA VEZ Y SIRVE PARA BUSCAR Y PARA ESCRIBIR.
+    //
+    // Antes no era así, y con una ruta de SOLO RETORNO —los adicionales del formato lo
+    // son— la función no podía funcionar nunca: buscaba la ficha con (ida="", retorno=
+    // "RUTA C/ RETORNO 19:00/…") mientras que al guardarla la escribía como (ida="RUTA C/
+    // RETORNO 19:00/…", retorno=null), porque una ficha sin ida sube su retorno al campo
+    // principal. Los dos pares no coincidían, así que NUNCA se encontraba a sí misma: la
+    // primera vez insertaba y todas las siguientes chocaban contra el índice único con
+    // "duplicate key value violates unique constraint uq_cliente_ruta_identidad". Es decir,
+    // la capacidad de una ruta de solo retorno se podía escribir una vez y no corregir
+    // jamás.
+    const idaCanonica = ruta.nombreIda ?? ruta.nombreRetorno ?? null;
+    const retornoCanonico = ruta.nombreIda ? ruta.nombreRetorno ?? null : null;
+
     // Se busca por el nombre YA normalizado, igual que el índice único de la tabla, para
     // no crear una segunda ficha por un espacio de más.
     const { data: existentes } = await sb
@@ -147,7 +161,7 @@ export async function guardarPaxContratado(
       .select("id,cliente_sede_id,nombre_ida,nombre_retorno")
       .eq("cliente_id", ruta.clienteId);
 
-    const clave = claveRuta(ruta.clienteId, ruta.sedeId, ruta.nombreIda, ruta.nombreRetorno);
+    const clave = claveRuta(ruta.clienteId, ruta.sedeId, idaCanonica, retornoCanonico);
     const yaEsta = ((existentes as any[]) ?? []).find(
       (f) => claveRuta(ruta.clienteId, f.cliente_sede_id, f.nombre_ida, f.nombre_retorno) === clave
     );
@@ -155,8 +169,8 @@ export async function guardarPaxContratado(
     const campos = {
       cliente_id: ruta.clienteId,
       cliente_sede_id: ruta.sedeId ?? null,
-      nombre_ida: ruta.nombreIda ?? ruta.nombreRetorno,
-      nombre_retorno: ruta.nombreIda ? ruta.nombreRetorno ?? null : null,
+      nombre_ida: idaCanonica,
+      nombre_retorno: retornoCanonico,
       pax_contratado: pax,
       ...(ruta.notas !== undefined ? { notas: ruta.notas } : {}),
       updated_at: new Date().toISOString(),
