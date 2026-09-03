@@ -20,14 +20,17 @@ import { supabase } from "@/lib/supabase";
 import { fmtMoneda } from "@/lib/finanzas/dinero";
 import {
   agruparServicios, analizarServicios, etiquetaRuta,
-  type ReservaLiq, type CatalogoLiq, type LineaAgrupada, type LadoLiquidacion, type ParServicio,
+  type ReservaLiq, type CatalogoLiq, type LineaAgrupada, type LadoLiquidacion,
+  type ParServicio, type ReservaBloqueada,
 } from "@/lib/liquidacion-agrupacion";
+import { indiceHermanos, type EnlacePendiente } from "@/lib/liquidacion-hermanos";
 import {
   cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxContratado,
   type CatalogoRutas,
 } from "@/lib/liquidacion-rutas";
 import ModalRutasContratadas, { type RutaDelPeriodo } from "./ModalRutasContratadas";
 import ModalPrecios, { type ReservaSinPrecio } from "./ModalPrecios";
+import ModalEnlaces from "./ModalEnlaces";
 import ModalServicios from "./ModalServicios";
 import {
   crearLiquidaciones, igvVigente, aprobarLiquidacionCliente, aprobarLiquidacionProveedor,
@@ -112,7 +115,7 @@ type Grupo = {
   reservas: ReservaLiq[];
   /** Servicios facturables (el par ida+retorno cuenta como uno). */
   pares: ParServicio[];
-  bloqueadas: { r: ReservaLiq; motivos: string[] }[];
+  bloqueadas: ReservaBloqueada[];
   avisos: { r: ReservaLiq; mensaje: string }[];
   total: number;
 };
@@ -150,17 +153,19 @@ type OpcionContraparte = { clave: string; nombre: string; servicios: number; doc
  * llega a ser par, así que un cliente con todo sin precio —justo el que hay que poder
  * aislar para cargárselos— habría aparecido con cero.
  */
-function diasDeServicio(rs: ReservaLiq[]): number {
+function diasDeServicio(rs: ReservaLiq[], hermanoDe: (r: ReservaLiq) => ReservaLiq | null): number {
   const presentes = new Set(rs.map((r) => r.id));
   const vistas = new Set<number>();
   let n = 0;
   for (const r of rs) {
     if (vistas.has(r.id)) continue;
     vistas.add(r.id);
-    // El par solo colapsa si el otro tramo está en el mismo periodo, que es la misma
-    // regla que aplica analizarServicios.
-    const otro = Number(r.reserva_vinculada_id ?? 0);
-    if (otro && presentes.has(otro)) vistas.add(otro);
+    // El par solo colapsa si el otro tramo está en el mismo conjunto, que es la misma
+    // regla que aplica `analizarServicios` — y por el mismo camino: el enlace se lee en
+    // los DOS sentidos (lib/liquidacion-hermanos.ts). Leyéndolo solo hacia adelante, un
+    // par con el enlace escrito en un lado contaba 2 donde la tarjeta decía 1.
+    const otro = hermanoDe(r);
+    if (otro && presentes.has(otro.id)) vistas.add(otro.id);
     n++;
   }
   return n;
@@ -205,6 +210,8 @@ export default function LiquidacionesPage() {
   const [modalCostos, setModalCostos] = useState<ReservaSinCosto[] | null>(null);
   const [modalRutas, setModalRutas] = useState<RutaDelPeriodo[] | null>(null);
   const [modalPrecios, setModalPrecios] = useState<ReservaSinPrecio[] | null>(null);
+  /** Los pares ida↔retorno que la base perdió y hay que volver a escribir. */
+  const [modalEnlaces, setModalEnlaces] = useState<EnlacePendiente[] | null>(null);
   /**
    * El detalle detrás de un contador. Los tres números de esta pantalla —el "N serv."
    * del bloque rojo, el "N/N serv." de cada línea y el "N servicio(s)" de la cabecera—
@@ -215,6 +222,17 @@ export default function LiquidacionesPage() {
 
   /** Las reservas del periodo por id: los tres contadores guardan ids, no filas. */
   const reservasPorId = useMemo(() => new Map(reservas.map((r) => [r.id, r])), [reservas]);
+
+  /**
+   * El OTRO tramo de cada día, sobre TODO el periodo (lib/liquidacion-hermanos.ts).
+   *
+   * Se arma acá, antes de partir en grupos, porque el hermano puede quedar fuera del
+   * grupo: el filtro `entraAlCierre` deja fuera lo ya liquidado, y la sede se resuelve
+   * por patrones de texto que la ida y el retorno no siempre comparten. Con el índice
+   * puesto, un retorno en S/ 0.00 cuyo día ya cobra su ida deja de salir como "Sin precio
+   * de venta" —que mandaba a cobrarlo por segunda vez— y dice dónde está su tarifa.
+   */
+  const hermanos = useMemo(() => indiceHermanos(reservas), [reservas]);
 
   /**
    * Abre el detalle. Recibe ids y no reservas para que los tres orígenes no tengan que
@@ -376,7 +394,7 @@ export default function LiquidacionesPage() {
         sedeId: sede?.id ?? null, sedeNombre: sede?.nombre ?? (lado === "cliente" ? "Sin sede asignada" : "Servicios tercerizados"),
         sede, lineas: [] as LineaAgrupada[], sinEjecutar: [] as LineaAgrupada[], reservas: [] as ReservaLiq[],
         pares: [] as ParServicio[],
-        bloqueadas: [] as { r: ReservaLiq; motivos: string[] }[],
+        bloqueadas: [] as ReservaBloqueada[],
         avisos: [] as { r: ReservaLiq; mensaje: string }[], total: 0,
       };
       g.reservas.push(r);
@@ -386,7 +404,11 @@ export default function LiquidacionesPage() {
     for (const g of mapa.values()) {
       // Emparejar ida+retorno ANTES de agrupar: AFA cobra una tarifa por los dos
       // tramos del día, así que la unidad facturable es el par, no la reserva.
-      const analisis = analizarServicios(g.reservas, lado);
+      const analisis = analizarServicios(g.reservas, lado, {
+        hermanoDe: hermanos.hermanoDe,
+        hermanoProbableDe: hermanos.hermanoProbableDe,
+        candidatosAmbiguosDe: hermanos.candidatosAmbiguosDe,
+      });
       g.pares = analisis.pares;
       g.bloqueadas = analisis.bloqueadas;
       g.avisos = analisis.avisos;
@@ -415,7 +437,7 @@ export default function LiquidacionesPage() {
     }
 
     return [...mapa.values()].sort((a, b) => b.total - a.total || a.contraparteNombre.localeCompare(b.contraparteNombre));
-  }, [reservas, lado, clientes, terceros, sedes, catalogo, igvPct, preciosConIgv, periodo.desde, periodo.hasta, rutas, paxCotizacion]);
+  }, [reservas, hermanos, lado, clientes, terceros, sedes, catalogo, igvPct, preciosConIgv, periodo.desde, periodo.hasta, rutas, paxCotizacion]);
 
   /**
    * Lo que el filtro deja ver. Todo lo que se lee de la pantalla —el árbol, el bloque rojo
@@ -452,7 +474,8 @@ export default function LiquidacionesPage() {
       return nuevo;
     };
     for (const g of grupos)
-      tocar(claveContraparte(g.contraparteId), g.contraparteNombre).servicios += diasDeServicio(g.reservas);
+      tocar(claveContraparte(g.contraparteId), g.contraparteNombre).servicios +=
+        diasDeServicio(g.reservas, hermanos.hermanoDe);
     for (const l of liquidaciones) {
       const id = (lado === "cliente" ? l.cliente_id : l.empresa_tercerizada_id) ?? null;
       const nombre = lado === "cliente"
@@ -461,7 +484,7 @@ export default function LiquidacionesPage() {
       tocar(claveContraparte(id), nombre).documentos += 1;
     }
     return [...out.values()].sort((a, b) => a.nombre.localeCompare(b.nombre));
-  }, [grupos, liquidaciones, clientes, terceros, lado]);
+  }, [grupos, hermanos, liquidaciones, clientes, terceros, lado]);
 
   /**
    * El filtro apunta a alguien que no tiene nada en este periodo (se movió el rango de
@@ -539,8 +562,8 @@ export default function LiquidacionesPage() {
     const vistos = new Set<number>();
     const out: ReservaSinCosto[] = [];
     for (const g of gruposVisibles)
-      for (const { r, motivos } of g.bloqueadas) {
-        if (!motivos.some((m: string) => m.includes("Sin costo de proveedor"))) continue;
+      for (const { r, codigos } of g.bloqueadas) {
+        if (!codigos.includes("sin_costo")) continue;
         if (vistos.has(r.id)) continue;
         vistos.add(r.id);
         out.push(r as ReservaSinCosto);
@@ -559,14 +582,38 @@ export default function LiquidacionesPage() {
     const vistos = new Set<number>();
     const out: ReservaSinPrecio[] = [];
     for (const g of gruposVisibles)
-      for (const { r, motivos } of g.bloqueadas) {
-        if (!motivos.some((m: string) => m.includes("Sin precio de venta"))) continue;
+      for (const { r, codigos } of g.bloqueadas) {
+        // Solo los que de verdad NO tienen tarifa en ningún tramo del día. Un retorno
+        // cuyo día ya cobra su ida sale con otro código (`falta_enlace`,
+        // `tarifa_fuera_del_cierre`) y NO entra acá: ponerle un precio cobraría el día
+        // dos veces, que es justo lo que este módulo existe para impedir.
+        if (!codigos.includes("sin_precio")) continue;
         if (vistos.has(r.id)) continue;
         vistos.add(r.id);
         out.push({ ...(r as ReservaSinPrecio), clienteNombre: g.contraparteNombre });
       }
     return out;
   }, [gruposVisibles, lado]);
+
+  /**
+   * Los días partidos en dos porque les falta el enlace ida↔retorno.
+   *
+   * Se arman sobre el PERIODO y no sobre los bloqueados: un par con el enlace escrito en
+   * un solo lado ya no bloquea nada —el cierre lo empareja igual, mirando el enlace por
+   * los dos sentidos— pero sigue roto para Programación y para las notificaciones, que lo
+   * leen hacia adelante. El que sí bloquea es el que no tiene enlace por ningún lado.
+   *
+   * Se limita a las reservas que se están mirando (el filtro por contraparte incluido):
+   * un botón que ofrece arreglar cosas que no están en pantalla es el mismo problema que
+   * el contador que decía 399.
+   */
+  const enlacesRotos = useMemo<EnlacePendiente[]>(() => {
+    const visibles = new Set<number>();
+    for (const g of gruposVisibles) for (const r of g.reservas) visibles.add(r.id);
+    return hermanos.pendientes.filter(
+      (e) => visibles.has(e.tramo.id) || (e.propuesto ? visibles.has(e.propuesto.id) : false)
+    );
+  }, [hermanos, gruposVisibles]);
 
   /**
    * Lo que NO entra al cierre, agrupado POR RUTA y con su motivo.
@@ -874,6 +921,23 @@ export default function LiquidacionesPage() {
                 Cargar {sinPrecio.length} precio(s) de venta faltante(s)
               </button>
             )}
+            {/* Un día partido en dos no es un precio que falta: es un enlace que falta. Y
+                la diferencia importa, porque "arreglarlo" con un precio cobra el día dos
+                veces. Por eso es su propio botón y no una fila más del de precios. */}
+            {enlacesRotos.length > 0 && (() => {
+              // Los ambiguos se cuentan aparte porque son trabajo distinto: ahí el hermano
+              // lo elige el operador. Meterlos en el mismo número haría creer que el ERP
+              // ya sabe cuál va con cuál — que es justo el error que costó un falso par.
+              const aElegir = enlacesRotos.filter((e) => !e.propuesto).length;
+              return (
+                <button onClick={() => setModalEnlaces(enlacesRotos)}
+                  className="px-3 py-2 rounded-xl text-sm font-bold text-amber-800 bg-amber-50 border border-amber-200 hover:bg-amber-100"
+                  title="Días partidos en dos servicios sueltos: les falta el enlace ida↔retorno">
+                  Enlazar {enlacesRotos.length} tramo(s) ida↔retorno
+                  {aElegir > 0 && ` · ${aElegir} a elegir`}
+                </button>
+              );
+            })()}
             {lado === "cliente" && rutasDelPeriodo.length > 0 && (
               <button onClick={() => setModalRutas(rutasDelPeriodo)}
                 className={`px-3 py-2 rounded-xl text-sm font-bold border ${
@@ -1198,6 +1262,19 @@ export default function LiquidacionesPage() {
           onGuardado={(n) => {
             setModalPrecios(null);
             setMsg(`✅ Precio cargado en ${n} servicio(s). Sus rutas ya entran a la valorización.`);
+            cargar();
+          }} />
+      )}
+      {modalEnlaces && (
+        <ModalEnlaces pendientes={modalEnlaces} lado={lado}
+          clienteDe={(r) =>
+            (r.cliente_id != null
+              ? clientes[r.cliente_id]?.empresa || clientes[r.cliente_id]?.nombre
+              : null) ?? "Sin cliente"}
+          onCerrar={() => setModalEnlaces(null)}
+          onGuardado={(n) => {
+            setModalEnlaces(null);
+            setMsg(`✅ ${n} par(es) enlazado(s). Esos días vuelven a contarse como UN servicio con su ida y su retorno.`);
             cargar();
           }} />
       )}
