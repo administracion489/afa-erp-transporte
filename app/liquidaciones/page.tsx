@@ -56,6 +56,14 @@ const COL_PAX_CONTRATADO = "capacidad_contratada";
 /** La añade supabase/reservas-04 (servicios adicionales). Misma prudencia. */
 const COL_ORIGEN = "origen_contractual";
 
+/**
+ * Los paraderos del tramo. Es el eje del MAPA de la agrupación: sin esto, dos redacciones
+ * distintas del mismo recorrido ("BSF→1RO DE MAYO" y "BSF→ALIPIO") vuelven a salir como
+ * dos ítems. Se pide junto a las demás opcionales y con la misma cascada: si la columna no
+ * estuviera, la agrupación se apoya solo en el nombre, que es como se comportaba antes.
+ */
+const COL_PARADAS = "paradas_json";
+
 /** Paginación defensiva: PostgREST corta en 1000 filas y un mes de operación pasa de eso. */
 async function traerTodo(query: () => any): Promise<any[]> {
   const paso = 1000; let desde = 0; const acc: any[] = [];
@@ -267,7 +275,8 @@ export default function LiquidacionesPage() {
       // reintenta quitándolas de a una: sin el pax la cascada pierde su primer escalón,
       // y sin el origen todo se lee como contratado. Ninguna de las dos puede impedir
       // cerrar el periodo.
-      const rs = await traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN}`)
+      const rs = await traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN},${COL_PARADAS}`)
+        .catch(() => traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN}`))
         .catch(() => traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO}`))
         .catch(() => traerReservas(`${COLS_RESERVA},${COL_ORIGEN}`))
         .catch(() => traerReservas(COLS_RESERVA));
