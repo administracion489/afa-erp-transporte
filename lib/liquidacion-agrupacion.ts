@@ -344,6 +344,12 @@ export type OpcionesAnalisis = {
   hermanoDe?: (r: ReservaLiq) => ReservaLiq | null;
   /** El hermano DEDUCIDO cuando no hay enlace. Solo para explicar y ofrecer el arreglo. */
   hermanoProbableDe?: (r: ReservaLiq) => ReservaLiq | null;
+  /**
+   * Los posibles hermanos cuando ese día esa ruta salió con más de un móvil y NO se puede
+   * elegir sin adivinar. Tampoco es "sin precio": el importe del día está en alguno de
+   * ellos, así que cargarle una tarifa a este tramo lo cobraría dos veces.
+   */
+  candidatosAmbiguosDe?: (r: ReservaLiq) => ReservaLiq[] | null;
 };
 
 /**
@@ -377,10 +383,12 @@ function tramoSinImporteCubierto(
     fuera: ReservaLiq | null;
     /** Hermano deducido, cuando no hay enlace por ningún lado. */
     probable: ReservaLiq | null;
+    /** Los posibles, cuando el día tuvo más de un móvil y no se puede elegir. */
+    ambiguos: ReservaLiq[] | null;
     enElConjunto: (x: ReservaLiq) => boolean;
   }
 ): Bloqueo | null {
-  const { lado, plata, laPlata, ref, ocupado, fuera, probable, enElConjunto } = ctx;
+  const { lado, plata, laPlata, ref, ocupado, fuera, probable, ambiguos, enElConjunto } = ctx;
   const cuando = (x: ReservaLiq) => fechaFormato(x.fecha_servicio) || String(x.fecha_servicio ?? "");
 
   if (ocupado || (fuera && enElConjunto(fuera))) {
@@ -428,6 +436,26 @@ function tramoSinImporteCubierto(
       mensaje:
         `Le falta el enlace ida↔retorno con ${ref(probable)}, que lleva ${laPlata} del día ` +
         `(S/ ${montoDe(probable, lado).toFixed(2)}). No necesita importe propio: enlázalos`,
+    };
+
+  // Ese día esa ruta salió con más de un móvil: el hermano es UNO de varios y el ERP no
+  // elige. Tampoco puede decir "sin precio": el importe del día está en alguno de esos
+  // candidatos, así que cargarle una tarifa a este tramo cobraría el día dos veces. La
+  // única salida honesta es nombrar a los candidatos y pedir que lo enlace un humano.
+  //
+  // Con la condición de que ALGUNO de esos candidatos lleve el importe: si ninguno lo
+  // lleva, este tramo no está cubierto por nadie y lo que falta de verdad es el precio —
+  // ahí el bloqueo normal es el correcto, y desviarlo dejaría al operador sin poder
+  // cargarlo desde el modal de precios.
+  const cubren = (ambiguos ?? []).filter((x) => montoDe(x, lado) > 0);
+  if (cubren.length)
+    return {
+      codigo: "hermano_ambiguo",
+      mensaje:
+        `Ese día esa ruta salió con más de un móvil: su hermano es uno de ${ambiguos!.length} ` +
+        `(${ambiguos!.map(ref).join(", ")}) y no se puede saber cuál sin adivinar. ` +
+        `${laPlata} del día ya está en ${cubren.map(ref).join(" o ")}, así que NO le pongas ` +
+        `importe: enlázalo a mano`,
     };
 
   return null;
@@ -512,6 +540,7 @@ export function analizarServicios(
           ocupado: posible ?? null,
           fuera: opts?.hermanoDe?.(r) ?? null,
           probable: opts?.hermanoProbableDe?.(r) ?? null,
+          ambiguos: opts?.candidatosAmbiguosDe?.(r) ?? null,
           enElConjunto: (x) => porId.has(x.id),
         });
         if (traba) { bloquear(r, [traba]); continue; }

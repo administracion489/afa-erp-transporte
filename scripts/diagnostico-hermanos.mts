@@ -122,39 +122,35 @@ for (const r of objetivos) {
     (atras.length ? `: ${atras.map(ref).join(", ")}` : "")
   );
 
+  // El DÍA entero de esa ruta: es lo único que dice cuántas veces salió, y por lo tanto
+  // si hay algo que deducir o hay que elegir. Contar solo los sueltos fue el falso positivo.
+  const { delDia, candidatos, seguro } = idx.candidaturaDe(r);
+  console.log(`   ese día esa ruta tiene ${delDia.length} tramo(s):`);
+  for (const x of delDia)
+    console.log(
+      `        ${x.id === r.id ? "»" : " "} ${ref(x).padEnd(16)} ${String(x.hora_servicio ?? "").slice(0, 5)} ` +
+      `${sentidoDeReserva(x).padEnd(7)} vinc=${String(Number(x.reserva_vinculada_id ?? 0) || "NULL").padEnd(7)} ${plata(x)}`
+    );
+
   const h = idx.de(r);
   if (!h) {
-    // ── Por qué no hay hermano ───────────────────────────────────────────
     const libre = (x: ReservaLiq) => !Number(x.reserva_vinculada_id ?? 0) && !apuntanA(x.id).length;
-    const mismaLlave = universo.filter(
-      (x) =>
-        x.id !== r.id &&
-        Number(x.cliente_id) === Number(r.cliente_id) &&
-        String(x.fecha_servicio).slice(0, 10) === String(r.fecha_servicio).slice(0, 10) &&
-        etiquetaRutaDetalle(x).etiqueta === etiqueta
-    );
-    const sueltas = mismaLlave.filter(libre);
-    const contrario = sueltas.filter((x) => sentidoDeReserva(x) !== sentidoDeReserva(r));
-
-    console.log(`   ❌ SIN HERMANO. En ese día y esa ruta hay ${mismaLlave.length} tramo(s) más, ${sueltas.length} sin enlace.`);
+    console.log(`   ❌ SIN HERMANO RESUELTO.`);
     if (fuente !== "nombre")
       console.log(`      · La etiqueta no sale del nombre de la ruta, así que NO se deduce nada (el origen→destino está invertido entre ida y retorno).`);
     else if (!libre(r))
-      console.log(`      · Este tramo YA tiene un enlace escrito y apunta a otro sitio: hay que corregirlo en Programación, no deducirlo.`);
-    else if (!contrario.length)
-      console.log(`      · No hay ningún tramo del sentido contrario libre ese día con esa ruta. Revisa si la ida se escribió con otro nombre de ruta, otra fecha u otro cliente.`);
-    else if (contrario.length > 1)
+      console.log(`      · Este tramo YA tiene un enlace escrito y apunta a otro sitio: hay que corregirlo, no deducirlo.`);
+    else if (!candidatos.length)
+      console.log(`      · No hay ningún tramo del sentido contrario ese día con esa ruta. Revisa si el otro tramo se escribió con otro nombre de ruta, otra fecha u otro cliente.`);
+    else if (!seguro) {
       console.log(
-        `      · AMBIGUO: hay ${contrario.length} candidatos del sentido contrario (${contrario.map(ref).join(", ")}). ` +
-        `Son dos móviles: el ERP no adivina, hay que enlazarlos a mano en Programación.`
+        `      · AMBIGUO: esa ruta salió MÁS DE UNA VEZ ese día, así que su hermano es uno de ` +
+        `${candidatos.length} (${candidatos.map(ref).join(", ")}) y el ERP no elige.`
       );
-    else
-      console.log(`      · El candidato ${ref(contrario[0])} existe pero no quedó emparejado — revisa su enlace.`);
-    for (const x of mismaLlave)
-      console.log(
-        `        ${ref(x).padEnd(16)} ${String(x.hora_servicio ?? "").slice(0, 5)} ${sentidoDeReserva(x).padEnd(7)} ` +
-        `vinc=${Number(x.reserva_vinculada_id ?? 0) || "NULL"} ${plata(x)}`
-      );
+      console.log(`      → Sale en el botón ámbar SIN marcar, con la lista para que lo elijas tú.`);
+      enlazables++;
+      continue;
+    }
     sinSalida++;
     continue;
   }
@@ -162,7 +158,7 @@ for (const r of objetivos) {
   const marca =
     h.procedencia === "enlace" ? "✅ enlazado por los dos lados"
     : h.procedencia === "enlace_a_medias" ? "🟠 ENLACE A MEDIAS (escrito en un solo lado)"
-    : "🔵 SIN ENLACE, par deducido sin ambigüedad";
+    : "🔵 SIN ENLACE, y esa ruta salió UNA sola vez ese día: par deducido sin adivinar";
   console.log(`   ${marca}`);
   console.log(`      hermano: ${ref(h.tramo)} ${h.tramo.fecha_servicio} ${String(h.tramo.hora_servicio ?? "").slice(0, 5)} ${sentidoDeReserva(h.tramo)}`);
   console.log(`               ${nombreRuta(h.tramo)}`);
@@ -176,6 +172,6 @@ for (const r of objetivos) {
 
 console.log("");
 console.log("═".repeat(88));
-console.log(`${yaBien} ya enlazado(s) · ${enlazables} reparable(s) desde el botón ámbar · ${sinSalida} sin hermano`);
-if (sinSalida) console.log(`Los "sin hermano" se enlazan a mano desde Programación: son los que el ERP no puede deducir sin adivinar.`);
+console.log(`${yaBien} ya enlazado(s) · ${enlazables} en el botón ámbar · ${sinSalida} sin candidato`);
+if (sinSalida) console.log(`Los "sin candidato" no tienen ningún tramo del sentido contrario ese día con esa ruta: el problema está en la fecha, el cliente o el nombre de la ruta, no en el enlace.`);
 console.log("═".repeat(88));
