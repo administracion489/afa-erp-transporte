@@ -47,17 +47,30 @@
 //   ej: npx tsx scripts/diagnostico-agrupacion.mts 2026-08-01 2026-08-31 cliente
 import fs from "node:fs";
 import path from "node:path";
+// OJO al importar de lib/ desde un script: SOLO se pueden traer símbolos declarados como
+// `export function`. Node carga estos .mts como ESM, tsx transpila el .ts a CommonJS, y
+// los named exports se detectan con un lexer estático que NO ve una arrow declarada con
+// `export const`. En lib/liquidacion-agrupacion.ts hay exactamente dos —`origenContractual`
+// (línea 83) y `nombreRuta` (202)— y pedirlas revienta en el arranque con
+// "does not provide an export named 'nombreRuta'", sin haber leído todavía una sola fila.
+// Por eso aquí se usan sus equivalentes declarados como función:
+//   nombreRuta(r)          → nombreRutaDetalle(r).nombre
+//   origenContractual(cab) → origenDelPar(par), que además es la abstracción correcta:
+//                            el origen del día lo declara el tramo que lleva el importe.
 import {
   analizarServicios,
   etiquetaRuta,
-  nombreRuta,
-  origenContractual,
+  nombreRutaDetalle,
+  origenDelPar,
   precioUnitario,
   type LadoLiquidacion,
   type ParServicio,
   type ReservaLiq,
 } from "../lib/liquidacion-agrupacion";
 import { fmtMoneda } from "../lib/finanzas/dinero";
+
+/** Atajo local: el `nombreRuta` de la librería es `export const` y no se puede importar aquí. */
+const nombreRuta = (r: ReservaLiq | null | undefined) => nombreRutaDetalle(r).nombre;
 
 const RAIZ = process.cwd();
 const env = fs.readFileSync(path.join(RAIZ, ".env.local"), "utf8");
@@ -122,6 +135,12 @@ async function traerReservas(): Promise<any[]> {
       return filas;
     } catch (e: any) {
       ultimo = String(e?.message ?? e);
+      // Solo se reintenta soltando columnas cuando el fallo ES por una columna que no
+      // existe (PostgREST 42703). Un error de red o una llave mal puesta no se arregla
+      // pidiendo menos campos: reintentar cuatro veces y terminar diciendo "no se pudieron
+      // leer ni con el mínimo de columnas" mandaría a buscar una migración que no falta,
+      // mientras el problema real —el .env.local o la conexión— queda sin nombrar.
+      if (!/42703|does not exist|column .* of relation|unknown column/i.test(ultimo)) throw e;
     }
   }
   throw new Error(`No se pudieron leer las reservas ni con el mínimo de columnas.\n  Último error: ${ultimo}`);
@@ -220,7 +239,7 @@ type Claves = { A: string; B: string; C: string; D: string };
 
 function clavesDelPar(p: ParServicio, lado: LadoLiquidacion, lugar: (r: ReservaLiq | null, t: "inicio" | "destino") => string): Claves {
   const precio = money(precioUnitario(p.cabeza, lado, { preciosIncluyenIgv: false, igvPct: 18 }));
-  const org = origenContractual(p.cabeza);
+  const org = origenDelPar(p);
   const nIda = p.ida ? nombreRuta(p.ida) : "";
   const nRet = p.retorno ? nombreRuta(p.retorno) : "";
 
@@ -434,7 +453,7 @@ for (const [, g] of [...grupos].sort((a, b) => b[1].filas.length - a[1].filas.le
   // salen como dos ítems y nadie los confronta.
   const porRuta = new Map<string, Map<number, number>>();
   for (const p of pares) {
-    const etiqueta = `${etiquetaRuta(p.ida ?? p.cabeza)} · ${origenContractual(p.cabeza)}`;
+    const etiqueta = `${etiquetaRuta(p.ida ?? p.cabeza)} · ${origenDelPar(p)}`;
     const precio = precioUnitario(p.cabeza, LADO, { preciosIncluyenIgv: false, igvPct: 18 });
     const m = porRuta.get(etiqueta) ?? new Map<number, number>();
     m.set(precio, (m.get(precio) ?? 0) + 1);
