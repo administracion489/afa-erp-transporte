@@ -148,7 +148,7 @@ export async function cargarDocumentoLiquidacion(
     if (reservaIds.length) {
       const reservas = await enLotes(reservaIds, 300, async (chunk) => {
         const { data } = await sb.from("reservas")
-          .select("id,codigo,fecha_servicio,hora_servicio,ruta_nombre,direccion_servicio,origen,destino,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,pasajeros_abordados,hora_real_inicio,hora_real_fin,precio_cliente,costo_proveedor,estado,reserva_vinculada_id")
+          .select("id,codigo,fecha_servicio,hora_servicio,ruta_nombre,direccion_servicio,origen,destino,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,pasajeros_abordados,precio_cliente,costo_proveedor,estado,reserva_vinculada_id")
           .in("id", chunk);
         return ((data as any[]) ?? []);
       });
@@ -180,6 +180,15 @@ export async function cargarDocumentoLiquidacion(
       };
       const montoDe = (r: any) =>
         Number((lado === "cliente" ? r.precio_cliente : r.costo_proveedor) ?? 0);
+      const diaHora = (r: any) =>
+        `${String(r.fecha_servicio ?? "").slice(0, 10)}T${hhmm(r.hora_servicio) || "99:99"}`;
+
+      // El anexo se imprime en orden de FECHA sobre todo el periodo (01-08 → 31-08),
+      // no agrupado por línea: quien revisa la valorización compara contra su propio
+      // calendario, y con una ruta por bloque el mismo día aparecía cuatro veces
+      // separado por páginas. La numeración del ítem (A-01, B-01…) se sigue calculando
+      // por línea, que es lo que la ata a la valorización; solo cambia el orden.
+      const pendientes: { fila: FilaAnexo; grupo: string; sub: string }[] = [];
 
       for (const l of lineasBd) {
         const deLinea = puente.filter((p) => Number(p.linea_id) === Number(l.id));
@@ -201,11 +210,24 @@ export async function cargarDocumentoLiquidacion(
           if (parId && filas.some((x) => x.id === parId)) numeroDe.set(parId, n);
         }
 
+        // Los dos tramos del día viajan JUNTOS aunque el retorno caiga en la
+        // madrugada siguiente: comparten número de ítem y el importe se cobra una
+        // vez, así que separarlos leería como dos servicios. El par se ubica en la
+        // fecha de su primer tramo.
+        const claveDe = new Map<number, string>();
+        for (const r of filas) {
+          const n = numeroDe.get(r.id) ?? 0;
+          const k = diaHora(r);
+          const previo = claveDe.get(n);
+          if (previo === undefined || k < previo) claveDe.set(n, k);
+        }
+
         for (const r of filas) {
           const esTercero = !!r.vehiculo_tercero_id;
           const incluida = montoDe(r) <= 0;   // el tramo que va dentro de la tarifa del par
-          anexo1.push({
-            ref: serieDe(l.referencia, (numeroDe.get(r.id) ?? 1) - 1),
+          const ref = serieDe(l.referencia, (numeroDe.get(r.id) ?? 1) - 1);
+          const fila: FilaAnexo = {
+            ref,
             fecha: fechaFormato(r.fecha_servicio).slice(0, 5),
             codigo: r.codigo || `#${r.id}`,
             ruta: [r.ruta_nombre || [r.origen, r.destino].filter(Boolean).join(" → "),
@@ -214,9 +236,6 @@ export async function cargarDocumentoLiquidacion(
             placa: placa.get((esTercero ? "t" : "p") + (r.vehiculo_tercero_id ?? r.vehiculo_id)) ?? "",
             conductor: chofer.get((r.conductor_tercero_id ? "t" : "p") + (r.conductor_tercero_id ?? r.conductor_id)) ?? "",
             pax: r.pasajeros_abordados != null ? Number(r.pasajeros_abordados) : null,
-            salida: hhmm(r.hora_real_inicio),
-            llegada: hhmm(r.hora_real_fin),
-            km: null,
             estado: r.estado !== "finalizada" ? "No ejecutado"
               : incluida ? "Incluido"
               : l.tipo === "adicional" ? "Adicional" : "Conforme",
@@ -224,9 +243,22 @@ export async function cargarDocumentoLiquidacion(
             // exactamente con el total de la línea.
             importe: incluida ? 0 : Number(l.precio_unitario ?? 0),
             alerta: r.estado !== "finalizada",
+          };
+          pendientes.push({
+            fila,
+            // El ítem desempata a igual fecha y hora, para que dos rutas que salen
+            // a la misma hora salgan siempre en el mismo orden.
+            grupo: `${claveDe.get(numeroDe.get(r.id) ?? 0) ?? diaHora(r)}|${ref}`,
+            sub: `${diaHora(r)}|${String(r.id).padStart(12, "0")}`,
           });
         }
       }
+
+      // Comparación binaria, no `localeCompare`: las claves son fechas ISO con
+      // separadores, y la colación del idioma ignora la puntuación.
+      const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+      pendientes.sort((a, b) => cmp(a.grupo, b.grupo) || cmp(a.sub, b.sub));
+      anexo1 = pendientes.map((p) => p.fila);
     }
   }
 
