@@ -47,34 +47,52 @@
 //   ej: npx tsx scripts/diagnostico-agrupacion.mts 2026-08-01 2026-08-31 cliente
 import fs from "node:fs";
 import path from "node:path";
-// LA LIBRERÍA SE CARGA CON `require`, NO CON `import`. No es capricho ni estilo viejo:
+// LA LIBRERÍA SE CARGA CON `require` PARA PODER COMPROBARLA ANTES DE USARLA.
 //
-// Node ejecuta estos .mts como ESM, tsx transpila los .ts de lib/ a CommonJS, y para saber
-// qué nombres exporta un módulo CJS visto desde ESM, Node lo analiza con un lexer estático.
-// Ese lexer NO ejecuta el módulo: reconoce ciertas formas del código generado y falla en
-// otras, y lo que reconoce CAMBIA ENTRE VERSIONES DE NODE. Con `import { … }` eso se paga
-// en el arranque y con el peor error posible:
+// Este script se apoya en símbolos de lib/liquidacion-agrupacion.ts que NO están en todas
+// las ramas: `origenDelPar`, `nombreRutaDetalle` y `origenContractual` llegaron con el
+// rediseño de la descripción del ítem. Quien lo corre suele traerse el script suelto
+// —`git checkout <rama> -- scripts/diagnostico-agrupacion.mts`— y entonces queda un script
+// nuevo hablándole a un lib/ viejo. Con `import { … }` eso muere así:
 //
 //     SyntaxError: The requested module '../lib/liquidacion-agrupacion'
 //                  does not provide an export named 'nombreRutaDetalle'
 //
-// diciendo que no existe algo que está exportado en la línea 194. El mismo archivo, con el
-// mismo tsx, arranca sin problema en Node 22 y muere en Node 24 — así que "funciona en mi
-// máquina" aquí no prueba nada, y perseguir qué formas tolera cada versión es tiempo tirado.
+// que es CIERTO pero se lee como un fallo del script, y manda a buscar el problema en el
+// sitio equivocado: se pierde la tarde revisando cómo está declarada la exportación en vez
+// de mirar en qué rama está el árbol de trabajo.
 //
-// `createRequire` se salta el análisis entero: devuelve el `module.exports` de verdad, el
-// que resulta de EJECUTAR el módulo. Los tipos no se pierden —`typeof import(...)` es una
-// anotación, se borra al compilar y no genera ninguna importación en tiempo de ejecución—,
-// así que el editor y `tsc` siguen viendo todo con nombre y firma.
-//
-// Si escribes otro script que use lib/, cópiate este patrón. Los que ya existen usan
-// `import { … }` y hoy funcionan por suerte, no por diseño: importan pocos símbolos y les
-// tocó una forma que el lexer reconoce.
+// Con `require` los símbolos se piden y se COMPRUEBAN abajo, y el script explica en una
+// frase qué falta y qué hacer. Los tipos no se pierden: `typeof import(...)` es una
+// anotación, se borra al compilar y no genera ninguna importación en tiempo de ejecución.
 import { createRequire } from "node:module";
 
 const requerir = createRequire(import.meta.url);
 const LIQ = requerir("../lib/liquidacion-agrupacion") as typeof import("../lib/liquidacion-agrupacion");
 const DINERO = requerir("../lib/finanzas/dinero") as typeof import("../lib/finanzas/dinero");
+
+// ── Comprobación de rama ────────────────────────────────────────────────────
+//
+// Se hace ANTES de leer una sola fila. Sin esto el script arranca, imprime la cobertura del
+// dato —que da la impresión de que todo va bien— y revienta a mitad del primer cliente con
+// "origenDelPar is not a function", que no le dice nada a quien lo corre.
+const REQUERIDOS = [
+  "analizarServicios", "etiquetaRuta", "precioUnitario",   // están desde siempre
+  "origenDelPar", "nombreRutaDetalle",                     // llegaron con el rediseño del ítem
+] as const;
+const faltantes = REQUERIDOS.filter((n) => typeof (LIQ as any)[n] !== "function");
+if (faltantes.length) {
+  console.error(
+    `\n  Tu copia de lib/liquidacion-agrupacion.ts no tiene: ${faltantes.join(", ")}.\n\n` +
+    `  El script es más nuevo que el resto del árbol de trabajo. Pasa cuando se baja el\n` +
+    `  script suelto con "git checkout <rama> -- scripts/…": eso trae UN archivo y deja\n` +
+    `  lib/ como estaba.\n\n` +
+    `  Cámbiate a la rama completa y vuelve a correrlo:\n\n` +
+    `      git checkout claude/consolidar-items-liquidaciones-iynx7l\n\n` +
+    `  (si git se queja de cambios sin guardar, primero: git stash)\n`
+  );
+  process.exit(1);
+}
 
 const { analizarServicios, etiquetaRuta, origenDelPar, precioUnitario } = LIQ;
 const { fmtMoneda } = DINERO;
