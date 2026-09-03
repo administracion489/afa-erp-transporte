@@ -150,9 +150,13 @@ export default function ModalEditor({
         if (!rp.ok) throw new Error(rp.error);
         // Lo que pasó DE VERDAD, no lo que se pidió: la descripción solo se reescribe si
         // el texto cambió, y el ítem puede quedar con otro número que el tecleado.
-        extra = ` ${paxAhora ?? "Sin"} PAX escritos en ${rp.reservas} servicio(s).`
+        extra = (rp.reservas
+                  ? ` ${paxAhora ?? "Sin"} PAX escritos en ${rp.reservas} servicio(s).`
+                  : " No se escribió en ningún servicio.")
               + (rp.descripciones ? " Se reescribió la descripción del ítem." : "")
-              + (rp.paxResultante !== paxAhora
+              // Solo se habla del ítem si se pudo releer: sin la migración este select
+              // también falla, y afirmar "queda sin «N PAX»" sería inventar un resultado.
+              + (rp.paxLeido && rp.paxResultante !== paxAhora
                   ? ` El ítem queda con ${rp.paxResultante ?? "sin «N PAX»"}: lo aporta la `
                     + "cotización o la ficha de la ruta. Para cambiarlo ahí, usa Rutas contratadas."
                   : "")
@@ -375,14 +379,16 @@ export default function ModalEditor({
                             corregir en ningún lado. Escribirlo acá NO se queda en el
                             renglón: va a `reservas.capacidad_contratada` de los servicios
                             de esta línea (ver `actualizarPaxContratado`), así que recalcular
-                            no lo borra y el mes siguiente sale bien solo. */}
+                            no lo borra. Corrige ESTE periodo: los servicios del mes que viene
+                            son otras filas, y quien los hace nacer bien es la ficha de la ruta
+                            (o el ítem de la cotización), no esta celda. */}
                         <td className="px-2 py-2">
                           {deReservas(l) ? (
                             <input
                               disabled={!editable} type="number" min="1" step="1"
                               placeholder="s/d"
                               title={l.pax_contratado == null
-                                ? "Ninguna fuente sabe cuántos asientos se contrataron: el ítem se imprime sin el «N PAX». Escríbelo acá y se guarda en los servicios de esta línea."
+                                ? "Ninguna fuente sabe cuántos asientos se contrataron: el ítem se imprime sin el «N PAX». Escríbelo acá y se guarda en los servicios de esta línea; para que los meses siguientes salgan solos, fíchalo en Liquidaciones → Rutas contratadas."
                                 : "Asientos CONTRATADOS por el cliente. No es la capacidad del bus asignado. Al cambiarlo se escribe en los servicios de esta línea y se rehace la descripción."}
                               className={`w-full px-1.5 py-1 rounded border text-sm text-center ${
                                 l.pax_contratado == null
@@ -443,8 +449,9 @@ export default function ModalEditor({
                 <b>PAX</b> son los asientos que el cliente <b>contrató</b>, no la capacidad del
                 bus que salió (esa cambia según la unidad disponible del día). Al corregirlo y
                 pulsar <b>✓</b> se guarda en los servicios de esa línea —no solo en este
-                documento—, se rehace su descripción y el mes siguiente sale bien solo. Vacío no
-                es cero: el ítem se imprime <b>sin el «N PAX»</b>.
+                documento—, se rehace su descripción y recalcular ya no lo borra. Corrige
+                <b>este periodo</b>: para que los próximos meses nazcan bien, fíchalo además en
+                <b>Rutas contratadas</b>. Vacío no es cero: el ítem se imprime <b>sin el «N PAX»</b>.
               </p>
             )}
 

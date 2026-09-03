@@ -2161,14 +2161,18 @@ export default function ReservasPage() {
    *     decía este servicio antes. Esos son la cohorte que se está corrigiendo; los que
    *     dicen otra cosa la dicen a propósito.
    */
-  const aceptaPax = (r: Reserva, m: NonNullable<typeof modalAplicarMasivo>) => {
+  const motivoPax = (
+    r: Reserva, m: NonNullable<typeof modalAplicarMasivo>
+  ): "ok" | "otra_ruta" | "otra_capacidad" => {
     if (m.rutasObjetivo.length) {
       const suyas = hermanosDelContrato.rutas(r);
-      if (suyas.length && !suyas.some(e => m.rutasObjetivo.includes(e))) return false;
+      if (suyas.length && !suyas.some(e => m.rutasObjetivo.includes(e))) return "otra_ruta";
     }
     const actual = hermanosDelContrato.pax(r);
-    return actual === null || actual === m.paxAntes || actual === m.pax;
+    return actual === null || actual === m.paxAntes || actual === m.pax ? "ok" : "otra_capacidad";
   };
+
+  const aceptaPax = (r: Reserva, m: NonNullable<typeof modalAplicarMasivo>) => motivoPax(r, m) === "ok";
 
   // Los servicios que recibirán la asignación, según los filtros elegidos en el modal.
   // Misma lógica en el render (contador) y en el update, para que el número que se ve
@@ -3273,9 +3277,13 @@ export default function ReservasPage() {
         // horario original: hay que decirlo, no es lo que el operador cree estar aplicando.
         const horaNueva  = payload.hora_servicio?.slice(0, 5) || "";
         const cambiaHora = !soloConductor && !soloPax && !!horaNueva && horaNueva !== horaOriginal;
-        // Los que declaran OTRA capacidad: se nombran, no se tocan en silencio.
-        const paxAjenos = modalAplicarMasivo.paxTocado
-          ? candidatos.filter(r => !aceptaPax(r, modalAplicarMasivo)).length : 0;
+        // Por qué queda fuera cada uno: son DOS trabajos distintos y decirlos con la
+        // misma frase mandaba a los de otra ruta —que se van a imprimir sin el «N PAX»—
+        // con un "la suya es correcta" que no era cierto.
+        const paxOtraRuta = modalAplicarMasivo.paxTocado
+          ? candidatos.filter(r => motivoPax(r, modalAplicarMasivo) === "otra_ruta").length : 0;
+        const paxOtraCapacidad = modalAplicarMasivo.paxTocado
+          ? candidatos.filter(r => motivoPax(r, modalAplicarMasivo) === "otra_capacidad").length : 0;
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
@@ -3317,9 +3325,13 @@ export default function ReservasPage() {
                         elijas «solo el conductor». Acá viajan pegados a la asignación, así
                         que los retornos solo los reciben si marcas abajo los de otro horario
                         — para alcanzarlos a todos, usa <b>«Solo los PAX contratados»</b>.
-                        {paxAjenos > 0 && (
-                          <> <b>{paxAjenos} servicio(s) ya declaran otra capacidad y no se
-                          tocan</b>: son otro móvil del mismo contrato.</>
+                        {paxOtraCapacidad > 0 && (
+                          <> <b>{paxOtraCapacidad} servicio(s) ya declaran otra capacidad y no
+                          se tocan</b>: son otro móvil de esta ruta.</>
+                        )}
+                        {paxOtraRuta > 0 && (
+                          <> <b>{paxOtraRuta} servicio(s) son de otras rutas de este
+                          contrato</b> y tampoco se tocan: los PAX son de cada ruta.</>
                         )}
                       </span>
                     </span>
@@ -3333,11 +3345,18 @@ export default function ReservasPage() {
                       : <><b>los PAX en blanco</b> (se borra la capacidad escrita en esos servicios)</>}
                     {" "}y nada más. Entran las idas <b>y</b> los retornos del rango: los
                     asientos son del día completo.
-                    {paxAjenos > 0 && (
+                    {paxOtraCapacidad > 0 && (
                       <span className="block mt-1">
-                        Quedan fuera <b>{paxAjenos} servicio(s)</b> que ya declaran otra
-                        capacidad: son otro móvil del mismo contrato y la suya es correcta.
-                        Para cambiarlos, abre uno de ellos.
+                        Quedan fuera <b>{paxOtraCapacidad} servicio(s)</b> que ya declaran otra
+                        capacidad: son otro móvil de esta ruta y la suya es correcta. Para
+                        cambiarlos, abre uno de ellos.
+                      </span>
+                    )}
+                    {paxOtraRuta > 0 && (
+                      <span className="block mt-1">
+                        Quedan fuera <b>{paxOtraRuta} servicio(s) de otras rutas</b> de este
+                        contrato: los PAX son de cada ruta, así que esos se corrigen abriendo
+                        uno de ellos. <b>Si están en blanco, su ítem saldrá sin el «N PAX».</b>
                       </span>
                     )}
                   </div>
@@ -4211,7 +4230,22 @@ export default function ReservasPage() {
                   placeholder={paxResuelto.pax != null && paxResuelto.fuente !== "servicio"
                     ? String(paxResuelto.pax) : "—"}
                   value={form.capacidad_contratada}
-                  onChange={f("capacidad_contratada")}
+                  onChange={e => {
+                    // El 0 (y el negativo) se normalizan ACÁ y no al guardar. Si no, el
+                    // campo mostraba "0", el pie decía "Queda escrito en este servicio" y
+                    // al guardar se borraba el 15 que había: la pantalla anunciaba lo
+                    // contrario de lo que iba a pasar. Vacío y cero son lo mismo para la
+                    // base (el CHECK rechaza el cero); que lo sean también acá. Se
+                    // conserva el texto tecleado mientras sea positivo —redondear en vivo
+                    // reescribiría lo que el operador está escribiendo—, que ya redondea
+                    // `paxDelForm` al guardar.
+                    const v = e.target.value;
+                    const n = Number(v);
+                    setForm(p => ({
+                      ...p,
+                      capacidad_contratada: v.trim() === "" || !(n > 0) ? "" : v,
+                    }));
+                  }}
                 />
                 {form.capacidad_contratada.trim() === "" ? (
                   paxResuelto.pax != null ? (

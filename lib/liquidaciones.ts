@@ -648,12 +648,19 @@ export async function contarServiciosDeLinea(
  *     cascada y la cascada no sabe nada de ese renglón (el escalón "línea editada" solo
  *     se consulta al reconstruir un documento ya emitido);
  *   · Programación seguiría mostrando el número viejo, o ninguno;
- *   · y el mes siguiente el periodo se cerraría otra vez mal, porque nada cambió en el
- *     origen del dato. Corregirlo una vez tiene que servir para siempre.
+ *   · y ni "↻ Recalcular" ni reabrir el documento lo recuperarían, porque nada cambió
+ *     en los servicios.
  *
  * Con la fila autoritativa escrita, recalcular es idempotente: la cascada vuelve a leer
  * el mismo número por el escalón 2. Por eso al final se rehace SOLO el texto de esta
  * línea, que lleva el «N PAX» adentro.
+ *
+ * Lo que esto NO hace, y la pantalla tiene que decirlo: arreglar los meses siguientes.
+ * Se escriben los servicios de ESTE periodo —los del puente de esta línea—; los de
+ * septiembre son otras filas y nacen del ítem de la cotización. El único escalón que
+ * sirve para siempre es la ficha de `cliente_ruta`, y se escribe desde Rutas contratadas.
+ * Tampoco se la escribe de acá: sería propagar el dato a una segunda tabla —el catálogo
+ * de TODO el cliente— como efecto colateral de corregir un renglón de un mes.
  *
  * `pax` en null borra el dato ("no lo sé"), que NO es lo mismo que cero: el CHECK de la
  * base rechaza el cero justamente por eso.
@@ -669,7 +676,10 @@ export async function actualizarPaxContratado(
   opts?: { usuario?: string | null }
 ): Promise<{
   ok: boolean;
+  /** Servicios REALMENTE escritos. 0 = la columna no existe y no se escribió nada. */
   reservas?: number;
+  /** false = no se pudo releer el renglón, así que no se afirma nada sobre el ítem. */
+  paxLeido?: boolean;
   /** Descripciones realmente reescritas (0 = el texto no cambió). */
   descripciones?: number;
   /** Con qué PAX queda imprimiéndose el ítem, ya resuelto por la cascada. */
@@ -727,19 +737,27 @@ export async function actualizarPaxContratado(
     // borrar la capacidad de los servicios no deja el ítem sin PAX si la cotización o la
     // ficha de la ruta lo siguen sabiendo — la cascada sigue de largo hasta el escalón 3.
     // Devolverlo es lo que permite que la pantalla diga lo que pasó en vez de suponerlo.
+    // `paxLeido` separa "quedó sin dato" de "no se pudo leer": sin la migración
+    // liquidaciones-03 la columna del renglón tampoco existe y este select siempre
+    // falla, y confundir las dos cosas hacía que la pantalla afirmara que el ítem queda
+    // sin «N PAX» —cuando puede seguir imprimiendo el suyo— y mandara al operador a una
+    // pantalla que esa misma migración que falta es la que respalda.
     let paxResultante: number | null | undefined;
     const rl = await sb.from(t.linea).select("pax_contratado").eq("id", lineaId).maybeSingle();
-    if (!rl.error) paxResultante = rl.data?.pax_contratado ?? null;
+    const paxLeido = !rl.error;
+    if (paxLeido) paxResultante = rl.data?.pax_contratado ?? null;
 
     await registrarEvento(sb, lado, Number(linea.liquidacion_id), "pax_contratado_corregido", {
       detalle: `Ítem #${lineaId}: ${limpio ?? "sin dato"} PAX contratados, escritos en ${ids.length} `
              + `servicio(s) (antes: ${antes.map((v) => v ?? "sin dato").join(", ") || "—"}). `
-             + `El ítem queda con ${paxResultante ?? "sin dato"}.`,
+             + `El ítem queda con ${paxLeido ? (paxResultante ?? "sin dato") : "…no se pudo releer el renglón"}.`,
       usuario: opts?.usuario ?? undefined,
     });
     return {
-      ok: true, reservas: ids.length, descripciones: rd.actualizadas ?? 0,
-      paxResultante, aviso: res.aviso,
+      // Lo REALMENTE escrito, no los candidatos: `guardarReservas` suelta la columna
+      // cuando la migración no corrió, y ahí no se escribió ninguna fila.
+      ok: true, reservas: res.guardados.length, descripciones: rd.actualizadas ?? 0,
+      paxLeido, paxResultante, aviso: res.aviso,
     };
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) };

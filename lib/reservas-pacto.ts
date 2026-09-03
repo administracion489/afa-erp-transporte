@@ -356,6 +356,11 @@ export async function guardarReservas(
       err = await escribir(lote);
     }
 
+    // El patch se quedó SIN columnas: no se escribió nada. Contarlo como guardado hacía
+    // que la pantalla anunciara una escritura que no ocurrió ("15 PAX escritos en 26
+    // servicio(s)") y el desmentido viajaba en `aviso`, al final de la misma frase.
+    if (Object.keys(payload).length === 0) continue;
+
     if (!err) { guardados.push(...lote); continue; }
 
     // El lote falló: fila por fila, para poder nombrar al culpable en vez de decir
