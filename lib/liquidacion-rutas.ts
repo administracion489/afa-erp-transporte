@@ -172,6 +172,48 @@ export async function guardarPaxContratado(
   }
 }
 
+/**
+ * Escribe los asientos contratados EN LOS SERVICIOS, no en la ficha de la ruta.
+ *
+ * Hace falta porque `cliente_ruta` tiene un índice único por (cliente, sede, nombre de ida,
+ * nombre de retorno): una ruta = una ficha = UN número. Y hay rutas que en el mismo periodo
+ * salen con dos contratos distintos. El caso que lo destapó: la RUTA C de retorno con tres
+ * adicionales, uno contratado por 4 asientos y dos por 10, todos con el mismo par de
+ * nombres. La ficha no puede sostener los dos números; el servicio sí, y además es el
+ * escalón que MANDA sobre ella en la cascada (ver la cabecera de este archivo).
+ *
+ * Es también lo correcto conceptualmente: `reservas.capacidad_contratada` es un snapshot de
+ * lo que se pactó PARA ESE SERVICIO, igual que `precio_cliente`. La ficha es la red de
+ * seguridad para los que no lo traen escrito.
+ *
+ * `pax` en null borra el snapshot y devuelve esos servicios a la cascada, que es distinto
+ * de escribir un cero.
+ */
+export async function guardarPaxDeServicios(
+  sb: any,
+  reservaIds: number[],
+  pax: number | null
+): Promise<{ ok: boolean; escritos: number; error?: string }> {
+  const ids = [...new Set(reservaIds.filter((n) => Number.isFinite(n) && n > 0))];
+  if (!ids.length) return { ok: true, escritos: 0 };
+  const valor = pax != null && Number(pax) > 0 ? Math.round(Number(pax)) : null;
+  let escritos = 0;
+  try {
+    // Por lotes: un `.in()` con cientos de ids desborda la URL y PostgREST responde 400.
+    for (let i = 0; i < ids.length; i += 80) {
+      const lote = ids.slice(i, i + 80);
+      const { error } = await sb.from("reservas").update({ capacidad_contratada: valor }).in("id", lote);
+      // Se corta al primer fallo y se dice cuántos SÍ entraron: dejar creer que se
+      // guardaron 200 cuando entraron 80 es peor que el propio fallo.
+      if (error) return { ok: false, escritos, error: error.message };
+      escritos += lote.length;
+    }
+    return { ok: true, escritos };
+  } catch (e: any) {
+    return { ok: false, escritos, error: String(e?.message ?? e) };
+  }
+}
+
 // ── Pax de la cotización ────────────────────────────────────────────────────
 
 /**

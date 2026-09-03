@@ -26,7 +26,19 @@ const titulo = (t: string) => console.log(`\n${t}\n${"─".repeat(t.length)}`);
 
 const OPTS: OpcionesAgrupacion = {
   lado: "cliente",
-  catalogo: { placaDe: () => "", capacidadDe: () => null, conductorDe: () => "" },
+  catalogo: {
+    placaDe: () => "",
+    capacidadDe: () => null,
+    conductorDe: () => "",
+    // Como en la pantalla: el pax sale del snapshot que el servicio lleva encima.
+    paxContratadoDe: (par) => {
+      for (const t of [par.ida, par.retorno, par.cabeza, ...par.adjuntas]) {
+        const n = Number(t?.capacidad_contratada ?? 0);
+        if (Number.isFinite(n) && n > 0) return Math.round(n);
+      }
+      return null;
+    },
+  },
   preciosIncluyenIgv: false,
   igvPct: 18,
   desde: "2026-08-01",
@@ -57,6 +69,8 @@ function dia(o: {
   fecha: string;
   hora?: string;
   origen?: string;
+  /** Asientos CONTRATADOS de este servicio (reservas.capacidad_contratada). */
+  pax?: number | null;
   /** Para el caso del retorno suelto: el importe va en el retorno y no hay ida. */
   soloRetorno?: boolean;
 }): ReservaLiq[] {
@@ -74,6 +88,7 @@ function dia(o: {
     estado: "finalizada",
     cliente_id: 1,
     origen_contractual: o.origen ?? "contrato",
+    capacidad_contratada: o.pax ?? null,
   };
   if (o.soloRetorno) {
     const id = ++idSeq;
@@ -317,6 +332,46 @@ titulo("13 · Reunir horas distintas no crea un MÓVIL falso");
   ok(ls2.length === 2, "dos unidades a la misma hora siguen partiendo el ítem", ls2.length);
   ok(caja(ls2) === 2200, "y la caja no se mueve", `S/ ${caja(ls2).toFixed(2)}`);
   ok(new Set(ls2.map((l) => l.clave)).size === ls2.length, "sin colisión de agrupacion_clave");
+}
+
+// ── 14 · El PAX contratado separa ítems, igual que la tarifa ────────────────
+//
+// Caso real reportado sobre la web: la RUTA C de retorno reunía tres adicionales en una
+// sola fila —OS-2026-008396 contratada por 4 PAX y las otras dos por 10— y el formato
+// habría impreso UN solo "N PAX". Peor: `agruparServicios` tomaba el pax del PRIMER par
+// del bucket, así que el número del papel dependía del orden de lectura de las reservas.
+titulo("14 · Dos capacidades contratadas NUNCA comparten ítem");
+{
+  const r = (h: string): Tramo => ({ nombre: `RUTA C/ RETORNO ${h}/ BSF→PRIMERO DE MAYO`, desde: BSF, hasta: MAYO });
+  const rs = [
+    ...dia({ ida: r("19:00"), precio: 320, fecha: "2026-08-14", origen: "adicional", soloRetorno: true, pax: 10 }),
+    ...dia({ ida: r("21:00"), precio: 320, fecha: "2026-08-21", origen: "adicional", soloRetorno: true, pax: 10 }),
+    ...dia({ ida: r("19:00"), precio: 320, fecha: "2026-08-13", origen: "adicional", soloRetorno: true, pax: 4 }),
+  ];
+  const ls = lineasDe(rs);
+  ok(ls.length === 2, "misma ruta y misma tarifa, pero 4 y 10 PAX → dos ítems", `${ls.length}`);
+  const de10 = ls.find((l) => l.pax_contratado === 10);
+  const de4 = ls.find((l) => l.pax_contratado === 4);
+  ok(!!de10 && de10.cantidad === 2, "el de 10 PAX lleva los dos servicios", de10?.cantidad);
+  ok(!!de4 && de4.cantidad === 1, "el de 4 PAX lleva el suyo", de4?.cantidad);
+  ok(caja(ls) === 960, "la caja no se mueve", `S/ ${caja(ls).toFixed(2)}`);
+
+  // Y el orden de lectura ya no decide qué número se imprime.
+  const alReves = lineasDe([...rs].reverse());
+  ok(alReves.length === 2, "leyendo las reservas al revés sale lo mismo", alReves.length);
+  ok(
+    JSON.stringify(ls.map((l) => l.pax_contratado).sort()) ===
+      JSON.stringify(alReves.map((l) => l.pax_contratado).sort()),
+    "y con los mismos PAX",
+    alReves.map((l) => l.pax_contratado).join(" · ")
+  );
+
+  // Sin dato de pax en ninguno, la ruta NO se fragmenta.
+  const sinDato = lineasDe([
+    ...dia({ ida: r("19:00"), precio: 320, fecha: "2026-08-14", origen: "adicional", soloRetorno: true }),
+    ...dia({ ida: r("21:00"), precio: 320, fecha: "2026-08-21", origen: "adicional", soloRetorno: true }),
+  ]);
+  ok(sinDato.length === 1, "sin capacidad contratada en ninguno, siguen en un ítem", sinDato.length);
 }
 
 console.log(fallos ? `\n${fallos} FALLA(S)\n` : "\nTODO OK\n");

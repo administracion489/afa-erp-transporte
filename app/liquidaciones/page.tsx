@@ -524,19 +524,31 @@ export default function LiquidacionesPage() {
     const out = new Map<string, RutaDelPeriodo>();
     for (const g of gruposVisibles)
       for (const l of g.lineas) {
-        const k = `${g.contraparteId ?? 0}|${g.sedeId ?? 0}|${l.nombre_ida ?? ""}|${l.nombre_retorno ?? ""}`;
-        // La ficha NO se parte por origen: la capacidad contratada es de la RUTA, y
-        // `cliente_ruta` la identifica por el par de nombres. Pero se cuenta cuántos de
-        // esos servicios fueron adicionales, para poder decirlo en la fila.
+        // La fila del modal es UN ÍTEM del formato, no una ruta entera. Antes se agrupaba
+        // solo por el par de nombres —porque `cliente_ruta` se identifica así— y eso metía
+        // en un mismo renglón servicios a tarifas distintas: en producción la RUTA C de
+        // retorno juntó tres adicionales a S/ 100 y S/ 320, con un único campo de PAX para
+        // los tres, y uno de ellos estaba contratado por 4 asientos y los otros por 10.
+        // Con un solo input no había forma de escribirlo.
+        //
+        // Ahora la fila se parte por lo mismo que parte el ítem —tarifa, origen y PAX— así
+        // que lo que se teclea aquí es exactamente lo que va a imprimir ese renglón. El
+        // guardado sabe distinguir los dos casos: ver `guardar()` en ModalRutasContratadas.
+        const k = [
+          g.contraparteId ?? 0, g.sedeId ?? 0,
+          l.nombre_ida ?? "", l.nombre_retorno ?? "",
+          l.precio_unitario.toFixed(2), l.origen_contractual, l.pax_contratado ?? "",
+        ].join("|");
         const adics = l.tipo === "adicional" ? l.cantidad : 0;
         const ya = out.get(k);
         if (ya) {
           ya.servicios += l.cantidad;
           ya.adicionales += adics;
-          // Los tramos y el dinero de TODAS las líneas que caen en la misma ficha: la
-          // ficha no se parte por móvil ni por origen, así que su detalle tampoco. Las
-          // tarifas se acumulan DISTINTAS, no promediadas: con un adicional a otro precio,
-          // un promedio mostraría un importe que no se le cobró a nadie.
+          // Lo único que sigue cayendo en la misma fila son los MÓVILES de una ruta que
+          // sale con dos unidades a la vez: comparten tarifa, origen y PAX, así que
+          // comparten ficha. Las tarifas se acumulan DISTINTAS y nunca promediadas — con
+          // la clave de arriba debería haber siempre una, y si apareciera una segunda es
+          // que algo se coló: se muestra en vez de esconderse detrás de un promedio.
           ya.reservasPeriodo.push(...l.reservas_periodo);
           if (!ya.precios.includes(l.precio_unitario)) ya.precios.push(l.precio_unitario);
           ya.total += l.total_linea;

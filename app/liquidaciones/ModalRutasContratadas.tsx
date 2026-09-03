@@ -28,7 +28,7 @@
 
 import { useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { guardarPaxContratado } from "@/lib/liquidacion-rutas";
+import { guardarPaxContratado, guardarPaxDeServicios } from "@/lib/liquidacion-rutas";
 import { fmtMoneda } from "@/lib/finanzas/dinero";
 
 export type RutaDelPeriodo = {
@@ -122,13 +122,35 @@ export default function ModalRutasContratadas({
         fallos.push(`${r.nombreIda ?? "(sin nombre)"}: "${texto}" no es una cantidad de asientos`);
         continue;
       }
-      const res = await guardarPaxContratado(supabase, {
-        clienteId: r.clienteId,
-        sedeId: r.sedeId,
-        nombreIda: r.nombreIda,
-        nombreRetorno: r.nombreRetorno,
-        pax,
-      });
+      // DÓNDE SE GUARDA depende de si esta fila es la ruta entera o solo una parte.
+      //
+      // `cliente_ruta` tiene un índice único por par de nombres: una ruta, un número. Pero
+      // la misma ruta puede salir en el periodo con dos contratos —la RUTA C de retorno
+      // tenía un adicional por 4 asientos y dos por 10, todos con el mismo nombre—, y ahí
+      // la ficha no da para los dos. Guardar las dos filas contra la ficha haría que la
+      // segunda pisara a la primera EN SILENCIO.
+      //
+      //   · ruta con UNA sola fila  → la ficha, como siempre: se corrige una vez y los
+      //                               meses siguientes salen bien solos.
+      //   · ruta con VARIAS filas   → el snapshot de cada servicio, que es el escalón que
+      //                               manda sobre la ficha y sí distingue fila por fila.
+      const filasDeLaRuta = rutas.filter(
+        (x) =>
+          (x.clienteId ?? 0) === (r.clienteId ?? 0) &&
+          (x.sedeId ?? 0) === (r.sedeId ?? 0) &&
+          (x.nombreIda ?? "") === (r.nombreIda ?? "") &&
+          (x.nombreRetorno ?? "") === (r.nombreRetorno ?? "")
+      ).length;
+
+      const res = filasDeLaRuta > 1
+        ? await guardarPaxDeServicios(supabase, r.reservasPeriodo, pax)
+        : await guardarPaxContratado(supabase, {
+            clienteId: r.clienteId,
+            sedeId: r.sedeId,
+            nombreIda: r.nombreIda,
+            nombreRetorno: r.nombreRetorno,
+            pax,
+          });
       if (res.ok) ok += 1;
       else fallos.push(`${r.nombreIda ?? "(sin nombre)"}: ${res.error}`);
     }
