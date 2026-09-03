@@ -2095,7 +2095,12 @@ export default function ReservasPage() {
     }
     const desde = sumarDias(fechas[0], -CANJE_DIAS);
     const hasta = sumarDias(fechas[fechas.length - 1], CANJE_DIAS);
-    const buscado = opuesto(m.destino); // el origen que la contraparte tiene HOY
+    // La contraparte es la que HOY lleva la etiqueta que este lado va a TOMAR: si este
+    // pasa a 'adicional', la otra es la que hoy figura como 'adicional' y volverá a
+    // 'contrato'. Buscarla por el origen contrario ofrecía exactamente las filas a las
+    // que después se les escribía el valor que ya tenían: el canje cambiaba un solo
+    // lado y el "intercambio" era un no-op que además movía dinero de verdad.
+    const buscado = m.destino;
 
     let colsUso = COLS_LISTA;
     const pedir = () => supabase.from("reservas").select(colsUso)
@@ -2153,9 +2158,14 @@ export default function ReservasPage() {
     return planDeCanje(de(ladoPropio(modalOrigen)), de(ladoContraparte(modalOrigen)), modalOrigen.destino);
   }, [modalOrigen]);
 
-  /** Qué le pasa a la valorización al marcar medio par. Null cuando no aplica. */
+  /**
+   * Qué le pasa a la valorización al marcar medio par. Solo sobre UN día: en una
+   * selección en lote cada día se decide por su propio tramo con importe, y una sola
+   * frase describiría a uno mientras miente sobre los demás. Ahí se dice la regla en
+   * vez de un número (ver el JSX del modal).
+   */
   const efectoTramo = useMemo(() => {
-    if (!modalOrigen?.soloTramo) return null;
+    if (!modalOrigen?.soloTramo || modalOrigen.ids.length !== 1) return null;
     const par = modalOrigen.todos.map(id => modalOrigen.filas[id]).filter(Boolean);
     if (par.length < 2) return null;
     return efectoDeMarcarTramo(par, modalOrigen.ids, modalOrigen.destino);
@@ -2578,12 +2588,21 @@ export default function ReservasPage() {
                             </span>
                           </span>
                         </label>
-                        {efectoTramo && (
+                        {modalOrigen.soloTramo && (efectoTramo ? (
                           <p className="text-[12px] leading-snug mt-2.5 pl-6"
                              style={{ color: efectoTramo.mueveValorizacion ? "#854d0e" : "#0b315f" }}>
                             {efectoTramo.aviso}
                           </p>
-                        )}
+                        ) : modalOrigen.ids.length > 1 && (
+                          // En lote no se puede dar UN importe: cada día lo decide su
+                          // propio tramo con tarifa. Se dice la regla, no una cifra falsa.
+                          <p className="text-[12px] leading-snug mt-2.5 pl-6" style={{ color: "#0b315f" }}>
+                            Son {modalOrigen.ids.length} tramos de días distintos. En cada día,
+                            el que decide cómo se cobra es <b>el tramo que lleva la tarifa</b>:
+                            donde marques ese, el día cambia de subtotal; donde marques el que
+                            va en S/ 0.00, la valorización no se mueve y queda el registro.
+                          </p>
+                        ))}
                       </div>
                     )}
 
@@ -2629,7 +2648,7 @@ export default function ReservasPage() {
                           <p className="text-[12px] text-gray-400">Buscando la contraparte…</p>
                         ) : (modalOrigen.candidatos ?? []).length === 0 ? (
                           <p className="text-[12px] leading-snug text-gray-500">
-                            No hay servicios <b>{opuesto(modalOrigen.destino)}</b> de este cliente
+                            No hay servicios <b>{modalOrigen.destino}</b> de este cliente
                             dentro de los ±{CANJE_DIAS} días. Un canje necesita los dos lados: si la
                             contraparte no está marcada todavía, márcala primero desde su propia fila.
                           </p>
@@ -2637,7 +2656,7 @@ export default function ReservasPage() {
                           <>
                             <p className="text-[11px] text-gray-500 leading-snug">
                               Elige el servicio que hoy está como{" "}
-                              <b>{opuesto(modalOrigen.destino)}</b> y que en realidad era el otro:
+                              <b>{modalOrigen.destino}</b> y que en realidad era el otro:
                             </p>
                             <div className="max-h-44 overflow-y-auto space-y-1.5 pr-1">
                               {(modalOrigen.candidatos ?? []).map(c => {

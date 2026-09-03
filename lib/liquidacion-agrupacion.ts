@@ -108,6 +108,41 @@ export function origenDelPar(p: ParServicio): string {
   return origenContractual(p.cabeza);
 }
 
+/**
+ * El origen de un CONJUNTO de tramos —una línea entera del documento— con la misma
+ * regla que `origenDelPar`: mandan los tramos que LLEVAN EL IMPORTE.
+ *
+ * `agruparServicios` arma cada línea con pares que ya comparten origen, así que por el
+ * camino normal todos los portadores dicen lo mismo. Esto existe para el camino que NO
+ * pasa por la agrupación: `recalcularDescripciones`, que reescribe el texto de una
+ * línea YA creada y solo tiene las reservas del puente, sin pares. Ahí se miraban
+ * TODOS los tramos y se tomaba el primero distinto de 'contrato' — el contagio, que
+ * `origenDelPar` ya había derogado. Con un solo retorno marcado (y el retorno va en
+ * S/ 0.00 a propósito) el renglón de 26 días contratados salía rotulado "SERVICIO
+ * ADICIONAL" mientras `tipo` seguía diciendo "servicio" y el importe sumaba bajo
+ * Servicios del periodo: dos textos distintos para la misma línea según se creara o se
+ * recalculara. Y esa descripción es un snapshot que se imprime en el AFA-FL-07 y se
+ * copia a correos y órdenes de compra.
+ *
+ * Si los portadores discrepan entre sí —alguien remarcó servicios después de emitir el
+ * borrador— gana el más repetido: desde aquí la línea ya no se puede partir, así que
+ * el texto tiene que describir a la mayoría de sus días. El empate lo decide el primer
+ * portador, para que el resultado no baile entre recargas.
+ */
+export function origenDeTramos(filas: ReservaLiq[], lado: LadoLiquidacion): string {
+  const portadores = filas.filter((r) => montoDe(r, lado) > 0);
+  const votan = portadores.length ? portadores : filas;
+  const cuenta = new Map<string, number>();
+  for (const r of votan) {
+    const o = origenContractual(r);
+    cuenta.set(o, (cuenta.get(o) ?? 0) + 1);
+  }
+  let ganador = "contrato";
+  let max = 0;
+  for (const [o, n] of cuenta) if (n > max) { ganador = o; max = n; }
+  return ganador;
+}
+
 /** Datos de apoyo que la página resuelve una sola vez (placas, capacidades, nombres). */
 export type CatalogoLiq = {
   placaDe: (r: ReservaLiq) => string;

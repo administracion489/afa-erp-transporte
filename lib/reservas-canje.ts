@@ -52,9 +52,11 @@ export type LadoCanje = {
   ids: number[];
   codigos: string[];
   /**
-   * Lo que ese lado factura el día. Es la SUMA de los tramos, no el precio de la
-   * cabeza: en un par normal la tarifa va entera en un tramo y el otro va en 0,
-   * así que sumar da el importe del día sin tener que decidir cuál es la cabeza.
+   * Lo que ese lado pone en juego. Es la SUMA de sus tramos, no el precio de la
+   * cabeza: en un par normal la tarifa va entera en un tramo y el otro va en 0, así
+   * que sumar da el importe del día sin tener que decidir cuál es la cabeza. Con el
+   * lado recortado a UN tramo (ver más abajo) el importe es el de ese tramo, que
+   * puede ser S/ 0.00 — y entonces `avisos` lo dice.
    */
   importe: number;
   destino: DestinoOrigen;
@@ -96,8 +98,16 @@ const lado = (filas: FilaCanje[], destino: DestinoOrigen): LadoCanje => ({
  * Arma el plan del canje y sus avisos.
  *
  * `destinoA` es a dónde va el lado que el operador estaba marcando; la contraparte
- * siempre va al opuesto. Los dos lados llegan YA expandidos con sus hermanos: partir
- * un par por la mitad es justamente lo que el canje evita.
+ * siempre va al OPUESTO — ese es todo el canje. Ojo con el otro extremo del hilo: lo
+ * que la pantalla BUSCA como contraparte tiene que ser lo que hoy lleva `destinoA`
+ * (la etiqueta que este lado va a tomar). Buscarla por el origen contrario ofrece
+ * filas a las que luego se les escribe el valor que ya tenían, y entonces el canje
+ * mueve un solo lado sin intercambiar nada.
+ *
+ * Cada lado llega con los tramos que el operador decidió mover: normalmente el día
+ * completo (ida + retorno, que es la unidad que se cobra), o un solo tramo cuando
+ * está encendido "Cambiar solo el tramo marcado". Los avisos cubren las dos formas,
+ * incluida la asimetría de 2 tramos contra 1.
  */
 export function planDeCanje(
   filasA: FilaCanje[],
@@ -168,11 +178,15 @@ export function planDeCanje(
 }
 
 export type EfectoTramo = {
-  /** El tramo que lleva la tarifa del día. null cuando ninguno la lleva. */
+  /**
+   * El tramo que clasifica el día. null cuando no hay UNO solo: ni cuando ningún
+   * tramo lleva tarifa, ni cuando la llevan los dos (ahí ya son dos servicios
+   * independientes y cada uno se clasifica a sí mismo).
+   */
   portador: FilaCanje | null;
-  /** La tarifa del día (la suma de los tramos: el otro va en 0). */
+  /** La tarifa del día: la suma de los tramos, porque el otro normalmente va en 0. */
   importe: number;
-  /** Lo marcado incluye al portador → el día entero cambia de subtotal. */
+  /** Lo marcado cambia de subtotal algún importe. */
   mueveValorizacion: boolean;
   /** Qué va a pasar, en la frase que se le enseña al operador ANTES de aplicar. */
   aviso: string;
@@ -182,50 +196,73 @@ export type EfectoTramo = {
  * Qué le pasa a la valorización si se marca SOLO una parte de un par.
  *
  * Como el origen del día lo declara el tramo que lleva el importe (ver
- * `origenDelPar`), marcar un tramo tiene dos efectos posibles y radicalmente
- * distintos, y desde la pantalla no se distinguen si nadie los dice:
+ * `origenDelPar`), marcar un tramo tiene efectos radicalmente distintos que desde la
+ * pantalla no se distinguen si nadie los dice:
  *
  *   · se marca el tramo que lleva la tarifa  → el día entero cambia de subtotal;
  *   · se marca el tramo que va en S/ 0.00    → la valorización no se mueve, y la
- *     marca queda como registro de que ESE tramo fue el que cambió de manos.
+ *     marca queda como registro de que ESE tramo fue el que cambió de manos;
+ *   · los DOS tramos llevan tarifa           → `analizarServicios` ya los trata como
+ *     dos servicios independientes (ver su rama "los dos cobran"), así que cada uno
+ *     se clasifica solo y marcar uno mueve únicamente lo suyo. Ese estado es legal:
+ *     Programación lo permite tras confirmar el candado del doble cobro.
  *
- * `par` son los dos tramos (o el único, si no tiene hermano) y `marcados` los ids
- * que el operador va a cambiar.
+ * `par` son los tramos de UN día —los dos, o el único si no tiene hermano— y
+ * `marcados` los ids que el operador va a cambiar. Pasarle una selección en lote de
+ * varios días daría una sola frase para días que se deciden por separado: por eso el
+ * llamador solo lo invoca sobre un par.
  */
 export function efectoDeMarcarTramo(
   par: FilaCanje[],
   marcados: number[],
   destino: DestinoOrigen
 ): EfectoTramo {
-  const importe = redondear(par.reduce((s, f) => s + Number(f.precio_cliente ?? 0), 0));
-  // El portador es el tramo con importe; a igualdad de importes manda el primero,
-  // que es el mismo criterio con el que `analizarServicios` elige la cabeza.
-  const portador = par.reduce<FilaCanje | null>(
-    (mejor, f) =>
-      Number(f.precio_cliente ?? 0) > Number(mejor?.precio_cliente ?? 0) ? f : mejor,
-    null
-  );
-  const llevaAlgo = Number(portador?.precio_cliente ?? 0) > 0;
+  const monto = (f: FilaCanje) => Number(f.precio_cliente ?? 0);
+  const importe = redondear(par.reduce((s, f) => s + monto(f), 0));
   const enMarcados = new Set(marcados);
-  const mueveValorizacion = llevaAlgo && !!portador && enMarcados.has(portador.id);
+  const conTarifa = par.filter((f) => monto(f) > 0);
 
-  let aviso: string;
-  if (!llevaAlgo) {
-    // Sin tarifa en ningún tramo el par ni siquiera entra a la liquidación: queda
-    // bloqueado por "sin precio". Decirlo aquí evita buscar el efecto donde no está.
-    aviso =
-      "Ninguno de los dos tramos lleva importe, así que este día todavía no entra a " +
-      "ninguna liquidación. La marca queda registrada igual.";
-  } else if (mueveValorizacion) {
-    aviso =
-      `El día completo pasará a cobrarse como ${destino.toUpperCase()} (${soles(importe)}): ` +
-      `estás marcando el tramo que lleva la tarifa.`;
-  } else {
-    aviso =
-      `La valorización NO se mueve: la tarifa del día (${soles(importe)}) está en ` +
-      `${rotulo(portador!)}, que no estás marcando, y ese tramo es el que clasifica el día. ` +
-      `Esta marca queda como registro de que fue este tramo el que cambió.`;
+  // Sin tarifa en ningún tramo el par ni siquiera entra a la liquidación: queda
+  // bloqueado por "sin precio". Decirlo evita buscar el efecto donde no está.
+  if (!conTarifa.length) {
+    return {
+      portador: null,
+      importe,
+      mueveValorizacion: false,
+      aviso:
+        "Ninguno de los dos tramos lleva importe, así que este día todavía no entra a " +
+        "ninguna liquidación. La marca queda registrada igual.",
+    };
   }
+
+  // Los dos cobran: no hay "día" que mover, hay dos servicios que van cada uno por su
+  // lado. Anunciar aquí "la valorización no se mueve" era decir lo contrario de lo que
+  // pasa — el tramo marcado SÍ se lleva su propio importe al otro subtotal.
+  if (conTarifa.length > 1) {
+    const seMueve = redondear(
+      conTarifa.filter((f) => enMarcados.has(f.id)).reduce((s, f) => s + monto(f), 0)
+    );
+    const quedan = redondear(importe - seMueve);
+    return {
+      portador: null,
+      importe,
+      mueveValorizacion: seMueve > 0,
+      aviso:
+        `Los dos tramos llevan importe, así que ya son dos servicios independientes y ` +
+        `cada uno se clasifica solo: pasa a ${destino.toUpperCase()} ${soles(seMueve)} y ` +
+        `${soles(quedan)} se queda como está.`,
+    };
+  }
+
+  const portador = conTarifa[0];
+  const mueveValorizacion = enMarcados.has(portador.id);
+
+  const aviso = mueveValorizacion
+    ? `El día completo pasará a cobrarse como ${destino.toUpperCase()} (${soles(importe)}): ` +
+      `estás marcando el tramo que lleva la tarifa.`
+    : `La valorización NO se mueve: la tarifa del día (${soles(importe)}) está en ` +
+      `${rotulo(portador)}, que no estás marcando, y ese tramo es el que clasifica el día. ` +
+      `Esta marca queda como registro de que fue este tramo el que cambió.`;
 
   return { portador, importe, mueveValorizacion, aviso };
 }

@@ -9,7 +9,7 @@
 // servicio, que la "salida adicional" suelta lleve el importe ella misma, y que sin la
 // migración de reservas-04 todo se siga leyendo como contratado.
 import {
-  analizarServicios, agruparServicios, totalesValorizacion,
+  analizarServicios, agruparServicios, totalesValorizacion, origenDeTramos,
   type ReservaLiq, type CatalogoLiq,
 } from "../lib/liquidacion-agrupacion";
 import { planDeCanje, notaDeCanje, efectoDeMarcarTramo } from "../lib/reservas-canje";
@@ -254,6 +254,80 @@ const opts = {
   chk("sin tarifa en ningún tramo lo dice en vez de inventar un efecto",
       !sinTarifa.mueveValorizacion && /no entra a ninguna liquidación/.test(sinTarifa.aviso),
       sinTarifa.aviso);
+}
+
+// ── 10. Los DOS tramos con importe: son dos servicios, no un día ──────────
+//
+// Estado legal (Programación lo permite tras confirmar el candado del doble cobro).
+// `efectoDeMarcarTramo` anunciaba aquí "la valorización no se mueve", que es justo lo
+// contrario de lo que pasa: el tramo marcado se lleva su propio importe.
+{
+  const a = { id: 100, codigo: "A", precio_cliente: 350 };
+  const b = { id: 101, codigo: "B", precio_cliente: 200 };
+
+  const e = efectoDeMarcarTramo([a, b], [b.id], "adicional");
+  chk("con los dos tramos cobrando, marcar uno SÍ mueve su importe", e.mueveValorizacion);
+  chk("y dice cuánto se mueve y cuánto se queda",
+      /200\.00/.test(e.aviso) && /350\.00/.test(e.aviso), e.aviso);
+  chk("no hay un solo portador que clasifique el día", e.portador === null);
+
+  // Y la liquidación lo respalda: son DOS líneas, cada una con su origen.
+  const rs = [
+    base(102, { id: 102, reserva_vinculada_id: 103, precio_cliente: 350 }),
+    base(103, {
+      id: 103, reserva_vinculada_id: 102, precio_cliente: 200, direccion_servicio: "retorno",
+      hora_servicio: "17:00", origen_contractual: "adicional",
+      ruta_nombre: "RUTA A/ RETORNO 17:00/ BSF→SANTA ANITA",
+    }),
+  ];
+  const lineas = agruparServicios(analizarServicios(rs, "cliente").pares, opts);
+  chk("los dos cobrando salen como dos líneas separadas", lineas.length === 2, `${lineas.length}`);
+  const t = totalesValorizacion(lineas, 18);
+  chk("cada importe cae en su propio subtotal",
+      t.servicios === 350 && t.adicionales === 200,
+      `servicios ${t.servicios} · adicionales ${t.adicionales}`);
+}
+
+// ── 11. El origen de una LÍNEA entera lo deciden sus tramos con importe ────
+//
+// `recalcularDescripciones` no tiene pares, solo las reservas del puente de la línea
+// (26 días × 2 tramos). Antes tomaba el primer tramo distinto de 'contrato' de TODA la
+// línea: un solo retorno marcado —que va en S/ 0.00— rotulaba "SERVICIO ADICIONAL" el
+// renglón entero, mientras `tipo` seguía diciendo "servicio". Dos textos distintos
+// para la misma línea según se creara o se recalculara.
+{
+  const dia = (d: number, over: Partial<ReservaLiq> = {}) => [
+    base(200 + d * 2, { id: 200 + d * 2, fecha_servicio: `2026-08-${String(d).padStart(2, "0")}`, precio_cliente: 790 }),
+    base(201 + d * 2, {
+      id: 201 + d * 2, fecha_servicio: `2026-08-${String(d).padStart(2, "0")}`,
+      precio_cliente: 0, direccion_servicio: "retorno", hora_servicio: "17:00", ...over,
+    }),
+  ];
+  const linea = [...dia(3), ...dia(12, { origen_contractual: "adicional" }), ...dia(20)];
+
+  chk("un retorno mudo marcado NO reetiqueta la línea",
+      origenDeTramos(linea, "cliente") === "contrato",
+      origenDeTramos(linea, "cliente"));
+
+  // Y cuando de verdad son adicionales, la línea lo dice: mandan los que cobran.
+  const lineaAdic = linea.map(r =>
+    Number(r.precio_cliente) > 0 ? { ...r, origen_contractual: "adicional" } : r);
+  chk("si los tramos que cobran son adicionales, la línea es adicional",
+      origenDeTramos(lineaAdic, "cliente") === "adicional");
+
+  // Sin ningún tramo con importe no se puede inventar: votan todos.
+  const sinTarifa = linea.map(r => ({ ...r, precio_cliente: 0 }));
+  chk("sin tarifa en la línea vota lo que hay, sin reventar",
+      typeof origenDeTramos(sinTarifa, "cliente") === "string");
+
+  // El lado PROVEEDOR mira costo_proveedor, no precio_cliente.
+  const porCosto = [
+    base(300, { id: 300, precio_cliente: 0, costo_proveedor: 500, origen_contractual: "adicional" }),
+    base(301, { id: 301, precio_cliente: 790, costo_proveedor: 0 }),
+  ];
+  chk("del lado proveedor manda quien lleva el COSTO",
+      origenDeTramos(porCosto, "proveedor") === "adicional" &&
+      origenDeTramos(porCosto, "cliente") === "contrato");
 }
 
 console.log(fallos === 0 ? "\nTODO OK" : `\n${fallos} FALLO(S)`);

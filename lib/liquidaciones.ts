@@ -27,7 +27,7 @@
 
 import { redondear, calcularDetraccion } from "@/lib/finanzas/dinero";
 import {
-  totalesValorizacion, descripcionLinea, sentidoDeReserva, nombreRuta, origenContractual,
+  totalesValorizacion, descripcionLinea, sentidoDeReserva, nombreRuta, origenDeTramos,
   analizarServicios, precioUnitario,
   type LineaAgrupada, type ParServicio, type ReservaLiq,
 } from "@/lib/liquidacion-agrupacion";
@@ -578,9 +578,13 @@ export async function recalcularDescripciones(
         nombreRetorno,
         movil,
         totalMoviles: moviles,
-        // Sobre TODOS los tramos de la línea, no solo la cabeza: basta con que uno esté
-        // marcado para que el día no sea contratado.
-        origen: filas.map(origenContractual).find((o) => o !== "contrato") ?? "contrato",
+        // La MISMA regla que la agrupación (`origenDelPar`): clasifica el tramo que
+        // LLEVA EL IMPORTE. Antes esto contagiaba desde cualquier tramo de la línea
+        // —que son los 26 días, no el par de un día—, así que un solo retorno marcado
+        // rotulaba "SERVICIO ADICIONAL" el renglón entero mientras `tipo` seguía
+        // diciendo "servicio" y el importe sumaba bajo Servicios del periodo. Crear y
+        // recalcular daban dos textos distintos para la misma línea.
+        origen: origenDeTramos(filas, lado),
       });
       if (descripcion === l.descripcion) continue;
 
