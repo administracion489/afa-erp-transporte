@@ -1575,10 +1575,25 @@ export default function ReservasPage() {
    * Se busca primero en lo ya cargado; si el filtro de la pantalla lo dejó fuera, se
    * pide esa sola fila.
    */
-  /** El id del otro tramo del servicio en edición. */
+  /**
+   * El id del otro tramo, por los DOS SENTIDOS del enlace.
+   *
+   * `reserva_vinculada_id` se escribe en los dos lados, pero en dos pasos (el generador
+   * inserta las idas, después los retornos apuntando a su ida y recién al final actualiza
+   * las idas), y borrar un tramo deja el enlace del superviviente en NULL. Cuando queda
+   * escrito en un solo lado y se sigue solo hacia adelante, el tramo que no lo lleva se
+   * ve SUELTO: un retorno en S/ 0.00 sin hermano dispara "sin precio de venta" y quien
+   * viene a arreglarlo le carga la tarifa — que es cobrarle al cliente el día dos veces.
+   */
   const hermanoId = useMemo(() => {
+    if (!editandoId) return null;
     const r = reservas.find((x) => x.id === editandoId);
-    return (r as any)?.reserva_vinculada_id ?? null;
+    const adelante = Number((r as any)?.reserva_vinculada_id ?? 0);
+    if (adelante) return adelante;
+    // Hacia atrás solo si es inequívoco: con dos filas apuntando a la misma, el enlace
+    // está roto de otra forma y elegir una sería adivinar.
+    const inverso = reservas.filter((x) => Number((x as any).reserva_vinculada_id ?? 0) === Number(editandoId));
+    return inverso.length === 1 ? inverso[0].id : null;
   }, [editandoId, reservas]);
 
   /** Si ya está en la tabla cargada, se DERIVA: no hace falta estado ni una consulta. */
@@ -1593,22 +1608,33 @@ export default function ReservasPage() {
       : null;
   }, [hermanoId, reservas]);
 
-  /** Solo cuando el filtro de la pantalla lo dejó fuera se pide esa única fila. */
-  const [hermanoRemoto, setHermanoRemoto] = useState<TramoHermano>(null);
+  /**
+   * Solo cuando el filtro de la pantalla lo dejó fuera se pide esa única fila. Y si acá no
+   * se conoce ningún id —el enlace está escrito solo en el otro tramo, que además no está
+   * cargado— se pregunta por ese sentido: quién apunta a este servicio.
+   */
+  const [hermanoRemoto, setHermanoRemoto] = useState<{ para: number; tramo: TramoHermano } | null>(null);
   useEffect(() => {
-    if (!hermanoId || hermanoLocal) return;
+    if (!editandoId || hermanoLocal) return;
     let vivo = true;
-    supabase.from("reservas")
-      .select("id,codigo,direccion_servicio,estado,precio_cliente,costo_proveedor,fecha_servicio")
-      .eq("id", hermanoId).maybeSingle()
-      .then(({ data }: any) => { if (vivo) setHermanoRemoto(data ?? null); });
+    const cols = "id,codigo,direccion_servicio,estado,precio_cliente,costo_proveedor,fecha_servicio";
+    const q = supabase.from("reservas").select(cols);
+    // Con dos filas apuntando a este servicio el enlace está roto de otra forma: no se
+    // elige ninguna, porque adivinar acá es escribir dinero en el tramo equivocado.
+    (hermanoId ? q.eq("id", hermanoId) : q.eq("reserva_vinculada_id", editandoId))
+      .limit(2)
+      .then((res: { data: TramoHermano[] | null }) => {
+        if (!vivo) return;
+        const filas = res.data ?? [];
+        setHermanoRemoto({ para: Number(editandoId), tramo: filas.length === 1 ? filas[0] : null });
+      });
     return () => { vivo = false; };
-  }, [hermanoId, hermanoLocal]);
+  }, [editandoId, hermanoId, hermanoLocal]);
 
-  // El id se compara al derivar: así, al saltar de un servicio a otro, nunca se muestra
-  // por un instante el hermano del anterior.
+  // Se compara contra QUÉ servicio se pidió: así, al saltar de uno a otro, nunca se
+  // muestra por un instante el hermano del anterior.
   const hermano: TramoHermano =
-    hermanoLocal ?? (hermanoRemoto && Number(hermanoRemoto.id) === Number(hermanoId) ? hermanoRemoto : null);
+    hermanoLocal ?? (hermanoRemoto?.para === Number(editandoId) ? hermanoRemoto.tramo : null);
 
   const porIdReserva = useMemo(() => new Map(reservas.map((r) => [r.id, r])), [reservas]);
 

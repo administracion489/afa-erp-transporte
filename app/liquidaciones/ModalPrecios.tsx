@@ -28,7 +28,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { fmtMoneda } from "@/lib/finanzas/dinero";
-import { nombreRuta, etiquetaRuta, sentidoDeReserva, origenContractual, type ReservaLiq } from "@/lib/liquidacion-agrupacion";
+import { nombreRuta, sentidoDeReserva, origenContractual, type ReservaLiq } from "@/lib/liquidacion-agrupacion";
+import { indiceHermanos, repararEnlaces } from "@/lib/liquidacion-hermanos";
 
 export type ReservaSinPrecio = ReservaLiq & { clienteNombre?: string };
 
@@ -114,33 +115,23 @@ export default function ModalPrecios({
         .in("fecha_servicio", fechas);
       if (!vivo) return;
 
-      // Solo sirve una pareja LIBRE: si esa ida ya tiene su retorno, enlazarla aquí
-      // rompería el par existente.
-      const libres = ((data as any[]) ?? []).filter((x) => !x.reserva_vinculada_id);
+      // Quién va con quién lo contesta lib/liquidacion-hermanos.ts, que es el ÚNICO sitio
+      // donde vive la regla "estos dos tramos son el mismo día" — la misma que usa el
+      // cierre para no pedir dos veces la tarifa. Antes esa regla estaba escrita acá
+      // dentro, y la del cierre por su cuenta: dos definiciones del mismo dato es
+      // exactamente lo que este módulo no puede permitirse.
+      const indice = indiceHermanos(((data as any[]) ?? []) as ReservaLiq[]);
       const hallado = new Map<number, IdaCandidata>();
-      const yaTomadas = new Set<number>();
 
       for (const h of huerfanos) {
-        const sentidoH = sentidoDeReserva(h);
-        const posibles = libres.filter(
-          (x) =>
-            x.id !== h.id &&
-            !yaTomadas.has(x.id) &&
-            Number(x.cliente_id) === Number(h.cliente_id) &&
-            String(x.fecha_servicio) === String(h.fecha_servicio) &&
-            sentidoDeReserva(x) !== sentidoH &&                       // el tramo contrario
-            etiquetaRuta(x) === etiquetaRuta(h) &&                    // la misma ruta
-            Number(x.precio_cliente ?? 0) > 0                         // y es la que cobra
-        );
-        // Con dos móviles el mismo día hay dos idas posibles y no se puede elegir sin
-        // adivinar: se deja para que un humano lo enlace desde Programación.
-        if (posibles.length !== 1) continue;
-        const ida = posibles[0];
-        yaTomadas.add(ida.id);
+        const otro = indice.hermanoDe(h) ?? indice.hermanoProbableDe(h);
+        // Solo cuenta como "va incluido" si el otro tramo LLEVA la tarifa del día: si
+        // ninguno de los dos la lleva, el precio sí falta y hay que pedirlo.
+        if (!otro || Number(otro.precio_cliente ?? 0) <= 0) continue;
         hallado.set(h.id, {
-          id: ida.id, codigo: ida.codigo ?? null,
-          hora: String(ida.hora_servicio ?? "").slice(0, 5),
-          precio: Number(ida.precio_cliente ?? 0),
+          id: otro.id, codigo: otro.codigo ?? null,
+          hora: String(otro.hora_servicio ?? "").slice(0, 5),
+          precio: Number(otro.precio_cliente ?? 0),
         });
       }
       setCandidatas(hallado);
@@ -155,6 +146,10 @@ export default function ModalPrecios({
     // Cuál lo lleva NO es siempre la ida: si el cliente canceló la ida y el retorno sí
     // se prestó, el importe tiene que ir donde hubo servicio, o el día no se factura.
     const porId = new Map(reservas.map((r) => [r.id, r]));
+    // El par se resuelve por los DOS sentidos del enlace: si estuviera escrito solo en el
+    // otro tramo, los dos aparecerían como filas sueltas y escribir un importe se lo
+    // pondría a los dos, que es cobrar el día dos veces.
+    const enLaLista = indiceHermanos(reservas as ReservaLiq[]);
     const hecho = (r?: ReservaSinPrecio | null) => String(r?.estado ?? "").toLowerCase() === "finalizada";
     const tramoQueCobra = (a: ReservaSinPrecio, b?: ReservaSinPrecio | null): ReservaSinPrecio => {
       if (!b) return a;
@@ -166,7 +161,8 @@ export default function ModalPrecios({
     const cobran: ReservaSinPrecio[] = [];
     for (const r of reservas) {
       if (vistos.has(r.id)) continue;
-      const par = r.reserva_vinculada_id ? porId.get(Number(r.reserva_vinculada_id)) : undefined;
+      const hermano = enLaLista.hermanoDe(r);
+      const par = hermano ? porId.get(hermano.id) : undefined;
       vistos.add(r.id);
       if (par) vistos.add(par.id);
       cobran.push(tramoQueCobra(r, par));
@@ -279,16 +275,17 @@ export default function ModalPrecios({
     setGuardando(true); setMsg("");
     let hechos = 0;
     try {
-      // 1) Reparar los vínculos. Se escribe en LOS DOS lados: `reserva_vinculada_id` es
-      //    bidireccional en el resto del ERP (analizarServicios comprueba `sonPar`), y
-      //    dejarlo a medias daría un par que unos sitios ven y otros no.
-      for (const id of aEnlazar) {
-        const ida = candidatas.get(id)!;
-        const a = await supabase.from("reservas").update({ reserva_vinculada_id: ida.id }).eq("id", id);
-        if (a.error) throw new Error(`enlace ${id}: ${a.error.message} (se enlazaron ${hechos})`);
-        const b = await supabase.from("reservas").update({ reserva_vinculada_id: id }).eq("id", ida.id);
-        if (b.error) throw new Error(`enlace ${ida.id}: ${b.error.message} (se enlazaron ${hechos})`);
-        hechos += 1;
+      // 1) Reparar los vínculos, por el mismo camino que el botón "Enlazar ida↔retorno"
+      //    del cierre: se escribe en LOS DOS lados, porque media docena de sitios del ERP
+      //    leen `reserva_vinculada_id` hacia adelante y dejarlo a medias da un par que
+      //    unos ven y otros no.
+      if (aEnlazar.length) {
+        const { reparados, errores } = await repararEnlaces(
+          supabase,
+          aEnlazar.map((id) => ({ tramo: { id }, hermano: candidatas.get(id)! }))
+        );
+        hechos += reparados;
+        if (errores.length) throw new Error(`${errores.join(" · ")} (se enlazaron ${reparados})`);
       }
 
       // 2) Y recién ahora los importes, sobre los tramos que de verdad cobran.
