@@ -77,7 +77,7 @@ const DINERO = requerir("../lib/finanzas/dinero") as typeof import("../lib/finan
 // dato —que da la impresión de que todo va bien— y revienta a mitad del primer cliente con
 // "origenDelPar is not a function", que no le dice nada a quien lo corre.
 const REQUERIDOS = [
-  "analizarServicios", "etiquetaRuta", "precioUnitario",   // están desde siempre
+  "analizarServicios", "etiquetaRuta", "precioUnitario", "fechaFormato",   // están desde siempre
   "origenDelPar", "nombreRutaDetalle",                     // llegaron con el rediseño del ítem
 ] as const;
 const faltantes = REQUERIDOS.filter((n) => typeof (LIQ as any)[n] !== "function");
@@ -94,7 +94,7 @@ if (faltantes.length) {
   process.exit(1);
 }
 
-const { analizarServicios, etiquetaRuta, origenDelPar, precioUnitario } = LIQ;
+const { analizarServicios, etiquetaRuta, fechaFormato, origenDelPar, precioUnitario } = LIQ;
 const { fmtMoneda } = DINERO;
 
 type LadoLiquidacion = import("../lib/liquidacion-agrupacion").LadoLiquidacion;
@@ -267,7 +267,13 @@ function sinHora(s: string | null | undefined): string {
 
 const money = (n: number) => n.toFixed(2);
 
-type Claves = { A: string; B: string; C: string; D: string };
+type Claves = {
+  A: string; B: string; C: string; D: string;
+  /** El eje tarifa+origen, que NUNCA se cruza. Todo lo demás se compara dentro de esto. */
+  dinero: string;
+  /** Partes por tramo, para poder emparejar cuando a un día le falta el retorno. */
+  idaB: string; retB: string; idaC: string; retC: string;
+};
 
 function clavesDelPar(p: ParServicio, lado: LadoLiquidacion, lugar: (r: ReservaLiq | null, t: "inicio" | "destino") => string): Claves {
   const precio = money(precioUnitario(p.cabeza, lado, { preciosIncluyenIgv: false, igvPct: 18 }));
@@ -283,7 +289,64 @@ function clavesDelPar(p: ParServicio, lado: LadoLiquidacion, lugar: (r: ReservaL
     B: [sinHora(nIda), sinHora(nRet), precio, org].join("|"),
     C: [extremos(p.ida), extremos(p.retorno), precio, org].join("|"),
     D: [etiquetaRuta(p.ida ?? p.cabeza), precio, org].join("|"),
+    dinero: [precio, org].join("|"),
+    idaB: sinHora(nIda), retB: sinHora(nRet),
+    idaC: extremos(p.ida), retC: extremos(p.retorno),
   };
+}
+
+/**
+ * Los pares que hay que unir por un eje, contando el DÍA AL QUE LE FALTA UN TRAMO.
+ *
+ * Un día cuyo retorno se canceló —o cuyo enlace ida↔retorno nunca se escribió— llega aquí
+ * con un solo tramo, así que su parte de retorno va vacía. Comparando claves completas eso
+ * lo deja SIEMPRE en un ítem propio, aunque su ida sea idéntica a la de los demás días: en
+ * el documento real son los ítems 9 y 11, dos renglones de la RUTA B que existen solo
+ * porque ese día no hubo retorno. No son otra ruta contratada.
+ *
+ * Así que el tramo ausente se trata como comodín, PERO solo cuando no hay ambigüedad: si
+ * dentro de la misma ida y la misma tarifa conviven DOS retornos distintos, el día suelto
+ * podría pertenecer a cualquiera de los dos y elegir sería adivinar. Ahí se deja aparte y
+ * se informa — el mismo criterio que `analizarServicios` aplica al hermano ambiguo.
+ */
+function unionesPorEje(
+  pares: ParServicio[],
+  de: (p: ParServicio) => Claves,
+  eje: "B" | "C"
+): { unir: [ParServicio, ParServicio][]; ambiguos: ParServicio[] } {
+  const idaDe = (p: ParServicio) => (eje === "B" ? de(p).idaB : de(p).idaC);
+  const retDe = (p: ParServicio) => (eje === "B" ? de(p).retB : de(p).retC);
+
+  // Cubos por (tarifa+origen, ida): dentro de un cubo nadie cruza precios.
+  const cubos = new Map<string, ParServicio[]>();
+  for (const p of pares) {
+    const k = `${de(p).dinero}|${idaDe(p)}`;
+    (cubos.get(k) ?? cubos.set(k, []).get(k)!).push(p);
+  }
+
+  const unir: [ParServicio, ParServicio][] = [];
+  const ambiguos: ParServicio[] = [];
+  for (const ps of cubos.values()) {
+    const porRet = new Map<string, ParServicio[]>();
+    for (const p of ps) {
+      const r = retDe(p);
+      (porRet.get(r) ?? porRet.set(r, []).get(r)!).push(p);
+    }
+    // Mismo retorno → mismo ítem, siempre.
+    for (const qs of porRet.values())
+      for (let i = 1; i < qs.length; i++) unir.push([qs[0], qs[i]]);
+
+    const sueltos = porRet.get("") ?? [];
+    const retornosReales = [...porRet.keys()].filter((r) => r !== "");
+    if (!sueltos.length || !retornosReales.length) continue;
+    if (retornosReales.length === 1) {
+      const destino = porRet.get(retornosReales[0])![0];
+      for (const s of sueltos) unir.push([destino, s]);
+    } else {
+      ambiguos.push(...sueltos);
+    }
+  }
+  return { unir, ambiguos };
 }
 
 // ── Carga ────────────────────────────────────────────────────────────────────
@@ -386,8 +449,8 @@ for (const [, g] of [...grupos].sort((a, b) => b[1].filas.length - a[1].filas.le
         if (e) puntos.push(e);
       }
 
-  const cuentaPorRadio = new Map<number, number>();
-  let clavesRef: Map<string, ParServicio[]> | null = null;
+  const porRadio = new Map<number, Map<string, ParServicio[]>>();
+  const clavesCPorRadio = new Map<number, Map<ParServicio, string>>();
 
   for (const radio of RADIOS) {
     const mapa = agruparLugares(puntos, radio);
@@ -397,20 +460,26 @@ for (const [, g] of [...grupos].sort((a, b) => b[1].filas.length - a[1].filas.le
       return mapa.get(`${e.nombre}|${e.lat ?? ""}|${e.lng ?? ""}`) ?? `?${e.nombre}`;
     };
     const porC = new Map<string, ParServicio[]>();
+    const deC = new Map<ParServicio, string>();
     for (const p of pares) {
       const k = clavesDelPar(p, LADO, lugar).C;
       (porC.get(k) ?? porC.set(k, []).get(k)!).push(p);
+      deC.set(p, k);
     }
-    cuentaPorRadio.set(radio, porC.size);
-    if (radio === 200) clavesRef = porC;
+    porRadio.set(radio, porC);
+    clavesCPorRadio.set(radio, deC);
   }
+  const RADIO_REF = 200;
+  const clavesRef = porRadio.get(RADIO_REF)!;
 
   // A, B y D no dependen del radio.
   const sinLugar = () => "";
+  const deClave = new Map<ParServicio, Claves>();
+  for (const p of pares) deClave.set(p, clavesDelPar(p, LADO, sinLugar));
   const cuenta = (sel: (c: Claves) => string) => {
     const m = new Map<string, ParServicio[]>();
     for (const p of pares) {
-      const k = sel(clavesDelPar(p, LADO, sinLugar));
+      const k = sel(deClave.get(p)!);
       (m.get(k) ?? m.set(k, []).get(k)!).push(p);
     }
     return m;
@@ -419,13 +488,62 @@ for (const [, g] of [...grupos].sort((a, b) => b[1].filas.length - a[1].filas.le
   const B = cuenta((c) => c.B);
   const D = cuenta((c) => c.D);
 
+  // ── E · el nombre O el mapa, no uno en lugar del otro ──────────────────────
+  //
+  // C NO es "B mejorado": es otro eje, y usarlo SOLO puede salir peor. Dos motivos, los
+  // dos vistos en datos reales:
+  //
+  //   · un 11 % de los servicios no tiene coordenadas en sus extremos, y esos caen en
+  //     cubos "sin-coord:…" que no se juntan con los que sí las tienen — aunque el nombre
+  //     sea idéntico;
+  //   · un día cuyo retorno se canceló queda con un solo tramo, así que su parte de
+  //     retorno en la clave va vacía y no coincide con la de los días completos.
+  //
+  // Por eso E une por CUALQUIERA de los dos: mismo nombre sin la hora, O mismos extremos
+  // en el mapa. Es una relación, no una clave, así que se resuelve con conjuntos
+  // disjuntos. La tarifa y el origen contractual están dentro de las DOS claves, de modo
+  // que ninguna cadena puede cruzar precios: la regla dura se sostiene sola.
+  const padre = new Map<ParServicio, ParServicio>(pares.map((p) => [p, p]));
+  const raiz = (p: ParServicio): ParServicio => {
+    let r = p;
+    while (padre.get(r) !== r) r = padre.get(r)!;
+    let q = p;
+    while (padre.get(q) !== q) { const s = padre.get(q)!; padre.set(q, r); q = s; }
+    return r;
+  };
+  const unir = (a: ParServicio, b: ParServicio) => { const ra = raiz(a), rb = raiz(b); if (ra !== rb) padre.set(ra, rb); };
+
+  const clavesConMapa = new Map<ParServicio, Claves>();
+  {
+    const mapa = agruparLugares(puntos, RADIO_REF);
+    const lugar = (r: ReservaLiq | null, t: "inicio" | "destino") => {
+      const e = r ? extremo((r as any).paradas_json, t) : null;
+      if (!e) return `sin-parada:${t}`;
+      return mapa.get(`${e.nombre}|${e.lat ?? ""}|${e.lng ?? ""}`) ?? `?${e.nombre}`;
+    };
+    for (const p of pares) clavesConMapa.set(p, clavesDelPar(p, LADO, lugar));
+  }
+  const de = (p: ParServicio) => clavesConMapa.get(p)!;
+
+  const ejeB = unionesPorEje(pares, de, "B");
+  const ejeC = unionesPorEje(pares, de, "C");
+  for (const [a, b] of [...ejeB.unir, ...ejeC.unir]) unir(a, b);
+  const diaSuelto = [...new Set([...ejeB.ambiguos].filter((p) => ejeC.ambiguos.includes(p)))];
+
+  const E = new Map<string, ParServicio[]>();
+  for (const p of pares) {
+    const k = String(pares.indexOf(raiz(p)));
+    (E.get(k) ?? E.set(k, []).get(k)!).push(p);
+  }
+
   console.log("");
   console.log("  ÍTEMS QUE SALDRÍAN, según cómo se decida que dos servicios son la misma ruta:");
-  console.log(`    A · nombre completo + tarifa   ${String(A.size).padStart(4)}   ← lo que hace el ERP hoy`);
-  console.log(`    B · nombre sin la hora + tarifa${String(B.size).padStart(4)}   ← derivable, sin riesgo`);
+  console.log(`    A · nombre completo + tarifa    ${String(A.size).padStart(4)}   ← lo que hace el ERP hoy`);
+  console.log(`    B · nombre sin la hora          ${String(B.size).padStart(4)}   ← derivable, sin riesgo`);
   for (const radio of RADIOS)
-    console.log(`    C · extremos en el mapa ±${String(radio).padStart(3)}m ${String(cuentaPorRadio.get(radio) ?? 0).padStart(4)}   ← derivable si hay coordenadas`);
-  console.log(`    D · etiqueta RUTA + tarifa     ${String(D.size).padStart(4)}   ← techo: la etiqueta NO es un dato`);
+    console.log(`    C · extremos en el mapa ±${String(radio).padStart(3)}m  ${String(porRadio.get(radio)!.size).padStart(4)}   ← derivable si hay coordenadas`);
+  console.log(`    E · B o C(±${RADIO_REF}m), lo que una ${String(E.size).padStart(4)}   ← LA PROPUESTA`);
+  console.log(`    D · etiqueta RUTA + tarifa      ${String(D.size).padStart(4)}   ← techo: la etiqueta NO es un dato`);
 
   // ── Qué gana cada escalón, con nombre y apellido ──────────────────────────
   const rotulo = (p: ParServicio) => {
@@ -434,49 +552,83 @@ for (const [, g] of [...grupos].sort((a, b) => b[1].filas.length - a[1].filas.le
     return `${n}  ·  ${fmtMoneda(precio)}`;
   };
 
+  /**
+   * Qué une el criterio grueso que el fino mantenía separado.
+   *
+   * Se listan los GRUPOS DEL FINO que quedan dentro de un mismo grupo del grueso, no las
+   * descripciones sueltas. La primera versión imprimía `[...new Set(ps.map(rotulo))]` —
+   * todas las descripciones del grupo grueso—, y eso incluía variantes que el fino YA
+   * había unido: en la corrida real, "D sobre C" mostró tres nombres de la RUTA B cuando
+   * C ya juntaba dos de ellos. Se leía como si D ganara tres uniones donde ganaba una.
+   */
   const detalle = (
     titulo: string,
     grueso: Map<string, ParServicio[]>,
     fino: Map<string, ParServicio[]>
   ) => {
-    // Grupos del criterio grueso que reúnen a 2+ grupos del fino: eso es lo que UNE de más.
+    const claveFina = new Map<ParServicio, string>();
+    for (const [k, ps] of fino) for (const p of ps) claveFina.set(p, k);
+
     const uniones: string[][] = [];
-    for (const [, ps] of grueso) {
-      const finos = new Set<string>();
+    for (const ps of grueso.values()) {
+      const bloques = new Map<string, ParServicio[]>();
       for (const p of ps) {
-        for (const [k, qs] of fino) if (qs.includes(p)) { finos.add(k); break; }
+        const k = claveFina.get(p)!;
+        (bloques.get(k) ?? bloques.set(k, []).get(k)!).push(p);
       }
-      if (finos.size > 1) {
-        const etiquetas = [...new Set(ps.map(rotulo))];
-        uniones.push(etiquetas);
-      }
+      if (bloques.size < 2) continue;
+      // Un renglón por bloque del fino: es lo que estaba separado y pasa a estar junto.
+      uniones.push([...bloques.values()].map((qs) => `${rotulo(qs[0])}   (${qs.length} serv.)`));
     }
     if (!uniones.length) return;
     console.log(`\n  ${titulo}`);
     for (const u of uniones.slice(0, 12)) {
-      console.log(`    ┌ une ${u.length} descripciones distintas en un solo ítem:`);
+      console.log(`    ┌ une ${u.length} ítems en uno:`);
       for (const e of u) console.log(`    │   ${e}`);
     }
     if (uniones.length > 12) console.log(`    … y ${uniones.length - 12} uniones más`);
   };
 
   detalle("LO QUE GANA QUITAR LA HORA (B sobre A):", B, A);
-  if (clavesRef) detalle("LO QUE GANA COMPARAR EL MAPA A ±200 m (C sobre B):", clavesRef, B);
-  detalle("LO QUE SOLO SE CONSIGUE DECLARÁNDOLO A MANO (D sobre C a ±200 m):", D, clavesRef ?? B);
+  detalle(`LO QUE AÑADE EL MAPA (E sobre B):`, E, B);
+  detalle(`LO QUE SOLO SE CONSIGUE DECLARÁNDOLO A MANO (D sobre E):`, D, E);
 
   // ── El invariante de caja: unir NUNCA puede mover un sol ──────────────────
   const total = (m: Map<string, ParServicio[]>) =>
     [...m.values()].reduce(
-      (a, ps) => a + ps.length * precioUnitario(ps[0].cabeza, LADO, { preciosIncluyenIgv: false, igvPct: 18 }),
+      (a, ps) => a + ps.reduce((s, p) => s + precioUnitario(p.cabeza, LADO, { preciosIncluyenIgv: false, igvPct: 18 }), 0),
       0
     );
   const tA = total(A);
   console.log("");
   console.log("  INVARIANTE DE CAJA (unir no puede mover un sol):");
-  for (const [n, m] of [["A", A], ["B", B], ["D", D]] as const)
+  for (const [n, m] of [["A", A], ["B", B], ["C", clavesRef], ["E", E], ["D", D]] as const)
     console.log(`    ${n}: ${fmtMoneda(total(m)).padStart(14)}   ${Math.abs(total(m) - tA) < 0.005 ? "✓ igual que A" : "✗ DIFIERE DE A"}`);
-  if (clavesRef)
-    console.log(`    C: ${fmtMoneda(total(clavesRef)).padStart(14)}   ${Math.abs(total(clavesRef) - tA) < 0.005 ? "✓ igual que A" : "✗ DIFIERE DE A"}`);
+
+  // ── ¿Alguna línea quedaría con dos tarifas? La regla dura, comprobada ──────
+  //
+  // No debería poder pasar —el precio está dentro de las dos claves que alimentan E—,
+  // pero se COMPRUEBA en vez de confiarse: es la única regla que el usuario puso como
+  // innegociable, y una unión que mezcle tarifas es un documento mal emitido.
+  const conDosTarifas = [...E.values()].filter(
+    (ps) => new Set(ps.map((p) => precioUnitario(p.cabeza, LADO, { preciosIncluyenIgv: false, igvPct: 18 }))).size > 1
+  );
+  console.log(
+    conDosTarifas.length
+      ? `    ✗ ${conDosTarifas.length} ítem(s) de E mezclarían tarifas — LA PROPUESTA ESTÁ MAL`
+      : `    ✓ ningún ítem de E mezcla dos tarifas`
+  );
+
+  // Días a los que les falta un tramo y su ida convive con DOS retornos distintos a la
+  // misma tarifa: podrían ir con cualquiera de los dos, y elegir sería adivinar. Quedan en
+  // su propio ítem, igual que hoy, pero dichos por su nombre en vez de en silencio.
+  if (diaSuelto.length) {
+    console.log(`\n  DÍAS CON UN SOLO TRAMO QUE NO SE PUEDEN UBICAR (${diaSuelto.length}):`);
+    for (const p of diaSuelto.slice(0, 6))
+      console.log(`    ${p.cabeza.codigo ?? "#" + p.cabeza.id}  ${fechaFormato(p.cabeza.fecha_servicio)}  ${rotulo(p)}`);
+    if (diaSuelto.length > 6) console.log(`    … y ${diaSuelto.length - 6} más`);
+    console.log(`    (su ida convive con dos retornos distintos a la misma tarifa: hay que enlazarlos a mano)`);
+  }
 
   // ── Misma ruta a varias tarifas: no se unen (regla dura), pero hay que verlo ──
   //
