@@ -77,6 +77,16 @@ export type ReservaLiq = {
    * Ausente (migración sin correr) se lee como 'contrato', el default de la base.
    */
   origen_contractual?: string | null;
+  /**
+   * Snapshot de los paraderos del tramo, con `tipo: inicio | intermedia | destino` y
+   * coordenadas. Es de donde `lib/nombre-ruta.ts` sacó el TEXTO del nombre, así que aquí
+   * está el hecho del que ese texto es solo una redacción: dos servicios que arrancan y
+   * terminan en el mismo punto son la misma ruta aunque se llamen distinto.
+   *
+   * Opcional a propósito: sin él la agrupación se apoya solo en el nombre, que es
+   * exactamente como se comportaba antes.
+   */
+  paradas_json?: unknown;
 };
 
 /** 'contrato' cuando la columna no existe o viene vacía. */
@@ -826,6 +836,313 @@ function serieAnexo(n: number): string {
   return s || "A";
 }
 
+// ── Qué servicios son LA MISMA RUTA CONTRATADA ──────────────────────────────
+//
+// EL PROBLEMA, MEDIDO
+//
+// La LQC-2026-000004 salió con 30 ítems para 141 servicios de un cliente en un mes. No
+// había 30 rutas: la clave era el NOMBRE de la ruta —texto libre tecleado en tres
+// pantallas— y el mismo recorrido aparece escrito de varias formas. Medido sobre esos
+// datos con scripts/diagnostico-agrupacion.mts:
+//
+//     nombre completo + tarifa (lo de antes) ....... 30 ítems
+//     nombre sin la hora + tarifa .................. 21
+//     extremos en el mapa ±200 m + tarifa .......... 13
+//     techo (etiqueta RUTA + tarifa) ............... 12
+//
+// TRES CAUSAS, NINGUNA ES UNA RUTA DISTINTA
+//
+//   · la hora va DENTRO del nombre: 'ENTRADA 06:30' y 'ENTRADA 06:35' son la misma ruta
+//     contratada saliendo dos días a horas ligeramente distintas;
+//   · el nombre lo sugirió el sistema desde un paradero sin renombrar, y sale con la
+//     dirección geocodificada: 'W2VG+39R, EL AGUSTINO 15022, PERÚ→M5JG+GFG…';
+//   · el mismo extremo se rotuló con otro paradero de referencia: 'BSF→1RO DE MAYO' y
+//     'BSF→ALIPIO'.
+//
+// EL MAPA NO SUSTITUYE AL NOMBRE: SE SUMAN
+//
+// Comparar los extremos parecía la respuesta completa, y no lo es. En SNACKS AMERICA
+// LATINA el mapa SOLO dio 5 ítems donde el nombre daba 4: un 11 % de los servicios no
+// tiene coordenadas en sus extremos y queda en cubos propios que no se juntan con nadie,
+// aunque el nombre sea idéntico. Y al revés, el nombre no alcanza cuando alguien lo
+// tecleó distinto. Los dos ejes fallan en sitios diferentes, así que se unen por
+// CUALQUIERA de los dos y se resuelve con conjuntos disjuntos.
+//
+// LA TARIFA NUNCA ENTRA EN LA UNIÓN
+//
+// Regla dura del negocio: dos ítems con precio unitario distinto no se unen jamás. El
+// formato imprime CANT × P. UNITARIO = TOTAL, y promediar dos tarifas daría un unitario
+// que nadie pactó. Aquí se sostiene POR CONSTRUCCIÓN y no por cuidado: la tarifa y el
+// origen contractual son el cubo dentro del cual se busca, así que ninguna cadena de
+// uniones puede cruzarlos. `agruparServicios` lo verifica igual antes de devolver.
+
+/**
+ * Cuánto puede separar a dos paraderos para seguir siendo "el mismo sitio".
+ *
+ * 200 m sale de medirlo, no de elegirlo: a 50 m el documento real daba 15 ítems y a 200
+ * bajaba a 13, que es el techo alcanzable menos uno. A 500 m aparecía el primer caso de
+ * sobre-unión —un cliente quedaba con MENOS ítems que su propio techo—, señal de que a esa
+ * distancia ya se estaban juntando dos paraderos que la operación distingue.
+ */
+export const RADIO_MISMO_PARADERO_M = 200;
+
+/**
+ * El nombre de la ruta sin el reloj. 'RUTA A/ ENTRADA 06:30/ SANTA ANITA→BSF' pasa a
+ * 'RUTA A ENTRADA SANTA ANITA→BSF'.
+ *
+ * Se conserva ENTRADA/RETORNO porque distingue el sentido, que sí importa. Lo que se borra
+ * es la hora: la lleva cada servicio en el Anexo 1, donde el cliente la puede verificar
+ * día por día, y en el ítem solo servía para partirlo.
+ */
+export function sinHoraRuta(s: string | null | undefined): string {
+  return String(s ?? "")
+    .toUpperCase()
+    .replace(/\b\d{1,2}:\d{2}(:\d{2})?\b/g, " ")
+    .replace(/[\/\s]+/g, " ")
+    .trim();
+}
+
+type PuntoRuta = { nombre: string; lat: number | null; lng: number | null };
+
+/** El paradero `inicio` o `destino` del snapshot. null cuando el tramo no lo trae. */
+function extremoDe(paradas: unknown, tipo: "inicio" | "destino"): PuntoRuta | null {
+  if (!Array.isArray(paradas)) return null;
+  const p: any = paradas.find((x: any) => String(x?.tipo ?? "") === tipo);
+  if (!p) return null;
+  const lat = Number(p.lat);
+  const lng = Number(p.lng);
+  return {
+    nombre: String(p.nombre ?? "").trim().toUpperCase().replace(/\s+/g, " "),
+    lat: Number.isFinite(lat) && lat !== 0 ? lat : null,
+    lng: Number.isFinite(lng) && lng !== 0 ? lng : null,
+  };
+}
+
+/** Metros entre dos puntos (haversine). Sobra precisión para distinguir paraderos. */
+function metrosEntre(a: PuntoRuta, b: PuntoRuta): number {
+  if (a.lat == null || a.lng == null || b.lat == null || b.lng == null) return Infinity;
+  const R = 6_371_000;
+  const rad = (x: number) => (x * Math.PI) / 180;
+  const dLat = rad(b.lat - a.lat);
+  const dLng = rad(b.lng - a.lng);
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+}
+
+/**
+ * Reparte los extremos en "lugares" por cercanía, y devuelve con qué etiqueta se compara
+ * cada uno. Greedy sobre una lista ORDENADA: la misma entrada da siempre el mismo reparto,
+ * así que la agrupación no baila entre recargas ni entre el servidor y el navegador.
+ *
+ * Un punto sin coordenadas NO se acerca a nadie: cae en su propio lugar rotulado por su
+ * nombre. Es deliberado — sin coordenadas no hay evidencia de que dos paraderos sean el
+ * mismo, y para eso ya está el eje del nombre.
+ */
+function mapaDeLugares(puntos: PuntoRuta[], radio: number): Map<string, string> {
+  const clave = (p: PuntoRuta) => `${p.nombre}|${p.lat ?? ""}|${p.lng ?? ""}`;
+  const unicos = new Map<string, PuntoRuta>();
+  for (const p of puntos) if (!unicos.has(clave(p))) unicos.set(clave(p), p);
+
+  const centros: { punto: PuntoRuta; id: string }[] = [];
+  const asignado = new Map<string, string>();
+  for (const [k, p] of [...unicos.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
+    if (p.lat == null || p.lng == null) { asignado.set(k, `sc:${p.nombre}`); continue; }
+    const cerca = centros.find((c) => metrosEntre(c.punto, p) <= radio);
+    if (cerca) { asignado.set(k, cerca.id); continue; }
+    const id = `L${centros.length + 1}`;
+    centros.push({ punto: p, id });
+    asignado.set(k, id);
+  }
+  return asignado;
+}
+
+/** Las señas de un par por los dos ejes, ya separadas por tramo. */
+type SenasRuta = {
+  /** Tarifa + origen contractual: el cubo que ninguna unión puede cruzar. */
+  dinero: string;
+  idaNombre: string; retNombre: string;
+  idaMapa: string; retMapa: string;
+};
+
+/**
+ * Agrupa los pares en RUTAS CONTRATADAS: uno por ítem del formato.
+ *
+ * Une dos pares cuando coinciden por el NOMBRE sin la hora O por los EXTREMOS en el mapa,
+ * siempre dentro de la misma tarifa y el mismo origen contractual.
+ *
+ * EL DÍA AL QUE LE FALTA UN TRAMO. Un día cuyo retorno se canceló —o cuyo enlace nunca se
+ * escribió— llega con un solo tramo, así que su mitad de retorno va vacía y ninguna
+ * comparación completa lo empareja: salía SIEMPRE en un ítem propio aunque su ida fuera
+ * idéntica a la de los demás días. En el documento real son dos renglones de la RUTA B que
+ * existen solo porque esos días no hubo retorno. Así que el tramo ausente se trata como
+ * comodín — PERO solo cuando no hay ambigüedad: si dentro de la misma ida y la misma
+ * tarifa conviven DOS retornos distintos, el día suelto podría ir con cualquiera y elegir
+ * sería adivinar. Ahí se queda aparte, que es el mismo criterio que `analizarServicios`
+ * aplica al hermano ambiguo.
+ */
+export function agruparPorRutaContratada(
+  pares: ParServicio[],
+  lado: LadoLiquidacion,
+  opts: { preciosIncluyenIgv: boolean; igvPct: number }
+): ParServicio[][] {
+  if (pares.length < 2) return pares.map((p) => [p]);
+
+  // Los lugares se calculan sobre los extremos de ESTE conjunto (un cliente y su periodo):
+  // mezclar clientes solo agrandaría el radio de confusión.
+  const puntos: PuntoRuta[] = [];
+  for (const p of pares)
+    for (const r of [p.ida, p.retorno])
+      for (const t of ["inicio", "destino"] as const) {
+        const e = r ? extremoDe(r.paradas_json, t) : null;
+        if (e) puntos.push(e);
+      }
+  const lugares = mapaDeLugares(puntos, RADIO_MISMO_PARADERO_M);
+  const lugarDe = (r: ReservaLiq | null, t: "inicio" | "destino") => {
+    const e = r ? extremoDe(r.paradas_json, t) : null;
+    if (!e) return "";
+    return lugares.get(`${e.nombre}|${e.lat ?? ""}|${e.lng ?? ""}`) ?? `?${e.nombre}`;
+  };
+  const extremos = (r: ReservaLiq | null) => (r ? `${lugarDe(r, "inicio")}→${lugarDe(r, "destino")}` : "");
+
+  const senas = new Map<ParServicio, SenasRuta>();
+  for (const p of pares) {
+    const precio = precioUnitario(p.cabeza, lado, opts).toFixed(2);
+    senas.set(p, {
+      dinero: `${precio}|${origenDelPar(p)}`,
+      idaNombre: sinHoraRuta(p.ida ? nombreRuta(p.ida) : ""),
+      retNombre: sinHoraRuta(p.retorno ? nombreRuta(p.retorno) : ""),
+      idaMapa: extremos(p.ida),
+      retMapa: extremos(p.retorno),
+    });
+  }
+
+  // ── Conjuntos disjuntos ───────────────────────────────────────────────────
+  const padre = new Map<ParServicio, ParServicio>(pares.map((p) => [p, p]));
+  const raiz = (p: ParServicio): ParServicio => {
+    let r = p;
+    while (padre.get(r) !== r) r = padre.get(r)!;
+    let q = p;                                    // compresión de camino
+    while (padre.get(q) !== q) { const s = padre.get(q)!; padre.set(q, r); q = s; }
+    return r;
+  };
+  const unir = (a: ParServicio, b: ParServicio) => {
+    const ra = raiz(a), rb = raiz(b);
+    if (ra !== rb) padre.set(ra, rb);
+  };
+
+  // Cubos por tarifa + origen contractual. TODA la unión ocurre dentro de un cubo, así
+  // que ninguna cadena puede cruzar precios: la regla dura es estructural.
+  const cubos = new Map<string, ParServicio[]>();
+  for (const p of pares) {
+    const k = senas.get(p)!.dinero;
+    const ya = cubos.get(k);
+    if (ya) ya.push(p); else cubos.set(k, [p]);
+  }
+
+  /**
+   * La firma del par por un eje. Se compara TRAMO CONTRA TRAMO y de forma simétrica: no
+   * se privilegia la ida.
+   *
+   * La primera versión bucketizaba por la ida y sub-agrupaba por el retorno, y con eso los
+   * servicios que son SOLO RETORNO —los adicionales del formato real, seis de sus treinta
+   * ítems— quedaban fuera de la unión entera: sin ida, no entraban en ningún cubo. Dos
+   * retornos de la misma ruta a distinta hora seguían saliendo como dos ítems.
+   */
+  const firma = (p: ParServicio, eje: "nombre" | "mapa") => {
+    const s = senas.get(p)!;
+    return eje === "nombre" ? { ida: s.idaNombre, ret: s.retNombre } : { ida: s.idaMapa, ret: s.retMapa };
+  };
+
+  /**
+   * ¿Son el mismo ítem por este eje? Los tramos presentes tienen que coincidir, y al menos
+   * uno tiene que coincidir DE VERDAD: dos pares a los que solo les consta el retorno no
+   * son la misma ruta por el mero hecho de que a ambos les falte la ida.
+   */
+  const casan = (a: ParServicio, b: ParServicio, eje: "nombre" | "mapa") => {
+    const x = firma(a, eje), y = firma(b, eje);
+    const idaOk = !x.ida || !y.ida || x.ida === y.ida;
+    const retOk = !x.ret || !y.ret || x.ret === y.ret;
+    const algoReal = (!!x.ida && x.ida === y.ida) || (!!x.ret && x.ret === y.ret);
+    return idaOk && retOk && algoReal;
+  };
+
+  for (const ps of cubos.values()) {
+    // Paso 1 · firma EXACTA, empates incluidos. Agrupar por `ida|ret` tal cual —con los
+    // huecos y todo— une lo que de verdad es idéntico por este eje, y de paso resuelve
+    // solo el caso de la ruta contratada de un solo sentido: dos días que ambos son solo
+    // ida comparten la firma `ida|` y caen juntos.
+    //
+    // La primera versión saltaba cualquier par al que le faltara un tramo y lo mandaba al
+    // paso 2. Con una ruta de solo ida —o con solo retorno, que es como vienen los
+    // adicionales del formato— eso significaba que NINGÚN par se unía en el paso 1, así
+    // que todos llegaban al paso 2 siendo cada uno su propia raíz y se bloqueaban entre
+    // ellos por "ambigüedad": 40 días de la misma ruta salían como 40 ítems.
+    for (const eje of ["nombre", "mapa"] as const) {
+      const porFirma = new Map<string, ParServicio[]>();
+      for (const p of ps) {
+        const f = firma(p, eje);
+        if (!f.ida && !f.ret) continue;           // este eje no sabe nada de este par
+        const k = `${f.ida}|${f.ret}`;
+        const ya = porFirma.get(k);
+        if (ya) ya.push(p); else porFirma.set(k, [p]);
+      }
+      for (const qs of porFirma.values())
+        for (let i = 1; i < qs.length; i++) unir(qs[0], qs[i]);
+    }
+
+    // Paso 2 · los días a los que les falta un tramo QUE OTROS SÍ TIENEN. Se acoplan al
+    // grupo con el que casan — pero SOLO si casan con uno. Con dos grupos posibles el día
+    // suelto podría ir a cualquiera y elegir sería adivinar: se queda aparte, igual que
+    // hace `analizarServicios` con el hermano ambiguo.
+    const leFaltaAlgo = (p: ParServicio) => {
+      for (const eje of ["nombre", "mapa"] as const) {
+        const f = firma(p, eje);
+        if (!f.ida && !f.ret) continue;
+        // Le falta un tramo por este eje, y hay algún otro par del cubo que sí lo declara.
+        if (!f.ida && ps.some((q) => q !== p && firma(q, eje).ida)) return true;
+        if (!f.ret && ps.some((q) => q !== p && firma(q, eje).ret)) return true;
+      }
+      return false;
+    };
+    for (const s of ps.filter(leFaltaAlgo)) {
+      const destinos = new Set<ParServicio>();
+      for (const q of ps) {
+        if (q === s || raiz(q) === raiz(s)) continue;
+        if (casan(s, q, "nombre") || casan(s, q, "mapa")) destinos.add(raiz(q));
+      }
+      if (destinos.size === 1) unir([...destinos][0], s);
+    }
+  }
+
+  const componentes = new Map<ParServicio, ParServicio[]>();
+  for (const p of pares) {
+    const r = raiz(p);
+    const ya = componentes.get(r);
+    if (ya) ya.push(p); else componentes.set(r, [p]);
+  }
+  return [...componentes.values()];
+}
+
+/**
+ * El nombre que se IMPRIME cuando un ítem reúne varias redacciones de la misma ruta: el
+ * más repetido entre sus tramos, con el alfabético como desempate para que no baile.
+ *
+ * Es la misma regla que `recalcularDescripciones` (lib/liquidaciones.ts) ya usaba para
+ * reescribir la descripción de una línea existente, así que crear y recalcular siguen
+ * dando el mismo texto. Y es un dato que alguien escribió —el que escribió más veces—,
+ * no una redacción inventada por el ERP.
+ */
+function nombreDominante(filas: (ReservaLiq | null)[]): string | null {
+  const cuenta = new Map<string, number>();
+  for (const r of filas) {
+    if (!r) continue;
+    const n = nombreRuta(r);
+    if (n && n !== "SIN NOMBRE DE RUTA") cuenta.set(n, (cuenta.get(n) ?? 0) + 1);
+  }
+  if (!cuenta.size) return null;
+  return [...cuenta].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
+}
+
 export type OpcionesAgrupacion = {
   lado: LadoLiquidacion;
   catalogo: CatalogoLiq;
@@ -881,7 +1198,14 @@ export function agruparServicios(
   };
   const buckets = new Map<string, Bucket>();
 
-  for (const p of pares) {
+  // Un bucket por RUTA CONTRATADA: ya no una por redacción del nombre. Ver
+  // `agruparPorRutaContratada` — une por el nombre sin la hora O por los extremos en el
+  // mapa, nunca cruzando tarifa ni origen contractual.
+  for (const componente of agruparPorRutaContratada(pares, lado, {
+    preciosIncluyenIgv: opts.preciosIncluyenIgv,
+    igvPct: opts.igvPct,
+  })) {
+    const p = componente[0];
     const r = p.cabeza;
     const precio = precioUnitario(r, lado, {
       preciosIncluyenIgv: opts.preciosIncluyenIgv,
@@ -890,19 +1214,29 @@ export function agruparServicios(
     // Los nombres salen de CADA TRAMO por su sentido, no de la cabeza: la cabeza es
     // el tramo que lleva el importe, y cuando la tarifa se cargó en el retorno la
     // línea terminaba rotulada con el nombre del retorno.
-    const nombreIda = p.ida ? nombreRuta(p.ida) : null;
-    const nombreRetorno = p.retorno ? nombreRuta(p.retorno) : null;
+    //
+    // Y salen de TODO el componente, no del primer par: el ítem reúne varias redacciones
+    // de la misma ruta ('ENTRADA 06:30' y 'ENTRADA 06:35') y se imprime la más repetida.
+    const nombreIda = nombreDominante(componente.map((x) => x.ida));
+    const nombreRetorno = nombreDominante(componente.map((x) => x.retorno));
     const { etiqueta: ruta, fuente: fuenteRuta } = etiquetaRutaDetalle(p.ida ?? r);
-    const sentido = p.sentido ?? (p.adjuntas.length ? "IDA Y RETORNO" : sentidoDeReserva(r));
+    // El sentido del ítem lo da el componente entero: si algún día llevó los dos tramos,
+    // la ruta contratada tiene ida y retorno aunque un día concreto se cayera.
+    const sentido = componente.some((x) => x.ida) && componente.some((x) => x.retorno)
+      ? "IDA Y RETORNO"
+      : (p.sentido ?? (p.adjuntas.length ? "IDA Y RETORNO" : sentidoDeReserva(r)));
     // El ORIGEN entra en la clave. Sin él, una salida adicional de la RUTA A cobrada a
     // la misma tarifa del contrato se sumaba a la línea del contrato y dejaba de
     // existir como concepto: el cliente leía "23 servicios" donde había 22 contratados
     // y 1 pedido aparte, y el subtotal de adicionales del formato salía en cero.
     const origen = origenDelPar(p);
+    // La clave conserva la forma de siempre —nombres, tarifa, origen— porque es lo que se
+    // guarda en `agrupacion_clave` y lo que lee el editor. Lo que cambió es de dónde salen
+    // los nombres: ahora son los del ítem entero, no los de una de sus redacciones.
     const clave = [norm(nombreIda ?? ""), norm(nombreRetorno ?? ""), precio.toFixed(2), origen].join("|");
     const b = buckets.get(clave)
       ?? { clave, ruta, fuenteRuta, nombreIda, nombreRetorno, sentido, origen, precio, movil: 1, moviles: 1, filas: [] };
-    b.filas.push(p);
+    b.filas.push(...componente);
     buckets.set(clave, b);
   }
 
@@ -1026,6 +1360,31 @@ export function agruparServicios(
         : "—",
     });
   });
+
+  // ── La regla dura, comprobada antes de devolver ───────────────────────────
+  //
+  // "Dos ítems con precio unitario distinto NO se unen jamás." Está garantizado por
+  // construcción —la tarifa es el cubo dentro del cual se une, ver
+  // `agruparPorRutaContratada`— pero se verifica igual, y ruidosamente. Un ítem que
+  // mezclara tarifas se imprimiría como CANT × P. UNITARIO con un unitario que nadie
+  // pactó, y el error viajaría hasta la factura sin que nada lo detenga. Prefiero que
+  // el cierre se caiga aquí, donde todavía se puede arreglar.
+  for (const b of ordenados) {
+    const tarifas = new Set(
+      b.filas.map((p) =>
+        precioUnitario(p.cabeza, lado, {
+          preciosIncluyenIgv: opts.preciosIncluyenIgv,
+          igvPct: opts.igvPct,
+        }).toFixed(2)
+      )
+    );
+    if (tarifas.size > 1)
+      throw new Error(
+        `Agrupación inválida: el ítem "${b.nombreIda ?? b.ruta}" reuniría ${tarifas.size} tarifas ` +
+        `distintas (${[...tarifas].join(", ")}). Dos servicios a distinto precio unitario nunca ` +
+        `pueden compartir ítem. Es un fallo del ERP: repórtalo en vez de emitir el documento.`
+      );
+  }
 
   return lineas;
 }
