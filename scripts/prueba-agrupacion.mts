@@ -292,5 +292,32 @@ titulo("12 · Ningún ítem reúne dos precios unitarios");
   ok(ls.reduce((a, l) => a + l.cantidad, 0) === 40, "con los 40 servicios repartidos", ls.reduce((a, l) => a + l.cantidad, 0));
 }
 
+// ── 13 · El MÓVIL no se inventa ni desaparece ───────────────────────────────
+titulo("13 · Reunir horas distintas no crea un MÓVIL falso");
+{
+  const t = (h: string): Tramo => ({ nombre: `RUTA G/ ENTRADA ${h}/ SANTA ANITA→BSF`, desde: SANTA_ANITA, hasta: BSF });
+  // Tres días a horas distintas: la ruta NUNCA salió con dos unidades a la vez.
+  const rs = [
+    ...dia({ ida: t("04:25"), precio: 550, fecha: "2026-08-03", hora: "04:25" }),
+    ...dia({ ida: t("06:30"), precio: 550, fecha: "2026-08-04", hora: "06:30" }),
+    ...dia({ ida: t("06:35"), precio: 550, fecha: "2026-08-05", hora: "06:35" }),
+  ];
+  const ls = lineasDe(rs);
+  ok(ls.length === 1 && ls[0].moviles === 1, "un ítem y ningún móvil", `${ls.length} ítem(s), ${ls[0]?.moviles} móvil(es)`);
+  ok(!ls[0].descripcion.includes("MÓVIL"), "la descripción no menciona MÓVIL");
+
+  // Y el corte legítimo sigue vivo: un día con DOS unidades a la MISMA hora.
+  const rs2 = [
+    ...dia({ ida: t("06:30"), precio: 550, fecha: "2026-08-03", hora: "06:30" }),
+    ...dia({ ida: t("06:30"), precio: 550, fecha: "2026-08-03", hora: "06:30" }),
+    ...dia({ ida: t("06:35"), precio: 550, fecha: "2026-08-04", hora: "06:35" }),
+    ...dia({ ida: t("06:35"), precio: 550, fecha: "2026-08-05", hora: "06:35" }),
+  ];
+  const ls2 = lineasDe(rs2);
+  ok(ls2.length === 2, "dos unidades a la misma hora siguen partiendo el ítem", ls2.length);
+  ok(caja(ls2) === 2200, "y la caja no se mueve", `S/ ${caja(ls2).toFixed(2)}`);
+  ok(new Set(ls2.map((l) => l.clave)).size === ls2.length, "sin colisión de agrupacion_clave");
+}
+
 console.log(fallos ? `\n${fallos} FALLA(S)\n` : "\nTODO OK\n");
 process.exit(fallos ? 1 : 0);
