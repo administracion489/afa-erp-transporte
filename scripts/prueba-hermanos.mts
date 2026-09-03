@@ -95,11 +95,13 @@ const motivosDe = (a: ReturnType<typeof analizarServicios>, id: number) =>
   const idx = indiceHermanos(rs);
   chk("se deduce el par que perdió el enlace", idx.hermanoProbableDe(rs[1])?.id === 8032);
   chk("y es simétrico", idx.hermanoProbableDe(rs[0])?.id === 8400);
-  chk("queda listado como reparable", idx.reparables.length === 1);
-  chk("con la procedencia dicha", idx.reparables[0]?.procedencia === "deducido");
+  chk("queda listado como pendiente", idx.pendientes.length === 1);
+  chk("con la procedencia dicha", idx.pendientes[0]?.procedencia === "deducido");
+  chk("y con un hermano propuesto", idx.pendientes[0]?.propuesto?.id === 8400);
 
   const a = analizarServicios(rs, "cliente", {
     hermanoDe: idx.hermanoDe, hermanoProbableDe: idx.hermanoProbableDe,
+    candidatosAmbiguosDe: idx.candidatosAmbiguosDe,
   });
   chk("el retorno NO pide precio: pide el ENLACE", motivosDe(a, 8400).includes("falta_enlace"),
     motivosDe(a, 8400).join(",") || "sin bloqueos");
@@ -114,16 +116,51 @@ const motivosDe = (a: ReturnType<typeof analizarServicios>, id: number) =>
 // sería inventado. Emparejar mal deja un día sin cobrar y otro cobrado por dos tramos.
 {
   const rs = [
-    ida(1, { hora_servicio: "05:10" }), ida(2, { hora_servicio: "05:10" }),
-    retorno(3, { hora_servicio: "17:00" }), retorno(4, { hora_servicio: "17:00" }),
+    ida(1, { hora_servicio: "05:10" }), ida(2, { hora_servicio: "07:00" }),
+    retorno(3, { hora_servicio: "15:00" }), retorno(4, { hora_servicio: "17:00" }),
   ];
   const idx = indiceHermanos(rs);
-  chk("con dos móviles no se deduce ningún par", idx.reparables.length === 0);
+  chk("con dos móviles no se PROPONE ningún par", idx.pendientes.every((p) => !p.propuesto));
+  chk("pero los cuatro tramos salen a que un humano los elija", idx.pendientes.length === 4);
+  chk("con sus candidatos del sentido contrario",
+    idx.pendientes.every((p) => p.candidatos.length === 2 && p.procedencia === "ambiguo"));
   const a = analizarServicios(rs, "cliente", {
     hermanoDe: idx.hermanoDe, hermanoProbableDe: idx.hermanoProbableDe,
+    candidatosAmbiguosDe: idx.candidatosAmbiguosDe,
   });
-  chk("y los retornos sí reclaman el dato que falta",
-    motivosDe(a, 3).includes("sin_precio") && motivosDe(a, 4).includes("sin_precio"));
+  chk("y los retornos NO piden precio (el día ya lo cobra alguno de los candidatos)",
+    motivosDe(a, 3).includes("hermano_ambiguo") && motivosDe(a, 4).includes("hermano_ambiguo"),
+    motivosDe(a, 3).join(","));
+  chk("el motivo nombra a los candidatos",
+    /OS-2026-000001.*OS-2026-000002|OS-2026-000002.*OS-2026-000001/.test(
+      a.bloqueadas.find((b) => b.r.id === 3)?.motivos[0] ?? ""));
+}
+
+// ── 5-bis. EL FALSO POSITIVO DE PRODUCCIÓN ──────────────────────────────────
+//
+// 22-08: la RUTA B salió con DOS móviles. Dos de sus cuatro tramos ya tenían enlace
+// (008215↔005381, cruzado), así que los otros dos —008039 y 008550— quedaban como los
+// únicos SUELTOS y el ERP los proponía como pareja: mismo cliente, mismo día, misma
+// ruta, sentidos contrarios, extremos invertidos. Se veía perfecto y era de móviles
+// distintos. Contar los que sobran no dice cuántas veces salió la ruta; hay que contar
+// el DÍA.
+{
+  const rs = [
+    ida(8039, { hora_servicio: "07:00" }),                                    // suelta
+    retorno(8550, { hora_servicio: "15:00" }),                                // suelta
+    ida(8215, { hora_servicio: "05:10", reserva_vinculada_id: 5381 }),        // enlazada…
+    retorno(5381, { hora_servicio: "17:00", reserva_vinculada_id: 8215 }),    // …entre ellas
+  ];
+  const idx = indiceHermanos(rs);
+  chk("NO se propone el par falso 008039↔008550", idx.hermanoProbableDe(rs[0]) === null);
+  chk("tampoco al revés", idx.hermanoProbableDe(rs[1]) === null);
+  chk("los dos sueltos salen a elegir, no propuestos",
+    idx.pendientes.filter((p) => p.procedencia === "ambiguo" && !p.propuesto).length === 2);
+  chk("y sus candidatos incluyen al que hoy está mal enlazado",
+    idx.pendientes.find((p) => p.tramo.id === 8039)?.candidatos.map((c) => c.id).sort().join(",") === "5381,8550");
+  chk("el par ya enlazado no se toca", idx.de(rs[2])?.tramo.id === 5381 && idx.de(rs[2])?.procedencia === "enlace");
+  chk("el contexto del día viaja con la fila para poder verificarlo",
+    idx.pendientes.find((p) => p.tramo.id === 8039)?.delDia.length === 4);
 }
 
 // ── 6. La deducción no cruza cliente, día ni ruta ───────────────────────────
@@ -135,7 +172,7 @@ const motivosDe = (a: ReturnType<typeof analizarServicios>, id: number) =>
     ["mismo sentido", [ida(1), ida(2, { precio_cliente: 0 })]],
   ];
   for (const [nombre, rs] of casos)
-    chk(`no se deduce con ${nombre}`, indiceHermanos(rs).reparables.length === 0);
+    chk(`no se deduce con ${nombre}`, indiceHermanos(rs).pendientes.every((p) => !p.propuesto));
 }
 
 // ── 7. El hermano quedó FUERA del cierre (ya liquidado) ─────────────────────
@@ -149,6 +186,7 @@ const motivosDe = (a: ReturnType<typeof analizarServicios>, id: number) =>
   const idx = indiceHermanos([laIda, elRetorno]);        // el periodo entero
   const a = analizarServicios([elRetorno], "cliente", {  // el grupo, ya filtrado
     hermanoDe: idx.hermanoDe, hermanoProbableDe: idx.hermanoProbableDe,
+    candidatosAmbiguosDe: idx.candidatosAmbiguosDe,
   });
   chk("no pide precio para un día ya cobrado", !motivosDe(a, 8400).includes("sin_precio"));
   chk("dice que su tarifa está fuera del cierre", motivosDe(a, 8400).includes("tarifa_fuera_del_cierre"));
@@ -169,6 +207,7 @@ const motivosDe = (a: ReturnType<typeof analizarServicios>, id: number) =>
   const idx = indiceHermanos(rs);
   const a = analizarServicios(rs, "cliente", {
     hermanoDe: idx.hermanoDe, hermanoProbableDe: idx.hermanoProbableDe,
+    candidatosAmbiguosDe: idx.candidatosAmbiguosDe,
   });
   chk("los dos tramos en cero siguen pidiendo el precio",
     motivosDe(a, 8032).includes("sin_precio") && motivosDe(a, 8400).includes("sin_precio"));
@@ -185,7 +224,7 @@ const motivosDe = (a: ReturnType<typeof analizarServicios>, id: number) =>
   const idx = indiceHermanos(rs);
   chk("la ida enlazada conserva su retorno", idx.hermanoDe(rs[0])?.id === 3);
   chk("y la suelta no le roba el par", idx.hermanoProbableDe(rs[1]) === null);
-  chk("no se propone reparar nada", idx.reparables.length === 0);
+  chk("no se propone ningún par", idx.pendientes.every((p) => !p.propuesto));
 }
 
 // ── 11. Enlace cruzado: apunta a un tramo que ya se emparejó con otro ───────
@@ -208,7 +247,7 @@ const motivosDe = (a: ReturnType<typeof analizarServicios>, id: number) =>
   const idx = indiceHermanos([laIda, elRetorno]);
   chk("el enlace se lee hacia atrás", idx.hermanoDe(laIda)?.id === 8400);
   chk("y se marca como escrito a medias", idx.de(laIda)?.procedencia === "enlace_a_medias");
-  chk("con su par reparable", idx.reparables.length === 1);
+  chk("con su par pendiente de escribir", idx.pendientes.length === 1);
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

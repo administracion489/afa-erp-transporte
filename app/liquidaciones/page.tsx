@@ -23,7 +23,7 @@ import {
   type ReservaLiq, type CatalogoLiq, type LineaAgrupada, type LadoLiquidacion,
   type ParServicio, type ReservaBloqueada,
 } from "@/lib/liquidacion-agrupacion";
-import { indiceHermanos, type EnlaceReparable } from "@/lib/liquidacion-hermanos";
+import { indiceHermanos, type EnlacePendiente } from "@/lib/liquidacion-hermanos";
 import {
   cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxContratado,
   type CatalogoRutas,
@@ -211,7 +211,7 @@ export default function LiquidacionesPage() {
   const [modalRutas, setModalRutas] = useState<RutaDelPeriodo[] | null>(null);
   const [modalPrecios, setModalPrecios] = useState<ReservaSinPrecio[] | null>(null);
   /** Los pares ida↔retorno que la base perdió y hay que volver a escribir. */
-  const [modalEnlaces, setModalEnlaces] = useState<EnlaceReparable[] | null>(null);
+  const [modalEnlaces, setModalEnlaces] = useState<EnlacePendiente[] | null>(null);
   /**
    * El detalle detrás de un contador. Los tres números de esta pantalla —el "N serv."
    * del bloque rojo, el "N/N serv." de cada línea y el "N servicio(s)" de la cabecera—
@@ -407,6 +407,7 @@ export default function LiquidacionesPage() {
       const analisis = analizarServicios(g.reservas, lado, {
         hermanoDe: hermanos.hermanoDe,
         hermanoProbableDe: hermanos.hermanoProbableDe,
+        candidatosAmbiguosDe: hermanos.candidatosAmbiguosDe,
       });
       g.pares = analisis.pares;
       g.bloqueadas = analisis.bloqueadas;
@@ -606,10 +607,12 @@ export default function LiquidacionesPage() {
    * un botón que ofrece arreglar cosas que no están en pantalla es el mismo problema que
    * el contador que decía 399.
    */
-  const enlacesRotos = useMemo<EnlaceReparable[]>(() => {
+  const enlacesRotos = useMemo<EnlacePendiente[]>(() => {
     const visibles = new Set<number>();
     for (const g of gruposVisibles) for (const r of g.reservas) visibles.add(r.id);
-    return hermanos.reparables.filter((e) => visibles.has(e.tramo.id) || visibles.has(e.hermano.id));
+    return hermanos.pendientes.filter(
+      (e) => visibles.has(e.tramo.id) || (e.propuesto ? visibles.has(e.propuesto.id) : false)
+    );
   }, [hermanos, gruposVisibles]);
 
   /**
@@ -921,13 +924,20 @@ export default function LiquidacionesPage() {
             {/* Un día partido en dos no es un precio que falta: es un enlace que falta. Y
                 la diferencia importa, porque "arreglarlo" con un precio cobra el día dos
                 veces. Por eso es su propio botón y no una fila más del de precios. */}
-            {enlacesRotos.length > 0 && (
-              <button onClick={() => setModalEnlaces(enlacesRotos)}
-                className="px-3 py-2 rounded-xl text-sm font-bold text-amber-800 bg-amber-50 border border-amber-200 hover:bg-amber-100"
-                title="Días partidos en dos servicios sueltos: les falta el enlace ida↔retorno">
-                Enlazar {enlacesRotos.length} par(es) ida↔retorno
-              </button>
-            )}
+            {enlacesRotos.length > 0 && (() => {
+              // Los ambiguos se cuentan aparte porque son trabajo distinto: ahí el hermano
+              // lo elige el operador. Meterlos en el mismo número haría creer que el ERP
+              // ya sabe cuál va con cuál — que es justo el error que costó un falso par.
+              const aElegir = enlacesRotos.filter((e) => !e.propuesto).length;
+              return (
+                <button onClick={() => setModalEnlaces(enlacesRotos)}
+                  className="px-3 py-2 rounded-xl text-sm font-bold text-amber-800 bg-amber-50 border border-amber-200 hover:bg-amber-100"
+                  title="Días partidos en dos servicios sueltos: les falta el enlace ida↔retorno">
+                  Enlazar {enlacesRotos.length} tramo(s) ida↔retorno
+                  {aElegir > 0 && ` · ${aElegir} a elegir`}
+                </button>
+              );
+            })()}
             {lado === "cliente" && rutasDelPeriodo.length > 0 && (
               <button onClick={() => setModalRutas(rutasDelPeriodo)}
                 className={`px-3 py-2 rounded-xl text-sm font-bold border ${
@@ -1256,7 +1266,7 @@ export default function LiquidacionesPage() {
           }} />
       )}
       {modalEnlaces && (
-        <ModalEnlaces enlaces={modalEnlaces} lado={lado}
+        <ModalEnlaces pendientes={modalEnlaces} lado={lado}
           clienteDe={(r) =>
             (r.cliente_id != null
               ? clientes[r.cliente_id]?.empresa || clientes[r.cliente_id]?.nombre

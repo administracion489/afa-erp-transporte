@@ -49,7 +49,7 @@ export type ProcedenciaHermano =
   | "enlace"
   /** Escrito en un solo lado. El par es real, pero la base quedó a medias y hay que repararla. */
   | "enlace_a_medias"
-  /** Sin enlace por ningún lado. Se dedujo por cliente + fecha + ruta + sentido contrario. */
+  /** Sin enlace por ningún lado. Se dedujo, y solo porque ese día esa ruta salió UNA vez. */
   | "deducido";
 
 export type Hermano = {
@@ -57,22 +57,51 @@ export type Hermano = {
   procedencia: ProcedenciaHermano;
 };
 
-/** Un enlace que le falta a la base, con el UPDATE que lo arregla. */
-export type EnlaceReparable = {
+/**
+ * Los otros tramos de la misma ruta, el mismo día y del mismo cliente. Es el CONTEXTO sin
+ * el cual no se puede verificar una propuesta.
+ *
+ * Existe por un falso positivo real: el 22-08 la RUTA B salió con DOS móviles, y como dos
+ * de los cuatro tramos ya tenían enlace, los otros dos quedaban como los únicos sueltos y
+ * el ERP los proponía como par. Se veían perfectos —mismo cliente, mismo día, misma ruta,
+ * sentidos contrarios, extremos invertidos— y eran de móviles distintos. Contar los que
+ * SOBRAN no dice nada; hay que contar los del DÍA.
+ */
+export type Candidatura = {
+  /** Todos los tramos de ese cliente, ese día y esa ruta — los enlazados incluidos. */
+  delDia: ReservaLiq[];
+  /** Los del sentido contrario: los únicos que pueden ser su hermano. */
+  candidatos: ReservaLiq[];
+  /**
+   * El hermano que se puede proponer SIN adivinar: solo cuando ese día esa ruta tiene
+   * exactamente una ida y un retorno, y los dos están sueltos. null = lo elige un humano.
+   */
+  seguro: ReservaLiq | null;
+};
+
+/** Un enlace que le falta a la base. `propuesto` en null = el operador tiene que elegirlo. */
+export type EnlacePendiente = {
   tramo: ReservaLiq;
-  hermano: ReservaLiq;
-  procedencia: Exclude<ProcedenciaHermano, "enlace">;
+  propuesto: ReservaLiq | null;
+  /** `ambiguo` = hay más de un móvil ese día y el ERP no elige por ti. */
+  procedencia: Exclude<ProcedenciaHermano, "enlace"> | "ambiguo";
+  candidatos: ReservaLiq[];
+  delDia: ReservaLiq[];
 };
 
 export type IndiceHermanos = {
   /** El otro tramo por el ENLACE ESCRITO, mirando los DOS sentidos. null si no hay. */
   hermanoDe: (r: ReservaLiq) => ReservaLiq | null;
-  /** El otro tramo DEDUCIDO, solo cuando no hay enlace escrito por ningún lado. */
+  /** El otro tramo DEDUCIDO, y solo cuando no hay nada que adivinar. */
   hermanoProbableDe: (r: ReservaLiq) => ReservaLiq | null;
+  /** Suelto, con candidatos, pero con más de un móvil ese día: los devuelve para que elija un humano. */
+  candidatosAmbiguosDe: (r: ReservaLiq) => ReservaLiq[] | null;
+  /** El contexto del día para poder verificar una propuesta. */
+  candidaturaDe: (r: ReservaLiq) => Candidatura;
   /** Cualquiera de los dos, diciendo de dónde salió. */
   de: (r: ReservaLiq) => Hermano | null;
-  /** Los enlaces que hay que escribir para que la base deje de partir el día en dos. */
-  reparables: EnlaceReparable[];
+  /** Lo que hay que enlazar para que la base deje de partir el día en dos. */
+  pendientes: EnlacePendiente[];
 };
 
 /** El enlace escrito de esta fila, si lo tiene. */
@@ -151,28 +180,49 @@ export function indiceHermanos(universo: ReservaLiq[]): IndiceHermanos {
   // Solo entran las filas SIN enlace por ningún lado: una fila que ya apunta a alguien
   // (o a la que apuntan) tiene su par escrito, y reemplazarlo por una conjetura rompería
   // un dato bueno.
-  const sueltas = universo.filter((r) => !vinculo(r) && !(apuntanA.get(r.id) ?? []).length);
+  const libre = (r: ReservaLiq) => !vinculo(r) && !(apuntanA.get(r.id) ?? []).length;
 
-  const porClave = new Map<string, { idas: ReservaLiq[]; retornos: ReservaLiq[] }>();
-  for (const r of sueltas) {
+  // El grupo lleva TODOS los tramos de esa ruta ese día, enlazados incluidos. Contar solo
+  // los sueltos era el falso positivo: con la ruta saliendo con dos móviles y dos de los
+  // cuatro tramos ya enlazados, los otros dos parecían "los únicos" y se proponían como
+  // par siendo de móviles distintos. Los que sobran no dicen cuántas veces salió la ruta.
+  const porClave = new Map<string, ReservaLiq[]>();
+  for (const r of universo) {
     const k = claveDeducible(r);
     if (!k) continue;
-    const bolsa = porClave.get(k) ?? { idas: [], retornos: [] };
-    (sentidoDeReserva(r) === "RETORNO" ? bolsa.retornos : bolsa.idas).push(r);
-    porClave.set(k, bolsa);
+    const bolsa = porClave.get(k);
+    if (bolsa) bolsa.push(r);
+    else porClave.set(k, [r]);
   }
+  const grupoDe = (r: ReservaLiq): ReservaLiq[] => {
+    const k = claveDeducible(r);
+    return (k && porClave.get(k)) || [];
+  };
 
-  const deducidos = new Map<number, ReservaLiq>();
-  for (const { idas, retornos } of porClave.values()) {
-    // Una ida y un retorno: no hay nada que adivinar. Con dos móviles la misma ruta el
-    // mismo día hay dos de cada uno y CUALQUIER emparejamiento sería inventado — se deja
-    // para que un humano lo enlace desde Programación, que es donde se ve la unidad.
-    if (idas.length !== 1 || retornos.length !== 1) continue;
-    deducidos.set(idas[0].id, retornos[0]);
-    deducidos.set(retornos[0].id, idas[0]);
-  }
+  const candidaturaDe = (r: ReservaLiq): Candidatura => {
+    const delDia = grupoDe(r);
+    const candidatos = delDia.filter((x) => x.id !== r.id && sentidoDeReserva(x) !== sentidoDeReserva(r));
+    if (!libre(r) || !delDia.length) return { delDia, candidatos, seguro: null };
 
-  const hermanoProbableDe = (r: ReservaLiq): ReservaLiq | null => deducidos.get(r.id) ?? null;
+    // La regla dura: ese día esa ruta salió UNA vez —una ida y un retorno en total— y los
+    // dos están sueltos. Cualquier otra cosa (dos móviles, un tramo de más, el candidato
+    // ya enlazado a un tercero) es una elección entre varias, y elegir por el operador es
+    // escribir dinero en el tramo equivocado.
+    const idas = delDia.filter((x) => sentidoDeReserva(x) !== "RETORNO");
+    const retornos = delDia.filter((x) => sentidoDeReserva(x) === "RETORNO");
+    if (idas.length !== 1 || retornos.length !== 1) return { delDia, candidatos, seguro: null };
+    const otro = candidatos[0];
+    return { delDia, candidatos, seguro: otro && libre(otro) ? otro : null };
+  };
+
+  const hermanoProbableDe = (r: ReservaLiq): ReservaLiq | null => candidaturaDe(r).seguro;
+
+  /** Suelto y con candidatos, pero el día tiene más de un móvil: lo elige un humano. */
+  const candidatosAmbiguosDe = (r: ReservaLiq): ReservaLiq[] | null => {
+    if (!libre(r)) return null;
+    const { candidatos, seguro } = candidaturaDe(r);
+    return !seguro && candidatos.length ? candidatos : null;
+  };
 
   const de = (r: ReservaLiq): Hermano | null => {
     const escrito = hermanoDe(r);
@@ -181,19 +231,30 @@ export function indiceHermanos(universo: ReservaLiq[]): IndiceHermanos {
     return probable ? { tramo: probable, procedencia: "deducido" } : null;
   };
 
-  // ── Lo que hay que escribir para que la base deje de partir el día ────────
-  const reparables: EnlaceReparable[] = [];
+  // ── Lo que hay que enlazar ────────────────────────────────────────────────
+  //
+  // Un par conocido (enlace a medias o deducido sin adivinar) es UNA fila. Un tramo suelto
+  // con varios candidatos es una fila POR TRAMO, porque cada uno necesita su elección.
+  const pendientes: EnlacePendiente[] = [];
   const vistos = new Set<number>();
   for (const r of universo) {
     if (vistos.has(r.id)) continue;
+    const { delDia, candidatos } = candidaturaDe(r);
     const h = de(r);
-    if (!h || h.procedencia === "enlace") continue;
+    if (h && h.procedencia !== "enlace") {
+      vistos.add(r.id);
+      vistos.add(h.tramo.id);
+      pendientes.push({ tramo: r, propuesto: h.tramo, procedencia: h.procedencia, candidatos, delDia });
+      continue;
+    }
+    if (h) continue;                       // enlazado por los dos lados: nada que hacer
+    const ambiguos = candidatosAmbiguosDe(r);
+    if (!ambiguos) continue;               // suelto sin ningún candidato: no es cosa del enlace
     vistos.add(r.id);
-    vistos.add(h.tramo.id);
-    reparables.push({ tramo: r, hermano: h.tramo, procedencia: h.procedencia });
+    pendientes.push({ tramo: r, propuesto: null, procedencia: "ambiguo", candidatos: ambiguos, delDia });
   }
 
-  return { hermanoDe, hermanoProbableDe, de, reparables };
+  return { hermanoDe, hermanoProbableDe, candidatosAmbiguosDe, candidaturaDe, de, pendientes };
 }
 
 export type ResultadoReparacion = {
@@ -223,6 +284,18 @@ export async function repararEnlaces(
   const errores: string[] = [];
   for (const { tramo, hermano } of pares) {
     const ref = (x: { id: number; codigo?: string | null }) => x.codigo ?? `#${x.id}`;
+
+    // Antes de escribir, se SUELTA a quien apuntaba a cualquiera de los dos. Corregir un
+    // par mal enlazado (el caso de los dos móviles que se cruzaron) deja si no un tercero
+    // apuntando a un tramo que ya tiene otro hermano: un enlace de tres puntas que las
+    // pantallas leen distinto según por dónde entren.
+    for (const [yo, mi] of [[tramo, hermano], [hermano, tramo]] as const) {
+      const s = await sb.from("reservas")
+        .update({ reserva_vinculada_id: null })
+        .eq("reserva_vinculada_id", yo.id).neq("id", mi.id);
+      if (s.error) { errores.push(`soltar los enlaces viejos de ${ref(yo)}: ${s.error.message}`); }
+    }
+
     const a = await sb.from("reservas").update({ reserva_vinculada_id: hermano.id }).eq("id", tramo.id);
     if (a.error) { errores.push(`${ref(tramo)}: ${a.error.message}`); continue; }
     const b = await sb.from("reservas").update({ reserva_vinculada_id: tramo.id }).eq("id", hermano.id);
