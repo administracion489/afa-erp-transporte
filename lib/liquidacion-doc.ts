@@ -525,8 +525,7 @@ function bloqueAnexo1(d: DocLiquidacion, cp: string): string {
     </table>
     <div class="nota"><b>Cómo leer este anexo:</b> las filas van en <b>orden de fecha</b>, del primer al último día del periodo; los dos tramos de un mismo día se listan juntos.
     La columna <b>ÍTEM</b> es el número con el que la fila se rastrea en la valorización, y <b>TURNO</b> es la hora programada de salida.
-    La columna <b>PAX</b> es la <b>capacidad contratada</b> de esa ruta: los asientos pactados con el cliente, que son los que se facturan y no cambian porque un día suba menos gente. Un guion significa que ese dato no está registrado, que no es lo mismo que cero.
-    Al pie <b>no se totaliza</b>: son los mismos asientos cada día, y sumarlos a lo largo del periodo daría un número que no pactó nadie. Cualquier fila puede rastrearse con su N° AFA.
+    La columna <b>PAX</b> es la <b>capacidad contratada</b> de esa ruta: los asientos pactados con el cliente. Cualquier fila puede rastrearse con su N° AFA.
     ${d.anexo1.some((f) => /incluido/i.test(f.estado))
       ? "Los tramos marcados <b>incl.</b> corresponden al retorno del mismo servicio: una sola tarifa cubre ida y retorno, por eso comparten el número de ítem y el importe se cobra una vez. "
       : ""}

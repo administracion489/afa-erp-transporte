@@ -146,14 +146,20 @@ titulo("4 · Al pie no se suman los asientos contratados");
 }
 
 // ── 5 · La nota explica lo que la columna es ahora ─────────────────────────
+//
+// La nota dice QUÉ es el número y nada más. Llegó a explicar además el guion de las filas
+// sin dato y por qué el pie no suma; AFA pidió quitar las dos cosas. Las reglas siguen en
+// pie —los casos 3 y 4 las comprueban sobre la tabla, que es donde se ven— pero no se
+// enuncian en el papel: la nota es para leer el anexo, no para justificarlo.
 titulo("5 · «Cómo leer este anexo» describe la columna de verdad");
 {
   const t = texto(buildLiquidacionHtml(doc([fila({})])));
   ok(/capacidad contratada/.test(t), "dice qué es el número");
-  ok(/guion significa que ese dato no está registrado/.test(t), "explica el guion");
-  ok(/no se totaliza/.test(t), "y avisa de que la columna no se suma");
+  ok(/asientos pactados con el cliente/.test(t), "y de dónde sale");
   ok(!/embarcad|manifiesto|contr\.\/emb\./.test(t),
-    "y ya no queda ni una palabra de los embarcados, que es la columna que se quitó");
+    "sin una palabra de los embarcados, que es la columna que se quitó");
+  ok(!/guion|totaliza|suba menos gente|pactó nadie/.test(t),
+    "y sin las dos explicaciones que AFA pidió quitar", t.match(/Cómo leer este anexo:.{0,340}/)?.[0]);
 }
 
 // ── 6 · La firma del Gerente General ───────────────────────────────────────
