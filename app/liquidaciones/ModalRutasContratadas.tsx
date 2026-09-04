@@ -39,6 +39,12 @@ export type RutaDelPeriodo = {
   sedeNombre: string;
   nombreIda: string | null;
   nombreRetorno: string | null;
+  /**
+   * false = el renglón reúne varias redacciones de la ruta, así que el par de nombres que
+   * muestra es el MÁS USADO de cada tramo y puede no existir tal cual en ningún servicio.
+   * Fichar con ese par escribiría una identidad inventada. Ver `guardar()`.
+   */
+  nombresUniformes: boolean;
   /** Lo que hoy resuelve la cascada. null = la ruta sale sin el "N PAX". */
   paxContratado: number | null;
   /** La unidad más chica que se asignó en el periodo. Solo referencia, nunca se copia sola. */
@@ -122,18 +128,25 @@ export default function ModalRutasContratadas({
         fallos.push(`${r.nombreIda ?? "(sin nombre)"}: "${texto}" no es una cantidad de asientos`);
         continue;
       }
-      // DÓNDE SE GUARDA depende de si esta fila es la ruta entera o solo una parte.
+      // SIEMPRE se escribe el snapshot de cada servicio, y la ficha solo cuando puede.
       //
-      // `cliente_ruta` tiene un índice único por par de nombres: una ruta, un número. Pero
-      // la misma ruta puede salir en el periodo con dos contratos —la RUTA C de retorno
-      // tenía un adicional por 4 asientos y dos por 10, todos con el mismo nombre—, y ahí
-      // la ficha no da para los dos. Guardar las dos filas contra la ficha haría que la
-      // segunda pisara a la primera EN SILENCIO.
+      // `reservas.capacidad_contratada` es el escalón que MANDA en la cascada y no depende
+      // de que ningún nombre calce: es exacto y siempre se encuentra. La ficha es un extra
+      // —sirve para que el mes siguiente salga solo— y tiene dos condiciones que no siempre
+      // se cumplen:
       //
-      //   · ruta con UNA sola fila  → la ficha, como siempre: se corrige una vez y los
-      //                               meses siguientes salen bien solos.
-      //   · ruta con VARIAS filas   → el snapshot de cada servicio, que es el escalón que
-      //                               manda sobre la ficha y sí distingue fila por fila.
+      //   · `cliente_ruta` admite UN número por par de nombres, así que una ruta que este
+      //     periodo salió con dos contratos (la RUTA C con un adicional por 4 asientos y
+      //     dos por 10) no cabe en una ficha: la segunda fila pisaría a la primera;
+      //   · y con varias redacciones, el par que muestra la fila es el más usado de CADA
+      //     tramo y puede no existir junto en ningún servicio. Pasó con la RUTA B: la fila
+      //     mostraba la ida de las 05:10 con el retorno de las 17:00, pero los del 05:10
+      //     vuelven a las 15:00. La ficha se guardaba con esa identidad inventada, ningún
+      //     servicio la encontraba, y como el PAX separa ítems el renglón se PARTÍA EN DOS
+      //     —una mitad con el número y otra sin él— después de decir "guardado".
+      //
+      // Por eso el snapshot va siempre y la ficha solo si la fila es toda la ruta y sus
+      // servicios se llaman igual. Guardar deja de depender de que los nombres calcen.
       const filasDeLaRuta = rutas.filter(
         (x) =>
           (x.clienteId ?? 0) === (r.clienteId ?? 0) &&
@@ -142,15 +155,16 @@ export default function ModalRutasContratadas({
           (x.nombreRetorno ?? "") === (r.nombreRetorno ?? "")
       ).length;
 
-      const res = filasDeLaRuta > 1
-        ? await guardarPaxDeServicios(supabase, r.reservasPeriodo, pax)
-        : await guardarPaxContratado(supabase, {
-            clienteId: r.clienteId,
-            sedeId: r.sedeId,
-            nombreIda: r.nombreIda,
-            nombreRetorno: r.nombreRetorno,
-            pax,
-          });
+      const res = await guardarPaxDeServicios(supabase, r.reservasPeriodo, pax);
+      if (res.ok && filasDeLaRuta === 1 && r.nombresUniformes) {
+        // El fallo de la ficha no tumba lo ya guardado en los servicios: el número queda
+        // puesto igual, y lo único que se pierde es la herencia al mes siguiente.
+        const f = await guardarPaxContratado(supabase, {
+          clienteId: r.clienteId, sedeId: r.sedeId,
+          nombreIda: r.nombreIda, nombreRetorno: r.nombreRetorno, pax,
+        });
+        if (!f.ok) fallos.push(`${r.nombreIda ?? "(sin nombre)"}: se guardó en los servicios, pero no en la ficha (${f.error})`);
+      }
       if (res.ok) ok += 1;
       else fallos.push(`${r.nombreIda ?? "(sin nombre)"}: ${res.error}`);
     }

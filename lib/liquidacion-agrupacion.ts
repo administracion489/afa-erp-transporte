@@ -797,6 +797,16 @@ export type LineaAgrupada = {
   /** Nombre COMPLETO de cada tramo, tal como lo escribió la operación. Esto es lo que se imprime. */
   nombre_ida: string | null;
   nombre_retorno: string | null;
+  /**
+   * ¿TODOS los servicios del ítem se llaman igual, o el ítem reúne varias redacciones?
+   *
+   * Importa fuera de aquí: `nombre_ida` y `nombre_retorno` son el nombre MÁS USADO de cada
+   * tramo, y con varias redacciones esa combinación puede no existir en ningún servicio —
+   * en el documento real, la RUTA B mostraba la ida de las 05:10 junto al retorno de las
+   * 17:00, y los del 05:10 vuelven a las 15:00. Fichar esa ruta con ese par escribía en
+   * `cliente_ruta` una identidad inventada que ningún servicio encontraba después.
+   */
+  nombres_uniformes: boolean;
   sentido: string;
   /** Posición dentro del día cuando la ruta necesita más de una unidad a la misma hora. */
   movil: number;
@@ -1389,6 +1399,10 @@ export function agruparServicios(
       fuente_ruta: b.fuenteRuta,
       nombre_ida: b.nombreIda,
       nombre_retorno: b.nombreRetorno,
+      nombres_uniformes:
+        new Set(
+          b.filas.map((p) => `${p.ida ? nombreRuta(p.ida) : ""}|${p.retorno ? nombreRuta(p.retorno) : ""}`)
+        ).size <= 1,
       sentido: b.sentido,
       movil: b.movil,
       moviles: b.moviles,

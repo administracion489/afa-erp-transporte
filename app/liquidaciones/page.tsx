@@ -550,6 +550,9 @@ export default function LiquidacionesPage() {
           // la clave de arriba debería haber siempre una, y si apareciera una segunda es
           // que algo se coló: se muestra en vez de esconderse detrás de un promedio.
           ya.reservasPeriodo.push(...l.reservas_periodo);
+          // Basta con que UNA de las líneas de la ficha reúna varias redacciones para que
+          // el par de nombres de la fila deje de existir tal cual en los servicios.
+          ya.nombresUniformes = ya.nombresUniformes && l.nombres_uniformes;
           if (!ya.precios.includes(l.precio_unitario)) ya.precios.push(l.precio_unitario);
           ya.total += l.total_linea;
           continue;
@@ -562,6 +565,7 @@ export default function LiquidacionesPage() {
           sedeNombre: g.sedeNombre,
           nombreIda: l.nombre_ida,
           nombreRetorno: l.nombre_retorno,
+          nombresUniformes: l.nombres_uniformes,
           paxContratado: l.pax_contratado,
           capacidadMinimaAsignada: l.capacidad_minima_asignada,
           servicios: l.cantidad,
