@@ -13,6 +13,8 @@
 
 import type { DocLiquidacion, FilaAnexo, LineaDoc, ControlDoc, Anexo2 } from "./liquidacion-doc";
 import { fechaFormato } from "./liquidacion-agrupacion";
+import { empresaConDefectos } from "./empresa-perfil";
+import { esAbordado } from "./documentos-servicio";
 import type { Lado } from "./liquidaciones";
 
 const TABLAS = {
@@ -148,7 +150,7 @@ export async function cargarDocumentoLiquidacion(
     if (reservaIds.length) {
       const reservas = await enLotes(reservaIds, 300, async (chunk) => {
         const { data } = await sb.from("reservas")
-          .select("id,codigo,fecha_servicio,hora_servicio,ruta_nombre,direccion_servicio,origen,destino,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,pasajeros_abordados,precio_cliente,costo_proveedor,estado,reserva_vinculada_id")
+          .select("id,codigo,fecha_servicio,hora_servicio,ruta_nombre,direccion_servicio,origen,destino,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,pasajeros_abordados,capacidad_contratada,precio_cliente,costo_proveedor,estado,reserva_vinculada_id")
           .in("id", chunk);
         return ((data as any[]) ?? []);
       });
@@ -165,6 +167,47 @@ export async function cargarDocumentoLiquidacion(
         cIds.length ? sb.from("conductores").select("id,nombre").in("id", cIds) : Promise.resolve({ data: [] }),
         ctIds.length ? sb.from("conductores_tercero").select("id,nombre").in("id", ctIds) : Promise.resolve({ data: [] }),
       ]);
+      // ── Los EMBARCADOS salen del manifiesto, no de la reserva ──────────────
+      //
+      // `reservas.pasajeros_abordados` existe como columna pero NO LA ESCRIBE NADIE: el
+      // abordaje se registra en `pasajeros_parada` cuando el conductor escanea el QR. Por
+      // eso la columna PAX del anexo salía en 0 con el manifiesto lleno — un cero que el
+      // cliente lee como "no viajó nadie" en un servicio que sí se prestó y se le cobra.
+      //
+      // Se cuenta con `esAbordado` (lib/documentos-servicio.ts), que es la MISMA definición
+      // que usan la app del conductor, el lector de QR y Seguimiento. Tener aquí un cuarto
+      // criterio haría que el papel y la pantalla dieran cifras distintas del mismo día.
+      const abordadosPorReserva = new Map<number, number>();
+      try {
+        const paradas = await enLotes(reservaIds, 300, async (chunk) => {
+          const { data } = await sb.from("paradas").select("id,reserva_id").in("reserva_id", chunk);
+          return ((data as any[]) ?? []);
+        });
+        const reservaDeParada = new Map<number, number>(paradas.map((p) => [Number(p.id), Number(p.reserva_id)]));
+        if (reservaDeParada.size) {
+          const pps = await enLotes([...reservaDeParada.keys()], 300, async (chunk) => {
+            const { data } = await sb.from("pasajeros_parada")
+              .select("parada_id,pasajero_id,estado,estado_abordaje").in("parada_id", chunk);
+            return ((data as any[]) ?? []);
+          });
+          // Por pasajero DISTINTO: un mismo pasajero puede figurar en dos paraderos del
+          // recorrido y contarlo dos veces inflaría el manifiesto.
+          const vistos = new Map<number, Set<string>>();
+          for (const pp of pps) {
+            if (!esAbordado(pp)) continue;
+            const rid = reservaDeParada.get(Number(pp.parada_id));
+            if (!rid) continue;
+            const set = vistos.get(rid) ?? new Set<string>();
+            set.add(String(pp.pasajero_id ?? `pp-${pp.parada_id}-${set.size}`));
+            vistos.set(rid, set);
+          }
+          for (const [rid, set] of vistos) abordadosPorReserva.set(rid, set.size);
+        }
+      } catch {
+        // Sin manifiesto el anexo sale con el contratado y un "—" en los embarcados, que
+        // es la verdad: no que viajaran cero.
+      }
+
       const placa = new Map<string, string>();
       for (const v of ((vs.data as any[]) ?? [])) placa.set("p" + v.id, v.placa);
       for (const v of ((vts.data as any[]) ?? [])) placa.set("t" + v.id, v.placa);
@@ -235,7 +278,13 @@ export async function cargarDocumentoLiquidacion(
             turno: hhmm(r.hora_servicio) || "—",
             placa: placa.get((esTercero ? "t" : "p") + (r.vehiculo_tercero_id ?? r.vehiculo_id)) ?? "",
             conductor: chofer.get((r.conductor_tercero_id ? "t" : "p") + (r.conductor_tercero_id ?? r.conductor_id)) ?? "",
-            pax: r.pasajeros_abordados != null ? Number(r.pasajeros_abordados) : null,
+            // Contratado / embarcados. El contratado sale del servicio y, si no lo trae,
+            // del ítem que lo cobra (es el número que se imprimió en la valorización).
+            paxContratado: Number(r.capacidad_contratada ?? 0) > 0
+              ? Number(r.capacidad_contratada)
+              : Number((l as any).pax_contratado ?? 0) > 0 ? Number((l as any).pax_contratado) : null,
+            pax: abordadosPorReserva.get(Number(r.id))
+              ?? (r.pasajeros_abordados != null ? Number(r.pasajeros_abordados) : null),
             estado: r.estado !== "finalizada" ? "No ejecutado"
               : incluida ? "Incluido"
               : l.tipo === "adicional" ? "Adicional" : "Conforme",
@@ -382,15 +431,15 @@ export async function cargarDocumentoLiquidacion(
             { rol: "Jefe de Operaciones", entidad: (emp.razon_social || emp.nombre || "AFA TOURS PERU S.A.C.").toUpperCase() },
             { rol: "Administración", entidad: (emp.razon_social || emp.nombre || "AFA TOURS PERU S.A.C.").toUpperCase() },
           ],
-    empresa: {
-      nombre: emp.nombre || emp.razon_social || "AFA Tours Peru S.A.C.",
-      ruc: emp.ruc ?? null,
-      logo: emp.logo_url ?? null,
-      direccion: emp.direccion ?? null,
-      telefono: emp.telefono ?? null,
-      email: emp.email ?? null,
-      web: emp.web ?? null,
-    },
+    // Con los huecos rellenos: hoy `empresa_perfil` tiene la dirección, el teléfono y el
+    // correo vacíos, y pasarlos tal cual dejaba el pie del documento con tres rayas. Los
+    // valores son los que ya imprime el PDF de la cotización, para que los papeles que AFA
+    // envía digan lo mismo salgan de donde salgan.
+    empresa: (() => {
+      const e = empresaConDefectos(emp);
+      return { nombre: e.nombre, ruc: e.ruc, logo: e.logo, direccion: e.direccion,
+               telefono: e.telefono, email: e.email, web: e.web };
+    })(),
     qr,
     urlVerificacion: url,
     aviso:

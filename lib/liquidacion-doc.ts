@@ -67,6 +67,15 @@ export type FilaAnexo = {
   turno: string;
   placa: string;
   conductor: string;
+  /**
+   * Asientos CONTRATADOS para ese servicio. Es lo que el cliente pactó, no lo que cupo en
+   * el bus. null = ninguna fuente lo sabe, y entonces se imprime "—" en vez de inventarlo.
+   */
+  paxContratado?: number | null;
+  /**
+   * Pasajeros que EMBARCARON de verdad, contados del manifiesto digital. null = ese
+   * servicio no tiene manifiesto, que no es lo mismo que cero.
+   */
   pax: number | null;
   estado: string;          // 'Conforme' | 'Tardío' | 'Adicional' | 'No ejecutado'
   importe: number;
@@ -457,16 +466,35 @@ function bloqueConformidad(d: DocLiquidacion, n: number): string {
 }
 
 function bloqueAnexo1(d: DocLiquidacion, cp: string): string {
+  /**
+   * La celda PAX: contratados / embarcados.
+   *
+   * Antes imprimía solo un número, `reservas.pasajeros_abordados`, que NO LO ESCRIBE NADIE
+   * —el abordaje vive en `pasajeros_parada`— así que salía 0 con el manifiesto lleno. Un
+   * cero ahí lo lee el cliente como "no viajó nadie" en un servicio que sí se prestó y que
+   * se le está cobrando.
+   *
+   * Los dos números juntos son además lo que hace falta para revisar: el contratado es lo
+   * que se pactó y lo que se factura; el embarcado, cuánta gente subió ese día. Que no
+   * coincidan es normal —nadie llena el bus a diario— y por eso el uno sin el otro no dice
+   * nada. Cada mitad va a "—" por su cuenta: sin dato no se escribe un cero.
+   */
+  const paxCelda = (f: FilaAnexo) =>
+    `${f.paxContratado ?? "—"} / ${f.pax ?? "—"}`;
+
   if (!d.anexo1.length) return "";
   const moneda = d.servicio.moneda;
   const filas = d.anexo1.map((f) => `<tr${f.alerta ? ' class="alerta"' : ""}>
     <td class="c">${esc(f.ref)}</td><td class="c">${esc(f.fecha)}</td><td class="c nw">${esc(f.codigo)}</td>
     <td>${esc(f.ruta)}</td><td class="c">${esc(f.turno)}</td><td class="c">${esc(f.placa || "—")}</td>
-    <td>${esc(f.conductor || "—")}</td><td class="c">${f.pax ?? "—"}</td>
+    <td>${esc(f.conductor || "—")}</td><td class="c">${paxCelda(f)}</td>
     <td class="c">${chip(f.estado, f.alerta ? "bad" : /adicional/i.test(f.estado) ? "warn" : /incluido/i.test(f.estado) ? "info" : "ok")}</td>
     <td class="r">${/incluido/i.test(f.estado) ? '<span style="color:#64748b">incl.</span>' : num(f.importe)}</td>
   </tr>`).join("");
 
+  // SOLO se suman los embarcados. Sumar los contratados a lo largo del mes no significa
+  // nada —son los mismos asientos cada día, y la ida y su retorno los contarían dos veces—
+  // así que un "50 / 38" al pie invitaría a leer el 50 como algo que no existe.
   const totPax = d.anexo1.reduce((a, f) => a + (f.pax ?? 0), 0);
   const totImp = d.anexo1.reduce((a, f) => a + f.importe, 0);
 
@@ -478,20 +506,21 @@ function bloqueAnexo1(d: DocLiquidacion, cp: string): string {
       <thead><tr>
         <th style="width:34px">ÍTEM</th><th style="width:42px">FECHA</th><th style="width:74px">N° AFA</th>
         <th>RUTA / SENTIDO</th><th style="width:38px">TURNO</th><th style="width:46px">PLACA</th>
-        <th style="width:110px">CONDUCTOR</th><th style="width:28px">PAX</th>
+        <th style="width:110px">CONDUCTOR</th><th style="width:54px">PAX<br><span style="font-weight:400">contr./emb.</span></th>
         <th style="width:56px">ESTADO</th><th style="width:60px">IMPORTE</th>
       </tr></thead>
       <tbody>${filas}</tbody>
       <tfoot><tr>
         <td colspan="7" class="r">TOTALES DEL PERIODO</td>
-        <td class="c">${totPax || "—"}</td>
+        <td class="c">${totPax ? totPax + " emb." : "—"}</td>
         <td class="c">${d.anexo1.length} serv.</td>
         <td class="r">${num(totImp)}</td>
       </tr></tfoot>
     </table>
     <div class="nota"><b>Cómo leer este anexo:</b> las filas van en <b>orden de fecha</b>, del primer al último día del periodo; los dos tramos de un mismo día se listan juntos.
     La columna <b>ÍTEM</b> es el número con el que la fila se rastrea en la valorización, y <b>TURNO</b> es la hora programada de salida.
-    Los pasajeros son los efectivamente embarcados según el manifiesto digital. Cualquier fila puede rastrearse con su N° AFA.
+    La columna <b>PAX</b> muestra <b>contratados / embarcados</b>: a la izquierda los asientos pactados para esa ruta —que es lo que se factura, y no cambia porque un día suba menos gente—, y a la derecha las personas que efectivamente embarcaron según el manifiesto digital.
+    Un guion significa que ese dato no está registrado, que no es lo mismo que cero. Al pie solo se totalizan los <b>embarques</b> del periodo: los asientos contratados son los mismos cada día y sumarlos no diría nada. Cualquier fila puede rastrearse con su N° AFA.
     ${d.anexo1.some((f) => /incluido/i.test(f.estado))
       ? "Los tramos marcados <b>incl.</b> corresponden al retorno del mismo servicio: una sola tarifa cubre ida y retorno, por eso comparten el número de ítem y el importe se cobra una vez. "
       : ""}
@@ -552,13 +581,9 @@ function bloqueAnexo2(d: DocLiquidacion): string {
 export function buildLiquidacionHtml(d: DocLiquidacion): string {
   const cp = d.lado === "cliente" ? CP_CLIENTE : CP_PROVEEDOR;
   const emp = d.empresa;
-  const pie = buildFooterPDFHtml(
-    cp,
-    emp.direccion || "—",
-    emp.telefono || "—",
-    emp.email || "—",
-    emp.web || "www.afatoursperu.com"
-  );
+  // Sin "—" de respaldo: `liquidacion-datos` ya entrega el perfil con los huecos rellenos
+  // (lib/empresa-perfil.ts). Dejarlos aquí solo escondería que el dato no llegó.
+  const pie = buildFooterPDFHtml(cp, emp.direccion || "", emp.telefono || "", emp.email || "", emp.web || "");
 
   const firmas = d.firmas.length
     ? `<div class="sec"><span class="num">6</span><h2>Firmas</h2></div>
