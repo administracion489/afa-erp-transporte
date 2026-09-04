@@ -61,6 +61,32 @@ async function enLotes<T>(ids: number[], tam: number, fn: (chunk: number[]) => P
   return out;
 }
 
+/**
+ * Como `enLotes`, pero paginando también las FILAS de cada lote.
+ *
+ * `enLotes` reparte los ids y da por hecho que la respuesta cabe entera. Para las reservas
+ * y los vehículos es cierto —una fila por id—, pero no para lo que se expande: 300
+ * paraderos traen unos 3.000 registros y sus pasajeros pasan de 6.000, y PostgREST recorta
+ * CUALQUIER respuesta a 1.000 filas sin avisar. Sin paginar, el conteo de embarcados del
+ * Anexo 1 saldría corto y nadie lo notaría: el número es plausible, solo que menor.
+ */
+async function enLotesPaginado<T>(
+  ids: number[],
+  tam: number,
+  fn: (chunk: number[], desde: number, hasta: number) => Promise<T[]>
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; i < ids.length; i += tam) {
+    const chunk = ids.slice(i, i + tam);
+    for (let desde = 0; ; desde += 1000) {
+      const filas = await fn(chunk, desde, desde + 999);
+      out.push(...filas);
+      if (filas.length < 1000) break;
+    }
+  }
+  return out;
+}
+
 export type OpcionesDoc = {
   /** Incluir el Anexo 1 (detalle servicio por servicio). Por defecto sí. */
   anexoDetalle?: boolean;
@@ -179,15 +205,15 @@ export async function cargarDocumentoLiquidacion(
       // criterio haría que el papel y la pantalla dieran cifras distintas del mismo día.
       const abordadosPorReserva = new Map<number, number>();
       try {
-        const paradas = await enLotes(reservaIds, 300, async (chunk) => {
-          const { data } = await sb.from("paradas").select("id,reserva_id").in("reserva_id", chunk);
+        const paradas = await enLotesPaginado(reservaIds, 300, async (chunk, desde, hasta) => {
+          const { data } = await sb.from("paradas").select("id,reserva_id").in("reserva_id", chunk).range(desde, hasta);
           return ((data as any[]) ?? []);
         });
         const reservaDeParada = new Map<number, number>(paradas.map((p) => [Number(p.id), Number(p.reserva_id)]));
         if (reservaDeParada.size) {
-          const pps = await enLotes([...reservaDeParada.keys()], 300, async (chunk) => {
+          const pps = await enLotesPaginado([...reservaDeParada.keys()], 300, async (chunk, desde, hasta) => {
             const { data } = await sb.from("pasajeros_parada")
-              .select("parada_id,pasajero_id,estado,estado_abordaje").in("parada_id", chunk);
+              .select("parada_id,pasajero_id,estado,estado_abordaje").in("parada_id", chunk).range(desde, hasta);
             return ((data as any[]) ?? []);
           });
           // Por pasajero DISTINTO: un mismo pasajero puede figurar en dos paraderos del
