@@ -14,7 +14,6 @@
 import type { DocLiquidacion, FilaAnexo, LineaDoc, ControlDoc, Anexo2 } from "./liquidacion-doc";
 import { fechaFormato } from "./liquidacion-agrupacion";
 import { empresaConDefectos } from "./empresa-perfil";
-import { esAbordado } from "./documentos-servicio";
 import type { Lado } from "./liquidaciones";
 
 const TABLAS = {
@@ -58,32 +57,6 @@ const hhmm = (h: string | null | undefined) => {
 async function enLotes<T>(ids: number[], tam: number, fn: (chunk: number[]) => Promise<T[]>): Promise<T[]> {
   const out: T[] = [];
   for (let i = 0; i < ids.length; i += tam) out.push(...(await fn(ids.slice(i, i + tam))));
-  return out;
-}
-
-/**
- * Como `enLotes`, pero paginando también las FILAS de cada lote.
- *
- * `enLotes` reparte los ids y da por hecho que la respuesta cabe entera. Para las reservas
- * y los vehículos es cierto —una fila por id—, pero no para lo que se expande: 300
- * paraderos traen unos 3.000 registros y sus pasajeros pasan de 6.000, y PostgREST recorta
- * CUALQUIER respuesta a 1.000 filas sin avisar. Sin paginar, el conteo de embarcados del
- * Anexo 1 saldría corto y nadie lo notaría: el número es plausible, solo que menor.
- */
-async function enLotesPaginado<T>(
-  ids: number[],
-  tam: number,
-  fn: (chunk: number[], desde: number, hasta: number) => Promise<T[]>
-): Promise<T[]> {
-  const out: T[] = [];
-  for (let i = 0; i < ids.length; i += tam) {
-    const chunk = ids.slice(i, i + tam);
-    for (let desde = 0; ; desde += 1000) {
-      const filas = await fn(chunk, desde, desde + 999);
-      out.push(...filas);
-      if (filas.length < 1000) break;
-    }
-  }
   return out;
 }
 
@@ -200,7 +173,7 @@ export async function cargarDocumentoLiquidacion(
     if (reservaIds.length) {
       const reservas = await enLotes(reservaIds, 300, async (chunk) => {
         const { data } = await sb.from("reservas")
-          .select("id,codigo,fecha_servicio,hora_servicio,ruta_nombre,direccion_servicio,origen,destino,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,pasajeros_abordados,capacidad_contratada,precio_cliente,costo_proveedor,estado,reserva_vinculada_id")
+          .select("id,codigo,fecha_servicio,hora_servicio,ruta_nombre,direccion_servicio,origen,destino,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,capacidad_contratada,precio_cliente,costo_proveedor,estado,reserva_vinculada_id")
           .in("id", chunk);
         return ((data as any[]) ?? []);
       });
@@ -217,47 +190,6 @@ export async function cargarDocumentoLiquidacion(
         cIds.length ? sb.from("conductores").select("id,nombre").in("id", cIds) : Promise.resolve({ data: [] }),
         ctIds.length ? sb.from("conductores_tercero").select("id,nombre").in("id", ctIds) : Promise.resolve({ data: [] }),
       ]);
-      // ── Los EMBARCADOS salen del manifiesto, no de la reserva ──────────────
-      //
-      // `reservas.pasajeros_abordados` existe como columna pero NO LA ESCRIBE NADIE: el
-      // abordaje se registra en `pasajeros_parada` cuando el conductor escanea el QR. Por
-      // eso la columna PAX del anexo salía en 0 con el manifiesto lleno — un cero que el
-      // cliente lee como "no viajó nadie" en un servicio que sí se prestó y se le cobra.
-      //
-      // Se cuenta con `esAbordado` (lib/documentos-servicio.ts), que es la MISMA definición
-      // que usan la app del conductor, el lector de QR y Seguimiento. Tener aquí un cuarto
-      // criterio haría que el papel y la pantalla dieran cifras distintas del mismo día.
-      const abordadosPorReserva = new Map<number, number>();
-      try {
-        const paradas = await enLotesPaginado(reservaIds, 300, async (chunk, desde, hasta) => {
-          const { data } = await sb.from("paradas").select("id,reserva_id").in("reserva_id", chunk).range(desde, hasta);
-          return ((data as any[]) ?? []);
-        });
-        const reservaDeParada = new Map<number, number>(paradas.map((p) => [Number(p.id), Number(p.reserva_id)]));
-        if (reservaDeParada.size) {
-          const pps = await enLotesPaginado([...reservaDeParada.keys()], 300, async (chunk, desde, hasta) => {
-            const { data } = await sb.from("pasajeros_parada")
-              .select("parada_id,pasajero_id,estado,estado_abordaje").in("parada_id", chunk).range(desde, hasta);
-            return ((data as any[]) ?? []);
-          });
-          // Por pasajero DISTINTO: un mismo pasajero puede figurar en dos paraderos del
-          // recorrido y contarlo dos veces inflaría el manifiesto.
-          const vistos = new Map<number, Set<string>>();
-          for (const pp of pps) {
-            if (!esAbordado(pp)) continue;
-            const rid = reservaDeParada.get(Number(pp.parada_id));
-            if (!rid) continue;
-            const set = vistos.get(rid) ?? new Set<string>();
-            set.add(String(pp.pasajero_id ?? `pp-${pp.parada_id}-${set.size}`));
-            vistos.set(rid, set);
-          }
-          for (const [rid, set] of vistos) abordadosPorReserva.set(rid, set.size);
-        }
-      } catch {
-        // Sin manifiesto el anexo sale con el contratado y un "—" en los embarcados, que
-        // es la verdad: no que viajaran cero.
-      }
-
       const placa = new Map<string, string>();
       for (const v of ((vs.data as any[]) ?? [])) placa.set("p" + v.id, v.placa);
       for (const v of ((vts.data as any[]) ?? [])) placa.set("t" + v.id, v.placa);
@@ -328,13 +260,15 @@ export async function cargarDocumentoLiquidacion(
             turno: hhmm(r.hora_servicio) || "—",
             placa: placa.get((esTercero ? "t" : "p") + (r.vehiculo_tercero_id ?? r.vehiculo_id)) ?? "",
             conductor: chofer.get((r.conductor_tercero_id ? "t" : "p") + (r.conductor_tercero_id ?? r.conductor_id)) ?? "",
-            // Contratado / embarcados. El contratado sale del servicio y, si no lo trae,
-            // del ítem que lo cobra (es el número que se imprimió en la valorización).
+            // El ÚNICO PAX que el anexo imprime: los asientos contratados. Salen del
+            // servicio y, si no los trae, del ítem que lo cobra — que es el mismo número
+            // que quedó impreso en la valorización, así que las dos hojas no se
+            // contradicen. El manifiesto (cuánta gente subió) ya no entra: se imprimió un
+            // tiempo junto al contratado y AFA decidió que la liquidación valoriza lo
+            // pactado, no la ocupación del bus.
             paxContratado: Number(r.capacidad_contratada ?? 0) > 0
               ? Number(r.capacidad_contratada)
               : Number((l as any).pax_contratado ?? 0) > 0 ? Number((l as any).pax_contratado) : null,
-            pax: abordadosPorReserva.get(Number(r.id))
-              ?? (r.pasajeros_abordados != null ? Number(r.pasajeros_abordados) : null),
             estado: r.estado !== "finalizada" ? "No ejecutado"
               : incluida ? "Incluido"
               : l.tipo === "adicional" ? "Adicional" : "Conforme",

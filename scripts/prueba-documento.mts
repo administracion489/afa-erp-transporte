@@ -24,7 +24,7 @@ const fila = (o: Partial<FilaAnexo>): FilaAnexo => ({
   ref: "A-01", fecha: "03/08", codigo: "OS-2026-005198",
   ruta: "RUTA A/ ENTRADA 06:30/ SANTA ANITA→BSF (Ida)", turno: "06:30",
   placa: "ABC-123", conductor: "JUAN PEREZ",
-  paxContratado: 25, pax: 18, estado: "Conforme", importe: 550, ...o,
+  paxContratado: 25, estado: "Conforme", importe: 550, ...o,
 });
 
 /** El documento mínimo, con el perfil de empresa VACÍO — que es como está hoy en la base. */
@@ -59,6 +59,20 @@ function doc(anexo1: FilaAnexo[], perfil: any = {}, firmaUrl: string | null = nu
 
 const texto = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ");
 
+/**
+ * La tabla del Anexo 1, recortada del documento.
+ *
+ * Hace falta recortar: el cuerpo entero del documento va dentro de una tabla de una celda
+ * con el pie colgado de un `<tfoot>` (así el navegador lo repite en cada hoja
+ * RESERVÁNDOLE el alto), de modo que el primer `<tbody>` y el primer `<tfoot>` del HTML
+ * son los del envoltorio. Buscarlos a secas devuelve la hoja de estilos.
+ */
+const anexo = (html: string) => {
+  const desde = html.indexOf("ANEXO 1 —");
+  const tabla = html.indexOf('<table class="anx">', desde);
+  return html.slice(tabla, html.indexOf("</table>", tabla));
+};
+
 // ── 1 · Que el documento se pueda construir ────────────────────────────────
 titulo("1 · El documento se renderiza");
 {
@@ -92,42 +106,54 @@ titulo("2 · El pie no sale con rayas cuando el perfil está vacío");
     "el dato del perfil pisa al de respaldo, no al revés");
 }
 
-// ── 3 · La columna PAX: contratados / embarcados ───────────────────────────
-titulo("3 · La columna PAX imprime contratados / embarcados");
+// ── 3 · La columna PAX: solo la capacidad contratada ───────────────────────
+//
+// La columna llegó a imprimir dos números —contratados / embarcados— y AFA decidió dejar
+// solo el contratado: es el que sustenta el importe. El embarcado es cierto, pero no es lo
+// que se valoriza, y en el papel invitaba a discutir la factura contra la ocupación.
+titulo("3 · La columna PAX imprime SOLO los asientos contratados");
 {
   const html = buildLiquidacionHtml(doc([
-    fila({ paxContratado: 25, pax: 18 }),
-    fila({ paxContratado: 25, pax: null, estado: "Incluido", importe: 0 }),
-    fila({ paxContratado: null, pax: 20 }),
+    fila({ paxContratado: 25 }),
+    fila({ paxContratado: 12, estado: "Incluido", importe: 0 }),
+    fila({ paxContratado: null }),
   ]));
-  const celdas = [...html.matchAll(/<td class="c">(\d+|—) \/ (\d+|—)<\/td>/g)].map((m) => `${m[1]}/${m[2]}`);
-  ok(celdas.includes("25/18"), "contratado y embarcado", celdas.join(" · "));
-  ok(celdas.includes("25/—"), "sin manifiesto imprime — y NO cero (cero sería afirmar que no viajó nadie)");
-  ok(celdas.includes("—/20"), "sin capacidad fichada imprime — en su mitad");
-  ok(texto(html).includes("contr./emb."), "la cabecera dice de qué son los dos números");
+  const cabecera = html.match(/<th[^>]*>PAX<br>.*?<\/th>/)?.[0] ?? "";
+  ok(/contratado/.test(cabecera) && !/emb/.test(cabecera), "la cabecera nombra un solo dato", texto(cabecera));
+
+  // La celda es el número a secas: si quedara la barra, quedaría media columna vacía en
+  // cada una de las 141 filas de un mes.
+  const cuerpo = anexo(html).split("<tbody>")[1]?.split("</tbody>")[0] ?? "";
+  ok(/<td class="c">25<\/td>/.test(cuerpo), "imprime el contratado del servicio");
+  ok(/<td class="c">12<\/td>/.test(cuerpo), "también en el tramo incluido");
+  ok(/<td class="c">—<\/td>/.test(cuerpo), "sin capacidad fichada imprime — y NO cero");
+  ok(!/\d+ \/ (\d+|—)/.test(texto(cuerpo)), "y no queda rastro del par contratado/embarcado", texto(cuerpo).slice(0, 90));
 }
 
-// ── 4 · El total solo suma embarques ───────────────────────────────────────
-titulo("4 · Al pie solo se totalizan los embarques");
+// ── 4 · El pie NO totaliza la columna PAX ──────────────────────────────────
+titulo("4 · Al pie no se suman los asientos contratados");
 {
   const html = buildLiquidacionHtml(doc([
-    fila({ paxContratado: 25, pax: 18 }),
-    fila({ paxContratado: 25, pax: 12 }),
+    fila({ paxContratado: 25 }),
+    fila({ paxContratado: 25 }),
   ]));
-  ok(html.includes("30 emb."), "suma 18 + 12 embarques", texto(html).match(/\d+ emb\./)?.[0]);
-  ok(!html.includes("50 / 30"),
-    "y NO suma los contratados: son los mismos asientos cada día, sumarlos no diría nada");
+  const pie = anexo(html).split("<tfoot>")[1]?.split("</tfoot>")[0] ?? "";
+  ok(/TOTALES DEL PERIODO/.test(pie), "el pie sigue ahí", texto(pie));
+  ok(/<td class="c">—<\/td>/.test(pie), "con un guion en la columna PAX");
+  ok(!/\b50\b/.test(pie),
+    "y NO suma 25 + 25: son los mismos asientos cada día, y la ida con su retorno los contarían dos veces");
+  ok(/2 serv\./.test(pie) && /1,100\.00/.test(pie), "los que sí se totalizan siguen igual", texto(pie));
 }
 
 // ── 5 · La nota explica lo que la columna es ahora ─────────────────────────
 titulo("5 · «Cómo leer este anexo» describe la columna de verdad");
 {
   const t = texto(buildLiquidacionHtml(doc([fila({})])));
-  ok(t.includes("contratados / embarcados"), "nombra las dos mitades");
+  ok(/capacidad contratada/.test(t), "dice qué es el número");
   ok(/guion significa que ese dato no está registrado/.test(t), "explica el guion");
-  ok(/solo se totalizan los embarques/.test(t), "y por qué el total no suma contratados");
-  ok(!/Los pasajeros son los efectivamente embarcados según el manifiesto digital\. Cualquier/.test(t),
-    "y ya no queda el texto viejo, que describía una columna que ya no existe");
+  ok(/no se totaliza/.test(t), "y avisa de que la columna no se suma");
+  ok(!/embarcad|manifiesto|contr\.\/emb\./.test(t),
+    "y ya no queda ni una palabra de los embarcados, que es la columna que se quitó");
 }
 
 // ── 6 · La firma del Gerente General ───────────────────────────────────────

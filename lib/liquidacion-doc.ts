@@ -68,15 +68,12 @@ export type FilaAnexo = {
   placa: string;
   conductor: string;
   /**
-   * Asientos CONTRATADOS para ese servicio. Es lo que el cliente pactó, no lo que cupo en
-   * el bus. null = ninguna fuente lo sabe, y entonces se imprime "—" en vez de inventarlo.
+   * Asientos CONTRATADOS para ese servicio, y lo ÚNICO que la columna PAX imprime. Es lo
+   * que el cliente pactó y lo que se le factura, no lo que cupo en el bus ni cuánta gente
+   * subió ese día. null = ninguna fuente lo sabe, y entonces se imprime "—" en vez de
+   * inventar un número.
    */
   paxContratado?: number | null;
-  /**
-   * Pasajeros que EMBARCARON de verdad, contados del manifiesto digital. null = ese
-   * servicio no tiene manifiesto, que no es lo mismo que cero.
-   */
-  pax: number | null;
   estado: string;          // 'Conforme' | 'Tardío' | 'Adicional' | 'No ejecutado'
   importe: number;
   alerta?: boolean;
@@ -478,20 +475,19 @@ function bloqueConformidad(d: DocLiquidacion, n: number): string {
 
 function bloqueAnexo1(d: DocLiquidacion, cp: string): string {
   /**
-   * La celda PAX: contratados / embarcados.
+   * La celda PAX: SOLO los asientos contratados.
    *
-   * Antes imprimía solo un número, `reservas.pasajeros_abordados`, que NO LO ESCRIBE NADIE
-   * —el abordaje vive en `pasajeros_parada`— así que salía 0 con el manifiesto lleno. Un
-   * cero ahí lo lee el cliente como "no viajó nadie" en un servicio que sí se prestó y que
-   * se le está cobrando.
+   * La columna llegó a imprimir `reservas.pasajeros_abordados`, que NO LO ESCRIBE NADIE
+   * —el abordaje vive en `pasajeros_parada`— así que salía 0 con el manifiesto lleno; un
+   * cero que el cliente lee como "no viajó nadie" en un servicio que sí se prestó y se le
+   * cobra. La corrección de aquello llegó a poner los dos números, contratados y
+   * embarcados, y AFA decidió imprimir solo el contratado: es el que sustenta el importe.
+   * Cuánta gente subió cada día es cierto pero no es lo que se está valorizando, y en el
+   * papel invitaba a discutir la factura contra la ocupación del bus.
    *
-   * Los dos números juntos son además lo que hace falta para revisar: el contratado es lo
-   * que se pactó y lo que se factura; el embarcado, cuánta gente subió ese día. Que no
-   * coincidan es normal —nadie llena el bus a diario— y por eso el uno sin el otro no dice
-   * nada. Cada mitad va a "—" por su cuenta: sin dato no se escribe un cero.
+   * Sin dato se imprime "—", nunca un cero: cero asientos contratados no existe.
    */
-  const paxCelda = (f: FilaAnexo) =>
-    `${f.paxContratado ?? "—"} / ${f.pax ?? "—"}`;
+  const paxCelda = (f: FilaAnexo) => `${f.paxContratado ?? "—"}`;
 
   if (!d.anexo1.length) return "";
   const moneda = d.servicio.moneda;
@@ -503,10 +499,9 @@ function bloqueAnexo1(d: DocLiquidacion, cp: string): string {
     <td class="r">${/incluido/i.test(f.estado) ? '<span style="color:#64748b">incl.</span>' : num(f.importe)}</td>
   </tr>`).join("");
 
-  // SOLO se suman los embarcados. Sumar los contratados a lo largo del mes no significa
-  // nada —son los mismos asientos cada día, y la ida y su retorno los contarían dos veces—
-  // así que un "50 / 38" al pie invitaría a leer el 50 como algo que no existe.
-  const totPax = d.anexo1.reduce((a, f) => a + (f.pax ?? 0), 0);
+  // La columna PAX no se totaliza. Son los mismos asientos contratados cada día, y la ida
+  // con su retorno los contarían dos veces: un "620" al pie de un mes de 31 servicios de
+  // 20 asientos es un número que no pactó nadie y que no se puede cotejar contra nada.
   const totImp = d.anexo1.reduce((a, f) => a + f.importe, 0);
 
   return `<div class="page-break"></div>
@@ -517,21 +512,21 @@ function bloqueAnexo1(d: DocLiquidacion, cp: string): string {
       <thead><tr>
         <th style="width:34px">ÍTEM</th><th style="width:42px">FECHA</th><th style="width:74px">N° AFA</th>
         <th>RUTA / SENTIDO</th><th style="width:38px">TURNO</th><th style="width:46px">PLACA</th>
-        <th style="width:110px">CONDUCTOR</th><th style="width:54px">PAX<br><span style="font-weight:400">contr./emb.</span></th>
+        <th style="width:110px">CONDUCTOR</th><th style="width:48px">PAX<br><span style="font-weight:400">contratado</span></th>
         <th style="width:56px">ESTADO</th><th style="width:60px">IMPORTE</th>
       </tr></thead>
       <tbody>${filas}</tbody>
       <tfoot><tr>
         <td colspan="7" class="r">TOTALES DEL PERIODO</td>
-        <td class="c">${totPax ? totPax + " emb." : "—"}</td>
+        <td class="c">—</td>
         <td class="c">${d.anexo1.length} serv.</td>
         <td class="r">${num(totImp)}</td>
       </tr></tfoot>
     </table>
     <div class="nota"><b>Cómo leer este anexo:</b> las filas van en <b>orden de fecha</b>, del primer al último día del periodo; los dos tramos de un mismo día se listan juntos.
     La columna <b>ÍTEM</b> es el número con el que la fila se rastrea en la valorización, y <b>TURNO</b> es la hora programada de salida.
-    La columna <b>PAX</b> muestra <b>contratados / embarcados</b>: a la izquierda los asientos pactados para esa ruta —que es lo que se factura, y no cambia porque un día suba menos gente—, y a la derecha las personas que efectivamente embarcaron según el manifiesto digital.
-    Un guion significa que ese dato no está registrado, que no es lo mismo que cero. Al pie solo se totalizan los <b>embarques</b> del periodo: los asientos contratados son los mismos cada día y sumarlos no diría nada. Cualquier fila puede rastrearse con su N° AFA.
+    La columna <b>PAX</b> es la <b>capacidad contratada</b> de esa ruta: los asientos pactados con el cliente, que son los que se facturan y no cambian porque un día suba menos gente. Un guion significa que ese dato no está registrado, que no es lo mismo que cero.
+    Al pie <b>no se totaliza</b>: son los mismos asientos cada día, y sumarlos a lo largo del periodo daría un número que no pactó nadie. Cualquier fila puede rastrearse con su N° AFA.
     ${d.anexo1.some((f) => /incluido/i.test(f.estado))
       ? "Los tramos marcados <b>incl.</b> corresponden al retorno del mismo servicio: una sola tarifa cubre ida y retorno, por eso comparten el número de ítem y el importe se cobra una vez. "
       : ""}
