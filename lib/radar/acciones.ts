@@ -15,6 +15,14 @@
 
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
+import {
+  candidatosPorPrecio,
+  desvioDePrecio,
+  etiquetaCombustible,
+  getCapacidad,
+  normalizarTipoCombustible,
+  referenciasDePrecio,
+} from "@/lib/combustibles";
 import type {
   AnomaliaCombustible,
   CategoriaRadar,
@@ -86,26 +94,6 @@ function numOpc(v: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-// ── Capacidad de tanque estimada por categoría del vehículo ──────────────────
-// Copiado de la constante CAPACIDAD_TANQUE de app/combustible/page.tsx (misma heurística).
-
-const CAPACIDAD_TANQUE: Record<string, Record<string, number>> = {
-  BUS:     { diesel: 100, gnv: 150, glp: 80,  gasolina: 80,  urea: 30 },
-  MINIBUS: { diesel: 60,  gnv: 80,  glp: 50,  gasolina: 50,  urea: 15 },
-  VAN:     { diesel: 20,  gnv: 40,  glp: 25,  gasolina: 20,  urea: 10 },
-  AUTO:    { diesel: 12,  gnv: 30,  glp: 15,  gasolina: 12,  urea: 5  },
-  DEFAULT: { diesel: 80,  gnv: 100, glp: 60,  gasolina: 60,  urea: 20 },
-};
-
-function getCapacidad(categoria: string | null | undefined, tipo: string): number {
-  if (!categoria) return CAPACIDAD_TANQUE.DEFAULT[tipo] || 80;
-  const cat = categoria.toUpperCase();
-  for (const [k, v] of Object.entries(CAPACIDAD_TANQUE)) {
-    if (cat.includes(k)) return v[tipo] || v.diesel || 80;
-  }
-  return CAPACIDAD_TANQUE.DEFAULT[tipo] || 80;
-}
-
 // Marcas de KIT DE CONVERSIÓN A GLP (se ven en el tablero) — NUNCA son el grifo/estación.
 // Si la IA las devuelve como grifo/proveedor, se descartan (trampa "LANDI RENZO" del caso CWQ-400).
 const MARCAS_KIT_GLP = [
@@ -119,15 +107,14 @@ function esMarcaKitGLP(s?: string | null): boolean {
 }
 
 /**
- * Capacidad del tanque para (vehículo, tipo). Usa la capacidad EDITABLE por vehículo si el
- * operador la configuró (vehiculos.capacidad_tanque jsonb { diesel, glp, gnv, ... }); si no,
- * cae a la heurística por categoría. Editable resuelve el caso GLP: un kit convertido tiene
- * ~20-30 gal, no los 80 que asumía la heurística de un bus.
+ * Capacidad del tanque para (vehículo, tipo). `getCapacidad` (lib/combustibles.ts, el mismo
+ * que usa /combustible) prefiere la capacidad EDITABLE por vehículo si el operador la
+ * configuró (vehiculos.capacidad_tanque jsonb { diesel, glp, gnv, ... }) y si no cae a la
+ * heurística por categoría. Editable resuelve el caso GLP: un kit convertido tiene ~20-30
+ * gal, no los 80 que asumía la heurística de un bus.
  */
 function capacidadTanque(veh: VehiculoMatch | null, tipo: string): number {
-  const editable = veh?.capacidad_tanque?.[tipo];
-  if (editable != null && Number(editable) > 0) return Number(editable);
-  return getCapacidad(veh?.categoria, tipo);
+  return getCapacidad(veh, tipo);
 }
 
 // ── Helpers compartidos contra la BD ─────────────────────────────────────────
@@ -167,6 +154,8 @@ export type VehiculoMatch = {
   kilometraje_actual: number | null;
   /** Capacidad de tanque editable por tipo de combustible (jsonb en `vehiculos`). null si no configurada. */
   capacidad_tanque?: Record<string, number> | null;
+  /** Ficha de costeo de la unidad (`parametros_costos.tipo_vehiculo`): dice qué combustible quema. */
+  tipo_vehiculo_costeo?: string | null;
 };
 
 /** Empareja una placa (en cualquier formato) contra la flota propia. */
@@ -184,6 +173,7 @@ export async function matchVehiculo(sb: any, placa: string | null | undefined): 
     categoria: hit.categoria ?? null,
     kilometraje_actual: hit.kilometraje_actual != null ? Number(hit.kilometraje_actual) : null,
     capacidad_tanque: hit.capacidad_tanque ?? null,
+    tipo_vehiculo_costeo: hit.tipo_vehiculo_costeo ?? null,
   };
 }
 
@@ -242,6 +232,41 @@ export async function matchCliente(
   return null;
 }
 
+/**
+ * Precios vigentes por tipo (`precios_combustible`, lo que el operador mantiene en
+ * /configuracion/costos). Devuelve [] si la tabla no está: `referenciasDePrecio` rellena
+ * con los referenciales del catálogo, así que la deducción por precio nunca depende de que
+ * esa tabla exista ni de que tenga las seis filas.
+ */
+async function preciosReferenciales(sb: any): Promise<{ tipo?: string | null; precio?: unknown }[]> {
+  try {
+    const { data } = await sb.from("precios_combustible").select("tipo, precio");
+    return ((data as any[]) ?? []) as { tipo?: string | null; precio?: unknown }[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Qué combustible declara la FICHA DE COSTEO de la unidad
+ * (vehiculos.tipo_vehiculo_costeo → parametros_costos.tipo_combustible_1). Último escalón
+ * de la cascada del tipo, y el más débil a propósito: una unidad convertida a GLP sigue
+ * fichada como diésel, así que el precio del voucher manda sobre esto.
+ */
+async function tipoCombustibleDeFicha(sb: any, veh: VehiculoMatch | null): Promise<string | null> {
+  if (!veh?.tipo_vehiculo_costeo) return null;
+  try {
+    const { data } = await sb
+      .from("parametros_costos")
+      .select("tipo_combustible_1")
+      .eq("tipo_vehiculo", veh.tipo_vehiculo_costeo)
+      .maybeSingle();
+    return normalizarTipoCombustible((data as any)?.tipo_combustible_1);
+  } catch {
+    return null;
+  }
+}
+
 /** Trae un vehículo de la flota propia por id (mismo shape que matchVehiculo). */
 async function vehiculoPorId(sb: any, id: number): Promise<VehiculoMatch | null> {
   try {
@@ -254,6 +279,7 @@ async function vehiculoPorId(sb: any, id: number): Promise<VehiculoMatch | null>
       categoria: hit.categoria ?? null,
       kilometraje_actual: hit.kilometraje_actual != null ? Number(hit.kilometraje_actual) : null,
       capacidad_tanque: hit.capacidad_tanque ?? null,
+      tipo_vehiculo_costeo: hit.tipo_vehiculo_costeo ?? null,
     };
   } catch {
     return null;
@@ -638,7 +664,6 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   // Placa resuelta (leída del voucher o inferida) y nombre canónico del conductor identificado.
   const placa = placaFormato(d.placa) ?? veh?.placa ?? terc?.placa ?? null;
   const conductorNombre = condMatch?.nombre ?? d.conductor ?? null;
-  const tipoComb = String(d.tipo_combustible || "diesel").toLowerCase();
   const cantidad = numOpc(d.galones) ?? numOpc(d.litros);
   const precioUnit = numOpc(d.precio_galon) ?? numOpc(d.precio_litro);
   const monto = numOpc(d.monto_total);
@@ -646,6 +671,80 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   const umbral = Number(config.umbral_confianza ?? 0.7);
 
   const anomalias: AnomaliaCombustible[] = [];
+
+  // ── Tipo de combustible: NUNCA se asume ──────────────────────────────────────
+  // Antes esto era `d.tipo_combustible || "diesel"`: un voucher que no dijera el tipo —o
+  // que la IA no supiera leer— entraba a `combustible` como DIÉSEL, y nadie lo veía porque
+  // /radar-ia tampoco mostraba la columna. Registrar GLP como diésel rompe tres cosas a la
+  // vez: el km/gal del vehículo (promedia dos combustibles distintos), el control de precio
+  // (S/ 7.55 es normal en GLP y absurdo en diésel) y el costo por km del cotizador. Es la
+  // regla de oro de la casa aplicada al tipo: un dato ausente es ausente, no un default.
+  //
+  // Cascada, y el escalón usado queda escrito en las anomalías:
+  //   1) lo que dice el VOUCHER, normalizado ("PETROLEO D2", "GASOHOL 90", "GLP-G"…)
+  //   2) el PRECIO unitario contra `precios_combustible` — evidencia de la propia
+  //      transacción, y manda sobre la ficha del vehículo: las unidades con kit GLP son
+  //      justamente las que la ficha declara a diésel (el caso CWQ-400 / LANDI RENZO)
+  //   3) la FICHA de costeo de la unidad (parametros_costos.tipo_combustible_1)
+  //   4) nada → anomalía bloqueante: va a revisión humana, no a la tabla real.
+  const refsPrecio = referenciasDePrecio(await preciosReferenciales(sb));
+  // Precio por unidad para deducir: el leído o, si no vino, el que sale del voucher
+  // (importe ÷ cantidad). Es el mismo que se registraría, así que deduce sobre lo real.
+  const precioParaTipo = precioUnit ?? (monto != null && cantidad ? monto / cantidad : null);
+  const candidatosTipo = candidatosPorPrecio(precioParaTipo, refsPrecio);
+  const tipoLeido = normalizarTipoCombustible(d.tipo_combustible);
+  let tipoComb: string | null = tipoLeido;
+  let tipoFuente: "voucher" | "precio" | "ficha" | null = tipoLeido ? "voucher" : null;
+  if (!tipoComb && candidatosTipo.length === 1) {
+    tipoComb = candidatosTipo[0].tipo;
+    tipoFuente = "precio";
+  }
+  if (!tipoComb) {
+    const deFicha = await tipoCombustibleDeFicha(sb, veh);
+    if (deFicha) {
+      tipoComb = deFicha;
+      tipoFuente = "ficha";
+    }
+  }
+  if (!tipoComb) {
+    anomalias.push({
+      codigo: "tipo_combustible_sin_leer",
+      detalle: `No se pudo determinar el tipo de combustible${d.tipo_combustible ? ` (el voucher decía "${d.tipo_combustible}", que no corresponde a ninguno conocido)` : " (el voucher no lo dice)"} — elígelo antes de registrar`,
+      bloquea: true,
+    });
+  } else if (tipoFuente !== "voucher") {
+    // Se dedujo: se registra igual, pero el chip lo dice y el revisor puede corregirlo.
+    const porQue =
+      tipoFuente === "precio"
+        ? `por el precio ${fmtSoles(precioParaTipo!)} (referencia ${fmtSoles(candidatosTipo[0].referencia)})`
+        : "por la ficha de costeo de la unidad";
+    anomalias.push({
+      codigo: "tipo_combustible_inferido",
+      detalle: `El voucher no dice el tipo de combustible; se dedujo ${etiquetaCombustible(tipoComb)} ${porQue}`,
+      bloquea: false,
+    });
+  } else {
+    // El voucher SÍ dice el tipo — pero si el precio pagado desmiente ese tipo y aterriza
+    // sobre la referencia de otro, quien se equivocó puede ser la lectura de la IA. No se
+    // corrige solo (el voucher es la fuente): se manda a revisión, que es donde un humano
+    // mira la foto y decide.
+    //
+    // La condición NO es "hay un único candidato": lo que importa es que el tipo leído
+    // quede FUERA de los candidatos. Entre líquidos siempre hay tres candidatos juntos
+    // (diésel/biodiésel/gasolina), y exigir uno solo dejaba pasar un "GLP" pagado a S/ 16.
+    // Que la referencia esté vieja tampoco basta para acusar: hace falta que el precio
+    // calce con OTRO combustible — un diésel encarecido sale por `precio_fuera_de_rango`.
+    const desvio = desvioDePrecio(precioParaTipo, tipoComb, refsPrecio);
+    const desmentido = candidatosTipo.length > 0 && !candidatosTipo.some((c) => c.tipo === tipoComb);
+    if (desvio != null && desvio > 0.25 && desmentido) {
+      const otro = candidatosTipo[0];
+      anomalias.push({
+        codigo: "tipo_combustible_dudoso",
+        detalle: `Se leyó ${etiquetaCombustible(tipoComb)} pero el precio ${fmtSoles(precioParaTipo!)} está ${(desvio * 100).toFixed(0)}% fuera de su referencia y calza con ${etiquetaCombustible(otro.tipo)} (${fmtSoles(otro.referencia)})`,
+        bloquea: true,
+      });
+    }
+  }
 
   // ── Campos del camino de VISIÓN multi-foto (opcionales; el de texto no los llena) ──
   const consumoTasa = numOpc(d.consumo_l_100km);
@@ -691,13 +790,15 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     anomalias.push({ codigo: "discrepancia_maquina_vs_nota", detalle: String(disc).slice(0, 240), bloquea: false });
   }
 
-  // 1) Cantidad vs capacidad del tanque (editable por vehículo si el operador la configuró)
-  if (veh && cantidad != null) {
+  // 1) Cantidad vs capacidad del tanque (editable por vehículo si el operador la configuró).
+  //    Sin tipo no se compara: el tanque de GLP de una unidad convertida es un tercio del
+  //    de diésel, así que asumir diésel aquí era declarar "cabe" cualquier cosa.
+  if (veh && cantidad != null && tipoComb) {
     const cap = capacidadTanque(veh, tipoComb);
     if (cantidad > cap * 1.1) {
       anomalias.push({
         codigo: "galones_exceden_tanque",
-        detalle: `Cantidad ${cantidad} supera la capacidad estimada del tanque de ${tipoComb} (${cap})`,
+        detalle: `Cantidad ${cantidad} supera la capacidad estimada del tanque de ${etiquetaCombustible(tipoComb)} (${cap})`,
       });
     }
   }
@@ -737,20 +838,16 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     }
   }
 
-  // 3) Precio unitario vs referencia de precios_combustible (±20%)
-  if (precioUnit != null) {
-    try {
-      const { data: precios } = await sb.from("precios_combustible").select("tipo, precio");
-      const ref = ((precios as any[]) ?? []).find((p) => String(p.tipo ?? "").toLowerCase() === tipoComb);
-      const pRef = ref ? Number(ref.precio) : 0;
-      if (pRef > 0 && Math.abs(precioUnit - pRef) / pRef > 0.2) {
-        anomalias.push({
-          codigo: "precio_fuera_de_rango",
-          detalle: `Precio ${fmtSoles(precioUnit)} se aleja más de 20% del referencial ${fmtSoles(pRef)} (${tipoComb})`,
-        });
-      }
-    } catch {
-      // sin tabla de precios: se omite este chequeo
+  // 3) Precio unitario vs referencia del TIPO (±20%). Contra el referencial de su propio
+  //    combustible: comparar un GLP de S/ 7.55 contra el diésel era el falso positivo que
+  //    llenaba de rojo las cargas correctas de las unidades convertidas.
+  if (precioUnit != null && tipoComb) {
+    const pRef = Number(refsPrecio[tipoComb] ?? 0);
+    if (pRef > 0 && Math.abs(precioUnit - pRef) / pRef > 0.2) {
+      anomalias.push({
+        codigo: "precio_fuera_de_rango",
+        detalle: `Precio ${fmtSoles(precioUnit)} se aleja más de 20% del referencial ${fmtSoles(pRef)} (${etiquetaCombustible(tipoComb)})`,
+      });
     }
   }
 
@@ -762,8 +859,10 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     });
   }
 
-  // 5) Consumo excesivo: rendimiento del tramo >30% bajo el promedio del vehículo
-  if (veh && km != null && cantidad != null) {
+  // 5) Consumo excesivo: rendimiento del tramo >30% bajo el promedio del vehículo.
+  //    Solo contra las cargas del MISMO combustible — un km/gal de GLP y uno de diésel de
+  //    la misma unidad no se promedian entre sí, así que sin tipo no hay con qué comparar.
+  if (veh && km != null && cantidad != null && tipoComb) {
     const { data: prevs } = await sb
       .from("combustible")
       .select("kilometraje, galones")
@@ -850,7 +949,10 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     hora: d.hora ?? null,
     grifo,
     direccion_grifo: d.direccion_grifo ?? null,
-    tipo_combustible: d.tipo_combustible ?? null,
+    // El tipo RESUELTO (el que se va a registrar), no el texto crudo del voucher: es lo que
+    // /radar-ia muestra en su columna "Combustible", y la columna tiene que decir la verdad
+    // sobre lo que entra al ERP. De dónde salió lo dice la anomalía tipo_combustible_*.
+    tipo_combustible: tipoComb,
     galones: numOpc(d.galones),
     litros: numOpc(d.litros),
     precio_galon: numOpc(d.precio_galon),
@@ -902,7 +1004,9 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
         grifo,
         conductor: conductorNombre,
         observaciones,
-        tipo_combustible: d.tipo_combustible ?? "diesel",
+        // `tipoComb` no puede ser null aquí: sin tipo hay anomalía bloqueante y no se llega
+        // a este auto-registro. Nunca se rellena con "diesel" por defecto.
+        tipo_combustible: tipoComb,
         unidad: numOpc(d.galones) != null ? "galones" : "litros",
       })
       .select("id")
@@ -935,7 +1039,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
 
     return {
       accion: "combustible_registrado",
-      detalle: `Carga de ${veh!.placa} registrada en /combustible: ${cantidad} ${numOpc(d.galones) != null ? "gal" : "lt"} de ${tipoComb}${monto != null ? ` por ${fmtSoles(monto)}` : ""}${conductorNombre ? ` · conductor ${conductorNombre}${condMatch?.via === "telefono" ? " (identificado por su WhatsApp)" : ""}` : ""}`,
+      detalle: `Carga de ${veh!.placa} registrada en /combustible: ${cantidad} ${numOpc(d.galones) != null ? "gal" : "lt"} de ${etiquetaCombustible(tipoComb)}${tipoFuente !== "voucher" ? " (tipo deducido)" : ""}${monto != null ? ` por ${fmtSoles(monto)}` : ""}${conductorNombre ? ` · conductor ${conductorNombre}${condMatch?.via === "telefono" ? " (identificado por su WhatsApp)" : ""}` : ""}`,
       datos: { combustible_id: combustibleId, vehiculo_id: veh!.id, conductor: conductorNombre, conductor_via: condMatch?.via ?? null, anomalias },
     };
   }
@@ -948,7 +1052,12 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     .single();
   if (errRadar) throw new Error(`radar_combustible: ${errRadar.message}`);
 
-  const motivos: string[] = anomalias.map((a) => a.detalle);
+  // Las BLOQUEANTES primero: `motivos[0]` es el titular del resultado ("quedó en revisión:
+  // …"), y una observación informativa —el tipo deducido, una discrepancia surtidor↔nota—
+  // no puede quedarse con ese sitio y tapar el motivo real del bloqueo.
+  const motivos: string[] = [...anomalias]
+    .sort((a, b) => Number(a.bloquea === false) - Number(b.bloquea === false))
+    .map((a) => a.detalle);
   if (config.acciones_automaticas?.combustible !== true) motivos.push("Registro automático de combustible desactivado en la configuración");
   if (!veh) {
     if (terc) {
@@ -977,7 +1086,10 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       a.codigo === "marca_kit_como_grifo" ||
       a.codigo === "tasa_como_cantidad" ||
       a.codigo === "trip_como_odometro" ||
-      a.codigo === "voucher_no_leido"
+      a.codigo === "voucher_no_leido" ||
+      // El ERP estaba a punto de contabilizar el combustible equivocado: eso ensucia el
+      // km/gal de la unidad y su costo por km, y no se ve hasta que los números no cuadran.
+      a.codigo === "tipo_combustible_dudoso"
   )
     ? "critico"
     : "atencion";

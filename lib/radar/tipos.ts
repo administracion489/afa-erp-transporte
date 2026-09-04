@@ -204,7 +204,12 @@ export type AnomaliaCombustible = {
     | "trip_como_odometro"           // el "Trip"/viaje parcial registrado como odómetro total
     | "discrepancia_maquina_vs_nota" // surtidor/display difiere de la nota (informativo: manda la nota)
     | "voucher_no_leido"             // había foto de nota/surtidor pero no se pudo leer la cantidad/importe
-    | "multiples_recargas_en_cluster"; // la ráfaga trae 2 recargas/comprobantes distintos
+    | "multiples_recargas_en_cluster" // la ráfaga trae 2 recargas/comprobantes distintos
+    // Tipo de combustible (nunca se asume diésel — la cascada está en accionCombustible,
+    // lib/radar/acciones.ts, y el catálogo de tipos en lib/combustibles.ts):
+    | "tipo_combustible_sin_leer"    // no se pudo determinar de ninguna forma → lo elige el revisor
+    | "tipo_combustible_inferido"    // el voucher no lo decía; se dedujo del precio o de la ficha (informativo)
+    | "tipo_combustible_dudoso";     // el voucher dice uno y el precio pagado calza con otro
   detalle: string;
   /** false = observación informativa (NO bloquea el auto-registro). Ausente o true = bloqueante. */
   bloquea?: boolean;

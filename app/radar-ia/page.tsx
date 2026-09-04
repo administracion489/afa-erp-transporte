@@ -10,6 +10,7 @@ import { supabase } from "@/lib/supabase";
 import { aceptarLectura } from "@/lib/odometro";
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 import { normalizarConfigRadar } from "@/lib/radar/config";
+import { COMBUSTIBLES, TIPOS_COMBUSTIBLE, normalizarTipoCombustible } from "@/lib/combustibles";
 import {
   CATEGORIAS_RADAR,
   LISTA_CATEGORIAS,
@@ -109,6 +110,9 @@ const ANOMALIA_LABEL: Record<string, string> = {
   recarga_madrugada:      "Recarga de madrugada",
   monto_inconsistente:    "Monto inconsistente",
   galones_coinciden_km:   "Cantidad = kilometraje",
+  tipo_combustible_sin_leer: "Combustible sin leer",
+  tipo_combustible_inferido: "Combustible deducido",
+  tipo_combustible_dudoso:   "Combustible no cuadra con el precio",
 };
 
 const TABS = [
@@ -610,6 +614,7 @@ type EdicionComb = {
   vehiculo: string;   // fleet-encoded: "propio:12" | "tercero:5" | ""
   fecha: string;      // YYYY-MM-DD
   grifo: string;
+  combustible: string; // tipo canónico (diesel|glp|gnv|…), "" si la IA no lo leyó
   cantidad: string;   // galones o litros (según esLitros)
   precio: string;     // precio unitario (por galón/litro)
   monto: string;      // monto total
@@ -620,11 +625,51 @@ export type OverrideComb = {
   vehiculoId: number;
   fecha: string | null;
   grifo: string | null;
+  /** Tipo de combustible con el que se registra. Obligatorio: nunca se asume diésel. */
+  tipoCombustible: string;
   cantidad: number | null;
   esLitros: boolean;
   precio: number | null;
   monto: number | null;
 };
+
+// Chip del tipo de combustible de una recarga del Radar. Sin dato NO dice "Diésel": dice
+// que no se leyó, en ámbar. Un chip azul de diésel puesto por defecto es exactamente el
+// error que hacía invisible el problema — el ERP registraba diésel y la pantalla lo
+// confirmaba, aunque el voucher fuera de GLP.
+function ChipCombustible({ tipo, registrado }: { tipo: string | null; registrado: boolean }) {
+  const canon = normalizarTipoCombustible(tipo);
+  const cfg = canon ? COMBUSTIBLES[canon] : null;
+  if (!cfg) {
+    // Sin nada, y "algo que no se reconoce" son dos cosas distintas: en el segundo caso se
+    // muestra el texto crudo tal cual, porque esconderlo detrás de "sin leer" impediría
+    // ver que el voucher decía algo (y qué decía) que el catálogo no sabe traducir.
+    const crudo = (tipo ?? "").trim();
+    return (
+      <span
+        className="text-[10px] font-black px-2 py-0.5 rounded-full bg-[#FBF1D8] text-[#B07A0F] whitespace-nowrap"
+        title={
+          crudo
+            ? `El voucher decía "${crudo}", que no corresponde a ningún combustible del catálogo.${registrado ? " Verifica esta carga en /combustible." : " Elige el tipo al revisar, antes de registrar."}`
+            : registrado
+              ? "La IA no leyó el tipo de combustible. Las recargas registradas antes de esta corrección entraron a /combustible como Diésel por defecto — verifica esta en /combustible."
+              : "La IA no leyó el tipo de combustible: elígelo al revisar, antes de registrar."
+        }
+      >
+        ⚠ {crudo ? `${crudo.slice(0, 14)} · sin reconocer` : "Sin leer"}
+      </span>
+    );
+  }
+  return (
+    <span
+      className="text-[10px] font-black px-2 py-0.5 rounded-full whitespace-nowrap"
+      style={{ background: cfg.bg, color: cfg.color }}
+      title={`Se registra como ${cfg.label}`}
+    >
+      {cfg.icon} {cfg.label}
+    </span>
+  );
+}
 
 function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, onRegistrar, onDescartar }: {
   registros: RadarCombustible[];
@@ -672,6 +717,8 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
       vehiculo: u ? `${u.tipo}:${u.id}` : "",
       fecha: c.fecha ?? "",
       grifo: c.grifo ?? "",
+      // Vacío a propósito cuando la IA no lo leyó: obliga a elegirlo en vez de colar diésel.
+      combustible: normalizarTipoCombustible(c.tipo_combustible) ?? "",
       cantidad: esLitros ? (c.litros != null ? String(c.litros) : "") : (c.galones != null ? String(c.galones) : ""),
       precio: (esLitros ? c.precio_litro : c.precio_galon) != null ? String(esLitros ? c.precio_litro : c.precio_galon) : "",
       monto: c.monto_total != null ? String(c.monto_total) : "",
@@ -686,7 +733,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
         <table className="w-full text-sm">
           <thead>
             <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-              {["Fecha", "Unidad", "Grifo", "Cantidad", "Precio", "Monto", "Anomalías", "Estado"].map((h) => (
+              {["Fecha", "Unidad", "Grifo", "Combustible", "Cantidad", "Precio", "Monto", "Anomalías", "Estado"].map((h) => (
                 <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -709,7 +756,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
               const precioEd = numEd(ed.precio);
               const montoEd = numEd(ed.monto);
               const fotos = fotosDe(c);
-              const puedeRegistrar = ed.vehiculo !== "" && cantEd != null && (precioEd != null || montoEd != null);
+              const puedeRegistrar = ed.vehiculo !== "" && ed.combustible !== "" && cantEd != null && (precioEd != null || montoEd != null);
               return (
                 <FragmentoFilaCombustible key={c.id}>
                   <tr
@@ -724,13 +771,21 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                       {esTercero && <span className="ml-1.5 text-[10px] font-black text-[#7c3aed] bg-[#f3e8ff] px-1.5 py-0.5 rounded-full">tercero</span>}
                     </td>
                     <td className="p-3 text-gray-600 max-w-[180px] truncate">{c.grifo ?? "—"}</td>
+                    <td className="p-3 whitespace-nowrap"><ChipCombustible tipo={c.tipo_combustible} registrado={c.estado === "registrado"} /></td>
                     <td className="p-3 whitespace-nowrap font-bold text-gray-700">{cantidad}</td>
                     <td className="p-3 whitespace-nowrap text-gray-600">{precio}</td>
                     <td className="p-3 whitespace-nowrap font-black text-[#0b315f]">{c.monto_total != null ? fmtSoles(c.monto_total) : "—"}</td>
                     <td className="p-3">
                       <div className="flex flex-wrap gap-1 max-w-[220px]">
+                        {/* Las observaciones informativas (bloquea:false) van en ámbar, no en
+                            rojo: no impiden registrar, y un rojo que no se puede atender
+                            enseña a ignorar los rojos de verdad. */}
                         {(c.anomalias ?? []).map((a, i) => (
-                          <span key={i} className="text-[10px] font-black px-1.5 py-0.5 rounded-full bg-[#FDECEC] text-[#EB5757]" title={a.detalle}>
+                          <span
+                            key={i}
+                            className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${a.bloquea === false ? "bg-[#FBF1D8] text-[#B07A0F]" : "bg-[#FDECEC] text-[#EB5757]"}`}
+                            title={a.detalle}
+                          >
                             {ANOMALIA_LABEL[a.codigo] ?? a.codigo}
                           </span>
                         ))}
@@ -750,7 +805,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                   </tr>
                   {esPendiente && abierto && (
                     <tr className="border-t" style={{ borderColor: "#f1f5f9" }}>
-                      <td colSpan={8} className="p-4 bg-blue-50/40" onClick={(e) => e.stopPropagation()}>
+                      <td colSpan={9} className="p-4 bg-blue-50/40" onClick={(e) => e.stopPropagation()}>
                         {/* Fotos que la IA procesó (voucher / surtidor / tablero) */}
                         {fotos.length > 0 ? (
                           <div className="mb-4">
@@ -770,7 +825,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                         )}
 
                         {/* Edición de los campos extraídos — corrige lo que la IA leyó mal */}
-                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-3">
                           <CampoEdit label="Fecha">
                             <input type="date" value={ed.fecha} onChange={(e) => setCampo(c, "fecha", e.target.value)} className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
                           </CampoEdit>
@@ -791,6 +846,21 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           </CampoEdit>
                           <CampoEdit label="Grifo">
                             <input type="text" value={ed.grifo} onChange={(e) => setCampo(c, "grifo", e.target.value)} placeholder="—" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
+                          </CampoEdit>
+                          <CampoEdit label="Combustible">
+                            {/* Sin opción "por defecto": si la IA no lo leyó hay que elegirlo.
+                                Registrar GLP como diésel arruina el km/gal de la unidad y su
+                                costo por km, y no se nota hasta meses después. */}
+                            <select
+                              value={ed.combustible}
+                              onChange={(e) => setCampo(c, "combustible", e.target.value)}
+                              className={`w-full border rounded-lg px-2 py-1.5 text-sm font-bold outline-none focus:border-[#0b315f] bg-white ${ed.combustible ? "border-gray-200 text-[#0b315f]" : "border-[#B07A0F] text-[#B07A0F]"}`}
+                            >
+                              <option value="">— Elegir —</option>
+                              {TIPOS_COMBUSTIBLE.map((t) => (
+                                <option key={t} value={t}>{COMBUSTIBLES[t].icon} {COMBUSTIBLES[t].label}</option>
+                              ))}
+                            </select>
                           </CampoEdit>
                           <CampoEdit label={esLitros ? "Cantidad (lt)" : "Cantidad (gal)"}>
                             <input type="number" inputMode="decimal" step="0.001" value={ed.cantidad} onChange={(e) => setCampo(c, "cantidad", e.target.value)} placeholder="—" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
@@ -813,6 +883,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                                 vehiculoId: Number(ed.vehiculo.split(":")[1]),
                                 fecha: ed.fecha || null,
                                 grifo: ed.grifo.trim() || null,
+                                tipoCombustible: ed.combustible,
                                 cantidad: cantEd,
                                 esLitros,
                                 precio: precioEd,
@@ -833,7 +904,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                         </div>
                         {!puedeRegistrar && (
                           <p className="text-[11px] text-[#B07A0F] font-bold mt-2">
-                            Para registrar se necesita unidad, galones o litros, y precio o monto total.
+                            Para registrar se necesita unidad, tipo de combustible, galones o litros, y precio o monto total.
                           </p>
                         )}
                         <p className="text-[11px] text-gray-400 mt-1">Si corriges lo que la IA leyó, se guarda como lección para que no repita el error.</p>
@@ -2223,6 +2294,9 @@ export default function RadarIAPage() {
     const campos: { campo: string; ia: unknown; correcto: unknown }[] = [
       { campo: "fecha",  ia: c.fecha,   correcto: ov.fecha },
       { campo: "grifo",  ia: c.grifo,   correcto: ov.grifo },
+      // También cuando la IA no leyó nada: "no leíste el tipo y era GLP" es justo la
+      // lección que evita que el siguiente voucher del mismo grifo vuelva a salir en blanco.
+      { campo: "tipo_combustible", ia: c.tipo_combustible, correcto: ov.tipoCombustible },
       { campo: ov.esLitros ? "litros" : "galones", ia: iaCantidad, correcto: ov.cantidad },
       { campo: "precio", ia: iaPrecio,  correcto: ov.precio },
       { campo: "monto",  ia: c.monto_total, correcto: ov.monto },
@@ -2244,6 +2318,12 @@ export default function RadarIAPage() {
   async function registrarCombustible(c: RadarCombustible, ov: OverrideComb) {
     if (!ov.vehiculoId || !ov.cantidad) {
       showToast("Faltan datos para registrar la recarga", false);
+      return;
+    }
+    // El tipo se exige aquí también, no solo en el botón: es el dato que antes se rellenaba
+    // solo con "diesel" y contamina el km/gal, el control de precio y el costo por km.
+    if (!ov.tipoCombustible) {
+      showToast("Elige el tipo de combustible antes de registrar", false);
       return;
     }
     // Precio unitario: el editado, o derivado del monto entre la cantidad.
@@ -2272,7 +2352,7 @@ export default function RadarIAPage() {
           grifo: ov.grifo ?? c.grifo,
           conductor: c.conductor,
           observaciones: `Radar IA (manual${ov.tipo === "tercero" ? " · tercero" : ""}) · grupo ${grupo}`,
-          tipo_combustible: c.tipo_combustible ?? "diesel",
+          tipo_combustible: ov.tipoCombustible,
           unidad: ov.esLitros ? "litros" : "galones",
         })
         .select("id")
@@ -2285,6 +2365,9 @@ export default function RadarIAPage() {
           combustible_id: (data as any).id,
           vehiculo_id: ov.tipo === "propio" ? ov.vehiculoId : null,
           vehiculo_tercero_id: ov.tipo === "tercero" ? ov.vehiculoId : null,
+          // La fila del Radar guarda lo que REALMENTE se registró: si el revisor corrigió el
+          // tipo, la columna "Combustible" tiene que mostrar el corregido, no lo que leyó la IA.
+          tipo_combustible: ov.tipoCombustible,
         })
         .eq("id", c.id);
       showToast("Recarga registrada en Combustible");

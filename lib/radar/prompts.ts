@@ -225,6 +225,14 @@ NO CONFUNDIR MARCA DE KIT GLP CON EL GRIFO: "LANDI RENZO", "BRC", "LOVATO", "TOM
 
 GLP: en Perú el GLP se despacha en GALONES. Unidades como "UGL", "U.GAL", "GLN" o etiquetas "GLP-G" significan GLP en galones → pon la cantidad en "galones" (no en "litros") y tipo_combustible="glp".
 
+TIPO DE COMBUSTIBLE — es un dato del voucher, no una suposición. Los grifos peruanos casi nunca escriben "diésel": léelo del producto despachado y tradúcelo.
+- "PETRÓLEO", "PETROLEO D2", "D-2", "DB5", "DB5 S-50", "DIESEL B5", "ULTRA DIESEL" → "diesel"
+- "GASOHOL 84/90/95/97/98", "G-90", "GASOLINA" → "gasolina"
+- "GLP", "GLP-G", "GAS LICUADO", "AUTOGAS" → "glp"
+- "GNV", "GAS NATURAL", "GNV m3" → "gnv"
+- "UREA", "ADBLUE" → "urea"
+Si el voucher NO dice qué se despachó, deja tipo_combustible en null. **No lo adivines por el tipo de unidad ni pongas "diesel" por defecto**: un null lo resuelve el sistema con el precio pagado y la ficha del vehículo, y un "diesel" inventado se registra como si fuera un dato leído.
+
 Si NO se pudo leer la cantidad/importe pero SÍ había una foto de la nota o del surtidor, igual marca vio_nota/vio_surtidor en true y deja los números en null (para distinguir "foto ilegible" de "dato ausente").
 Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.`;
 

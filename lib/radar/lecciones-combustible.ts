@@ -13,6 +13,7 @@ const CAMPO_LABEL: Record<string, string> = {
   precio:  "el precio unitario",
   monto:   "el monto total",
   fecha:   "la fecha",
+  tipo_combustible: "el tipo de combustible",
 };
 
 /**
