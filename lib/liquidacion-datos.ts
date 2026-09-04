@@ -94,6 +94,14 @@ export type OpcionesDoc = {
   anexo2?: Anexo2 | null;
   /** URL pública de conformidad/verificación (para el QR y el pie). */
   urlPublica?: string | null;
+  /**
+   * Firma escaneada del Gerente General, ABSOLUTA. Es la misma imagen que ya rubrica el
+   * Reporte de Servicio (`/firmaJLCA.png` en public/), y se pasa desde fuera por lo mismo
+   * que `urlPublica`: aquí no se sabe el origen, y el documento se imprime tanto desde el
+   * navegador como desde el servidor al enviarlo por correo. Si no llega, se deduce del
+   * origen de `urlPublica`; y si tampoco, la firma sale en blanco, que es lo que había.
+   */
+  firmaUrl?: string | null;
   /** Genera el QR como data URL. Se puede desactivar en entornos sin `qrcode`. */
   conQr?: boolean;
 };
@@ -130,6 +138,22 @@ export async function cargarDocumentoLiquidacion(
   const cp: any = contraparteR?.data ?? {};
   const sede: any = sedeR?.data ?? null;
   const emp: any = empresaR?.data ?? {};
+
+  /**
+   * La firma rubricada del Gerente General. Se deduce del origen de `urlPublica` cuando el
+   * llamador no la pasa, para que el documento salga firmado también por los caminos que
+   * hoy solo mandan esa URL — sin inventar un dominio si no hay ninguno.
+   */
+  const firmaUrl: string | null = (() => {
+    const dada = String(opts.firmaUrl ?? "").trim();
+    if (dada) return dada;
+    try {
+      const base = String(opts.urlPublica ?? "").trim();
+      return base ? new URL("/firmaJLCA.png", base).toString() : null;
+    } catch {
+      return null;
+    }
+  })();
   const ctl: any = controlR?.data ?? {};
 
   const control: ControlDoc = {
@@ -448,7 +472,9 @@ export async function cargarDocumentoLiquidacion(
     firmas:
       lado === "cliente"
         ? [
-            { rol: "Gerente General", entidad: (emp.razon_social || emp.nombre || "AFA TOURS PERU S.A.C.").toUpperCase() },
+            // La única que va rubricada. Las dos siguientes son del cliente y quedan en
+            // blanco a propósito: son las que él firma al dar la conformidad.
+            { rol: "Gerente General", entidad: (emp.razon_social || emp.nombre || "AFA TOURS PERU S.A.C.").toUpperCase(), firmaUrl },
             { rol: "Usuario", entidad: String(nombreContraparte).toUpperCase() },
             { rol: "Área solicitante", entidad: String(cab.area_solicitante || sede?.nombre || "—").toUpperCase() },
           ]

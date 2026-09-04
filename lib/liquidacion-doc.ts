@@ -150,7 +150,15 @@ export type DocLiquidacion = {
   comentarios?: string | null;
   anexo1: FilaAnexo[];
   anexo2?: Anexo2 | null;
-  firmas: { rol: string; entidad: string }[];
+  firmas: {
+    rol: string;
+    entidad: string;
+    /**
+     * Firma escaneada, ya rubricada. Solo la lleva la de AFA: las del cliente van en blanco
+     * a propósito, porque son las que él tiene que firmar al dar la conformidad.
+     */
+    firmaUrl?: string | null;
+  }[];
   empresa: { nombre: string; ruc?: string | null; logo?: string | null; direccion?: string | null; telefono?: string | null; email?: string | null; web?: string | null };
   /** QR como data URL; enlaza a la página pública de verificación/conformidad. */
   qr?: string | null;
@@ -236,6 +244,9 @@ table{width:100%;border-collapse:collapse}
 .firmas{display:flex;gap:14px;margin-top:18px}
 .firma{flex:1;text-align:center}
 .firma .linea{border-top:1.2px solid #334155;margin:34px 8px 4px}
+/* Con firma escaneada, el hueco lo ocupa la imagen y la línea deja de reservarlo. */
+.firma .linea.con-rubrica{margin-top:0}
+.firma .rubrica{display:block;margin:0 auto;height:38px;width:auto;max-width:86%;object-fit:contain;object-position:bottom}
 .firma .rol{font-size:8.4px;font-weight:900;color:${cp}}
 .firma .ent{font-size:7.4px;color:#64748b;margin-top:1px}
 .anx thead th{background:${cp};color:#fff;font-size:6.8px;font-weight:800;padding:4px 3px;border:1px solid ${cp};text-transform:uppercase}
@@ -588,7 +599,13 @@ export function buildLiquidacionHtml(d: DocLiquidacion): string {
   const firmas = d.firmas.length
     ? `<div class="sec"><span class="num">6</span><h2>Firmas</h2></div>
        <div class="firmas">${d.firmas.map((f) =>
-         `<div class="firma"><div class="linea"></div><div class="rol">${esc(f.rol)}</div><div class="ent">${esc(f.entidad)}</div></div>`
+         // La imagen va DENTRO del hueco que la línea ya reservaba (el margen superior de
+         // 34px), no encima: si se sumara, la banda de firmas crecería y en un documento de
+         // varias páginas empujaría el bloque a la siguiente. Por eso la firma rubricada
+         // lleva su propia clase, con el margen recortado.
+         `<div class="firma">${f.firmaUrl ? `<img class="rubrica" src="${esc(f.firmaUrl)}" alt=""/>` : ""}` +
+         `<div class="linea${f.firmaUrl ? " con-rubrica" : ""}"></div>` +
+         `<div class="rol">${esc(f.rol)}</div><div class="ent">${esc(f.entidad)}</div></div>`
        ).join("")}</div>`
     : "";
 

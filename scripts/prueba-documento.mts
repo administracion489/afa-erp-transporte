@@ -28,7 +28,7 @@ const fila = (o: Partial<FilaAnexo>): FilaAnexo => ({
 });
 
 /** El documento mínimo, con el perfil de empresa VACÍO — que es como está hoy en la base. */
-function doc(anexo1: FilaAnexo[], perfil: any = {}): DocLiquidacion {
+function doc(anexo1: FilaAnexo[], perfil: any = {}, firmaUrl: string | null = null): DocLiquidacion {
   const e = empresaConDefectos(perfil);
   return {
     lado: "cliente", codigo: "LQC-2026-000004", estado: "BORRADOR",
@@ -46,7 +46,13 @@ function doc(anexo1: FilaAnexo[], perfil: any = {}): DocLiquidacion {
     lineas: [{ item: 1, tipo: "servicio", descripcion: "TRANSPORTE DE PERSONAL",
                unidad_medida: "SERV.", cantidad: 3, precio_unitario: 550, total_linea: 1650 }],
     totales: { servicios: 1650, adicionales: 0, descuentos: 0, subtotal: 1650, igv: 297, total: 1947 },
-    anexo1, firmas: [], documentacion: [], conformidad: {},
+    anexo1,
+    firmas: [
+      { rol: "Gerente General", entidad: "AFA TOURS PERU S.A.C.", firmaUrl },
+      { rol: "Usuario", entidad: "COMPAÑÍA HARD DISCOUNT S.A.C." },
+      { rol: "Área solicitante", entidad: "GESTION HUMANA" },
+    ],
+    documentacion: [], conformidad: {},
     qr: null, urlVerificacion: "", aviso: null, anexo2: null,
   } as unknown as DocLiquidacion;
 }
@@ -122,6 +128,40 @@ titulo("5 · «Cómo leer este anexo» describe la columna de verdad");
   ok(/solo se totalizan los embarques/.test(t), "y por qué el total no suma contratados");
   ok(!/Los pasajeros son los efectivamente embarcados según el manifiesto digital\. Cualquier/.test(t),
     "y ya no queda el texto viejo, que describía una columna que ya no existe");
+}
+
+// ── 6 · La firma del Gerente General ───────────────────────────────────────
+//
+// Es la misma imagen que ya rubrica el Reporte de Servicio. Va SOLO en la de AFA: las dos
+// del cliente quedan en blanco a propósito, porque son las que él firma al dar la
+// conformidad. Rubricarlas sería firmar por el cliente.
+titulo("6 · La firma va en la del Gerente General, y solo en esa");
+{
+  const url = "https://www.transportesafa.com/firmaJLCA.png";
+  const html = buildLiquidacionHtml(doc([fila({})], {}, url));
+  const rubricas = [...html.matchAll(/<img class="rubrica"[^>]*>/g)];
+  ok(rubricas.length === 1, "hay UNA sola firma rubricada", rubricas.length);
+  ok(rubricas[0]?.[0].includes(url), "y es la del Reporte de Servicio", rubricas[0]?.[0].slice(0, 70));
+
+  // Que esté en el bloque del Gerente General y no en otro.
+  const bloques = html.split('<div class="firma">').slice(1);
+  ok(bloques.length === 3, "siguen siendo tres firmas", bloques.length);
+  const conRubrica = bloques.filter((b) => b.includes("rubrica"));
+  ok(conRubrica.length === 1 && /Gerente General/.test(conRubrica[0]),
+    "la rubricada es la del Gerente General");
+  ok(bloques.filter((b) => /Usuario|Área solicitante/.test(b)).every((b) => !b.includes("rubrica")),
+    "las del cliente quedan EN BLANCO para que las firme él");
+
+  // Y la línea de la firma rubricada no reserva otra vez el hueco: si lo hiciera, la banda
+  // crecería y en un documento de varias páginas empujaría el bloque a la siguiente.
+  ok(/class="linea con-rubrica"/.test(conRubrica[0]), "la línea recorta su margen bajo la imagen");
+
+  // Sin firma, todo sigue como antes.
+  const sinFirma = buildLiquidacionHtml(doc([fila({})], {}, null));
+  // Se busca la ETIQUETA, no la palabra: `rubrica` aparece siempre en la hoja de estilos.
+  ok(!/<img class="rubrica"/.test(sinFirma), "sin firma configurada no se pinta ninguna imagen");
+  ok(!/class="linea con-rubrica"/.test(sinFirma), "y la línea conserva el hueco de siempre para firmar a mano");
+  ok(sinFirma.split('<div class="firma">').length - 1 === 3, "con sus tres recuadros");
 }
 
 console.log(fallos ? `\n${fallos} FALLA(S)\n` : "\nTODO OK\n");

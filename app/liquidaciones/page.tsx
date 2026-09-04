@@ -758,7 +758,11 @@ export default function LiquidacionesPage() {
     try {
       const fila = liquidaciones.find((l) => l.id === id);
       const url = fila?.token ? `${location.origin}/conformidad/${fila.token}` : null;
-      const doc = await cargarDocumentoLiquidacion(supabase, lado, { id }, { urlPublica: url });
+      const doc = await cargarDocumentoLiquidacion(supabase, lado, { id }, {
+        urlPublica: url,
+        // La misma firma que rubrica el Reporte de Servicio.
+        firmaUrl: `${window.location.origin}/firmaJLCA.png`,
+      });
       if (!doc) { setMsg("⚠️ No se pudo armar el documento."); return; }
       const win = window.open("", "_blank");
       if (!win) { setMsg("⚠️ El navegador bloqueó la ventana emergente."); return; }
