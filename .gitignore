@@ -51,3 +51,6 @@ android/keystore.properties
 
 # Claude Code local settings (puede contener tokens en comandos permitidos)
 .claude/settings.local.json
+
+# Reversión de scripts/corregir-combustible-tipo.mts (datos de la operación, no del código)
+reversion-tipo-combustible-*.json
