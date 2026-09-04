@@ -16,7 +16,11 @@
 // afirmar lo único que importa: que la segunda vez ACTUALIZA en lugar de insertar.
 //
 // Correr:  npx tsx scripts/prueba-fichas-ruta.mts
-import { guardarPaxContratado, guardarPaxDeServicios } from "../lib/liquidacion-rutas";
+import {
+  cargarRutasContratadas, guardarPaxContratado, guardarPaxDeServicios,
+  parCanonicoRuta, resolverPaxContratado,
+} from "../lib/liquidacion-rutas";
+import type { ParServicio, ReservaLiq } from "../lib/liquidacion-agrupacion";
 
 let fallos = 0;
 const ok = (cond: boolean, que: string, detalle: unknown = "") => {
@@ -55,8 +59,16 @@ function fakeSb() {
         };
       }
       return {
+        // Constructor de consulta encadenable Y esperable, como el de supabase-js: hay
+        // llamadas que hacen .select().eq() y otras .select().eq().in() antes de await.
         select() {
-          return { eq: (_c: string, v: any) => Promise.resolve({ data: filas.filter((f) => f.cliente_id === v) }) };
+          const filtros: ((f: any) => boolean)[] = [];
+          const q: any = {
+            eq(col: string, v: any) { filtros.push((f) => (f[col] ?? true) === v); return q; },
+            in(col: string, vs: any[]) { filtros.push((f) => vs.includes(f[col])); return q; },
+            then(res: any) { return Promise.resolve({ data: filas.filter((f) => filtros.every((p) => p(f))), error: null }).then(res); },
+          };
+          return q;
         },
         insert(campos: any) {
           ops.push("insert");
@@ -64,7 +76,7 @@ function fakeSb() {
             return Promise.resolve({
               error: { message: 'duplicate key value violates unique constraint "uq_cliente_ruta_identidad"' },
             });
-          filas.push({ id: ++secuencia, ...campos });
+          filas.push({ id: ++secuencia, activo: true, ...campos });
           return Promise.resolve({ error: null });
         },
         update(campos: any) {
@@ -146,6 +158,55 @@ titulo("4 · Cuando la ficha no puede sostener dos números, se escribe el servi
 
   const vacio = await guardarPaxDeServicios(sb, [], 10);
   ok(vacio.ok && vacio.escritos === 0, "sin servicios no hace nada");
+}
+
+// ── 5 · EL CICLO COMPLETO: guardar y volver a encontrarlo ───────────────────
+//
+// Es el caso que llegó desde la web y que las pruebas anteriores no cubrían: la pantalla
+// decía "3 ruta(s) fichada(s)" y al recargar volvía a decir "3 ruta(s) sin capacidad
+// contratada". La escritura funcionaba; la LECTURA preguntaba por el otro par de nombres.
+// Guardar y leer son un solo ciclo: probar solo una mitad deja pasar justo esto.
+titulo("5 · Lo guardado se vuelve a encontrar (el fallo de «se guardó pero sigue vacía»)");
+{
+  const sb = fakeSb();
+  const nombreRetorno = "RUTA C/ RETORNO 19:00/ M5JG+GFG PASILLO D LATERAL SUR BSF→PRIMERO DE MAYO";
+
+  // Un servicio de SOLO RETORNO, como los adicionales del formato.
+  const tramo = {
+    id: 1, codigo: "OS-1", fecha_servicio: "2026-08-13", hora_servicio: "19:00",
+    estado: "finalizada", cliente_id: 7, cliente_sede_id: null,
+    ruta_nombre: nombreRetorno, direccion_servicio: "retorno", precio_cliente: 320,
+  } as ReservaLiq;
+  const par: ParServicio = {
+    cabeza: tramo, adjuntas: [], ejecutado: true, ejecutados: [tramo],
+    sentido: "RETORNO", ida: null, retorno: tramo,
+  };
+
+  const g = await guardarPaxContratado(sb, {
+    clienteId: 7, sedeId: null, nombreIda: null, nombreRetorno, pax: 10,
+  });
+  ok(g.ok, "se guarda la ficha", g.error ?? "");
+
+  const catalogo = await cargarRutasContratadas(sb, [7]);
+  ok(catalogo.filas.length === 1, "el catálogo trae la ficha", catalogo.filas.length);
+
+  const pax = resolverPaxContratado(par, { catalogo, paxCotizacion: new Map(), sedeId: null });
+  ok(pax === 10, "y la cascada LA ENCUENTRA — antes devolvía null y la ruta salía sin PAX", pax);
+}
+
+// ── 6 · El par canónico, que es la regla que unifica las dos mitades ────────
+titulo("6 · parCanonicoRuta: un tramo suelto siempre se guarda como la ida de su ficha");
+{
+  const soloRetorno = parCanonicoRuta(null, "RUTA C/ RETORNO 19:00/ BSF→MAYO");
+  ok(soloRetorno.ida === "RUTA C/ RETORNO 19:00/ BSF→MAYO" && soloRetorno.retorno === null,
+    "el retorno sube al campo principal", JSON.stringify(soloRetorno));
+
+  const completa = parCanonicoRuta("RUTA A/ ENTRADA 06:30/ X→Y", "RUTA A/ RETORNO 17:00/ Y→X");
+  ok(completa.ida === "RUTA A/ ENTRADA 06:30/ X→Y" && completa.retorno === "RUTA A/ RETORNO 17:00/ Y→X",
+    "la ruta de dos tramos no se toca");
+
+  const soloIda = parCanonicoRuta("RUTA B/ ENTRADA 05:10/ X→Y", null);
+  ok(soloIda.ida === "RUTA B/ ENTRADA 05:10/ X→Y" && soloIda.retorno === null, "la de solo ida tampoco");
 }
 
 console.log(fallos ? `\n${fallos} FALLA(S)\n` : "\nTODO OK\n");
