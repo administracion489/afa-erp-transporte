@@ -160,6 +160,26 @@ titulo("5 · «Cómo leer este anexo» describe la columna de verdad");
     "sin una palabra de los embarcados, que es la columna que se quitó");
   ok(!/guion|totaliza|suba menos gente|pactó nadie/.test(t),
     "y sin las dos explicaciones que AFA pidió quitar", t.match(/Cómo leer este anexo:.{0,340}/)?.[0]);
+  // Lo que SÍ tiene que seguir saliendo. Va aquí explícito porque el recorte de arriba lo
+  // dejó pegado al texto que se quitó, y es fácil llevárselo por delante en el siguiente.
+  const conIncl = texto(buildLiquidacionHtml(doc([fila({}), fila({ estado: "Incluido", importe: 0 })])));
+  ok(/una sola tarifa cubre ida y retorno, por eso comparten el número de ítem y el importe se cobra una vez/.test(conIncl),
+    "explica el incl. del retorno — es lo que evita que el cliente lea un servicio gratis");
+  ok(/Importes en soles, sin IGV\./.test(conIncl), "y dice en qué moneda están los importes");
+
+  // Pero solo cuando hay algo marcado: explicar una marca que no aparece en la tabla es
+  // ruido, y el anexo de un periodo sin retornos no la tiene.
+  ok(!/una sola tarifa cubre ida y retorno/.test(t),
+    "sin ninguna fila incl., esa frase no se imprime");
+  ok(/Importes en soles, sin IGV\./.test(t), "la de la moneda sí sale siempre");
+
+  // Se mira SOLO la nota: "sin IGV" también aparece en el bloque de totales, y buscarlo en
+  // el documento entero daría un falso rojo.
+  const base = doc([fila({})]);
+  const usd = texto(buildLiquidacionHtml({ ...base, servicio: { ...base.servicio, moneda: "USD" } } as any)
+    .split('<div class="nota">')[1] ?? "");
+  ok(/Importes en dólares\./.test(usd) && !/sin IGV/.test(usd),
+    "y cambia sola si la liquidación es en dólares", usd.slice(-60).trim());
 }
 
 // ── 6 · La firma del Gerente General ───────────────────────────────────────
