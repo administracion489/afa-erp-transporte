@@ -343,13 +343,27 @@ export const TIPOS_DOC_UNIDAD: TipoDoc[] = [
   { canonico: "Tarjeta Única de Circulación (TUC)", exige: "ambas",
     alias: ["habilitacion sutran", "sutran", "tuc", "tarjeta unica de circulacion",
             "tarjeta unica de circulacion tuc"] },
-  // Habilitación Vehicular · la otorga el MTC, y en Lima y Callao la ATU para el transporte
-  // urbano de su ámbito — de ahí el doble rótulo. El ERP la llamaba "Permiso Operación MTC",
-  // que confunde dos cosas: el permiso/autorización es de la EMPRESA (una Resolución
-  // Directoral) y la habilitación es de la UNIDAD dentro de esa autorización. Como esta fila
-  // cuelga de un vehículo, el nombre correcto es el de la unidad. El viejo queda de alias,
-  // igual que en la TUC, y la migración pasa las filas ya escritas.
-  { canonico: "Habilitación Vehicular (MTC/ATU)", exige: "ambas",
+  // Habilitación Vehicular · CATALOGADA PERO **NO OBLIGATORIA POR PLACA**, y esto es lo que
+  // hay que entender antes de volver a marcarla:
+  //
+  // LA HABILITACIÓN ES UNA SOLA Y ES DE LA EMPRESA — la madre. La otorga el MTC (o la ATU en
+  // Lima y Callao, o un Gobierno Regional), es una Resolución Directoral, y de ELLA cuelgan
+  // las TUC de cada vehículo — las hijas. Un bus no tiene su propia "habilitación vehicular"
+  // como papel aparte: lo que lleva a bordo y le enseña al fiscalizador es su TUC.
+  //
+  // Consecuencia práctica, y es la razón del cambio: **si una placa tiene TUC, la empresa
+  // tiene habilitación por lógica** — la TUC no se emite de otro modo. Exigirla también por
+  // unidad producía un "obligatorio sin registrar" imposible de cerrar salvo colgándole a la
+  // placa una copia del papel de la empresa, que es duplicar el dato en el sitio equivocado.
+  //
+  // Dónde vive de verdad: `empresas_tercerizadas.autorizacion_mtc` / `.venc_autorizacion`,
+  // con su autoridad y su territorio (lib/autorizacion-transporte.ts). Ahí sí se vigila.
+  //
+  // Se queda en el catálogo con `exige: null` en vez de borrarse, por las filas que ya
+  // existen: sin la entrada, un "Permiso Operación MTC" viejo dejaría de resolver, caería a
+  // "Otro" y perdería hasta el nombre. Catalogada se sigue viendo, y si está cargada y
+  // vencida se avisa (sin bloquear); lo que no se hace es reclamarla.
+  { canonico: "Habilitación Vehicular (MTC/ATU)", exige: null,
     alias: ["permiso operacion mtc", "permiso mtc", "permiso de operacion mtc",
             "habilitacion vehicular", "habilitacion vehicular mtc", "habilitacion vehicular atu",
             "habilitacion vehicular mtc atu"] },

@@ -16,6 +16,12 @@
 //      deja de bloquear — en silencio. Es el patrón que CLAUDE.md llama "escribir con una
 //      identidad y leer con otra", el que ya costó tres fallos en producción.
 //
+//   3. LO DE LA EMPRESA NO SE LE PIDE A LA PLACA. La habilitación es UNA, de la empresa —la
+//      madre—, y de ella salen las TUC de cada vehículo —las hijas—. Si una placa tiene TUC,
+//      la empresa tiene habilitación por lógica. Exigirla también por unidad producía un
+//      "obligatorio sin registrar" que solo se podía cerrar colgándole al bus una copia del
+//      papel de la empresa. Lo mismo con el SCTR y la Vida Ley, que son de las PERSONAS.
+//
 // Se prueba el CICLO (nombre viejo → veredicto correcto), no una mitad.
 //
 // Correr:  npx tsx scripts/prueba-documentos.mts
@@ -39,7 +45,6 @@ const docsBase = (): DocFila[] => [
   { tipo: "SOAT", fecha_vencimiento: "2027-04-21" },
   { tipo: "Revisión Técnica (CITV)", fecha_vencimiento: "2026-11-18" },
   { tipo: "Tarjeta Única de Circulación (TUC)", fecha_vencimiento: "2034-02-20" },
-  { tipo: "Habilitación Vehicular (MTC/ATU)", fecha_vencimiento: "2030-01-01" },
   { tipo: "SCTR Salud", fecha_vencimiento: "2027-01-01" },
   { tipo: "SCTR Pensión", fecha_vencimiento: "2027-01-01" },
   { tipo: "Vida Ley", fecha_vencimiento: "2027-01-01" },
@@ -96,15 +101,16 @@ titulo("2 · Cargada y sin fecha = CONFORME, no «sin cargar»");
   ok(sobre(a, "Tarjeta de Propiedad").length === 0,
      "la Tarjeta de Propiedad no genera NINGÚN hallazgo", JSON.stringify(sobre(a, "Tarjeta de Propiedad")));
   ok(a.avisos.length === 0, "no queda ni un aviso", a.avisos.map(h => h.texto).join(" · "));
-  // 10 = 8 exigencias del proveedor (SOAT/CAT cuentan como una) + 1 de la empresa (su
+  // 9 = 7 exigencias de la unidad (SOAT/CAT cuentan como una) + 1 de la empresa (su
   // autorización de transporte) + la licencia del conductor.
   //
-  // Eran 11 hasta que se retiró la "Habilitación SUTRAN" de la empresa: SUTRAN fiscaliza, no
-  // autoriza, y lo que se pedía ahí era en realidad la habilitación VEHICULAR — que es por
-  // placa y hoy es la TUC. Se fija el número ENTERO y no solo "la TIVE suma": este renglón
-  // es el que avisa si mañana desaparece una exigencia sin que nadie lo haya pedido, y de
-  // hecho es el que cazó esta.
-  ok(a.conformes === 10, "cuenta como conforme (10 exigencias verificadas)", a.conformes);
+  // Bajó dos veces, y las dos por la misma confusión entre lo de la EMPRESA y lo de la PLACA:
+  // primero se retiró la "Habilitación SUTRAN" de la empresa (SUTRAN fiscaliza, no autoriza)
+  // y después la "Habilitación Vehicular" por unidad, que es UNA de la empresa y de la que
+  // cuelgan las TUC. Se fija el número ENTERO y no solo "la TIVE suma": este renglón es el
+  // que avisa si mañana desaparece una exigencia sin que nadie lo haya pedido, y de hecho es
+  // el que cazó las dos.
+  ok(a.conformes === 9, "cuenta como conforme (9 exigencias verificadas)", a.conformes);
   ok(!/sin cargar|sin fecha/i.test(a.resumen), "el resumen no habla de datos que faltan", a.resumen);
 }
 
@@ -132,8 +138,9 @@ titulo("2b · La empresa tiene UNA exigencia, no dos");
 
 {
   // Había una segunda, "Habilitación SUTRAN", que no correspondía a nada: SUTRAN fiscaliza,
-  // no autoriza. Lo que se pedía ahí era la habilitación VEHICULAR, que es por placa y hoy
-  // es la TUC. Como exigencia de empresa era un aviso permanente e incumplible.
+  // no autoriza. La habilitación de verdad es la que ya está aquí —la autorización de la
+  // empresa— y de ella cuelgan las TUC de cada vehículo. Duplicarla era un aviso permanente
+  // e incumplible en la ficha de todo proveedor.
   const a = evaluar([...docsBase(), { tipo: "Tarjeta de Propiedad", fecha_vencimiento: null }]);
   const deEmpresa = hallazgosDe(a).filter(h => h.sujeto === "empresa");
   ok(!hallazgosDe(a).some(h => /sutran/i.test(h.tipo) || /sutran/i.test(h.texto)),
@@ -224,13 +231,24 @@ ok(etiquetaTipoDoc(null) === "", "null no revienta");
 }
 
 {
-  const docs = docsBase()
-    .filter(d => d.tipo !== "Habilitación Vehicular (MTC/ATU)")
-    .concat([{ tipo: "Permiso Operación MTC", fecha_vencimiento: "2026-08-01" },
-             { tipo: "Tarjeta de Propiedad", fecha_vencimiento: null }]);
-  const a = evaluar(docs);
-  ok(!a.apto && a.bloqueantes[0]?.tipo === "Habilitación Vehicular (MTC/ATU)",
-     "lo mismo con el «Permiso Operación MTC» vencido", a.bloqueantes[0]?.tipo);
+  // LA HABILITACIÓN VEHICULAR NO SE LE PIDE A UNA PLACA. Es UNA de la empresa —la madre— y de
+  // ella salen las TUC de cada vehículo. Si la placa tiene TUC, la empresa la tiene por
+  // lógica: reclamarla también por unidad era un pendiente imposible de cerrar salvo
+  // colgándole al bus una copia del papel de la empresa.
+  const a = evaluar([...docsBase(), { tipo: "Tarjeta de Propiedad", fecha_vencimiento: null }]);
+  ok(!hallazgosDe(a).some(h => h.tipo === "Habilitación Vehicular (MTC/ATU)"),
+     "no se reclama por placa aunque no esté cargada",
+     hallazgosDe(a).map(h => h.tipo).join(" · "));
+
+  // Pero si alguien SÍ la cargó y está vencida, se avisa — sin detener el bus, porque lo que
+  // de verdad habilita es la autorización de la empresa, que se vigila en su ficha.
+  const b = evaluar([...docsBase(),
+    { tipo: "Tarjeta de Propiedad", fecha_vencimiento: null },
+    { tipo: "Permiso Operación MTC", fecha_vencimiento: "2026-08-01" }]);
+  const h = sobre(b, "Habilitación Vehicular (MTC/ATU)");
+  ok(b.apto, "cargada y vencida NO bloquea la salida");
+  ok(h.length === 1 && h[0].veredicto === "vencido" && !h[0].bloquea,
+     "…pero se avisa, y con el nombre de hoy", h.map(x => `${x.veredicto}/bloquea:${x.bloquea}`).join());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -239,12 +257,14 @@ titulo("5 · La lista de obligatorios que consume el cron de proveedores");
 {
   const oblig = tiposObligatorios(true).map(t => t.canonico);
   const esperados = ["SOAT", "Revisión Técnica (CITV)", "Tarjeta de Propiedad",
-                     "Tarjeta Única de Circulación (TUC)", "Habilitación Vehicular (MTC/ATU)",
+                     "Tarjeta Única de Circulación (TUC)",
                      "SCTR Salud", "SCTR Pensión", "Vida Ley"];
   ok(oblig.length === esperados.length, `son ${esperados.length} para un tercero`, oblig.length);
   for (const e of esperados) ok(oblig.includes(e), `incluye ${e}`);
   ok(!oblig.includes("CAT"), "el CAT no se le exige a un tercero");
   ok(!oblig.includes("Tarjeta de Circulación"), "la Tarjeta de Circulación municipal tampoco");
+  ok(!oblig.includes("Habilitación Vehicular (MTC/ATU)"),
+     "ni la Habilitación Vehicular: es de la EMPRESA, no de la placa");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -264,9 +284,14 @@ for (const t of ["SOAT", "Revisión Técnica (CITV)", "Tarjeta de Propiedad",
 }
 ok(ambitoTipoDoc("Constancia rara") === "unidad", "lo no catalogado se trata como de la unidad");
 
+// Sigue CATALOGADA aunque no sea obligatoria: sin la entrada, un "Permiso Operación MTC"
+// viejo dejaría de resolver, caería a "Otro" y perdería hasta el nombre.
+ok(etiquetaTipoDoc("Permiso Operación MTC") === "Habilitación Vehicular (MTC/ATU)",
+   "la Habilitación Vehicular sigue catalogada, solo que opcional");
+
 {
   const soloUnidad = tiposObligatorios(true, "unidad").map(t => t.canonico);
-  ok(soloUnidad.length === 5, "a una placa se le exigen 5 documentos", soloUnidad.join(", "));
+  ok(soloUnidad.length === 4, "a una placa se le exigen 4 documentos", soloUnidad.join(", "));
   ok(!soloUnidad.some(t => ["SCTR Salud", "SCTR Pensión", "Vida Ley"].includes(t)),
      "…y ninguno es un seguro del trabajador");
 
