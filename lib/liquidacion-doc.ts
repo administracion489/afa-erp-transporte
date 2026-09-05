@@ -374,10 +374,21 @@ function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
   const filaTot = (k: string, v: string, cls = "") =>
     `<tr class="${cls}"><td class="k">${esc(k)}</td><td class="v">${v}</td></tr>`;
 
+  // El formato del cliente NO desglosa el valorizado por categoría. "Servicios del
+  // periodo", "Adicionales autorizados" y —el día que exista— el subtotal de falsos
+  // fletes (servicios cancelados con acuerdo) son cortes internos de AFA: al cliente
+  // se le entrega el detalle renglón por renglón en la tabla de arriba —cada adicional
+  // sale rotulado ADICIONAL, cada descuento con su cláusula— y abajo lo único que tiene
+  // que cuadrar contra su orden de compra, que es el valorizado. El desglose sigue
+  // entero donde se trabaja el documento: el botón "Revisar" (app/liquidaciones/
+  // ModalEditor.tsx) y el lado proveedor de aquí abajo. Cualquier subtotal nuevo por
+  // categoría se agrega ahí, no acá.
+  //
+  // El descuento SÍ se imprime: no es un corte por categoría, es plata que se le
+  // resta a este cliente en esta factura, y callarla en el total sería cobrar sin decir
+  // por qué el importe bajó.
   const totales = d.lado === "cliente"
     ? [
-        filaTot("Servicios del periodo", m2(t.servicios, moneda)),
-        t.adicionales ? filaTot("Adicionales autorizados", m2(t.adicionales, moneda)) : "",
         t.descuentos ? filaTot("Descuentos y penalidades", "− " + m2(t.descuentos, moneda), "neg") : "",
         filaTot("TOTAL VALORIZADO (sin IGV)", m2(t.subtotal, moneda)),
         filaTot(`IGV ${num(t.igvPct, 0)}%`, m2(t.igv, moneda)),
