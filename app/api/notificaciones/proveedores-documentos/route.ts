@@ -28,6 +28,24 @@ async function handler(req: NextRequest) {
   const force = new URL(req.url).searchParams.get("force") === "1";
 
   try {
+    // ¿ESTÁ INSTALADO EL MÓDULO? Se comprueba ANTES de mandarle nada a nadie.
+    //
+    // `proveedor_tokens` la crea `proveedor-documentos-autoservicio.sql`. Sin ella, este cron
+    // seguía adelante —cada consulta se tragaba su error— y le mandaba al proveedor un correo
+    // con un enlace que nunca se guardó: lo abría y leía "Este enlace no es válido o ya
+    // expiró". Un link muerto con el membrete de AFA es peor que no mandar nada, porque
+    // enseña al proveedor a no abrir el que sí sirve. Y como el registro del aviso también
+    // fallaba, no había dedupe: volvía a salir cada día gatillo.
+    const { error: errModulo } = await admin.from("proveedor_tokens").select("id").limit(1);
+    if (errModulo) {
+      return NextResponse.json({
+        ok: false,
+        mensaje: "Módulo de autoservicio de proveedores no instalado: no se envió ningún aviso.",
+        falta: "supabase/proveedor-documentos-autoservicio.sql",
+        detalle: errModulo.message,
+      }, { status: 200 });   // 200 a propósito: no es un fallo del cron, es una migración pendiente
+    }
+
     const { data: cfg } = await admin.from("config_proveedores_docs").select("*").eq("id", 1).maybeSingle();
     if (cfg && cfg.activo === false) {
       return NextResponse.json({ ok: true, mensaje: "Módulo desactivado" });

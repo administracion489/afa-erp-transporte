@@ -83,7 +83,21 @@ export async function tokenVigentePara(admin: any, empresaId: number): Promise<s
 
   const token = generarToken();
   const expira = new Date(Date.now() + DIAS_VIGENCIA_TOKEN * 86400000).toISOString();
-  await admin.from("proveedor_tokens").insert({ empresa_id: empresaId, token, expira_en: expira });
+  // SE COMPRUEBA EL ERROR, y esto no es celo: si el insert falla —lo más probable, que
+  // `proveedor-documentos-autoservicio.sql` no se haya corrido y la tabla no exista— el
+  // `await` a secas se lo tragaba y esta función devolvía igual un token que NO ESTÁ GUARDADO
+  // EN NINGÚN SITIO. El correo salía con su enlace, el proveedor lo abría y leía "Este enlace
+  // no es válido o ya expiró". Mandarle a un tercero un link muerto con el membrete de AFA es
+  // peor que no mandarle nada: la próxima vez no abre el que sí sirve.
+  const { error } = await admin
+    .from("proveedor_tokens")
+    .insert({ empresa_id: empresaId, token, expira_en: expira });
+  if (error) {
+    throw new Error(
+      `No se pudo crear el enlace del proveedor (proveedor_tokens): ${error.message}. ` +
+      `Si la tabla no existe, falta correr supabase/proveedor-documentos-autoservicio.sql.`,
+    );
+  }
   return token;
 }
 
