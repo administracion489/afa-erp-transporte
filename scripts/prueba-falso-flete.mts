@@ -263,5 +263,73 @@ const cancelado = { estado: "cancelada" };
       vivo.some((x) => x.nivel === "alerta"), vivo.map((x) => x.texto).join(" | "));
 }
 
+// ── 10 bis. El cierre tampoco puede negar un acuerdo que sí existe ──────────
+{
+  const rs = dia(26, {
+    ida: { ...cancelado, falso_flete: true, costo_proveedor: 0 },
+    ret: { ...cancelado },
+  });
+  const { pares, bloqueadas } = analizarServicios(rs, "proveedor");
+  const codigos = bloqueadas.flatMap((b) => b.codigos);
+
+  chk("marcado sin monto no llega a cobrarse", pares.length === 0);
+  chk("y NO se le dice 'cancelado sin acuerdo' — el acuerdo existe",
+      !codigos.includes("cancelado_sin_pago"), codigos.join(","));
+  chk("se dice que falta el monto", codigos.every((c) => c === "falso_flete_sin_monto"),
+      codigos.join(","));
+  chk("y eso SÍ es trabajo pendiente (rojo)", bloqueoEsTrabajo(codigos));
+  chk("el mensaje ofrece las dos salidas",
+      /escribe el avance|quítale la marca/i.test(bloqueadas[0]?.motivos[0] ?? ""),
+      bloqueadas[0]?.motivos[0]);
+}
+
+// ── 11. Marcado pero sin monto: el aviso tiene que decir ESO ────────────────
+{
+  const [ida, ret] = dia(23, { ida: { ...cancelado }, ret: { ...cancelado } });
+  const hermano = { ...ret, falso_flete: false };
+  const marcadoSinMonto = {
+    ...ida, tipo_asignacion: "tercerizado", costo_proveedor: 0, falso_flete: true,
+  };
+
+  const a = avisosDe(marcadoSinMonto, ida, hermano, "costo");
+  chk("marcado sin monto NO dice 'el día entero no se podrá liquidar'",
+      !a.some((x) => /no se podrá liquidar al cierre/i.test(x.texto)),
+      a.map((x) => x.texto).join(" | "));
+  chk("dice que falta el monto del avance",
+      a.some((x) => x.nivel === "alerta" && /ningún tramo del día lleva monto/i.test(x.texto)),
+      a.map((x) => x.texto).join(" | "));
+
+  // Con el monto puesto en un tramo, el otro queda explicado y sin alerta.
+  const conMonto = avisosDe(
+    { ...marcadoSinMonto, costo_proveedor: 120 }, ida, hermano, "costo"
+  );
+  chk("con el monto puesto no queda ninguna alerta",
+      !conMonto.some((x) => x.nivel === "alerta"), conMonto.map((x) => x.texto).join(" | "));
+
+  const mudo = avisosDe(
+    { ...ret, tipo_asignacion: "tercerizado", costo_proveedor: 0, falso_flete: false },
+    ret, { ...ida, falso_flete: true, costo_proveedor: 120 }, "costo"
+  );
+  chk("el tramo mudo del falso flete se explica, no se alarma",
+      mudo.every((x) => x.nivel === "info") && mudo.some((x) => /avance del día va en/i.test(x.texto)),
+      mudo.map((x) => `${x.nivel}:${x.texto}`).join(" | "));
+
+  // Y el doble pago del avance sigue detectándose.
+  const doble = avisosDe(
+    { ...marcadoSinMonto, costo_proveedor: 120 }, ida,
+    { ...hermano, costo_proveedor: 120 }, "costo"
+  );
+  chk("dos tramos con monto avisan del pago doble",
+      doble.some((x) => x.nivel === "alerta" && /una vez por día|pagará doble/i.test(x.texto)),
+      doble.map((x) => x.texto).join(" | "));
+
+  // Del lado venta no se juzga nada: al cliente no se le cobra la cancelación.
+  const venta = avisosDe(
+    { ...marcadoSinMonto, precio_cliente: 0 }, ida, hermano, "precio"
+  );
+  chk("del lado venta un día cancelado no levanta alertas",
+      !venta.some((x) => x.nivel === "alerta"), venta.map((x) => x.texto).join(" | "));
+}
+
 console.log(fallos === 0 ? "\nTODO OK" : `\n${fallos} FALLO(S)`);
 process.exit(fallos === 0 ? 0 : 1);

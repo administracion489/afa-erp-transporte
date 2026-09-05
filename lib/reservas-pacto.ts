@@ -204,13 +204,46 @@ export function avisosDe(
    */
   const diaCaido = seCayo(patch.estado) && (!hermano || seCayo(hermano.estado));
   const conAcuerdo = patch.falso_flete === true || hermano?.falso_flete === true;
-  if (diaCaido && !conAcuerdo) {
-    avisos.push({
-      nivel: "info",
-      texto: juzgaPrecio && !juzgaCosto
-        ? "Servicio cancelado: no se le cobra al cliente. El importe que tenga cargado no entra a la liquidación."
-        : "Servicio cancelado: no se paga ni se cobra. Si el proveedor ya había salido y hay acuerdo por el avance, márcalo como falso flete.",
-    });
+  if (diaCaido) {
+    if (!conAcuerdo) {
+      avisos.push({
+        nivel: "info",
+        texto: juzgaPrecio && !juzgaCosto
+          ? "Servicio cancelado: no se le cobra al cliente. El importe que tenga cargado no entra a la liquidación."
+          : "Servicio cancelado: no se paga ni se cobra. Si el proveedor ya había salido y hay acuerdo por el avance, márcalo como falso flete.",
+      });
+      return avisos;
+    }
+
+    /**
+     * Día caído CON acuerdo de falso flete. Los avisos genéricos del dinero NO sirven
+     * acá y decían justo lo contrario de lo que pasa: "el día entero no se podrá
+     * liquidar al cierre" sobre un día que, por estar marcado, SÍ se va a liquidar. Lo
+     * que falta no es el importe del servicio: es el monto del avance.
+     *
+     * Del lado VENTA no se juzga nada: al cliente no se le cobra la cancelación, así que
+     * un "sin precio de venta" aquí sería un rojo imposible de atender.
+     */
+    if (juzgaCosto) {
+      if (costo > 0 && costoHermano > 0)
+        avisos.push({
+          nivel: "alerta",
+          texto: `Falso flete con monto en los DOS tramos (${nombreTramo(hermano)} lleva S/ ${costoHermano.toFixed(2)}). ` +
+                 `El avance se paga una vez por día: déjalo en un solo tramo o se pagará doble.`,
+        });
+      else if (costo <= 0 && costoHermano <= 0)
+        avisos.push({
+          nivel: "alerta",
+          texto: "Marcaste falso flete pero ningún tramo del día lleva monto. Escribe el avance acordado " +
+                 "con el proveedor, o desmarca la casilla y el día no se paga.",
+        });
+      else if (costo <= 0)
+        avisos.push({
+          nivel: "info",
+          texto: `El avance del día va en ${nombreTramo(hermano)} (${refTramo(hermano)}): S/ ${costoHermano.toFixed(2)}. ` +
+                 `Este tramo va en 0 a propósito.`,
+        });
+    }
     return avisos;
   }
 
