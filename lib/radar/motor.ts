@@ -552,7 +552,13 @@ async function procesarMensaje(
     );
     const notaMultiple =
       bloquesMedia.length > 1
-        ? `\n\nSe adjuntan ${bloquesMedia.length} archivos que el remitente envió JUNTOS como parte del MISMO reporte. Si es una recarga de combustible suelen tener ROLES distintos (foto del tablero/odómetro, del nivel de combustible, del surtidor del grifo y de la NOTA DE DESPACHO): combínalos en UNA sola extracción cruzando sus datos — no los trates por separado, y no ignores ninguno (la nota con los importes suele ir al final del álbum).`
+        // OJO con lo que se le pide aquí: la versión anterior decía "son parte del MISMO
+        // reporte … combínalos en UNA sola extracción, no los trates por separado", sin
+        // excepción. Un conductor que al cerrar turno manda juntos los vouchers del DÍA hacía
+        // que el modelo obedeciera y fusionara dos despachos de dos placas distintas en uno,
+        // perdiendo el segundo. Ahora la ráfaga es un solo reporte SALVO prueba en contrario,
+        // y la prueba son los datos del propio papel (ver album-recargas.ts).
+        ? `\n\nSe adjuntan ${bloquesMedia.length} archivos que el remitente envió JUNTOS. No ignores ninguno (la nota con los importes suele ir al final del álbum).\nLo NORMAL es que sean UN mismo reporte fotografiado por partes, con ROLES distintos (tablero/odómetro, nivel de combustible, surtidor del grifo, NOTA DE DESPACHO): en ese caso combínalos en UNA sola extracción cruzando sus datos.\nPERO antes COMPRUÉBALO: si ves DOS NOTAS con número de comprobante distinto, o placas distintas, o importes distintos, son DOS RECARGAS y NO se mezclan — un conductor manda juntos los vouchers del día al cerrar el turno. Ahí, la primera va en los campos de siempre y CADA UNA DE LAS DEMÁS en "recargas_adicionales". Nunca elijas una ni promedies: los datos de un despacho no describen al otro.`
         : "";
     const prompt =
       promptExtraccionMedia(ctx) +

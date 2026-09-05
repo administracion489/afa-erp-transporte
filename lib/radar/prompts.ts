@@ -212,6 +212,13 @@ const FORMA_COMBUSTIBLE_MEDIA = `{
       "valor_b": number,                // el de la SEGUNDA (la nota). Si valor_a == valor_b NO es una discrepancia: no la reportes
       "detalle": string }
   ],
+  "comprobantes_vistos": [ string ],    // TODOS los nº de nota/comprobante distintos que ves en el álbum. Uno solo en el caso normal
+  "recargas_adicionales": [             // SOLO si el álbum trae MÁS DE UN despacho distinto (2 notas ≠). [] en el caso normal
+    { "placa": string|null, "comprobante": string|null, "fecha": "YYYY-MM-DD"|null, "hora": "HH:MM"|null,
+      "grifo": string|null, "tipo_combustible": "diesel"|"gasolina"|"glp"|"gnv"|"urea"|"biodiesel"|null,
+      "galones": number|null, "litros": number|null, "precio_galon": number|null, "precio_litro": number|null,
+      "monto_total": number|null, "kilometraje": number|null }
+  ],
   "notas_extraccion": string|null       // dígitos ambiguos, fotos borrosas, y CÓMO resolviste una lectura dudosa (p.ej. cuál de los dos números del tablero es el total)
 }`;
 
@@ -283,6 +290,13 @@ GLP: en Perú el GLP se despacha en GALONES. Unidades como "UGL", "U.GAL", "GLN"
 
 Si NO se pudo leer la cantidad/importe pero SÍ había una foto de la nota o del surtidor, igual marca vio_nota/vio_surtidor en true y deja los números en null (para distinguir "foto ilegible" de "dato ausente").
 Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.
+
+UN ÁLBUM PUEDE TRAER DOS DESPACHOS, NO SOLO DOS FOTOS:
+Antes de combinar nada, cuenta cuántas NOTAS DE DESPACHO distintas hay. Un conductor que cierra turno fotografía los vouchers del DÍA y los manda juntos, así que la ráfaga puede ser una recarga contada en varias fotos… o dos recargas completas. Los discriminantes, en este orden: **nº de comprobante distinto**, **placa distinta**, **importe o fecha/hora distintos**. Cualquiera de los tres y son DOS despachos.
+- Un solo despacho → todo en los campos planos, "recargas_adicionales": [].
+- Dos o más → el primero en los campos planos y cada uno de los demás en "recargas_adicionales", COMPLETO (su placa, su comprobante, sus galones, su precio, su importe, su kilometraje). Jamás mezcles la placa de un voucher con los importes de otro, ni elijas "el más grande", ni promedies.
+- "comprobantes_vistos" lleva SIEMPRE todos los números de nota que viste, aunque no llegaras a extraerlos todos: el ERP lo usa para saber si quedó alguno sin cargar.
+Ejemplo de lo que NO se puede hacer: dos notas de COESTI del mismo día, una de la placa CTV370 por S/ 180.03 a las 05:36 y otra de la BUI272 por S/ 240.56 a las 17:08, NO son un reporte con "roles distintos": son dos recargas de dos unidades.
 
 UNA DISCREPANCIA ES UN DESACUERDO, NO EL RELATO DE CÓMO LEÍSTE:
 "discrepancias" es SOLO para valores que NO coinciden. Si contrastaste dos fuentes y **dan lo mismo**, no hay discrepancia: deja la lista vacía. Si lo que quieres contar es cómo resolviste una lectura dudosa —cuál de los dos números del tablero era el total, un dígito borroso, una foto en diagonal— eso va en "notas_extraccion", que es para eso. Cada discrepancia lleva sus dos valores (valor_a / valor_b) y el ERP los compara: reportar dos números iguales como discrepancia pinta una alerta roja sobre una recarga correcta, y un rojo falso enseña a ignorar los rojos de verdad.

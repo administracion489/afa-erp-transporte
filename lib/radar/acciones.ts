@@ -16,6 +16,7 @@
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion } from "./coherencia-voucher";
+import { leerAlbumRecargas, type RecargaAlbum } from "./album-recargas";
 import {
   resolverIdentidadGrifo,
   normalizarDiscrepancias,
@@ -645,6 +646,80 @@ async function accionOportunidad({ sb, mensaje, datos }: ArgsAccion): Promise<Re
 
 // ── Combustible ──────────────────────────────────────────────────────────────
 
+/**
+ * Abre una fila de `radar_combustible` por cada despacho ADICIONAL del álbum (el primero ya
+ * tiene la suya, con el pipeline completo). Devuelve cuántas se crearon.
+ *
+ * Deliberadamente NO repite el pipeline entero —conductor por WhatsApp, consumo contra el
+ * histórico, duplicados, cuadre— sobre cada extra: eso es un segundo camino con las reglas
+ * escritas otra vez, y lo que hay que resolver acá es más simple y más urgente. Lo que sí hace
+ * es lo único que el operador no puede rehacer a mano: **guardar los números del voucher que
+ * si no se perdía**, con su placa ya cruzada contra la flota. El resto lo confirma la persona
+ * que abre la fila con la foto delante, que es quien tiene que decidirlo igual.
+ */
+async function insertarRecargasAdicionales(
+  sb: any,
+  ctx: {
+    album: RecargaAlbum[];
+    mensajeId: string;
+    fechaPorDefecto: string;
+    grifoPorDefecto: string | null;
+    fotos: { url: string; mime: string | null; nombre: string | null }[];
+    conductor: string | null;
+    proveedor: string | null;
+    totalDespachos: number;
+  }
+): Promise<number> {
+  if (!ctx.album.length) return 0;
+  let creadas = 0;
+  for (const [i, r] of ctx.album.entries()) {
+    try {
+      const veh = await matchVehiculo(sb, r.placa);
+      const terc = veh ? null : await matchVehiculoTercero(sb, r.placa);
+      const { error } = await sb.from("radar_combustible").insert({
+        mensaje_id: ctx.mensajeId,
+        placa: placaFormato(r.placa) ?? veh?.placa ?? terc?.placa ?? null,
+        vehiculo_id: veh?.id ?? null,
+        vehiculo_tercero_id: terc?.id ?? null,
+        fecha: r.fecha || ctx.fechaPorDefecto,
+        hora: r.hora,
+        // El grifo del álbum es el mismo salvo que el voucher diga otro: son notas de la
+        // misma ráfaga, casi siempre de la misma estación.
+        grifo: r.grifo ?? ctx.grifoPorDefecto,
+        tipo_combustible: r.tipoCombustible,
+        galones: r.galones,
+        litros: r.litros,
+        precio_galon: r.precioGalon,
+        precio_litro: r.precioLitro,
+        monto_total: r.montoTotal,
+        comprobante: r.comprobante,
+        kilometraje: r.kilometraje,
+        conductor: ctx.conductor,
+        proveedor: ctx.proveedor,
+        estado: "pendiente_revision",
+        combustible_id: null,
+        anomalias: [
+          {
+            codigo: "multiples_recargas_en_cluster",
+            detalle:
+              `Recarga ${i + 2} de ${ctx.totalDespachos} de una misma ráfaga de fotos${r.comprobante ? ` (comprobante ${r.comprobante})` : ""}. ` +
+              `Se le abrió fila propia para no perderla al fusionarla con la primera; sus datos salen del voucher, ` +
+              `pero el conductor y los controles de consumo no se le cruzaron — confírmala entera contra su foto.`,
+            bloquea: true,
+          },
+        ],
+        fotos: ctx.fotos,
+      });
+      if (error) throw new Error(error.message);
+      creadas++;
+    } catch (e: unknown) {
+      // Una extra que falla no puede tumbar el reporte principal, que ya está guardado.
+      console.warn("[radar/acciones] recarga adicional no guardada:", (e as Error)?.message ?? e);
+    }
+  }
+  return creadas;
+}
+
 async function accionCombustible({ sb, mensaje, datos, confianza, config }: ArgsAccion): Promise<ResultadoAccion> {
   const d = datos as ExtraccionCombustible;
   const fecha = d.fecha || fechaLimaDeTs(mensaje.ts_mensaje) || fechaLima();
@@ -845,6 +920,23 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       codigo: "cantidad_no_coincide_texto",
       detalle: `La IA extrajo ${cantidadIA} ${unidadCant} pero transcribió "${String(d.texto_cantidad).trim()}" del voucher — las dos lecturas del mismo número no coinciden${cuadre.estado === "cuadra" ? ", aunque la cantidad extraída sí cuadra con el precio y el importe" : ""}`,
       bloquea: cuadre.estado === "incompleto",
+    });
+  }
+
+  // ── ¿LA RÁFAGA ES UN REPORTE O SON VARIOS DESPACHOS? ───────────────────────
+  // El cluster agrupa por remitente y hora porque un reporte llega partido en varias fotos,
+  // pero un conductor que cierra turno manda juntos los vouchers del DÍA. El 20-08 eso fusionó
+  // dos notas de COESTI —CTV370 por S/ 180.03 y BUI272 por S/ 240.56, once horas aparte— en una
+  // sola recarga con la placa de una y los números de la otra, y el segundo gasto desapareció.
+  // `multiples_recargas_en_cluster` existía como código desde el día uno y NADIE lo levantaba.
+  const album = leerAlbumRecargas(d, { comprobante: d.comprobante ?? null, placa, monto });
+  if (album.multiple) {
+    anomalias.push({
+      codigo: "multiples_recargas_en_cluster",
+      detalle: album.detalle,
+      // Bloquea siempre: con dos despachos en la ráfaga, ni siquiera el principal es de fiar
+      // hasta que alguien confirme cuál voucher describe cuál fila.
+      bloquea: true,
     });
   }
 
@@ -1135,6 +1227,22 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     if (errLeccion) console.warn("[radar/acciones] lección de cuadre no guardada:", errLeccion.message);
   }
 
+  // Cada despacho ADICIONAL del álbum recibe su propia fila. Sin esto, la segunda recarga —un
+  // gasto real, con su placa y su importe— no quedaba en ninguna parte del ERP: la ráfaga
+  // producía una sola fila y el resto se evaporaba. Van todas a `pendiente_revision` (nunca
+  // auto-registro: si la ráfaga trajo dos vouchers, cuál describe a cuál lo confirma una
+  // persona contra la foto), con las MISMAS fotos del cluster, que son su evidencia.
+  const filasExtra = await insertarRecargasAdicionales(sb, {
+    album: album.adicionales,
+    mensajeId: mensaje.id,
+    fechaPorDefecto: fecha,
+    grifoPorDefecto: grifo,
+    fotos: fotosEvidencia,
+    conductor: conductorNombre,
+    proveedor,
+    totalDespachos: album.total,
+  });
+
   const motivos: string[] = anomalias.map((a) => a.detalle);
   if (config.acciones_automaticas?.combustible !== true) motivos.push("Registro automático de combustible desactivado en la configuración");
   if (!veh) {
@@ -1170,7 +1278,10 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       // entra acá — deja el número bueno puesto y solo hay que confirmarlo, y la
       // transcripción que no calza sobre un voucher que SÍ cuadra tampoco (no bloquea).
       a.codigo === "cuadre_ambiguo" ||
-      (a.codigo === "cantidad_no_coincide_texto" && a.bloquea !== false)
+      (a.codigo === "cantidad_no_coincide_texto" && a.bloquea !== false) ||
+      // Dos vouchers en la misma ráfaga: hasta que alguien diga cuál describe cuál fila, no se
+      // sabe de qué unidad es el gasto — y antes el segundo directamente se perdía.
+      a.codigo === "multiples_recargas_en_cluster"
   )
     ? "critico"
     : "atencion";
@@ -1194,7 +1305,9 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
 
   return {
     accion: "combustible_en_revision",
-    detalle: `Carga capturada pero quedó en revisión: ${motivos[0] ?? "requiere revisión manual"}`,
+    detalle:
+      `Carga capturada pero quedó en revisión: ${motivos[0] ?? "requiere revisión manual"}` +
+      (filasExtra ? ` · ${filasExtra} recarga(s) más de la misma ráfaga quedaron en filas aparte` : ""),
     datos: {
       radar_combustible_id: (rcIns as any)?.id ?? null,
       alerta_id: alertaId,
@@ -1205,6 +1318,8 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       placa_inferida: placaInferida,
       anomalias,
       motivos,
+      recargas_adicionales: filasExtra,
+      despachos_en_rafaga: album.total,
     },
   };
 }
