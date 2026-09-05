@@ -243,10 +243,10 @@ export default function ModalServicios({
    * Programación: si el día se está quedando sin importe, o llevándolo dos veces, lo
    * dice aquí con las mismas palabras.
    *
-   * Van los DOS niveles. El `info` no es decoración: es el que avisa de que subir el
-   * precio genera el enlace de conformidad que el cliente tiene que aceptar, y el que
-   * explica que este tramo va en S/ 0.00 porque su hermano lleva la tarifa del día —
-   * justo lo que alguien "arreglaría" cargando el importe dos veces.
+   * Van los DOS niveles. El `info` no es decoración: es el que explica que este tramo
+   * va en S/ 0.00 porque su hermano lleva la tarifa del día — justo lo que alguien
+   * "arreglaría" cargando el importe dos veces— y el que pide el motivo cuando cambia
+   * un costo ya pactado.
    */
   const avisos = useMemo(() => {
     const out: { r: ReservaLiq; avisos: AvisoPacto[] }[] = [];

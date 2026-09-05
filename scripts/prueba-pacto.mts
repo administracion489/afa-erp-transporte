@@ -47,7 +47,14 @@ ok(av1.some(x => x.nivel === "alerta"), "tercerizado sin costo dispara alerta");
 const av2 = avisosDe({ tipo_asignacion: "tercerizado", costo_proveedor: 550, precio_cliente: 1400 },
                      { costo_proveedor: 500, precio_cliente: 1180 });
 ok(av2.some(x => x.texto.includes("motivo")), "costo cambiado sin motivo lo pide");
-ok(av2.some(x => x.texto.includes("conformidad")), "precio al alza anuncia la conformidad");
+// Fase 6: subir el precio ya NO anuncia un enlace de conformidad, porque ya no se emite
+// ninguno (supabase/pacto-06-sin-conformidad-de-cambio.sql). El aviso existía solo para
+// anunciarlo, así que se fue con él; el cambio sigue quedando en el acta de venta.
+// Se prueba por el CONCEPTO y no por la frase: un texto nuevo que vuelva a prometerle
+// algo al cliente desde acá tiene que hacer fallar esto.
+ok(!av2.some(x => /conformidad|enlace/i.test(x.texto)),
+   "precio al alza NO promete ningún enlace al cliente", av2.map(x => x.texto).join(" | "));
+ok(av2.length === 1, "y no agrega ningún otro aviso en su lugar", `${av2.length} aviso(s)`);
 
 // El modal de servicios de /liquidaciones edita UNA sola cara del dinero: en la pestaña
 // del cliente el precio, en la del proveedor el costo. Sin acotarlo, corregir un precio
@@ -104,7 +111,12 @@ const sbSinPacto = {
 };
 const r2 = await guardarReservas(sbSinPacto, [10, 11], { costo_proveedor: 500 }, { motivo: "proveedor_sin_unidad" });
 ok(r2.ok && r2.guardados.length === 2, "guarda igual sin las migraciones corridas");
-ok(!!r2.aviso && r2.aviso.includes("pacto-00"), "avisa qué migración falta", r2.aviso ?? "");
+// La aserción pedía "pacto-00" desde antes de COLUMNAS_OPCIONALES, cuando el aviso era
+// fijo y acusaba siempre a las dos migraciones del Pacto. Hoy se suelta —y se nombra—
+// SOLO la columna que el error nombra, y este mock tumba `cambio_motivo`, que es de
+// pacto-02. La prueba estaba midiendo el bug que ese cambio arregló.
+ok(!!r2.aviso && r2.aviso.includes("pacto-02-acta.sql") && r2.aviso.includes("el motivo del cambio"),
+   "avisa qué migración falta Y qué se perdió, nombrando la columna caída", r2.aviso ?? "");
 ok(intentos === 2, "reintentó exactamente una vez, sin las columnas del Pacto", `intentos=${intentos}`);
 
 console.log(`\n${fallos === 0 ? "✅ TODO EN VERDE" : `❌ ${fallos} FALLO(S)`}\n`);

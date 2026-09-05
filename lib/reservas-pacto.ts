@@ -218,12 +218,15 @@ export function avisosDe(
       texto: "Cambió el costo pactado. Elige el motivo para que quede sustentado.",
     });
 
-  const precioAntes = Number(anterior?.precio_cliente ?? 0);
-  if (juzgaPrecio && precioAntes > 0 && precio > precioAntes)
-    avisos.push({
-      nivel: "info",
-      texto: "Subió el precio de venta: se generará un enlace de conformidad para que el cliente lo acepte.",
-    });
+  // Acá vivía "Subió el precio de venta: se generará un enlace de conformidad para que
+  // el cliente lo acepte". Se quitó con el enlace que anunciaba (fase 6, ver
+  // supabase/pacto-06-sin-conformidad-de-cambio.sql): la firma del cliente se pide UNA
+  // vez por periodo, en la liquidación del cierre, y no servicio por servicio.
+  //
+  // No se reemplaza por otro aviso. Subir el precio ya pide su motivo en la misma
+  // pantalla y queda en el acta de venta; un `info` que solo dijera "esto quedó
+  // registrado" es ruido, y el ruido en este panel se paga caro: es el mismo sitio
+  // donde sale el aviso de que el día se está cobrando DOS VECES.
 
   return avisos;
 }
