@@ -13,6 +13,7 @@
 
 import type { DocLiquidacion, FilaAnexo, LineaDoc, ControlDoc, Anexo2 } from "./liquidacion-doc";
 import { fechaFormato } from "./liquidacion-agrupacion";
+import { empresaConDefectos } from "./empresa-perfil";
 import type { Lado } from "./liquidaciones";
 
 const TABLAS = {
@@ -66,6 +67,14 @@ export type OpcionesDoc = {
   anexo2?: Anexo2 | null;
   /** URL pública de conformidad/verificación (para el QR y el pie). */
   urlPublica?: string | null;
+  /**
+   * Firma escaneada del Gerente General, ABSOLUTA. Es la misma imagen que ya rubrica el
+   * Reporte de Servicio (`/firmaJLCA.png` en public/), y se pasa desde fuera por lo mismo
+   * que `urlPublica`: aquí no se sabe el origen, y el documento se imprime tanto desde el
+   * navegador como desde el servidor al enviarlo por correo. Si no llega, se deduce del
+   * origen de `urlPublica`; y si tampoco, la firma sale en blanco, que es lo que había.
+   */
+  firmaUrl?: string | null;
   /** Genera el QR como data URL. Se puede desactivar en entornos sin `qrcode`. */
   conQr?: boolean;
 };
@@ -102,6 +111,22 @@ export async function cargarDocumentoLiquidacion(
   const cp: any = contraparteR?.data ?? {};
   const sede: any = sedeR?.data ?? null;
   const emp: any = empresaR?.data ?? {};
+
+  /**
+   * La firma rubricada del Gerente General. Se deduce del origen de `urlPublica` cuando el
+   * llamador no la pasa, para que el documento salga firmado también por los caminos que
+   * hoy solo mandan esa URL — sin inventar un dominio si no hay ninguno.
+   */
+  const firmaUrl: string | null = (() => {
+    const dada = String(opts.firmaUrl ?? "").trim();
+    if (dada) return dada;
+    try {
+      const base = String(opts.urlPublica ?? "").trim();
+      return base ? new URL("/firmaJLCA.png", base).toString() : null;
+    } catch {
+      return null;
+    }
+  })();
   const ctl: any = controlR?.data ?? {};
 
   const control: ControlDoc = {
@@ -148,7 +173,7 @@ export async function cargarDocumentoLiquidacion(
     if (reservaIds.length) {
       const reservas = await enLotes(reservaIds, 300, async (chunk) => {
         const { data } = await sb.from("reservas")
-          .select("id,codigo,fecha_servicio,hora_servicio,ruta_nombre,direccion_servicio,origen,destino,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,pasajeros_abordados,precio_cliente,costo_proveedor,estado,reserva_vinculada_id")
+          .select("id,codigo,fecha_servicio,hora_servicio,ruta_nombre,direccion_servicio,origen,destino,vehiculo_id,vehiculo_tercero_id,conductor_id,conductor_tercero_id,capacidad_contratada,precio_cliente,costo_proveedor,estado,reserva_vinculada_id")
           .in("id", chunk);
         return ((data as any[]) ?? []);
       });
@@ -235,14 +260,27 @@ export async function cargarDocumentoLiquidacion(
             turno: hhmm(r.hora_servicio) || "—",
             placa: placa.get((esTercero ? "t" : "p") + (r.vehiculo_tercero_id ?? r.vehiculo_id)) ?? "",
             conductor: chofer.get((r.conductor_tercero_id ? "t" : "p") + (r.conductor_tercero_id ?? r.conductor_id)) ?? "",
-            pax: r.pasajeros_abordados != null ? Number(r.pasajeros_abordados) : null,
-            estado: r.estado !== "finalizada" ? "No ejecutado"
+            // El ÚNICO PAX que el anexo imprime: los asientos contratados. Salen del
+            // servicio y, si no los trae, del ítem que lo cobra — que es el mismo número
+            // que quedó impreso en la valorización, así que las dos hojas no se
+            // contradicen. El manifiesto (cuánta gente subió) ya no entra: se imprimió un
+            // tiempo junto al contratado y AFA decidió que la liquidación valoriza lo
+            // pactado, no la ocupación del bus.
+            paxContratado: Number(r.capacidad_contratada ?? 0) > 0
+              ? Number(r.capacidad_contratada)
+              : Number((l as any).pax_contratado ?? 0) > 0 ? Number((l as any).pax_contratado) : null,
+            // El falso flete se rotula ANTES que "No ejecutado": los dos son ciertos, pero
+            // el que hay que leer es el que explica por qué esa fila lleva importe.
+            estado: l.tipo === "falso_flete" ? "Falso flete"
+              : r.estado !== "finalizada" ? "No ejecutado"
               : incluida ? "Incluido"
               : l.tipo === "adicional" ? "Adicional" : "Conforme",
             // El importe va una sola vez por servicio: así la suma del anexo cuadra
             // exactamente con el total de la línea.
             importe: incluida ? 0 : Number(l.precio_unitario ?? 0),
-            alerta: r.estado !== "finalizada",
+            // El falso flete NO es una alerta: que no se prestara es su definición, y
+            // pintarlo en rojo enseñaría a ignorar los rojos del anexo.
+            alerta: r.estado !== "finalizada" && l.tipo !== "falso_flete",
           };
           pendientes.push({
             fila,
@@ -309,6 +347,7 @@ export async function cargarDocumentoLiquidacion(
       ? {
           servicios: sumar(lineasBd, ["servicio"]),
           adicionales: sumar(lineasBd, ["adicional"]),
+          falsos_fletes: sumar(lineasBd, ["falso_flete"]),
           descuentos: Math.abs(sumar(lineasBd, ["penalidad", "descuento"])),
           subtotal: Number(cab.subtotal ?? 0),
           igvPct: Number(cab.igv_pct ?? 18),
@@ -318,6 +357,7 @@ export async function cargarDocumentoLiquidacion(
       : {
           servicios: sumar(lineasBd, ["servicio"]),
           adicionales: sumar(lineasBd, ["adicional"]),
+          falsos_fletes: sumar(lineasBd, ["falso_flete"]),
           descuentos: Math.abs(sumar(lineasBd, ["penalidad", "descuento"])),
           subtotal: Number(cab.subtotal ?? 0),
           igvPct: Number(cab.igv_pct ?? 18),
@@ -373,7 +413,9 @@ export async function cargarDocumentoLiquidacion(
     firmas:
       lado === "cliente"
         ? [
-            { rol: "Gerente General", entidad: (emp.razon_social || emp.nombre || "AFA TOURS PERU S.A.C.").toUpperCase() },
+            // La única que va rubricada. Las dos siguientes son del cliente y quedan en
+            // blanco a propósito: son las que él firma al dar la conformidad.
+            { rol: "Gerente General", entidad: (emp.razon_social || emp.nombre || "AFA TOURS PERU S.A.C.").toUpperCase(), firmaUrl },
             { rol: "Usuario", entidad: String(nombreContraparte).toUpperCase() },
             { rol: "Área solicitante", entidad: String(cab.area_solicitante || sede?.nombre || "—").toUpperCase() },
           ]
@@ -382,15 +424,15 @@ export async function cargarDocumentoLiquidacion(
             { rol: "Jefe de Operaciones", entidad: (emp.razon_social || emp.nombre || "AFA TOURS PERU S.A.C.").toUpperCase() },
             { rol: "Administración", entidad: (emp.razon_social || emp.nombre || "AFA TOURS PERU S.A.C.").toUpperCase() },
           ],
-    empresa: {
-      nombre: emp.nombre || emp.razon_social || "AFA Tours Peru S.A.C.",
-      ruc: emp.ruc ?? null,
-      logo: emp.logo_url ?? null,
-      direccion: emp.direccion ?? null,
-      telefono: emp.telefono ?? null,
-      email: emp.email ?? null,
-      web: emp.web ?? null,
-    },
+    // Con los huecos rellenos: hoy `empresa_perfil` tiene la dirección, el teléfono y el
+    // correo vacíos, y pasarlos tal cual dejaba el pie del documento con tres rayas. Los
+    // valores son los que ya imprime el PDF de la cotización, para que los papeles que AFA
+    // envía digan lo mismo salgan de donde salgan.
+    empresa: (() => {
+      const e = empresaConDefectos(emp);
+      return { nombre: e.nombre, ruc: e.ruc, logo: e.logo, direccion: e.direccion,
+               telefono: e.telefono, email: e.email, web: e.web };
+    })(),
     qr,
     urlVerificacion: url,
     aviso:

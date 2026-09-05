@@ -78,6 +78,22 @@ export type ReservaLiq = {
    */
   origen_contractual?: string | null;
   /**
+   * Hay un acuerdo para PAGARLE AL PROVEEDOR un servicio que se canceló: ya había salido
+   * de cochera, o ya había llegado al punto de origen. Es la ÚNICA llave que hace que una
+   * cancelación valga algo (ver `montoDe`).
+   *
+   * Es una marca explícita y no se deduce del importe a propósito, y el motivo es de
+   * negocio: los operadores dejan canceladas con el costo puesto —error humano, todos los
+   * meses— así que deducirlo del importe convertiría cada descuido en un pago. Y los dos
+   * errores no cuestan lo mismo: pagar de menos lo reclama el proveedor y se corrige;
+   * pagar de más hay que pedir que lo devuelvan, y no vuelve. El default cae del lado
+   * reversible. Ausente (migración reservas-05 sin correr) se lee como false, que es
+   * justamente el lado seguro.
+   */
+  falso_flete?: boolean | null;
+  /** Por qué se le paga un viaje que no salió. Es el único rastro de esa salida de dinero. */
+  falso_flete_motivo?: string | null;
+  /**
    * Snapshot de los paraderos del tramo, con `tipo: inicio | intermedia | destino` y
    * coordenadas. Es de donde `lib/nombre-ruta.ts` sacó el TEXTO del nombre, así que aquí
    * está el hecho del que ese texto es solo una redacción: dos servicios que arrancan y
@@ -89,8 +105,15 @@ export type ReservaLiq = {
   paradas_json?: unknown;
 };
 
-/** 'contrato' cuando la columna no existe o viene vacía. */
-export const origenContractual = (r: ReservaLiq | null | undefined): string =>
+/**
+ * 'contrato' cuando la columna no existe o viene vacía.
+ *
+ * Se tipa por lo que LEE y no por `ReservaLiq`: lib/liquidacion-clases.ts clasifica
+ * proyecciones más estrechas (dos columnas), y pedirles la reserva entera obligaría a
+ * inventar campos o a repetir aquí este `|| "contrato"`, que es justo el default de la
+ * base que no puede tener dos versiones.
+ */
+export const origenContractual = (r: { origen_contractual?: string | null } | null | undefined): string =>
   String(r?.origen_contractual || "contrato");
 
 /**
@@ -265,6 +288,18 @@ export type ParServicio = {
   /** Los tramos que realmente se prestaron. Vacío = el día entero se cayó. */
   ejecutados: ReservaLiq[];
   /**
+   * El día no se prestó y AUN ASÍ se le paga al proveedor: el avance acordado cuando ya
+   * había salido de cochera. Es la única forma de que un par con `ejecutado: false` valga
+   * dinero, y va marcado en vez de deducirse del importe porque el importe de una
+   * cancelación suele ser el que dejó un error humano (ver `montoDe`).
+   *
+   * Nunca se funde con los servicios prestados de su ruta, ni a la misma tarifa: entra en
+   * el cubo de la agrupación igual que la tarifa y el pax. Si se fundiera, el documento
+   * imprimiría "26 servicios" donde 25 salieron y uno no — el mismo defecto que el
+   * adicional ya corrigió.
+   */
+  falsoFlete: boolean;
+  /**
    * Lo que CUBRE la tarifa, no lo que se prestó ese día. Se decide aquí, donde se sabe
    * si la reserva viaja enlazada, y no en la agrupación: allí solo se veía `adjuntas`,
    * que queda vacía cuando el retorno no se ejecutó, y el mismo servicio se partía en
@@ -296,8 +331,48 @@ function tramosDelPar(a: ReservaLiq, b?: ReservaLiq | null): { ida: ReservaLiq |
 const rotuloTramo = (r: ReservaLiq) =>
   `${sentidoDeReserva(r) === "RETORNO" ? "El retorno" : "La ida"} del ${fechaFormato(r.fecha_servicio) || r.fecha_servicio || ""}`;
 
-/** Importe de una reserva según el lado que se esté liquidando. */
+/** El servicio no salió, y alguien lo decidió: es un estado terminal, no un cabo suelto. */
+export const esCancelada = (r: { estado?: string | null } | null | undefined): boolean =>
+  String(r?.estado ?? "") === "cancelada";
+
+/**
+ * La cancelación que SÍ se le paga al proveedor: el acuerdo por el avance ("ya salió de
+ * cochera", "ya llegó al punto de origen"). Exige las DOS cosas — cancelada y marcada—
+ * porque la marca sobre un servicio que después volvió a otro estado quedó colgada y no
+ * describe nada.
+ */
+export const esFalsoFlete = (r: ReservaLiq | null | undefined): boolean =>
+  esCancelada(r) && r?.falso_flete === true;
+
+/**
+ * Importe de una reserva según el lado que se esté liquidando.
+ *
+ * ES EL ÚNICO SITIO DONDE UNA CANCELACIÓN VALE CERO, y por eso está aquí y no repartido
+ * por la pantalla: de esta función derivan los bloqueos, quién es la cabeza del par, el
+ * precio unitario del renglón y los totales. Con la regla en un solo sitio, un servicio
+ * cancelado no puede valer 0 para el bloqueo y S/ 664.41 para el documento.
+ *
+ * La regla, y su porqué:
+ *
+ *   · NO cancelada           → su importe, como siempre.
+ *   · Cancelada, lado CLIENTE → 0 SIEMPRE. AFA no le cobra la cancelación al cliente
+ *     (decisión comercial, fidelidad), así que no hay marca que pueda cambiarlo:
+ *     ofrecerla sería ofrecer algo que la empresa decidió no hacer.
+ *   · Cancelada, lado PROVEEDOR → 0, salvo `falso_flete`. El importe por sí solo NO
+ *     autoriza el pago: es justo el número que deja el error humano de cancelar sin
+ *     borrar el costo, y pagarlo por descuido es el error que no se puede deshacer.
+ */
 function montoDe(r: ReservaLiq, lado: LadoLiquidacion): number {
+  const bruto = Number((lado === "cliente" ? r.precio_cliente : r.costo_proveedor) ?? 0);
+  if (!esCancelada(r)) return bruto;
+  return lado === "proveedor" && esFalsoFlete(r) ? bruto : 0;
+}
+
+/**
+ * Lo que el ERP tiene cargado en la fila, valga o no. Sirve para DECIRLO —"conserva
+ * S/ 664.41 que no se va a pagar"— y para ofrecer limpiarlo; nunca para cobrar.
+ */
+export function importeCargado(r: ReservaLiq, lado: LadoLiquidacion): number {
   return Number((lado === "cliente" ? r.precio_cliente : r.costo_proveedor) ?? 0);
 }
 
@@ -321,24 +396,70 @@ export type Bloqueo = { codigo: string; mensaje: string };
 export function bloqueosDe(
   r: ReservaLiq,
   lado: LadoLiquidacion,
-  cubiertaPor?: ReservaLiq | null
+  cubiertaPor?: ReservaLiq | null,
+  /**
+   * Los tramos del DÍA. Sin ellos el diagnóstico se hace sobre el tramo suelto, que es
+   * como se comportaba antes; con ellos se distingue "el día corrió y falta el costo" de
+   * "el día entero se cayó", que son trabajos opuestos.
+   */
+  tramosDelDia?: ReservaLiq[]
 ): Bloqueo[] {
   const b: Bloqueo[] = [];
   if (r.estado !== "finalizada")
     b.push({ codigo: "no_finalizada", mensaje: "El servicio no está finalizado" });
 
   const cubierta = !!cubiertaPor && montoDe(cubiertaPor, lado) > 0;
+  const dia = tramosDelDia?.length ? tramosDelDia : [r];
+  /** El día se prestó si CUALQUIERA de sus tramos llegó a finalizada. */
+  const corrio = dia.some((x) => x.estado === "finalizada");
+  const cancelado = dia.every(esCancelada);
+
+  /**
+   * QUÉ FALTA DE VERDAD CUANDO NO HAY IMPORTE.
+   *
+   * Hasta acá los tres casos salían con el mismo rojo —"Sin costo de proveedor"— y se
+   * resuelven en sitios opuestos. El peor no era el ruido: con un servicio que nadie
+   * cerró, ese mensaje mandaba a cargarle un costo a un viaje que quizá no ocurrió, y
+   * eso crea una cuenta por pagar de la nada.
+   */
+  const faltaElImporte = (): Bloqueo => {
+    if (cancelado && !corrio) {
+      // Marcado como falso flete y sin monto: el acuerdo SÍ existe, lo que falta es la
+      // cifra. Decirle "cancelado sin acuerdo" sería negar lo que el operador acaba de
+      // escribir y dejarlo sin saber qué le falta — y esto sí es trabajo pendiente.
+      if (lado === "proveedor" && dia.some(esFalsoFlete))
+        return {
+          codigo: "falso_flete_sin_monto",
+          mensaje: "Falso flete marcado pero sin monto acordado: escribe el avance o quítale la marca",
+        };
+      return lado === "proveedor"
+        ? {
+            codigo: "cancelado_sin_pago",
+            mensaje: "Cancelado sin acuerdo de falso flete: no se le paga al proveedor",
+          }
+        : { codigo: "cancelado_sin_pago", mensaje: "Cancelado: no se le cobra al cliente" };
+    }
+    if (!corrio)
+      return {
+        codigo: "no_cerrado",
+        mensaje:
+          `El servicio quedó en "${r.estado ?? "sin estado"}" y el periodo ya cerró: ` +
+          `revísalo y márcalo como finalizado o cancelado — hasta entonces no se sabe si ` +
+          `${lado === "cliente" ? "se cobra" : "se paga"}`,
+      };
+    return lado === "cliente"
+      ? { codigo: "sin_precio", mensaje: "Sin precio de venta" }
+      : { codigo: "sin_costo", mensaje: "Sin costo de proveedor" };
+  };
+
+  if (montoDe(r, lado) <= 0 && !cubierta) b.push(faltaElImporte());
 
   if (lado === "cliente") {
-    if (!Number(r.precio_cliente ?? 0) && !cubierta)
-      b.push({ codigo: "sin_precio", mensaje: "Sin precio de venta" });
     if (r.liquidacion_cliente_id)
       b.push({ codigo: "ya_liquidada", mensaje: `Ya está en la liquidación #${r.liquidacion_cliente_id}` });
     if (!r.cliente_id)
       b.push({ codigo: "sin_cliente", mensaje: "Sin cliente asignado" });
   } else {
-    if (!Number(r.costo_proveedor ?? 0) && !cubierta)
-      b.push({ codigo: "sin_costo", mensaje: "Sin costo de proveedor" });
     if (r.liquidacion_proveedor_id)
       b.push({ codigo: "ya_liquidada", mensaje: `Ya está en la liquidación #${r.liquidacion_proveedor_id}` });
     if (!r.empresa_tercerizada_id)
@@ -346,6 +467,17 @@ export function bloqueosDe(
   }
   return b;
 }
+
+/**
+ * ¿Este bloqueo es TRABAJO, o solo el registro de algo que no corresponde?
+ *
+ * `cancelado_sin_pago` no se arregla: es la respuesta correcta. Se sigue mostrando —
+ * esconderlo sería la forma de que una ruta entera desaparezca del cierre sin que nadie
+ * pueda decir por qué— pero no en rojo, no cuenta como pendiente y no alimenta el botón
+ * de importes faltantes. Un rojo que no se puede arreglar enseña a ignorar los rojos.
+ */
+export const bloqueoEsTrabajo = (codigos: string[]): boolean =>
+  !codigos.every((c) => c === "cancelado_sin_pago");
 
 /** Una reserva que no entra al cierre, con el porqué en texto y en código. */
 export type ReservaBloqueada = {
@@ -554,8 +686,16 @@ export function analizarServicios(
   const hecho = (r: ReservaLiq) => r.estado === "finalizada";
   // "No finalizado" no es un bloqueo: es un servicio programado que no se prestó, y el
   // formato tiene que mostrarlo en la columna PROG./EJEC. El resto sí impide liquidar.
-  const trabas = (r: ReservaLiq, cubiertaPor?: ReservaLiq | null) =>
-    bloqueosDe(r, lado, cubiertaPor).filter((b) => b.codigo !== "no_finalizada");
+  const trabas = (r: ReservaLiq, cubiertaPor?: ReservaLiq | null, dia?: ReservaLiq[]) =>
+    bloqueosDe(r, lado, cubiertaPor, dia).filter((b) => b.codigo !== "no_finalizada");
+  /**
+   * Un día que no se prestó pero que SÍ se le paga al proveedor por acuerdo de avance.
+   * Exige las dos cosas: que ningún tramo haya corrido —si corrió, es un servicio normal
+   * y la marca no pinta nada— y que quien lleva el importe lo tenga acordado. Con
+   * `montoDe` devolviendo 0 para una cancelación sin marca, la cabeza de un día así solo
+   * puede ser el tramo marcado.
+   */
+  const marcaFF = (cabeza: ReservaLiq, ejecutado: boolean) => !ejecutado && esFalsoFlete(cabeza);
   const bloquear = (r: ReservaLiq, motivos: Bloqueo[]) => {
     if (motivos.length)
       res.bloqueadas.push({ r, motivos: motivos.map((b) => b.mensaje), codigos: motivos.map((b) => b.codigo) });
@@ -594,6 +734,7 @@ export function analizarServicios(
       if (motivos.length) bloquear(r, motivos);
       else res.pares.push({
         cabeza: r, adjuntas: [], ejecutado: hecho(r), ejecutados: hecho(r) ? [r] : [],
+        falsoFlete: marcaFF(r, hecho(r)),
         sentido: sentidoDeReserva(r), ...tramosDelPar(r),
       });
       continue;
@@ -626,10 +767,11 @@ export function analizarServicios(
     // Los dos cobran: dos servicios facturables distintos que además viajan juntos.
     if (mA > 0 && mB > 0) {
       for (const x of [r, par]) {
-        const motivos = trabas(x);
+        const motivos = trabas(x, null, [r, par]);
         if (motivos.length) bloquear(x, motivos);
         else res.pares.push({
           cabeza: x, adjuntas: [], ejecutado: hecho(x), ejecutados: hecho(x) ? [x] : [],
+          falsoFlete: marcaFF(x, hecho(x)),
           sentido: sentidoDeReserva(x), ...tramosDelPar(x),
         });
       }
@@ -638,8 +780,8 @@ export function analizarServicios(
 
     // Ninguno cobra: el precio nunca se cargó. Los dos quedan fuera con su motivo.
     if (mA <= 0 && mB <= 0) {
-      bloquear(r, trabas(r));
-      bloquear(par, trabas(par));
+      bloquear(r, trabas(r, null, [r, par]));
+      bloquear(par, trabas(par, null, [r, par]));
       continue;
     }
 
@@ -647,7 +789,7 @@ export function analizarServicios(
     const cabeza = mA > 0 ? r : par;
     const adjunta = mA > 0 ? par : r;
 
-    const motivosCabeza = trabas(cabeza);
+    const motivosCabeza = trabas(cabeza, null, [cabeza, adjunta]);
     if (motivosCabeza.length) {
       bloquear(cabeza, motivosCabeza);
       bloquear(adjunta, [{
@@ -681,7 +823,7 @@ export function analizarServicios(
           `— si el día entero iba aparte, marca los dos tramos.`,
       });
 
-    const motivosAdjunta = trabas(adjunta, cabeza);
+    const motivosAdjunta = trabas(adjunta, cabeza, [cabeza, adjunta]);
     if (motivosAdjunta.length) {
       // El tramo incluido tiene su propio problema (p. ej. ya entró en otra
       // liquidación): la tarifa se cobra igual, pero queda el aviso.
@@ -691,6 +833,7 @@ export function analizarServicios(
       });
       res.pares.push({
         cabeza, adjuntas: [], ejecutado, ejecutados,
+        falsoFlete: marcaFF(cabeza, ejecutado),
         sentido: "IDA Y RETORNO", ...tramosDelPar(cabeza, adjunta),
       });
       continue;
@@ -722,9 +865,13 @@ export function analizarServicios(
       cabeza,
       // Al puente solo van los tramos realmente prestados: marcar como liquidado algo
       // que no se ejecutó ensuciaría el ciclo del servicio.
-      adjuntas: hecho(adjunta) ? [adjunta] : [],
+      // Un falso flete no tiene ningún tramo prestado y aun así se paga el DÍA, así que
+      // ahí el par lleva a su hermano: los dos quedan saldados con el proveedor y ninguno
+      // vuelve al pool el mes siguiente a cobrarse por segunda vez.
+      adjuntas: hecho(adjunta) || marcaFF(cabeza, ejecutado) ? [adjunta] : [],
       ejecutado,
       ejecutados,
+      falsoFlete: marcaFF(cabeza, ejecutado),
       sentido: "IDA Y RETORNO",
       ...tramosDelPar(cabeza, adjunta),
     });
@@ -770,7 +917,13 @@ export type LineaAgrupada = {
    * ("Adicionales autorizados"), que hasta ahora solo se podía llenar escribiendo el
    * importe a mano en el editor.
    */
-  tipo: "servicio" | "adicional";
+  /**
+   * 'falso_flete' NO puede ser ninguno de los otros dos. Como 'servicio' inflaría la
+   * cantidad que el proveedor coteja contra su propia cuenta; como 'adicional' rotularía
+   * de "pedido de más" algo que es exactamente lo contrario, un servicio que no se
+   * prestó. Y 'penalidad'/'descuento' no sirven: `totalesValorizacion` los RESTA.
+   */
+  tipo: "servicio" | "adicional" | "falso_flete";
   /** contrato | adicional | contingencia — el valor crudo, para poder rotularlo. */
   origen_contractual: string;
   descripcion: string;
@@ -797,6 +950,16 @@ export type LineaAgrupada = {
   /** Nombre COMPLETO de cada tramo, tal como lo escribió la operación. Esto es lo que se imprime. */
   nombre_ida: string | null;
   nombre_retorno: string | null;
+  /**
+   * ¿TODOS los servicios del ítem se llaman igual, o el ítem reúne varias redacciones?
+   *
+   * Importa fuera de aquí: `nombre_ida` y `nombre_retorno` son el nombre MÁS USADO de cada
+   * tramo, y con varias redacciones esa combinación puede no existir en ningún servicio —
+   * en el documento real, la RUTA B mostraba la ida de las 05:10 junto al retorno de las
+   * 17:00, y los del 05:10 vuelven a las 15:00. Fichar esa ruta con ese par escribía en
+   * `cliente_ruta` una identidad inventada que ningún servicio encontraba después.
+   */
+  nombres_uniformes: boolean;
   sentido: string;
   /** Posición dentro del día cuando la ruta necesita más de una unidad a la misma hora. */
   movil: number;
@@ -1023,7 +1186,11 @@ export function agruparPorRutaContratada(
     const precio = precioUnitario(p.cabeza, lado, opts).toFixed(2);
     const pax = opts.paxDe?.(p) ?? null;
     senas.set(p, {
-      dinero: `${precio}|${origenDelPar(p)}|pax:${pax ?? ""}`,
+      // El falso flete entra en el CUBO, no en la unión: así un avance pagado a la misma
+      // tarifa que el servicio normal de esa ruta no puede caer en su renglón por más que
+      // el nombre y el precio coincidan. Es el mismo blindaje estructural que ya tienen la
+      // tarifa y el pax contratado — ninguna cadena de uniones puede cruzarlo.
+      dinero: `${precio}|${origenDelPar(p)}|pax:${pax ?? ""}${p.falsoFlete ? "|ff" : ""}`,
       idaNombre: sinHoraRuta(p.ida ? nombreRuta(p.ida) : ""),
       retNombre: sinHoraRuta(p.retorno ? nombreRuta(p.retorno) : ""),
       idaMapa: extremos(p.ida),
@@ -1325,6 +1492,9 @@ export function agruparServicios(
     (a, b) =>
       // Primero lo contratado y al final lo pedido aparte, como en el formato: los
       // adicionales se leen contra el bloque de servicios, no mezclados entre ellos.
+      // Y los falsos fletes DESPUÉS de los adicionales: es lo único del documento que
+      // no se prestó, y se lee al final contra todo lo que sí salió.
+      Number(a.filas[0]?.falsoFlete ?? false) - Number(b.filas[0]?.falsoFlete ?? false) ||
       Number(a.origen !== "contrato") - Number(b.origen !== "contrato") ||
       String(a.nombreIda ?? a.ruta).localeCompare(String(b.nombreIda ?? b.ruta)) ||
       String(a.nombreRetorno ?? "").localeCompare(String(b.nombreRetorno ?? "")) ||
@@ -1334,6 +1504,17 @@ export function agruparServicios(
 
   ordenados.forEach((b, idx) => {
     const ejecutados = b.filas.filter((p) => p.ejecutado);
+    // El falso flete es del BUCKET entero, por construcción: entra en el cubo de
+    // `agruparPorRutaContratada` igual que la tarifa, así que ninguna unión puede
+    // mezclarlo con servicios prestados. Se verifica igual antes de seguir —como con la
+    // tarifa— porque si alguna vez se mezclaran, la línea cobraría días que no salieron
+    // dentro de un renglón rotulado como servicio prestado, y eso no se ve en el papel.
+    const esFF = b.filas.length > 0 && b.filas.every((p) => p.falsoFlete);
+    if (!esFF && b.filas.some((p) => p.falsoFlete))
+      throw new Error(
+        `agruparServicios: el ítem "${b.nombreIda ?? b.ruta}" mezcla falsos fletes con ` +
+        `servicios prestados. Es un error de la agrupación, no del dato: no se puede emitir.`
+      );
     // Todas las reservas del bucket (cabezas + tramos incluidos): de aquí salen las
     // placas, los pasajeros y el detalle del Anexo 1.
     const todas = b.filas.flatMap((p) => [p.cabeza, ...p.adjuntas]);
@@ -1350,11 +1531,15 @@ export function agruparServicios(
     const capacidadMinima = capacidades.length ? Math.min(...capacidades) : null;
     const placas = [...new Set(todas.map((r) => catalogo.placaDe(r)).filter(Boolean))];
     const serie = serieAnexo(idx + 1);
-    const cantidad = ejecutados.length;
+    // Lo que se cobra. En un falso flete NINGÚN tramo se prestó y aun así se paga el día,
+    // así que la cantidad son los días acordados y no los ejecutados — si no, la línea
+    // saldría en cero y la pantalla la descartaría, que es exactamente lo que hacía antes
+    // de existir este tipo: al avance acordado con el proveedor no lo pagaba nadie.
+    const cantidad = esFF ? b.filas.length : ejecutados.length;
 
     lineas.push({
       clave: b.clave,
-      tipo: b.origen === "contrato" ? "servicio" : "adicional",
+      tipo: esFF ? "falso_flete" : b.origen === "contrato" ? "servicio" : "adicional",
       origen_contractual: b.origen,
       descripcion: descripcionLinea({
         concepto: opts.concepto,
@@ -1367,10 +1552,15 @@ export function agruparServicios(
         movil: b.movil,
         totalMoviles: b.moviles,
         origen: b.origen,
+        falsoFlete: esFF,
       }),
       unidad_medida: "SERV.",
       cantidad_programada: b.filas.length,
-      cantidad_ejecutada: ejecutados.length,
+      // En un falso flete "ejecutada" son los días acordados, no los prestados (cero por
+      // definición). No es un adorno: el editor exige "motivo del ajuste" en cuanto la
+      // cantidad cobrada difiere de la ejecutada, y aquí no hay ningún ajuste que
+      // justificar — el renglón ya dice en su descripción que el servicio no salió.
+      cantidad_ejecutada: esFF ? b.filas.length : ejecutados.length,
       cantidad,
       precio_unitario: b.precio,
       total_linea: redondear(cantidad * b.precio),
@@ -1378,17 +1568,31 @@ export function agruparServicios(
       // normal (los dos quedan liquidados y los dos se ven en el Anexo 1, el segundo
       // con importe incluido), y solo uno cuando el otro se canceló. Marcar como
       // liquidado un tramo que no se prestó ensuciaría el ciclo del servicio.
-      reservas: ejecutados.flatMap((p) =>
-        p.ejecutados?.length ? p.ejecutados.map((t) => t.id) : [p.cabeza.id, ...p.adjuntas.map((a) => a.id)]
-      ),
+      //
+      // El falso flete es la excepción, y tiene que serlo: no hay ningún tramo prestado y
+      // el día SÍ se saldó con el proveedor. Si no se reclamaran, esos días volverían al
+      // pool el mes siguiente y se pagarían por segunda vez. Queda `estado` en 'cancelada'
+      // —el bus no salió— y `estado_proveedor` en 'conciliada' —ya se saldó—: son dos
+      // dimensiones independientes (lib/estados.ts) y esto es justo para lo que existen.
+      reservas: esFF
+        ? b.filas.flatMap((p) => [p.cabeza.id, ...p.adjuntas.map((a) => a.id)])
+        : ejecutados.flatMap((p) =>
+            p.ejecutados?.length ? p.ejecutados.map((t) => t.id) : [p.cabeza.id, ...p.adjuntas.map((a) => a.id)]
+          ),
       // Uno por servicio, y tiene que ser un id que SÍ esté en `reservas`: al crear la
       // liquidación se cuentan los que se lograron reclamar, y un id ausente restaría.
-      servicios: ejecutados.map((p) => (p.ejecutados?.[0] ?? p.cabeza).id),
+      servicios: esFF
+        ? b.filas.map((p) => p.cabeza.id)
+        : ejecutados.map((p) => (p.ejecutados?.[0] ?? p.cabeza).id),
       reservas_periodo: todas.map((r) => r.id),
       ruta: b.ruta,
       fuente_ruta: b.fuenteRuta,
       nombre_ida: b.nombreIda,
       nombre_retorno: b.nombreRetorno,
+      nombres_uniformes:
+        new Set(
+          b.filas.map((p) => `${p.ida ? nombreRuta(p.ida) : ""}|${p.retorno ? nombreRuta(p.retorno) : ""}`)
+        ).size <= 1,
       sentido: b.sentido,
       movil: b.movil,
       moviles: b.moviles,
@@ -1468,12 +1672,20 @@ export function descripcionLinea(p: {
   totalMoviles?: number;
   /** contrato | adicional | contingencia. Solo lo distinto del contrato se rotula. */
   origen?: string | null;
+  /** El día no se prestó y se paga el avance acordado. Manda sobre el rótulo del origen. */
+  falsoFlete?: boolean;
 }): string {
   // El rótulo va ADELANTE del concepto y en la primera línea. El formato ya pinta la
   // fila de otro color y la suma aparte, pero eso se pierde en cuanto alguien copia la
   // descripción a un correo o a la orden de compra del cliente — que es exactamente lo
   // que pasa con un adicional, porque es el ítem que el cliente pregunta.
-  const rotuloOrigen = p.origen && p.origen !== "contrato" ? `SERVICIO ${norm(p.origen)}` : null;
+  //
+  // El falso flete manda sobre el origen: un avance de una ruta contratada seguiría
+  // diciendo "contrato" y el renglón se leería como un servicio prestado más. Lo que hay
+  // que poder distinguir de un vistazo es que ese día NO salió.
+  const rotuloOrigen = p.falsoFlete
+    ? "FALSO FLETE · SERVICIO CANCELADO CON ACUERDO DE AVANCE"
+    : p.origen && p.origen !== "contrato" ? `SERVICIO ${norm(p.origen)}` : null;
   const cabecera = [
     rotuloOrigen,
     `${p.concepto || "TRANSPORTE DE PERSONAL"}${p.sede ? " " + norm(p.sede) : ""}`,
@@ -1494,7 +1706,7 @@ export function descripcionLinea(p: {
 // ── Totales de la valorización ──────────────────────────────────────────────
 
 export type LineaMonto = {
-  tipo: "servicio" | "adicional" | "penalidad" | "descuento";
+  tipo: "servicio" | "adicional" | "falso_flete" | "penalidad" | "descuento";
   cantidad: number;
   precio_unitario: number;
 };
@@ -1508,6 +1720,14 @@ export function totalLinea(l: LineaMonto): number {
 export type TotalesValorizacion = {
   servicios: number;
   adicionales: number;
+  /**
+   * Los avances pagados por servicios que NO se prestaron. Subtotal propio y no metidos
+   * en ninguno de los otros dos: sumarlos a "Servicios del periodo" haría que la cifra
+   * no cuadre con la cantidad de servicios que el proveedor cotejará contra su factura,
+   * y meterlos en "Adicionales" los rotularía de algo pedido de más. Del lado cliente
+   * siempre es 0 — a los clientes no se les cobra la cancelación.
+   */
+  falsos_fletes: number;
   descuentos: number;   // positivo: lo que se resta
   subtotal: number;     // neto sin IGV
   igv: number;
@@ -1515,18 +1735,20 @@ export type TotalesValorizacion = {
 };
 
 export function totalesValorizacion(lineas: LineaMonto[], igvPct: number): TotalesValorizacion {
-  let servicios = 0, adicionales = 0, descuentos = 0;
+  let servicios = 0, adicionales = 0, falsosFletes = 0, descuentos = 0;
   for (const l of lineas) {
     const m = totalLinea(l);
     if (l.tipo === "servicio") servicios += m;
     else if (l.tipo === "adicional") adicionales += m;
+    else if (l.tipo === "falso_flete") falsosFletes += m;
     else descuentos += Math.abs(m);
   }
-  const subtotal = redondear(servicios + adicionales - descuentos);
+  const subtotal = redondear(servicios + adicionales + falsosFletes - descuentos);
   const igv = redondear(subtotal * (igvPct / 100));
   return {
     servicios: redondear(servicios),
     adicionales: redondear(adicionales),
+    falsos_fletes: redondear(falsosFletes),
     descuentos: redondear(descuentos),
     subtotal,
     igv,

@@ -46,7 +46,7 @@ export type ControlDoc = {
 
 export type LineaDoc = {
   item: number;
-  tipo: "servicio" | "adicional" | "penalidad" | "descuento";
+  tipo: "servicio" | "adicional" | "falso_flete" | "penalidad" | "descuento";
   descripcion: string;
   unidad_medida: string;
   cantidad_programada?: number | null;
@@ -67,7 +67,13 @@ export type FilaAnexo = {
   turno: string;
   placa: string;
   conductor: string;
-  pax: number | null;
+  /**
+   * Asientos CONTRATADOS para ese servicio, y lo ÚNICO que la columna PAX imprime. Es lo
+   * que el cliente pactó y lo que se le factura, no lo que cupo en el bus ni cuánta gente
+   * subió ese día. null = ninguna fuente lo sabe, y entonces se imprime "—" en vez de
+   * inventar un número.
+   */
+  paxContratado?: number | null;
   estado: string;          // 'Conforme' | 'Tardío' | 'Adicional' | 'No ejecutado'
   importe: number;
   alerta?: boolean;
@@ -86,6 +92,8 @@ export type Anexo2 = {
 export type TotalesDoc = {
   servicios: number;
   adicionales: number;
+  /** Avances pagados por servicios que no se prestaron. Siempre 0 del lado cliente. */
+  falsos_fletes?: number;
   descuentos: number;
   subtotal: number;
   igvPct: number;
@@ -141,7 +149,15 @@ export type DocLiquidacion = {
   comentarios?: string | null;
   anexo1: FilaAnexo[];
   anexo2?: Anexo2 | null;
-  firmas: { rol: string; entidad: string }[];
+  firmas: {
+    rol: string;
+    entidad: string;
+    /**
+     * Firma escaneada, ya rubricada. Solo la lleva la de AFA: las del cliente van en blanco
+     * a propósito, porque son las que él tiene que firmar al dar la conformidad.
+     */
+    firmaUrl?: string | null;
+  }[];
   empresa: { nombre: string; ruc?: string | null; logo?: string | null; direccion?: string | null; telefono?: string | null; email?: string | null; web?: string | null };
   /** QR como data URL; enlaza a la página pública de verificación/conformidad. */
   qr?: string | null;
@@ -227,6 +243,9 @@ table{width:100%;border-collapse:collapse}
 .firmas{display:flex;gap:14px;margin-top:18px}
 .firma{flex:1;text-align:center}
 .firma .linea{border-top:1.2px solid #334155;margin:34px 8px 4px}
+/* Con firma escaneada, el hueco lo ocupa la imagen y la línea deja de reservarlo. */
+.firma .linea.con-rubrica{margin-top:0}
+.firma .rubrica{display:block;margin:0 auto;height:38px;width:auto;max-width:86%;object-fit:contain;object-position:bottom}
 .firma .rol{font-size:8.4px;font-weight:900;color:${cp}}
 .firma .ent{font-size:7.4px;color:#64748b;margin-top:1px}
 .anx thead th{background:${cp};color:#fff;font-size:6.8px;font-weight:800;padding:4px 3px;border:1px solid ${cp};text-transform:uppercase}
@@ -345,15 +364,19 @@ function bloqueDatos(d: DocLiquidacion): string {
 function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
   const moneda = d.servicio.moneda;
   const filas = d.lineas.map((l) => {
-    const clase = l.tipo === "adicional" ? "adicional" : (l.tipo === "penalidad" || l.tipo === "descuento") ? "negativo" : "";
+    const clase = l.tipo === "adicional" || l.tipo === "falso_flete" ? "adicional"
+      : (l.tipo === "penalidad" || l.tipo === "descuento") ? "negativo" : "";
     const negativo = l.total_linea < 0;
     // Un adicional puede venir de dos sitios y no se informan igual: el que se generó
     // en Programación TIENE programado y ejecutado (se pidieron 3 salidas, se
     // prestaron 2) y esconderlo tras un guion perdería justo lo que el cliente
     // pregunta; el que se escribió a mano en el editor no tiene contra qué comparar.
     const conProgramado = Number(l.cantidad_programada ?? 0) > 0;
-    const cumplimiento =
-      l.tipo === "servicio" || (l.tipo === "adicional" && conProgramado)
+    // Un falso flete no tiene nada que contrastar: se pactaron N avances y se pagan N.
+    // Imprimir "3 / 0" sería cierto y a la vez ilegible — parecería un incumplimiento.
+    const cumplimiento = l.tipo === "falso_flete"
+      ? `— / <b>${num(l.cantidad, 0)}</b> ${chip("FALSO FLETE", "warn")}`
+      : l.tipo === "servicio" || (l.tipo === "adicional" && conProgramado)
         ? `${num(l.cantidad_programada, 0)} / <b>${num(l.cantidad_ejecutada, 0)}</b> ${chipCumplimiento(l.cantidad_programada, l.cantidad_ejecutada)}`
           + (l.tipo === "adicional" ? ` ${chip("ADICIONAL", "warn")}` : "")
         : l.tipo === "adicional"
@@ -375,14 +398,18 @@ function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
     `<tr class="${cls}"><td class="k">${esc(k)}</td><td class="v">${v}</td></tr>`;
 
   // El formato del cliente NO desglosa el valorizado por categoría. "Servicios del
-  // periodo", "Adicionales autorizados" y —el día que exista— el subtotal de falsos
-  // fletes (servicios cancelados con acuerdo) son cortes internos de AFA: al cliente
-  // se le entrega el detalle renglón por renglón en la tabla de arriba —cada adicional
-  // sale rotulado ADICIONAL, cada descuento con su cláusula— y abajo lo único que tiene
-  // que cuadrar contra su orden de compra, que es el valorizado. El desglose sigue
-  // entero donde se trabaja el documento: el botón "Revisar" (app/liquidaciones/
+  // periodo", "Adicionales autorizados" y "Falsos fletes" son cortes internos de AFA:
+  // al cliente se le entrega el detalle renglón por renglón en la tabla de arriba —cada
+  // adicional sale rotulado ADICIONAL, cada descuento con su cláusula— y abajo lo único
+  // que tiene que cuadrar contra su orden de compra, que es el valorizado. El desglose
+  // sigue entero donde se trabaja el documento: el botón "Revisar" (app/liquidaciones/
   // ModalEditor.tsx) y el lado proveedor de aquí abajo. Cualquier subtotal nuevo por
   // categoría se agrega ahí, no acá.
+  //
+  // El falso flete además NO ES SUYO: una cancelación se le cobra al cliente en S/ 0.00
+  // pase lo que pase, y el avance que se le reconoce al proveedor es cosa de AFA con el
+  // proveedor. Imprimirle ese renglón —aunque llegue en cero— sería enseñarle un acuerdo
+  // en el que no es parte.
   //
   // El descuento SÍ se imprime: no es un corte por categoría, es plata que se le
   // resta a este cliente en esta factura, y callarla en el total sería cobrar sin decir
@@ -397,6 +424,7 @@ function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
     : [
         filaTot("Servicios prestados", m2(t.servicios, moneda)),
         t.adicionales ? filaTot("Adicionales", m2(t.adicionales, moneda)) : "",
+        t.falsos_fletes ? filaTot("Falsos fletes (servicios cancelados con acuerdo)", m2(t.falsos_fletes, moneda)) : "",
         t.descuentos ? filaTot("Penalidades y descuentos", "− " + m2(t.descuentos, moneda), "neg") : "",
         filaTot("Subtotal (sin IGV)", m2(t.subtotal, moneda)),
         filaTot(`IGV ${num(t.igvPct, 0)}%`, m2(t.igv, moneda)),
@@ -468,17 +496,34 @@ function bloqueConformidad(d: DocLiquidacion, n: number): string {
 }
 
 function bloqueAnexo1(d: DocLiquidacion, cp: string): string {
+  /**
+   * La celda PAX: SOLO los asientos contratados.
+   *
+   * La columna llegó a imprimir `reservas.pasajeros_abordados`, que NO LO ESCRIBE NADIE
+   * —el abordaje vive en `pasajeros_parada`— así que salía 0 con el manifiesto lleno; un
+   * cero que el cliente lee como "no viajó nadie" en un servicio que sí se prestó y se le
+   * cobra. La corrección de aquello llegó a poner los dos números, contratados y
+   * embarcados, y AFA decidió imprimir solo el contratado: es el que sustenta el importe.
+   * Cuánta gente subió cada día es cierto pero no es lo que se está valorizando, y en el
+   * papel invitaba a discutir la factura contra la ocupación del bus.
+   *
+   * Sin dato se imprime "—", nunca un cero: cero asientos contratados no existe.
+   */
+  const paxCelda = (f: FilaAnexo) => `${f.paxContratado ?? "—"}`;
+
   if (!d.anexo1.length) return "";
   const moneda = d.servicio.moneda;
   const filas = d.anexo1.map((f) => `<tr${f.alerta ? ' class="alerta"' : ""}>
     <td class="c">${esc(f.ref)}</td><td class="c">${esc(f.fecha)}</td><td class="c nw">${esc(f.codigo)}</td>
     <td>${esc(f.ruta)}</td><td class="c">${esc(f.turno)}</td><td class="c">${esc(f.placa || "—")}</td>
-    <td>${esc(f.conductor || "—")}</td><td class="c">${f.pax ?? "—"}</td>
+    <td>${esc(f.conductor || "—")}</td><td class="c">${paxCelda(f)}</td>
     <td class="c">${chip(f.estado, f.alerta ? "bad" : /adicional/i.test(f.estado) ? "warn" : /incluido/i.test(f.estado) ? "info" : "ok")}</td>
     <td class="r">${/incluido/i.test(f.estado) ? '<span style="color:#64748b">incl.</span>' : num(f.importe)}</td>
   </tr>`).join("");
 
-  const totPax = d.anexo1.reduce((a, f) => a + (f.pax ?? 0), 0);
+  // La columna PAX no se totaliza. Son los mismos asientos contratados cada día, y la ida
+  // con su retorno los contarían dos veces: un "620" al pie de un mes de 31 servicios de
+  // 20 asientos es un número que no pactó nadie y que no se puede cotejar contra nada.
   const totImp = d.anexo1.reduce((a, f) => a + f.importe, 0);
 
   return `<div class="page-break"></div>
@@ -489,20 +534,20 @@ function bloqueAnexo1(d: DocLiquidacion, cp: string): string {
       <thead><tr>
         <th style="width:34px">ÍTEM</th><th style="width:42px">FECHA</th><th style="width:74px">N° AFA</th>
         <th>RUTA / SENTIDO</th><th style="width:38px">TURNO</th><th style="width:46px">PLACA</th>
-        <th style="width:110px">CONDUCTOR</th><th style="width:28px">PAX</th>
+        <th style="width:110px">CONDUCTOR</th><th style="width:48px">PAX<br><span style="font-weight:400">contratado</span></th>
         <th style="width:56px">ESTADO</th><th style="width:60px">IMPORTE</th>
       </tr></thead>
       <tbody>${filas}</tbody>
       <tfoot><tr>
         <td colspan="7" class="r">TOTALES DEL PERIODO</td>
-        <td class="c">${totPax || "—"}</td>
+        <td class="c">—</td>
         <td class="c">${d.anexo1.length} serv.</td>
         <td class="r">${num(totImp)}</td>
       </tr></tfoot>
     </table>
     <div class="nota"><b>Cómo leer este anexo:</b> las filas van en <b>orden de fecha</b>, del primer al último día del periodo; los dos tramos de un mismo día se listan juntos.
     La columna <b>ÍTEM</b> es el número con el que la fila se rastrea en la valorización, y <b>TURNO</b> es la hora programada de salida.
-    Los pasajeros son los efectivamente embarcados según el manifiesto digital. Cualquier fila puede rastrearse con su N° AFA.
+    La columna <b>PAX</b> es la <b>capacidad contratada</b> de esa ruta: los asientos pactados con el cliente. Cualquier fila puede rastrearse con su N° AFA.
     ${d.anexo1.some((f) => /incluido/i.test(f.estado))
       ? "Los tramos marcados <b>incl.</b> corresponden al retorno del mismo servicio: una sola tarifa cubre ida y retorno, por eso comparten el número de ítem y el importe se cobra una vez. "
       : ""}
@@ -563,18 +608,20 @@ function bloqueAnexo2(d: DocLiquidacion): string {
 export function buildLiquidacionHtml(d: DocLiquidacion): string {
   const cp = d.lado === "cliente" ? CP_CLIENTE : CP_PROVEEDOR;
   const emp = d.empresa;
-  const pie = buildFooterPDFHtml(
-    cp,
-    emp.direccion || "—",
-    emp.telefono || "—",
-    emp.email || "—",
-    emp.web || "www.afatoursperu.com"
-  );
+  // Sin "—" de respaldo: `liquidacion-datos` ya entrega el perfil con los huecos rellenos
+  // (lib/empresa-perfil.ts). Dejarlos aquí solo escondería que el dato no llegó.
+  const pie = buildFooterPDFHtml(cp, emp.direccion || "", emp.telefono || "", emp.email || "", emp.web || "");
 
   const firmas = d.firmas.length
     ? `<div class="sec"><span class="num">6</span><h2>Firmas</h2></div>
        <div class="firmas">${d.firmas.map((f) =>
-         `<div class="firma"><div class="linea"></div><div class="rol">${esc(f.rol)}</div><div class="ent">${esc(f.entidad)}</div></div>`
+         // La imagen va DENTRO del hueco que la línea ya reservaba (el margen superior de
+         // 34px), no encima: si se sumara, la banda de firmas crecería y en un documento de
+         // varias páginas empujaría el bloque a la siguiente. Por eso la firma rubricada
+         // lleva su propia clase, con el margen recortado.
+         `<div class="firma">${f.firmaUrl ? `<img class="rubrica" src="${esc(f.firmaUrl)}" alt=""/>` : ""}` +
+         `<div class="linea${f.firmaUrl ? " con-rubrica" : ""}"></div>` +
+         `<div class="rol">${esc(f.rol)}</div><div class="ent">${esc(f.entidad)}</div></div>`
        ).join("")}</div>`
     : "";
 

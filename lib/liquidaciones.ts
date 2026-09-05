@@ -28,7 +28,7 @@
 import { redondear, calcularDetraccion } from "@/lib/finanzas/dinero";
 import {
   totalesValorizacion, descripcionLinea, sentidoDeReserva, nombreRuta, origenDeTramos,
-  analizarServicios, precioUnitario,
+  analizarServicios, agruparServicios, precioUnitario,
   type LineaAgrupada, type ParServicio, type ReservaLiq,
 } from "@/lib/liquidacion-agrupacion";
 import {
@@ -115,7 +115,8 @@ export async function registrarEvento(
 export type LineaPersistida = {
   id?: number;
   item: number;
-  tipo: "servicio" | "adicional" | "penalidad" | "descuento";
+  /** 'falso_flete' = un servicio cancelado que se le paga al proveedor por acuerdo de avance. */
+  tipo: "servicio" | "adicional" | "falso_flete" | "penalidad" | "descuento";
   descripcion: string;
   unidad_medida: string;
   cantidad_programada?: number | null;
@@ -438,6 +439,14 @@ const COLS_RECALCULO =
 /** La agrega supabase/reservas-04: se pide aparte para no romper el recálculo si falta. */
 const COL_ORIGEN_CONTRACTUAL = "origen_contractual";
 
+/**
+ * La agrega supabase/reservas-05. Aquí NO es decorativa: sin ella `montoDe` lee toda
+ * cancelación como S/ 0.00, así que una línea de FALSO FLETE se recalcularía a cero y al
+ * reagrupar desaparecería del documento. Por eso las accesorias se sueltan de a una y en
+ * orden: primero se intenta con las dos, y solo se renuncia a la que de verdad falte.
+ */
+const COL_FALSO_FLETE = "falso_flete,falso_flete_motivo";
+
 /** El nombre de ruta que más veces aparece en un conjunto de tramos. */
 function nombreMasFrecuente(filas: ReservaLiq[]): string | null {
   const cuenta = new Map<string, number>();
@@ -511,7 +520,10 @@ export async function recalcularDescripciones(
     const reservas: any[] = [];
     for (let i = 0; i < reservaIds.length; i += 300) {
       const trozo = reservaIds.slice(i, i + 300);
-      let r = await sb.from("reservas").select(`${COLS_RECALCULO},${COL_ORIGEN_CONTRACTUAL}`).in("id", trozo);
+      let r = await sb.from("reservas")
+        .select(`${COLS_RECALCULO},${COL_ORIGEN_CONTRACTUAL},${COL_FALSO_FLETE}`).in("id", trozo);
+      if (r.error) r = await sb.from("reservas").select(`${COLS_RECALCULO},${COL_ORIGEN_CONTRACTUAL}`).in("id", trozo);
+      if (r.error) r = await sb.from("reservas").select(`${COLS_RECALCULO},${COL_FALSO_FLETE}`).in("id", trozo);
       if (r.error) r = await sb.from("reservas").select(COLS_RECALCULO).in("id", trozo);
       reservas.push(...((r.data as any[]) ?? []));
     }
@@ -553,6 +565,10 @@ export async function recalcularDescripciones(
         adjuntas: [],
         ejecutado: true,
         ejecutados: [cabeza],
+        // Este par es un ARMAZÓN para resolver el pax de una línea ya creada, no un día
+        // real: se declara prestado y sin falso flete porque solo se le va a preguntar la
+        // capacidad contratada, que no depende de ninguna de las dos cosas.
+        falsoFlete: false,
         sentido: idas.length && retornos.length ? "IDA Y RETORNO" : sentidoDeReserva(cabeza),
         ida: idas[0] ?? null,
         retorno: retornos[0] ?? null,
@@ -792,6 +808,238 @@ export type ResultadoResincronizacion = {
   preciosDispares?: number;
   error?: string;
 };
+
+/**
+ * Columnas para REAGRUPAR. Es la lista del recálculo más lo que necesita la agrupación
+ * nueva: `paradas_json` (el eje del mapa) y `origen_contractual`.
+ *
+ * NO incluye `liquidacion_*_id`, y no es un olvido: estas reservas ya están dentro de ESTA
+ * liquidación, y `bloqueosDe` lee ese FK como "ya está en otra". Pidiéndolo, todas saldrían
+ * bloqueadas y el documento quedaría sin una sola línea.
+ */
+const COLS_REAGRUPAR =
+  "id,codigo,fecha_servicio,hora_servicio,estado,cliente_id,cliente_sede_id,ruta_nombre," +
+  "direccion_servicio,origen,destino,reserva_vinculada_id,cotizacion_id,capacidad_contratada," +
+  "precio_cliente,costo_proveedor,vehiculo_id,vehiculo_tercero_id,empresa_tercerizada_id," +
+  "tipo_asignacion,paradas_json";
+
+export type ResultadoReagrupacion = {
+  ok: boolean;
+  /** Cuántas líneas derivadas había y cuántas quedan. */
+  antes?: number;
+  despues?: number;
+  /** Líneas escritas a mano que se conservaron intactas. */
+  manuales?: number;
+  /**
+   * Cantidades fijadas a mano que NO se pudieron trasladar porque su línea ya no existe con
+   * la misma identidad. Se nombran para que el operador vuelva a ponerlas: perderlas en
+   * silencio borraría una decisión con su motivo escrito.
+   */
+  ajustesPerdidos?: string[];
+  error?: string;
+};
+
+/**
+ * Rehace las LÍNEAS de un borrador volviendo a agrupar sus propios servicios.
+ *
+ * `recalcularDescripciones` reescribe el texto de cada línea sin tocar los renglones;
+ * esto rehace los renglones. Hace falta porque la agrupación cambió —un ítem es ahora una
+ * ruta contratada y no una redacción de su nombre— y la línea de un documento ya creado es
+ * un SNAPSHOT: sin esto, la única forma de ver un borrador con la agrupación nueva sería
+ * anularlo y volver a cerrar el periodo entero, que además devuelve los servicios al pool y
+ * les cambia el estado.
+ *
+ * QUÉ RESPETA, y por qué:
+ *
+ *   · Las líneas ESCRITAS A MANO (sin `agrupacion_clave`) no se tocan. Una penalidad o un
+ *     descuento que alguien tecleó no se deriva de ningún servicio y reconstruirlo sería
+ *     borrarlo. Quedan al final, después de los servicios, que es donde el formato las pone.
+ *   · Las CANTIDADES FIJADAS A MANO (las que llevan `cantidad_motivo`) se trasladan a la
+ *     línea nueva que conserve la misma `agrupacion_clave`. Las que no encuentran destino
+ *     —porque justamente esa línea se fundió con otra— se DEVUELVEN NOMBRADAS en
+ *     `ajustesPerdidos`: el operador tiene que volver a decidirlas, y callarlo borraría una
+ *     decisión que alguien tomó y justificó por escrito.
+ *   · Los SERVICIOS no se tocan: ni su estado, ni su precio, ni el FK a la liquidación.
+ *     Solo se reconstruye el puente línea↔reserva.
+ *
+ * Solo sobre BORRADOR. Un documento emitido ya salió de la casa: sus renglones son los que
+ * el cliente tiene delante.
+ *
+ * Sin transacción (PostgREST no la da), así que el orden importa: primero se calcula y se
+ * VALIDA todo lo nuevo, y solo entonces se borra lo viejo. Si aun así fallara a mitad, el
+ * documento queda con menos líneas de las que debe —visiblemente roto y reparable
+ * repitiendo la operación—, que es mejor que la alternativa de insertar antes de borrar:
+ * eso dejaría las líneas DUPLICADAS y un total al doble que puede pasar por bueno.
+ */
+export async function reagruparLineas(
+  sb: any,
+  lado: Lado,
+  id: number,
+  opts?: { usuario?: string | null }
+): Promise<ResultadoReagrupacion> {
+  try {
+    const t = T[lado];
+    const { data: cab } = await sb.from(t.cab).select("*").eq("id", id).maybeSingle();
+    if (!cab) throw new Error("La liquidación no existe.");
+    if (cab.estado !== "borrador")
+      throw new Error(
+        `${cab.codigo ?? "#" + id} está en estado "${cab.estado}": los renglones de un documento emitido son los que el cliente tiene delante. Reábrelo como borrador primero.`
+      );
+
+    const { data: lineasRaw } = await sb
+      .from(t.linea)
+      .select("id,item,tipo,descripcion,agrupacion_clave,cantidad,cantidad_motivo")
+      .eq("liquidacion_id", id)
+      .order("item");
+    const todas = ((lineasRaw as any[]) ?? []);
+    const derivadas = todas.filter((l) => !!l.agrupacion_clave);
+    const manuales = todas.filter((l) => !l.agrupacion_clave);
+    if (!derivadas.length) return { ok: true, antes: 0, despues: 0, manuales: manuales.length, ajustesPerdidos: [] };
+
+    // ── Las reservas de este documento ────────────────────────────────────
+    const lineaIds = derivadas.map((l) => Number(l.id));
+    const puente: any[] = [];
+    for (let i = 0; i < lineaIds.length; i += 100) {
+      const { data } = await sb.from(t.puente).select("linea_id,reserva_id").in("linea_id", lineaIds.slice(i, i + 100));
+      puente.push(...((data as any[]) ?? []));
+    }
+    const reservaIds = [...new Set(puente.map((p) => Number(p.reserva_id)))];
+    if (!reservaIds.length) throw new Error("Las líneas de este documento no tienen servicios detrás: no hay nada que reagrupar.");
+
+    const reservas: any[] = [];
+    for (let i = 0; i < reservaIds.length; i += 300) {
+      const trozo = reservaIds.slice(i, i + 300);
+      // Igual que en el recálculo: las columnas accesorias se sueltan si su migración no
+      // se corrió, en vez de dejar el documento sin poder reagruparse.
+      let r = await sb.from("reservas")
+        .select(`${COLS_REAGRUPAR},${COL_ORIGEN_CONTRACTUAL},${COL_FALSO_FLETE}`).in("id", trozo);
+      if (r.error) r = await sb.from("reservas").select(`${COLS_REAGRUPAR},${COL_ORIGEN_CONTRACTUAL}`).in("id", trozo);
+      if (r.error) r = await sb.from("reservas").select(`${COLS_REAGRUPAR},${COL_FALSO_FLETE}`).in("id", trozo);
+      if (r.error) r = await sb.from("reservas").select(COLS_REAGRUPAR).in("id", trozo);
+      if (r.error) r = await sb.from("reservas").select(COLS_RESINCRONIZAR).in("id", trozo);
+      if (r.error) throw new Error(`no se pudieron leer los servicios: ${r.error.message}`);
+      reservas.push(...((r.data as any[]) ?? []));
+    }
+
+    // ── El mismo contexto que usa la pantalla de cierre ───────────────────
+    const [catalogoRutas, paxCotizacion, sedeR, veh, vehT] = await Promise.all([
+      cargarRutasContratadas(sb, cab.cliente_id ? [Number(cab.cliente_id)] : undefined),
+      cargarPaxDeCotizaciones(sb, reservas.map((r) => Number(r.cotizacion_id ?? 0))),
+      cab.cliente_sede_id
+        ? sb.from("cliente_sedes").select("nombre,servicio_contratado").eq("id", cab.cliente_sede_id).maybeSingle()
+        : Promise.resolve({ data: null }),
+      sb.from("vehiculos").select("id,capacidad_pasajeros"),
+      sb.from("vehiculos_tercero").select("id,capacidad"),
+    ]);
+    const sede: any = (sedeR as any)?.data ?? null;
+    // La capacidad del vehículo no se imprime, pero decide qué unidad es el "móvil 1"
+    // cuando una ruta sale con dos a la vez: sin ella la numeración bailaría.
+    const cap = new Map<string, number | null>();
+    for (const v of ((veh as any)?.data ?? [])) cap.set("p" + v.id, v.capacidad_pasajeros ?? null);
+    for (const v of ((vehT as any)?.data ?? [])) cap.set("t" + v.id, v.capacidad ?? null);
+
+    const analisis = analizarServicios(reservas as ReservaLiq[], lado);
+    const nuevas = agruparServicios(analisis.pares, {
+      lado,
+      catalogo: {
+        placaDe: () => "",
+        conductorDe: () => "",
+        capacidadDe: (r) => cap.get((r.vehiculo_tercero_id ? "t" : "p") + (r.vehiculo_tercero_id ?? r.vehiculo_id)) ?? null,
+        paxContratadoDe: (par) =>
+          resolverPaxContratado(par, { catalogo: catalogoRutas, paxCotizacion, sedeId: cab.cliente_sede_id ?? null }),
+      },
+      preciosIncluyenIgv: !!cab.precios_incluyen_igv,
+      igvPct: Number(cab.igv_pct ?? 18),
+      sede: sede?.nombre ?? null,
+      desde: cab.periodo_desde ?? null,
+      hasta: cab.periodo_hasta ?? null,
+      concepto:
+        (cab.servicio_contratado || sede?.servicio_contratado || "").replace(/^SERVICIO DE /i, "") ||
+        "TRANSPORTE DE PERSONAL",
+    }).filter((l) => l.cantidad > 0);
+
+    if (!nuevas.length)
+      throw new Error("La reagrupación no produjo ninguna línea con servicios ejecutados. No se ha tocado nada.");
+
+    // ── Las cantidades fijadas a mano ─────────────────────────────────────
+    const fijadas = new Map<string, { cantidad: number; motivo: string }>();
+    for (const l of derivadas)
+      if (String(l.cantidad_motivo ?? "").trim())
+        fijadas.set(String(l.agrupacion_clave), { cantidad: Number(l.cantidad ?? 0), motivo: String(l.cantidad_motivo) });
+    const clavesNuevas = new Set(nuevas.map((l) => l.clave));
+    const ajustesPerdidos = [...fijadas.keys()].filter((k) => !clavesNuevas.has(k));
+
+    // ── Recién ahora se borra lo viejo ────────────────────────────────────
+    for (let i = 0; i < lineaIds.length; i += 100) {
+      const { error } = await sb.from(t.puente).delete().in("linea_id", lineaIds.slice(i, i + 100));
+      if (error) throw new Error(`no se pudo limpiar el puente: ${error.message}`);
+    }
+    {
+      const { error } = await sb.from(t.linea).delete().in("id", lineaIds);
+      if (error) throw new Error(`no se pudieron borrar las líneas viejas: ${error.message}`);
+    }
+
+    // ── Y se escriben las nuevas ──────────────────────────────────────────
+    let item = 0;
+    for (const l of nuevas) {
+      item += 1;
+      const fijada = fijadas.get(l.clave);
+      const cantidad = fijada ? fijada.cantidad : l.cantidad;
+      const fila: any = {
+        liquidacion_id: id,
+        item,
+        tipo: l.tipo,
+        descripcion: l.descripcion,
+        unidad_medida: l.unidad_medida,
+        cantidad_programada: l.cantidad_programada,
+        cantidad_ejecutada: l.cantidad_ejecutada,
+        cantidad,
+        ...(fijada ? { cantidad_motivo: fijada.motivo } : {}),
+        pax_contratado: l.pax_contratado ?? null,
+        precio_unitario: l.precio_unitario,
+        orden_compra: cab.orden_compra ?? null,
+        total_linea: redondear(cantidad * l.precio_unitario),
+        agrupacion_clave: l.clave,
+        referencia: l.referencia,
+      };
+      let { data: lin, error } = await sb.from(t.linea).insert(fila).select("id").single();
+      if (error && /pax_contratado/i.test(String(error.message))) {
+        delete fila.pax_contratado;                       // falta supabase/liquidaciones-03
+        ({ data: lin, error } = await sb.from(t.linea).insert(fila).select("id").single());
+      }
+      if (error) throw new Error(`línea ${item}: ${error.message}`);
+
+      const filas = l.reservas.map((rid) => ({ linea_id: Number(lin.id), reserva_id: rid }));
+      for (let i = 0; i < filas.length; i += 500) {
+        const { error: eP } = await sb.from(t.puente).insert(filas.slice(i, i + 500));
+        if (eP) throw new Error(`puente de la línea ${item}: ${eP.message}`);
+      }
+    }
+
+    // Las manuales van detrás de los servicios, que es donde las pone el formato.
+    for (const m of manuales) {
+      item += 1;
+      if (Number(m.item) === item) continue;
+      await sb.from(t.linea).update({ item }).eq("id", m.id);
+    }
+
+    await recalcularTotales(sb, lado, id);
+    await registrarEvento(sb, lado, id, "reagrupada", {
+      usuario: opts?.usuario ?? undefined,
+      detalle: `${derivadas.length} → ${nuevas.length} línea(s)` + (ajustesPerdidos.length ? ` · ${ajustesPerdidos.length} ajuste(s) manual(es) sin destino` : ""),
+    });
+
+    return {
+      ok: true,
+      antes: derivadas.length,
+      despues: nuevas.length,
+      manuales: manuales.length,
+      ajustesPerdidos,
+    };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
 
 /**
  * Vuelve a DERIVAR los importes de un borrador desde sus reservas.

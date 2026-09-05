@@ -10,7 +10,7 @@ import { fmtMoneda } from "@/lib/finanzas/dinero";
 import { totalesValorizacion } from "@/lib/liquidacion-agrupacion";
 import {
   actualizarCantidad, agregarLineaManual, eliminarLinea, recalcularTotales,
-  emitirLiquidacion, recalcularDescripciones, actualizarPaxContratado,
+  emitirLiquidacion, recalcularDescripciones, reagruparLineas, actualizarPaxContratado,
   contarServiciosDeLinea, totalesProveedorExt, detraccionDe, type Lado,
 } from "@/lib/liquidaciones";
 
@@ -226,6 +226,37 @@ export default function ModalEditor({
    * con el nombre real de la ruta sería anularlo y volver a cerrar el periodo.
    * No toca cantidades, precios ni totales.
    */
+  /**
+   * Rehace los RENGLONES con la agrupación de hoy. Es el hermano del recálculo de
+   * descripciones: aquel reescribe el texto de cada línea, este decide qué líneas hay.
+   *
+   * Se pide confirmación porque, a diferencia del recálculo, esto CAMBIA la forma del
+   * documento: donde había tres renglones puede quedar uno. Los importes no se mueven —la
+   * agrupación no puede mover un sol— pero el papel se ve distinto, y quien lo tenga a
+   * medio revisar merece saberlo antes.
+   */
+  async function reagrupar() {
+    if (!confirm(
+      "Rehacer los renglones con la agrupación de hoy.\n\n" +
+      "Los servicios de una misma ruta contratada se juntan en un solo ítem, y los que " +
+      "tienen distinta tarifa o distinta capacidad contratada quedan separados. El total " +
+      "NO cambia.\n\n" +
+      "Las líneas escritas a mano (penalidades, descuentos) no se tocan.\n\n¿Continuar?"
+    )) return;
+    setTrabajando(true); setMsg("");
+    const r = await reagruparLineas(supabase, lado, liquidacionId, { usuario });
+    setMsg(
+      r.ok
+        ? `✅ ${r.antes} → ${r.despues} ítem(s).` +
+          (r.manuales ? ` ${r.manuales} línea(s) escrita(s) a mano intacta(s).` : "") +
+          (r.ajustesPerdidos?.length
+            ? ` ⚠️ ${r.ajustesPerdidos.length} cantidad(es) que habías fijado a mano no tienen dónde ir porque su ítem se fundió con otro: vuelve a ponerlas.`
+            : "")
+        : "⚠️ " + r.error
+    );
+    await cargar(); onCambio(); setTrabajando(false);
+  }
+
   async function recalcular() {
     setTrabajando(true); setMsg("");
     const r = await recalcularDescripciones(supabase, lado, liquidacionId, { usuario });
@@ -263,6 +294,13 @@ export default function ModalEditor({
                 title="Reescribe las descripciones con el nombre real de cada ruta y la capacidad contratada. No toca cantidades ni precios."
                 className="px-3 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 disabled:opacity-50">
                 ↻ Recalcular descripciones
+              </button>
+            )}
+            {editable && (
+              <button onClick={reagrupar} disabled={trabajando}
+                title="Rehace los renglones con la agrupación de hoy: junta los servicios de una misma ruta contratada y separa los de distinta tarifa o capacidad. No cambia el total ni toca las líneas escritas a mano."
+                className="px-3 py-1.5 rounded-lg text-xs font-bold border hover:bg-gray-50 disabled:opacity-50">
+                ↻ Reagrupar ítems
               </button>
             )}
             {editable && (

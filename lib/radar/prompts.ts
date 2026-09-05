@@ -176,14 +176,16 @@ const FORMA_COMBUSTIBLE_MEDIA = `{
   "unidad": string|null,                // referencia informal ("bus 45") si no hay placa
   "fecha": "YYYY-MM-DD"|null,
   "hora": "HH:MM"|null,
-  "grifo": string|null,                 // SOLO de la NOTA de despacho. NUNCA una marca del tablero (LANDI RENZO, BRC…)
-  "direccion_grifo": string|null,       // SOLO de la nota
-  "ruc": string|null,                   // RUC del grifo — SOLO de la nota
-  "proveedor": string|null,             // razón social — SOLO de la nota
+  "grifo": string|null,                 // quien VENDE: el ENCABEZADO de la nota. NUNCA el "RAZ.SOC"/cliente ni una marca del tablero (LANDI RENZO, BRC…)
+  "direccion_grifo": string|null,       // dirección de la ESTACIÓN (encabezado). NO la del "DIRECC" del cliente
+  "ruc": string|null,                   // RUC del GRIFO (el del encabezado). NO el que va junto a "RAZ.SOC"
+  "proveedor": string|null,             // razón social del GRIFO. NO la del cliente
+  "cliente_en_nota": string|null,       // razón social de quien COMPRÓ ("RAZ.SOC"/"SEÑOR(ES)"/"CLIENTE"). Va SOLO acá, jamás en "grifo"/"proveedor"
   "comprobante": string|null,           // serie-correlativo — SOLO de la nota
   "tipo_combustible": "diesel"|"gasolina"|"glp"|"gnv"|"urea"|"biodiesel"|null,
   "galones": number|null,               // cantidad DESPACHADA (surtidor manda; si no, la nota). GLP en galones. NUNCA el km ni una tasa L/100km
   "litros": number|null,                // solo si el despacho fue realmente en litros
+  "texto_cantidad": string|null,        // los dígitos de la cantidad TAL CUAL están impresos, sin interpretar ("8.799x"). Cópialos mirando la foto, no los deduzcas del importe
   "precio_galon": number|null,
   "precio_litro": number|null,
   "monto_total": number|null,           // importe pagado — usa el de la NOTA (comprobante) como valor oficial
@@ -203,30 +205,84 @@ const FORMA_COMBUSTIBLE_MEDIA = `{
     "comprobante": "nota"|"texto"|null
   },
   "confianza_campos": { "galones": number|null, "monto_total": number|null, "kilometraje": number|null, "grifo": number|null },
-  "discrepancias": [ string ],          // si el surtidor y la nota difieren en galones/soles/km, descríbelo aquí
+  "discrepancias": [                    // diferencias entre dos fuentes que REALMENTE miraste; [] si no hay
+    { "campo": "cantidad"|"importe"|"precio"|"kilometraje"|"otro",
+      "entre": "surtidor_vs_nota"|"tablero_vs_nota"|"otro",  // NUNCA "surtidor_vs_nota" si no viste una foto del surtidor: no se puede comparar contra una foto que no llegó
+      "detalle": string }
+  ],
   "notas_extraccion": string|null       // dígitos ambiguos de 7 segmentos, fotos borrosas, etc.
 }`;
+
+/**
+ * El cuadre aritmético, en el prompt. El voucher trae los TRES números atados por una
+ * identidad, así que el modelo puede verificar su propia lectura antes de responder — y esa
+ * es la única defensa que actúa mientras todavía se está mirando la foto. (El ERP repite la
+ * cuenta después en lib/radar/coherencia-voucher.ts: si el modelo igual se equivoca, la
+ * división dice qué dígito falló. Pero corregir a posteriori manda la carga a revisión;
+ * leerla bien de entrada la registra sola.)
+ *
+ * El ejemplo es literal: la nota V72S-00023776 de COESTI (E/S Macarena) que se leyó como
+ * 6.799 galones donde el papel decía 8.799 — un solo dígito, con el precio y el total
+ * impresos al costado gritando cuál era.
+ */
+const CUADRE_VOUCHER = `CUADRE ARITMÉTICO — HAZLO ANTES DE RESPONDER (es la verificación más importante de todo el voucher):
+Los tres números de una recarga están atados: CANTIDAD × PRECIO UNITARIO = IMPORTE. El voucher imprime los tres, así que tienes con qué verificarte a ti mismo.
+1. Multiplica la cantidad que leíste por el precio que leíste.
+2. Compárala con el importe impreso (unos céntimos de diferencia por redondeo son normales).
+3. Si NO coinciden, NO respondas con esos números: hay una cifra mal leída. Divide el importe entre el precio para saber qué cantidad tendría que ser, VUELVE A MIRAR la foto y comprueba si ese es el número que está impreso. Casi siempre falla un solo dígito.
+4. Si después de mirarla otra vez sigue sin cuadrar, deja los números que REALMENTE ves y descríbelo en "discrepancias". Nunca maquilles el cuadre con un número que no está impreso.
+
+DÍGITOS QUE SE CONFUNDEN. La nota de despacho sale de una impresora de matriz de puntos o térmica (tinta corrida, papel arrugado, foto en diagonal) y el surtidor es un display de 7 segmentos, donde un segmento apagado convierte un 8 en casi cualquier cosa. Los pares que más fallan: 8↔6, 8↔0, 8↔9, 8↔3, 5↔6, 5↔8, 3↔9, 0↔9, 1↔7. Ante uno de esos, decide con el cuadre, no con el trazo.
+
+CÓMO SE IMPRIME LA LÍNEA DEL PRODUCTO EN LOS GRIFOS PERUANOS (COESTI/Primax, Repsol, Petroperú, Pecsa):
+    040002019 UGL   8.799x     24.640
+      MAX-D DIESEL B5 S50 UV       216.81
+    TOTAL      :   S/    216.81
+Ahí la CANTIDAD es 8.799, el PRECIO por galón es 24.640 y el IMPORTE 216.81 — y 8.799 × 24.640 = 216.81, que es exactamente cómo se comprueba.
+- El número pegado a la "x" es SIEMPRE la cantidad; el que le sigue es el precio unitario. Nunca al revés.
+- "UGL", "U.GAL", "GLN", "GAL" es la unidad (galones), no un número.
+- El número largo del inicio ("040002019") es el CÓDIGO del artículo: jamás es cantidad, precio ni importe.
+- "Kilometraje", "Placa", "Tarjeta", "TURNO", "CARA", "CAJERO" y el N° de la nota tampoco son números de la compra.
+- Un comprobante puede traer VARIAS líneas de producto (diésel + urea): cada una tiene su cantidad y su precio, y el TOTAL es la suma. Si es el caso, dilo en "discrepancias" (con entre="otro") y pon en "galones" solo el combustible principal.`;
 
 // Reglas de lectura de un reporte de combustible que llega como VARIAS fotos con roles distintos.
 const GUIA_COMBUSTIBLE_MEDIA = `REGLAS ESPECIALES SI EL CONTENIDO ES DE COMBUSTIBLE (recarga de una unidad de AFA):
 Un reporte de recarga suele venir como VARIAS fotos con ROLES distintos; combina los datos de TODAS, no de una sola:
 - TABLERO / ODÓMETRO: lee el kilometraje TOTAL. El "Trip"/viaje es PARCIAL (va en "trip_km", NO en "kilometraje"). Cifras como "16.3 L/100km" o "km/gal" son la TASA DE CONSUMO del viaje (va en "consumo_l_100km"): NUNCA la pongas en galones/litros/monto.
 - NIVEL DE COMBUSTIBLE (aguja del tablero, a veces antes y después): solo evidencia visual; no aporta números duros.
-- SURTIDOR del grifo (pantalla digital de 7 segmentos): galones/litros despachados, soles y a veces el precio. Transcríbelo dígito a dígito; cuida las confusiones 8↔0↔6↔9 y la posición del punto decimal (8.548 gal ≠ 8548). Verifica que galones × precio ≈ total.
+- SURTIDOR del grifo (pantalla digital de 7 segmentos): galones/litros despachados, soles y a veces el precio. Transcríbelo dígito a dígito; cuida las confusiones 8↔0↔6↔9 y la posición del punto decimal (8.548 gal ≠ 8548).
 - NOTA DE DESPACHO / voucher (papel impreso por el grifo): grifo, dirección, RUC, razón social, N° de comprobante (serie-correlativo), placa, kilometraje, galones, precio, total, fecha y hora.
 
 JERARQUÍA DE FUENTES (rellena "fuentes" con la que usaste en cada campo):
 - Cantidad y precio: manda el SURTIDOR; si no se ve, la NOTA.
-- Kilometraje: manda el TABLERO; contrástalo con el km impreso en la nota (si difieren, ponlo en "discrepancias").
+- Kilometraje: manda el TABLERO; contrástalo con el km impreso en la nota (si difieren, ponlo en "discrepancias" con entre="tablero_vs_nota").
 - IDENTIDAD (grifo, dirección, RUC, razón social, comprobante): SIEMPRE de la NOTA DE DESPACHO, JAMÁS del tablero. Si no ves una nota, deja grifo/RUC/comprobante en null.
-- Importe oficial ("monto_total"): usa el de la NOTA (es el comprobante deducible). Si el surtidor muestra un total distinto, NO lo pongas en "monto_total": descríbelo en "discrepancias".
+- Importe oficial ("monto_total"): usa el de la NOTA (es el comprobante deducible). Si el surtidor muestra un total distinto, NO lo pongas en "monto_total": descríbelo en "discrepancias" con entre="surtidor_vs_nota".
+
+QUIÉN VENDE Y QUIÉN COMPRA — NO LOS INVIERTAS (el error más frecuente al leer esta nota):
+La nota trae DOS empresas y el ERP solo quiere la que VENDE.
+- EL GRIFO (vende) es el ENCABEZADO, impreso ARRIBA del título del documento: razón social + RUC, el domicilio fiscal, el nombre de la estación ("E/S MACARENA", "ESTACIÓN …") y su dirección. Eso va en "grifo", "proveedor", "ruc" y "direccion_grifo".
+- EL CLIENTE (compra) va DEBAJO del título, rotulado "RAZ.SOC", "RAZÓN SOCIAL", "SEÑOR(ES)", "CLIENTE" o "ADQUIRIENTE", con SU RUC y SU dirección. Eso va SOLO en "cliente_en_nota".
+Ejemplo real, con las dos mitades marcadas:
+    COESTI S.A. - RUC: 20127765279        ← EL GRIFO → "grifo"/"proveedor"/"ruc"
+    AV.CIRC.GOLF LOS INCAS 134 TORRE1       (domicilio fiscal del grifo)
+    E/S MACARENA                          ← nombre de la estación
+    Z.I. ZONA INDUSTRIAL Mz 251 Lote S/N  ← "direccion_grifo"
+    ------- NOTA DE DESPACHO -------
+    RAZ.SOC : GLOBAL BUS PERU S.A.C.      ← EL CLIENTE → "cliente_en_nota". NO es el grifo
+    RUC     : 20611105291                 ← RUC del cliente. NO va en "ruc"
+    DIRECC  : PJ. SANTA ISABEL NRO. 380   ← dirección del cliente. NO va en "direccion_grifo"
+"RAZ.SOC" abrevia "razón social", pero es la DEL CLIENTE: que el campo se llame así no lo convierte en el proveedor.
+Desempate: el grifo se llama como una estación de servicio o una petrolera (COESTI, PRIMAX, REPSOL, PETROPERÚ, PECSA, GRIFO/ESTACIÓN…); el cliente se llama como un transportista (TOURS, BUS, TRANSPORTES, CARGO) y suele ser AFA misma o el operador dueño del bus. **Si el único nombre de empresa que ves es de transporte, ese es el CLIENTE: deja "grifo" en null antes que poner ahí a quien compró.**
 
 NO CONFUNDIR MARCA DE KIT GLP CON EL GRIFO: "LANDI RENZO", "BRC", "LOVATO", "TOMASETTO", "ZAVOLI", "OMVL", "AC STAG", "PRINS", "GASITALY" y similares son marcas del KIT DE CONVERSIÓN A GLP del vehículo (se ven en el tablero), NO son el grifo ni el proveedor. Nunca las uses como "grifo"/"proveedor".
 
 GLP: en Perú el GLP se despacha en GALONES. Unidades como "UGL", "U.GAL", "GLN" o etiquetas "GLP-G" significan GLP en galones → pon la cantidad en "galones" (no en "litros") y tipo_combustible="glp".
 
 Si NO se pudo leer la cantidad/importe pero SÍ había una foto de la nota o del surtidor, igual marca vio_nota/vio_surtidor en true y deja los números en null (para distinguir "foto ilegible" de "dato ausente").
-Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.`;
+Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.
+
+${CUADRE_VOUCHER}`;
 
 const FORMA_ODOMETRO = `{
   "placa": string|null,                 // normalizada AAA-123 en MAYÚSCULAS
@@ -360,7 +416,9 @@ export function promptExtraccion(categoria: CategoriaRadar, ctx: ContextoPrompt)
   const guiasOdo = bloqueGuiasOdometro(ctx);
   const extra =
     categoria === "combustible"
-      ? `\n- Si el texto transcribe un voucher, captura TODOS los campos impresos que se mencionen (grifo, dirección, comprobante, cantidad, precio, total, fecha y hora).${lineaLeccionesCombustible(ctx)}`
+      // El voucher dictado por texto también se cuadra: un dígito se puede tipear mal igual
+      // que se puede leer mal, y ahí la cuenta es lo único que lo delata.
+      ? `\n- Si el texto transcribe un voucher, captura TODOS los campos impresos que se mencionen (grifo, dirección, comprobante, cantidad, precio, total, fecha y hora).\n- CUADRA LOS NÚMEROS antes de responder: cantidad × precio unitario debe dar el importe total (salvo céntimos de redondeo). Si no da, alguno de los tres está mal tipeado: deja los tres tal como los dice el mensaje y no ajustes ninguno por tu cuenta (el ERP levanta la alerta).${lineaLeccionesCombustible(ctx)}`
       : categoria === "odometro"
         // El reporte dictado por texto ("el kilometraje de la BUI-272 es …") también merece la
         // guía de la unidad y las lecciones: antes este camino no recibía ninguna de las dos.

@@ -60,6 +60,7 @@ function reserva(p: Partial<ReservaLiq> & { fecha: string; precio: number; vehic
     vehiculo_id: p.vehiculo,
     conductor_id: p.conductor_id ?? 1,
     pasajeros_abordados: p.pasajeros_abordados ?? null,
+    capacidad_contratada: p.capacidad_contratada ?? null,
     hora_real_inicio: p.hora_real_inicio ?? null,
     hora_real_fin: p.hora_real_fin ?? null,
     tipo_servicio_detalle: "transporte_personal",
@@ -78,14 +79,17 @@ const VEHICULOS: Record<number, { placa: string; cap: number; desc: string }> = 
 // 52 servicios, no como 104.
 const reservas: ReservaLiq[] = [];
 function parDelDia(f: string, i: number, veh: number, precio: number, costo: number, pax: number, horas: { ida: [string, string]; ret: [string, string] }) {
+  // Los asientos CONTRATADOS son del día y no cambian con la ocupación: se escriben
+  // iguales en los dos tramos, como los escribe Programación.
+  const contratados = veh === 2 ? 12 : 45;
   const ida = reserva({
     fecha: f, precio, vehiculo: veh, costo_proveedor: costo,
-    conductor_id: veh, pasajeros_abordados: pax,
+    conductor_id: veh, pasajeros_abordados: pax, capacidad_contratada: contratados,
     hora_real_inicio: horas.ida[0], hora_real_fin: horas.ida[1],
   });
   const ret = reserva({
     fecha: f, precio: 0, vehiculo: veh, costo_proveedor: 0,
-    conductor_id: veh, pasajeros_abordados: pax - 1,
+    conductor_id: veh, pasajeros_abordados: pax - 1, capacidad_contratada: contratados,
     hora_real_inicio: horas.ret[0], hora_real_fin: horas.ret[1],
   });
   ida.reserva_vinculada_id = ret.id;
@@ -196,7 +200,8 @@ lineasAgrupadas.forEach((l, gi) => {
         turno: String(r.hora_servicio ?? "").slice(0, 5) || "—",
         placa: catalogo.placaDe(r),
         conductor: catalogo.conductorDe(r),
-        pax: r.pasajeros_abordados ?? null,
+        // La columna PAX del anexo es la capacidad CONTRATADA, no la ocupación.
+        paxContratado: r.capacidad_contratada ?? null,
         estado: tarde ? "Tardío" : incluida ? "Incluido" : "Conforme",
         importe: incluida ? 0 : l.precio_unitario,
         alerta: tarde,
@@ -210,7 +215,7 @@ pendientes.push({
   fila: {
     ref: "C-01", fecha: "28/06", codigo: adicional.codigo!,
     ruta: "CD Callao → RUTA 1 (Ida) · adicional", turno: "22:00",
-    placa: "AYL-789", conductor: "Sergio Sánchez", pax: 44,
+    placa: "AYL-789", conductor: "Sergio Sánchez", paxContratado: 44,
     estado: "Adicional", importe: 790,
   },
 });
@@ -278,7 +283,9 @@ const docCliente: DocLiquidacion = {
     serviciosEjecutados: anexo1.length,
     serviciosProgramados: reservas.length,
     puntualidadPct: 96.2,
-    pasajeros: anexo1.reduce((a, f) => a + (f.pax ?? 0), 0),
+    // El Anexo 2 sí cuenta personas transportadas, y sale de las reservas: el Anexo 1
+    // ya no lleva ese dato porque su columna PAX es la capacidad contratada.
+    pasajeros: reservas.reduce((a, r) => a + (r.pasajeros_abordados ?? 0), 0),
     km: Math.round(kmMuestra),
     incidencias: [
       { fecha: "28/06", codigo: adicional.codigo!, tipo: "Adicional", descripcion: "Sobredemanda del turno noche: se despachó una unidad extra (AYL-789) a solicitud del área.", accion: "Autorizado por correo del cliente", efecto: 790 },

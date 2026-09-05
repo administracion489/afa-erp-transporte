@@ -977,7 +977,7 @@ export default function ModalGenerarPrograma({ clientes, onClose, onGenerado, mo
                     />
                     <p className="text-[10px] mt-1 leading-snug" style={{ color: "#92400e" }}>
                       Es el único sitio donde queda escrito el porqué: un adicional nace con su
-                      precio, así que no dispara el acta de conformidad del cliente.
+                      precio, así que no genera un acta de cambio de venta.
                     </p>
                   </div>
                 </>

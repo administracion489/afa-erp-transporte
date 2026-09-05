@@ -374,5 +374,46 @@ titulo("14 · Dos capacidades contratadas NUNCA comparten ítem");
   ok(sinDato.length === 1, "sin capacidad contratada en ninguno, siguen en un ítem", sinDato.length);
 }
 
+// ── 15 · El nombre que muestra el ítem puede no existir en ningún servicio ──
+//
+// Caso real de la RUTA B: 48 servicios en un ítem, con la ida de las 05:10 volviendo a las
+// 15:00 y la de las 07:00 a las 17:00. El ítem se rotula con el nombre MÁS USADO de CADA
+// tramo por separado, así que puede mostrar una combinación —05:10 con 17:00— que ningún
+// día tuvo. No es un fallo del rótulo: es correcto imprimir lo más representativo. Pero
+// quien fiche la ruta con ese par escribiría en `cliente_ruta` una identidad que ningún
+// servicio encuentra, y como el PAX separa ítems, el renglón se partiría en dos después de
+// decir "guardado". Por eso el ítem DECLARA si sus nombres son uniformes.
+titulo("15 · El ítem declara si reúne varias redacciones (nombres_uniformes)");
+{
+  const t = (n: string): Tramo => ({ nombre: n, desde: CHILCA, hasta: BSF });
+  const v = (n: string): Tramo => ({ nombre: n, desde: BSF, hasta: CHILCA });
+  const rs = [
+    ...dia({ ida: t("RUTA B/ ENTRADA 05:10/ CHILCA→BSF"), retorno: v("RUTA B/ RETORNO 15:00/ BSF→CHILCA"), precio: 350, fecha: "2026-08-03", hora: "05:10" }),
+    ...dia({ ida: t("RUTA B/ ENTRADA 05:10/ CHILCA→BSF"), retorno: v("RUTA B/ RETORNO 15:00/ BSF→CHILCA"), precio: 350, fecha: "2026-08-04", hora: "05:10" }),
+    ...dia({ ida: t("RUTA B/ ENTRADA 07:00/ CHILCA→BSF"), retorno: v("RUTA B/ RETORNO 17:00/ BSF→CHILCA"), precio: 350, fecha: "2026-08-05", hora: "07:00" }),
+    ...dia({ ida: t("RUTA B/ ENTRADA 07:00/ CHILCA→BSF"), retorno: v("RUTA B/ RETORNO 17:00/ BSF→CHILCA"), precio: 350, fecha: "2026-08-06", hora: "07:00" }),
+    ...dia({ ida: t("RUTA B/ ENTRADA 07:00/ CHILCA→BSF"), retorno: v("RUTA B/ RETORNO 17:00/ BSF→CHILCA"), precio: 350, fecha: "2026-08-07", hora: "07:00" }),
+  ];
+  const ls = lineasDe(rs);
+  ok(ls.length === 1, "los cinco días salen en un ítem", ls.length);
+  ok(ls[0].nombres_uniformes === false, "y el ítem AVISA de que reúne varias redacciones", ls[0].nombres_uniformes);
+
+  // El par impreso no tiene por qué existir: se comprueba que la bandera lo delata.
+  const paresReales = new Set(
+    rs.filter((r) => r.direccion_servicio === "ida")
+      .map((r) => `${r.ruta_nombre}|${rs.find((x) => x.id === r.reserva_vinculada_id)?.ruta_nombre ?? ""}`)
+  );
+  const impreso = `${ls[0].nombre_ida}|${ls[0].nombre_retorno}`;
+  ok(!paresReales.has(impreso) || ls[0].nombres_uniformes === false,
+    "si el par impreso no existe en ningún servicio, la bandera está en false", impreso);
+
+  // Y una ruta que se llama SIEMPRE igual sí es fichable.
+  const uniforme = lineasDe([
+    ...dia({ ida: t("RUTA D/ ENTRADA 06:00/ CHILCA→BSF"), retorno: v("RUTA D/ RETORNO 18:00/ BSF→CHILCA"), precio: 400, fecha: "2026-08-03" }),
+    ...dia({ ida: t("RUTA D/ ENTRADA 06:00/ CHILCA→BSF"), retorno: v("RUTA D/ RETORNO 18:00/ BSF→CHILCA"), precio: 400, fecha: "2026-08-04" }),
+  ]);
+  ok(uniforme[0]?.nombres_uniformes === true, "una ruta con una sola redacción sí se puede fichar", uniforme[0]?.nombres_uniformes);
+}
+
 console.log(fallos ? `\n${fallos} FALLA(S)\n` : "\nTODO OK\n");
 process.exit(fallos ? 1 : 0);

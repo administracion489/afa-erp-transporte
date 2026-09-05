@@ -48,6 +48,35 @@ import { nombreRuta } from "@/lib/liquidacion-agrupacion";
 export const normalizarNombreRuta = (s: string | null | undefined) =>
   String(s ?? "").trim().replace(/\s+/g, " ").toUpperCase();
 
+/**
+ * La forma CANÓNICA del par de nombres, que es como la ficha vive en la base.
+ *
+ * Una ruta sin ida —y los adicionales del formato son casi siempre servicios de solo
+ * retorno— sube su retorno al campo principal y deja el otro en null. `cliente_ruta` no
+ * tiene un campo "sentido": tiene `nombre_ida` obligatorio y `nombre_retorno` opcional, así
+ * que un tramo suelto SIEMPRE se guarda como la ida de su ficha.
+ *
+ * Existe como función porque tiene que aplicarse en los DOS extremos y ya falló por no
+ * hacerlo, dos veces seguidas:
+ *
+ *   · al ESCRIBIR, la búsqueda de la ficha existente usaba el par crudo y la escritura el
+ *     canónico, así que nunca se encontraba a sí misma: insertaba una vez y luego chocaba
+ *     contra el índice único ("duplicate key value violates unique constraint…");
+ *   · al LEER, `clavesCandidatas` seguía preguntando por el par crudo, de modo que la ficha
+ *     recién guardada resultaba invisible para la cascada. En pantalla eso se veía como
+ *     "se guardó correctamente" seguido de "3 rutas sin capacidad contratada" al recargar,
+ *     que es la peor forma de fallar: la que hace dudar de lo que uno acaba de teclear.
+ */
+export function parCanonicoRuta(
+  nombreIda: string | null | undefined,
+  nombreRetorno: string | null | undefined
+): { ida: string | null; retorno: string | null } {
+  return {
+    ida: nombreIda ?? nombreRetorno ?? null,
+    retorno: nombreIda ? nombreRetorno ?? null : null,
+  };
+}
+
 export type RutaContratada = {
   id: number;
   cliente_id: number | null;
@@ -140,6 +169,19 @@ export async function guardarPaxContratado(
       throw new Error("La ruta no tiene nombre: no hay contra qué guardar la capacidad.");
     const pax = ruta.pax != null && Number(ruta.pax) > 0 ? Math.round(Number(ruta.pax)) : null;
 
+    // EL PAR CANÓNICO SE CALCULA UNA VEZ Y SIRVE PARA BUSCAR Y PARA ESCRIBIR.
+    //
+    // Antes no era así, y con una ruta de SOLO RETORNO —los adicionales del formato lo
+    // son— la función no podía funcionar nunca: buscaba la ficha con (ida="", retorno=
+    // "RUTA C/ RETORNO 19:00/…") mientras que al guardarla la escribía como (ida="RUTA C/
+    // RETORNO 19:00/…", retorno=null), porque una ficha sin ida sube su retorno al campo
+    // principal. Los dos pares no coincidían, así que NUNCA se encontraba a sí misma: la
+    // primera vez insertaba y todas las siguientes chocaban contra el índice único con
+    // "duplicate key value violates unique constraint uq_cliente_ruta_identidad". Es decir,
+    // la capacidad de una ruta de solo retorno se podía escribir una vez y no corregir
+    // jamás.
+    const { ida: idaCanonica, retorno: retornoCanonico } = parCanonicoRuta(ruta.nombreIda, ruta.nombreRetorno);
+
     // Se busca por el nombre YA normalizado, igual que el índice único de la tabla, para
     // no crear una segunda ficha por un espacio de más.
     const { data: existentes } = await sb
@@ -147,7 +189,7 @@ export async function guardarPaxContratado(
       .select("id,cliente_sede_id,nombre_ida,nombre_retorno")
       .eq("cliente_id", ruta.clienteId);
 
-    const clave = claveRuta(ruta.clienteId, ruta.sedeId, ruta.nombreIda, ruta.nombreRetorno);
+    const clave = claveRuta(ruta.clienteId, ruta.sedeId, idaCanonica, retornoCanonico);
     const yaEsta = ((existentes as any[]) ?? []).find(
       (f) => claveRuta(ruta.clienteId, f.cliente_sede_id, f.nombre_ida, f.nombre_retorno) === clave
     );
@@ -155,8 +197,8 @@ export async function guardarPaxContratado(
     const campos = {
       cliente_id: ruta.clienteId,
       cliente_sede_id: ruta.sedeId ?? null,
-      nombre_ida: ruta.nombreIda ?? ruta.nombreRetorno,
-      nombre_retorno: ruta.nombreIda ? ruta.nombreRetorno ?? null : null,
+      nombre_ida: idaCanonica,
+      nombre_retorno: retornoCanonico,
       pax_contratado: pax,
       ...(ruta.notas !== undefined ? { notas: ruta.notas } : {}),
       updated_at: new Date().toISOString(),
@@ -317,14 +359,19 @@ export function resolverPaxContratado(par: ParServicio, ctx: ContextoPax): numbe
  */
 function clavesCandidatas(par: ParServicio, ctx: ContextoPax): string[] {
   const { ida, retorno } = nombresDelPar(par);
+  const canonico = parCanonicoRuta(ida, retorno);
   const clienteId = par.cabeza.cliente_id ?? null;
   const sedes = [ctx.sedeId, par.cabeza.cliente_sede_id, null];
   const vistas = new Set<string>();
   const claves: string[] = [];
-  for (const s of sedes) {
-    const k = claveRuta(clienteId, s ?? null, ida, retorno);
-    if (!vistas.has(k)) { vistas.add(k); claves.push(k); }
-  }
+  for (const s of sedes)
+    // El par tal como viaja en el servicio, y el par tal como la ficha lo GUARDA. Para una
+    // ruta de ida y retorno son el mismo y la segunda no añade nada; para una de un solo
+    // tramo son distintos, y sin la segunda la ficha guardada es invisible.
+    for (const par2 of [{ ida, retorno }, canonico]) {
+      const k = claveRuta(clienteId, s ?? null, par2.ida, par2.retorno);
+      if (!vistas.has(k)) { vistas.add(k); claves.push(k); }
+    }
   return claves;
 }
 

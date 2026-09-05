@@ -104,6 +104,8 @@ export type TramoHermano = {
   codigo?: string | null;
   direccion_servicio?: string | null;
   estado?: string | null;
+  /** Acuerdo de pago sobre una cancelación. Ver `avisosDe`: cambia si el día vale algo. */
+  falso_flete?: boolean | null;
   precio_cliente?: number | null;
   costo_proveedor?: number | null;
   /**
@@ -191,6 +193,60 @@ export function avisosDe(
   const juzgaCosto = soloJuzgar !== "precio";
   const juzgaPrecio = soloJuzgar !== "costo";
 
+  /**
+   * EL DÍA ENTERO SE CAYÓ Y NADIE ACORDÓ PAGARLO: no falta ningún importe.
+   *
+   * Sin esto, un día cancelado disparaba "Ni este tramo ni el retorno tienen costo: el
+   * día entero no se podrá liquidar al cierre" — cierto y a la vez inútil, porque es
+   * exactamente lo que tiene que pasar. Es el mismo rojo falso que ya se corrigió para el
+   * retorno en S/ 0.00: uno que no se puede arreglar enseña a ignorar los de al lado, y
+   * el de al lado es el que avisa de que el día se está cobrando DOS VECES.
+   */
+  const diaCaido = seCayo(patch.estado) && (!hermano || seCayo(hermano.estado));
+  const conAcuerdo = patch.falso_flete === true || hermano?.falso_flete === true;
+  if (diaCaido) {
+    if (!conAcuerdo) {
+      avisos.push({
+        nivel: "info",
+        texto: juzgaPrecio && !juzgaCosto
+          ? "Servicio cancelado: no se le cobra al cliente. El importe que tenga cargado no entra a la liquidación."
+          : "Servicio cancelado: no se paga ni se cobra. Si el proveedor ya había salido y hay acuerdo por el avance, márcalo como falso flete.",
+      });
+      return avisos;
+    }
+
+    /**
+     * Día caído CON acuerdo de falso flete. Los avisos genéricos del dinero NO sirven
+     * acá y decían justo lo contrario de lo que pasa: "el día entero no se podrá
+     * liquidar al cierre" sobre un día que, por estar marcado, SÍ se va a liquidar. Lo
+     * que falta no es el importe del servicio: es el monto del avance.
+     *
+     * Del lado VENTA no se juzga nada: al cliente no se le cobra la cancelación, así que
+     * un "sin precio de venta" aquí sería un rojo imposible de atender.
+     */
+    if (juzgaCosto) {
+      if (costo > 0 && costoHermano > 0)
+        avisos.push({
+          nivel: "alerta",
+          texto: `Falso flete con monto en los DOS tramos (${nombreTramo(hermano)} lleva S/ ${costoHermano.toFixed(2)}). ` +
+                 `El avance se paga una vez por día: déjalo en un solo tramo o se pagará doble.`,
+        });
+      else if (costo <= 0 && costoHermano <= 0)
+        avisos.push({
+          nivel: "alerta",
+          texto: "Marcaste falso flete pero ningún tramo del día lleva monto. Escribe el avance acordado " +
+                 "con el proveedor, o desmarca la casilla y el día no se paga.",
+        });
+      else if (costo <= 0)
+        avisos.push({
+          nivel: "info",
+          texto: `El avance del día va en ${nombreTramo(hermano)} (${refTramo(hermano)}): S/ ${costoHermano.toFixed(2)}. ` +
+                 `Este tramo va en 0 a propósito.`,
+        });
+    }
+    return avisos;
+  }
+
   if (esTercero && juzgaCosto) {
     if (hermano) importeDelDia(costo, costoHermano, "costo", "S/");
     else if (costo <= 0)
@@ -218,12 +274,15 @@ export function avisosDe(
       texto: "Cambió el costo pactado. Elige el motivo para que quede sustentado.",
     });
 
-  const precioAntes = Number(anterior?.precio_cliente ?? 0);
-  if (juzgaPrecio && precioAntes > 0 && precio > precioAntes)
-    avisos.push({
-      nivel: "info",
-      texto: "Subió el precio de venta: se generará un enlace de conformidad para que el cliente lo acepte.",
-    });
+  // Acá vivía "Subió el precio de venta: se generará un enlace de conformidad para que
+  // el cliente lo acepte". Se quitó con el enlace que anunciaba (fase 6, ver
+  // supabase/pacto-06-sin-conformidad-de-cambio.sql): la firma del cliente se pide UNA
+  // vez por periodo, en la liquidación del cierre, y no servicio por servicio.
+  //
+  // No se reemplaza por otro aviso. Subir el precio ya pide su motivo en la misma
+  // pantalla y queda en el acta de venta; un `info` que solo dijera "esto quedó
+  // registrado" es ruido, y el ruido en este panel se paga caro: es el mismo sitio
+  // donde sale el aviso de que el día se está cobrando DOS VECES.
 
   return avisos;
 }
@@ -284,6 +343,14 @@ const COLUMNAS_OPCIONALES: Record<string, { sql: string; que: string }> = {
   capacidad_contratada: {
     sql: "supabase/liquidaciones-03-ruta-contratada.sql",
     que: "los PAX contratados",
+  },
+  falso_flete: {
+    sql: "supabase/reservas-05-falso-flete.sql",
+    que: "el acuerdo de falso flete (el servicio cancelado se seguirá tratando como S/ 0.00)",
+  },
+  falso_flete_motivo: {
+    sql: "supabase/reservas-05-falso-flete.sql",
+    que: "el motivo del falso flete",
   },
 };
 
