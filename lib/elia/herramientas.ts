@@ -6,6 +6,7 @@
 // ============================================================
 import { createClient } from "@supabase/supabase-js";
 import { etiquetaEstado, etiquetaAdmin } from "@/lib/estados";
+import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/documentos-estado";
 import type {
   BloqueUI,
   ServicioUI,
@@ -82,13 +83,15 @@ const tienePermiso = (ctx: { permisos: string[]; rol: string }, modulos: string[
 const puedeVerPrecios = (ctx: { permisos: string[]; rol: string }) =>
   tienePermiso(ctx, ["facturacion", "reportes", "cotizaciones", "gastos"]);
 
-// Documentos vehiculares obligatorios (mismo criterio que documentos-vehiculares)
+// Documentos vehiculares obligatorios (mismo criterio que documentos-vehiculares).
+// Se comparan SIEMPRE contra `etiquetaTipoDoc(tipo)`: en la base el tipo es texto tecleado
+// y hay filas con el nombre viejo ("Habilitación SUTRAN", "Permiso Operación MTC").
 const DOCS_OBLIGATORIOS = new Set([
   "SOAT",
   "Revisión Técnica (CITV)",
   "Tarjeta de Propiedad",
-  "Habilitación SUTRAN",
-  "Permiso Operación MTC",
+  "Tarjeta Única de Circulación (TUC)",
+  "Habilitación Vehicular (MTC/ATU)",
   "Tarjeta de Circulación",
 ]);
 
@@ -452,7 +455,7 @@ const TOOLS_DEF: any[] = [
   {
     name: "consultar_tercerizadas",
     description:
-      "Semáforo de riesgo de las EMPRESAS tercerizadas: documentos obligatorios (SOAT, CITV, SUTRAN, MTC, Tarjeta de Propiedad, SCTR) vencidos o por vencer, licencias de sus conductores, tamaño de su flota y servicios que nos hicieron en el período. Úsala para '¿qué empresas tercerizadas están en riesgo?', '¿con quién trabajamos más?'.",
+      "Semáforo de riesgo de las EMPRESAS tercerizadas: documentos obligatorios (SOAT, CITV, TUC, Habilitación Vehicular MTC/ATU, Tarjeta de Propiedad, SCTR) vencidos o por vencer, licencias de sus conductores, tamaño de su flota y servicios que nos hicieron en el período. Úsala para '¿qué empresas tercerizadas están en riesgo?', '¿con quién trabajamos más?'.",
     input_schema: {
       type: "object",
       properties: {
@@ -628,7 +631,8 @@ export async function calcularRadar(sb: SB, permisos: string[], rol: string): Pr
       const { data } = await sb.from("documentos_vehiculo").select("vehiculo_id, tipo, fecha_vencimiento");
       let vencidos = 0, porVencer = 0;
       for (const d of (data as any[]) ?? []) {
-        if (!DOCS_OBLIGATORIOS.has(d.tipo)) continue;
+        if (!DOCS_OBLIGATORIOS.has(etiquetaTipoDoc(d.tipo))) continue;
+        if (docSinVencimiento(d.tipo)) continue;
         const dias = diasPara(d.fecha_vencimiento);
         if (dias === null) continue;
         if (dias < 0) vencidos++;
@@ -648,6 +652,7 @@ export async function calcularRadar(sb: SB, permisos: string[], rol: string): Pr
       const vencidasPorEmpresa = new Set<number>();
       const porVencerPorEmpresa = new Set<number>();
       for (const d of (data as any[]) ?? []) {
+        if (docSinVencimiento(d.tipo)) continue;
         const dias = diasPara(d.fecha_vencimiento);
         if (dias === null) continue;
         if (dias < 0) vencidasPorEmpresa.add(d.empresa_id);
@@ -901,9 +906,10 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
 
             const porVehiculo: Record<number, { tipo: string; dias: number }[]> = {};
             for (const d of (docs as any[]) ?? []) {
+              if (docSinVencimiento(d.tipo)) continue;
               const dias = diasPara(d.fecha_vencimiento);
               if (dias === null || dias > 30) continue;
-              (porVehiculo[d.vehiculo_id] ||= []).push({ tipo: d.tipo, dias });
+              (porVehiculo[d.vehiculo_id] ||= []).push({ tipo: etiquetaTipoDoc(d.tipo), dias });
             }
 
             itemsPropios = flota.map((v) => {
@@ -2629,15 +2635,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
         const unidadesPorEmpresa: Record<number, number> = {};
         for (const v of (vt as any[]) ?? []) unidadesPorEmpresa[v.empresa_id] = (unidadesPorEmpresa[v.empresa_id] || 0) + 1;
 
-        const OBLIG_TERCERO = new Set([
-          "SOAT",
-          "Revisión Técnica (CITV)",
-          "Habilitación SUTRAN",
-          "Permiso Operación MTC",
-          "Tarjeta de Propiedad",
-          "SCTR Salud",
-          "SCTR Pensión",
-        ]);
+        const OBLIG_TERCERO = new Set(tiposObligatorios(true).map((t) => t.canonico));
         const detalle = empresas.map((e) => {
           const docs = ((dt as any[]) ?? []).filter((d) => d.empresa_id === e.id);
           const vencidos: string[] = [];
@@ -2645,8 +2643,12 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
           for (const d of docs) {
             const dias = diasPara(d.fecha_vencimiento);
             if (dias === null) continue;
-            if (dias < 0 && OBLIG_TERCERO.has(d.tipo)) vencidos.push(d.tipo);
-            else if (dias >= 0 && dias <= 30 && OBLIG_TERCERO.has(d.tipo)) porVencer.push(`${d.tipo} (${dias}d)`);
+            const nom = etiquetaTipoDoc(d.tipo);
+            // Un documento que no caduca no entra por la fecha: si arrastra una tecleada por
+            // error, ELIA reportaría como "vencida" una unidad en regla.
+            if (docSinVencimiento(d.tipo)) continue;
+            if (dias < 0 && OBLIG_TERCERO.has(nom)) vencidos.push(nom);
+            else if (dias >= 0 && dias <= 30 && OBLIG_TERCERO.has(nom)) porVencer.push(`${nom} (${dias}d)`);
           }
           for (const [campo, etiqueta] of [
             ["venc_autorizacion", "Autorización MTC"],

@@ -8,6 +8,7 @@ import DescargaMasivaModal from "@/components/seguimiento/DescargaMasivaModal";
 import FichaServicioNueva from "@/components/seguimiento/FichaServicio";
 import ModalRutaMasiva from "@/components/seguimiento/ModalRutaMasiva";
 import { supabase } from "@/lib/supabase";
+import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/documentos-estado";
 import { ESTADOS_RESERVA } from "@/lib/estados";
 import { idAfa } from "@/lib/folio";
 import { esAbordado } from "@/lib/documentos-servicio";
@@ -203,10 +204,20 @@ const TIPOS_SERVICIO_FIJO_SEG = new Set([
   "fijo_reten",
 ]);
 function esEventual(r: Reserva): boolean { return !TIPOS_SERVICIO_FIJO_SEG.has(r.tipo_servicio_detalle || ""); }
+// Las dos listas de obligatorios que esta pantalla tenía hardcodeadas (PROBLEMA 2 de
+// lib/documentos-estado.ts) se DERIVAN del catálogo, y se comparan contra la etiqueta
+// canónica: en la base el tipo es texto tecleado, así que un `includes(d.tipo)` sobre
+// literales deja de reconocer la fila en cuanto alguien renombra el documento — que es
+// justo lo que pasó con "Habilitación SUTRAN" → TUC. Un control que se apaga sin avisar.
+const OBL_SEG = new Set(tiposObligatorios(true).map(t => t.canonico));
+const obligVencido = (d: { tipo: string; fecha_vencimiento?: string | null }) =>
+  // `docSinVencimiento` primero: la Tarjeta de Propiedad no caduca, y una fecha suya
+  // tecleada por error bloquearía un servicio que está en regla.
+  !docSinVencimiento(d.tipo) && OBL_SEG.has(etiquetaTipoDoc(d.tipo)) && (diasPara(d.fecha_vencimiento) ?? 1) < 0;
+
 function riesgoEmpresaDocs(docs: DocTer[], empresaId: number|null): boolean {
   if (!empresaId) return false;
-  const OBL = ["SOAT","Revisión Técnica (CITV)","Habilitación SUTRAN","Permiso Operación MTC"];
-  return docs.some(d => d.empresa_id === empresaId && OBL.includes(d.tipo) && (diasPara(d.fecha_vencimiento) ?? 1) < 0);
+  return docs.some(d => d.empresa_id === empresaId && obligVencido(d));
 }
 function seguroVehiculoVenceHoy(docs: DocVeh[], vehiculoId: number|null): boolean {
   if (!vehiculoId) return false;
@@ -220,12 +231,13 @@ function seguroVehiculoVenceHoy(docs: DocVeh[], vehiculoId: number|null): boolea
 // Documentos vencidos (fecha de vencimiento ya pasada): bloquean la salida.
 function docsVencidosVehiculo(docs: DocVeh[], vehiculoId: number|null): string[] {
   if (!vehiculoId) return [];
-  return docs.filter(d => d.vehiculo_id === vehiculoId && (diasPara(d.fecha_vencimiento) ?? 1) < 0).map(d => d.tipo);
+  return docs
+    .filter(d => d.vehiculo_id === vehiculoId && !docSinVencimiento(d.tipo) && (diasPara(d.fecha_vencimiento) ?? 1) < 0)
+    .map(d => etiquetaTipoDoc(d.tipo));
 }
 function docsVencidosEmpresa(docs: DocTer[], empresaId: number|null): string[] {
   if (!empresaId) return [];
-  const OBL = ["SOAT","Revisión Técnica (CITV)","Habilitación SUTRAN","Permiso Operación MTC"];
-  return docs.filter(d => d.empresa_id === empresaId && OBL.includes(d.tipo) && (diasPara(d.fecha_vencimiento) ?? 1) < 0).map(d => d.tipo);
+  return docs.filter(d => d.empresa_id === empresaId && obligVencido(d)).map(d => etiquetaTipoDoc(d.tipo));
 }
 
 // ── Alertas de flota cruzadas entre servicios (solape de recurso + jornada del conductor) ──

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/documentos-estado";
 
 // ─── TOKENS ──────────────────────────────────────────────────────────────────
 const C = {
@@ -110,7 +111,15 @@ function fmtFecha(f: string | null) {
   if (!f) return "—";
   return new Date(f + "T00:00:00").toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
-const DOCS_OBL = ["SOAT", "Revisión Técnica (CITV)", "Habilitación SUTRAN", "Permiso Operación MTC"];
+// Se DERIVA del catálogo y se compara por etiqueta canónica: la lista literal que había aquí
+// dejaba de reconocer sus propias filas en cuanto se renombraba un documento, sin fallar.
+const DOCS_OBL_SET = new Set(tiposObligatorios(true).map(t => t.canonico));
+/** ¿Es un obligatorio VENCIDO? La Tarjeta de Propiedad nunca lo es: no caduca. */
+const oblVencido = (d: { tipo: string; fecha_vencimiento?: string | null }) =>
+  !docSinVencimiento(d.tipo) && DOCS_OBL_SET.has(etiquetaTipoDoc(d.tipo)) && estadoFecha(d.fecha_vencimiento ?? null) === "vencido";
+/** ¿Es un obligatorio POR VENCER (≤30 días)? */
+const oblPorVencer = (d: { tipo: string; fecha_vencimiento?: string | null }) =>
+  !docSinVencimiento(d.tipo) && DOCS_OBL_SET.has(etiquetaTipoDoc(d.tipo)) && estadoFecha(d.fecha_vencimiento ?? null) === "por_vencer";
 
 // ─── ÁTOMOS ───────────────────────────────────────────────────────────────────
 function Card({ children, pad = 18, style = {}, onClick }: {
@@ -631,7 +640,7 @@ export default function DashboardPage() {
 
   const docsVenc    = docsVehiculo.filter(d => estadoFecha(d.fecha_vencimiento) === "vencido").length;
   const docsPorVenc = docsVehiculo.filter(d => estadoFecha(d.fecha_vencimiento) === "por_vencer").length;
-  const docsOblVenc = docsVehiculo.filter(d => DOCS_OBL.includes(d.tipo) && estadoFecha(d.fecha_vencimiento) === "vencido").length;
+  const docsOblVenc = docsVehiculo.filter(oblVencido).length;
 
   const neuActivos  = neumaticos.filter(n => n.estado === "activo");
   const neuCrit     = neuActivos.filter(n => { const km=Number(n.km_actual||0)-Number(n.km_instalacion||0); const v=Number(n.vida_util_km||80000); return v>0&&(km/v)>=0.9; }).length;
@@ -646,8 +655,8 @@ export default function DashboardPage() {
   const mantPend    = mantenimiento.filter(m => m.estado === "pendiente").length;
   const mantProx    = mantenimiento.filter(m => { const d=diasPara(m.proxima_fecha); return d!==null&&d>=0&&d<=15; }).length;
 
-  const empConRiesgo = empresasTer.filter(e => docsTercero.filter(d=>d.empresa_id===e.id).some(d=>DOCS_OBL.includes(d.tipo)&&estadoFecha(d.fecha_vencimiento)==="vencido")).length;
-  const empPorVenc   = empresasTer.filter(e => !docsTercero.filter(d=>d.empresa_id===e.id).some(d=>DOCS_OBL.includes(d.tipo)&&estadoFecha(d.fecha_vencimiento)==="vencido")&&docsTercero.filter(d=>d.empresa_id===e.id).some(d=>DOCS_OBL.includes(d.tipo)&&estadoFecha(d.fecha_vencimiento)==="por_vencer")).length;
+  const empConRiesgo = empresasTer.filter(e => docsTercero.filter(d=>d.empresa_id===e.id).some(oblVencido)).length;
+  const empPorVenc   = empresasTer.filter(e => !docsTercero.filter(d=>d.empresa_id===e.id).some(oblVencido) && docsTercero.filter(d=>d.empresa_id===e.id).some(oblPorVencer)).length;
 
   // ── Alertas ─────────────────────────────────────────────────────────────────
   type Alerta = { tipo: "critico"|"atencion"|"info"|"ok"; texto: string; href?: string; orden: number };
@@ -1043,8 +1052,8 @@ export default function DashboardPage() {
               ? <p style={{ fontSize:13, color:C.mute, textAlign:"center", padding:"12px 0" }}>Sin empresas registradas</p>
               : empresasTer.slice(0, 5).map(e => {
                   const docs = docsTercero.filter(d => d.empresa_id === e.id);
-                  const venc = docs.some(d => DOCS_OBL.includes(d.tipo) && estadoFecha(d.fecha_vencimiento) === "vencido");
-                  const porV = !venc && docs.some(d => DOCS_OBL.includes(d.tipo) && estadoFecha(d.fecha_vencimiento) === "por_vencer");
+                  const venc = docs.some(oblVencido);
+                  const porV = !venc && docs.some(oblPorVencer);
                   const code = e.razon_social.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
                   return (
                     <div key={e.id} onClick={() => router.push("/tercerizadas")} style={{

@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { paginarFilas } from "@/lib/huella";
 import OdometroTerceroModal from "./_components/OdometroTerceroModal";
 import { DISTRITOS_LIMA, distanciaDistritos, etiquetaDistancia } from "@/lib/distritos-lima";
+import { ambitoTipoDoc, docSinVencimiento, etiquetaTipoDoc } from "@/lib/documentos-estado";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -75,18 +76,29 @@ type DetalleEmpresa = {
 
 // ─── TIPOS DOC ────────────────────────────────────────────────────────────────
 
+// Las CLAVES son las etiquetas canónicas de lib/documentos-estado.ts. Nunca se indexa este
+// Record con `d.tipo` crudo: en la base el tipo es texto tecleado y hay filas con el nombre
+// viejo ("Habilitación SUTRAN") o sin tildes. Siempre `etiquetaTipoDoc(d.tipo)` primero, que
+// es lo que hace que renombrar un documento no le apague la marca de OBLIGATORIO.
 const TIPOS_DOC_TERCERO: Record<string, { icon: string; obligatorio: boolean }> = {
-  "SOAT":                     { icon: "🚗", obligatorio: true  },
-  "Revisión Técnica (CITV)":  { icon: "🔍", obligatorio: true  },
-  "Habilitación SUTRAN":      { icon: "✅", obligatorio: true  },
-  "Permiso Operación MTC":    { icon: "🏛️", obligatorio: true  },
-  "Tarjeta de Propiedad":     { icon: "📋", obligatorio: true  },
-  "SCTR Salud":               { icon: "🏥", obligatorio: true  },
-  "SCTR Pensión":             { icon: "💼", obligatorio: true  },
-  "Seguro Todo Riesgo":       { icon: "🛡️", obligatorio: false },
-  "Responsabilidad Civil":    { icon: "⚖️", obligatorio: false },
-  "Otro":                     { icon: "📄", obligatorio: false },
+  "SOAT":                              { icon: "🚗", obligatorio: true  },
+  "Revisión Técnica (CITV)":           { icon: "🔍", obligatorio: true  },
+  "Tarjeta Única de Circulación (TUC)":{ icon: "✅", obligatorio: true  },
+  "Habilitación Vehicular (MTC/ATU)":  { icon: "🏛️", obligatorio: true  },
+  "Tarjeta de Propiedad":              { icon: "📋", obligatorio: true  },
+  // Seguros del TRABAJADOR, no de la placa: `ambitoTipoDoc` los marca "personal" y por eso
+  // no se le reclaman a una unidad concreta. Vida Ley faltaba y es igual de obligatoria.
+  "SCTR Salud":                        { icon: "🏥", obligatorio: true  },
+  "SCTR Pensión":                      { icon: "💼", obligatorio: true  },
+  "Vida Ley":                          { icon: "🧾", obligatorio: true  },
+  "Seguro Todo Riesgo":                { icon: "🛡️", obligatorio: false },
+  "Responsabilidad Civil":             { icon: "⚖️", obligatorio: false },
+  "Otro":                              { icon: "📄", obligatorio: false },
 };
+
+/** Config del tipo de UNA fila, resolviendo antes la etiqueta canónica. */
+const cfgTipoDoc = (tipo: string | null | undefined) =>
+  TIPOS_DOC_TERCERO[etiquetaTipoDoc(tipo)] ?? null;
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -94,12 +106,32 @@ function diasPara(f: string | null): number | null {
   if (!f) return null;
   return Math.ceil((new Date(f + "T00:00:00").getTime() - Date.now()) / 86400000);
 }
-function estadoDoc(f: string | null): "vigente" | "por_vencer" | "vencido" | "sin_fecha" {
+
+type EstDoc = "vigente" | "por_vencer" | "vencido" | "sin_fecha" | "sin_vencimiento";
+
+/** Estado de una FECHA suelta: las habilitaciones MTC/SUTRAN de la empresa, que no son
+ *  filas de `documentos_tercero` y por tanto no tienen tipo que consultar. */
+function estadoDoc(f: string | null): Exclude<EstDoc, "sin_vencimiento"> {
   const d = diasPara(f);
   if (d === null) return "sin_fecha";
   if (d < 0)    return "vencido";
   if (d <= 30)  return "por_vencer";
   return "vigente";
+}
+
+/**
+ * Estado de una FILA de documento. El TIPO manda sobre la fecha, y ese orden es todo el
+ * arreglo: la Tarjeta de Propiedad (TIVE) que emite SUNARP no tiene fecha de vencimiento,
+ * así que la pantalla la sacaba como "Sin fecha" y `calcAptitud` la contaba como motivo de
+ * REVISAR — un ámbar permanente por un dato que no existe y que nadie podía completar. Tres
+ * de las cuatro unidades de la captura del dueño estaban en ámbar por esto.
+ *
+ * Si además hay una fecha tecleada por error se ignora igual: un documento que no caduca no
+ * puede estar vencido, y dejar que caduque sería el mismo ámbar disfrazado de rojo.
+ */
+function estadoDocumento(d: { tipo?: string | null; fecha_vencimiento: string | null }): EstDoc {
+  if (docSinVencimiento(d.tipo)) return "sin_vencimiento";
+  return estadoDoc(d.fecha_vencimiento);
 }
 function fmtFecha(f: string | null) {
   if (!f) return "—";
@@ -133,11 +165,14 @@ const telE164 = (t: string | null | undefined) => {
   return d.length === 9 ? "51" + d : d;
 };
 
-const ESTADO_DOC_CFG = {
+const ESTADO_DOC_CFG: Record<EstDoc, { label: string; bg: string; color: string; dot: string }> = {
   vigente:    { label: "Vigente",    bg: "#dcfce7", color: "#166534", dot: "#16a34a" },
   por_vencer: { label: "Por vencer", bg: "#fef9c3", color: "#854d0e", dot: "#eab308" },
   vencido:    { label: "Vencido",    bg: "#fee2e2", color: "#991b1b", dot: "#dc2626" },
   sin_fecha:  { label: "Sin fecha",  bg: "#f3f4f6", color: "#4b5563", dot: "#9ca3af" },
+  // Azul informativo, no verde: "Vigente" se lee como "al día HASTA una fecha", y aquí no
+  // hay ninguna. Tampoco el gris de "Sin fecha", que se lee como dato pendiente.
+  sin_vencimiento: { label: "No vence", bg: "#e0f2fe", color: "#075985", dot: "#0284c7" },
 };
 
 const NIVEL_CFG: Record<Nivel, { label: string; bg: string; color: string; borde: string; icono: string }> = {
@@ -152,8 +187,8 @@ const OBLIGATORIOS = Object.entries(TIPOS_DOC_TERCERO).filter(([, v]) => v.oblig
 // habilitaciones propias de la empresa (MTC/SUTRAN), que antes no entraban al semáforo.
 function calcRiesgo(docs: DocumentoTercero[], conductores: ConductorTercero[], emp?: Empresa | null): Nivel {
   if (emp && emp.estado === "suspendido") return "alto";
-  const docVencidos = docs.filter(d => estadoDoc(d.fecha_vencimiento) === "vencido" &&
-    TIPOS_DOC_TERCERO[d.tipo]?.obligatorio).length;
+  const docVencidos = docs.filter(d => estadoDocumento(d) === "vencido" &&
+    cfgTipoDoc(d.tipo)?.obligatorio).length;
   const licVencidas = conductores.filter(c => {
     const d = diasPara(c.vencimiento_licencia);
     return d !== null && d < 0;
@@ -162,8 +197,8 @@ function calcRiesgo(docs: DocumentoTercero[], conductores: ConductorTercero[], e
     ? [emp.venc_autorizacion, emp.venc_habilitacion].filter(f => estadoDoc(f) === "vencido").length
     : 0;
   if (docVencidos > 0 || licVencidas > 0 || habVencidas > 0) return "alto";
-  const docPorV = docs.filter(d => estadoDoc(d.fecha_vencimiento) === "por_vencer" &&
-    TIPOS_DOC_TERCERO[d.tipo]?.obligatorio).length;
+  const docPorV = docs.filter(d => estadoDocumento(d) === "por_vencer" &&
+    cfgTipoDoc(d.tipo)?.obligatorio).length;
   const licPorV = conductores.filter(c => {
     const d = diasPara(c.vencimiento_licencia);
     return d !== null && d >= 0 && d <= 30;
@@ -178,9 +213,21 @@ function calcRiesgo(docs: DocumentoTercero[], conductores: ConductorTercero[], e
 // PUNTO CIEGO HISTÓRICO: calcRiesgo solo castiga documentos REGISTRADOS y vencidos, así que
 // un proveedor que nunca cargó su SOAT salía ✅ verde. Esto lo detecta, pero como dimensión
 // aparte (chip "Sin documentos") para no teñir de rojo a toda la cartera.
-function docsObligFaltantes(docs: DocumentoTercero[]): string[] {
-  const presentes = new Set(docs.map(d => d.tipo));
-  return OBLIGATORIOS.filter(t => !presentes.has(t));
+/**
+ * Obligatorios que ninguna fila cubre.
+ *
+ * `soloUnidad` acota la lista a los documentos de la PLACA. Filtrando por BUI-272 el ERP
+ * reclamaba "SCTR Salud" y "SCTR Pensión" como obligatorios sin registrar de esa unidad, y
+ * un bus no tiene SCTR: la póliza es de las personas que lo conducen. El chip llevaba a un
+ * formulario donde lo único que se podía hacer era colgarle a la placa un documento que no
+ * es suyo — y mientras tanto la lista de pendientes nunca bajaba de tres.
+ */
+function docsObligFaltantes(docs: DocumentoTercero[], soloUnidad = false): string[] {
+  // Por etiqueta CANÓNICA: con `d.tipo` crudo, la fila que dice "Habilitación SUTRAN" no
+  // casaba con la clave nueva y el documento salía como faltante teniéndolo cargado.
+  const presentes = new Set(docs.map(d => etiquetaTipoDoc(d.tipo)));
+  return OBLIGATORIOS.filter(t =>
+    !presentes.has(t) && (!soloUnidad || ambitoTipoDoc(t) === "unidad"));
 }
 
 // Veredicto de UNA unidad, en una frase con causa concreta: es lo que el operador
@@ -203,12 +250,15 @@ function calcAptitud(
   const cands: Cand[] = [];
 
   for (const d of aplican) {
-    if (!TIPOS_DOC_TERCERO[d.tipo]?.obligatorio) continue;
-    const est = estadoDoc(d.fecha_vencimiento);
+    if (!cfgTipoDoc(d.tipo)?.obligatorio) continue;
+    const est = estadoDocumento(d);
     const dias = diasPara(d.fecha_vencimiento);
-    if (est === "vencido" && dias !== null) cands.push({ nivel: "alto",  dias, texto: `${d.tipo} vencido hace ${Math.abs(dias)} d` });
-    if (est === "por_vencer" && dias !== null) cands.push({ nivel: "medio", dias, texto: `${d.tipo} vence en ${dias} d` });
-    if (est === "sin_fecha") cands.push({ nivel: "medio", dias: 9999, texto: `${d.tipo} sin fecha de vencimiento` });
+    const nom = etiquetaTipoDoc(d.tipo);
+    if (est === "vencido" && dias !== null) cands.push({ nivel: "alto",  dias, texto: `${nom} vencido hace ${Math.abs(dias)} d` });
+    if (est === "por_vencer" && dias !== null) cands.push({ nivel: "medio", dias, texto: `${nom} vence en ${dias} d` });
+    // "sin_fecha" sigue siendo un aviso legítimo: al SOAT le falta un dato que existe.
+    // "sin_vencimiento" no genera candidato ninguno — no hay nada que revisar ni que renovar.
+    if (est === "sin_fecha") cands.push({ nivel: "medio", dias: 9999, texto: `${nom} sin fecha de vencimiento` });
   }
   for (const h of [
     { label: "Autorización MTC", f: emp.venc_autorizacion },
@@ -227,8 +277,14 @@ function calcAptitud(
   const medios = cands.filter(c => c.nivel === "medio").sort((a, b) => a.dias - b.dias);
   if (medios.length) return { nivel: "medio", causa: medios[0].texto };
 
-  const faltan = docsObligFaltantes(aplican);
-  if (faltan.length >= OBLIGATORIOS.length) return { nivel: "medio", causa: "Sin documentos cargados" };
+  // Con `veh` la pregunta es "¿puede salir ESTA unidad?", y el SCTR de los conductores no
+  // se responde desde su ficha. Sin `veh` (veredicto de la empresa entera) sí cuentan.
+  const faltan = docsObligFaltantes(aplican, !!veh);
+  // El "no hay NADA" se mide contra el total del mismo ámbito: comparando siempre contra los
+  // 8 de la empresa, una unidad sin un solo papel nunca llegaba al tope (tiene 5 exigibles)
+  // y salía como "Faltan 5 documentos obligatorios", que suena a que hay algo cargado.
+  const totalExigible = veh ? OBLIGATORIOS.filter(t => ambitoTipoDoc(t) === "unidad").length : OBLIGATORIOS.length;
+  if (faltan.length >= totalExigible) return { nivel: "medio", causa: "Sin documentos cargados" };
   if (faltan.length > 0) return { nivel: "medio", causa: `Faltan ${faltan.length} documento${faltan.length > 1 ? "s" : ""} obligatorio${faltan.length > 1 ? "s" : ""}` };
   return { nivel: "ok", causa: "Sin vencimientos próximos" };
 }
@@ -310,7 +366,7 @@ export default function EmpresasTercerizadasPage() {
   const [busqCond,   setBusqCond]   = useState("");
   const [filtroLic,  setFiltroLic]  = useState<"todos" | "vencida" | "por_vencer" | "app">("todos");
   const [limiteCond, setLimiteCond] = useState(50);
-  const [filtroDoc,  setFiltroDoc]  = useState<"todos" | "vencido" | "por_vencer" | "vigente" | "sin_fecha">("todos");
+  const [filtroDoc,  setFiltroDoc]  = useState<"todos" | EstDoc>("todos");
   const [filtroDocVeh, setFiltroDocVeh] = useState("");
   const [limiteDoc,  setLimiteDoc]  = useState(50);
 
@@ -370,12 +426,16 @@ export default function EmpresasTercerizadasPage() {
   const aprobarRevision = async (r: RevisionPendiente) => {
     setProcesandoRevision(r.id);
     try {
+      // Aprobar es la puerta por la que un texto de fuera entra a `documentos_tercero`: se
+      // canoniza el tipo (el proveedor pudo mandarlo con el nombre viejo) y se anula la fecha
+      // si el documento no caduca — la misma regla que aplica el formulario interno.
+      const tipoAprobado = etiquetaTipoDoc(r.tipo);
       const payloadDoc = {
         empresa_id: r.empresa_id,
         vehiculo_id: r.vehiculo_id,
-        tipo: r.tipo,
+        tipo: tipoAprobado,
         numero: r.numero,
-        fecha_vencimiento: r.fecha_vencimiento_propuesta,
+        fecha_vencimiento: docSinVencimiento(tipoAprobado) ? null : r.fecha_vencimiento_propuesta,
         entidad_emisora: r.entidad_emisora,
         archivo_url: r.archivo_url,
       };
@@ -399,7 +459,7 @@ export default function EmpresasTercerizadasPage() {
   };
 
   const rechazarRevision = async (r: RevisionPendiente) => {
-    const motivo = prompt(`¿Por qué se rechaza "${r.tipo}"? Se lo enviamos al proveedor para que lo corrija.`);
+    const motivo = prompt(`¿Por qué se rechaza "${etiquetaTipoDoc(r.tipo)}"? Se lo enviamos al proveedor para que lo corrija.`);
     if (motivo === null) return;
     setProcesandoRevision(r.id);
     try {
@@ -497,7 +557,7 @@ export default function EmpresasTercerizadasPage() {
       m[e.id] = {
         nivel: calcRiesgo(docs, conds, e),
         faltan: docsObligFaltantes(docs).length,
-        venc: docs.filter(d => estadoDoc(d.fecha_vencimiento) === "vencido").length
+        venc: docs.filter(d => estadoDocumento(d) === "vencido").length
             + conds.filter(c => { const x = diasPara(c.vencimiento_licencia); return x !== null && x < 0; }).length,
       };
     }
@@ -514,8 +574,8 @@ export default function EmpresasTercerizadasPage() {
   // ── Alertas empresa seleccionada ──────────────────────────────────────────
 
   const riesgoEmp = empActual ? calcRiesgo(docEmpresa, condEmpresa, empActual) : "ok";
-  const docsVencOblig  = docEmpresa.filter(d => estadoDoc(d.fecha_vencimiento) === "vencido" && TIPOS_DOC_TERCERO[d.tipo]?.obligatorio);
-  const docsPorVOblig  = docEmpresa.filter(d => estadoDoc(d.fecha_vencimiento) === "por_vencer" && TIPOS_DOC_TERCERO[d.tipo]?.obligatorio);
+  const docsVencOblig  = docEmpresa.filter(d => estadoDocumento(d) === "vencido" && cfgTipoDoc(d.tipo)?.obligatorio);
+  const docsPorVOblig  = docEmpresa.filter(d => estadoDocumento(d) === "por_vencer" && cfgTipoDoc(d.tipo)?.obligatorio);
   const licVencidas    = condEmpresa.filter(c => diasPara(c.vencimiento_licencia) !== null && diasPara(c.vencimiento_licencia)! < 0);
   const aptitudEmp     = empActual ? calcAptitud(null, empActual, docEmpresa, condEmpresa) : null;
 
@@ -865,7 +925,10 @@ export default function EmpresasTercerizadasPage() {
       vehiculo_id: formDoc.vehiculo_id ? Number(formDoc.vehiculo_id) : null,
       tipo: formDoc.tipo,
       numero: formDoc.numero.trim() || null,
-      fecha_vencimiento: formDoc.fecha_vencimiento || null,
+      // Se GUARDA null, no solo se oculta la casilla: editar un documento que ya traía una
+      // fecha vieja tiene que limpiarla, o el dato malo sobrevive al arreglo y vuelve a salir
+      // en cualquier pantalla que todavía mire la columna en crudo.
+      fecha_vencimiento: docSinVencimiento(formDoc.tipo) ? null : (formDoc.fecha_vencimiento || null),
       entidad_emisora: formDoc.entidad_emisora.trim() || null,
       archivo_url: formDoc.archivo_url.trim() || null,
       observaciones: formDoc.observaciones.trim() || null,
@@ -910,15 +973,16 @@ export default function EmpresasTercerizadasPage() {
 
   // Copia antes de ordenar: docEmpresa viene del estado y .sort() lo mutaría en pleno render.
   const docsFiltrados = useMemo(() => {
-    const ord = { vencido: 0, por_vencer: 1, sin_fecha: 2, vigente: 3 };
+    // "No vence" va al final: lo urgente arriba, y lo que no tiene nada que vigilar, abajo.
+    const ord: Record<EstDoc, number> = { vencido: 0, por_vencer: 1, sin_fecha: 2, vigente: 3, sin_vencimiento: 4 };
     return [...docEmpresa]
       .filter(d => {
-        if (filtroDoc !== "todos" && estadoDoc(d.fecha_vencimiento) !== filtroDoc) return false;
+        if (filtroDoc !== "todos" && estadoDocumento(d) !== filtroDoc) return false;
         if (filtroDocVeh === "empresa" && d.vehiculo_id !== null) return false;
         if (filtroDocVeh && filtroDocVeh !== "empresa" && String(d.vehiculo_id) !== filtroDocVeh) return false;
         return true;
       })
-      .sort((a, b) => (ord[estadoDoc(a.fecha_vencimiento)] ?? 3) - (ord[estadoDoc(b.fecha_vencimiento)] ?? 3));
+      .sort((a, b) => (ord[estadoDocumento(a)] ?? 3) - (ord[estadoDocumento(b)] ?? 3));
   }, [docEmpresa, filtroDoc, filtroDocVeh]);
 
   // ── Piezas de UI reutilizadas ─────────────────────────────────────────────
@@ -1370,7 +1434,7 @@ export default function EmpresasTercerizadasPage() {
                       const dias = diasPara(d.fecha_vencimiento);
                       return (
                         <p key={d.id}>
-                          · <b>{d.tipo}</b> vencido{dias !== null ? ` hace ${Math.abs(dias)} d` : ""} —{" "}
+                          · <b>{etiquetaTipoDoc(d.tipo)}</b> vencido{dias !== null ? ` hace ${Math.abs(dias)} d` : ""} —{" "}
                           {veh ? <span className="font-mono font-bold">{veh.placa}</span> : "empresa (general)"}
                         </p>
                       );
@@ -1817,7 +1881,7 @@ export default function EmpresasTercerizadasPage() {
                 <div className="bg-white rounded-b-2xl border shadow-sm p-4 space-y-3">
                   <div className="flex justify-between items-center gap-3 flex-wrap">
                     <Segmented valor={filtroDoc} onChange={setFiltroDoc}
-                      ops={[["todos", "Todos"], ["vencido", "Vencidos"], ["por_vencer", "Por vencer"], ["vigente", "Vigentes"], ["sin_fecha", "Sin fecha"]] as ["todos" | "vencido" | "por_vencer" | "vigente" | "sin_fecha", string][]} />
+                      ops={[["todos", "Todos"], ["vencido", "Vencidos"], ["por_vencer", "Por vencer"], ["vigente", "Vigentes"], ["sin_fecha", "Sin fecha"], ["sin_vencimiento", "No vencen"]] as ["todos" | EstDoc, string][]} />
                     <select value={filtroDocVeh} onChange={e => setFiltroDocVeh(e.target.value)}
                       className="border border-gray-200 rounded-xl px-2 py-1.5 text-xs focus:outline-none focus:border-[#0b315f]">
                       <option value="">Todas las unidades</option>
@@ -1830,21 +1894,44 @@ export default function EmpresasTercerizadasPage() {
                     </button>
                   </div>
 
-                  {/* Obligatorios que ningún registro cubre: el semáforo por sí solo no los ve. */}
+                  {/* Obligatorios que ningún registro cubre: el semáforo por sí solo no los ve.
+                      Se mide contra LO QUE SE ESTÁ MIRANDO, no contra toda la empresa: con
+                      una placa elegida, los documentos que aplican son los suyos más los
+                      generales, y los que se le pueden reclamar son solo los de la UNIDAD —
+                      el SCTR y la Vida Ley son de las personas, no del bus. */}
                   {(() => {
-                    const faltan = docsObligFaltantes(docEmpresa);
+                    const placaSel = filtroDocVeh && filtroDocVeh !== "empresa" ? Number(filtroDocVeh) : null;
+                    const aplican = placaSel
+                      ? docEmpresa.filter(d => d.vehiculo_id === null || d.vehiculo_id === placaSel)
+                      : docEmpresa;
+                    const faltan = docsObligFaltantes(aplican, placaSel !== null);
                     if (!faltan.length || cargandoDetalle) return null;
+                    const placa = placaSel ? vehEmpresa.find(v => v.id === placaSel)?.placa : null;
                     return (
                       <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2">
-                        <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">Obligatorios sin registrar ({faltan.length})</p>
+                        <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                          Obligatorios sin registrar ({faltan.length}){placa ? ` · ${placa}` : ""}
+                        </p>
                         <div className="flex gap-1.5 flex-wrap">
                           {faltan.map(t => (
-                            <button key={t} onClick={() => { setFormDoc({ ...FORM_DOC, tipo: t }); setEditDocId(null); setMostrarFormDoc(true); }}
+                            <button key={t} onClick={() => {
+                              // Un documento de la unidad nace con la placa que se está mirando;
+                              // uno del personal, nunca: es de la empresa.
+                              setFormDoc({ ...FORM_DOC, tipo: t,
+                                vehiculo_id: placaSel && ambitoTipoDoc(t) === "unidad" ? String(placaSel) : "" });
+                              setEditDocId(null); setMostrarFormDoc(true);
+                            }}
                               className="text-[11px] font-bold px-2 py-0.5 rounded-lg border border-gray-300 bg-white text-gray-600 hover:border-[#0b315f] hover:text-[#0b315f]">
-                              {TIPOS_DOC_TERCERO[t]?.icon} {t} +
+                              {cfgTipoDoc(t)?.icon} {t} +
                             </button>
                           ))}
                         </div>
+                        {placaSel !== null && (
+                          <p className="text-[10px] text-gray-400 mt-1">
+                            Los seguros del personal (SCTR Salud, SCTR Pensión, Vida Ley) son de la empresa,
+                            no de una unidad: se ven eligiendo «Todas las unidades».
+                          </p>
+                        )}
                       </div>
                     );
                   })()}
@@ -1866,8 +1953,17 @@ export default function EmpresasTercerizadasPage() {
                         <Campo label="Número">
                           <input className={inputCls("font-mono")} value={formDoc.numero} onChange={e => setFormDoc(p => ({ ...p, numero: e.target.value }))} />
                         </Campo>
+                        {/* La casilla se APAGA, no se esconde: el hueco vacío en la rejilla
+                            haría pensar que la pantalla se rompió. Deshabilitada y con el
+                            motivo escrito, enseña la regla en el sitio donde se teclea. */}
                         <Campo label="Fecha vencimiento">
-                          <input type="date" className={inputCls()} value={formDoc.fecha_vencimiento} onChange={e => setFormDoc(p => ({ ...p, fecha_vencimiento: e.target.value }))} />
+                          {docSinVencimiento(formDoc.tipo) ? (
+                            <div className="w-full border border-sky-200 bg-sky-50 rounded-xl px-3 py-2.5 text-xs text-sky-800">
+                              <b>No vence.</b> Este documento no tiene fecha de vencimiento.
+                            </div>
+                          ) : (
+                            <input type="date" className={inputCls()} value={formDoc.fecha_vencimiento} onChange={e => setFormDoc(p => ({ ...p, fecha_vencimiento: e.target.value }))} />
+                          )}
                         </Campo>
                         <Campo label="Entidad emisora">
                           <input className={inputCls()} value={formDoc.entidad_emisora} onChange={e => setFormDoc(p => ({ ...p, entidad_emisora: e.target.value }))} />
@@ -1902,10 +1998,13 @@ export default function EmpresasTercerizadasPage() {
                         </thead>
                         <tbody>
                           {docsFiltrados.slice(0, limiteDoc).map(d => {
-                            const est = estadoDoc(d.fecha_vencimiento);
+                            const est = estadoDocumento(d);
                             const cfg = ESTADO_DOC_CFG[est];
-                            const dias = diasPara(d.fecha_vencimiento);
-                            const tipoCfg = TIPOS_DOC_TERCERO[d.tipo] || { icon: "📄", obligatorio: false };
+                            // Un documento que no caduca no tiene cuenta atrás que mostrar,
+                            // tenga o no una fecha tecleada por error en la fila.
+                            const dias = est === "sin_vencimiento" ? null : diasPara(d.fecha_vencimiento);
+                            const nombreTipo = etiquetaTipoDoc(d.tipo);
+                            const tipoCfg = cfgTipoDoc(d.tipo) || { icon: "\ud83d\udcc4", obligatorio: false };
                             // Solo entre las unidades de ESTA empresa: las secuencias de id de
                             // `vehiculos` y `vehiculos_tercero` se solapan.
                             const veh = vehEmpresa.find(v => v.id === d.vehiculo_id);
@@ -1915,13 +2014,13 @@ export default function EmpresasTercerizadasPage() {
                                 <td className="p-2">
                                   <div className="flex items-center gap-1">
                                     <span>{tipoCfg.icon}</span>
-                                    <span className="font-bold text-gray-800">{d.tipo}</span>
+                                    <span className="font-bold text-gray-800">{nombreTipo}</span>
                                     {tipoCfg.obligatorio && <span className="text-[9px] text-red-500 font-bold">OBL</span>}
                                   </div>
                                 </td>
                                 <td className="p-2 font-mono text-[#0b315f]">{veh ? veh.placa : "Empresa"}</td>
                                 <td className="p-2 font-mono text-gray-500">{d.numero || "—"}</td>
-                                <td className="p-2">{fmtFecha(d.fecha_vencimiento)}</td>
+                                <td className="p-2">{est === "sin_vencimiento" ? <span className="text-sky-700">No vence</span> : fmtFecha(d.fecha_vencimiento)}</td>
                                 <td className="p-2 font-black" style={{ color: dias !== null && dias < 0 ? "#dc2626" : dias !== null && dias <= 30 ? "#d97706" : "#166534" }}>
                                   {dias !== null ? (dias < 0 ? `${Math.abs(dias)}d venc.` : `${dias}d`) : "—"}
                                 </td>
@@ -1936,7 +2035,7 @@ export default function EmpresasTercerizadasPage() {
                                 </td>
                                 <td className="p-2">
                                   <div className="flex gap-1">
-                                    <button onClick={() => { setFormDoc({ vehiculo_id: d.vehiculo_id ? String(d.vehiculo_id) : "", tipo: d.tipo, numero: d.numero || "", fecha_vencimiento: d.fecha_vencimiento || "", entidad_emisora: d.entidad_emisora || "", archivo_url: d.archivo_url || "", observaciones: d.observaciones || "" }); setEditDocId(d.id); setMostrarFormDoc(true); }}
+                                    <button onClick={() => { setFormDoc({ vehiculo_id: d.vehiculo_id ? String(d.vehiculo_id) : "", tipo: nombreTipo, numero: d.numero || "", fecha_vencimiento: d.fecha_vencimiento || "", entidad_emisora: d.entidad_emisora || "", archivo_url: d.archivo_url || "", observaciones: d.observaciones || "" }); setEditDocId(d.id); setMostrarFormDoc(true); }}
                                       className="text-gray-400 hover:text-gray-800">✏️</button>
                                     <button onClick={async () => { if (!confirm("¿Eliminar?")) return; await supabase.from("documentos_tercero").delete().eq("id", d.id); await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]); }}
                                       className="text-red-400 hover:text-red-600">✕</button>
@@ -2122,7 +2221,7 @@ export default function EmpresasTercerizadasPage() {
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <p className="font-bold text-sm text-gray-900">{r.empresa?.razon_social || "—"}</p>
-                        <p className="text-xs text-gray-500">{r.tipo} · {r.vehiculo?.placa ? `Unidad ${r.vehiculo.placa}` : "Empresa (general)"}</p>
+                        <p className="text-xs text-gray-500">{etiquetaTipoDoc(r.tipo)} · {r.vehiculo?.placa ? `Unidad ${r.vehiculo.placa}` : "Empresa (general)"}</p>
                       </div>
                       <a href={r.archivo_url} target="_blank" rel="noreferrer"
                         className="text-xs font-bold text-[#0b315f] hover:underline whitespace-nowrap flex-shrink-0">Ver archivo →</a>
