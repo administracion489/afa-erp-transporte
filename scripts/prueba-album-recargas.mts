@@ -12,7 +12,7 @@
 // voucher y los números del otro, y los S/ 240.56 del segundo no quedaron en ninguna parte.
 // El prompt lo ordenaba ("combínalos en UNA sola extracción — no los trates por separado") y
 // `multiples_recargas_en_cluster` existía como código… sin que ningún código lo levantara.
-import { leerAlbumRecargas } from "../lib/radar/album-recargas";
+import { leerAlbumRecargas, buscarDuplicado, type DespachoGuardado } from "../lib/radar/album-recargas";
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -150,6 +150,69 @@ const CTV = { comprobante: "V70S-00043064", placa: "CTV-370", monto: 180.03 };
   );
   chk("sin comprobantes, dos importes distintos siguen siendo dos", a.multiple, `total=${a.total}`);
   chk("y la segunda conserva su importe", a.adicionales[0].montoTotal === 240.56);
+}
+
+// ── 10. EL MISMO VOUCHER DOS VECES, CON PLACAS DISTINTAS ───────────────────
+// El otro caso real: la nota V70S-00043064 (CTV370, 7.430 gal, S/ 180.03) entró DOS veces —
+// una atribuida a BUI-272 y otra a CTV-370. El chequeo de duplicados exigía `.eq("placa", …)`,
+// así que como las placas no coincidían nunca las comparó y no salió ninguna advertencia.
+const YA_GUARDADO: DespachoGuardado[] = [
+  { id: "rc-bui", placa: "BUI-272", fecha: "2026-08-20", comprobante: "U70S-00043064", monto: 180.03, cantidad: 7.43 },
+];
+{
+  const d = buscarDuplicado(
+    { placa: "CTV-370", fecha: "2026-08-20", comprobante: "U70S-00043064", monto: 180.03, cantidad: 7.43 },
+    YA_GUARDADO
+  );
+  chk("el mismo comprobante se detecta aunque cambie la placa", d?.por === "comprobante", d?.por ?? "sin duplicado");
+  chk("y apunta a la fila que ya estaba", d?.id === "rc-bui");
+  console.log(`        ${d?.detalle}`);
+}
+{
+  // Sin comprobante legible en ninguno: importe Y cantidad idénticos con OTRA placa.
+  const d = buscarDuplicado(
+    { placa: "CTV-370", fecha: "2026-08-20", comprobante: null, monto: 180.03, cantidad: 7.43 },
+    [{ ...YA_GUARDADO[0], comprobante: null }]
+  );
+  chk("sin comprobante, importe + cantidad cruzando placas también", d?.por === "otra_placa", d?.por ?? "sin duplicado");
+  console.log(`        ${d?.detalle}`);
+}
+{
+  // El comprobante se compara normalizado: guiones y mayúsculas no lo cambian.
+  const d = buscarDuplicado(
+    { placa: "X", fecha: "2026-09-01", comprobante: "u70s 00043064", monto: 9, cantidad: 1 },
+    YA_GUARDADO
+  );
+  chk("el comprobante normaliza guiones y mayúsculas", d?.por === "comprobante");
+  chk("y NO exige que la fecha coincida (una foto reenviada después)", d != null);
+}
+
+// ── 11. Lo que NO se puede acusar de duplicado ─────────────────────────────
+{
+  // Dos unidades que llenan por el mismo importe el mismo día: pasa, y NO es duplicado
+  // mientras las cantidades difieran. Llenar por S/ 100 redondos es lo normal.
+  const d = buscarDuplicado(
+    { placa: "CTV-370", fecha: "2026-08-20", comprobante: null, monto: 180.03, cantidad: 7.9 },
+    [{ ...YA_GUARDADO[0], comprobante: null }]
+  );
+  chk("mismo importe pero otra cantidad y otra placa NO es duplicado", d === null, d?.por ?? "null");
+}
+{
+  const d = buscarDuplicado(
+    { placa: "CTV-370", fecha: "2026-08-21", comprobante: "U70S-99999999", monto: 180.03, cantidad: 7.43 },
+    YA_GUARDADO
+  );
+  chk("otro día y otro comprobante no es duplicado", d === null, d?.por ?? "null");
+}
+{
+  const d = buscarDuplicado({ placa: "BUI-272", fecha: "2026-08-20", comprobante: null, monto: 180.03, cantidad: null }, [
+    { ...YA_GUARDADO[0], comprobante: null },
+  ]);
+  chk("la misma placa y el mismo importe siguen bastando", d?.por === "misma_placa", d?.por ?? "null");
+}
+{
+  chk("sin nada guardado no hay duplicado", buscarDuplicado({ placa: "A", fecha: "2026-08-20", comprobante: "X", monto: 1, cantidad: 1 }, []) === null);
+  chk("sin importe ni comprobante no se juzga", buscarDuplicado({ placa: "A", fecha: "2026-08-20", comprobante: null, monto: null, cantidad: 5 }, YA_GUARDADO) === null);
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");
