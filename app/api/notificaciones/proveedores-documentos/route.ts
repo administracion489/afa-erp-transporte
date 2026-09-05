@@ -35,7 +35,7 @@ async function handler(req: NextRequest) {
 
     const { data: empresas } = await admin
       .from("empresas_tercerizadas")
-      .select("id, razon_social, email, telefono, contacto_nombre, contacto_telefono, venc_autorizacion, venc_habilitacion, estado")
+      .select("id, razon_social, email, telefono, contacto_nombre, contacto_telefono, venc_autorizacion, estado")
       .neq("estado", "inactivo");
 
     if (!empresas || empresas.length === 0) {

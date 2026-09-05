@@ -68,16 +68,36 @@ update public.empresas_tercerizadas
  where autoridad_habilitante is null
    and coalesce(btrim(autorizacion_mtc), '') <> '';
 
--- `habilitacion_sutran` / `venc_habilitacion` NO se borran ni se vacían: son datos que
--- alguien escribió y hay fichas que los tienen. Salen del formulario (SUTRAN fiscaliza, no
--- autoriza) pero se siguen mostrando y editando mientras tengan valor, para que nadie pierda
--- un control que ya estaba puesto.
+-- `habilitacion_sutran` / `venc_habilitacion` QUEDAN HUÉRFANAS: por decisión del dueño el
+-- ERP ya no las lee ni las escribe en ningún sitio. SUTRAN fiscaliza, no autoriza, y lo que
+-- se pedía ahí era en realidad la habilitación VEHICULAR — que es por placa y hoy vive como
+-- "Tarjeta Única de Circulación (TUC)" en `documentos_tercero`.
+--
+-- NO SE HACE `drop column`, y es a propósito: borrar una columna es irreversible y estas
+-- pueden tener datos que alguien tecleó. Se quedan ahí, inertes y consultables. Antes de
+-- borrarlas de verdad hay que MIRAR qué guardan (consulta al pie).
 comment on column public.empresas_tercerizadas.habilitacion_sutran is
-  'HEREDADO. N° de registro ante SUTRAN. SUTRAN fiscaliza, no autoriza, así que el '
-  'formulario ya no lo pide; se conserva y se sigue editando en las fichas que lo tienen.';
+  'OBSOLETA · el ERP ya no la lee ni la escribe. SUTRAN fiscaliza, no autoriza: lo que se '
+  'registraba aquí era la habilitación vehicular, que es por placa y hoy es la TUC en '
+  'documentos_tercero. Se conserva por si guarda datos históricos; ver el pie de '
+  'supabase/tercerizadas-autorizacion-ambito.sql antes de eliminarla.';
+
+comment on column public.empresas_tercerizadas.venc_habilitacion is
+  'OBSOLETA · misma historia que habilitacion_sutran. El ERP ya no la lee.';
 
 -- ── VERIFICACIÓN ───────────────────────────────────────────────────────────────
+-- 1) Qué falta por completar a mano. Las filas con autoridad_habilitante NULL son las que
+--    el ERP todavía no puede verificar; lo dice en pantalla mientras tanto.
 -- select autoridad_habilitante, autoridad_emisor, count(*)
 --   from public.empresas_tercerizadas group by 1, 2 order by 3 desc;
--- Las filas con autoridad_habilitante NULL son las que hay que completar a mano: hasta
--- entonces el ERP no puede verificar su alcance y lo dice en pantalla.
+--
+-- 2) ¿Qué guardaban de verdad las columnas de SUTRAN? Correr ESTO ANTES de plantearse
+--    borrarlas: si sale vacío, no hay nada que perder; si sale un número, mirar qué es —
+--    lo más probable es una TUC que le corresponde a una placa, no a la empresa.
+-- select razon_social, habilitacion_sutran, venc_habilitacion
+--   from public.empresas_tercerizadas
+--  where coalesce(btrim(habilitacion_sutran), '') <> '' or venc_habilitacion is not null;
+--
+-- 3) Solo si (2) sale vacío o ya moviste lo que había, y con esa decisión tomada:
+-- alter table public.empresas_tercerizadas drop column if exists habilitacion_sutran;
+-- alter table public.empresas_tercerizadas drop column if exists venc_habilitacion;

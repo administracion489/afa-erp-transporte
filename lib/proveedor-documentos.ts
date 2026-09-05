@@ -96,7 +96,7 @@ export function linkProveedor(token: string): string {
 // ─── DOCUMENTOS POR VENCER DE UNA EMPRESA ────────────────────────────────────────
 
 export type ItemVencimiento = {
-  claveDoc: string;           // "doc:<id>" | "auth_mtc" | "hab_sutran" — dedupe del aviso
+  claveDoc: string;           // "doc:<id>" | "auth_mtc" — dedupe del aviso
   documentoId: number | null;
   vehiculoId: number | null;
   vehiculoPlaca: string | null;
@@ -106,10 +106,10 @@ export type ItemVencimiento = {
   estado: "por_vencer" | "vencido";
 };
 
-/** Junta, para UNA empresa, los documentos obligatorios (propios + por unidad) y las
- *  habilitaciones MTC/SUTRAN que están vencidos o por vencer (≤30 días). */
+/** Junta, para UNA empresa, los documentos obligatorios (propios + por unidad) y su
+ *  autorización de transporte, que estén vencidos o por vencer (≤30 días). */
 export async function documentosPorVencerDeEmpresa(admin: any, empresa: {
-  id: number; venc_autorizacion?: string | null; venc_habilitacion?: string | null;
+  id: number; venc_autorizacion?: string | null;
 }): Promise<ItemVencimiento[]> {
   const items: ItemVencimiento[] = [];
 
@@ -156,10 +156,10 @@ export async function documentosPorVencerDeEmpresa(admin: any, empresa: {
   // "Autorización de transporte" y no "Autorización MTC": la firma el MTC, la ATU, un
   // Gobierno Regional o una Municipalidad Provincial según el ámbito, y el correo lo lee el
   // proveedor — pedirle a un operador de la ATU que renueve su "MTC" es pedirle un papel que
-  // no tiene. El registro SUTRAN solo se vigila si esa ficha lo tiene cargado.
+  // no tiene. La antigua "Habilitación SUTRAN" ya no se avisa: SUTRAN fiscaliza, no autoriza,
+  // así que ese correo le pedía renovar algo que nadie le emite.
   for (const h of [
     { clave: "auth_mtc", tipo: "Autorización de transporte", f: empresa.venc_autorizacion },
-    { clave: "hab_sutran", tipo: "Registro SUTRAN (empresa)", f: empresa.venc_habilitacion },
   ]) {
     const est = estadoDoc(h.f);
     if (est !== "por_vencer" && est !== "vencido") continue;

@@ -213,8 +213,9 @@ export type ConductorDoc = {
 
 /**
  * Empresa tercerizada. Columnas verificadas en app/tercerizadas/page.tsx:13-21:
- * `razon_social, venc_autorizacion (Autorización MTC), venc_habilitacion (Habilitación
- * SUTRAN), estado`. Valores de `estado` observados en la UI (page.tsx:1982-1983):
+ * `razon_social, venc_autorizacion (LA autorización de transporte, la firme el MTC, la ATU,
+ * un Gobierno Regional o una Municipalidad Provincial — ver lib/autorizacion-transporte.ts),
+ * estado`. Valores de `estado` observados en la UI (page.tsx:1982-1983):
  * "activo" | "inactivo" | "suspendido".
  */
 export type EmpresaDoc = {
@@ -222,7 +223,6 @@ export type EmpresaDoc = {
   razon_social?: string | null;
   estado?: string | null;
   venc_autorizacion?: string | null;
-  venc_habilitacion?: string | null;
 };
 
 export type EntradaAptitud = {
@@ -727,16 +727,15 @@ export function evaluarAptitud(e: EntradaAptitud): AptitudServicio {
     // Rotularla "Autorización MTC" le reclamaba al operador de la ATU un papel que no le
     // corresponde tener.
     //
-    // La segunda es el registro ante SUTRAN, y solo se evalúa SI ESTÁ CARGADA: SUTRAN
-    // fiscaliza, no autoriza, así que su ausencia no es un incumplimiento — tratarla como
-    // "sin cargar" ponía un aviso permanente en la ficha de todo proveedor que nunca tuvo ese
-    // número. Un aviso que sale siempre se vuelve paisaje. Si alguien SÍ lo cargó, se sigue
-    // vigilando su vencimiento como antes.
-    const habsEmpresa: { label: string; f: string | null | undefined }[] = [
+    // Y es LA ÚNICA de la empresa. Antes había una segunda, "Habilitación SUTRAN", que no
+    // correspondía a nada: SUTRAN fiscaliza, no autoriza, y lo que se estaba pidiendo ahí era
+    // en realidad la habilitación VEHICULAR — que es por placa y hoy es la TUC, en
+    // `documentos_tercero`. Exigirla a nivel de empresa ponía un aviso permanente e
+    // incumplible en la ficha de todo proveedor, y un aviso que sale siempre se vuelve
+    // paisaje. Las columnas siguen en la base; nadie las lee.
+    for (const h of [
       { label: "Autorización de transporte", f: emp.venc_autorizacion },
-    ];
-    if (emp.venc_habilitacion) habsEmpresa.push({ label: "Registro SUTRAN (empresa)", f: emp.venc_habilitacion });
-    for (const h of habsEmpresa) {
+    ]) {
       const r = evaluarFecha(fechaServicio, h.f, cfg.avisoDias);
       push(hallazgo("empresa", empNombre, h.label, r.veredicto, h.f ?? null, r.dias, esFuturo));
     }
