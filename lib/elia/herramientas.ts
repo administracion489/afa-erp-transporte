@@ -969,8 +969,8 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
           }
           for (const e of empresas) {
             for (const [campo, etiqueta] of [
-              ["venc_autorizacion", "Autorización MTC"],
-              ["venc_habilitacion", "Habilitación SUTRAN"],
+              ["venc_autorizacion", "Autorización de transporte"],
+              ["venc_habilitacion", "Registro SUTRAN"],
             ] as [string, string][]) {
               const dias = diasPara(e[campo]);
               if (dias !== null && dias <= 30) (docsEmpresa[e.id] ||= []).push({ tipo: etiqueta, dias });
@@ -2651,8 +2651,8 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
             else if (dias >= 0 && dias <= 30 && OBLIG_TERCERO.has(nom)) porVencer.push(`${nom} (${dias}d)`);
           }
           for (const [campo, etiqueta] of [
-            ["venc_autorizacion", "Autorización MTC"],
-            ["venc_habilitacion", "Habilitación SUTRAN"],
+            ["venc_autorizacion", "Autorización de transporte"],
+            ["venc_habilitacion", "Registro SUTRAN"],
           ] as [string, string][]) {
             const dias = diasPara(e[campo]);
             if (dias === null) continue;
