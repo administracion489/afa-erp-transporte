@@ -326,6 +326,30 @@ export type ExtraccionCombustible = {
    */
   cliente_en_nota?: string | null;
   /**
+   * TODOS los nº de comprobante distintos del álbum. Si trae más de uno, la ráfaga no es un
+   * reporte: son varios despachos (ver lib/radar/album-recargas.ts).
+   */
+  comprobantes_vistos?: string[] | null;
+  /**
+   * Los despachos ADICIONALES cuando el álbum trae más de uno — el primero vive en los campos
+   * planos de arriba. Cada uno recibe su propia fila en `radar_combustible`: fusionarlos daba
+   * una recarga con la placa de un voucher y los importes de otro, y perdía el segundo gasto.
+   */
+  recargas_adicionales?: {
+    placa?: string | null;
+    comprobante?: string | null;
+    fecha?: string | null;
+    hora?: string | null;
+    grifo?: string | null;
+    tipo_combustible?: string | null;
+    galones?: number | null;
+    litros?: number | null;
+    precio_galon?: number | null;
+    precio_litro?: number | null;
+    monto_total?: number | null;
+    kilometraje?: number | null;
+  }[] | null;
+  /**
    * Diferencias entre dos fuentes. La forma nueva declara ENTRE QUÉ dos es
    * (`{campo, entre, detalle}`); los strings sueltos son la forma vieja, que sigue entrando
    * como observación porque no dice qué se comparó con qué.
