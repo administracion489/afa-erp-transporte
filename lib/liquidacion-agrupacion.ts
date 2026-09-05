@@ -89,8 +89,15 @@ export type ReservaLiq = {
   paradas_json?: unknown;
 };
 
-/** 'contrato' cuando la columna no existe o viene vacía. */
-export const origenContractual = (r: ReservaLiq | null | undefined): string =>
+/**
+ * 'contrato' cuando la columna no existe o viene vacía.
+ *
+ * Se tipa por lo que LEE y no por `ReservaLiq`: lib/liquidacion-clases.ts clasifica
+ * proyecciones más estrechas (dos columnas), y pedirles la reserva entera obligaría a
+ * inventar campos o a repetir aquí este `|| "contrato"`, que es justo el default de la
+ * base que no puede tener dos versiones.
+ */
+export const origenContractual = (r: { origen_contractual?: string | null } | null | undefined): string =>
   String(r?.origen_contractual || "contrato");
 
 /**
