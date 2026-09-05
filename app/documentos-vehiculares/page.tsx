@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState, useRef } from "react";
 import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import { supabase } from "@/lib/supabase";
+import { docSinVencimiento, etiquetaTipoDoc } from "@/lib/documentos-estado";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -29,9 +30,11 @@ const TIPOS_DOC: Record<string, {
   "SOAT":                    { label: "SOAT",                    icon: "🚗", obligatorio: true,  renovacion: "Anual",      entidad: "Aseguradora" },
   "CAT":                     { label: "CAT",                     icon: "📜", obligatorio: true,  renovacion: "Anual",      entidad: "AFOCAT" },
   "Revisión Técnica (CITV)": { label: "Revisión Técnica (CITV)", icon: "🔍", obligatorio: true,  renovacion: "Semestral",  entidad: "CITV / MTC" },
-  "Tarjeta de Propiedad":    { label: "Tarjeta de Propiedad",    icon: "📋", obligatorio: true,  renovacion: "Permanente", entidad: "SUNARP" },
-  "Habilitación SUTRAN":     { label: "Habilitación SUTRAN",     icon: "✅", obligatorio: true,  renovacion: "Anual",      entidad: "SUTRAN" },
-  "Permiso Operación MTC":   { label: "Permiso Operación MTC",   icon: "🏛️", obligatorio: true,  renovacion: "10 años",    entidad: "MTC" },
+  // "No vence" no es una periodicidad rara: la TIVE que emite SUNARP no caduca. Ver
+  // `sinVencimiento` en lib/documentos-estado.ts — ahí vive la regla, esto solo la rotula.
+  "Tarjeta de Propiedad":    { label: "Tarjeta de Propiedad",    icon: "📋", obligatorio: true,  renovacion: "No vence",   entidad: "SUNARP" },
+  "Tarjeta Única de Circulación (TUC)": { label: "Tarjeta Única de Circulación (TUC)", icon: "✅", obligatorio: true, renovacion: "Anual", entidad: "MTC / SUTRAN" },
+  "Habilitación Vehicular (MTC/ATU)":   { label: "Habilitación Vehicular (MTC/ATU)",   icon: "🏛️", obligatorio: true, renovacion: "10 años", entidad: "MTC / ATU" },
   "Tarjeta de Circulación":  { label: "Tarjeta de Circulación",  icon: "🏙️", obligatorio: true,  renovacion: "Anual",      entidad: "Municipio" },
   "Certificado GNV":         { label: "Certificado GNV",         icon: "💨", obligatorio: false, renovacion: "Anual",      entidad: "Taller cert." },
   "Certificado GLP":         { label: "Certificado GLP",         icon: "🔵", obligatorio: false, renovacion: "Anual",      entidad: "Taller cert." },
@@ -43,6 +46,11 @@ const TIPOS_DOC: Record<string, {
 const DOCS_OBLIGATORIOS = Object.entries(TIPOS_DOC)
   .filter(([, v]) => v.obligatorio).map(([k]) => k);
 
+// Toda lectura de TIPOS_DOC en esta pantalla se indexa por la etiqueta CANÓNICA (`d._tipo`,
+// que calcula `docsCalc`), nunca por el tipo crudo: en la base es texto tecleado y hay filas
+// con el nombre viejo. Sin eso, una fila renombrada cae a "Otro", pierde su marca de
+// obligatoria y desaparece de la completitud — un control legal apagado por un renombre.
+
 const CATEGORIAS_VEH = ["BUS", "MINIBUS", "CUSTER", "VAN", "SUV", "AUTO"];
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -51,12 +59,21 @@ function diasPara(fecha: string | null): number | null {
   if (!fecha) return null;
   return Math.ceil((new Date(fecha + "T00:00:00").getTime() - Date.now()) / 86400000);
 }
-function estadoDoc(fecha: string | null): "vigente" | "por_vencer" | "vencido" | "sin_fecha" {
+type EstDoc = "vigente" | "por_vencer" | "vencido" | "sin_fecha" | "sin_vencimiento";
+
+function estadoDoc(fecha: string | null): Exclude<EstDoc, "sin_vencimiento"> {
   const d = diasPara(fecha);
   if (d === null) return "sin_fecha";
   if (d < 0)    return "vencido";
   if (d <= 30)  return "por_vencer";
   return "vigente";
+}
+
+/** Estado de una FILA: el tipo manda sobre la fecha. La Tarjeta de Propiedad (TIVE) no
+ *  caduca, así que ni sale "Sin fecha" —no le falta un dato— ni puede llegar a vencida. */
+function estadoDocumento(d: { tipo?: string | null; fecha_vencimiento: string | null }): EstDoc {
+  if (docSinVencimiento(d.tipo)) return "sin_vencimiento";
+  return estadoDoc(d.fecha_vencimiento);
 }
 function fmtFecha(f: string | null) {
   if (!f) return "—";
@@ -76,11 +93,13 @@ function Campo({ label, span, req, children }: { label: string; span?: number; r
   );
 }
 
-const ESTADO_CFG = {
+const ESTADO_CFG: Record<EstDoc, { label: string; bg: string; color: string; dot: string; fc: string }> = {
   vigente:    { label: "Vigente",    bg: "#dcfce7", color: "#166534", dot: "#16a34a", fc: "#16a34a" },
   por_vencer: { label: "Por vencer", bg: "#fef9c3", color: "#854d0e", dot: "#eab308", fc: "#eab308" },
   vencido:    { label: "Vencido",    bg: "#fee2e2", color: "#991b1b", dot: "#dc2626", fc: "#dc2626" },
   sin_fecha:  { label: "Sin fecha",  bg: "#f3f4f6", color: "#4b5563", dot: "#9ca3af", fc: "#9ca3af" },
+  // Azul: ni verde (que promete una vigencia con fecha) ni gris (que se lee como pendiente).
+  sin_vencimiento: { label: "No vence", bg: "#e0f2fe", color: "#075985", dot: "#0284c7", fc: "#0284c7" },
 };
 
 const FORM_VACIO = {
@@ -92,7 +111,7 @@ const FORM_VACIO = {
 // ─── INDICADOR COMPLETITUD ────────────────────────────────────────────────────
 
 function IndicadorCompletitud({ docs, vehiculo }: { docs: DocVehiculo[]; vehiculo: Vehiculo }) {
-  const tiposRegistrados = new Set(docs.map(d => d.tipo));
+  const tiposRegistrados = new Set(docs.map(d => etiquetaTipoDoc(d.tipo)));
   const completados = DOCS_OBLIGATORIOS.filter(t => tiposRegistrados.has(t)).length;
   const total = DOCS_OBLIGATORIOS.length;
   const pct = Math.round((completados / total) * 100);
@@ -174,7 +193,9 @@ export default function DocumentosVehiculosPage() {
       tipo:              form.tipo,
       numero:            form.numero.trim()            || null,
       fecha_emision:     form.fecha_emision            || null,
-      fecha_vencimiento: form.fecha_vencimiento        || null,
+      // Se GUARDA null: ocultar la casilla no basta, porque editar un documento que ya
+      // arrastraba una fecha vieja tiene que limpiarla, o el dato malo sobrevive al arreglo.
+      fecha_vencimiento: docSinVencimiento(form.tipo) ? null : (form.fecha_vencimiento || null),
       entidad_emisora:   form.entidad_emisora.trim()   || cfg?.entidad || null,
       archivo_url:       form.archivo_url.trim()       || null,
       observaciones:     form.observaciones.trim()     || null,
@@ -190,7 +211,7 @@ export default function DocumentosVehiculosPage() {
     setForm({
       vehiculo_id:       String(d.vehiculo_id),
       conductor_id:      d.conductor_id ? String(d.conductor_id) : "",
-      tipo:              d.tipo,
+      tipo:              etiquetaTipoDoc(d.tipo),
       numero:            d.numero            || "",
       fecha_emision:     d.fecha_emision     || "",
       fecha_vencimiento: d.fecha_vencimiento || "",
@@ -211,7 +232,7 @@ export default function DocumentosVehiculosPage() {
   // ── Documentos enriquecidos ────────────────────────────────────────────────
 
   const docsCalc = useMemo(() =>
-    documentos.map(d => ({ ...d, _estado: estadoDoc(d.fecha_vencimiento) })),
+    documentos.map(d => ({ ...d, _tipo: etiquetaTipoDoc(d.tipo), _estado: estadoDocumento(d) })),
     [documentos]
   );
 
@@ -221,19 +242,21 @@ export default function DocumentosVehiculosPage() {
   const vigentes   = docsCalc.filter(d => d._estado === "vigente").length;
   const porVencer  = docsCalc.filter(d => d._estado === "por_vencer").length;
   const vencidos   = docsCalc.filter(d => d._estado === "vencido").length;
-  const obligVenc  = docsCalc.filter(d => d._estado === "vencido" && TIPOS_DOC[d.tipo]?.obligatorio).length;
+  const obligVenc  = docsCalc.filter(d => d._estado === "vencido" && TIPOS_DOC[d._tipo]?.obligatorio).length;
   const vehConProb = new Set(docsCalc.filter(d => d._estado === "vencido").map(d => d.vehiculo_id)).size;
 
   // Vehículos con todos los obligatorios al 100%
   const vehCompletos = vehiculos.filter(v => {
     const docs = docsCalc.filter(d => d.vehiculo_id === v.id);
-    const tipos = new Set(docs.map(d => d.tipo));
+    const tipos = new Set(docs.map(d => d._tipo));
     return DOCS_OBLIGATORIOS.every(t => tipos.has(t));
   }).length;
 
   // Próximos 60 días
   const proximosVencer = docsCalc
-    .filter(d => { const d2 = diasPara(d.fecha_vencimiento); return d2 !== null && d2 >= 0 && d2 <= 60; })
+    // `_estado` y no solo la fecha: un documento que no caduca no entra al radar de los
+    // próximos 60 días aunque arrastre una fecha tecleada por error.
+    .filter(d => { const d2 = diasPara(d.fecha_vencimiento); return d._estado !== "sin_vencimiento" && d2 !== null && d2 >= 0 && d2 <= 60; })
     .sort((a, b) => (diasPara(a.fecha_vencimiento) || 0) - (diasPara(b.fecha_vencimiento) || 0));
 
   // ── Filtrado ──────────────────────────────────────────────────────────────
@@ -242,17 +265,18 @@ export default function DocumentosVehiculosPage() {
     const v   = vehiculos.find(v => v.id === d.vehiculo_id);
     const q   = busqueda.toLowerCase();
     const cond= conductores.find(c => c.id === d.conductor_id);
-    const txt = `${v?.placa || ""} ${d.tipo} ${d.numero || ""} ${d.entidad_emisora || ""} ${cond?.nombre || ""}`.toLowerCase();
+    const txt = `${v?.placa || ""} ${d._tipo} ${d.tipo} ${d.numero || ""} ${d.entidad_emisora || ""} ${cond?.nombre || ""}`.toLowerCase();
     const cat = v?.categoria?.toUpperCase() || "";
     return txt.includes(q) &&
       (filtroEst  === "todos" || d._estado === filtroEst) &&
-      (filtroTipo === "todos" || d.tipo    === filtroTipo) &&
+      (filtroTipo === "todos" || d._tipo   === filtroTipo) &&
       (filtroVeh  === "todos" || String(d.vehiculo_id) === filtroVeh) &&
       (filtroCond === "todos" || String(d.conductor_id) === filtroCond) &&
       (filtroCat  === "todas" || cat.includes(filtroCat));
   }).sort((a, b) => {
-    const ord = { vencido: 0, por_vencer: 1, sin_fecha: 2, vigente: 3 };
-    return (ord[a._estado] || 3) - (ord[b._estado] || 3);
+    // "No vence" al final: lo que hay que atender primero, arriba.
+    const ord: Record<EstDoc, number> = { vencido: 0, por_vencer: 1, sin_fecha: 2, vigente: 3, sin_vencimiento: 4 };
+    return (ord[a._estado] ?? 3) - (ord[b._estado] ?? 3);
   }), [docsCalc, busqueda, filtroEst, filtroTipo, filtroVeh, filtroCond, filtroCat, vehiculos, conductores]);
 
   // ── Datos por vehículo ────────────────────────────────────────────────────
@@ -261,7 +285,7 @@ export default function DocumentosVehiculosPage() {
     const cat = (v.categoria || "").toUpperCase();
     if (filtroCat !== "todas" && !cat.includes(filtroCat)) return null;
     const docs = docsCalc.filter(d => d.vehiculo_id === v.id);
-    const tipos = new Set(docs.map(d => d.tipo));
+    const tipos = new Set(docs.map(d => d._tipo));
     const completitud = DOCS_OBLIGATORIOS.filter(t => tipos.has(t)).length;
     const venc = docs.filter(d => d._estado === "vencido").length;
     const porV = docs.filter(d => d._estado === "por_vencer").length;
@@ -275,10 +299,10 @@ export default function DocumentosVehiculosPage() {
     .map(d => {
       const v   = vehiculos.find(v => v.id === d.vehiculo_id);
       const cfg = ESTADO_CFG[d._estado];
-      const tipoCfg = TIPOS_DOC[d.tipo] || TIPOS_DOC["Otro"];
+      const tipoCfg = TIPOS_DOC[d._tipo] || TIPOS_DOC["Otro"];
       return {
         id:    String(d.id),
-        title: `${tipoCfg.icon} ${v?.placa || "—"} · ${d.tipo}`,
+        title: `${tipoCfg.icon} ${v?.placa || "—"} · ${d._tipo}`,
         start: d.fecha_vencimiento!,
         backgroundColor: cfg.fc,
         borderColor:     cfg.fc,
@@ -295,12 +319,12 @@ export default function DocumentosVehiculosPage() {
       return `<tr>
         <td>${v?.placa || "—"}</td>
         <td>${v?.categoria || "—"}</td>
-        <td>${d.tipo}</td>
+        <td>${d._tipo}</td>
         <td>${d.numero || "—"}</td>
         <td>${fmtFecha(d.fecha_vencimiento)}</td>
         <td>${diasPara(d.fecha_vencimiento) !== null ? (diasPara(d.fecha_vencimiento)! < 0 ? `${Math.abs(diasPara(d.fecha_vencimiento)!)}d vencido` : `${diasPara(d.fecha_vencimiento)}d`) : "—"}</td>
         <td>${ESTADO_CFG[d._estado]?.label || "—"}</td>
-        <td>${TIPOS_DOC[d.tipo]?.obligatorio ? "SÍ" : "No"}</td>
+        <td>${TIPOS_DOC[d._tipo]?.obligatorio ? "SÍ" : "No"}</td>
       </tr>`;
     }).join("");
 
@@ -396,7 +420,7 @@ export default function DocumentosVehiculosPage() {
             {proximosVencer.slice(0, 12).map(d => {
               const v    = vehiculos.find(v => v.id === d.vehiculo_id);
               const dias = diasPara(d.fecha_vencimiento) || 0;
-              const cfg  = TIPOS_DOC[d.tipo] || TIPOS_DOC["Otro"];
+              const cfg  = TIPOS_DOC[d._tipo] || TIPOS_DOC["Otro"];
               const urg  = dias <= 7;
               const barW = Math.max(2, 100 - (dias / 60) * 100);
               return (
@@ -407,7 +431,7 @@ export default function DocumentosVehiculosPage() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5 text-xs flex-wrap">
                       <span className="font-black text-[#0b315f] font-mono">{v?.placa || "—"}</span>
-                      <span className="font-bold text-gray-700">{d.tipo}</span>
+                      <span className="font-bold text-gray-700">{d._tipo}</span>
                       {cfg.obligatorio && <span className="text-[9px] text-red-600 font-bold bg-red-50 px-1.5 py-0.5 rounded">OBLIG.</span>}
                       {d.conductor_id && <span className="text-[9px] text-gray-500">👤 {nombreConductor(d.conductor_id)}</span>}
                     </div>
@@ -505,21 +529,31 @@ export default function DocumentosVehiculosPage() {
               <Campo label="Fecha de emisión">
                 <input type="date" className={inputCls()} value={form.fecha_emision} onChange={f("fecha_emision")} />
               </Campo>
+              {/* La casilla se APAGA en vez de esconderse: un hueco en la rejilla se lee
+                  como pantalla rota. Deshabilitada y con el motivo escrito, enseña la regla
+                  justo donde alguien iba a inventarse una fecha. */}
               <Campo label="Fecha de vencimiento">
-                <input type="date" className={inputCls(
-                  form.fecha_vencimiento && diasPara(form.fecha_vencimiento) !== null && diasPara(form.fecha_vencimiento)! <= 0
-                    ? "border-red-400 bg-red-50" : ""
-                )} value={form.fecha_vencimiento} onChange={f("fecha_vencimiento")} />
-                {form.fecha_vencimiento && diasPara(form.fecha_vencimiento) !== null && (
-                  <p className="text-[10px] mt-1 font-bold" style={{
-                    color: diasPara(form.fecha_vencimiento)! <= 0 ? "#dc2626"
-                      : diasPara(form.fecha_vencimiento)! <= 30 ? "#854d0e" : "#166534"
-                  }}>
-                    {diasPara(form.fecha_vencimiento)! <= 0
-                      ? `⚠ Vencido hace ${Math.abs(diasPara(form.fecha_vencimiento)!)} días`
-                      : `✓ Vence en ${diasPara(form.fecha_vencimiento)} días`}
-                  </p>
-                )}
+                {docSinVencimiento(form.tipo) ? (
+                  <div className="w-full border border-sky-200 bg-sky-50 rounded-xl px-3 py-2.5 text-xs text-sky-800">
+                    <b>No vence.</b> La {form.tipo} no tiene fecha de vencimiento: se emite una vez y
+                    vale mientras no cambien el titular ni las características del vehículo.
+                  </div>
+                ) : (<>
+                  <input type="date" className={inputCls(
+                    form.fecha_vencimiento && diasPara(form.fecha_vencimiento) !== null && diasPara(form.fecha_vencimiento)! <= 0
+                      ? "border-red-400 bg-red-50" : ""
+                  )} value={form.fecha_vencimiento} onChange={f("fecha_vencimiento")} />
+                  {form.fecha_vencimiento && diasPara(form.fecha_vencimiento) !== null && (
+                    <p className="text-[10px] mt-1 font-bold" style={{
+                      color: diasPara(form.fecha_vencimiento)! <= 0 ? "#dc2626"
+                        : diasPara(form.fecha_vencimiento)! <= 30 ? "#854d0e" : "#166534"
+                    }}>
+                      {diasPara(form.fecha_vencimiento)! <= 0
+                        ? `⚠ Vencido hace ${Math.abs(diasPara(form.fecha_vencimiento)!)} días`
+                        : `✓ Vence en ${diasPara(form.fecha_vencimiento)} días`}
+                    </p>
+                  )}
+                </>)}
               </Campo>
             </div>
           </div>
@@ -616,6 +650,7 @@ export default function DocumentosVehiculosPage() {
             <option value="por_vencer">⚠️ Por vencer</option>
             <option value="vigente">✅ Vigentes</option>
             <option value="sin_fecha">Sin fecha</option>
+            <option value="sin_vencimiento">No vencen</option>
           </select>
           <div className="flex items-center px-4 py-2.5 bg-gray-50 border rounded-xl text-sm text-gray-400 whitespace-nowrap">
             {filtrados.length} resultado{filtrados.length !== 1 ? "s" : ""}
@@ -649,7 +684,7 @@ export default function DocumentosVehiculosPage() {
                 ) : filtrados.map(d => {
                   const v    = vehiculos.find(v => v.id === d.vehiculo_id);
                   const cfg  = ESTADO_CFG[d._estado];
-                  const tipoCfg = TIPOS_DOC[d.tipo] || TIPOS_DOC["Otro"];
+                  const tipoCfg = TIPOS_DOC[d._tipo] || TIPOS_DOC["Otro"];
                   const dias = diasPara(d.fecha_vencimiento);
                   const rowBg = d._estado === "vencido" ? "#fff5f5" : d._estado === "por_vencer" ? "#fffbeb" : "white";
                   return (
@@ -664,7 +699,7 @@ export default function DocumentosVehiculosPage() {
                         <div className="flex items-center gap-1.5">
                           <span>{tipoCfg.icon}</span>
                           <div>
-                            <div className="text-xs font-bold text-gray-800">{d.tipo}</div>
+                            <div className="text-xs font-bold text-gray-800">{d._tipo}</div>
                             {tipoCfg.obligatorio && <div className="text-[9px] text-red-500 font-bold">Obligatorio</div>}
                           </div>
                         </div>
@@ -754,7 +789,7 @@ export default function DocumentosVehiculosPage() {
                   ) : docs.map(d => {
                     const est    = d._estado;
                     const cfg    = ESTADO_CFG[est];
-                    const tipoCfg= TIPOS_DOC[d.tipo] || TIPOS_DOC["Otro"];
+                    const tipoCfg= TIPOS_DOC[d._tipo] || TIPOS_DOC["Otro"];
                     const dias   = diasPara(d.fecha_vencimiento);
                     return (
                       <div key={d.id} className="flex items-center justify-between rounded-xl px-3 py-2 cursor-pointer hover:brightness-95"
@@ -763,7 +798,7 @@ export default function DocumentosVehiculosPage() {
                         <div className="flex items-center gap-2 min-w-0">
                           <span className="flex-shrink-0">{tipoCfg.icon}</span>
                           <div className="min-w-0">
-                            <p className="text-xs font-bold text-gray-700 truncate">{d.tipo}</p>
+                            <p className="text-xs font-bold text-gray-700 truncate">{d._tipo}</p>
                             {d.conductor_id && <p className="text-[9px] text-gray-400">👤 {nombreConductor(d.conductor_id)}</p>}
                           </div>
                         </div>
@@ -787,7 +822,7 @@ export default function DocumentosVehiculosPage() {
 
                 {/* Docs obligatorios faltantes */}
                 {(() => {
-                  const tipos = new Set(docs.map(d => d.tipo));
+                  const tipos = new Set(docs.map(d => d._tipo));
                   const faltantes = DOCS_OBLIGATORIOS.filter(t => !tipos.has(t));
                   if (faltantes.length === 0) return null;
                   return (
@@ -877,7 +912,7 @@ export default function DocumentosVehiculosPage() {
               return (
                 <div className="px-1 py-0.5 overflow-hidden" title={arg.event.title}>
                   <div className="font-bold text-white truncate" style={{ fontSize: "10px" }}>
-                    {v?.placa || "—"} · {d.tipo}
+                    {v?.placa || "—"} · {etiquetaTipoDoc(d.tipo)}
                   </div>
                 </div>
               );

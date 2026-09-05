@@ -9,11 +9,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
+import { docSinVencimiento } from "@/lib/documentos-estado";
 
 type Documento = {
   id: number; vehiculo_id: number | null; tipo: string; numero: string | null;
   fecha_vencimiento: string | null; entidad_emisora: string | null; archivo_url: string | null;
-  estado: "vigente" | "por_vencer" | "vencido" | "sin_fecha";
+  estado: "vigente" | "por_vencer" | "vencido" | "sin_fecha" | "sin_vencimiento";
 };
 type Revision = {
   id: number; documento_id: number | null; vehiculo_id: number | null; tipo: string;
@@ -26,6 +27,8 @@ const ESTADO_CFG: Record<string, { label: string; bg: string; color: string }> =
   por_vencer: { label: "Por vencer", bg: "#fef9c3", color: "#854d0e" },
   vencido:    { label: "Vencido",    bg: "#fee2e2", color: "#991b1b" },
   sin_fecha:  { label: "Sin fecha",  bg: "#f3f4f6", color: "#4b5563" },
+  // Azul y no verde: no es que esté al día hasta una fecha, es que no hay fecha que vigilar.
+  sin_vencimiento: { label: "No vence", bg: "#e0f2fe", color: "#075985" },
 };
 
 const fmtFecha = (f: string | null) =>
@@ -153,7 +156,8 @@ export default function ProveedorDocumentosPage() {
   }
 
   const ordenados = [...documentos].sort((a, b) => {
-    const peso = (e: string) => (e === "vencido" ? 0 : e === "por_vencer" ? 1 : e === "sin_fecha" ? 2 : 3);
+    const peso = (e: string) =>
+      e === "vencido" ? 0 : e === "por_vencer" ? 1 : e === "sin_fecha" ? 2 : e === "vigente" ? 3 : 4;
     return peso(a.estado) - peso(b.estado);
   });
 
@@ -183,7 +187,10 @@ export default function ProveedorDocumentosPage() {
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="font-bold text-[#0b315f] text-sm">{d.tipo}</p>
-                  <p className="text-xs text-gray-400 mt-0.5">{placa ? `Unidad ${placa}` : "Empresa (general)"} · Vence {fmtFecha(d.fecha_vencimiento)}</p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    {placa ? `Unidad ${placa}` : "Empresa (general)"} ·{" "}
+                    {d.estado === "sin_vencimiento" ? "No tiene fecha de vencimiento" : `Vence ${fmtFecha(d.fecha_vencimiento)}`}
+                  </p>
                 </div>
                 <span className="text-[11px] font-bold px-2 py-1 rounded-lg whitespace-nowrap" style={{ background: cfg.bg, color: cfg.color }}>{cfg.label}</span>
               </div>
@@ -226,11 +233,21 @@ export default function ProveedorDocumentosPage() {
                 <input type="file" accept="image/*,application/pdf" onChange={e => setArchivo(e.target.files?.[0] || null)}
                   className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2.5" />
               </div>
-              <div>
-                <label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">Nueva fecha de vencimiento</label>
-                <input type="date" value={form.fechaVencimientoPropuesta} onChange={e => setForm(p => ({ ...p, fechaVencimientoPropuesta: e.target.value }))}
-                  className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2.5" />
-              </div>
+              {/* El documento que no caduca no pide fecha: dejar la casilla ahí invita a
+                  inventar una, y una fecha inventada en un papel permanente reaparece
+                  meses después como un "vencido" que nadie puede arreglar. */}
+              {docSinVencimiento(panelAbierto.tipo) ? (
+                <p className="text-xs text-sky-800 bg-sky-50 border border-sky-200 rounded-xl px-3 py-2.5">
+                  Este documento <b>no tiene fecha de vencimiento</b>: se emite una vez y vale mientras
+                  no cambien el titular ni las características del vehículo. Solo suba la foto o el PDF.
+                </p>
+              ) : (
+                <div>
+                  <label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">Nueva fecha de vencimiento</label>
+                  <input type="date" value={form.fechaVencimientoPropuesta} onChange={e => setForm(p => ({ ...p, fechaVencimientoPropuesta: e.target.value }))}
+                    className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2.5" />
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-bold uppercase text-gray-400 mb-1">N° documento</label>

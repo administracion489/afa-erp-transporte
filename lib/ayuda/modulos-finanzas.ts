@@ -1029,7 +1029,7 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       {
         pregunta: "¿Qué diferencia hay entre Proveedores y Empresas Tercerizadas?",
         respuesta:
-          "• **Proveedores** — a quien le compras **bienes y servicios de apoyo**: el taller, el grifo, la vulcanizadora, el seguro, la financiera del leasing, el lavadero. Te venden algo y te facturan.\n\n• **Empresas Tercerizadas** — empresas de transporte que **ejecutan servicios en nombre de AFA**. Ponen la unidad y el chofer, y el cliente ve un servicio de AFA. Por eso su ficha lleva mucho más: la flota con sus placas, los conductores con sus licencias y los documentos (autorización MTC, habilitación SUTRAN) con sus vencimientos.\n\nSi la SUTRAN para una unidad tercerizada con la habilitación vencida, el problema es de AFA, no del tercero. Por eso ese control vive aquí.",
+          "• **Proveedores** — a quien le compras **bienes y servicios de apoyo**: el taller, el grifo, la vulcanizadora, el seguro, la financiera del leasing, el lavadero. Te venden algo y te facturan.\n\n• **Empresas Tercerizadas** — empresas de transporte que **ejecutan servicios en nombre de AFA**. Ponen la unidad y el chofer, y el cliente ve un servicio de AFA. Por eso su ficha lleva mucho más: la flota con sus placas, los conductores con sus licencias y los documentos (Tarjeta Única de Circulación, Habilitación Vehicular MTC/ATU) con sus vencimientos.\n\nSi la SUTRAN para una unidad tercerizada con la TUC vencida, el problema es de AFA, no del tercero. Por eso ese control vive aquí.",
       },
       {
         pregunta: "Quiero pagarle a un proveedor por el archivo del banco. ¿Dónde pongo su cuenta y su CCI?",
@@ -1049,7 +1049,7 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       {
         pregunta: "¿Para qué sirven los avisos de documentos vencidos de una tercerizada?",
         respuesta:
-          "Para que no salga a la calle una unidad que no puede circular. En la ficha de cada empresa, la pestaña **📄 Documentos** lleva el control de la autorización del MTC, la habilitación de la SUTRAN y demás, con su fecha de vencimiento.\n\nCuando algo está vencido o por vencer, la ficha te lo marca arriba con un enlace directo a la lista filtrada. Es un control operativo, pero tiene consecuencias de dinero: una unidad intervenida es un servicio no prestado, una multa, y un cliente molesto.",
+          "Para que no salga a la calle una unidad que no puede circular. En la ficha de cada empresa, la pestaña **📄 Documentos** lleva el control del SOAT, la CITV, la Tarjeta Única de Circulación (TUC), la Habilitación Vehicular (MTC/ATU) y demás, con su fecha de vencimiento.\n\nCuando algo está vencido o por vencer, la ficha te lo marca arriba con un enlace directo a la lista filtrada. Es un control operativo, pero tiene consecuencias de dinero: una unidad intervenida es un servicio no prestado, una multa, y un cliente molesto.\n\nDos cosas que conviene saber para no perseguir pendientes que no existen:\n\n• **La Tarjeta de Propiedad (TIVE) no vence.** La emite SUNARP y no trae fecha: sale como **No vence** y lo único que se le pregunta es si está cargada. No le inventes una fecha.\n\n• **El SCTR Salud, el SCTR Pensión y la Vida Ley son de las PERSONAS, no del bus.** Si filtras la lista por una placa no te los va a pedir, porque una unidad no tiene SCTR: la póliza cubre a los conductores. Los ves eligiendo «Todas las unidades», donde figuran como documentos de la empresa.",
       },
       {
         pregunta: "Puse un proveedor en “Bloqueado”. ¿Qué cambia?",
@@ -1078,10 +1078,10 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
           "Selecciona la empresa en la lista de la izquierda para abrir su ficha.",
           "Pestaña 🚌 Flota: agrega cada unidad con su placa (por ejemplo CWQ-400), categoría, capacidad de pasajeros y fotos.",
           "Pestaña 👤 Conductores: agrega los choferes que esa empresa asigna a los servicios de AFA.",
-          "Pestaña 📄 Documentos: carga la autorización MTC, la habilitación SUTRAN y demás, con sus fechas de vencimiento.",
+          "Pestaña 📄 Documentos: carga el SOAT, la CITV, la Tarjeta Única de Circulación (TUC) y la Habilitación Vehicular (MTC/ATU) de cada placa, con sus fechas; y como documentos de la empresa (sin placa), el SCTR Salud, el SCTR Pensión y la Vida Ley, que cubren a los conductores.",
         ],
         advertencia:
-          "Carga las fechas de vencimiento aunque el documento esté al día. Sin fecha, el ERP no te puede avisar cuando esté por caducar, y esa es la mitad del valor de tener el módulo.",
+          "Carga las fechas de vencimiento aunque el documento esté al día. Sin fecha, el ERP no te puede avisar cuando esté por caducar, y esa es la mitad del valor de tener el módulo. La única excepción es la Tarjeta de Propiedad, que no vence: ahí el ERP ni te pide la fecha.",
       },
     ],
     relacionadas: [

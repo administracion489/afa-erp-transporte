@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/documentos-estado";
 import { Calculator, Calendar, FileText, Pencil, Sparkles, Trash2, X } from "lucide-react";
 import {
   ESTADOS_RESERVA, ESTADOS_RESERVA_LISTA, ORDEN_ESTADO,
@@ -451,10 +452,22 @@ function Campo({ label, span, children }: { label: string; span?: number; childr
   );
 }
 
+// La lista literal que había aquí estaba SIN TILDES ("Revision Tecnica (CITV)",
+// "Habilitacion SUTRAN", "Permiso Operacion MTC") y los datos de `documentos_tercero` SÍ las
+// llevan, así que ese `includes()` solo acertaba con "SOAT": tres de los cuatro documentos
+// obligatorios eran invisibles para esta pantalla, en silencio, desde siempre. Es el defecto
+// que lib/documentos-estado.ts documenta como PROBLEMA 2, punto 4. Se deriva del catálogo y
+// se compara por etiqueta canónica, que es lo único que sobrevive a cómo se teclea el tipo.
+const OBLIGATORIOS_PROG = new Set(tiposObligatorios(true).map(t => t.canonico));
+
 function riesgoEmpresa(docs: DocumentoTercero[], empresaId: number): "alto" | "ok" {
-  const OBLIGATORIOS = ["SOAT", "Revision Tecnica (CITV)", "Habilitacion SUTRAN", "Permiso Operacion MTC"];
-  const docsEmp = docs.filter(d => d.empresa_id === empresaId);
-  const vencidos = docsEmp.filter(d => OBLIGATORIOS.includes(d.tipo) && diasPara(d.fecha_vencimiento || null) !== null && diasPara(d.fecha_vencimiento || null)! < 0);
+  const vencidos = docs.filter(d =>
+    d.empresa_id === empresaId &&
+    // La Tarjeta de Propiedad no caduca: una fecha suya tecleada por error marcaría en rojo
+    // a un proveedor en regla.
+    !docSinVencimiento(d.tipo) &&
+    OBLIGATORIOS_PROG.has(etiquetaTipoDoc(d.tipo)) &&
+    (diasPara(d.fecha_vencimiento || null) ?? 1) < 0);
   return vencidos.length > 0 ? "alto" : "ok";
 }
 
