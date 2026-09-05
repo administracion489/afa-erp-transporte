@@ -25,6 +25,7 @@ import {
   type SeveridadAlerta,
 } from "@/lib/radar/tipos";
 import { COMBUSTIBLES, TIPOS_PARA_ELEGIR, configCombustible } from "@/lib/combustible-tipos";
+import { fotosDeLectura, type FotoLeida } from "@/lib/radar/fotos-lectura";
 
 // ── Helpers puros ────────────────────────────────────────────────────────────
 
@@ -685,12 +686,11 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
   };
 
   // Fotos que la IA procesó: las guardadas en la fila, o (filas viejas) la del mensaje origen.
-  const fotosDe = (c: RadarCombustible): { url: string; nombre: string | null }[] => {
-    const propias = (c.fotos ?? []).filter((f) => f?.url).map((f) => ({ url: f.url, nombre: f.nombre ?? null }));
-    if (propias.length) return propias;
-    const m = c.mensaje_id ? mensajesPorId[c.mensaje_id] : null;
-    return m?.media_url ? [{ url: m.media_url, nombre: m.media_nombre ?? null }] : [];
-  };
+  // La cascada vive en lib/radar/fotos-lectura.ts porque /combustible hace la misma pregunta
+  // para poder CORREGIR una carga contra el papel; dos copias se desincronizan en la primera
+  // fila vieja, que es justo la que se audita.
+  const fotosDe = (c: RadarCombustible): FotoLeida[] =>
+    fotosDeLectura(c, c.mensaje_id ? mensajesPorId[c.mensaje_id] : null);
 
   // Estado de edición de una fila (perezoso: se crea al expandir con lo que dejó la IA).
   const edicionDe = (c: RadarCombustible): EdicionComb => {

@@ -1,9 +1,17 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { registrarLectura } from "@/lib/odometro";
 import { sincronizarPrecioDesdeCarga } from "@/lib/precios-combustible";
+import {
+  esImagenLeida,
+  fotosPorCarga,
+  type FilaConFotos,
+  type FotoLeida,
+  type MediaDeMensaje,
+} from "@/lib/radar/fotos-lectura";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -22,6 +30,11 @@ type Combustible = {
   tipo_combustible: string | null;
   unidad: string | null;
 };
+
+// Lo que el Radar IA guarda de la carga que él mismo registró. `combustible` no guarda NADA
+// del Radar (ni el id de la lectura, ni la foto, ni el nº de nota), así que el puente es
+// `radar_combustible.combustible_id` y se lee al revés: del Radar hacia la carga.
+type LecturaRadar = FilaConFotos & { combustible_id: number | null; comprobante?: string | null };
 
 type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo";
 type GranPeriodo = "dia" | "semana" | "mes";
@@ -84,6 +97,64 @@ function Campo({ label, span, children }: { label: string; span?: number; childr
   );
 }
 
+/**
+ * La(s) foto(s) que el Radar IA leyó para esta carga, al lado de los números que sacó de ellas.
+ *
+ * Sin esto, corregir una carga que registró el Radar era teclear de memoria: el galonaje, el
+ * precio y el monto salieron de un papel que estaba en WhatsApp y que esta pantalla no
+ * mostraba por ningún lado. Es la misma tira del panel de revisión de /radar-ia, con la
+ * diferencia de que aquí la carga YA está en el libro y lo que se hace es enmendarla.
+ *
+ * Se abre en pestaña nueva a tamaño real: la miniatura sirve para reconocer el papel, no para
+ * leer un dígito de matriz de puntos —que es justo el error que trae aquí a la gente.
+ */
+function FotosDelRadar({ fotos, nota, alto = "h-40" }: { fotos: FotoLeida[]; nota?: string | null; alto?: string }) {
+  if (!fotos.length) return null;
+  return (
+    <div className="rounded-2xl border border-[#bfdbfe] bg-[#eff6ff] px-4 py-3">
+      <p className="text-[10px] font-black uppercase tracking-widest text-[#1d4ed8] mb-2">
+        📷 {fotos.length === 1 ? "Foto que leyó el Radar IA" : `${fotos.length} fotos que leyó el Radar IA`}
+        {nota && <span className="ml-2 font-mono lowercase tracking-normal text-[#1e40af]">· nota {nota}</span>}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {fotos.map((f, i) => esImagenLeida(f) ? (
+          <a key={i} href={f.url} target="_blank" rel="noreferrer" title={f.nombre ?? "Abrir en tamaño real"} className="block">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={f.url} alt={f.nombre ?? `Foto ${i + 1}`}
+              className={`${alto} w-auto max-w-[240px] object-contain rounded-xl border border-blue-200 bg-white hover:ring-2 hover:ring-[#1d4ed8] transition`} />
+          </a>
+        ) : (
+          // El bucket del Radar guarda también PDFs y audios: un adjunto que no es imagen se
+          // ofrece como enlace y no como un <img> roto, que se lee igual que "no hay foto".
+          <a key={i} href={f.url} target="_blank" rel="noreferrer"
+            className={`${alto} w-[150px] flex flex-col items-center justify-center gap-1 rounded-xl border border-blue-200 bg-white text-center px-2 hover:ring-2 hover:ring-[#1d4ed8] transition`}>
+            <span className="text-2xl">📄</span>
+            <span className="text-[10px] font-bold text-[#1e40af] truncate max-w-full">{f.nombre ?? "Abrir adjunto"}</span>
+          </a>
+        ))}
+      </div>
+      <p className="text-[10px] text-[#1e40af]/70 mt-2">Ábrela en tamaño real y compara los números con lo que está guardado antes de corregir.</p>
+    </div>
+  );
+}
+
+/**
+ * Las lecturas del Radar IA que YA se convirtieron en una carga de este libro.
+ *
+ * `fotos` llegó con una migración accesoria (supabase/radar-ia-combustible-revision.sql): si no
+ * se corrió, la consulta falla nombrando la columna y se reintenta sin ella — igual que hacen
+ * `guardarReservas` y el modal de adicionales. Ver una foto es un extra; que /combustible deje
+ * de listar cargas porque falta un SQL accesorio, no.
+ */
+async function cargarLecturasRadar(): Promise<LecturaRadar[]> {
+  const pedir = (cols: string) =>
+    supabase.from("radar_combustible").select(cols).not("combustible_id", "is", null);
+  let res = await pedir("combustible_id, mensaje_id, comprobante, fotos");
+  if (res.error && /fotos/i.test(res.error.message || "")) res = await pedir("combustible_id, mensaje_id, comprobante");
+  if (res.error || !res.data) return [];
+  return res.data as unknown as LecturaRadar[];
+}
+
 function calcRendimiento(curr: Combustible, prev: Combustible | null): number | null {
   if (!prev || !curr.kilometraje || !prev.kilometraje || !curr.galones) return null;
   const km = Number(curr.kilometraje) - Number(prev.kilometraje);
@@ -134,6 +205,11 @@ export default function CombustiblePage() {
   const [filtroTipo,  setFiltroTipo]  = useState("todos");
   const [filtroMes,   setFiltroMes]   = useState("todos");
   const [form, setForm] = useState(FORM_VACIO);
+  // Lo que leyó el Radar IA de las cargas que él registró, para poder corregirlas mirando el
+  // papel. `mediaMensajes` es el respaldo de las filas viejas (sin `fotos`) y se pide de a una
+  // al abrir la carga: son ids de mensajes, y pedirlos todos de golpe sería una URL kilométrica.
+  const [lecturasRadar, setLecturasRadar] = useState<LecturaRadar[]>([]);
+  const [mediaMensajes, setMediaMensajes] = useState<Record<string, MediaDeMensaje>>({});
 
   const fuelCfg = COMBUSTIBLES[form.tipo_combustible] || COMBUSTIBLES.diesel;
   const totalPreview = Number(form.galones || 0) * Number(form.precio_galon || 0);
@@ -146,16 +222,18 @@ export default function CombustiblePage() {
 
   const cargarDatos = async () => {
     setLoading(true);
-    const [vRes, vtRes, cRes, condRes] = await Promise.all([
+    const [vRes, vtRes, cRes, condRes, radRes] = await Promise.all([
       supabase.from("vehiculos").select("*").order("placa"),
       supabase.from("vehiculos_tercero").select("*").order("placa"),
       supabase.from("combustible").select("*").order("fecha", { ascending: false }).order("id", { ascending: false }),
       supabase.from("conductores").select("id,nombre").order("nombre"),
+      cargarLecturasRadar(),
     ]);
     setVehiculos(vRes.data || []);
     setVehiculosTercero(vtRes.data || []);
     setRegistros(cRes.data || []);
     setConductores(condRes.data || []);
+    setLecturasRadar(radRes);
     setLoading(false);
   };
 
@@ -209,6 +287,51 @@ export default function CombustiblePage() {
     });
     return mapa;
   }, [registros]);
+
+  // ── Lo que leyó el Radar IA ────────────────────────────────────────────────
+
+  // Índice carga → fotos. La cascada (fila del Radar, y si no la media del mensaje) vive en
+  // lib/radar/fotos-lectura.ts, compartida con el panel de revisión de /radar-ia.
+  const fotosDeCarga = useMemo(() => fotosPorCarga(lecturasRadar, mediaMensajes), [lecturasRadar, mediaMensajes]);
+  // El nº de nota de despacho: con dos fotos (nota y tablero) es lo que dice CUÁL papel es este.
+  const notaDeCarga = useMemo(() => {
+    const mapa: Record<number, string> = {};
+    for (const l of lecturasRadar) {
+      const id = Number(l.combustible_id);
+      if (Number.isFinite(id) && l.comprobante && !mapa[id]) mapa[id] = l.comprobante;
+    }
+    return mapa;
+  }, [lecturasRadar]);
+  const lecturaDeCarga = (id: number) => lecturasRadar.find(l => Number(l.combustible_id) === id) || null;
+  // Qué cargas nacieron de una foto. Se marca la CARGA, no la foto: en una fila vieja la foto
+  // se pide recién al abrirla, y de todos modos lo que dice el marcador es de dónde salió el dato.
+  const cargasDelRadar = useMemo(
+    () => new Set(lecturasRadar.map(l => Number(l.combustible_id)).filter(Number.isFinite)),
+    [lecturasRadar]);
+
+  // Filas viejas (anteriores a la columna `fotos`): su única evidencia es la media del mensaje
+  // de WhatsApp. Se pide al ABRIR la carga —una consulta de una fila— en vez de traer todos los
+  // mensajes al cargar la pantalla.
+  const asegurarMedia = async (mensajeId: string | null | undefined) => {
+    if (!mensajeId || mediaMensajes[mensajeId] !== undefined) return;
+    const { data } = await supabase
+      .from("radar_mensajes").select("media_url, media_mime, media_nombre").eq("id", mensajeId).maybeSingle();
+    // Se guarda incluso el vacío: marca la consulta como hecha y no se vuelve a pedir.
+    setMediaMensajes(prev => ({ ...prev, [mensajeId]: (data as MediaDeMensaje) ?? {} }));
+  };
+  const verLoQueLeyoElRadar = (cargaId: number) => {
+    const l = lecturaDeCarga(cargaId);
+    if (l && !(l.fotos ?? []).length) asegurarMedia(l.mensaje_id);
+  };
+  // Los cuatro estados posibles, para no afirmar "no hay foto" mientras todavía se está
+  // pidiendo: en una fila vieja la media se consulta al abrir la carga.
+  const estadoFotoRadar = (cargaId: number): "sin_radar" | "cargando" | "sin_foto" | "hay" => {
+    if ((fotosDeCarga[cargaId] ?? []).length) return "hay";
+    const l = lecturaDeCarga(cargaId);
+    if (!l) return "sin_radar";
+    if (l.mensaje_id && mediaMensajes[l.mensaje_id] === undefined) return "cargando";
+    return "sin_foto";
+  };
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
@@ -297,6 +420,7 @@ export default function CombustiblePage() {
       observaciones:    r.observaciones|| "",
     });
     setEditandoId(r.id); setMostrarForm(true);
+    verLoQueLeyoElRadar(r.id);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
   };
 
@@ -477,6 +601,22 @@ export default function CombustiblePage() {
               <p className="text-xs text-gray-400">Selecciona el tipo de combustible — la unidad y precio referencial se ajustan automáticamente</p>
             </div>
           </div>
+
+          {/* La foto del voucher, arriba de los campos: se corrige mirándola, no de memoria. */}
+          {editandoId != null && (() => {
+            const est = estadoFotoRadar(editandoId);
+            if (est === "sin_radar") return null;
+            if (est === "hay") return <FotosDelRadar fotos={fotosDeCarga[editandoId]} nota={notaDeCarga[editandoId]} />;
+            return (
+              <p className="rounded-2xl border border-blue-100 bg-[#f8fafc] px-4 py-3 text-xs text-gray-500">
+                {est === "cargando" ? "Buscando la foto que leyó el Radar IA…" : <>
+                  📷 Esta carga la registró el <b>Radar IA</b>, pero no quedó guardada la foto que leyó
+                  {notaDeCarga[editandoId] ? <> (nota <span className="font-mono">{notaDeCarga[editandoId]}</span>)</> : null}.
+                  {" "}Su lectura completa está en <Link href="/radar-ia?tab=combustible" className="font-bold text-[#1d4ed8] hover:underline">Radar IA → Combustible</Link>.
+                </>}
+              </p>
+            );
+          })()}
 
           {/* Selector visual de tipo de combustible */}
           <div>
@@ -693,9 +833,14 @@ export default function CombustiblePage() {
                       <React.Fragment key={r.id}>
                         <tr className={`border-t transition-colors cursor-pointer ${tieneAnomalia ? "bg-red-50/40" : "hover:bg-gray-50"}`}
                           style={{ borderColor: "#f1f5f9" }}
-                          onClick={() => setExpandidoId(expandido ? null : r.id)}>
+                          onClick={() => { setExpandidoId(expandido ? null : r.id); if (!expandido) verLoQueLeyoElRadar(r.id); }}>
                           <td className="p-3 text-gray-300 text-xs">{expandido ? "▼" : "▶"}</td>
-                          <td className="p-3 text-xs text-gray-600 font-medium">{fmtFecha(r.fecha)}</td>
+                          <td className="p-3 text-xs text-gray-600 font-medium whitespace-nowrap">
+                            {fmtFecha(r.fecha)}
+                            {cargasDelRadar.has(r.id) && (
+                              <span className="ml-1.5" title="La leyó el Radar IA de una foto — ábrela para verla">📷</span>
+                            )}
+                          </td>
                           <td className="p-3 font-mono font-black text-xs text-[#0b315f]">
                             {placaReg(r)}
                             {uni?.tipo === "tercero" && <span className="ml-1.5 text-[9px] font-black text-[#7c3aed] bg-[#f3e8ff] px-1.5 py-0.5 rounded-full align-middle">tercero</span>}
@@ -769,6 +914,20 @@ export default function CombustiblePage() {
                                       </>}
                                 </div>
                               </div>
+                              {(() => {
+                                const est = estadoFotoRadar(r.id);
+                                if (est === "sin_radar") return null;
+                                if (est === "hay") return (
+                                  <div className="mt-4"><FotosDelRadar fotos={fotosDeCarga[r.id]} nota={notaDeCarga[r.id]} alto="h-28" /></div>
+                                );
+                                return (
+                                  <p className="mt-3 text-[11px] text-gray-400">
+                                    {est === "cargando"
+                                      ? "Buscando la foto que leyó el Radar IA…"
+                                      : "📷 La registró el Radar IA, pero no quedó guardada la foto que leyó."}
+                                  </p>
+                                );
+                              })()}
                             </td>
                           </tr>
                         )}
