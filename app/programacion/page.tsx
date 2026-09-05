@@ -1422,8 +1422,12 @@ export default function ReservasPage() {
       supabase.from("clientes").select("id,nombre,empresa,tipo").order("nombre"),
       supabase.from("vehiculos").select("id,placa,categoria,estado,estado_operativo,capacidad_pasajeros").order("placa"),
       supabase.from("conductores").select("id,nombre,licencia,vencimiento_licencia,estado,telefono").order("nombre"),
-      // Las columnas del alcance son accesorias: si el SQL no se corrió, este select se cae y
-      // se lleva por delante TODO el catálogo de la pantalla. Se reintenta sin ellas.
+      // Las columnas del alcance son accesorias: si el SQL no se corrió, este select falla y
+      // se llevaría por delante TODO el catálogo de la pantalla. Se reintenta sin ellas.
+      // Aquí sí se puede encadenar el reintento porque se mira `r.error` del builder crudo.
+      // OJO si alguien lo pasa a `paginarFilas`: ese helper NO lanza y NO propaga el error
+      // (lib/huella.ts:89) — devuelve [] en silencio, y así fue como /tercerizadas se quedó
+      // sin un solo proveedor en pantalla. Con `paginarFilas` hay que SONDEAR antes.
       supabase.from("empresas_tercerizadas")
         .select("id,razon_social,ruc,telefono,estado,autoridad_habilitante,autoridad_emisor")
         .order("razon_social")
