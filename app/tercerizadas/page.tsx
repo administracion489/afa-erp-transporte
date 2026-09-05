@@ -405,22 +405,24 @@ export default function EmpresasTercerizadasPage() {
 
   const cargarIndice = async () => {
     setLoading(true);
+
+    // ¿EXISTEN LAS COLUMNAS DE LA AUTORIZACIÓN? Se pregunta ANTES y con una consulta de una
+    // fila, mirando `error`.
+    //
+    // NO se puede envolver `paginarFilas` en un try/catch para averiguarlo, y esto ya dejó la
+    // pantalla EN BLANCO una vez: `paginarFilas` (lib/huella.ts:89) hace `if (error) break`
+    // —conserva lo acumulado a propósito, "huella parcial > vacía"— así que NUNCA lanza.
+    // Pedirle una columna inexistente devuelve `[]` sin un solo aviso, el catch no llega a
+    // ejecutarse, y los 21 proveedores desaparecen de la lista como si no existieran. Un
+    // dato accesorio no puede tumbar la pantalla entera, y menos en silencio.
+    const { error: errAutoridad } = await supabase
+      .from("empresas_tercerizadas").select("id,autoridad_habilitante").limit(1);
+    const hayAutoridad = !errAutoridad;
+    setColsAutoridad(hayAutoridad);
+
     const [eRows, vRows, cRows, dRows] = await Promise.all([
-      // El reintento va INLINE y no en una función aparte del componente: extraerla obliga a
-      // `useCallback` o a un eslint-disable para que el efecto de montaje siga siendo de
-      // montaje. No vale la pena por diez líneas que solo se usan aquí.
-      (async (): Promise<Empresa[]> => {
-        try {
-          const filas = await paginarFilas(() => supabase.from("empresas_tercerizadas")
-            .select(COLS_EMP_AUTORIDAD).order("razon_social").order("id"));
-          setColsAutoridad(true);
-          return filas as Empresa[];
-        } catch {
-          setColsAutoridad(false);
-          return await paginarFilas(() => supabase.from("empresas_tercerizadas")
-            .select(COLS_EMP).order("razon_social").order("id")) as Empresa[];
-        }
-      })(),
+      paginarFilas(() => supabase.from("empresas_tercerizadas")
+        .select(hayAutoridad ? COLS_EMP_AUTORIDAD : COLS_EMP).order("razon_social").order("id")),
       paginarFilas(() => supabase.from("vehiculos_tercero")
         .select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,distrito_cochera")
         .order("placa").order("id")),
