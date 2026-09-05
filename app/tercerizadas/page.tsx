@@ -97,7 +97,10 @@ const TIPOS_DOC_TERCERO: Record<string, { icon: string; obligatorio: boolean }> 
   "SOAT":                              { icon: "🚗", obligatorio: true  },
   "Revisión Técnica (CITV)":           { icon: "🔍", obligatorio: true  },
   "Tarjeta Única de Circulación (TUC)":{ icon: "✅", obligatorio: true  },
-  "Habilitación Vehicular (MTC/ATU)":  { icon: "🏛️", obligatorio: true  },
+  // NO obligatoria por placa: la habilitación es UNA de la empresa (la madre) y de ella
+  // salen las TUC de cada vehículo (las hijas). Si la placa tiene TUC, la empresa la tiene.
+  // Se vigila en la ficha de la empresa. Ver `exige: null` en lib/documentos-estado.ts.
+  "Habilitación Vehicular (MTC/ATU)":  { icon: "🏛️", obligatorio: false },
   "Tarjeta de Propiedad":              { icon: "📋", obligatorio: true  },
   // Seguros del TRABAJADOR, no de la placa: `ambitoTipoDoc` los marca "personal" y por eso
   // no se le reclaman a una unidad concreta. Vida Ley faltaba y es igual de obligatoria.
@@ -1461,7 +1464,7 @@ export default function EmpresasTercerizadasPage() {
                       <p className="text-[11px] mt-1" style={{ color: faltaLoEsencial ? "#92400e" : "#0c4a6e" }}>
                         {cfg && !faltaLoEsencial
                           ? cfg.alcance
-                          : "Sin saber qué autoridad lo autorizó y en qué territorio, el ERP no puede avisar cuando un servicio se salga de su ámbito. Complétalo en ✏️ Editar."}
+                          : "Si sus unidades tienen TUC, la empresa está habilitada — pero la TUC no dice QUIÉN la autorizó ni HASTA DÓNDE puede llegar, y sin eso el ERP no puede avisar cuando un servicio se salga de su ámbito. Complétalo en ✏️ Editar."}
                       </p>
                     </div>
                   );

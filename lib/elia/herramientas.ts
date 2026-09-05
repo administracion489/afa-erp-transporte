@@ -91,8 +91,9 @@ const DOCS_OBLIGATORIOS = new Set([
   "Revisión Técnica (CITV)",
   "Tarjeta de Propiedad",
   "Tarjeta Única de Circulación (TUC)",
-  "Habilitación Vehicular (MTC/ATU)",
   "Tarjeta de Circulación",
+  // La Habilitación Vehicular NO va aquí: es UNA de la empresa, y de ella salen las TUC de
+  // cada vehículo. Se vigila en la ficha del proveedor, no por placa.
 ]);
 
 // ── Rutas navegables (espejo de menuGrupos en app/layout.tsx) ───────────────

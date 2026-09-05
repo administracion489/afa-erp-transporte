@@ -34,7 +34,10 @@ const TIPOS_DOC: Record<string, {
   // `sinVencimiento` en lib/documentos-estado.ts — ahí vive la regla, esto solo la rotula.
   "Tarjeta de Propiedad":    { label: "Tarjeta de Propiedad",    icon: "📋", obligatorio: true,  renovacion: "No vence",   entidad: "SUNARP" },
   "Tarjeta Única de Circulación (TUC)": { label: "Tarjeta Única de Circulación (TUC)", icon: "✅", obligatorio: true, renovacion: "Anual", entidad: "MTC / SUTRAN" },
-  "Habilitación Vehicular (MTC/ATU)":   { label: "Habilitación Vehicular (MTC/ATU)",   icon: "🏛️", obligatorio: true, renovacion: "10 años", entidad: "MTC / ATU" },
+  // NO obligatoria por placa: la habilitación es UNA de la empresa (la madre) y de ella
+  // salen las TUC de cada vehículo (las hijas). Si la placa tiene TUC, la empresa la tiene.
+  // Se vigila en la ficha de la empresa. Ver `exige: null` en lib/documentos-estado.ts.
+  "Habilitación Vehicular (MTC/ATU)":   { label: "Habilitación Vehicular (MTC/ATU)",   icon: "🏛️", obligatorio: false, renovacion: "10 años", entidad: "MTC / ATU" },
   "Tarjeta de Circulación":  { label: "Tarjeta de Circulación",  icon: "🏙️", obligatorio: true,  renovacion: "Anual",      entidad: "Municipio" },
   "Certificado GNV":         { label: "Certificado GNV",         icon: "💨", obligatorio: false, renovacion: "Anual",      entidad: "Taller cert." },
   "Certificado GLP":         { label: "Certificado GLP",         icon: "🔵", obligatorio: false, renovacion: "Anual",      entidad: "Taller cert." },
