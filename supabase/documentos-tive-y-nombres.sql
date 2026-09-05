@@ -80,27 +80,44 @@ update public.documentos_tercero
 
 -- Las revisiones que el proveedor subió y nadie aprobó todavía viajan con su propio `tipo`,
 -- y al aprobarlas se copia a `documentos_tercero`: sin esto entraría el nombre viejo otra vez.
-update public.documentos_tercero_revisiones
-   set tipo = 'Tarjeta Única de Circulación (TUC)'
- where public.fn_norm_tipo_doc(tipo) in ('habilitacion sutran', 'sutran');
+--
+-- VA DENTRO DE UN GUARD, y esto costó un error en producción: `documentos_tercero_revisiones`
+-- la crea `proveedor-documentos-autoservicio.sql`, que es OTRO módulo y puede no estar
+-- instalado. Sin el guard el update revienta con 42P01 y —como el editor SQL de Supabase
+-- envuelve el script en una transacción— tumba TAMBIÉN los renombres de arriba, que sí eran
+-- aplicables. Una migración no puede exigir un módulo que no le pertenece.
+do $$
+begin
+  if to_regclass('public.documentos_tercero_revisiones') is null then
+    raise notice 'documentos_tercero_revisiones no existe (falta proveedor-documentos-autoservicio.sql): se omite ese bloque; el resto se aplicó igual.';
+    return;
+  end if;
 
-update public.documentos_tercero_revisiones
-   set tipo = 'Habilitación Vehicular (MTC/ATU)'
- where public.fn_norm_tipo_doc(tipo) in ('permiso operacion mtc', 'permiso de operacion mtc', 'permiso mtc');
+  update public.documentos_tercero_revisiones
+     set tipo = 'Tarjeta Única de Circulación (TUC)'
+   where public.fn_norm_tipo_doc(tipo) in ('habilitacion sutran', 'sutran');
 
-update public.documentos_tercero_revisiones
-   set fecha_vencimiento_propuesta = null
- where fecha_vencimiento_propuesta is not null
-   and public.fn_norm_tipo_doc(tipo) in ('tarjeta de propiedad', 'tarjeta propiedad', 'tive',
-                                         'tarjeta de identificacion vehicular',
-                                         'tarjeta identificacion vehicular');
+  update public.documentos_tercero_revisiones
+     set tipo = 'Habilitación Vehicular (MTC/ATU)'
+   where public.fn_norm_tipo_doc(tipo) in ('permiso operacion mtc', 'permiso de operacion mtc', 'permiso mtc');
+
+  update public.documentos_tercero_revisiones
+     set fecha_vencimiento_propuesta = null
+   where fecha_vencimiento_propuesta is not null
+     and public.fn_norm_tipo_doc(tipo) in ('tarjeta de propiedad', 'tarjeta propiedad', 'tive',
+                                           'tarjeta de identificacion vehicular',
+                                           'tarjeta identificacion vehicular');
+end $$;
 
 -- ── 3 · LO QUE NO SE TOCA, Y POR QUÉ ───────────────────────────────────────────
--- `empresas_tercerizadas.venc_autorizacion` / `.venc_habilitacion` se quedan como están:
--- son de la EMPRESA (su autorización del MTC y su habilitación ante SUTRAN), no de una
--- unidad, y sí tienen vigencia. La TUC y la Habilitación Vehicular renombradas arriba
--- cuelgan de un vehículo. Son cosas distintas con nombres parecidos; unirlas sería perder
--- el control de la empresa para ganar una etiqueta.
+-- `empresas_tercerizadas.venc_autorizacion` se queda como está: es LA autorización de la
+-- EMPRESA (la firme el MTC, la ATU, un Gobierno Regional o una Municipalidad Provincial), no
+-- de una unidad. La TUC y la Habilitación Vehicular renombradas arriba cuelgan de un
+-- vehículo: son cosas distintas con nombres parecidos, y unirlas sería perder el control de
+-- la empresa para ganar una etiqueta.
+--
+-- `habilitacion_sutran` / `venc_habilitacion` tampoco: quedaron huérfanas por decisión del
+-- dueño (el ERP ya no las lee) y su historia está en tercerizadas-autorizacion-ambito.sql.
 
 -- ── VERIFICACIÓN ───────────────────────────────────────────────────────────────
 -- select tipo, count(*) filter (where fecha_vencimiento is not null) as con_fecha, count(*)
