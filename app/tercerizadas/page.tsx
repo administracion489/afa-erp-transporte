@@ -6,6 +6,10 @@ import { paginarFilas } from "@/lib/huella";
 import OdometroTerceroModal from "./_components/OdometroTerceroModal";
 import { DISTRITOS_LIMA, distanciaDistritos, etiquetaDistancia } from "@/lib/distritos-lima";
 import { ambitoTipoDoc, docSinVencimiento, etiquetaTipoDoc } from "@/lib/documentos-estado";
+import {
+  AUTORIDADES, REGIONES_PERU, avisosAutorizacion, configAutoridad, etiquetaAutorizacion,
+  type Autoridad,
+} from "@/lib/autorizacion-transporte";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -15,6 +19,10 @@ type Empresa = {
   contacto_nombre: string | null; contacto_telefono: string | null;
   autorizacion_mtc: string | null; habilitacion_sutran: string | null;
   venc_autorizacion: string | null; venc_habilitacion: string | null;
+  // Columnas de tercerizadas-autorizacion-ambito.sql. Opcionales en el tipo porque la app
+  // reintenta el SELECT sin ellas si la migración no se corrió (mismo patrón que
+  // COLUMNAS_OPCIONALES en lib/reservas-pacto.ts).
+  autoridad_habilitante?: Autoridad | null; autoridad_emisor?: string | null;
   estado: string; observaciones?: string | null; created_at?: string;
   direccion_fiscal?: string | null; distrito_fiscal?: string | null;
   direccion_cochera?: string | null; distrito_cochera?: string | null;
@@ -183,6 +191,14 @@ const NIVEL_CFG: Record<Nivel, { label: string; bg: string; color: string; borde
 
 const OBLIGATORIOS = Object.entries(TIPOS_DOC_TERCERO).filter(([, v]) => v.obligatorio).map(([k]) => k);
 
+// Las columnas de la autorización son ACCESORIAS: si `tercerizadas-autorizacion-ambito.sql`
+// no se corrió, pedirlas tumba el SELECT ENTERO y la pantalla se queda vacía por un dato de
+// adorno. Se reintenta sin ellas y se avisa en el formulario, que es donde hacen falta —
+// mismo criterio que `guardarReservas` con COLUMNAS_OPCIONALES: a un ERP al que le falta un
+// SQL accesorio se le tiene que poder seguir gestionando la flota.
+const COLS_EMP = "id,razon_social,ruc,estado,telefono,email,contacto_nombre,contacto_telefono,autorizacion_mtc,habilitacion_sutran,venc_autorizacion,venc_habilitacion,direccion_fiscal,distrito_fiscal,direccion_cochera,distrito_cochera,lat_cochera,lng_cochera";
+const COLS_EMP_AUTORIDAD = `${COLS_EMP},autoridad_habilitante,autoridad_emisor`;
+
 // Riesgo de la EMPRESA: documentos obligatorios vencidos/por vencer, licencias y las
 // habilitaciones propias de la empresa (MTC/SUTRAN), que antes no entraban al semáforo.
 function calcRiesgo(docs: DocumentoTercero[], conductores: ConductorTercero[], emp?: Empresa | null): Nivel {
@@ -260,9 +276,11 @@ function calcAptitud(
     // "sin_vencimiento" no genera candidato ninguno — no hay nada que revisar ni que renovar.
     if (est === "sin_fecha") cands.push({ nivel: "medio", dias: 9999, texto: `${nom} sin fecha de vencimiento` });
   }
+  // La autorización la firma quien corresponda según el ámbito (MTC, ATU, Gobierno Regional
+  // o Municipalidad Provincial): el rótulo lo dice la ficha, no una constante.
   for (const h of [
-    { label: "Autorización MTC", f: emp.venc_autorizacion },
-    { label: "Habilitación SUTRAN", f: emp.venc_habilitacion },
+    { label: `Autorización ${configAutoridad(emp.autoridad_habilitante)?.corto ?? "de transporte"}`, f: emp.venc_autorizacion },
+    { label: "Registro SUTRAN", f: emp.venc_habilitacion },
   ]) {
     const est = estadoDoc(h.f);
     const dias = diasPara(h.f);
@@ -294,6 +312,7 @@ const FORM_EMP = {
   contacto_nombre: "", contacto_telefono: "",
   autorizacion_mtc: "", habilitacion_sutran: "",
   venc_autorizacion: "", venc_habilitacion: "",
+  autoridad_habilitante: "", autoridad_emisor: "",
   estado: "activo", observaciones: "",
   direccion_fiscal: "", distrito_fiscal: "",
   direccion_cochera: "", distrito_cochera: "",
@@ -337,6 +356,9 @@ export default function EmpresasTercerizadasPage() {
   const [confirmarBorrado, setConfirmarBorrado] = useState<Empresa | null>(null);
   const [textoBorrado, setTextoBorrado] = useState("");
   const [geocodificando, setGeocodificando] = useState(false);
+  // ¿Se corrió tercerizadas-autorizacion-ambito.sql? Se sondea UNA vez al cargar el índice y
+  // se degrada sin romper (mismo patrón que `detectarVigencia` en radar-worker/src/db.ts).
+  const [colsAutoridad, setColsAutoridad] = useState(true);
 
   // Documentos que algún proveedor subió desde su link público, pendientes de aprobar.
   const [revisionesPend, setRevisionesPend] = useState<RevisionPendiente[]>([]);
@@ -370,6 +392,8 @@ export default function EmpresasTercerizadasPage() {
   const [filtroDocVeh, setFiltroDocVeh] = useState("");
   const [limiteDoc,  setLimiteDoc]  = useState(50);
 
+  const cfgAutoridadForm = configAutoridad(formEmp.autoridad_habilitante as Autoridad);
+
   const fe = (k: keyof typeof FORM_EMP) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
       setFormEmp(p => ({ ...p, [k]: e.target.value }));
@@ -382,9 +406,21 @@ export default function EmpresasTercerizadasPage() {
   const cargarIndice = async () => {
     setLoading(true);
     const [eRows, vRows, cRows, dRows] = await Promise.all([
-      paginarFilas(() => supabase.from("empresas_tercerizadas")
-        .select("id,razon_social,ruc,estado,telefono,email,contacto_nombre,contacto_telefono,autorizacion_mtc,habilitacion_sutran,venc_autorizacion,venc_habilitacion,direccion_fiscal,distrito_fiscal,direccion_cochera,distrito_cochera,lat_cochera,lng_cochera")
-        .order("razon_social").order("id")),
+      // El reintento va INLINE y no en una función aparte del componente: extraerla obliga a
+      // `useCallback` o a un eslint-disable para que el efecto de montaje siga siendo de
+      // montaje. No vale la pena por diez líneas que solo se usan aquí.
+      (async (): Promise<Empresa[]> => {
+        try {
+          const filas = await paginarFilas(() => supabase.from("empresas_tercerizadas")
+            .select(COLS_EMP_AUTORIDAD).order("razon_social").order("id"));
+          setColsAutoridad(true);
+          return filas as Empresa[];
+        } catch {
+          setColsAutoridad(false);
+          return await paginarFilas(() => supabase.from("empresas_tercerizadas")
+            .select(COLS_EMP).order("razon_social").order("id")) as Empresa[];
+        }
+      })(),
       paginarFilas(() => supabase.from("vehiculos_tercero")
         .select("id,empresa_id,placa,categoria,marca,modelo,capacidad,estado,distrito_cochera")
         .order("placa").order("id")),
@@ -754,6 +790,13 @@ export default function EmpresasTercerizadasPage() {
       habilitacion_sutran: formEmp.habilitacion_sutran.trim() || null,
       venc_autorizacion: formEmp.venc_autorizacion || null,
       venc_habilitacion: formEmp.venc_habilitacion || null,
+      // El emisor solo tiene sentido para las autoridades que lo piden: guardar "Ica" bajo
+      // una autorización de la ATU sería escribir un territorio que nadie autorizó.
+      ...(colsAutoridad ? {
+        autoridad_habilitante: formEmp.autoridad_habilitante || null,
+        autoridad_emisor: configAutoridad(formEmp.autoridad_habilitante as Autoridad)?.pideEmisor
+          ? (formEmp.autoridad_emisor.trim() || null) : null,
+      } : {}),
       estado: formEmp.estado,
       observaciones: formEmp.observaciones.trim() || null,
       direccion_fiscal: formEmp.direccion_fiscal.trim() || null,
@@ -781,6 +824,8 @@ export default function EmpresasTercerizadasPage() {
       habilitacion_sutran: e.habilitacion_sutran || "",
       venc_autorizacion: e.venc_autorizacion || "",
       venc_habilitacion: e.venc_habilitacion || "",
+      autoridad_habilitante: e.autoridad_habilitante || "",
+      autoridad_emisor: e.autoridad_emisor || "",
       estado: e.estado || "activo", observaciones: e.observaciones || "",
       direccion_fiscal: e.direccion_fiscal || "", distrito_fiscal: e.distrito_fiscal || "",
       direccion_cochera: e.direccion_cochera || "", distrito_cochera: e.distrito_cochera || "",
@@ -1378,12 +1423,60 @@ export default function EmpresasTercerizadasPage() {
                   </div>
                 </div>
 
+                {/* ALCANCE · lo primero que hay que saber antes de asignarle un servicio.
+                    No es lo mismo que "tiene los papeles al día": una autorización de la ATU
+                    perfectamente vigente NO habilita un viaje a Ica, y ese es el error que
+                    ninguna fecha de vencimiento puede detectar. Va arriba de las
+                    habilitaciones, con su territorio escrito, para que se lea antes de
+                    elegir la unidad. */}
+                {(() => {
+                  const aut = {
+                    autoridad: empActual.autoridad_habilitante ?? null,
+                    emisor: empActual.autoridad_emisor ?? null,
+                    numero: empActual.autorizacion_mtc,
+                    vencimiento: empActual.venc_autorizacion,
+                  };
+                  const cfg = configAutoridad(aut.autoridad);
+                  const avisos = avisosAutorizacion(aut);
+                  const faltaLoEsencial = avisos.some(v => v.codigo === "sin_autoridad" || v.codigo === "sin_emisor");
+                  return (
+                    <div className="mt-3 rounded-xl border px-3 py-2.5"
+                      style={{ borderColor: faltaLoEsencial ? "#fde68a" : "#bae6fd",
+                               background: faltaLoEsencial ? "#fffbeb" : "#f0f9ff" }}>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-[10px] font-bold uppercase tracking-wide"
+                          style={{ color: faltaLoEsencial ? "#92400e" : "#075985" }}>
+                          Alcance autorizado
+                        </span>
+                        <span className="text-[11px] font-black px-2 py-0.5 rounded-lg"
+                          style={{ background: faltaLoEsencial ? "#fef3c7" : "#e0f2fe",
+                                   color: faltaLoEsencial ? "#92400e" : "#075985" }}>
+                          {etiquetaAutorizacion(aut) ?? "Sin autoridad registrada"}
+                        </span>
+                        {empActual.autorizacion_mtc && (
+                          <span className="text-[11px] font-mono text-gray-500">{empActual.autorizacion_mtc}</span>
+                        )}
+                      </div>
+                      <p className="text-[11px] mt-1" style={{ color: faltaLoEsencial ? "#92400e" : "#0c4a6e" }}>
+                        {cfg && !faltaLoEsencial
+                          ? cfg.alcance
+                          : "Sin saber qué autoridad lo autorizó y en qué territorio, el ERP no puede avisar cuando un servicio se salga de su ámbito. Complétalo en ✏️ Editar."}
+                      </p>
+                    </div>
+                  );
+                })()}
+
                 {/* Habilitaciones: chips en línea si ambas están vigentes; tarjetas cuando
-                    hay algo que atender. */}
+                    hay algo que atender. La de SUTRAN solo aparece si esa ficha la tiene
+                    cargada — SUTRAN fiscaliza, no autoriza, y pedírsela a todo el mundo era
+                    pedir un dato que para la mayoría no existe. */}
                 {(() => {
                   const habs = [
-                    { label: "MTC", full: "Autorización MTC", num: empActual.autorizacion_mtc, venc: empActual.venc_autorizacion },
-                    { label: "SUTRAN", full: "Habilitación SUTRAN", num: empActual.habilitacion_sutran, venc: empActual.venc_habilitacion },
+                    { label: configAutoridad(empActual.autoridad_habilitante)?.corto ?? "Autorización",
+                      full: "Autorización de transporte", num: empActual.autorizacion_mtc, venc: empActual.venc_autorizacion },
+                    ...(empActual.habilitacion_sutran || empActual.venc_habilitacion
+                      ? [{ label: "SUTRAN", full: "Registro SUTRAN (heredado)", num: empActual.habilitacion_sutran, venc: empActual.venc_habilitacion }]
+                      : []),
                   ];
                   const hayQueAtender = habs.some(h => ["vencido", "por_vencer"].includes(estadoDoc(h.venc)));
                   if (!hayQueAtender) {
@@ -1440,8 +1533,10 @@ export default function EmpresasTercerizadasPage() {
                       );
                     })}
                     {licVencidas.map(c => <p key={c.id}>· Licencia vencida: <b>{c.nombre}</b></p>)}
-                    {estadoDoc(empActual.venc_autorizacion) === "vencido" && <p>· <b>Autorización MTC</b> vencida</p>}
-                    {estadoDoc(empActual.venc_habilitacion) === "vencido" && <p>· <b>Habilitación SUTRAN</b> vencida</p>}
+                    {estadoDoc(empActual.venc_autorizacion) === "vencido" && (
+                      <p>· <b>Autorización {configAutoridad(empActual.autoridad_habilitante)?.corto ?? "de transporte"}</b> vencida</p>
+                    )}
+                    {estadoDoc(empActual.venc_habilitacion) === "vencido" && <p>· <b>Registro SUTRAN</b> vencido</p>}
                     <button onClick={() => { setTabActiva("documentos"); setFiltroDoc("vencido"); }}
                       className="font-bold underline">Ver documentos →</button>
                   </div>
@@ -2119,13 +2214,65 @@ export default function EmpresasTercerizadasPage() {
                 </Campo>
               </div>
             </div>
+            {/* ── AUTORIZACIÓN DE TRANSPORTE ──────────────────────────────────────────
+                UNA sola, no dos. Antes se pedían "N° Autorización MTC" y "N° Habilitación
+                SUTRAN" como si todo transportista tuviera las dos: quien opera con
+                autorización de la ATU no tiene número de MTC, dejaba el campo vacío, y el
+                vacío se leía como "le falta un papel" en vez de "no le corresponde". SUTRAN
+                además no autoriza, fiscaliza.
+                Lo que se gana no es un campo menos: es saber HASTA DÓNDE puede llegar. */}
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Habilitaciones legales</p>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">
+                Autorización de transporte de personas
+              </p>
+              {!colsAutoridad && (
+                <div className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-900 mb-3">
+                  Falta correr <b>supabase/tercerizadas-autorizacion-ambito.sql</b>: hasta entonces se puede
+                  cargar el número y el vencimiento, pero no queda registrado quién autorizó ni hasta dónde
+                  puede circular esta empresa.
+                </div>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <Campo label="N° Autorización MTC">
-                  <input className={inputCls("font-mono")} placeholder="Ej: MTC-001-2024" value={formEmp.autorizacion_mtc} onChange={fe("autorizacion_mtc")} />
+                <Campo label="Autoridad que autoriza" span={2}>
+                  <select className={inputCls()} value={formEmp.autoridad_habilitante}
+                    disabled={!colsAutoridad}
+                    onChange={e => setFormEmp(p => ({
+                      ...p, autoridad_habilitante: e.target.value,
+                      // El emisor pertenece a la autoridad elegida: al cambiarla se limpia, o
+                      // quedaría "ATU · Región Ica" — un territorio que nadie autorizó.
+                      autoridad_emisor: "",
+                    }))}>
+                    <option value="">— Sin especificar —</option>
+                    {AUTORIDADES.map(a => <option key={a.clave} value={a.clave}>{a.label}</option>)}
+                  </select>
                 </Campo>
-                <Campo label="Vencimiento autorización MTC">
+                {cfgAutoridadForm?.pideEmisor && (
+                  <Campo label={cfgAutoridadForm.etiquetaEmisor ?? "Emisor"} span={2}>
+                    {cfgAutoridadForm.clave === "regional" ? (
+                      <select className={inputCls()} value={formEmp.autoridad_emisor} onChange={fe("autoridad_emisor")}>
+                        <option value="">— Elegir región —</option>
+                        {REGIONES_PERU.map(r => <option key={r} value={r}>{r}</option>)}
+                      </select>
+                    ) : (
+                      <input className={inputCls()} placeholder="Ej: Cañete, Huaral, Trujillo…"
+                        value={formEmp.autoridad_emisor} onChange={fe("autoridad_emisor")} />
+                    )}
+                  </Campo>
+                )}
+                {cfgAutoridadForm && (
+                  <div className="md:col-span-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2.5">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-sky-700 mb-0.5">
+                      Alcance · {etiquetaAutorizacion({ autoridad: cfgAutoridadForm.clave, emisor: formEmp.autoridad_emisor })}
+                    </p>
+                    <p className="text-[11px] text-sky-900">{cfgAutoridadForm.alcance}</p>
+                  </div>
+                )}
+                <Campo label="N° de la resolución que autoriza">
+                  <input className={inputCls("font-mono")}
+                    placeholder={cfgAutoridadForm?.clave === "atu" ? "Ej: R.D. 000123-2024-ATU/DO" : "Ej: R.D. 1234-2024-MTC/15"}
+                    value={formEmp.autorizacion_mtc} onChange={fe("autorizacion_mtc")} />
+                </Campo>
+                <Campo label="Vencimiento de la autorización">
                   <input type="date" className={inputCls()} value={formEmp.venc_autorizacion} onChange={fe("venc_autorizacion")} />
                   {formEmp.venc_autorizacion && (
                     <p className="text-[10px] mt-1 font-bold" style={{ color: diasPara(formEmp.venc_autorizacion) !== null && diasPara(formEmp.venc_autorizacion)! <= 0 ? "#dc2626" : "#166534" }}>
@@ -2133,17 +2280,22 @@ export default function EmpresasTercerizadasPage() {
                     </p>
                   )}
                 </Campo>
-                <Campo label="N° Habilitación SUTRAN">
-                  <input className={inputCls("font-mono")} placeholder="Ej: SUTRAN-001-2024" value={formEmp.habilitacion_sutran} onChange={fe("habilitacion_sutran")} />
-                </Campo>
-                <Campo label="Vencimiento habilitación SUTRAN">
-                  <input type="date" className={inputCls()} value={formEmp.venc_habilitacion} onChange={fe("venc_habilitacion")} />
-                  {formEmp.venc_habilitacion && (
-                    <p className="text-[10px] mt-1 font-bold" style={{ color: diasPara(formEmp.venc_habilitacion) !== null && diasPara(formEmp.venc_habilitacion)! <= 0 ? "#dc2626" : "#166534" }}>
-                      {diasPara(formEmp.venc_habilitacion) !== null && diasPara(formEmp.venc_habilitacion)! <= 0 ? "⚠ Vencida" : `Vence en ${diasPara(formEmp.venc_habilitacion)} días`}
-                    </p>
-                  )}
-                </Campo>
+                {/* SUTRAN sale del formulario porque fiscaliza, no autoriza — pero NO se
+                    borra lo que alguien escribió: la ficha que ya lo tiene lo sigue viendo y
+                    editando, y así nadie pierde un vencimiento que ya estaba vigilado. */}
+                {(formEmp.habilitacion_sutran || formEmp.venc_habilitacion) && (
+                  <>
+                    <Campo label="N° registro SUTRAN (heredado)">
+                      <input className={inputCls("font-mono")} value={formEmp.habilitacion_sutran} onChange={fe("habilitacion_sutran")} />
+                      <p className="text-[10px] text-gray-400 mt-1">
+                        SUTRAN fiscaliza, no autoriza. Se conserva porque ya estaba cargado; puedes vaciarlo.
+                      </p>
+                    </Campo>
+                    <Campo label="Vencimiento registro SUTRAN (heredado)">
+                      <input type="date" className={inputCls()} value={formEmp.venc_habilitacion} onChange={fe("venc_habilitacion")} />
+                    </Campo>
+                  </>
+                )}
               </div>
             </div>
             <Campo label="Observaciones"><input className={inputCls()} value={formEmp.observaciones} onChange={fe("observaciones")} /></Campo>

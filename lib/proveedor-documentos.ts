@@ -153,9 +153,13 @@ export async function documentosPorVencerDeEmpresa(admin: any, empresa: {
     });
   }
 
+  // "Autorización de transporte" y no "Autorización MTC": la firma el MTC, la ATU, un
+  // Gobierno Regional o una Municipalidad Provincial según el ámbito, y el correo lo lee el
+  // proveedor — pedirle a un operador de la ATU que renueve su "MTC" es pedirle un papel que
+  // no tiene. El registro SUTRAN solo se vigila si esa ficha lo tiene cargado.
   for (const h of [
-    { clave: "auth_mtc", tipo: "Autorización MTC", f: empresa.venc_autorizacion },
-    { clave: "hab_sutran", tipo: "Habilitación SUTRAN (empresa)", f: empresa.venc_habilitacion },
+    { clave: "auth_mtc", tipo: "Autorización de transporte", f: empresa.venc_autorizacion },
+    { clave: "hab_sutran", tipo: "Registro SUTRAN (empresa)", f: empresa.venc_habilitacion },
   ]) {
     const est = estadoDoc(h.f);
     if (est !== "por_vencer" && est !== "vencido") continue;

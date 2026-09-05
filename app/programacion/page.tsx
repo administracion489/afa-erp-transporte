@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/documentos-estado";
+import { configAutoridad, etiquetaAutorizacion, type Autoridad } from "@/lib/autorizacion-transporte";
 import { Calculator, Calendar, FileText, Pencil, Sparkles, Trash2, X } from "lucide-react";
 import {
   ESTADOS_RESERVA, ESTADOS_RESERVA_LISTA, ORDEN_ESTADO,
@@ -166,7 +167,11 @@ type ParadaTP = {
 type Cliente            = { id: number; nombre: string; empresa?: string; tipo?: string; };
 type Vehiculo           = { id: number; placa: string; categoria?: string; estado?: string; estado_operativo?: string; capacidad_pasajeros?: number; };
 type Conductor          = { id: number; nombre: string; licencia?: string; vencimiento_licencia?: string; estado?: string; telefono?: string; };
-type EmpresaTercerizada = { id: number; razon_social: string; ruc?: string | null; telefono?: string | null; estado: string; };
+type EmpresaTercerizada = {
+  id: number; razon_social: string; ruc?: string | null; telefono?: string | null; estado: string;
+  // De tercerizadas-autorizacion-ambito.sql. Opcionales: el SELECT reintenta sin ellas.
+  autoridad_habilitante?: Autoridad | null; autoridad_emisor?: string | null;
+};
 type VehiculoTercero    = { id: number; empresa_id: number; placa: string; categoria?: string | null; capacidad?: number | null; estado: string; marca?: string | null; };
 type ConductorTercero   = { id: number; empresa_id: number; nombre: string; licencia?: string | null; vencimiento_licencia?: string | null; telefono?: string | null; estado: string; };
 type DocumentoTercero   = { id: number; empresa_id: number; tipo: string; fecha_vencimiento?: string | null; };
@@ -1417,7 +1422,14 @@ export default function ReservasPage() {
       supabase.from("clientes").select("id,nombre,empresa,tipo").order("nombre"),
       supabase.from("vehiculos").select("id,placa,categoria,estado,estado_operativo,capacidad_pasajeros").order("placa"),
       supabase.from("conductores").select("id,nombre,licencia,vencimiento_licencia,estado,telefono").order("nombre"),
-      supabase.from("empresas_tercerizadas").select("id,razon_social,ruc,telefono,estado").order("razon_social"),
+      // Las columnas del alcance son accesorias: si el SQL no se corrió, este select se cae y
+      // se lleva por delante TODO el catálogo de la pantalla. Se reintenta sin ellas.
+      supabase.from("empresas_tercerizadas")
+        .select("id,razon_social,ruc,telefono,estado,autoridad_habilitante,autoridad_emisor")
+        .order("razon_social")
+        .then((r: { error: unknown }) => r.error
+          ? supabase.from("empresas_tercerizadas").select("id,razon_social,ruc,telefono,estado").order("razon_social")
+          : r),
       supabase.from("vehiculos_tercero").select("id,empresa_id,placa,categoria,capacidad,estado,marca").order("placa"),
       supabase.from("conductores_tercero").select("id,empresa_id,nombre,licencia,vencimiento_licencia,telefono,estado").order("nombre"),
       supabase.from("documentos_tercero").select("id,empresa_id,tipo,fecha_vencimiento"),
@@ -4437,6 +4449,36 @@ export default function ReservasPage() {
                     ATENCION: Esta empresa tiene documentos obligatorios vencidos. Revisar modulo de Tercerizadas antes de confirmar.
                   </div>
                 )}
+
+                {/* HASTA DÓNDE PUEDE LLEGAR ESTE PROVEEDOR. Es lo que ninguna fecha de
+                    vencimiento detecta: una autorización de la ATU perfectamente VIGENTE no
+                    habilita un viaje a Ica. Va aquí, en el momento de asignar, porque es
+                    cuando se decide — y no se afirma nada sobre ESTE servicio en concreto:
+                    el destino de una reserva es texto libre y deducirle la región sería
+                    adivinar. Se pone el dato delante de quien sí sabe a dónde va el bus. */}
+                {empSelId && (() => {
+                  const e = empresasTer.find(x => x.id === empSelId);
+                  if (!e) return null;
+                  const aut = { autoridad: e.autoridad_habilitante ?? null, emisor: e.autoridad_emisor ?? null };
+                  const cfg = configAutoridad(aut.autoridad);
+                  const nacional = cfg?.ambito === "nacional";
+                  if (!cfg) {
+                    return (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-[11px] text-amber-900">
+                        <b>Alcance no registrado.</b> No consta qué autoridad autorizó a {e.razon_social}, así que no
+                        se puede saber si este servicio cae dentro de su ámbito. Complétalo en Tercerizadas → Editar.
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="rounded-xl px-4 py-2.5 text-[11px] border"
+                      style={{ borderColor: nacional ? "#bbf7d0" : "#bae6fd",
+                               background: nacional ? "#f0fdf4" : "#f0f9ff",
+                               color: nacional ? "#14532d" : "#0c4a6e" }}>
+                      <b>Alcance autorizado: {etiquetaAutorizacion(aut)}.</b> {cfg.alcance}
+                    </div>
+                  );
+                })()}
 
                 {empSelId && (
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

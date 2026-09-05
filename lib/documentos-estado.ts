@@ -720,10 +720,23 @@ export function evaluarAptitud(e: EntradaAptitud): AptitudServicio {
       });
     }
     // Habilitaciones propias de la EMPRESA (columnas verificadas en tercerizadas:19).
-    for (const h of [
-      { label: "Autorización MTC", f: emp.venc_autorizacion },
-      { label: "Habilitación SUTRAN (empresa)", f: emp.venc_habilitacion },
-    ]) {
+    //
+    // La primera es LA autorización de transporte, la exija quien la exija: el nombre de la
+    // columna dice "mtc" por historia, pero la firma el MTC, la ATU, un Gobierno Regional o
+    // una Municipalidad Provincial según el ámbito (ver lib/autorizacion-transporte.ts).
+    // Rotularla "Autorización MTC" le reclamaba al operador de la ATU un papel que no le
+    // corresponde tener.
+    //
+    // La segunda es el registro ante SUTRAN, y solo se evalúa SI ESTÁ CARGADA: SUTRAN
+    // fiscaliza, no autoriza, así que su ausencia no es un incumplimiento — tratarla como
+    // "sin cargar" ponía un aviso permanente en la ficha de todo proveedor que nunca tuvo ese
+    // número. Un aviso que sale siempre se vuelve paisaje. Si alguien SÍ lo cargó, se sigue
+    // vigilando su vencimiento como antes.
+    const habsEmpresa: { label: string; f: string | null | undefined }[] = [
+      { label: "Autorización de transporte", f: emp.venc_autorizacion },
+    ];
+    if (emp.venc_habilitacion) habsEmpresa.push({ label: "Registro SUTRAN (empresa)", f: emp.venc_habilitacion });
+    for (const h of habsEmpresa) {
       const r = evaluarFecha(fechaServicio, h.f, cfg.avisoDias);
       push(hallazgo("empresa", empNombre, h.label, r.veredicto, h.f ?? null, r.dias, esFuturo));
     }
