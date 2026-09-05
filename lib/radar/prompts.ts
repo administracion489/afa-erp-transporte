@@ -205,12 +205,14 @@ const FORMA_COMBUSTIBLE_MEDIA = `{
     "comprobante": "nota"|"texto"|null
   },
   "confianza_campos": { "galones": number|null, "monto_total": number|null, "kilometraje": number|null, "grifo": number|null },
-  "discrepancias": [                    // diferencias entre dos fuentes que REALMENTE miraste; [] si no hay
+  "discrepancias": [                    // SOLO valores que DIFIEREN entre dos fuentes que REALMENTE miraste; [] si no hay
     { "campo": "cantidad"|"importe"|"precio"|"kilometraje"|"otro",
       "entre": "surtidor_vs_nota"|"tablero_vs_nota"|"otro",  // NUNCA "surtidor_vs_nota" si no viste una foto del surtidor: no se puede comparar contra una foto que no llegó
+      "valor_a": number,                // el valor de la PRIMERA fuente que nombra "entre" (el surtidor, o el tablero)
+      "valor_b": number,                // el de la SEGUNDA (la nota). Si valor_a == valor_b NO es una discrepancia: no la reportes
       "detalle": string }
   ],
-  "notas_extraccion": string|null       // dígitos ambiguos de 7 segmentos, fotos borrosas, etc.
+  "notas_extraccion": string|null       // dígitos ambiguos, fotos borrosas, y CÓMO resolviste una lectura dudosa (p.ej. cuál de los dos números del tablero es el total)
 }`;
 
 /**
@@ -255,7 +257,7 @@ Un reporte de recarga suele venir como VARIAS fotos con ROLES distintos; combina
 
 JERARQUÍA DE FUENTES (rellena "fuentes" con la que usaste en cada campo):
 - Cantidad y precio: manda el SURTIDOR; si no se ve, la NOTA.
-- Kilometraje: manda el TABLERO; contrástalo con el km impreso en la nota (si difieren, ponlo en "discrepancias" con entre="tablero_vs_nota").
+- Kilometraje: manda el TABLERO; contrástalo con el km impreso en la nota. **Solo si DIFIEREN** ponlo en "discrepancias" con entre="tablero_vs_nota" y los dos valores.
 - IDENTIDAD (grifo, dirección, RUC, razón social, comprobante): SIEMPRE de la NOTA DE DESPACHO, JAMÁS del tablero. Si no ves una nota, deja grifo/RUC/comprobante en null.
 - Importe oficial ("monto_total"): usa el de la NOTA (es el comprobante deducible). Si el surtidor muestra un total distinto, NO lo pongas en "monto_total": descríbelo en "discrepancias" con entre="surtidor_vs_nota".
 
@@ -281,6 +283,11 @@ GLP: en Perú el GLP se despacha en GALONES. Unidades como "UGL", "U.GAL", "GLN"
 
 Si NO se pudo leer la cantidad/importe pero SÍ había una foto de la nota o del surtidor, igual marca vio_nota/vio_surtidor en true y deja los números en null (para distinguir "foto ilegible" de "dato ausente").
 Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.
+
+UNA DISCREPANCIA ES UN DESACUERDO, NO EL RELATO DE CÓMO LEÍSTE:
+"discrepancias" es SOLO para valores que NO coinciden. Si contrastaste dos fuentes y **dan lo mismo**, no hay discrepancia: deja la lista vacía. Si lo que quieres contar es cómo resolviste una lectura dudosa —cuál de los dos números del tablero era el total, un dígito borroso, una foto en diagonal— eso va en "notas_extraccion", que es para eso. Cada discrepancia lleva sus dos valores (valor_a / valor_b) y el ERP los compara: reportar dos números iguales como discrepancia pinta una alerta roja sobre una recarga correcta, y un rojo falso enseña a ignorar los rojos de verdad.
+
+SEPARADOR DE MILES EN PERÚ: en la nota, la COMA separa los miles y el PUNTO los decimales. "Kilometraje: 175,445" son **175445 km** (ciento setenta y cinco mil), NO 175.445. Un tablero que muestra 175445 y una nota que dice 175,445 tienen el MISMO odómetro — no lo reportes como diferencia. Los importes van al revés de lo que parece por la misma razón: "S/ 1,234.56" son mil doscientos treinta y cuatro soles con 56.
 
 ${CUADRE_VOUCHER}`;
 

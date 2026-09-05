@@ -330,7 +330,19 @@ export type ExtraccionCombustible = {
    * (`{campo, entre, detalle}`); los strings sueltos son la forma vieja, que sigue entrando
    * como observación porque no dice qué se comparó con qué.
    */
-  discrepancias?: (string | { campo?: string | null; entre?: string | null; detalle?: string | null })[] | null;
+  discrepancias?:
+    | (
+        | string
+        | {
+            campo?: string | null;
+            entre?: string | null;
+            /** Los dos valores comparados: si coinciden, no era una discrepancia. */
+            valor_a?: number | string | null;
+            valor_b?: number | string | null;
+            detalle?: string | null;
+          }
+      )[]
+    | null;
   notas_extraccion?: string | null;    // dudas de 7 segmentos, fotos ilegibles, etc.
   /**
    * Los dígitos de la cantidad TAL CUAL están impresos ("8.799x"), sin interpretar. Espejo de
