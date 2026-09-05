@@ -423,13 +423,22 @@ export function bloqueosDe(
    * eso crea una cuenta por pagar de la nada.
    */
   const faltaElImporte = (): Bloqueo => {
-    if (cancelado && !corrio)
+    if (cancelado && !corrio) {
+      // Marcado como falso flete y sin monto: el acuerdo SÍ existe, lo que falta es la
+      // cifra. Decirle "cancelado sin acuerdo" sería negar lo que el operador acaba de
+      // escribir y dejarlo sin saber qué le falta — y esto sí es trabajo pendiente.
+      if (lado === "proveedor" && dia.some(esFalsoFlete))
+        return {
+          codigo: "falso_flete_sin_monto",
+          mensaje: "Falso flete marcado pero sin monto acordado: escribe el avance o quítale la marca",
+        };
       return lado === "proveedor"
         ? {
             codigo: "cancelado_sin_pago",
             mensaje: "Cancelado sin acuerdo de falso flete: no se le paga al proveedor",
           }
         : { codigo: "cancelado_sin_pago", mensaje: "Cancelado: no se le cobra al cliente" };
+    }
     if (!corrio)
       return {
         codigo: "no_cerrado",
