@@ -19,6 +19,7 @@ import { revisarCoherenciaVoucher, numeroDeTranscripcion } from "./coherencia-vo
 import {
   resolverIdentidadGrifo,
   normalizarDiscrepancias,
+  esFalsaDiscrepancia,
   codigoDeDiscrepancia,
   detalleDeDiscrepancia,
   type EmpresasConocidas,
@@ -771,8 +772,14 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   // TABLERO— eso acusaba a una máquina que nadie fotografió. Cada una declara entre qué dos
   // fuentes es, y se contrasta contra las fotos que de verdad se vieron: una comparación
   // contra una foto ausente baja a observación en vez de nombrar al surtidor.
+  // Y antes de eso se descarta la que NO es una diferencia: la IA reportó como discrepancia el
+  // odómetro de una nota (175,445 km) contra el de su tablero (175445 km) —el mismo número, con
+  // la coma de miles leída como decimal— y su propio texto decía "es congruente con el de la
+  // nota". Un rojo sobre una recarga correcta enseña a ignorar los rojos de verdad, así que la
+  // discrepancia declara sus dos valores y acá se comprueban (ver `esFalsaDiscrepancia`).
   const fotosVistas = { vioSurtidor, vioNota, vioTablero };
   for (const disc of discrepancias) {
+    if (esFalsaDiscrepancia(disc)) continue;
     anomalias.push({
       codigo: codigoDeDiscrepancia(disc, fotosVistas),
       detalle: detalleDeDiscrepancia(disc, fotosVistas),

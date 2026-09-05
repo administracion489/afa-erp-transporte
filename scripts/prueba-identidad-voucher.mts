@@ -19,6 +19,7 @@ import {
   pareceGrifo,
   resolverIdentidadGrifo,
   normalizarDiscrepancias,
+  esFalsaDiscrepancia,
   codigoDeDiscrepancia,
   detalleDeDiscrepancia,
   type EmpresasConocidas,
@@ -194,6 +195,70 @@ const CONOCIDAS: EmpresasConocidas = {
   chk("sin declarar fuentes, es observación", codigoDeDiscrepancia(ds[0], fotos) === "observacion_lectura");
   chk("los vacíos y nulos se descartan", normalizarDiscrepancias([null, "", "   "]).length === 0);
   chk("un no-array da lista vacía", normalizarDiscrepancias("x").length === 0 && normalizarDiscrepancias(null).length === 0);
+}
+
+// ── 13. UNA DISCREPANCIA CON LOS DOS VALORES IGUALES NO ES UNA DISCREPANCIA ──
+// El caso real de la nota V71S-00031149 (BUI-272, 24-08): la IA comparó el odómetro de la
+// nota con el del tablero, vio que era el MISMO, y lo archivó igual como discrepancia. Su
+// propio texto lo decía: "El odómetro TOTAL del tablero (175445) es congruente con el de la
+// nota". En pantalla salía un rojo sobre una recarga en la que todo cuadraba.
+{
+  const [d] = normalizarDiscrepancias([
+    { campo: "kilometraje", entre: "tablero_vs_nota", valor_a: 175445, valor_b: 175445, detalle: "congruente" },
+  ]);
+  chk("dos valores idénticos no son discrepancia", esFalsaDiscrepancia(d));
+}
+{
+  // La coma de MILES peruana leída como decimal: "175,445" en la nota es 175445 km. Ese es el
+  // desacuerdo aparente que la IA escribió como "175.445 vs 175445".
+  const [d] = normalizarDiscrepancias([
+    { campo: "kilometraje", entre: "tablero_vs_nota", valor_a: 175445, valor_b: "175,445", detalle: "x" },
+  ]);
+  chk('"175,445" es la coma de miles, no un decimal', d.valorB === 175445, String(d.valorB));
+  chk("y por lo tanto tampoco es discrepancia", esFalsaDiscrepancia(d));
+}
+{
+  // Aunque la IA lo escriba con el punto corrido, en el ODÓMETRO son el mismo número.
+  const [d] = normalizarDiscrepancias([
+    { campo: "kilometraje", entre: "tablero_vs_nota", valor_a: 175.445, valor_b: 175445, detalle: "x" },
+  ]);
+  chk("el separador corrido en el km tampoco es discrepancia", esFalsaDiscrepancia(d));
+}
+{
+  // Un km REALMENTE distinto sí pasa: el grifero teclea mal y eso hay que verlo.
+  const [d] = normalizarDiscrepancias([
+    { campo: "kilometraje", entre: "tablero_vs_nota", valor_a: 175445, valor_b: 175545, detalle: "x" },
+  ]);
+  chk("un km de verdad distinto SÍ se reporta", esFalsaDiscrepancia(d) === false);
+  chk("y con su código propio", codigoDeDiscrepancia(d, { vioSurtidor: false, vioNota: true, vioTablero: true }) === "discrepancia_km_tablero_vs_nota");
+}
+{
+  // Lo del punto corrido se acota a kilometraje: 1.22 y 12.2 galones son dos cantidades.
+  const [d] = normalizarDiscrepancias([
+    { campo: "cantidad", entre: "surtidor_vs_nota", valor_a: 1.22, valor_b: 12.2, detalle: "x" },
+  ]);
+  chk("en galones, mismos dígitos NO es lo mismo", esFalsaDiscrepancia(d) === false);
+}
+{
+  // Sin los dos valores no se puede juzgar: se abstiene y la discrepancia entra como antes.
+  const [viejo] = normalizarDiscrepancias(["texto de una fila vieja"]);
+  chk("sin valores declarados, no se descarta", esFalsaDiscrepancia(viejo) === false);
+  const [solo] = normalizarDiscrepancias([{ campo: "importe", valor_a: 271.87, detalle: "x" }]);
+  chk("con un solo valor, tampoco", esFalsaDiscrepancia(solo) === false);
+}
+{
+  // El importe con coma de miles: "S/ 1,234.56" son 1234.56, y coincide con 1234.56.
+  const [d] = normalizarDiscrepancias([
+    { campo: "importe", entre: "surtidor_vs_nota", valor_a: "S/ 1,234.56", valor_b: 1234.56, detalle: "x" },
+  ]);
+  chk('"S/ 1,234.56" se lee como 1234.56', d.valorA === 1234.56, String(d.valorA));
+  chk("y coincide, así que no es discrepancia", esFalsaDiscrepancia(d));
+}
+{
+  // Coma decimal sin grupo de tres detrás: "11,22" galones son 11.22, no 1122.
+  const [d] = normalizarDiscrepancias([{ campo: "cantidad", valor_a: "11,22", valor_b: 11.22, detalle: "x" }]);
+  chk('"11,22" es coma decimal', d.valorA === 11.22, String(d.valorA));
+  chk("y coincide con 11.22", esFalsaDiscrepancia(d));
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

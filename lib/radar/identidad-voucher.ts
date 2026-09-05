@@ -241,13 +241,80 @@ export type Discrepancia = {
   campo: string | null;
   /** "surtidor_vs_nota" | "tablero_vs_nota" | "otro" */
   entre: string | null;
+  /** Los dos valores que la IA dice estar comparando. `null` si no los declaró. */
+  valorA: number | null;
+  valorB: number | null;
   detalle: string;
 };
 
 /**
- * Acepta la forma nueva (objeto con `entre`) y la vieja (string suelto), porque las filas ya
- * guardadas y cualquier modelo que se salte el esquema siguen mandando texto. Un string no
- * declara entre qué fuentes es → `entre: null`, que abajo se resuelve como observación.
+ * Los dígitos significativos de un número, sin separador ni ceros de relleno: 175445, 175.445
+ * y 175,445 dan todos "175445". Espejo del helper homónimo de coherencia-voucher.ts.
+ */
+function digitosSignificativos(n: number): string {
+  const s = Math.abs(n).toFixed(6).replace(".", "");
+  return s.replace(/^0+/, "").replace(/0+$/, "");
+}
+
+/**
+ * ¿La IA reportó como discrepancia dos valores que en realidad COINCIDEN?
+ *
+ * Pasó tal cual, y el propio texto de la IA lo confesaba: *"nota registra 175.445 km, tablero
+ * digital muestra 3089.6 km (parcial) y 175445 km total. **El odómetro TOTAL del tablero
+ * (175445) es congruente con el de la nota**"*. Es decir: contrastó los dos, vio que eran el
+ * mismo número, y lo archivó igual como discrepancia. En pantalla eso sale como un rojo que
+ * dice que algo no cuadra sobre una recarga en la que todo cuadraba — y un rojo falso enseña
+ * a ignorar los rojos de verdad, que es lo único que este panel no se puede permitir.
+ *
+ * Por eso la discrepancia declara los DOS valores y el ERP los compara él mismo (no confiar
+ * solo en el prompt, el mismo criterio que `esMarcaKitGLP` o el cuadre aritmético):
+ *  - iguales como números → no hay nada que reportar;
+ *  - **en el kilometraje**, iguales en sus DÍGITOS aunque el separador esté corrido: en la nota
+ *    peruana `175,445` es la coma de MILES, y leerla como decimal produce "175.445 vs 175445",
+ *    que parece un desacuerdo y es el mismo odómetro escrito de dos formas. Se acota a
+ *    kilometraje a propósito: un odómetro no tiene decimales, pero `1.22` y `12.2` galones sí
+ *    pueden ser dos cantidades distintas de verdad.
+ */
+export function esFalsaDiscrepancia(d: Discrepancia): boolean {
+  if (d.valorA == null || d.valorB == null) return false; // sin los dos valores no se puede juzgar
+  if (d.valorA === d.valorB) return true;
+  if (String(d.campo ?? "").toLowerCase() === "kilometraje") {
+    return digitosSignificativos(d.valorA) === digitosSignificativos(d.valorB);
+  }
+  return false;
+}
+
+/**
+ * Un valor comparado, venga como número o como el texto impreso. `"175,445"` es la coma de
+ * MILES en un voucher peruano: 175445 km, no 175.445. Ante cualquier ambigüedad devuelve null
+ * y `esFalsaDiscrepancia` se abstiene — solo sirve para descartar un falso positivo, así que
+ * quedarse callado es gratis y adivinar no.
+ */
+function numeroDeValor(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v !== "string") return null;
+  const s = v.replace(/[^0-9.,]/g, "");
+  if (!/\d/.test(s)) return null;
+  // "175,445" → miles. "3089.6" → decimal. Con los dos separadores, el último manda.
+  const ultimaComa = s.lastIndexOf(",");
+  const ultimoPunto = s.lastIndexOf(".");
+  let limpio = s;
+  if (ultimaComa >= 0 && ultimoPunto >= 0) {
+    const dec = Math.max(ultimaComa, ultimoPunto);
+    limpio = s.slice(0, dec).replace(/[.,]/g, "") + "." + s.slice(dec + 1).replace(/[.,]/g, "");
+  } else if (ultimaComa >= 0) {
+    // Coma sola: miles si deja un grupo de 3 detrás (175,445), decimal si no (11,22).
+    limpio = /,\d{3}$/.test(s) ? s.replace(/,/g, "") : s.replace(",", ".");
+  }
+  const n = Number(limpio);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Acepta la forma nueva (objeto con `entre` y los dos valores) y la vieja (string suelto),
+ * porque las filas ya guardadas y cualquier modelo que se salte el esquema siguen mandando
+ * texto. Un string no declara entre qué fuentes es → `entre: null`, que abajo se resuelve
+ * como observación, ni con qué valores → no se puede descartar como falsa.
  */
 export function normalizarDiscrepancias(raw: unknown): Discrepancia[] {
   if (!Array.isArray(raw)) return [];
@@ -256,7 +323,7 @@ export function normalizarDiscrepancias(raw: unknown): Discrepancia[] {
     if (item == null) continue;
     if (typeof item === "string") {
       const t = item.trim();
-      if (t) out.push({ campo: null, entre: null, detalle: t });
+      if (t) out.push({ campo: null, entre: null, valorA: null, valorB: null, detalle: t });
       continue;
     }
     if (typeof item === "object") {
@@ -266,6 +333,8 @@ export function normalizarDiscrepancias(raw: unknown): Discrepancia[] {
       out.push({
         campo: o.campo == null ? null : String(o.campo),
         entre: o.entre == null ? null : String(o.entre),
+        valorA: numeroDeValor(o.valor_a),
+        valorB: numeroDeValor(o.valor_b),
         detalle,
       });
     }
