@@ -178,7 +178,7 @@ titulo("5 · Lo guardado se vuelve a encontrar (el fallo de «se guardó pero si
     ruta_nombre: nombreRetorno, direccion_servicio: "retorno", precio_cliente: 320,
   } as ReservaLiq;
   const par: ParServicio = {
-    cabeza: tramo, adjuntas: [], ejecutado: true, ejecutados: [tramo],
+    cabeza: tramo, adjuntas: [], ejecutado: true, ejecutados: [tramo], falsoFlete: false,
     sentido: "RETORNO", ida: null, retorno: tramo,
   };
 

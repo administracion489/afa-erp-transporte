@@ -827,7 +827,8 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
       "Ordenar por dentro el mes de un proveedor: ver (o cerrar aparte) solo lo de un cliente, o solo los servicios fijos, los adicionales o los eventuales.",
       "Mandarle al cliente un documento con el detalle de lo que se ejecutó, para que dé su conformidad antes de facturar.",
       "Convertir los servicios que hizo un tercerizado en una cuenta por pagar con su detalle.",
-      "Ver en rojo, antes de emitir, qué servicios están mal (sin precio, sin unidad, sin finalizar).",
+      "Ver en rojo, antes de emitir, qué servicios están mal (sin precio, sin unidad, sin finalizar) — y en gris lo que simplemente no corresponde liquidar, como los cancelados.",
+      "Pagarle al proveedor el falso flete de un servicio cancelado, cuando hay acuerdo por el avance, sin que se pague solo por un descuido.",
     ],
     conceptos: [
       "liquidacion_cliente",
@@ -937,6 +938,21 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
         pregunta: "¿Qué cuenta como “Fijo”, “Adicional” y “Eventual” en ese filtro?",
         respuesta:
           "Son tres cosas que no se cobran ni se concilian igual:\n\n• **Fijos** — transporte de personal contratado: el programa recurrente que nace de una cotización de servicio **fijo**.\n• **Adicionales** — lo que el cliente pidió **por encima del contrato** (se registra con el botón *Adicional* en Reservas). Incluye también las **contingencias**. Son los que van en el subtotal *“Adicionales autorizados”* del formato.\n• **Eventuales** — ventas sueltas: full day, multi-día, traslados, turismo. Todo lo que **no** nació de un contrato fijo — y ahí caen también los servicios que se registraron **sin tipo de servicio**, así que si el número de eventuales te sorprende, mira primero eso.\n\nDos reglas que conviene tener claras:\n\n• **La clase es del DÍA, no del tramo.** La declara el tramo que **lleva el importe**, igual que el origen contractual: marcar el retorno —que va en S/ 0.00 a propósito— no mueve el día de sitio. Así la ida y su retorno **siempre caen en el mismo filtro** y ningún filtro puede partir un día en dos.\n• **La marca escrita gana.** Si un servicio está marcado como adicional, sale en *Adicionales* aunque su tipo diga otra cosa: alguien lo escribió a propósito.",
+      },
+      {
+        pregunta: "Un servicio cancelado me sale como “Sin costo de proveedor”. ¿Tengo que cargarle algo?",
+        respuesta:
+          "**No.** Un servicio cancelado no se paga ni se cobra: el bus no salió. Eso ya está corregido — ahora esas filas dicen **“Cancelado sin acuerdo de falso flete: no se le paga al proveedor”**, salen en **gris y no en rojo**, y **no cuentan** en el botón de “Cargar N costo(s) faltante(s)”.\n\nSiguen apareciendo en “No entran a la liquidación” a propósito: esconderlas sería la forma de que una ruta desaparezca del cierre sin que nadie pueda decir por qué. La cabecera del bloque ahora desglosa **“N por resolver · M cancelados, y está bien”**, para que se vea de un vistazo cuánto de eso es trabajo de verdad.\n\nY ojo con un tercer caso que antes salía con ese mismo mensaje: un servicio que quedó en **Programada o Confirmada** en un mes ya cerrado. Ese **sí es rojo**, pero lo que falta no es el costo: es **cerrarlo**. El mensaje ahora lo dice, porque cargarle un costo a un viaje que nadie confirmó que salió crea una cuenta por pagar de la nada.",
+      },
+      {
+        pregunta: "El proveedor ya había salido de cochera y acordamos pagarle. ¿Cómo lo registro?",
+        respuesta:
+          "Es un **falso flete**, y ahora tiene su propio camino:\n\n1. Abre el detalle del servicio (pulsando el contador de la fila, en el bloque rojo o en la tarjeta del proveedor).\n2. En la columna del costo verás el importe **tachado**: mientras el servicio esté cancelado no se paga.\n3. Marca la casilla **“Falso flete”**, escribe el **monto acordado** (que casi nunca es la tarifa completa: es el avance) y el **motivo** — *“ya había llegado al punto de origen”*.\n4. Guarda. Ese día entra a la liquidación en un renglón propio y con su propio subtotal: **“Falsos fletes (servicios cancelados con acuerdo)”**.\n\n**El motivo es obligatorio y no se puede saltar.** Es la única constancia de por qué salió dinero por un viaje que no se prestó.\n\nDos cosas más:\n\n• **Sin marcar la casilla no se paga, por más que el importe esté escrito.** Es a propósito. Muchas veces la cancelada se queda con el costo puesto por error, y si el ERP lo pagara solo, recuperar esa plata del proveedor es muy difícil. Al revés no: si le falta, el proveedor reclama y se le paga después. El sistema se equivoca siempre para el lado que se puede arreglar.\n• **Al cliente no se le cobra la cancelación**, así que del lado facturar la casilla no existe.",
+      },
+      {
+        pregunta: "Me sale un botón “Poner en S/ 0.00” sobre los cancelados. ¿Qué hace y es peligroso?",
+        respuesta:
+          "Borra el importe que quedó cargado en servicios cancelados que **no se van a liquidar**. Te dice antes cuánto es y sobre cuántos servicios, y pide confirmación.\n\n**Por qué conviene hacerlo aunque la liquidación ya los ignore:** ese importe sí lo leen los reportes de **margen y de egresos**, que miran el costo del servicio sin preguntar si llegó a prestarse. Mientras siga escrito, el mes se ve **más caro de lo que fue**.\n\nNo es peligroso y no se hace solo: lo pulsa una persona, se guarda por el mismo camino que Programación, queda registrado con el motivo *“Corrección de un dato mal cargado”* y se puede ver en el historial del Pacto. Si alguno de esos servicios sí correspondía pagarlo, márcalo antes como **falso flete** — los marcados no se tocan.",
       },
       {
         pregunta: "¿Qué es el botón “Del 15 al 14”?",

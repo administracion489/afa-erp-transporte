@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { fmtMoneda } from "@/lib/finanzas/dinero";
 import {
-  agruparServicios, analizarServicios, etiquetaRuta,
+  agruparServicios, analizarServicios, etiquetaRuta, bloqueoEsTrabajo, importeCargado,
   type ReservaLiq, type CatalogoLiq, type LineaAgrupada, type LadoLiquidacion,
   type ParServicio, type ReservaBloqueada,
 } from "@/lib/liquidacion-agrupacion";
@@ -45,6 +45,7 @@ import ModalEditor from "./ModalEditor";
 import ModalSede, { SEDE_VACIA, type Sede } from "./ModalSede";
 import ModalEnviar from "./ModalEnviar";
 import ModalCostos, { type ReservaSinCosto } from "@/components/pactos/ModalCostos";
+import { guardarReservas } from "@/lib/reservas-pacto";
 
 const COLS_RESERVA =
   "id,codigo,fecha_servicio,hora_servicio,estado,estado_admin,estado_proveedor,cliente_id,cliente_sede_id," +
@@ -58,6 +59,13 @@ const COL_PAX_CONTRATADO = "capacidad_contratada";
 
 /** La añade supabase/reservas-04 (servicios adicionales). Misma prudencia. */
 const COL_ORIGEN = "origen_contractual";
+
+/**
+ * Las añade supabase/reservas-05. Sin ellas TODA cancelación vale S/ 0.00 y no hay forma
+ * de marcar un falso flete — que es el lado seguro: se deja de pagar algo que había que
+ * pagar, y el proveedor lo reclama. Al revés no se puede deshacer.
+ */
+const COL_FALSO_FLETE = "falso_flete,falso_flete_motivo";
 
 /**
  * Los paraderos del tramo. Es el eje del MAPA de la agrupación: sin esto, dos redacciones
@@ -307,7 +315,9 @@ export default function LiquidacionesPage() {
       // reintenta quitándolas de a una: sin el pax la cascada pierde su primer escalón,
       // y sin el origen todo se lee como contratado. Ninguna de las dos puede impedir
       // cerrar el periodo.
-      const rs = await traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN},${COL_PARADAS}`)
+      const rs = await traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN},${COL_PARADAS},${COL_FALSO_FLETE}`)
+        .catch(() => traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN},${COL_PARADAS}`))
+        .catch(() => traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN},${COL_FALSO_FLETE}`))
         .catch(() => traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO},${COL_ORIGEN}`))
         .catch(() => traerReservas(`${COLS_RESERVA},${COL_PAX_CONTRATADO}`))
         .catch(() => traerReservas(`${COLS_RESERVA},${COL_ORIGEN}`))
@@ -911,32 +921,88 @@ export default function LiquidacionesPage() {
     type Fila = {
       clave: string; grupo: string; contraparte: string; ruta: string; motivo: string;
       servicios: number; ids: number[]; cruces: Set<string>;
+      /**
+       * ¿Esta fila es TRABAJO o solo el registro de algo que no corresponde? Una
+       * cancelación sin acuerdo no se arregla: es la respuesta correcta. Se sigue
+       * mostrando —esconderla sería la forma de que una ruta desaparezca del cierre sin
+       * que nadie pueda decir por qué— pero en gris y sin contar como pendiente.
+       */
+      trabajo: boolean;
+      /**
+       * Lo que esas filas conservan cargado y NO se va a pagar. No es un detalle
+       * estético: `v_costo_servicio` y `v_egresos` leen ese importe sin preguntar si el
+       * servicio se prestó, así que mientras siga escrito el margen del mes está mal.
+       */
+      importeHuerfano: number;
     };
     const out = new Map<string, Fila>();
-    const sumar = (grupo: string, contraparte: string, ruta: string, motivo: string, r: ReservaLiq | undefined, id: number) => {
+    const sumar = (
+      grupo: string, contraparte: string, ruta: string, motivo: string,
+      r: ReservaLiq | undefined, id: number, trabajo: boolean
+    ) => {
       const clave = `${grupo}|${ruta}|${motivo}`;
       const dueño = r ? nombreDelCruce(cruceDe(r)) : "";
+      const suelto = !trabajo && r ? importeCargado(r, lado) : 0;
       const ya = out.get(clave);
-      if (ya) { ya.servicios += 1; ya.ids.push(id); if (dueño) ya.cruces.add(dueño); return; }
+      if (ya) {
+        ya.servicios += 1; ya.ids.push(id); ya.importeHuerfano += suelto;
+        if (dueño) ya.cruces.add(dueño);
+        return;
+      }
       out.set(clave, {
-        clave, grupo, contraparte, ruta, motivo, servicios: 1, ids: [id],
+        clave, grupo, contraparte, ruta, motivo, servicios: 1, ids: [id], trabajo,
+        importeHuerfano: suelto,
         cruces: new Set(dueño ? [dueño] : []),
       });
     };
     for (const g of gruposVisibles) {
       const donde = g.sedeNombre && g.sedeNombre !== "Servicios tercerizados" ? `${g.contraparteNombre} · ${g.sedeNombre}` : g.contraparteNombre;
       const quien = claveContraparte(g.contraparteId);
-      for (const { r, motivos } of g.bloqueadas)
+      for (const { r, motivos, codigos } of g.bloqueadas)
         // El motivo se despersonaliza (#1234 → #…) para que sesenta servicios con el
         // mismo problema sean UNA fila y no sesenta.
-        sumar(donde, quien, etiquetaRuta(r), (motivos[0] ?? "Bloqueada").replace(/#\d+/g, "#…"), r, r.id);
+        sumar(donde, quien, etiquetaRuta(r), (motivos[0] ?? "Bloqueada").replace(/#\d+/g, "#…"),
+              r, r.id, bloqueoEsTrabajo(codigos));
       for (const l of g.sinEjecutar)
         for (const id of l.reservas_periodo)
           sumar(donde, quien, l.ruta, `Programada pero ningún servicio quedó finalizado (${l.cantidad_programada})`,
-                reservasPorId.get(id), id);
+                reservasPorId.get(id), id, true);
     }
-    return [...out.values()].sort((a, b) => b.servicios - a.servicios || a.ruta.localeCompare(b.ruta));
-  }, [gruposVisibles, reservasPorId, cruceDe, nombreDelCruce]);
+    // Primero lo que hay que arreglar. Lo informativo se hunde al fondo: es lo que ya
+    // está bien y solo se consulta.
+    return [...out.values()].sort(
+      (a, b) => Number(b.trabajo) - Number(a.trabajo) || b.servicios - a.servicios || a.ruta.localeCompare(b.ruta)
+    );
+  }, [gruposVisibles, reservasPorId, cruceDe, nombreDelCruce, lado]);
+
+  /** El desglose que se lee en la cabecera del bloque rojo, y el material del botón de limpieza. */
+  const resumenFuera = useMemo(() => {
+    const conTrabajo = fueraDelCierre.filter((f) => f.trabajo);
+    const informativas = fueraDelCierre.filter((f) => !f.trabajo);
+    return {
+      porResolver: conTrabajo.reduce((a, f) => a + f.servicios, 0),
+      canceladas: informativas.reduce((a, f) => a + f.servicios, 0),
+      importeHuerfano: informativas.reduce((a, f) => a + f.importeHuerfano, 0),
+      idsHuerfanos: informativas.flatMap((f) => f.ids.filter((id) => {
+        const r = reservasPorId.get(id);
+        return !!r && importeCargado(r, lado) > 0;
+      })),
+    };
+  }, [fueraDelCierre, reservasPorId, lado]);
+
+  /**
+   * Los días que SÍ se le pagan al proveedor sin haberse prestado. Se cuentan aparte y se
+   * dicen antes de emitir: es dinero saliendo por un servicio que no salió, y aunque cada
+   * uno lleve su acuerdo escrito, verlos juntos es la última oportunidad de notar que uno
+   * se marcó por error.
+   */
+  const falsosFletes = useMemo(() => {
+    const out: { lineas: number; dias: number; total: number } = { lineas: 0, dias: 0, total: 0 };
+    for (const g of gruposVisibles)
+      for (const l of g.lineas)
+        if (l.tipo === "falso_flete") { out.lineas += 1; out.dias += l.cantidad; out.total += l.total_linea; }
+    return out;
+  }, [gruposVisibles]);
 
   /**
    * Mover el periodo INVALIDA la selección. `g.clave` es cliente|sede y no lleva fechas,
@@ -1089,6 +1155,41 @@ export default function LiquidacionesPage() {
   }, [reservas, liquidaciones, lado]);
 
   const totalRetenidos = retenidos.reduce((a, x) => a + x.servicios, 0);
+
+  /**
+   * Borra el importe que quedó cargado en servicios cancelados que no se van a pagar.
+   *
+   * NO se hace solo, y esa es la mitad del diseño: un UPDATE masivo automático sobre
+   * dinero es exactamente lo que no debe hacer un ERP. Lo pulsa una persona, después de
+   * leer cuánto y sobre cuántos servicios.
+   *
+   * Escribe por `guardarReservas` —la misma puerta que Programación— y con el motivo
+   * `correccion_carga`, que es literalmente lo que es. El acta de cambio se levanta sola
+   * en el trigger y eso está bien: es dinero que se retira de una fila, y tiene que
+   * quedar quién y cuándo.
+   */
+  async function limpiarImportesHuerfanos() {
+    const ids = [...new Set(resumenFuera.idsHuerfanos)];
+    if (!ids.length) return;
+    if (!confirm(
+      `Se va a poner en S/ 0.00 el ${lado === "cliente" ? "precio" : "costo"} de ${ids.length} ` +
+      `servicio(s) cancelado(s) que no se ${lado === "cliente" ? "cobran" : "pagan"}.\n\n` +
+      `Hoy ese importe no se liquida, pero sí está contando como ${lado === "cliente" ? "ingreso" : "costo"} ` +
+      `en los reportes de margen. Queda registrado quién lo hizo.\n\n¿Continuar?`
+    )) return;
+    setTrabajando(true); setMsg("");
+    const campo = lado === "cliente" ? "precio_cliente" : "costo_proveedor";
+    const r = await guardarReservas(supabase, ids, { [campo]: 0 }, {
+      motivo: "correccion_carga",
+      nota: "Servicio cancelado sin acuerdo de falso flete: se retira el importe que había quedado cargado.",
+    });
+    setMsg(r.guardados.length
+      ? `✅ ${r.guardados.length} servicio(s) cancelado(s) quedaron en S/ 0.00.` +
+        (r.rechazos.length ? ` ⚠️ ${r.rechazos.length} no se pudieron: ${r.rechazos[0].motivo}` : "") +
+        (r.aviso ? ` ${r.aviso}` : "")
+      : `⚠️ No se pudo: ${r.rechazos[0]?.motivo ?? "sin detalle"}`);
+    await cargar(); setTrabajando(false);
+  }
 
   async function liberarRetenidos() {
     setTrabajando(true); setMsg("");
@@ -1319,6 +1420,20 @@ export default function LiquidacionesPage() {
               </button>
             </div>
           )}
+          {/*
+            Dinero saliendo por servicios que NO se prestaron. Cada uno lleva su acuerdo
+            escrito, así que esto no es un error — es la última oportunidad de notar que
+            uno se marcó por equivocación, que es el único fallo de este camino que no se
+            puede deshacer después.
+          */}
+          {lado === "proveedor" && falsosFletes.dias > 0 && (
+            <div className="mb-2 px-3 py-2 rounded-xl bg-amber-50 border border-amber-200 text-[12px] text-amber-900">
+              <b>{falsosFletes.dias} falso(s) flete(s)</b> por <b>{fmtMoneda(falsosFletes.total)}</b>:
+              servicios que no salieron y que se le pagan igual al proveedor por el avance acordado.
+              Van en su propio subtotal del documento. Si alguno no corresponde, quítale la marca desde
+              el detalle del servicio y deja de pagarse.
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-sm text-gray-600">
               <b>{gruposVisibles.length}</b> grupo(s)
@@ -1381,17 +1496,46 @@ export default function LiquidacionesPage() {
               siempre: es la primera pregunta de quien cierra el mes, y antes había que
               desplegar la tarjeta para encontrar la respuesta partida en códigos sueltos. */}
           {fueraDelCierre.length > 0 && (
-            <div className="bg-white rounded-2xl border border-red-200 shadow-sm mb-3 overflow-hidden">
-              <div className="px-4 py-2 bg-red-50 border-b">
-                <p className="text-[11px] font-black text-red-700 uppercase tracking-wide">
+            <div className={`bg-white rounded-2xl border shadow-sm mb-3 overflow-hidden ${
+              resumenFuera.porResolver ? "border-red-200" : "border-gray-200"
+            }`}>
+              {/* La cabecera desglosa, porque este bloque mezcla dos cosas que se
+                  resuelven en sitios opuestos: lo que hay que arreglar y lo que ya está
+                  bien. Un solo número los daba por iguales, y con seis cancelaciones
+                  dentro parecía que había seis pendientes que no existían. */}
+              <div className={`px-4 py-2 border-b flex flex-wrap items-center gap-2 ${
+                resumenFuera.porResolver ? "bg-red-50" : "bg-gray-50"
+              }`}>
+                <p className={`text-[11px] font-black uppercase tracking-wide ${
+                  resumenFuera.porResolver ? "text-red-700" : "text-gray-500"
+                }`}>
                   No entran a la liquidación ({fueraDelCierre.reduce((a, f) => a + f.servicios, 0)} servicios)
                 </p>
+                <span className="text-[11px] text-gray-500">
+                  {resumenFuera.porResolver > 0 && (
+                    <b className="text-red-700">{resumenFuera.porResolver} por resolver</b>
+                  )}
+                  {resumenFuera.porResolver > 0 && resumenFuera.canceladas > 0 && " · "}
+                  {resumenFuera.canceladas > 0 && `${resumenFuera.canceladas} cancelado(s), y está bien`}
+                </span>
+                {/* El importe que quedó cargado en una cancelación no se liquida, pero sí
+                    pesa en los reportes de margen: mientras siga escrito, el mes se ve
+                    peor de lo que fue. */}
+                {resumenFuera.importeHuerfano > 0 && (
+                  <button onClick={limpiarImportesHuerfanos} disabled={trabajando}
+                    className="ml-auto px-2.5 py-1 rounded-lg border border-amber-300 bg-amber-50 text-[11px] font-bold text-amber-800 hover:bg-amber-100 disabled:opacity-40"
+                    title={`Esos servicios conservan un ${lado === "cliente" ? "precio" : "costo"} que no se va a liquidar y que sí está contando en el margen`}>
+                    {trabajando ? "Limpiando…" : `Poner en S/ 0.00 · ${fmtMoneda(resumenFuera.importeHuerfano)} en ${resumenFuera.idsHuerfanos.length} servicio(s)`}
+                  </button>
+                )}
               </div>
               <table className="w-full text-sm">
                 <tbody className="divide-y">
                   {fueraDelCierre.map((f) => (
-                    <tr key={f.clave}>
-                      <td className="px-4 py-1.5 font-medium text-gray-800 w-48">{f.ruta}</td>
+                    <tr key={f.clave} className={f.trabajo ? "" : "bg-gray-50/60"}>
+                      <td className={`px-4 py-1.5 font-medium w-48 ${f.trabajo ? "text-gray-800" : "text-gray-500"}`}>
+                        {f.ruta}
+                      </td>
                       {/* El nombre filtra: con diez clientes en la lista, "¿por qué no sale
                           la RUTA A?" se responde aislando al que la contrató. Debajo, de
                           quién son esos servicios: en la pestaña de pagar, la fila dice el
@@ -1410,12 +1554,24 @@ export default function LiquidacionesPage() {
                           arregla el motivo por el que esos servicios no entran. */}
                       <td className="px-2 py-1.5 text-xs text-right w-24">
                         <button onClick={() => verServicios(f.ruta, `${f.grupo} · ${f.motivo}`, f.ids)}
-                          className="font-bold text-red-700 underline decoration-dotted hover:text-red-900"
-                          title="Ver y corregir estos servicios">
+                          className={`font-bold underline decoration-dotted ${
+                            f.trabajo ? "text-red-700 hover:text-red-900" : "text-gray-500 hover:text-gray-800"
+                          }`}
+                          title={f.trabajo ? "Ver y corregir estos servicios" : "Ver estos servicios"}>
                           {f.servicios} serv.
                         </button>
                       </td>
-                      <td className="px-4 py-1.5 text-xs text-red-700">{f.motivo}</td>
+                      {/* Rojo solo lo que se puede arreglar. Pintar de rojo una cancelación
+                          —que es la respuesta correcta— enseña a ignorar los rojos, y el de
+                          al lado puede ser el día que se está cobrando dos veces. */}
+                      <td className={`px-4 py-1.5 text-xs ${f.trabajo ? "text-red-700" : "text-gray-500"}`}>
+                        {f.motivo}
+                        {!f.trabajo && f.importeHuerfano > 0 && (
+                          <span className="block text-[10px] text-amber-700">
+                            conserva {fmtMoneda(f.importeHuerfano)} cargado(s) que no se {lado === "cliente" ? "cobran" : "pagan"}
+                          </span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1480,7 +1636,15 @@ export default function LiquidacionesPage() {
                     title="Ver el detalle de estos servicios">
                     {g.pares.filter((p) => p.ejecutado).length} servicio(s)
                     {g.pares.some((p) => p.adjuntas.length) ? " (ida y retorno)" : ""}
-                    {g.bloqueadas.length ? ` · ${g.bloqueadas.length} con problema` : ""}
+                    {/* Aparte, siempre: un falso flete no es un servicio prestado, y
+                        sumarlo aquí rompería el número que el proveedor coteja contra su
+                        propia cuenta. */}
+                    {g.pares.some((p) => p.falsoFlete)
+                      ? ` · ${g.pares.filter((p) => p.falsoFlete).length} falso(s) flete(s)`
+                      : ""}
+                    {g.bloqueadas.filter((b) => bloqueoEsTrabajo(b.codigos)).length
+                      ? ` · ${g.bloqueadas.filter((b) => bloqueoEsTrabajo(b.codigos)).length} con problema`
+                      : ""}
                   </button>
                   {lado === "cliente" && (
                     <button
@@ -1546,11 +1710,17 @@ export default function LiquidacionesPage() {
                       const deQuien = lado === "proveedor" ? cruceDeLinea(l) : [];
                       return (
                         <div key={l.clave} className="flex items-start gap-3 px-4 py-2 text-sm"
-                             style={l.tipo === "adicional" ? { background: "#fffbeb" } : undefined}>
+                             style={l.tipo === "adicional" || l.tipo === "falso_flete" ? { background: "#fffbeb" } : undefined}>
                           <span className="flex-1 text-gray-700">
                             {/* El nombre completo de cada tramo, que es lo que se imprime. */}
                             <span className="block">
-                              {l.tipo === "adicional" && (
+                              {l.tipo === "falso_flete" ? (
+                                <span className="mr-1.5 text-[9px] font-black px-1.5 py-0.5 rounded-full uppercase align-middle"
+                                      title="El servicio no se prestó y se paga el avance acordado con el proveedor. Va en su propio subtotal del formato."
+                                      style={{ background: "#fed7aa", color: "#9a3412" }}>
+                                  falso flete
+                                </span>
+                              ) : l.tipo === "adicional" && (
                                 <span className="mr-1.5 text-[9px] font-black px-1.5 py-0.5 rounded-full uppercase align-middle"
                                       title="Fuera del contrato: va en el subtotal de adicionales del formato"
                                       style={{ background: "#fef3c7", color: "#b45309" }}>
@@ -1612,10 +1782,12 @@ export default function LiquidacionesPage() {
                         {g.avisos.length > 6 && <p className="text-[11px] text-amber-600 mt-1">y {g.avisos.length - 6} más…</p>}
                       </div>
                     )}
-                    {g.bloqueadas.length > 0 && (
+                    {g.bloqueadas.filter((b) => bloqueoEsTrabajo(b.codigos)).length > 0 && (() => {
+                      const conTrabajo = g.bloqueadas.filter((b) => bloqueoEsTrabajo(b.codigos));
+                      return (
                       <div className="px-4 py-3 bg-red-50/60">
                         <p className="text-[11px] font-black text-red-700 uppercase tracking-wide mb-1">No se pueden liquidar todavía</p>
-                        {g.bloqueadas.slice(0, 8).map(({ r, motivos }) => (
+                        {conTrabajo.slice(0, 8).map(({ r, motivos }) => (
                           <div key={r.id} className="text-[11px] text-red-700 flex gap-2">
                             <span className="font-mono">{r.codigo ?? "#" + r.id}</span>
                             <span className="text-red-400">{r.fecha_servicio}</span>
@@ -1623,9 +1795,10 @@ export default function LiquidacionesPage() {
                             <span>{motivos.join(" · ")}</span>
                           </div>
                         ))}
-                        {g.bloqueadas.length > 8 && <p className="text-[11px] text-red-500 mt-1">y {g.bloqueadas.length - 8} más…</p>}
+                        {conTrabajo.length > 8 && <p className="text-[11px] text-red-500 mt-1">y {conTrabajo.length - 8} más…</p>}
                       </div>
-                    )}
+                      );
+                    })()}
                   </div>
                 )}
               </div>

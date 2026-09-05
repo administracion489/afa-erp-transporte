@@ -58,7 +58,7 @@ const ORIGENES = ["contrato", "adicional", "contingencia"] as const;
  * poder reintentar sin ellas: que falte una migración accesoria no puede impedir
  * corregir un precio en pleno cierre.
  */
-const COLUMNAS_OPCIONALES = ["origen_contractual"] as const;
+const COLUMNAS_OPCIONALES = ["origen_contractual", "falso_flete", "falso_flete_motivo"] as const;
 
 /** Lo que el operador puede cambiar de una fila. */
 type Campos = {
@@ -68,6 +68,13 @@ type Campos = {
   estado: string;
   monto: string;
   origen_contractual: string;
+  /**
+   * El acuerdo para pagarle al proveedor un servicio CANCELADO. Sin él, el importe de una
+   * cancelación no se paga por más que esté escrito: es justo el número que deja el error
+   * humano de cancelar sin borrar el costo, y pagarlo por descuido no se puede deshacer.
+   */
+  falso_flete: boolean;
+  falso_flete_motivo: string;
 };
 
 /** Estado del documento que reclama a esta reserva, y qué permite. */
@@ -95,6 +102,8 @@ function camposDe(r: ReservaLiq, lado: LadoLiquidacion): Campos {
     estado: String(r.estado ?? ""),
     monto: num(lado === "cliente" ? r.precio_cliente : r.costo_proveedor),
     origen_contractual: origenContractual(r),
+    falso_flete: r.falso_flete === true,
+    falso_flete_motivo: String(r.falso_flete_motivo ?? ""),
   };
 }
 
@@ -229,6 +238,13 @@ export default function ModalServicios({
     if (c.estado !== orig.estado && c.estado) p.estado = c.estado;
     if (c.monto !== orig.monto) p[campoMonto] = Number(c.monto || 0);
     if (c.origen_contractual !== orig.origen_contractual) p.origen_contractual = c.origen_contractual;
+    // La marca solo tiene sentido sobre una cancelación. Si el operador la puso y después
+    // devolvió el servicio a "finalizada", se retira sola: una marca colgada sobre un
+    // servicio prestado no describe nada y confundiría al siguiente que lo mire.
+    const ff = c.estado === "cancelada" && c.falso_flete;
+    if (ff !== orig.falso_flete) p.falso_flete = ff;
+    const motivoFF = ff ? c.falso_flete_motivo.trim() : "";
+    if (motivoFF !== orig.falso_flete_motivo) p.falso_flete_motivo = motivoFF || null;
     return Object.keys(p).length ? p : null;
   }
 
@@ -263,9 +279,11 @@ export default function ModalServicios({
         direccion_servicio: r.direccion_servicio,
         tipo_asignacion: r.tipo_asignacion,
         [campoMonto]: Number(c.monto || 0),
+        falso_flete: c.estado === "cancelada" && c.falso_flete,
       } as Record<string, unknown>;
       const otroTramo = hermano && cH
-        ? { ...hermano, estado: cH.estado, [campoMonto]: Number(cH.monto || 0) }
+        ? { ...hermano, estado: cH.estado, [campoMonto]: Number(cH.monto || 0),
+            falso_flete: cH.estado === "cancelada" && cH.falso_flete }
         : hermano;
       // Solo la cara del dinero que este modal edita: en la pestaña del cliente, el
       // precio. Los avisos del costo del proveedor son ciertos pero no se pueden
@@ -284,7 +302,8 @@ export default function ModalServicios({
   const reagrupa = useMemo(
     () => pendientes.filter((r) => {
       const p = patchDe(r) ?? {};
-      return "ruta_nombre" in p || "fecha_servicio" in p || campoMonto in p || "origen_contractual" in p;
+      return "ruta_nombre" in p || "fecha_servicio" in p || campoMonto in p
+        || "origen_contractual" in p || "falso_flete" in p || "estado" in p;
     }).length,
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
     [pendientes, edit]
@@ -305,6 +324,23 @@ export default function ModalServicios({
 
   async function guardar() {
     if (!pendientes.length) { setMsg("⚠️ No hay ningún cambio que guardar."); return; }
+
+    // Sin motivo no se guarda, y esto SÍ bloquea. Pagar un servicio que no se prestó es
+    // la salida de dinero más fácil de colar en un cierre, y este campo es lo único que
+    // queda escrito para defenderla — igual que `adicional_motivo` en un adicional.
+    const sinMotivo = pendientes.filter((r) => {
+      const c = campos(r);
+      return c.estado === "cancelada" && c.falso_flete && !c.falso_flete_motivo.trim();
+    });
+    if (sinMotivo.length) {
+      setMsg(
+        `⚠️ ${sinMotivo.length} falso(s) flete(s) sin motivo: ` +
+        `${sinMotivo.slice(0, 3).map((r) => r.codigo ?? `#${r.id}`).join(", ")}` +
+        `${sinMotivo.length > 3 ? "…" : ""}. Escribe por qué se le paga al proveedor un ` +
+        `servicio que no se prestó — es la única constancia que va a quedar.`
+      );
+      return;
+    }
     const dobles = avisos.filter((a) => a.avisos.some((x) => /DOS VECES/.test(x.texto)));
     if (dobles.length && !confirm(
       `${dobles.length} servicio(s) quedarían con importe en la ida Y en el retorno. ` +
@@ -453,6 +489,10 @@ export default function ModalServicios({
                 const candado = candadoDe(r);
                 const cambiada = candado.editable && patchDe(r) !== null;
                 const cfg = configEstado(c.estado);
+                // Se mira el estado EN EL FORMULARIO, no el guardado: si el operador acaba
+                // de cambiarlo a "cancelada", el importe tiene que tacharse ya, antes de
+                // guardar. Ver el efecto antes de confirmarlo es la mitad del arreglo.
+                const esCancelado = c.estado === "cancelada";
                 const vinculo = hermanoDe(r);
                 const hermano = vinculo?.tramo ?? null;
                 const alertas = avisos.find((a) => a.r.id === r.id)?.avisos ?? [];
@@ -533,11 +573,54 @@ export default function ModalServicios({
                       )}
                     </td>
                     <td className="px-2 py-2 align-top">
-                      <input type="number" min="0" step="0.01" disabled={!candado.editable}
-                        className="w-full px-1.5 py-1 rounded border text-xs text-right disabled:bg-gray-100 disabled:text-gray-400"
+                      {/*
+                        Un servicio CANCELADO no se paga ni se cobra. El importe se ve
+                        tachado y en gris: que el número siga escrito y no haga nada tiene
+                        que ser evidente, porque es justo el que deja el error humano de
+                        cancelar sin borrarlo.
+
+                        Del lado proveedor —y solo ahí— existe la salida: el falso flete.
+                        Al cliente no se le cobra la cancelación por decisión comercial, así
+                        que la casilla ni se ofrece.
+                      */}
+                      <input type="number" min="0" step="0.01"
+                        disabled={!candado.editable || (esCancelado && !c.falso_flete)}
+                        className={`w-full px-1.5 py-1 rounded border text-xs text-right disabled:bg-gray-100 disabled:text-gray-400 ${
+                          esCancelado && !c.falso_flete ? "line-through" : ""
+                        }`}
                         placeholder="0.00"
+                        title={esCancelado && !c.falso_flete
+                          ? "Cancelado: este importe no se liquida. Marca «falso flete» si hay acuerdo de pago por el avance."
+                          : undefined}
                         value={c.monto} onChange={(e) => tocar(r.id, { monto: e.target.value })} />
-                      {!Number(c.monto || 0) && hermano && (
+
+                      {esCancelado && lado === "proveedor" && (
+                        <label className="mt-1 flex items-start gap-1 text-[10px] text-gray-600 cursor-pointer">
+                          <input type="checkbox" disabled={!candado.editable} className="mt-0.5"
+                            checked={c.falso_flete}
+                            onChange={(e) => tocar(r.id, { falso_flete: e.target.checked })} />
+                          <span className={c.falso_flete ? "font-bold text-amber-800" : ""}>Falso flete</span>
+                        </label>
+                      )}
+                      {esCancelado && c.falso_flete && (
+                        // El motivo es OBLIGATORIO y por eso se pide aquí mismo, no en otra
+                        // pantalla: es el único sitio donde queda escrito por qué salió
+                        // dinero por un viaje que no se prestó.
+                        <input type="text" disabled={!candado.editable}
+                          className={`mt-1 w-full px-1.5 py-1 rounded border text-[10px] ${
+                            c.falso_flete_motivo.trim() ? "" : "border-amber-400 bg-amber-50"
+                          }`}
+                          placeholder="Motivo (obligatorio)"
+                          title="Por ejemplo: ya había salido de cochera, o ya había llegado al punto de origen"
+                          value={c.falso_flete_motivo}
+                          onChange={(e) => tocar(r.id, { falso_flete_motivo: e.target.value })} />
+                      )}
+                      {esCancelado && !c.falso_flete && Number(c.monto || 0) > 0 && (
+                        <span className="block text-[10px] text-amber-700 mt-0.5">
+                          no se {lado === "cliente" ? "cobra" : "paga"}
+                        </span>
+                      )}
+                      {!esCancelado && !Number(c.monto || 0) && hermano && (
                         <span className="block text-[10px] text-gray-400 mt-0.5">
                           incluido en {hermano.codigo ?? `#${hermano.id}`}
                         </span>

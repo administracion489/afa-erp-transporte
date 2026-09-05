@@ -115,7 +115,8 @@ export async function registrarEvento(
 export type LineaPersistida = {
   id?: number;
   item: number;
-  tipo: "servicio" | "adicional" | "penalidad" | "descuento";
+  /** 'falso_flete' = un servicio cancelado que se le paga al proveedor por acuerdo de avance. */
+  tipo: "servicio" | "adicional" | "falso_flete" | "penalidad" | "descuento";
   descripcion: string;
   unidad_medida: string;
   cantidad_programada?: number | null;
@@ -438,6 +439,14 @@ const COLS_RECALCULO =
 /** La agrega supabase/reservas-04: se pide aparte para no romper el recálculo si falta. */
 const COL_ORIGEN_CONTRACTUAL = "origen_contractual";
 
+/**
+ * La agrega supabase/reservas-05. Aquí NO es decorativa: sin ella `montoDe` lee toda
+ * cancelación como S/ 0.00, así que una línea de FALSO FLETE se recalcularía a cero y al
+ * reagrupar desaparecería del documento. Por eso las accesorias se sueltan de a una y en
+ * orden: primero se intenta con las dos, y solo se renuncia a la que de verdad falte.
+ */
+const COL_FALSO_FLETE = "falso_flete,falso_flete_motivo";
+
 /** El nombre de ruta que más veces aparece en un conjunto de tramos. */
 function nombreMasFrecuente(filas: ReservaLiq[]): string | null {
   const cuenta = new Map<string, number>();
@@ -511,7 +520,10 @@ export async function recalcularDescripciones(
     const reservas: any[] = [];
     for (let i = 0; i < reservaIds.length; i += 300) {
       const trozo = reservaIds.slice(i, i + 300);
-      let r = await sb.from("reservas").select(`${COLS_RECALCULO},${COL_ORIGEN_CONTRACTUAL}`).in("id", trozo);
+      let r = await sb.from("reservas")
+        .select(`${COLS_RECALCULO},${COL_ORIGEN_CONTRACTUAL},${COL_FALSO_FLETE}`).in("id", trozo);
+      if (r.error) r = await sb.from("reservas").select(`${COLS_RECALCULO},${COL_ORIGEN_CONTRACTUAL}`).in("id", trozo);
+      if (r.error) r = await sb.from("reservas").select(`${COLS_RECALCULO},${COL_FALSO_FLETE}`).in("id", trozo);
       if (r.error) r = await sb.from("reservas").select(COLS_RECALCULO).in("id", trozo);
       reservas.push(...((r.data as any[]) ?? []));
     }
@@ -553,6 +565,10 @@ export async function recalcularDescripciones(
         adjuntas: [],
         ejecutado: true,
         ejecutados: [cabeza],
+        // Este par es un ARMAZÓN para resolver el pax de una línea ya creada, no un día
+        // real: se declara prestado y sin falso flete porque solo se le va a preguntar la
+        // capacidad contratada, que no depende de ninguna de las dos cosas.
+        falsoFlete: false,
         sentido: idas.length && retornos.length ? "IDA Y RETORNO" : sentidoDeReserva(cabeza),
         ida: idas[0] ?? null,
         retorno: retornos[0] ?? null,
@@ -895,7 +911,10 @@ export async function reagruparLineas(
       const trozo = reservaIds.slice(i, i + 300);
       // Igual que en el recálculo: las columnas accesorias se sueltan si su migración no
       // se corrió, en vez de dejar el documento sin poder reagruparse.
-      let r = await sb.from("reservas").select(`${COLS_REAGRUPAR},${COL_ORIGEN_CONTRACTUAL}`).in("id", trozo);
+      let r = await sb.from("reservas")
+        .select(`${COLS_REAGRUPAR},${COL_ORIGEN_CONTRACTUAL},${COL_FALSO_FLETE}`).in("id", trozo);
+      if (r.error) r = await sb.from("reservas").select(`${COLS_REAGRUPAR},${COL_ORIGEN_CONTRACTUAL}`).in("id", trozo);
+      if (r.error) r = await sb.from("reservas").select(`${COLS_REAGRUPAR},${COL_FALSO_FLETE}`).in("id", trozo);
       if (r.error) r = await sb.from("reservas").select(COLS_REAGRUPAR).in("id", trozo);
       if (r.error) r = await sb.from("reservas").select(COLS_RESINCRONIZAR).in("id", trozo);
       if (r.error) throw new Error(`no se pudieron leer los servicios: ${r.error.message}`);
