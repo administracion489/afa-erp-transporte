@@ -109,7 +109,26 @@ const ANOMALIA_LABEL: Record<string, string> = {
   recarga_madrugada:      "Recarga de madrugada",
   monto_inconsistente:    "Monto inconsistente",
   galones_coinciden_km:   "Cantidad = kilometraje",
+  // Camino de visión multi-foto (lib/radar/acciones.ts) — sin etiqueta salía el código crudo.
+  marca_kit_como_grifo:   "Marca de kit como grifo",
+  tasa_como_cantidad:     "Tasa como cantidad",
+  trip_como_odometro:     "Trip como odómetro",
+  discrepancia_maquina_vs_nota: "Surtidor ≠ nota",
+  voucher_no_leido:       "Voucher ilegible",
+  multiples_recargas_en_cluster: "Varias recargas juntas",
+  // Cuadre aritmético del voucher (lib/radar/coherencia-voucher.ts)
+  lectura_corregida:      "Lectura corregida",
+  dato_derivado:          "Dato calculado",
+  cuadre_ambiguo:         "No cuadra (ambiguo)",
+  cantidad_no_coincide_texto: "Cantidad ≠ transcripción",
 };
+
+/**
+ * Una corrección del cuadre no es un problema: es el número YA arreglado esperando que alguien
+ * lo confirme contra la foto. Pintarla del mismo rojo que "Posible duplicado" enseña a
+ * ignorarla, que es justo lo contrario de lo que se necesita.
+ */
+const ANOMALIA_ES_ARREGLO = (codigo: string) => codigo === "lectura_corregida" || codigo === "dato_derivado";
 
 const TABS = [
   { id: "feed",          label: "Feed" },
@@ -730,7 +749,13 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                     <td className="p-3">
                       <div className="flex flex-wrap gap-1 max-w-[220px]">
                         {(c.anomalias ?? []).map((a, i) => (
-                          <span key={i} className="text-[10px] font-black px-1.5 py-0.5 rounded-full bg-[#FDECEC] text-[#EB5757]" title={a.detalle}>
+                          <span
+                            key={i}
+                            className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${
+                              ANOMALIA_ES_ARREGLO(a.codigo) ? "bg-[#E8F5E9] text-[#2E7D32]" : "bg-[#FDECEC] text-[#EB5757]"
+                            }`}
+                            title={a.detalle}
+                          >
                             {ANOMALIA_LABEL[a.codigo] ?? a.codigo}
                           </span>
                         ))}
@@ -767,6 +792,28 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           </div>
                         ) : (
                           <p className="text-[11px] text-gray-400 font-semibold mb-4">Sin foto disponible para esta recarga.</p>
+                        )}
+
+                        {/* POR QUÉ quedó en revisión, en texto. El detalle de cada anomalía vivía solo en
+                            el `title` del chip: con "Monto inconsistente" en un tooltip, la única forma de
+                            saber CUÁL de los tres números no cuadraba era abrir la foto y rehacer la cuenta
+                            a mano. Acá se lee sin pasar el mouse por nada, y cuando el cuadre ya corrigió el
+                            dígito, dice qué número cambió y a cuál — que es todo lo que hace falta para
+                            mirar la foto una vez y confirmar. */}
+                        {(c.anomalias ?? []).length > 0 && (
+                          <div className="mb-4 rounded-xl border border-[#F2C94C] bg-[#FFFBEB] px-3 py-2.5">
+                            <p className="text-[11px] font-black text-[#B07A0F] uppercase tracking-wide mb-1.5">Lo que revisó el Radar</p>
+                            <ul className="space-y-1">
+                              {(c.anomalias ?? []).map((a, i) => (
+                                <li key={i} className="text-xs leading-relaxed text-[#6b5310]">
+                                  <span className={`font-black ${ANOMALIA_ES_ARREGLO(a.codigo) ? "text-[#2E7D32]" : "text-[#B07A0F]"}`}>
+                                    {ANOMALIA_ES_ARREGLO(a.codigo) ? "✓ " : "• "}{ANOMALIA_LABEL[a.codigo] ?? a.codigo}:
+                                  </span>{" "}
+                                  {a.detalle}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
                         )}
 
                         {/* Edición de los campos extraídos — corrige lo que la IA leyó mal */}
@@ -2213,8 +2260,14 @@ export default function RadarIAPage() {
 
   // Registra la corrección del revisor (valor IA vs valor final) como lección de la IA. Best-effort.
   async function guardarCorreccionesCombustible(c: RadarCombustible, ov: OverrideComb, fotoUrl: string | null) {
-    const iaCantidad = ov.esLitros ? c.litros : c.galones;
-    const iaPrecio = ov.esLitros ? c.precio_litro : c.precio_galon;
+    // Lo que la IA LEYÓ no es siempre lo que quedó en la fila: cuando el cuadre aritmético del
+    // voucher atrapó un dígito, la fila ya trae el número arreglado y la lectura original viaja
+    // en la anomalía. Sin esto, corregir a mano un valor ya corregido le enseñaría a la IA que
+    // se equivocó en algo que nunca leyó — se lee por CÓDIGO, no olfateando el texto del detalle.
+    const leidoPorIA = (campo: "cantidad" | "precio" | "monto", enLaFila: number | null) =>
+      (c.anomalias ?? []).find((a) => a.correccion?.campo === campo)?.correccion?.leido ?? enLaFila;
+    const iaCantidad = leidoPorIA("cantidad", ov.esLitros ? c.litros : c.galones);
+    const iaPrecio = leidoPorIA("precio", ov.esLitros ? c.precio_litro : c.precio_galon);
     const distinto = (a: unknown, b: unknown) => {
       const na = a == null || a === "" ? null : a, nb = b == null || b === "" ? null : b;
       if (typeof na === "number" || typeof nb === "number") return Number(na) !== Number(nb);
@@ -2225,7 +2278,7 @@ export default function RadarIAPage() {
       { campo: "grifo",  ia: c.grifo,   correcto: ov.grifo },
       { campo: ov.esLitros ? "litros" : "galones", ia: iaCantidad, correcto: ov.cantidad },
       { campo: "precio", ia: iaPrecio,  correcto: ov.precio },
-      { campo: "monto",  ia: c.monto_total, correcto: ov.monto },
+      { campo: "monto",  ia: leidoPorIA("monto", c.monto_total), correcto: ov.monto },
     ];
     const filas = campos
       .filter((x) => x.correcto != null && distinto(x.ia, x.correcto))

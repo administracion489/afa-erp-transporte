@@ -204,10 +204,28 @@ export type AnomaliaCombustible = {
     | "trip_como_odometro"           // el "Trip"/viaje parcial registrado como odómetro total
     | "discrepancia_maquina_vs_nota" // surtidor/display difiere de la nota (informativo: manda la nota)
     | "voucher_no_leido"             // había foto de nota/surtidor pero no se pudo leer la cantidad/importe
-    | "multiples_recargas_en_cluster"; // la ráfaga trae 2 recargas/comprobantes distintos
+    | "multiples_recargas_en_cluster" // la ráfaga trae 2 recargas/comprobantes distintos
+    // Cuadre aritmético del voucher (lib/radar/coherencia-voucher.ts):
+    | "lectura_corregida"            // cantidad × precio = total identificó el dígito mal leído y se corrigió
+    | "cuadre_ambiguo"               // no cuadra y más de una lectura lo explicaría: no se tocó nada
+    | "dato_derivado"                // faltaba uno de los tres números y se calculó de los otros dos
+    | "cantidad_no_coincide_texto";  // el número extraído contradice la transcripción literal de la IA
   detalle: string;
   /** false = observación informativa (NO bloquea el auto-registro). Ausente o true = bloqueante. */
   bloquea?: boolean;
+  /**
+   * Qué número cambió el cuadre aritmético, en estructurado. Existe para que la pantalla y el
+   * dataset de lecciones NO tengan que olfatear el texto de `detalle`: `valor_ia` de una
+   * corrección humana posterior es `leido`, no lo que quedó guardado en la fila.
+   */
+  correccion?: {
+    campo: "cantidad" | "precio" | "monto";
+    /** Lo que leyó la IA. null = el campo faltaba y se derivó. */
+    leido: number | null;
+    corregido: number;
+    /** Si la cantidad se guardó en litros y no en galones (para nombrar el campo). */
+    unidad?: string | null;
+  };
 };
 
 export type SeveridadAlerta = "critico" | "atencion" | "info";
@@ -298,6 +316,13 @@ export type ExtraccionCombustible = {
   confianza_campos?: Record<string, number | null> | null; // 0..1 por campo clave
   discrepancias?: string[] | null;     // p.ej. "surtidor 8.548 gal vs nota 8.55 gal"
   notas_extraccion?: string | null;    // dudas de 7 segmentos, fotos ilegibles, etc.
+  /**
+   * Los dígitos de la cantidad TAL CUAL están impresos ("8.799x"), sin interpretar. Espejo de
+   * `texto_leido` en ExtraccionOdometro y por el mismo motivo: transcribir obliga a mirar las
+   * cifras en vez de estimar el número, y deja una SEGUNDA lectura del mismo dato con la que
+   * el ERP puede contrastar la primera (ver lib/radar/coherencia-voucher.ts).
+   */
+  texto_cantidad?: string | null;
 };
 
 /**

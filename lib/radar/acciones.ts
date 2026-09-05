@@ -15,6 +15,7 @@
 
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
+import { revisarCoherenciaVoucher, numeroDeTranscripcion } from "./coherencia-voucher";
 import type {
   AnomaliaCombustible,
   CategoriaRadar,
@@ -639,10 +640,21 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   const placa = placaFormato(d.placa) ?? veh?.placa ?? terc?.placa ?? null;
   const conductorNombre = condMatch?.nombre ?? d.conductor ?? null;
   const tipoComb = String(d.tipo_combustible || "diesel").toLowerCase();
-  const cantidad = numOpc(d.galones) ?? numOpc(d.litros);
-  const precioUnit = numOpc(d.precio_galon) ?? numOpc(d.precio_litro);
-  const monto = numOpc(d.monto_total);
+  // Los tres números del voucher son `let`: el cuadre aritmético (más abajo) puede corregir
+  // el que se leyó mal, y todos los controles siguientes —tanque, consumo, duplicado— tienen
+  // que juzgar el número corregido, no el que ya se sabe equivocado.
+  let cantidad = numOpc(d.galones) ?? numOpc(d.litros);
+  let precioUnit = numOpc(d.precio_galon) ?? numOpc(d.precio_litro);
+  let monto = numOpc(d.monto_total);
   const km = numOpc(d.kilometraje);
+  // La cantidad se guarda en la columna que la IA usó (galones XOR litros). Se lleva aparte
+  // para que una corrección aterrice en la misma columna de la que salió.
+  let galonesFila = numOpc(d.galones);
+  let litrosFila = numOpc(d.litros);
+  let precioGalonFila = numOpc(d.precio_galon);
+  let precioLitroFila = numOpc(d.precio_litro);
+  const esLitros = galonesFila == null && litrosFila != null;
+  const unidadCant = esLitros ? "lt" : "gal";
   const umbral = Number(config.umbral_confianza ?? 0.7);
 
   const anomalias: AnomaliaCombustible[] = [];
@@ -689,6 +701,67 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   // operador); el valor del surtidor queda solo como alerta informativa (no bloquea).
   for (const disc of discrepancias) {
     anomalias.push({ codigo: "discrepancia_maquina_vs_nota", detalle: String(disc).slice(0, 240), bloquea: false });
+  }
+
+  // ── CUADRE ARITMÉTICO DEL VOUCHER ──────────────────────────────────────────
+  // El papel trae CANTIDAD × PRECIO = IMPORTE, así que se verifica a sí mismo: cuando los
+  // tres no dan, la división dice cuál se leyó mal y cuál es su valor. Va ANTES de todos los
+  // controles de abajo a propósito — un galonaje mal leído hace mentir al consumo, al tanque
+  // y al duplicado, y el revisor terminaba persiguiendo anomalías que no existían.
+  // La corrección NUNCA auto-registra (bloquea: true): es una propuesta que una persona
+  // confirma contra la foto, con el número ya puesto en el formulario.
+  const cantidadIA = cantidad; // lo que la IA extrajo, antes de que el cuadre lo toque
+  const cuadre = revisarCoherenciaVoucher({
+    cantidad,
+    precio: precioUnit,
+    monto,
+    cantidadTexto: d.texto_cantidad ?? null,
+    unidad: unidadCant,
+  });
+  const corr = cuadre.correccion;
+  if (corr && (cuadre.estado === "corregible" || cuadre.estado === "completado")) {
+    if (corr.campo === "cantidad") {
+      cantidad = corr.corregido;
+      if (esLitros) litrosFila = corr.corregido;
+      else galonesFila = corr.corregido;
+    } else if (corr.campo === "precio") {
+      precioUnit = corr.corregido;
+      if (esLitros) precioLitroFila = corr.corregido;
+      else precioGalonFila = corr.corregido;
+    } else {
+      monto = corr.corregido;
+    }
+    anomalias.push({
+      codigo: cuadre.estado === "completado" ? "dato_derivado" : "lectura_corregida",
+      detalle: cuadre.detalle,
+      // Un dígito corregido SIEMPRE bloquea: sobre plata decide una persona. Un dato derivado
+      // solo si es la CANTIDAD — un galonaje que nadie leyó no puede registrarse solo. El
+      // precio y el importe derivados NO bloquean porque el ERP ya los derivaba en silencio
+      // (`precioFinal = monto / cantidad` en el auto-registro, y `combustible.total` es una
+      // columna generada): mandar a revisión lo que antes pasaba solo sería castigar al
+      // operador con cola nueva por hacer explícita una cuenta que ya se hacía.
+      bloquea: cuadre.estado === "corregible" || corr.campo === "cantidad",
+      correccion: { campo: corr.campo, leido: corr.leido, corregido: corr.corregido, unidad: unidadCant },
+    });
+  } else if (cuadre.estado === "ambiguo") {
+    anomalias.push({ codigo: "cuadre_ambiguo", detalle: cuadre.detalle, bloquea: true });
+  }
+
+  // La transcripción literal ("8.799x" copiado del papel) es una SEGUNDA lectura del mismo
+  // número: si contradice a la que la IA puso en el campo, una de las dos está mal.
+  // Se compara contra lo que la IA EXTRAJO, no contra el valor ya corregido: cuando el cuadre
+  // corrigió la cantidad, la aritmética ya zanjó cuál de las dos era —levantar además esta
+  // sería acusar dos veces el mismo dígito, y en rojo crítico sobre algo ya resuelto.
+  // Y solo BLOQUEA cuando no hay cuenta que lo desempate: con los tres números cuadrando,
+  // que la transcripción no calce es un descuido de copia, no una carga que registrar mal.
+  const cantTexto = numeroDeTranscripcion(d.texto_cantidad);
+  const cuadreCorrigioCantidad = corr?.campo === "cantidad";
+  if (!cuadreCorrigioCantidad && cantTexto != null && cantidadIA != null && Math.abs(cantTexto - cantidadIA) > 0.0005) {
+    anomalias.push({
+      codigo: "cantidad_no_coincide_texto",
+      detalle: `La IA extrajo ${cantidadIA} ${unidadCant} pero transcribió "${String(d.texto_cantidad).trim()}" del voucher — las dos lecturas del mismo número no coinciden${cuadre.estado === "cuadra" ? ", aunque la cantidad extraída sí cuadra con el precio y el importe" : ""}`,
+      bloquea: cuadre.estado === "incompleto",
+    });
   }
 
   // 1) Cantidad vs capacidad del tanque (editable por vehículo si el operador la configuró)
@@ -800,14 +873,15 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     }
   }
 
-  // 7) Cantidad × precio no cuadra con el total del voucher
-  if (cantidad != null && precioUnit != null && monto != null) {
-    const calc = cantidad * precioUnit;
-    if (Math.abs(calc - monto) > Math.max(2, 0.05 * monto)) {
-      anomalias.push({
-        codigo: "monto_inconsistente",
-        detalle: `Cantidad × precio = ${fmtSoles(calc)} pero el total reportado es ${fmtSoles(monto)}`,
-      });
+  // 7) Cantidad × precio no cuadra con el total del voucher.
+  //    El cuadre de arriba ya intentó explicarlo dígito a dígito; esto se queda con lo que
+  //    NINGÚN error de lectura explica (un descuento del grifo, otro producto en el mismo
+  //    comprobante) y hereda su detalle, que dice cuánto falta y por qué no se corrigió.
+  //    Si el cuadre corrigió, los números de acá ya cuadran y esta anomalía no se levanta.
+  if (cuadre.estado === "descuadra") {
+    const calc = cantidad! * precioUnit!;
+    if (Math.abs(calc - monto!) > Math.max(2, 0.05 * monto!)) {
+      anomalias.push({ codigo: "monto_inconsistente", detalle: cuadre.detalle });
     }
   }
 
@@ -840,6 +914,15 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     });
   }
 
+  // Todas las fotos del cluster (voucher/surtidor/tablero) que la IA procesó, para el panel de
+  // revisión. Fallback a la foto propia del mensaje si el motor no las pasó.
+  const fotosEvidencia: { url: string; mime: string | null; nombre: string | null }[] =
+    (mensaje as { fotos_cluster?: { url: string; mime: string | null; nombre: string | null }[] }).fotos_cluster?.length
+      ? (mensaje as { fotos_cluster: { url: string; mime: string | null; nombre: string | null }[] }).fotos_cluster
+      : mensaje.media_url
+        ? [{ url: mensaje.media_url, mime: mensaje.media_mime ?? null, nombre: mensaje.media_nombre ?? null }]
+        : [];
+
   // Fila base para radar_combustible (se inserta SIEMPRE, con el estado que corresponda)
   const filaRadar: Record<string, unknown> = {
     mensaje_id: mensaje.id,
@@ -851,21 +934,20 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     grifo,
     direccion_grifo: d.direccion_grifo ?? null,
     tipo_combustible: d.tipo_combustible ?? null,
-    galones: numOpc(d.galones),
-    litros: numOpc(d.litros),
-    precio_galon: numOpc(d.precio_galon),
-    precio_litro: numOpc(d.precio_litro),
+    // Los números que el cuadre pudo corregir, no los crudos de la IA: el formulario de
+    // revisión se llena de acá y el revisor tiene que ver el valor bueno ya puesto. Lo que
+    // leyó la IA no se pierde — viaja en `anomalias[].correccion.leido`.
+    galones: galonesFila,
+    litros: litrosFila,
+    precio_galon: precioGalonFila,
+    precio_litro: precioLitroFila,
     monto_total: monto,
     comprobante: d.comprobante ?? null,
     kilometraje: km,
     conductor: conductorNombre,
     proveedor,
     anomalias,
-    // Todas las fotos del cluster (voucher/surtidor/tablero) que la IA procesó, para el
-    // panel de revisión. Fallback a la foto propia del mensaje si el motor no las pasó.
-    fotos: (mensaje as any).fotos_cluster?.length
-      ? (mensaje as any).fotos_cluster
-      : (mensaje.media_url ? [{ url: mensaje.media_url, mime: mensaje.media_mime ?? null, nombre: mensaje.media_nombre ?? null }] : []),
+    fotos: fotosEvidencia,
   };
 
   // ¿Se puede registrar automáticamente en la tabla real `combustible`?
@@ -903,7 +985,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
         conductor: conductorNombre,
         observaciones,
         tipo_combustible: d.tipo_combustible ?? "diesel",
-        unidad: numOpc(d.galones) != null ? "galones" : "litros",
+        unidad: esLitros ? "litros" : "galones",
       })
       .select("id")
       .single();
@@ -935,7 +1017,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
 
     return {
       accion: "combustible_registrado",
-      detalle: `Carga de ${veh!.placa} registrada en /combustible: ${cantidad} ${numOpc(d.galones) != null ? "gal" : "lt"} de ${tipoComb}${monto != null ? ` por ${fmtSoles(monto)}` : ""}${conductorNombre ? ` · conductor ${conductorNombre}${condMatch?.via === "telefono" ? " (identificado por su WhatsApp)" : ""}` : ""}`,
+      detalle: `Carga de ${veh!.placa} registrada en /combustible: ${cantidad} ${unidadCant} de ${tipoComb}${monto != null ? ` por ${fmtSoles(monto)}` : ""}${conductorNombre ? ` · conductor ${conductorNombre}${condMatch?.via === "telefono" ? " (identificado por su WhatsApp)" : ""}` : ""}`,
       datos: { combustible_id: combustibleId, vehiculo_id: veh!.id, conductor: conductorNombre, conductor_via: condMatch?.via ?? null, anomalias },
     };
   }
@@ -947,6 +1029,25 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     .select("id")
     .single();
   if (errRadar) throw new Error(`radar_combustible: ${errRadar.message}`);
+
+  // El dígito que corrigió la aritmética se guarda como LECCIÓN, igual que si lo hubiera
+  // corregido una persona en la pantalla: leccionesCombustible() la inyecta en el prompt de
+  // visión y la próxima nota de despacho parecida se lee bien de entrada. Cerrar el ciclo sin
+  // esperar a un humano es la diferencia entre corregir el mismo error todos los meses y
+  // dejar de cometerlo. `usuario: "radar_ia"` es lo que distingue estas lecciones de las
+  // humanas (la pantalla no llena esa columna), para que no ahoguen a las de una persona.
+  if (corr && corr.leido != null && cuadre.estado === "corregible") {
+    const { error: errLeccion } = await sb.from("radar_combustible_correcciones").insert({
+      radar_combustible_id: (rcIns as { id?: string } | null)?.id ?? null,
+      campo: corr.campo === "cantidad" ? (esLitros ? "litros" : "galones") : corr.campo,
+      valor_ia: String(corr.leido),
+      valor_correcto: String(corr.corregido),
+      foto_url: fotosEvidencia[0]?.url ?? null,
+      nota: `lo detectó el cuadre del voucher (cantidad × precio = importe), no una persona${corr.cambio ? ` · ${corr.cambio}` : ""}`,
+      usuario: "radar_ia",
+    });
+    if (errLeccion) console.warn("[radar/acciones] lección de cuadre no guardada:", errLeccion.message);
+  }
 
   const motivos: string[] = anomalias.map((a) => a.detalle);
   if (config.acciones_automaticas?.combustible !== true) motivos.push("Registro automático de combustible desactivado en la configuración");
@@ -977,7 +1078,13 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       a.codigo === "marca_kit_como_grifo" ||
       a.codigo === "tasa_como_cantidad" ||
       a.codigo === "trip_como_odometro" ||
-      a.codigo === "voucher_no_leido"
+      a.codigo === "voucher_no_leido" ||
+      // Los números del voucher se contradicen y NADA los explica: la plata que se va a
+      // registrar no es la del papel. Una corrección resuelta ("lectura_corregida") no
+      // entra acá — deja el número bueno puesto y solo hay que confirmarlo, y la
+      // transcripción que no calza sobre un voucher que SÍ cuadra tampoco (no bloquea).
+      a.codigo === "cuadre_ambiguo" ||
+      (a.codigo === "cantidad_no_coincide_texto" && a.bloquea !== false)
   )
     ? "critico"
     : "atencion";
