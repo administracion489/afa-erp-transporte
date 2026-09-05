@@ -214,7 +214,8 @@ export type AnomaliaCombustible = {
     | "lectura_corregida"            // cantidad × precio = total identificó el dígito mal leído y se corrigió
     | "cuadre_ambiguo"               // no cuadra y más de una lectura lo explicaría: no se tocó nada
     | "dato_derivado"                // faltaba uno de los tres números y se calculó de los otros dos
-    | "cantidad_no_coincide_texto";  // el número extraído contradice la transcripción literal de la IA
+    | "cantidad_no_coincide_texto"   // el número extraído contradice la transcripción literal de la IA
+    | "cantidad_precio_invertidos";  // se leyó el precio como cantidad y viceversa (el cuadre no lo ve: es conmutativo)
   detalle: string;
   /** false = observación informativa (NO bloquea el auto-registro). Ausente o true = bloqueante. */
   bloquea?: boolean;
@@ -325,6 +326,11 @@ export type ExtraccionCombustible = {
    * "razón social" y el prompt pedía la razón social. Ver lib/radar/identidad-voucher.ts.
    */
   cliente_en_nota?: string | null;
+  /**
+   * La descripción del PRODUCTO tal como la imprime el voucher ("MAX-D DIESEL B5 S50 UV",
+   * "GLP-G", "GASOHOL 95"). De ahí sale el tipo de combustible: la unidad ("UGL") no lo dice.
+   */
+  producto_voucher?: string | null;
   /**
    * TODOS los nº de comprobante distintos del álbum. Si trae más de uno, la ráfaga no es un
    * reporte: son varios despachos (ver lib/radar/album-recargas.ts).

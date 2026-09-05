@@ -17,6 +17,7 @@ import {
   revisarCoherenciaVoucher,
   numeroDeTranscripcion,
   toleranciaCuadre,
+  detectarInversionCantidadPrecio,
 } from "../lib/radar/coherencia-voucher";
 
 let fallos = 0;
@@ -197,6 +198,48 @@ const chk = (nombre: string, ok: boolean, extra = "") => {
   const r = revisarCoherenciaVoucher({ cantidad: 66, precio: 16.5, monto: 990 });
   chk("en un voucher de S/ 990 se detecta igual", r.estado === "corregible", r.estado);
   chk("y la cantidad vuelve a 60", r.correccion?.corregido === 60, String(r.correccion?.corregido));
+}
+
+// ── 19. LA INVERSIÓN QUE EL CUADRE NO PUEDE VER ────────────────────────────
+// La nota V87T-00008182 imprime `040002072 UGL 8.829x 6.990` con `GLP-G 61.71`: 8.829 galones
+// a S/ 6.990. La IA guardó 6.99 gal a S/ 8.829 — y cuadra IGUAL DE BIEN, porque la
+// multiplicación es conmutativa. Hace falta una cuarta cifra de fuera del voucher: el precio
+// referencial del tipo de combustible.
+{
+  const cuadra = revisarCoherenciaVoucher({ cantidad: 6.99, precio: 8.829, monto: 61.71 });
+  chk("con los números invertidos el cuadre no ve nada", cuadra.estado === "cuadra", cuadra.estado);
+  const inv = detectarInversionCantidadPrecio(6.99, 8.829, 7.0);
+  chk("el referencial del GLP sí lo delata", inv !== null);
+  chk("y devuelve los valores en su sitio", inv?.cantidad === 8.829 && inv?.precio === 6.99,
+    `${inv?.cantidad} gal a ${inv?.precio}`);
+  console.log(`        ${inv?.detalle}`);
+}
+{
+  // La compra legítima NO se toca: 8.829 gal a S/ 6.99 con el mismo referencial.
+  chk("la lectura correcta no se marca", detectarInversionCantidadPrecio(8.829, 6.99, 7.0) === null);
+}
+{
+  // El falso positivo que hay que evitar: un diésel de ~16 gal con el referencial al día en
+  // ~24.6. La cantidad NO se parece al referencial, así que no se propone nada.
+  chk("16.4 gal de diésel a S/ 24.64 con ref 24.60 no es inversión",
+    detectarInversionCantidadPrecio(16.4, 24.64, 24.6) === null);
+  // Y con el referencial DESACTUALIZADO (16.5), la cantidad sí se le parece: por eso se exige
+  // además que el precio esté fuera de rango… que aquí lo está. Este es el caso límite y se
+  // acepta a conciencia: un referencial mal mantenido produce ruido, no una corrección callada
+  // (la anomalía bloquea y una persona confirma contra la foto).
+  const limite = detectarInversionCantidadPrecio(16.4, 24.64, 16.5);
+  chk("con el referencial desactualizado se avisa, y bloquea para que alguien mire", limite !== null);
+}
+{
+  chk("sin referencial no se juzga", detectarInversionCantidadPrecio(6.99, 8.829, null) === null);
+  chk("con referencial en cero tampoco", detectarInversionCantidadPrecio(6.99, 8.829, 0) === null);
+  chk("sin cantidad o sin precio tampoco",
+    detectarInversionCantidadPrecio(null, 8.829, 7) === null && detectarInversionCantidadPrecio(6.99, null, 7) === null);
+  chk("dos valores iguales no se intercambian", detectarInversionCantidadPrecio(7, 7, 7) === null);
+}
+{
+  // El precio dentro de rango nunca es inversión, aunque la cantidad se parezca al referencial.
+  chk("precio dentro de rango no se toca", detectarInversionCantidadPrecio(7.1, 7.4, 7.0) === null);
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

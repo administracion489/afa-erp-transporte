@@ -15,7 +15,8 @@
 
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
-import { revisarCoherenciaVoucher, numeroDeTranscripcion } from "./coherencia-voucher";
+import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
+import { familiaCombustible, normalizarTipoCombustible } from "@/lib/combustible-tipos";
 import { leerAlbumRecargas, buscarDuplicado, type RecargaAlbum, type DespachoGuardado } from "./album-recargas";
 import { planificarReproceso, type ArtefactoPrevio, type PlanReproceso } from "./reproceso";
 import {
@@ -838,7 +839,14 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   // Placa resuelta (leída del voucher o inferida) y nombre canónico del conductor identificado.
   const placa = placaFormato(d.placa) ?? veh?.placa ?? terc?.placa ?? null;
   const conductorNombre = condMatch?.nombre ?? d.conductor ?? null;
-  const tipoComb = String(d.tipo_combustible || "diesel").toLowerCase();
+  // El tipo que la IA leyó, normalizado contra el catálogo del ERP: acepta tanto la clave
+  // (`glp`) como la descripción del producto del voucher (`GLP-G`, `MAX-D DIESEL B5 S50`,
+  // `GASOHOL 95`). `null` cuando no hay señal — la columna sale vacía, que es lo honesto.
+  const tipoLeido =
+    normalizarTipoCombustible(d.tipo_combustible) ?? normalizarTipoCombustible(d.producto_voucher) ?? null;
+  // Para los cruces que necesitan SÍ o SÍ un tipo (capacidad de tanque, rendimiento): el diésel
+  // es el 90 % de la flota y es el respaldo de toda la app.
+  const tipoComb = tipoLeido ?? "diesel";
   // Los tres números del voucher son `let`: el cuadre aritmético (más abajo) puede corregir
   // el que se leyó mal, y todos los controles siguientes —tanque, consumo, duplicado— tienen
   // que juzgar el número corregido, no el que ya se sabe equivocado.
@@ -1086,13 +1094,35 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     }
   }
 
-  // 3) Precio unitario vs referencia de precios_combustible (±20%)
+  // 3) Precio unitario vs referencia de precios_combustible (±20%), y la INVERSIÓN.
   if (precioUnit != null) {
     try {
       const { data: precios } = await sb.from("precios_combustible").select("tipo, precio");
-      const ref = ((precios as any[]) ?? []).find((p) => String(p.tipo ?? "").toLowerCase() === tipoComb);
-      const pRef = ref ? Number(ref.precio) : 0;
-      if (pRef > 0 && Math.abs(precioUnit - pRef) / pRef > 0.2) {
+      // El referencial es por FAMILIA: `gasolina_premium` y `gasolina_regular` comparten la
+      // fila de gasolina si el operador no cargó una por grado.
+      const filas = ((precios as any[]) ?? []).map((p) => ({ tipo: String(p.tipo ?? "").toLowerCase(), precio: Number(p.precio) }));
+      const ref = filas.find((p) => p.tipo === tipoComb) ?? filas.find((p) => p.tipo === familiaCombustible(tipoComb));
+      const pRef = ref ? ref.precio : 0;
+
+      // Antes del "precio fuera de rango": ¿no estarán la cantidad y el precio intercambiados?
+      // El cuadre aritmético es CIEGO a esto (la multiplicación es conmutativa), así que hace
+      // falta el referencial. Si lo están, "precio fuera de rango" es un síntoma, no la causa.
+      const inv = detectarInversionCantidadPrecio(cantidad, precioUnit, pRef, unidadCant);
+      if (inv) {
+        const cantAntes = cantidad;
+        const precioAntes = precioUnit;
+        cantidad = inv.cantidad;
+        precioUnit = inv.precio;
+        if (esLitros) { litrosFila = inv.cantidad; precioLitroFila = inv.precio; }
+        else { galonesFila = inv.cantidad; precioGalonFila = inv.precio; }
+        anomalias.push({
+          codigo: "cantidad_precio_invertidos",
+          detalle: inv.detalle,
+          bloquea: true,
+          correccion: { campo: "cantidad", leido: cantAntes, corregido: inv.cantidad, unidad: unidadCant },
+        });
+        void precioAntes;
+      } else if (pRef > 0 && Math.abs(precioUnit - pRef) / pRef > 0.2) {
         anomalias.push({
           codigo: "precio_fuera_de_rango",
           detalle: `Precio ${fmtSoles(precioUnit)} se aleja más de 20% del referencial ${fmtSoles(pRef)} (${tipoComb})`,
@@ -1211,7 +1241,8 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     // La ya resuelta, no la cruda: cuando el "grifo" resultó ser el comprador, esta dirección
     // salía del mismo bloque "RAZ.SOC / RUC / DIRECC" y es la del cliente, no la de la estación.
     direccion_grifo: direccionGrifo,
-    tipo_combustible: d.tipo_combustible ?? null,
+    // El normalizado, no el crudo: es lo que pinta la columna y lo que se registra.
+    tipo_combustible: tipoLeido,
     // Los números que el cuadre pudo corregir, no los crudos de la IA: el formulario de
     // revisión se llena de acá y el revisor tiene que ver el valor bueno ya puesto. Lo que
     // leyó la IA no se pierde — viaja en `anomalias[].correccion.leido`.
@@ -1262,7 +1293,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
         grifo,
         conductor: conductorNombre,
         observaciones,
-        tipo_combustible: d.tipo_combustible ?? "diesel",
+        tipo_combustible: tipoComb,
         unidad: esLitros ? "litros" : "galones",
       })
       .select("id")
@@ -1378,6 +1409,8 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       // entra acá — deja el número bueno puesto y solo hay que confirmarlo, y la
       // transcripción que no calza sobre un voucher que SÍ cuadra tampoco (no bloquea).
       a.codigo === "cuadre_ambiguo" ||
+      // Cantidad y precio intercambiados: los dos números de plata están en el campo del otro.
+      a.codigo === "cantidad_precio_invertidos" ||
       (a.codigo === "cantidad_no_coincide_texto" && a.bloquea !== false) ||
       // Dos vouchers en la misma ráfaga: hasta que alguien diga cuál describe cuál fila, no se
       // sabe de qué unidad es el gasto — y antes el segundo directamente se perdía.
