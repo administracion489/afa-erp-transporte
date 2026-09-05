@@ -46,7 +46,7 @@ export type ControlDoc = {
 
 export type LineaDoc = {
   item: number;
-  tipo: "servicio" | "adicional" | "penalidad" | "descuento";
+  tipo: "servicio" | "adicional" | "falso_flete" | "penalidad" | "descuento";
   descripcion: string;
   unidad_medida: string;
   cantidad_programada?: number | null;
@@ -92,6 +92,8 @@ export type Anexo2 = {
 export type TotalesDoc = {
   servicios: number;
   adicionales: number;
+  /** Avances pagados por servicios que no se prestaron. Siempre 0 del lado cliente. */
+  falsos_fletes?: number;
   descuentos: number;
   subtotal: number;
   igvPct: number;
@@ -362,15 +364,19 @@ function bloqueDatos(d: DocLiquidacion): string {
 function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
   const moneda = d.servicio.moneda;
   const filas = d.lineas.map((l) => {
-    const clase = l.tipo === "adicional" ? "adicional" : (l.tipo === "penalidad" || l.tipo === "descuento") ? "negativo" : "";
+    const clase = l.tipo === "adicional" || l.tipo === "falso_flete" ? "adicional"
+      : (l.tipo === "penalidad" || l.tipo === "descuento") ? "negativo" : "";
     const negativo = l.total_linea < 0;
     // Un adicional puede venir de dos sitios y no se informan igual: el que se generó
     // en Programación TIENE programado y ejecutado (se pidieron 3 salidas, se
     // prestaron 2) y esconderlo tras un guion perdería justo lo que el cliente
     // pregunta; el que se escribió a mano en el editor no tiene contra qué comparar.
     const conProgramado = Number(l.cantidad_programada ?? 0) > 0;
-    const cumplimiento =
-      l.tipo === "servicio" || (l.tipo === "adicional" && conProgramado)
+    // Un falso flete no tiene nada que contrastar: se pactaron N avances y se pagan N.
+    // Imprimir "3 / 0" sería cierto y a la vez ilegible — parecería un incumplimiento.
+    const cumplimiento = l.tipo === "falso_flete"
+      ? `— / <b>${num(l.cantidad, 0)}</b> ${chip("FALSO FLETE", "warn")}`
+      : l.tipo === "servicio" || (l.tipo === "adicional" && conProgramado)
         ? `${num(l.cantidad_programada, 0)} / <b>${num(l.cantidad_ejecutada, 0)}</b> ${chipCumplimiento(l.cantidad_programada, l.cantidad_ejecutada)}`
           + (l.tipo === "adicional" ? ` ${chip("ADICIONAL", "warn")}` : "")
         : l.tipo === "adicional"
@@ -395,6 +401,7 @@ function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
     ? [
         filaTot("Servicios del periodo", m2(t.servicios, moneda)),
         t.adicionales ? filaTot("Adicionales autorizados", m2(t.adicionales, moneda)) : "",
+        t.falsos_fletes ? filaTot("Falsos fletes (servicios cancelados con acuerdo)", m2(t.falsos_fletes, moneda)) : "",
         t.descuentos ? filaTot("Descuentos y penalidades", "− " + m2(t.descuentos, moneda), "neg") : "",
         filaTot("TOTAL VALORIZADO (sin IGV)", m2(t.subtotal, moneda)),
         filaTot(`IGV ${num(t.igvPct, 0)}%`, m2(t.igv, moneda)),
@@ -403,6 +410,7 @@ function bloqueValorizacion(d: DocLiquidacion, cp: string): string {
     : [
         filaTot("Servicios prestados", m2(t.servicios, moneda)),
         t.adicionales ? filaTot("Adicionales", m2(t.adicionales, moneda)) : "",
+        t.falsos_fletes ? filaTot("Falsos fletes (servicios cancelados con acuerdo)", m2(t.falsos_fletes, moneda)) : "",
         t.descuentos ? filaTot("Penalidades y descuentos", "− " + m2(t.descuentos, moneda), "neg") : "",
         filaTot("Subtotal (sin IGV)", m2(t.subtotal, moneda)),
         filaTot(`IGV ${num(t.igvPct, 0)}%`, m2(t.igv, moneda)),

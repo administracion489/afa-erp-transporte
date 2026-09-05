@@ -269,13 +269,18 @@ export async function cargarDocumentoLiquidacion(
             paxContratado: Number(r.capacidad_contratada ?? 0) > 0
               ? Number(r.capacidad_contratada)
               : Number((l as any).pax_contratado ?? 0) > 0 ? Number((l as any).pax_contratado) : null,
-            estado: r.estado !== "finalizada" ? "No ejecutado"
+            // El falso flete se rotula ANTES que "No ejecutado": los dos son ciertos, pero
+            // el que hay que leer es el que explica por qué esa fila lleva importe.
+            estado: l.tipo === "falso_flete" ? "Falso flete"
+              : r.estado !== "finalizada" ? "No ejecutado"
               : incluida ? "Incluido"
               : l.tipo === "adicional" ? "Adicional" : "Conforme",
             // El importe va una sola vez por servicio: así la suma del anexo cuadra
             // exactamente con el total de la línea.
             importe: incluida ? 0 : Number(l.precio_unitario ?? 0),
-            alerta: r.estado !== "finalizada",
+            // El falso flete NO es una alerta: que no se prestara es su definición, y
+            // pintarlo en rojo enseñaría a ignorar los rojos del anexo.
+            alerta: r.estado !== "finalizada" && l.tipo !== "falso_flete",
           };
           pendientes.push({
             fila,
@@ -342,6 +347,7 @@ export async function cargarDocumentoLiquidacion(
       ? {
           servicios: sumar(lineasBd, ["servicio"]),
           adicionales: sumar(lineasBd, ["adicional"]),
+          falsos_fletes: sumar(lineasBd, ["falso_flete"]),
           descuentos: Math.abs(sumar(lineasBd, ["penalidad", "descuento"])),
           subtotal: Number(cab.subtotal ?? 0),
           igvPct: Number(cab.igv_pct ?? 18),
@@ -351,6 +357,7 @@ export async function cargarDocumentoLiquidacion(
       : {
           servicios: sumar(lineasBd, ["servicio"]),
           adicionales: sumar(lineasBd, ["adicional"]),
+          falsos_fletes: sumar(lineasBd, ["falso_flete"]),
           descuentos: Math.abs(sumar(lineasBd, ["penalidad", "descuento"])),
           subtotal: Number(cab.subtotal ?? 0),
           igvPct: Number(cab.igv_pct ?? 18),

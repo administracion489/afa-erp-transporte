@@ -104,6 +104,8 @@ export type TramoHermano = {
   codigo?: string | null;
   direccion_servicio?: string | null;
   estado?: string | null;
+  /** Acuerdo de pago sobre una cancelación. Ver `avisosDe`: cambia si el día vale algo. */
+  falso_flete?: boolean | null;
   precio_cliente?: number | null;
   costo_proveedor?: number | null;
   /**
@@ -190,6 +192,27 @@ export function avisosDe(
 
   const juzgaCosto = soloJuzgar !== "precio";
   const juzgaPrecio = soloJuzgar !== "costo";
+
+  /**
+   * EL DÍA ENTERO SE CAYÓ Y NADIE ACORDÓ PAGARLO: no falta ningún importe.
+   *
+   * Sin esto, un día cancelado disparaba "Ni este tramo ni el retorno tienen costo: el
+   * día entero no se podrá liquidar al cierre" — cierto y a la vez inútil, porque es
+   * exactamente lo que tiene que pasar. Es el mismo rojo falso que ya se corrigió para el
+   * retorno en S/ 0.00: uno que no se puede arreglar enseña a ignorar los de al lado, y
+   * el de al lado es el que avisa de que el día se está cobrando DOS VECES.
+   */
+  const diaCaido = seCayo(patch.estado) && (!hermano || seCayo(hermano.estado));
+  const conAcuerdo = patch.falso_flete === true || hermano?.falso_flete === true;
+  if (diaCaido && !conAcuerdo) {
+    avisos.push({
+      nivel: "info",
+      texto: juzgaPrecio && !juzgaCosto
+        ? "Servicio cancelado: no se le cobra al cliente. El importe que tenga cargado no entra a la liquidación."
+        : "Servicio cancelado: no se paga ni se cobra. Si el proveedor ya había salido y hay acuerdo por el avance, márcalo como falso flete.",
+    });
+    return avisos;
+  }
 
   if (esTercero && juzgaCosto) {
     if (hermano) importeDelDia(costo, costoHermano, "costo", "S/");
@@ -287,6 +310,14 @@ const COLUMNAS_OPCIONALES: Record<string, { sql: string; que: string }> = {
   capacidad_contratada: {
     sql: "supabase/liquidaciones-03-ruta-contratada.sql",
     que: "los PAX contratados",
+  },
+  falso_flete: {
+    sql: "supabase/reservas-05-falso-flete.sql",
+    que: "el acuerdo de falso flete (el servicio cancelado se seguirá tratando como S/ 0.00)",
+  },
+  falso_flete_motivo: {
+    sql: "supabase/reservas-05-falso-flete.sql",
+    que: "el motivo del falso flete",
   },
 };
 
