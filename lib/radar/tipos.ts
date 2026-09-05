@@ -205,6 +205,11 @@ export type AnomaliaCombustible = {
     | "discrepancia_maquina_vs_nota" // surtidor/display difiere de la nota (informativo: manda la nota)
     | "voucher_no_leido"             // había foto de nota/surtidor pero no se pudo leer la cantidad/importe
     | "multiples_recargas_en_cluster" // la ráfaga trae 2 recargas/comprobantes distintos
+    // Identidad de la nota (lib/radar/identidad-voucher.ts):
+    | "cliente_como_grifo"           // se guardó como grifo a quien COMPRÓ (AFA o una tercerizada del ERP)
+    | "ruc_del_cliente"              // el nombre del grifo está bien pero el RUC salió del bloque del cliente
+    | "discrepancia_km_tablero_vs_nota" // el km del tablero no coincide con el impreso en la nota
+    | "observacion_lectura"          // diferencia que la IA notó sin declarar entre qué dos fuentes
     // Cuadre aritmético del voucher (lib/radar/coherencia-voucher.ts):
     | "lectura_corregida"            // cantidad × precio = total identificó el dígito mal leído y se corrigió
     | "cuadre_ambiguo"               // no cuadra y más de una lectura lo explicaría: no se tocó nada
@@ -314,7 +319,18 @@ export type ExtraccionCombustible = {
   vio_tablero?: boolean | null;        // se vio una foto del tablero/odómetro
   fuentes?: Record<string, string | null> | null;          // de qué foto salió cada campo clave (galones→surtidor, etc.)
   confianza_campos?: Record<string, number | null> | null; // 0..1 por campo clave
-  discrepancias?: string[] | null;     // p.ej. "surtidor 8.548 gal vs nota 8.55 gal"
+  /**
+   * Razón social de quien COMPRÓ (el "RAZ.SOC" de la nota). Existe para que el comprador
+   * tenga dónde ir: sin este campo terminaba en `grifo`, porque la nota rotula ese dato como
+   * "razón social" y el prompt pedía la razón social. Ver lib/radar/identidad-voucher.ts.
+   */
+  cliente_en_nota?: string | null;
+  /**
+   * Diferencias entre dos fuentes. La forma nueva declara ENTRE QUÉ dos es
+   * (`{campo, entre, detalle}`); los strings sueltos son la forma vieja, que sigue entrando
+   * como observación porque no dice qué se comparó con qué.
+   */
+  discrepancias?: (string | { campo?: string | null; entre?: string | null; detalle?: string | null })[] | null;
   notas_extraccion?: string | null;    // dudas de 7 segmentos, fotos ilegibles, etc.
   /**
    * Los dígitos de la cantidad TAL CUAL están impresos ("8.799x"), sin interpretar. Espejo de

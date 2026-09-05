@@ -16,6 +16,13 @@
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion } from "./coherencia-voucher";
+import {
+  resolverIdentidadGrifo,
+  normalizarDiscrepancias,
+  codigoDeDiscrepancia,
+  detalleDeDiscrepancia,
+  type EmpresasConocidas,
+} from "./identidad-voucher";
 import type {
   AnomaliaCombustible,
   CategoriaRadar,
@@ -129,6 +136,47 @@ function capacidadTanque(veh: VehiculoMatch | null, tipo: string): number {
   const editable = veh?.capacidad_tanque?.[tipo];
   if (editable != null && Number(editable) > 0) return Number(editable);
   return getCapacidad(veh?.categoria, tipo);
+}
+
+// ── Empresas que el ERP conoce como suyas (para el guard de identidad del voucher) ──
+// La propia (`empresa_perfil`, fila 1) y las tercerizadas. Ninguna puede ser el grifo de su
+// propio voucher de combustible: en la nota de despacho son el CLIENTE que compró. Ver
+// lib/radar/identidad-voucher.ts.
+//
+// Se memoiza por 5 minutos: son dos selects sobre tablas chicas, pero el lote procesa hasta
+// 50 mensajes y no tiene sentido repetirlos por cada uno. Cinco minutos es corto de sobra
+// para que una tercerizada recién dada de alta entre en el siguiente barrido del cron.
+const TTL_EMPRESAS_MS = 5 * 60_000;
+let _empresasConocidas: { data: EmpresasConocidas; en: number } | null = null;
+
+async function cargarEmpresasConocidas(sb: any): Promise<EmpresasConocidas> {
+  if (_empresasConocidas && Date.now() - _empresasConocidas.en < TTL_EMPRESAS_MS) return _empresasConocidas.data;
+  const nombres: string[] = [];
+  const rucs: string[] = [];
+  // La propia va PRIMERA: identidad-voucher.ts la usa para decir "la propia empresa" en vez
+  // de "una tercerizada" en el texto de la anomalía.
+  try {
+    const { data } = await sb.from("empresa_perfil").select("nombre, ruc").eq("id", 1).maybeSingle();
+    if (data?.nombre) nombres.push(String(data.nombre));
+    if (data?.ruc) rucs.push(String(data.ruc));
+  } catch {
+    // sin perfil de empresa: el guard sigue con las tercerizadas
+  }
+  // Respaldo por si el perfil está vacío: la misma variable que ya usan las notificaciones y
+  // los pactos para firmar como la empresa. Nunca un nombre hardcodeado — este ERP se vende.
+  if (!nombres.length && process.env.EMPRESA_NOMBRE) nombres.push(process.env.EMPRESA_NOMBRE);
+  try {
+    const { data } = await sb.from("empresas_tercerizadas").select("razon_social, ruc");
+    for (const e of (data ?? []) as { razon_social?: string; ruc?: string }[]) {
+      if (e.razon_social) nombres.push(String(e.razon_social));
+      if (e.ruc) rucs.push(String(e.ruc));
+    }
+  } catch {
+    // sin tabla de tercerizadas: el guard se abstiene con lo que tenga
+  }
+  const res: EmpresasConocidas = { nombres, rucs };
+  _empresasConocidas = { data: res, en: Date.now() };
+  return res;
 }
 
 // ── Helpers compartidos contra la BD ─────────────────────────────────────────
@@ -664,11 +712,13 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
   const tripKm = numOpc(d.trip_km);
   const vioNota = d.vio_nota === true;
   const vioSurtidor = d.vio_surtidor === true;
-  const discrepancias = Array.isArray(d.discrepancias) ? d.discrepancias.filter(Boolean) : [];
+  const vioTablero = d.vio_tablero === true;
+  const discrepancias = normalizarDiscrepancias(d.discrepancias);
 
   // Identidad: el grifo/proveedor JAMÁS es una marca de kit GLP del tablero (trampa "LANDI RENZO").
   let grifo = d.grifo ?? null;
   let proveedor = d.proveedor ?? null;
+  let direccionGrifo = d.direccion_grifo ?? null;
   if (esMarcaKitGLP(grifo) || esMarcaKitGLP(proveedor)) {
     anomalias.push({
       codigo: "marca_kit_como_grifo",
@@ -678,6 +728,24 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     if (esMarcaKitGLP(grifo)) grifo = null;
     if (esMarcaKitGLP(proveedor)) proveedor = null;
   }
+
+  // El grifo tampoco es quien COMPRÓ. La nota de despacho trae DOS empresas —el grifo en el
+  // encabezado y el cliente en "RAZ.SOC"— y el segundo campo se llama literalmente "razón
+  // social", así que ahí terminaban GLOBAL BUS PERÚ S.A.C. (la tercerizada dueña del bus) y
+  // hasta AFA TOURS PERÚ S.A.C. El ERP tiene la evidencia que el modelo no puede tener: sabe
+  // cómo se llama y quiénes son sus tercerizadas, y ninguna puede venderle combustible a AFA
+  // en su propio voucher. Ver lib/radar/identidad-voucher.ts.
+  // `radar_combustible` no guarda el RUC, así que del resultado solo se aplican el nombre y la
+  // dirección; el RUC entra igual porque es la otra mitad de la prueba (el nombre puede estar
+  // bien y el RUC salir del bloque del cliente, y ahí lo que sobra es la dirección).
+  const identidad = resolverIdentidadGrifo(
+    { grifo, proveedor, ruc: d.ruc ?? null, direccionGrifo, clienteEnNota: d.cliente_en_nota ?? null },
+    await cargarEmpresasConocidas(sb)
+  );
+  grifo = identidad.grifo;
+  proveedor = identidad.proveedor;
+  direccionGrifo = identidad.direccionGrifo;
+  if (identidad.anomalia) anomalias.push(identidad.anomalia);
 
   // Guard determinista (no confiar solo en el prompt): "16.3 L/100km" es una TASA de consumo,
   // no una cantidad cargada. 16.3 es un galonaje plausible → sin este freno pasaría todos los
@@ -697,10 +765,19 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
       bloquea: true,
     });
   }
-  // Discrepancias surtidor/display vs nota que reportó la IA: la NOTA manda (decisión del
-  // operador); el valor del surtidor queda solo como alerta informativa (no bloquea).
+  // Diferencias que reportó la IA: la NOTA manda (decisión del operador), así que quedan como
+  // alerta informativa (no bloquean). Lo que SÍ cambia es la etiqueta: antes TODAS entraban
+  // como "el surtidor no coincide con la nota", y en un reporte de dos fotos —la nota y el
+  // TABLERO— eso acusaba a una máquina que nadie fotografió. Cada una declara entre qué dos
+  // fuentes es, y se contrasta contra las fotos que de verdad se vieron: una comparación
+  // contra una foto ausente baja a observación en vez de nombrar al surtidor.
+  const fotosVistas = { vioSurtidor, vioNota, vioTablero };
   for (const disc of discrepancias) {
-    anomalias.push({ codigo: "discrepancia_maquina_vs_nota", detalle: String(disc).slice(0, 240), bloquea: false });
+    anomalias.push({
+      codigo: codigoDeDiscrepancia(disc, fotosVistas),
+      detalle: detalleDeDiscrepancia(disc, fotosVistas),
+      bloquea: false,
+    });
   }
 
   // ── CUADRE ARITMÉTICO DEL VOUCHER ──────────────────────────────────────────
@@ -932,7 +1009,9 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     fecha,
     hora: d.hora ?? null,
     grifo,
-    direccion_grifo: d.direccion_grifo ?? null,
+    // La ya resuelta, no la cruda: cuando el "grifo" resultó ser el comprador, esta dirección
+    // salía del mismo bloque "RAZ.SOC / RUC / DIRECC" y es la del cliente, no la de la estación.
+    direccion_grifo: direccionGrifo,
     tipo_combustible: d.tipo_combustible ?? null,
     // Los números que el cuadre pudo corregir, no los crudos de la IA: el formulario de
     // revisión se llena de acá y el revisor tiene que ver el valor bueno ya puesto. Lo que
@@ -971,7 +1050,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
     const observaciones =
       firmaRadar(mensaje) +
       (d.comprobante ? ` · Comprobante ${d.comprobante}` : "") +
-      (d.direccion_grifo ? ` · ${d.direccion_grifo}` : "");
+      (direccionGrifo ? ` · ${direccionGrifo}` : "");
 
     const { data: comb, error: errComb } = await sb
       .from("combustible")

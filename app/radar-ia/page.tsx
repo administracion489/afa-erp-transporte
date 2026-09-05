@@ -114,8 +114,13 @@ const ANOMALIA_LABEL: Record<string, string> = {
   tasa_como_cantidad:     "Tasa como cantidad",
   trip_como_odometro:     "Trip como odómetro",
   discrepancia_maquina_vs_nota: "Surtidor ≠ nota",
+  discrepancia_km_tablero_vs_nota: "KM tablero ≠ nota",
+  observacion_lectura:    "Observación de lectura",
   voucher_no_leido:       "Voucher ilegible",
   multiples_recargas_en_cluster: "Varias recargas juntas",
+  // Identidad de la nota (lib/radar/identidad-voucher.ts)
+  cliente_como_grifo:     "Cliente puesto como grifo",
+  ruc_del_cliente:        "RUC del cliente",
   // Cuadre aritmético del voucher (lib/radar/coherencia-voucher.ts)
   lectura_corregida:      "Lectura corregida",
   dato_derivado:          "Dato calculado",
