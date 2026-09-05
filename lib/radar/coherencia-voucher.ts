@@ -393,6 +393,63 @@ function derivar(
   return null;
 }
 
+// ── La inversión que el cuadre NO puede ver ──────────────────────────────────
+
+export type InversionVoucher = {
+  cantidad: number;
+  precio: number;
+  detalle: string;
+};
+
+/**
+ * ¿Están intercambiados la cantidad y el precio?
+ *
+ * **La multiplicación es conmutativa, así que el cuadre de arriba es CIEGO a esto.** La nota
+ * V87T-00008182 imprime `040002072 UGL 8.829x 6.990` con `GLP-G 61.71`: 8.829 galones a
+ * S/ 6.990. La IA guardó 6.99 galones a S/ 8.829 — y `6.99 × 8.829 = 61.71` cuadra igual de
+ * bien que `8.829 × 6.990`. Ninguna cuenta con esos tres números puede distinguir un caso del
+ * otro; hace falta una CUARTA cifra que venga de fuera del voucher.
+ *
+ * Esa cifra es el **precio referencial del tipo de combustible** (`precios_combustible`, que
+ * AFA mantiene al día por tipo). Con GLP a S/ 7.00: lo que quedó en "cantidad" (6.99) es el
+ * precio referencial casi exacto, y lo que quedó en "precio" (8.829) se le va un 26 %. Esa
+ * asimetría es la firma de la inversión.
+ *
+ * Se exige que la evidencia sea fuerte por los dos lados —el valor en `cantidad` pegado al
+ * referencial (≤ 8 %) **y** el de `precio` claramente fuera (> 20 %)— porque el fallo caro
+ * aquí es al revés: dar por invertida una compra legítima intercambia los dos números y
+ * escribe un galonaje y un precio que nadie despachó. Sin referencial (0 o ausente) no se
+ * juzga nada: el guard se abstiene antes que adivinar.
+ */
+export function detectarInversionCantidadPrecio(
+  cantidad: number | null,
+  precio: number | null,
+  precioRef: number | null,
+  unidad = "gal"
+): InversionVoucher | null {
+  const c = pos(cantidad);
+  const p = pos(precio);
+  const ref = pos(precioRef);
+  if (c == null || p == null || ref == null) return null;
+  if (Math.abs(c - p) < 1e-9) return null; // iguales: intercambiarlos no cambia nada
+
+  const desvio = (v: number) => Math.abs(v - ref) / ref;
+  const CERCA = 0.08; // el valor que ocupa "cantidad" es, en realidad, el precio
+  const LEJOS = 0.2;  // y el que ocupa "precio" no puede serlo
+  if (!(desvio(c) <= CERCA && desvio(p) > LEJOS)) return null;
+
+  return {
+    cantidad: p,
+    precio: c,
+    detalle:
+      `La cantidad y el precio están intercambiados: se leyó ${c} ${unidad} a ${soles(p)}, pero ${c} es ` +
+      `justo el precio referencial de este combustible (${soles(ref)}) y ${soles(p)} se le aleja un ` +
+      `${Math.round(desvio(p) * 100)} %. El voucher imprime la cantidad pegada a la "x" y el precio después, ` +
+      `así que lo despachado son ${p} ${unidad} a ${soles(c)}. El cuadre no lo detecta solo: ` +
+      `${c} × ${p} da el mismo total que ${p} × ${c}. Se corrigió — confírmalo contra la foto.`,
+  };
+}
+
 /** ¿`leido` y `corregido` se explican por UN error de lectura? */
 function diferenciaDeLectura(leido: number, corregido: number): ErrorDeLectura | null {
   if (leido === corregido) return null;

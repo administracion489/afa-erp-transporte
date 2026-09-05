@@ -24,6 +24,7 @@ import {
   type RadarOportunidad,
   type SeveridadAlerta,
 } from "@/lib/radar/tipos";
+import { COMBUSTIBLES, TIPOS_PARA_ELEGIR, configCombustible } from "@/lib/combustible-tipos";
 
 // ── Helpers puros ────────────────────────────────────────────────────────────
 
@@ -126,6 +127,7 @@ const ANOMALIA_LABEL: Record<string, string> = {
   dato_derivado:          "Dato calculado",
   cuadre_ambiguo:         "No cuadra (ambiguo)",
   cantidad_no_coincide_texto: "Cantidad ≠ transcripción",
+  cantidad_precio_invertidos: "Cantidad y precio invertidos",
 };
 
 /**
@@ -634,6 +636,7 @@ type EdicionComb = {
   vehiculo: string;   // fleet-encoded: "propio:12" | "tercero:5" | ""
   fecha: string;      // YYYY-MM-DD
   grifo: string;
+  tipoCombustible: string; // clave del catálogo de lib/combustible-tipos.ts
   cantidad: string;   // galones o litros (según esLitros)
   precio: string;     // precio unitario (por galón/litro)
   monto: string;      // monto total
@@ -644,6 +647,8 @@ export type OverrideComb = {
   vehiculoId: number;
   fecha: string | null;
   grifo: string | null;
+  /** Tipo de combustible confirmado por el revisor: es lo que se registra. */
+  tipoCombustible: string;
   cantidad: number | null;
   esLitros: boolean;
   precio: number | null;
@@ -696,6 +701,8 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
       vehiculo: u ? `${u.tipo}:${u.id}` : "",
       fecha: c.fecha ?? "",
       grifo: c.grifo ?? "",
+      // Vacío cuando la IA no lo leyó: antes se registraba TODO como diésel en silencio.
+      tipoCombustible: c.tipo_combustible ?? "",
       cantidad: esLitros ? (c.litros != null ? String(c.litros) : "") : (c.galones != null ? String(c.galones) : ""),
       precio: (esLitros ? c.precio_litro : c.precio_galon) != null ? String(esLitros ? c.precio_litro : c.precio_galon) : "",
       monto: c.monto_total != null ? String(c.monto_total) : "",
@@ -710,7 +717,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
         <table className="w-full text-sm">
           <thead>
             <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-              {["Fecha", "Unidad", "Grifo", "Cantidad", "Precio", "Monto", "Anomalías", "Estado"].map((h) => (
+              {["Fecha", "Unidad", "Grifo", "Tipo", "Cantidad", "Precio", "Monto", "Anomalías", "Estado"].map((h) => (
                 <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -733,7 +740,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
               const precioEd = numEd(ed.precio);
               const montoEd = numEd(ed.monto);
               const fotos = fotosDe(c);
-              const puedeRegistrar = ed.vehiculo !== "" && cantEd != null && (precioEd != null || montoEd != null);
+              const puedeRegistrar = ed.vehiculo !== "" && ed.tipoCombustible !== "" && cantEd != null && (precioEd != null || montoEd != null);
               return (
                 <FragmentoFilaCombustible key={c.id}>
                   <tr
@@ -748,6 +755,17 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                       {esTercero && <span className="ml-1.5 text-[10px] font-black text-[#7c3aed] bg-[#f3e8ff] px-1.5 py-0.5 rounded-full">tercero</span>}
                     </td>
                     <td className="p-3 text-gray-600 max-w-[180px] truncate">{c.grifo ?? "—"}</td>
+                    <td className="p-3 whitespace-nowrap">
+                      {c.tipo_combustible ? (() => {
+                        const cfg = configCombustible(c.tipo_combustible);
+                        return (
+                          <span className="text-[10px] font-black px-2 py-0.5 rounded-full whitespace-nowrap"
+                                style={{ background: cfg.bg, color: cfg.color }} title={cfg.label}>
+                            {cfg.icon} {cfg.labelCorto}
+                          </span>
+                        );
+                      })() : <span className="text-xs text-gray-300">—</span>}
+                    </td>
                     <td className="p-3 whitespace-nowrap font-bold text-gray-700">{cantidad}</td>
                     <td className="p-3 whitespace-nowrap text-gray-600">{precio}</td>
                     <td className="p-3 whitespace-nowrap font-black text-[#0b315f]">{c.monto_total != null ? fmtSoles(c.monto_total) : "—"}</td>
@@ -780,7 +798,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                   </tr>
                   {esPendiente && abierto && (
                     <tr className="border-t" style={{ borderColor: "#f1f5f9" }}>
-                      <td colSpan={8} className="p-4 bg-blue-50/40" onClick={(e) => e.stopPropagation()}>
+                      <td colSpan={9} className="p-4 bg-blue-50/40" onClick={(e) => e.stopPropagation()}>
                         {/* Fotos que la IA procesó (voucher / surtidor / tablero) */}
                         {fotos.length > 0 ? (
                           <div className="mb-4">
@@ -844,6 +862,20 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           <CampoEdit label="Grifo">
                             <input type="text" value={ed.grifo} onChange={(e) => setCampo(c, "grifo", e.target.value)} placeholder="—" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
                           </CampoEdit>
+                          <CampoEdit label="Tipo de combustible">
+                            <select value={ed.tipoCombustible} onChange={(e) => setCampo(c, "tipoCombustible", e.target.value)}
+                                    className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm font-bold outline-none focus:border-[#0b315f] bg-white"
+                                    style={{ color: ed.tipoCombustible ? configCombustible(ed.tipoCombustible).color : "#0b315f" }}>
+                              <option value="">— Elegir —</option>
+                              {TIPOS_PARA_ELEGIR.map((t) => (
+                                <option key={t} value={t}>{COMBUSTIBLES[t].icon} {COMBUSTIBLES[t].label}</option>
+                              ))}
+                              {/* El valor legado solo aparece si la fila ya lo trae, para no perderlo al guardar. */}
+                              {ed.tipoCombustible && !TIPOS_PARA_ELEGIR.includes(ed.tipoCombustible) && (
+                                <option value={ed.tipoCombustible}>{configCombustible(ed.tipoCombustible).label}</option>
+                              )}
+                            </select>
+                          </CampoEdit>
                           <CampoEdit label={esLitros ? "Cantidad (lt)" : "Cantidad (gal)"}>
                             <input type="number" inputMode="decimal" step="0.001" value={ed.cantidad} onChange={(e) => setCampo(c, "cantidad", e.target.value)} placeholder="—" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm font-bold text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
                           </CampoEdit>
@@ -865,6 +897,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                                 vehiculoId: Number(ed.vehiculo.split(":")[1]),
                                 fecha: ed.fecha || null,
                                 grifo: ed.grifo.trim() || null,
+                                tipoCombustible: ed.tipoCombustible,
                                 cantidad: cantEd,
                                 esLitros,
                                 precio: precioEd,
@@ -885,7 +918,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                         </div>
                         {!puedeRegistrar && (
                           <p className="text-[11px] text-[#B07A0F] font-bold mt-2">
-                            Para registrar se necesita unidad, galones o litros, y precio o monto total.
+                            Para registrar se necesita unidad, tipo de combustible, galones o litros, y precio o monto total.
                           </p>
                         )}
                         <p className="text-[11px] text-gray-400 mt-1">Si corriges lo que la IA leyó, se guarda como lección para que no repita el error.</p>
@@ -2284,6 +2317,7 @@ export default function RadarIAPage() {
       { campo: ov.esLitros ? "litros" : "galones", ia: iaCantidad, correcto: ov.cantidad },
       { campo: "precio", ia: iaPrecio,  correcto: ov.precio },
       { campo: "monto",  ia: leidoPorIA("monto", c.monto_total), correcto: ov.monto },
+      { campo: "tipo_combustible", ia: c.tipo_combustible, correcto: ov.tipoCombustible || null },
     ];
     const filas = campos
       .filter((x) => x.correcto != null && distinto(x.ia, x.correcto))
@@ -2330,7 +2364,10 @@ export default function RadarIAPage() {
           grifo: ov.grifo ?? c.grifo,
           conductor: c.conductor,
           observaciones: `Radar IA (manual${ov.tipo === "tercero" ? " · tercero" : ""}) · grupo ${grupo}`,
-          tipo_combustible: c.tipo_combustible ?? "diesel",
+          // El que confirmó el revisor. Antes era `c.tipo_combustible ?? "diesel"`: una recarga
+          // de GLP cuyo tipo la IA no leyó entraba al libro como diésel, y de ahí a la
+          // capacidad de tanque, al precio referencial y al rendimiento del vehículo.
+          tipo_combustible: ov.tipoCombustible || c.tipo_combustible || "diesel",
           unidad: ov.esLitros ? "litros" : "galones",
         })
         .select("id")

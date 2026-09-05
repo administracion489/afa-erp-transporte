@@ -26,24 +26,13 @@ type Combustible = {
 type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo";
 type GranPeriodo = "dia" | "semana" | "mes";
 
+import { COMBUSTIBLES } from "@/lib/combustible-tipos";
+
 // ─── CONFIGURACIÓN DE COMBUSTIBLES ───────────────────────────────────────────
-
-type FuelConfig = {
-  label: string; unidad: string; unidadLabel: string;
-  icon: string; color: string; bg: string;
-  precioRef: number; // precio referencial Perú S/
-  esAditivo: boolean; // UREA es aditivo, no combustible principal
-  rendimientoLabel: string; // km/gal, km/m³, etc.
-};
-
-const COMBUSTIBLES: Record<string, FuelConfig> = {
-  diesel:   { label: "Diésel",        unidad: "galones", unidadLabel: "gal", icon: "🛢️",  color: "#1d4ed8", bg: "#dbeafe", precioRef: 16.5, esAditivo: false, rendimientoLabel: "km/gal" },
-  gasolina: { label: "Gasolina",      unidad: "galones", unidadLabel: "gal", icon: "⛽",  color: "#dc2626", bg: "#fee2e2", precioRef: 18.0, esAditivo: false, rendimientoLabel: "km/gal" },
-  glp:      { label: "GLP",           unidad: "galones", unidadLabel: "gal", icon: "🔵",  color: "#7c3aed", bg: "#ede9fe", precioRef: 7.65, esAditivo: false, rendimientoLabel: "km/gal" },
-  gnv:      { label: "GNV",           unidad: "m3",      unidadLabel: "m³",  icon: "💨",  color: "#0f766e", bg: "#f0fdfa", precioRef: 1.78, esAditivo: false, rendimientoLabel: "km/m³"  },
-  urea:     { label: "Urea (AdBlue)", unidad: "litros",  unidadLabel: "lt",  icon: "🧪",  color: "#854d0e", bg: "#fef9c3", precioRef: 5.50, esAditivo: true,  rendimientoLabel: "lt/100km"},
-  biodiesel:{ label: "Biodiésel",     unidad: "galones", unidadLabel: "gal", icon: "🌿",  color: "#166534", bg: "#dcfce7", precioRef: 15.0, esAditivo: false, rendimientoLabel: "km/gal" },
-};
+// El catálogo vive en lib/combustible-tipos.ts: /radar-ia lo necesita para su columna de
+// tipo, y dos copias con etiquetas o colores distintos serían el mismo combustible con dos
+// caras. Ahí están además los grados de gasolina (regular/premium) y `familia`, que es con
+// lo que se compara tanque, precio referencial y rendimiento.
 
 const CAPACIDAD_TANQUE: Record<string, Record<string, number>> = {
   BUS:     { diesel: 100, gnv: 150, glp: 80,  gasolina: 80,  urea: 30 },

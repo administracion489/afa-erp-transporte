@@ -156,7 +156,8 @@ const FORMA_COMBUSTIBLE = `{
   "hora": "HH:MM"|null,
   "grifo": string|null,                 // nombre del grifo/estación (ej "Primax", "Repsol")
   "direccion_grifo": string|null,       // dirección impresa en el voucher
-  "tipo_combustible": "diesel"|"gasolina"|"glp"|"gnv"|"urea"|"biodiesel"|null,
+  "tipo_combustible": "diesel"|"glp"|"gnv"|"gasolina_regular"|"gasolina_premium"|"urea"|"biodiesel"|null,  // del PRODUCTO impreso, jamás de la unidad ("UGL" es galones, no GLP)
+  "producto_voucher": string|null,      // la descripción del producto TAL CUAL la imprime el voucher ("MAX-D DIESEL B5 S50 UV", "GLP-G", "GASOHOL 95")
   "galones": number|null,
   "litros": number|null,                // solo si el voucher está en litros
   "precio_galon": number|null,
@@ -182,7 +183,8 @@ const FORMA_COMBUSTIBLE_MEDIA = `{
   "proveedor": string|null,             // razón social del GRIFO. NO la del cliente
   "cliente_en_nota": string|null,       // razón social de quien COMPRÓ ("RAZ.SOC"/"SEÑOR(ES)"/"CLIENTE"). Va SOLO acá, jamás en "grifo"/"proveedor"
   "comprobante": string|null,           // serie-correlativo — SOLO de la nota
-  "tipo_combustible": "diesel"|"gasolina"|"glp"|"gnv"|"urea"|"biodiesel"|null,
+  "tipo_combustible": "diesel"|"glp"|"gnv"|"gasolina_regular"|"gasolina_premium"|"urea"|"biodiesel"|null,  // del PRODUCTO impreso, jamás de la unidad ("UGL" es galones, no GLP)
+  "producto_voucher": string|null,      // la descripción del producto TAL CUAL la imprime el voucher ("MAX-D DIESEL B5 S50 UV", "GLP-G", "GASOHOL 95")
   "galones": number|null,               // cantidad DESPACHADA (surtidor manda; si no, la nota). GLP en galones. NUNCA el km ni una tasa L/100km
   "litros": number|null,                // solo si el despacho fue realmente en litros
   "texto_cantidad": string|null,        // los dígitos de la cantidad TAL CUAL están impresos, sin interpretar ("8.799x"). Cópialos mirando la foto, no los deduzcas del importe
@@ -215,7 +217,8 @@ const FORMA_COMBUSTIBLE_MEDIA = `{
   "comprobantes_vistos": [ string ],    // TODOS los nº de nota/comprobante distintos que ves en el álbum. Uno solo en el caso normal
   "recargas_adicionales": [             // SOLO si el álbum trae MÁS DE UN despacho distinto (2 notas ≠). [] en el caso normal
     { "placa": string|null, "comprobante": string|null, "fecha": "YYYY-MM-DD"|null, "hora": "HH:MM"|null,
-      "grifo": string|null, "tipo_combustible": "diesel"|"gasolina"|"glp"|"gnv"|"urea"|"biodiesel"|null,
+      "grifo": string|null, "tipo_combustible": "diesel"|"glp"|"gnv"|"gasolina_regular"|"gasolina_premium"|"urea"|"biodiesel"|null,  // del PRODUCTO impreso, jamás de la unidad ("UGL" es galones, no GLP)
+  "producto_voucher": string|null,      // la descripción del producto TAL CUAL la imprime el voucher ("MAX-D DIESEL B5 S50 UV", "GLP-G", "GASOHOL 95")
       "galones": number|null, "litros": number|null, "precio_galon": number|null, "precio_litro": number|null,
       "monto_total": number|null, "kilometraje": number|null }
   ],
@@ -249,6 +252,10 @@ CÓMO SE IMPRIME LA LÍNEA DEL PRODUCTO EN LOS GRIFOS PERUANOS (COESTI/Primax, R
     TOTAL      :   S/    216.81
 Ahí la CANTIDAD es 8.799, el PRECIO por galón es 24.640 y el IMPORTE 216.81 — y 8.799 × 24.640 = 216.81, que es exactamente cómo se comprueba.
 - El número pegado a la "x" es SIEMPRE la cantidad; el que le sigue es el precio unitario. Nunca al revés.
+- **NO DECIDAS CUÁL ES CUÁL POR SU TAMAÑO.** Con diésel el precio (24.640) es mayor que la cantidad (8.799), pero con GLP es al revés — mira esta nota real:
+      040002072 UGL   8.829x      6.990
+        GLP-G                       61.71
+  Ahí son **8.829 galones a S/ 6.990**, no 6.99 galones a S/ 8.829. Los dos dan 61.71 al multiplicar, así que el cuadre NO puede distinguirlos: lo único que lo decide es la "x". Intercambiarlos es el error más fácil de cometer y el más difícil de ver después.
 - "UGL", "U.GAL", "GLN", "GAL" es la unidad (galones), no un número.
 - El número largo del inicio ("040002019") es el CÓDIGO del artículo: jamás es cantidad, precio ni importe.
 - "Kilometraje", "Placa", "Tarjeta", "TURNO", "CARA", "CAJERO" y el N° de la nota tampoco son números de la compra.
@@ -286,7 +293,12 @@ Desempate: el grifo se llama como una estación de servicio o una petrolera (COE
 
 NO CONFUNDIR MARCA DE KIT GLP CON EL GRIFO: "LANDI RENZO", "BRC", "LOVATO", "TOMASETTO", "ZAVOLI", "OMVL", "AC STAG", "PRINS", "GASITALY" y similares son marcas del KIT DE CONVERSIÓN A GLP del vehículo (se ven en el tablero), NO son el grifo ni el proveedor. Nunca las uses como "grifo"/"proveedor".
 
-GLP: en Perú el GLP se despacha en GALONES. Unidades como "UGL", "U.GAL", "GLN" o etiquetas "GLP-G" significan GLP en galones → pon la cantidad en "galones" (no en "litros") y tipo_combustible="glp".
+EL TIPO SALE DEL PRODUCTO, NUNCA DE LA UNIDAD. "UGL", "U.GAL", "GLN" y "GAL" son la UNIDAD de la línea (galones) y NO dicen qué se compró: la nota de COESTI imprime "040002019 UGL 8.799x 24.640" y en la línea de abajo "MAX-D DIESEL B5 S50 UV" — eso es DIÉSEL despachado en galones, no GLP. El tipo se lee de la DESCRIPCIÓN del producto:
+- "MAX-D", "DB5", "B5 S50", "DIESEL", "PETRÓLEO" → diesel
+- "GLP", "GLP-G", "GAS LICUADO" → glp   ·   "GNV", "GAS NATURAL" → gnv
+- "GASOHOL 84/90" o "G-90" → gasolina_regular   ·   "GASOHOL 95/97/98", "PREMIUM", "SÚPER" → gasolina_premium
+- "UREA", "ADBLUE" → urea   ·   "BIODIESEL" → biodiesel
+En Perú el GLP se despacha en GALONES: con GLP la cantidad va en "galones", nunca en "litros".
 
 Si NO se pudo leer la cantidad/importe pero SÍ había una foto de la nota o del surtidor, igual marca vio_nota/vio_surtidor en true y deja los números en null (para distinguir "foto ilegible" de "dato ausente").
 Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.
