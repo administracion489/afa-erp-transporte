@@ -15,7 +15,7 @@
 //
 // Requiere haber corrido supabase/liquidaciones-v2.sql.
 // ──────────────────────────────────────────────────────────────────────────────
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { fmtMoneda } from "@/lib/finanzas/dinero";
 import {
@@ -24,6 +24,9 @@ import {
   type ParServicio, type ReservaBloqueada,
 } from "@/lib/liquidacion-agrupacion";
 import { indiceHermanos, type EnlacePendiente } from "@/lib/liquidacion-hermanos";
+import {
+  claseDeTramos, CLASES_SERVICIO, etiquetaClase, type ClaseServicio,
+} from "@/lib/liquidacion-clases";
 import {
   cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxContratado,
   type CatalogoRutas,
@@ -179,6 +182,18 @@ function diasDeServicio(rs: ReservaLiq[], hermanoDe: (r: ReservaLiq) => ReservaL
   return n;
 }
 
+/** `groupBy` de bolsillo, conservando el orden de aparición. */
+function porClave<T>(filas: T[], clave: (x: T) => string): Map<string, T[]> {
+  const out = new Map<string, T[]>();
+  for (const f of filas) {
+    const k = clave(f);
+    const ya = out.get(k);
+    if (ya) ya.push(f);
+    else out.set(k, [f]);
+  }
+  return out;
+}
+
 export default function LiquidacionesPage() {
   const [lado, setLado] = useState<LadoLiquidacion>("cliente");
   const [vista, setVista] = useState<"cierre" | "documentos">("cierre");
@@ -211,6 +226,18 @@ export default function LiquidacionesPage() {
    * distintas y un mismo número significaría otra empresa.
    */
   const [filtroContraparte, setFiltroContraparte] = useState("");
+  /**
+   * Los DOS filtros finos. A diferencia del de contraparte, estos cortan DENTRO del
+   * grupo, así que no solo cambian lo que se ve: cambian lo que se va a emitir. Ver
+   * `filtroFino` y el aviso de cierre parcial.
+   *
+   *   · `filtroCruce`  — la otra punta del servicio: el CLIENTE en la pestaña de pagar
+   *     (un proveedor mueve a varios clientes en el mismo mes) y el PROVEEDOR en la de
+   *     facturar (incluida la flota propia, que es la clave "sin").
+   *   · `filtroClase`  — fijo | adicional | eventual (lib/liquidacion-clases.ts).
+   */
+  const [filtroCruce, setFiltroCruce] = useState("");
+  const [filtroClase, setFiltroClase] = useState<"" | ClaseServicio>("");
 
   const [editor, setEditor] = useState<number | null>(null);
   const [modalSede, setModalSede] = useState<{ sede: Sede; cliente: string } | null>(null);
@@ -347,7 +374,11 @@ export default function LiquidacionesPage() {
 
   useEffect(() => { cargar(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [periodo.desde, periodo.hasta]);
   useEffect(() => {
-    cargarLiquidaciones(); setSel(new Set()); setFiltroContraparte("");
+    cargarLiquidaciones(); setSel(new Set());
+    // Los tres filtros se limpian juntos: los ids de contraparte y de cruce salen de
+    // tablas distintas en cada pestaña (un mismo número sería otra empresa), y dejar
+    // puesto el de clase escondería medio cierre del lado al que se acaba de entrar.
+    setFiltroContraparte(""); setFiltroCruce(""); setFiltroClase("");
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [lado]);
 
@@ -391,18 +422,111 @@ export default function LiquidacionesPage() {
     return delCliente.find((s) => (s.patrones ?? []).some((p) => p && texto.includes(p))) ?? null;
   }
 
+  // ── Las dos puntas del servicio ──────────────────────────────────────────
+  //
+  // Cada servicio tiene un cliente (a quien se le cobra) y, si se tercerizó, una empresa
+  // (a quien se le paga). La pestaña activa decide cuál de las dos arma los grupos —la
+  // CONTRAPARTE— y cuál queda como el otro extremo —el CRUCE—, que es justo el que la
+  // pantalla no sabía mostrar: un proveedor mueve a varios clientes en el mismo mes y su
+  // tarjeta los apilaba a todos en una lista sin decir de quién era cada ruta.
+
+  const nombreCliente = useMemo(
+    () => (id: number | null | undefined) =>
+      id != null ? (clientes[id]?.empresa || clientes[id]?.nombre || `Cliente ${id}`) : "Sin cliente",
+    [clientes]
+  );
+  /** `sinTercero` cambia con el lado: en la pestaña de facturar, "sin empresa" es la flota propia. */
+  const nombreEmpresa = useMemo(
+    () => (id: number | null | undefined, sinTercero = "Sin empresa") =>
+      id != null ? (terceros[id]?.razon_social || `Empresa ${id}`) : sinTercero,
+    [terceros]
+  );
+
+  const contraparteDe = useCallback(
+    (r: ReservaLiq) => (lado === "cliente" ? r.cliente_id ?? null : r.empresa_tercerizada_id ?? null),
+    [lado]
+  );
+  const cruceDe = useCallback(
+    (r: ReservaLiq) => (lado === "cliente" ? r.empresa_tercerizada_id ?? null : r.cliente_id ?? null),
+    [lado]
+  );
+  const nombreContraparte = useMemo(
+    () => (id: number | null | undefined) => (lado === "cliente" ? nombreCliente(id) : nombreEmpresa(id)),
+    [lado, nombreCliente, nombreEmpresa]
+  );
+  const nombreDelCruce = useMemo(
+    () => (id: number | null | undefined) =>
+      lado === "cliente" ? nombreEmpresa(id, "Flota propia") : nombreCliente(id),
+    [lado, nombreCliente, nombreEmpresa]
+  );
+  /** El nombre detrás de una clave del filtro ("sin" = flota propia / sin cliente). */
+  const nombreDeClave = useMemo(
+    () => (clave: string) => nombreDelCruce(clave === "sin" ? null : Number(clave)),
+    [nombreDelCruce]
+  );
+
+  /**
+   * El pool del lado, ANTES de cualquier filtro. Es la base de los desplegables y del
+   * "de N" que se lee en los contadores: calculando las opciones sobre lo ya filtrado,
+   * cada filtro escondería la salida del otro y no habría forma de volver.
+   */
+  const enCola = useMemo(() => reservas.filter((r) => entraAlCierre(r, lado)), [reservas, lado]);
+
+  /** Los tramos del DÍA: la reserva y su hermano escrito, que es la unidad que se cobra. */
+  const tramosDelDia = useCallback(
+    (r: ReservaLiq) => {
+      const h = hermanos.hermanoDe(r);
+      return h ? [r, h] : [r];
+    },
+    [hermanos]
+  );
+
+  /**
+   * ¿El día de esta reserva pasa los filtros finos?
+   *
+   * Se juzga por DÍA y no por tramo, y no es un detalle: la ida y el retorno son un solo
+   * servicio a una sola tarifa, así que un filtro que dejara pasar uno y no el otro
+   * PARTIRÍA EL DÍA EN DOS —el tramo superviviente saldría "Sin precio de venta",
+   * pidiendo cobrar por segunda vez algo que su hermano ya cobra— que es exactamente el
+   * destrozo que lib/liquidacion-hermanos.ts existe para impedir. Por eso:
+   *
+   *   · la CLASE la declara el tramo que lleva el importe (lib/liquidacion-clases.ts);
+   *   · el CRUCE basta con que lo cumpla UNO de los dos tramos: un día cuya ida puso la
+   *     flota propia y cuyo retorno cubrió un tercero sigue siendo un día entero.
+   */
+  const pasaCruce = useCallback(
+    (r: ReservaLiq) =>
+      !filtroCruce || tramosDelDia(r).some((t) => claveContraparte(cruceDe(t)) === filtroCruce),
+    [filtroCruce, tramosDelDia, cruceDe]
+  );
+  const pasaClase = useCallback(
+    (r: ReservaLiq) => !filtroClase || claseDeTramos(tramosDelDia(r), lado) === filtroClase,
+    [filtroClase, tramosDelDia, lado]
+  );
+  // Se guardan por separado —y no solo la conjunción— porque cada desplegable tiene que
+  // contarse con el OTRO filtro puesto y sin el suyo: pasándose a sí mismo el suyo, la
+  // lista de clientes se quedaría con el cliente ya elegido y no habría forma de cambiar
+  // de cliente sin quitar antes el filtro.
+  const pasaFinos = useCallback((r: ReservaLiq) => pasaCruce(r) && pasaClase(r), [pasaCruce, pasaClase]);
+
+  /** ¿Hay algún filtro que esté CORTANDO el cierre (y no solo mirando)? */
+  const filtroFino = !!filtroCruce || !!filtroClase;
+
   // ── Árbol de grupos ──────────────────────────────────────────────────────
   const grupos: Grupo[] = useMemo(() => {
-    const candidatas = reservas.filter((r) => entraAlCierre(r, lado));
+    // Los filtros finos entran ACÁ, sobre las reservas, y no al final sobre los grupos:
+    // cortan dentro de la tarjeta, así que el total, el bloque rojo, los botones de
+    // precios y costos faltantes y —sobre todo— el documento que se emita tienen que
+    // hablar de lo mismo que se está viendo. Filtrar solo la vista dejaría la pantalla
+    // diciendo S/ 5,000 y el botón verde emitiendo S/ 17,598.
+    const candidatas = enCola.filter(pasaFinos);
 
     const mapa = new Map<string, Grupo>();
     for (const r of candidatas) {
-      const contraparteId = lado === "cliente" ? r.cliente_id : (r.empresa_tercerizada_id ?? null);
+      const contraparteId = contraparteDe(r);
       const sede = lado === "cliente" ? sedeDe(r) : null;
       const clave = `${contraparteId ?? "x"}|${sede?.id ?? "0"}`;
-      const nombre = lado === "cliente"
-        ? (contraparteId != null ? (clientes[contraparteId]?.empresa || clientes[contraparteId]?.nombre || `Cliente ${contraparteId}`) : "Sin cliente")
-        : (contraparteId != null ? (terceros[contraparteId]?.razon_social || `Empresa ${contraparteId}`) : "Sin empresa");
+      const nombre = nombreContraparte(contraparteId);
       const g: Grupo = mapa.get(clave) ?? {
         clave, contraparteId, contraparteNombre: nombre,
         sedeId: sede?.id ?? null, sedeNombre: sede?.nombre ?? (lado === "cliente" ? "Sin sede asignada" : "Servicios tercerizados"),
@@ -451,7 +575,8 @@ export default function LiquidacionesPage() {
     }
 
     return [...mapa.values()].sort((a, b) => b.total - a.total || a.contraparteNombre.localeCompare(b.contraparteNombre));
-  }, [reservas, hermanos, lado, clientes, terceros, sedes, catalogo, igvPct, preciosConIgv, periodo.desde, periodo.hasta, rutas, paxCotizacion]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enCola, pasaFinos, hermanos, lado, contraparteDe, nombreContraparte, sedes, catalogo, igvPct, preciosConIgv, periodo.desde, periodo.hasta, rutas, paxCotizacion]);
 
   /**
    * Lo que el filtro deja ver. Todo lo que se lee de la pantalla —el árbol, el bloque rojo
@@ -477,6 +602,13 @@ export default function LiquidacionesPage() {
    * son del periodo, los documentos son todos los que lleva emitidos (cargarLiquidaciones
    * trae los últimos 200 sin filtrar por fecha, a propósito: la vista Documentos es un
    * histórico). Decir "N doc. en el periodo" sería falso.
+   *
+   * Se cuenta sobre `enCola` —el pool ENTERO— y no sobre `grupos`, que ya viene recortado
+   * por los filtros finos: un proveedor que este mes solo hizo servicios eventuales tiene
+   * que seguir en la lista mientras el filtro dice "Fijos", o el filtro se convierte en
+   * una trampa sin salida. Contarlo por contraparte y no por grupo además arregla un
+   * pequeño desfase: la ida y el retorno de un día pueden caer en sedes distintas (la
+   * sede se resuelve por patrones de texto), y ahí el conteo por grupo veía dos días.
    */
   const opcionesContraparte = useMemo<OpcionContraparte[]>(() => {
     const out = new Map<string, OpcionContraparte>();
@@ -487,18 +619,70 @@ export default function LiquidacionesPage() {
       out.set(clave, nuevo);
       return nuevo;
     };
-    for (const g of grupos)
-      tocar(claveContraparte(g.contraparteId), g.contraparteNombre).servicios +=
-        diasDeServicio(g.reservas, hermanos.hermanoDe);
+    for (const [clave, rs] of porClave(enCola, (r) => claveContraparte(contraparteDe(r))))
+      tocar(clave, nombreContraparte(contraparteDe(rs[0]))).servicios =
+        diasDeServicio(rs, hermanos.hermanoDe);
     for (const l of liquidaciones) {
       const id = (lado === "cliente" ? l.cliente_id : l.empresa_tercerizada_id) ?? null;
-      const nombre = lado === "cliente"
-        ? (id != null ? (clientes[id]?.empresa || clientes[id]?.nombre || `Cliente ${id}`) : "Sin cliente")
-        : (id != null ? (terceros[id]?.razon_social || `Empresa ${id}`) : "Sin empresa");
-      tocar(claveContraparte(id), nombre).documentos += 1;
+      tocar(claveContraparte(id), nombreContraparte(id)).documentos += 1;
     }
     return [...out.values()].sort((a, b) => a.nombre.localeCompare(b.nombre));
-  }, [grupos, hermanos, liquidaciones, clientes, terceros, lado]);
+  }, [enCola, hermanos, liquidaciones, contraparteDe, nombreContraparte, lado]);
+
+  /**
+   * Lo que hay dentro de la contraparte elegida: el mismo pool, cortado por la OTRA punta
+   * y por la clase. Las dos listas se calculan con el otro filtro fino ya aplicado, así
+   * que cada opción dice exactamente cuántos servicios quedarían si se eligiera — que es
+   * lo único que hace útil un número al lado de un nombre.
+   */
+  const enAlcance = useMemo(
+    () => enCola.filter((r) => !filtroContraparte || claveContraparte(contraparteDe(r)) === filtroContraparte),
+    [enCola, filtroContraparte, contraparteDe]
+  );
+
+  const opcionesCruce = useMemo<{ clave: string; nombre: string; servicios: number }[]>(() => {
+    // Ojo con la unidad: un día cuya ida puso la flota propia y cuyo retorno cubrió un
+    // tercero cuenta en los dos, así que la suma de la columna puede pasarse por uno.
+    // Es correcto para lo que dice cada fila ("días en los que participó"), y preferible
+    // a repartir medio servicio entre dos nombres.
+    const base = enAlcance.filter(pasaClase);
+    const out = [...porClave(base, (r) => claveContraparte(cruceDe(r)))].map(([clave, rs]) => ({
+      clave,
+      nombre: nombreDelCruce(cruceDe(rs[0])),
+      servicios: diasDeServicio(rs, hermanos.hermanoDe),
+    }));
+    // El elegido nunca desaparece de su propio desplegable: al cruzarlo con la clase
+    // puede quedarse sin servicios, y un select en blanco sobre una pantalla vacía no
+    // deja ni entender qué pasó ni volver.
+    if (filtroCruce && !out.some((o) => o.clave === filtroCruce))
+      out.push({ clave: filtroCruce, nombre: nombreDeClave(filtroCruce), servicios: 0 });
+    return out.sort((a, b) => b.servicios - a.servicios || a.nombre.localeCompare(b.nombre));
+  }, [enAlcance, pasaClase, filtroCruce, cruceDe, nombreDelCruce, nombreDeClave, hermanos]);
+
+  const opcionesClase = useMemo(() => {
+    const base = enAlcance.filter(pasaCruce);
+    const porClase = new Map<ClaseServicio, ReservaLiq[]>();
+    for (const r of base) {
+      const c = claseDeTramos(tramosDelDia(r), lado);
+      (porClase.get(c) ?? porClase.set(c, []).get(c)!).push(r);
+    }
+    return CLASES_SERVICIO.map((c) => ({
+      ...c,
+      servicios: diasDeServicio(porClase.get(c.clave) ?? [], hermanos.hermanoDe),
+    }));
+  }, [enAlcance, pasaCruce, tramosDelDia, lado, hermanos]);
+
+  /**
+   * Cuánto del cierre está quedando fuera por los filtros finos. Es el número que
+   * convierte "estoy mirando" en "estoy por emitir un documento parcial", y por eso se
+   * muestra pegado al botón verde y no en una esquina.
+   */
+  const recorte = useMemo(() => {
+    if (!filtroFino) return null;
+    const total = diasDeServicio(enAlcance, hermanos.hermanoDe);
+    const incluidos = diasDeServicio(enAlcance.filter(pasaFinos), hermanos.hermanoDe);
+    return { total, incluidos, fuera: Math.max(0, total - incluidos) };
+  }, [filtroFino, enAlcance, pasaFinos, hermanos]);
 
   /**
    * El filtro apunta a alguien que no tiene nada en este periodo (se movió el rango de
@@ -588,6 +772,52 @@ export default function LiquidacionesPage() {
     [rutasDelPeriodo, lado]
   );
 
+  /**
+   * De quién es cada renglón de un grupo. En la pestaña de pagar es LA pregunta que la
+   * tarjeta no contestaba: GRIJALVA sale con 34 servicios de tres clientes distintos y
+   * la lista no nombraba a ninguno, así que revisar "lo de SNACKS" obligaba a reconocer
+   * las rutas de memoria.
+   *
+   * Se atribuye por LÍNEA y no por servicio, para que los importes de las etiquetas
+   * sumen exactamente el total del grupo. Una línea que mezcla dos clientes —posible: la
+   * agrupación junta por ruta y tarifa, no por cliente— no se reparte a medias: se dice
+   * que es de varios, que es lo que de verdad se sabe.
+   */
+  const desgloseDe = useCallback(
+    (g: Grupo) => {
+      const out = new Map<string, { clave: string; nombre: string; servicios: number; total: number }>();
+      for (const l of g.lineas) {
+        const suyos = new Map<string, number | null>();
+        for (const id of l.reservas_periodo) {
+          const r = reservasPorId.get(id);
+          if (r) suyos.set(claveContraparte(cruceDe(r)), cruceDe(r));
+        }
+        const uno = suyos.size === 1 ? [...suyos.entries()][0] : null;
+        const clave = uno ? uno[0] : "varios";
+        const nombre = uno ? nombreDelCruce(uno[1]) : "Varios";
+        const ya = out.get(clave) ?? { clave, nombre, servicios: 0, total: 0 };
+        ya.servicios += l.cantidad;
+        ya.total += l.total_linea;
+        out.set(clave, ya);
+      }
+      return [...out.values()].sort((a, b) => b.total - a.total || a.nombre.localeCompare(b.nombre));
+    },
+    [reservasPorId, cruceDe, nombreDelCruce]
+  );
+
+  /** Los clientes (o proveedores) que sustentan UNA línea, para nombrarlos en su renglón. */
+  const cruceDeLinea = useCallback(
+    (l: LineaAgrupada) => {
+      const nombres = new Set<string>();
+      for (const id of l.reservas_periodo) {
+        const r = reservasPorId.get(id);
+        if (r) nombres.add(nombreDelCruce(cruceDe(r)));
+      }
+      return [...nombres];
+    },
+    [reservasPorId, cruceDe, nombreDelCruce]
+  );
+
   const seleccionados = grupos.filter((g) => sel.has(g.clave) && g.lineas.length);
   const totalSeleccionado = seleccionados.reduce((a, g) => a + g.total, 0);
   /**
@@ -671,15 +901,27 @@ export default function LiquidacionesPage() {
    * una lista de códigos de servicio sueltos, recortada a ocho filas y escondida
    * dentro de una tarjeta plegada. Con sesenta servicios bloqueados eso se leía como
    * "y 52 más…" y no nombraba la ruta ni una vez.
+   *
+   * Cada fila lleva además DE QUIÉN es (`cruces`). Un servicio bloqueado no llega a ser
+   * línea, así que no aparece en las etiquetas por cliente de la tarjeta: sin nombrarlo
+   * aquí, los 13 servicios con problema de un proveedor no tendrían dueño en ninguna
+   * parte de la pantalla, que es justo lo que hay que saber para ir a arreglarlos.
    */
   const fueraDelCierre = useMemo(() => {
-    type Fila = { clave: string; grupo: string; contraparte: string; ruta: string; motivo: string; servicios: number; ids: number[] };
+    type Fila = {
+      clave: string; grupo: string; contraparte: string; ruta: string; motivo: string;
+      servicios: number; ids: number[]; cruces: Set<string>;
+    };
     const out = new Map<string, Fila>();
-    const sumar = (grupo: string, contraparte: string, ruta: string, motivo: string, id: number) => {
+    const sumar = (grupo: string, contraparte: string, ruta: string, motivo: string, r: ReservaLiq | undefined, id: number) => {
       const clave = `${grupo}|${ruta}|${motivo}`;
+      const dueño = r ? nombreDelCruce(cruceDe(r)) : "";
       const ya = out.get(clave);
-      if (ya) { ya.servicios += 1; ya.ids.push(id); return; }
-      out.set(clave, { clave, grupo, contraparte, ruta, motivo, servicios: 1, ids: [id] });
+      if (ya) { ya.servicios += 1; ya.ids.push(id); if (dueño) ya.cruces.add(dueño); return; }
+      out.set(clave, {
+        clave, grupo, contraparte, ruta, motivo, servicios: 1, ids: [id],
+        cruces: new Set(dueño ? [dueño] : []),
+      });
     };
     for (const g of gruposVisibles) {
       const donde = g.sedeNombre && g.sedeNombre !== "Servicios tercerizados" ? `${g.contraparteNombre} · ${g.sedeNombre}` : g.contraparteNombre;
@@ -687,13 +929,14 @@ export default function LiquidacionesPage() {
       for (const { r, motivos } of g.bloqueadas)
         // El motivo se despersonaliza (#1234 → #…) para que sesenta servicios con el
         // mismo problema sean UNA fila y no sesenta.
-        sumar(donde, quien, etiquetaRuta(r), (motivos[0] ?? "Bloqueada").replace(/#\d+/g, "#…"), r.id);
+        sumar(donde, quien, etiquetaRuta(r), (motivos[0] ?? "Bloqueada").replace(/#\d+/g, "#…"), r, r.id);
       for (const l of g.sinEjecutar)
         for (const id of l.reservas_periodo)
-          sumar(donde, quien, l.ruta, `Programada pero ningún servicio quedó finalizado (${l.cantidad_programada})`, id);
+          sumar(donde, quien, l.ruta, `Programada pero ningún servicio quedó finalizado (${l.cantidad_programada})`,
+                reservasPorId.get(id), id);
     }
     return [...out.values()].sort((a, b) => b.servicios - a.servicios || a.ruta.localeCompare(b.ruta));
-  }, [gruposVisibles]);
+  }, [gruposVisibles, reservasPorId, cruceDe, nombreDelCruce]);
 
   /**
    * Mover el periodo INVALIDA la selección. `g.clave` es cliente|sede y no lleva fechas,
@@ -707,6 +950,19 @@ export default function LiquidacionesPage() {
     setSel(new Set());
   }
 
+  /**
+   * Mover un filtro FINO también invalida la selección, y por la misma razón que moverse
+   * de periodo: no cambia qué grupos se ven, cambia lo que cada grupo CONTIENE. Un grupo
+   * marcado con el filtro puesto en un cliente y liquidado con el filtro puesto en otro
+   * emitiría un documento con servicios que nadie llegó a mirar. El filtro de contraparte
+   * no necesita esto —ahí cada grupo entra o no entra, pero por dentro no cambia.
+   */
+  function cambiarFiltroFino(aplicar: () => void) {
+    aplicar();
+    setSel(new Set());
+  }
+  const limpiarFinos = () => cambiarFiltroFino(() => { setFiltroCruce(""); setFiltroClase(""); });
+
   function toggle(clave: string) {
     setSel((s) => { const n = new Set(s); n.has(clave) ? n.delete(clave) : n.add(clave); return n; });
   }
@@ -718,6 +974,16 @@ export default function LiquidacionesPage() {
 
   async function liquidarSeleccion() {
     if (!seleccionados.length) { setMsg("⚠️ Marca al menos un grupo."); return; }
+    // Emitir con un filtro fino puesto es legítimo —pagarle a un proveedor solo lo de un
+    // cliente, o cerrar aparte los adicionales, es una forma normal de ordenar el mes—,
+    // pero tiene que ser una decisión y no un descuido: el documento lleva el periodo
+    // completo en la cabecera y solo una parte de sus servicios dentro.
+    if (recorte && recorte.fuera > 0 && !confirm(
+      `Los filtros dejan fuera ${recorte.fuera} de ${recorte.total} servicio(s).\n\n` +
+      `El documento saldrá solo con los ${recorte.incluidos} que estás viendo; ` +
+      `el resto queda ${lado === "cliente" ? "por liquidar" : "por conciliar"} y se puede cerrar en otro documento.\n\n` +
+      `¿Emitir así?`
+    )) return;
     setTrabajando(true); setMsg("");
     try {
       const res = await crearLiquidaciones(supabase,
@@ -898,7 +1164,8 @@ export default function LiquidacionesPage() {
       )}
 
       {/* Filtros de periodo */}
-      <div className="bg-gray-50 border rounded-2xl p-3 mb-4 flex flex-wrap gap-2 items-center">
+      <div className="bg-gray-50 border rounded-2xl p-3 mb-4 space-y-2">
+      <div className="flex flex-wrap gap-2 items-center">
         <span className="text-xs font-black text-gray-500 uppercase tracking-wide">Periodo</span>
         <input type="date" value={periodo.desde} onChange={(e) => cambiarPeriodo({ ...periodo, desde: e.target.value })}
           className="px-3 py-1.5 rounded-xl border text-sm" />
@@ -946,12 +1213,113 @@ export default function LiquidacionesPage() {
         </label>
       </div>
 
+      {/*
+        Segunda fila: los filtros que cortan DENTRO de la contraparte.
+
+        Van aparte y con su propio rótulo a propósito. El de arriba elige QUÉ TARJETAS se
+        ven —cada proveedor es su propio documento, así que aislar uno no cambia nada de
+        lo que se emite—; estos dos cortan la tarjeta por dentro, y lo que se emita va a
+        contener solo lo que quede. Mezclarlos en la misma fila sería sugerir que hacen
+        lo mismo.
+
+        Solo en la vista de cierre: un documento ya emitido no guarda ni el cliente del
+        proveedor ni la clase de sus servicios, así que ahí estos filtros no tendrían
+        contra qué filtrar y mentirían por omisión.
+      */}
+      {vista === "cierre" && (
+        <div className="flex flex-wrap gap-2 items-center border-t border-gray-200 pt-2">
+          <span className="text-xs font-black text-gray-500 uppercase tracking-wide"
+                title="Estos dos filtros recortan el cierre: lo que emitas contendrá solo lo que quede dentro.">
+            Dentro {filtroContraparte
+              ? (lado === "cliente" ? "del cliente" : "del proveedor")
+              : (lado === "cliente" ? "de cada cliente" : "de cada proveedor")}
+          </span>
+
+          <span className="text-xs font-bold text-gray-500">
+            {lado === "cliente" ? "Proveedor" : "Cliente"}
+          </span>
+          <select value={filtroCruce} onChange={(e) => cambiarFiltroFino(() => setFiltroCruce(e.target.value))}
+            className={`px-3 py-1.5 rounded-xl border text-sm max-w-[20rem] ${filtroCruce ? "font-bold bg-white" : "text-gray-600"}`}
+            style={filtroCruce ? { borderColor: cp, color: cp } : {}}
+            title={lado === "cliente"
+              ? "Quién puso la unidad: cada empresa tercerizada, o la flota propia."
+              : "Para qué cliente hizo el proveedor cada servicio."}>
+            <option value="">{lado === "cliente" ? "Todos (propios y tercerizados)" : "Todos los clientes"}</option>
+            {opcionesCruce.map((o) => (
+              <option key={o.clave} value={o.clave}>
+                {o.nombre}{o.servicios ? ` · ${o.servicios} serv.` : " · sin servicios"}
+              </option>
+            ))}
+          </select>
+          {filtroCruce && (
+            <button onClick={() => cambiarFiltroFino(() => setFiltroCruce(""))}
+              className="px-2.5 py-1.5 rounded-xl border bg-white text-xs font-bold text-gray-500 hover:bg-gray-50"
+              title="Quitar el filtro">✕</button>
+          )}
+
+          <div className="w-px h-6 bg-gray-200 mx-1" />
+          <span className="text-xs font-bold text-gray-500">Servicios</span>
+          {/* Botones y no un desplegable: son cuatro opciones fijas y el número de cada
+              una es la mitad de la información. Con un select habría que abrirlo para
+              descubrir que este mes no hubo ningún adicional. */}
+          <div className="flex flex-wrap gap-1">
+            <button onClick={() => cambiarFiltroFino(() => setFiltroClase(""))}
+              className={`px-2.5 py-1.5 rounded-xl border text-xs font-bold ${filtroClase ? "bg-white text-gray-600 hover:bg-gray-50" : "text-white"}`}
+              style={filtroClase ? {} : { background: cp, borderColor: cp }}>
+              Todas
+            </button>
+            {opcionesClase.map((c) => (
+              <button key={c.clave} onClick={() => cambiarFiltroFino(() => setFiltroClase(c.clave))}
+                title={c.ayuda}
+                className={`px-2.5 py-1.5 rounded-xl border text-xs font-bold ${
+                  filtroClase === c.clave ? "text-white" : "bg-white text-gray-600 hover:bg-gray-50"
+                } ${!c.servicios && filtroClase !== c.clave ? "opacity-50" : ""}`}
+                style={filtroClase === c.clave ? { background: cp, borderColor: cp } : {}}>
+                {c.etiqueta} · {c.servicios}
+              </button>
+            ))}
+          </div>
+
+          {filtroFino && (
+            <button onClick={limpiarFinos}
+              className="ml-auto px-3 py-1.5 rounded-xl border bg-white text-xs font-bold text-gray-600 hover:bg-gray-50">
+              Ver todo lo del periodo
+            </button>
+          )}
+        </div>
+      )}
+      </div>
+
       {cargando ? (
         <div className="py-16 text-center text-gray-400">Cargando el periodo…</div>
       ) : vista === "cierre" ? (
         <>
           {/* Barra de acción masiva */}
-          <div className="sticky top-0 z-20 bg-white/95 backdrop-blur border rounded-2xl p-3 mb-3 flex flex-wrap items-center gap-3 shadow-sm">
+          <div className="sticky top-0 z-20 bg-white/95 backdrop-blur border rounded-2xl p-3 mb-3 shadow-sm">
+          {/*
+            El aviso de CIERRE PARCIAL va DENTRO de la barra pegajosa y encima del botón
+            verde, no en una esquina de la pantalla: el riesgo de estos dos filtros es
+            olvidárselos puestos y emitir media liquidación creyendo que es entera, y ese
+            olvido ocurre justo cuando ya se hizo scroll y el filtro dejó de verse.
+          */}
+          {recorte && recorte.fuera > 0 && (
+            <div className="mb-2 px-3 py-2 rounded-xl bg-amber-50 border border-amber-200 text-[12px] text-amber-900 flex flex-wrap items-center gap-2">
+              <span className="flex-1 min-w-[20rem]">
+                <b>Cierre parcial:</b> se está valorizando <b>{recorte.incluidos}</b> de{" "}
+                <b>{recorte.total}</b> servicio(s)
+                {filtroContraparte ? (lado === "cliente" ? " del cliente" : " del proveedor") : " del periodo"}
+                {filtroCruce && ` · solo ${nombreDeClave(filtroCruce)}`}
+                {filtroClase && ` · solo ${etiquetaClase(filtroClase).toLowerCase()}`}.
+                Los otros <b>{recorte.fuera}</b> quedan {lado === "cliente" ? "por liquidar" : "por conciliar"} y se
+                pueden cerrar aparte, en otro documento.
+              </span>
+              <button onClick={limpiarFinos}
+                className="px-2.5 py-1 rounded-lg border border-amber-300 bg-white text-[11px] font-bold text-amber-800 hover:bg-amber-100">
+                Incluir todo
+              </button>
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-3">
             <span className="text-sm text-gray-600">
               <b>{gruposVisibles.length}</b> grupo(s)
               {filtroContraparte ? ` de ${grupos.length} en el periodo` : " en el periodo"} ·{" "}
@@ -1007,6 +1375,7 @@ export default function LiquidacionesPage() {
               {trabajando ? "Generando…" : `Liquidar ${seleccionados.length || ""} grupo(s) → ${seleccionados.length || 0} documento(s)`}
             </button>
           </div>
+          </div>
 
           {/* Qué NO va a salir en la liquidación, y por qué. Agrupado por ruta y visible
               siempre: es la primera pregunta de quien cierra el mes, y antes había que
@@ -1024,13 +1393,18 @@ export default function LiquidacionesPage() {
                     <tr key={f.clave}>
                       <td className="px-4 py-1.5 font-medium text-gray-800 w-48">{f.ruta}</td>
                       {/* El nombre filtra: con diez clientes en la lista, "¿por qué no sale
-                          la RUTA A?" se responde aislando al que la contrató. */}
+                          la RUTA A?" se responde aislando al que la contrató. Debajo, de
+                          quién son esos servicios: en la pestaña de pagar, la fila dice el
+                          proveedor y hasta ahora callaba el cliente. */}
                       <td className="px-2 py-1.5 text-xs text-gray-400">
                         <button onClick={() => setFiltroContraparte(f.contraparte)}
                           className="text-left hover:text-gray-700 hover:underline"
                           title={`Filtrar por ${lado === "cliente" ? "este cliente" : "este proveedor"}`}>
                           {f.grupo}
                         </button>
+                        {lado === "proveedor" && f.cruces.size > 0 && (
+                          <span className="block text-[10px] text-gray-400">{[...f.cruces].join(" · ")}</span>
+                        )}
                       </td>
                       {/* El contador abre el detalle: es el sitio donde de verdad se
                           arregla el motivo por el que esos servicios no entran. */}
@@ -1051,7 +1425,22 @@ export default function LiquidacionesPage() {
 
           {gruposVisibles.length === 0 ? (
             <div className="bg-white rounded-2xl border p-10 text-center text-gray-400">
-              {filtroContraparte ? (
+              {/* Los filtros finos se nombran PRIMERO: son los que acaban de vaciar la
+                  pantalla, y decir "ese proveedor no tiene servicios" cuando sí los
+                  tiene —solo que de otra clase— manda a buscar el problema al sitio
+                  equivocado. */}
+              {filtroFino ? (
+                <>
+                  No hay servicios que cumplan
+                  {filtroCruce && ` "${nombreDeClave(filtroCruce)}"`}
+                  {filtroCruce && filtroClase && " y"}
+                  {filtroClase && ` "${etiquetaClase(filtroClase)}"`}
+                  {filtroContraparte ? (lado === "cliente" ? " en ese cliente" : " en ese proveedor") : " en este periodo"}.
+                  <button onClick={limpiarFinos} className="ml-2 underline font-semibold text-gray-500 hover:text-gray-700">
+                    Quitar esos filtros
+                  </button>
+                </>
+              ) : filtroContraparte ? (
                 <>
                   {lado === "cliente" ? "Ese cliente" : "Ese proveedor"} no tiene servicios{" "}
                   {lado === "cliente" ? "por liquidar" : "por conciliar"} en este periodo.
@@ -1068,6 +1457,12 @@ export default function LiquidacionesPage() {
           ) : gruposVisibles.map((g) => {
             const abiertoG = abierto.has(g.clave);
             const listo = g.lineas.length > 0;
+            // La composición del grupo por la otra punta. Se muestra cuando hay más de
+            // una —o cuando el filtro dejó una sola, para confirmar de quién es lo que se
+            // está mirando—; con un único cliente y sin filtro no dice nada que la tarjeta
+            // no diga ya, y sería una línea de ruido en todas las tarjetas.
+            const desglose = desgloseDe(g);
+            const mostrarDesglose = desglose.length > 1 || (!!filtroCruce && desglose.length > 0);
             return (
               <div key={g.clave} className={`bg-white rounded-2xl border shadow-sm mb-3 overflow-hidden ${!listo ? "border-red-200" : ""}`}>
                 <div className={`flex items-center gap-3 px-4 py-3 border-b ${listo ? "bg-gray-50" : "bg-red-50"}`}>
@@ -1101,6 +1496,34 @@ export default function LiquidacionesPage() {
                   <span className="text-gray-400 text-xs">{abiertoG ? "▲" : "▼"}</span>
                 </div>
 
+                {/* De quién es el dinero de esta tarjeta. Cada etiqueta filtra: es el
+                    camino corto para revisar (o liquidar) solo lo de un cliente sin tener
+                    que reconocer sus rutas de memoria en una lista de treinta y cuatro. */}
+                {mostrarDesglose && (
+                  <div className="px-4 py-2 border-b bg-white flex flex-wrap items-center gap-1.5">
+                    <span className="text-[10px] font-black text-gray-400 uppercase tracking-wide mr-1">
+                      {lado === "cliente" ? "Lo puso" : "Servicios de"}
+                    </span>
+                    {desglose.map((d) => {
+                      const activo = filtroCruce === d.clave;
+                      return (
+                        <button key={d.clave}
+                          onClick={() => cambiarFiltroFino(() => setFiltroCruce(activo ? "" : d.clave))}
+                          disabled={d.clave === "varios"}
+                          title={d.clave === "varios"
+                            ? "Renglones que reúnen servicios de más de uno: la agrupación junta por ruta y tarifa, no por cliente."
+                            : activo ? "Quitar el filtro" : `Ver solo lo de ${d.nombre}`}
+                          className={`px-2 py-0.5 rounded-full text-[11px] font-bold border ${
+                            activo ? "text-white" : "bg-gray-50 text-gray-600 hover:bg-gray-100"
+                          } ${d.clave === "varios" ? "opacity-60 cursor-default" : ""}`}
+                          style={activo ? { background: cp, borderColor: cp } : {}}>
+                          {d.nombre} · {d.servicios} serv. · {fmtMoneda(d.total)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
                 {!g.sede && lado === "cliente" && (
                   <div className="px-4 py-2 bg-amber-50 border-b text-[11px] text-amber-800">
                     Este grupo no tiene sede: el formato saldrá sin área solicitante ni usuario que aprueba, y no habrá a quién enviarle la conformidad.
@@ -1117,6 +1540,10 @@ export default function LiquidacionesPage() {
                         l.pax_contratado != null &&
                         l.capacidad_minima_asignada != null &&
                         l.capacidad_minima_asignada < l.pax_contratado;
+                      // De quién es este renglón. Solo en la pestaña de pagar: ahí la
+                      // tarjeta es del proveedor y el cliente no aparece en ningún otro
+                      // sitio del renglón. Del lado cliente sería repetir la cabecera.
+                      const deQuien = lado === "proveedor" ? cruceDeLinea(l) : [];
                       return (
                         <div key={l.clave} className="flex items-start gap-3 px-4 py-2 text-sm"
                              style={l.tipo === "adicional" ? { background: "#fffbeb" } : undefined}>
@@ -1136,6 +1563,9 @@ export default function LiquidacionesPage() {
                               <span className="block text-gray-500">↩ {l.nombre_retorno}</span>
                             )}
                             <span className="block text-[11px] text-gray-400">
+                              {deQuien.length > 0 && (
+                                <span className="font-bold text-gray-500">{deQuien.join(" + ")} · </span>
+                              )}
                               {l.pax_contratado ? `${l.pax_contratado} PAX contratados` : "sin capacidad contratada"}
                               {l.moviles > 1 ? ` · Móvil ${l.movil} de ${l.moviles}` : ""}
                               {l.placas.length ? ` · ${l.placas.join(", ")}` : ""}

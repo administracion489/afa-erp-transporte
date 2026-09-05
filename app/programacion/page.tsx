@@ -4489,7 +4489,8 @@ export default function ReservasPage() {
                     <input type="number" min="0" className={inputCls()} placeholder="0.00"
                       value={form.precio_cliente} onChange={f("precio_cliente")} />
                     <p className="text-[10px] mt-1 text-gray-400">
-                      Súbelo cuando el cliente pida una unidad mayor. Se le pedirá conformidad.
+                      Súbelo cuando el cliente pida una unidad mayor. Queda en el acta con su motivo,
+                      y se cobra en la liquidación del cierre.
                     </p>
                   </Campo>
 
