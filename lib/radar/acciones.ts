@@ -16,7 +16,8 @@
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion } from "./coherencia-voucher";
-import { leerAlbumRecargas, type RecargaAlbum } from "./album-recargas";
+import { leerAlbumRecargas, buscarDuplicado, type RecargaAlbum, type DespachoGuardado } from "./album-recargas";
+import { planificarReproceso, type ArtefactoPrevio, type PlanReproceso } from "./reproceso";
 import {
   resolverIdentidadGrifo,
   normalizarDiscrepancias,
@@ -452,10 +453,60 @@ type ArgsAccion = {
   datos: any; // extracción de la IA (forma según categoría)
   confianza: number;
   config: RadarConfig;
+  /** Lo que dejó la corrida anterior de este mensaje. Lo llena `ejecutarAccion`. */
+  previo?: PlanReproceso;
 };
+
+/**
+ * Retira lo que la corrida ANTERIOR de este mensaje dejó propuesto, y devuelve qué comprometió
+ * (para no repetirlo). Se ejecuta solo cuando el mensaje ya tiene `procesado_en`: el endpoint
+ * de reproceso lo conserva, así que es la señal de "esto ya pasó por aquí" sin columna nueva.
+ * Best-effort: si algo falla, el reproceso sigue — peor un duplicado que un mensaje perdido.
+ */
+async function retirarCorridaAnterior(sb: any, mensaje: any): Promise<PlanReproceso | undefined> {
+  if (!mensaje?.id || !mensaje?.procesado_en) return undefined;
+  try {
+    const [rc, ro, ra] = await Promise.all([
+      sb.from("radar_combustible").select("id, estado, combustible_id").eq("mensaje_id", mensaje.id),
+      sb.from("radar_oportunidades").select("id, estado, cotizacion_id").eq("mensaje_id", mensaje.id),
+      sb.from("radar_alertas").select("id").eq("mensaje_id", mensaje.id),
+    ]);
+    const previos: ArtefactoPrevio[] = [
+      ...(((rc?.data as Record<string, unknown>[]) ?? []).map((r) => ({
+        tabla: "radar_combustible" as const,
+        id: String(r.id),
+        estado: (r.estado as string) ?? null,
+        comprometido: r.combustible_id == null ? null : Number(r.combustible_id),
+      }))),
+      ...(((ro?.data as Record<string, unknown>[]) ?? []).map((r) => ({
+        tabla: "radar_oportunidades" as const,
+        id: String(r.id),
+        estado: (r.estado as string) ?? null,
+        comprometido: r.cotizacion_id == null ? null : Number(r.cotizacion_id),
+      }))),
+      ...(((ra?.data as Record<string, unknown>[]) ?? []).map((r) => ({
+        tabla: "radar_alertas" as const,
+        id: String(r.id),
+      }))),
+    ];
+    const plan = planificarReproceso(previos, mensaje.resultado);
+    // Solo se borra lo que el plan autorizó: nunca una fila con una carga real detrás.
+    for (const [tabla, ids] of Object.entries(plan.retirar) as [string, string[]][]) {
+      if (ids.length) await sb.from(tabla).delete().in("id", ids);
+    }
+    return plan;
+  } catch (e: unknown) {
+    console.warn("[radar/acciones] no se pudo retirar la corrida anterior:", (e as Error)?.message ?? e);
+    return undefined;
+  }
+}
 
 export async function ejecutarAccion(args: ArgsAccion): Promise<ResultadoAccion> {
   try {
+    // Reprocesar vuelve a correr la acción ENTERA, y las acciones insertan sin mirar si la
+    // corrida anterior ya lo hizo: cada clic en "Reprocesar" duplicaba lo que el mensaje había
+    // creado. Se retira antes lo PROPUESTO y se recuerda lo COMPROMETIDO para no repetirlo.
+    args.previo = await retirarCorridaAnterior(args.sb, args.mensaje);
     switch (args.categoria) {
       case "oportunidad_comercial": return await accionOportunidad(args);
       case "combustible":           return await accionCombustible(args);
@@ -487,7 +538,18 @@ function firmaRadar(mensaje: any): string {
 
 // ── Oportunidad comercial ────────────────────────────────────────────────────
 
-async function accionOportunidad({ sb, mensaje, datos }: ArgsAccion): Promise<ResultadoAccion> {
+async function accionOportunidad({ sb, mensaje, datos, previo }: ArgsAccion): Promise<ResultadoAccion> {
+  // Alguien ya cotizó, revisó o descartó la oportunidad de este mensaje: reprocesarlo no puede
+  // abrir otra igual al lado, borrando de hecho ese trabajo de la vista del comercial.
+  if (previo?.oportunidadTocada) {
+    return {
+      accion: "oportunidad_ya_trabajada",
+      detalle:
+        "Reproceso sin efecto: la oportunidad de este mensaje ya fue trabajada (cotizada, revisada o descartada). " +
+        "No se crea otra para no duplicarla en la bandeja comercial.",
+      datos: { reproceso: true },
+    };
+  }
   const d = datos as ExtraccionOportunidad;
   const hoy = fechaLima();
   const manana = fechaLima(1);
@@ -720,7 +782,20 @@ async function insertarRecargasAdicionales(
   return creadas;
 }
 
-async function accionCombustible({ sb, mensaje, datos, confianza, config }: ArgsAccion): Promise<ResultadoAccion> {
+async function accionCombustible({ sb, mensaje, datos, confianza, config, previo }: ArgsAccion): Promise<ResultadoAccion> {
+  // Este mensaje YA registró una carga real en `combustible`. Volver a procesarlo NO puede
+  // crear una segunda: sería el mismo gasto contado dos veces en v_egresos, en el costo por km
+  // y en el margen del servicio. Tampoco se borra la que existe — eso lo decide una persona en
+  // /combustible, que es donde vive la fila autoritativa.
+  if (previo?.combustibleId != null) {
+    return {
+      accion: "combustible_ya_registrado",
+      detalle:
+        `Reproceso sin efecto: este mensaje ya registró la carga #${previo.combustibleId} en /combustible. ` +
+        `No se vuelve a registrar para no duplicar el gasto. Si hay que rehacerla, bórrala primero desde /combustible.`,
+      datos: { combustible_id: previo.combustibleId, reproceso: true },
+    };
+  }
   const d = datos as ExtraccionCombustible;
   const fecha = d.fecha || fechaLimaDeTs(mensaje.ts_mensaje) || fechaLima();
   // La IA a veces deja una placa real (p.ej. "CUP 435" sin guion) en "unidad" en vez de
@@ -967,22 +1042,47 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config }: Args
         });
       }
     }
-    if (placa && !anomalias.some((a) => a.codigo === "posible_duplicado")) {
-      const { data: rc } = await sb
-        .from("radar_combustible")
-        .select("id, monto_total")
-        .eq("placa", placa)
-        .eq("fecha", fecha)
-        .in("estado", ["registrado", "pendiente_revision"]);
-      const dup = ((rc as any[]) ?? []).find(
-        (r) => r.monto_total != null && Math.abs(Number(r.monto_total) - monto) < 1
-      );
-      if (dup) {
-        anomalias.push({
-          codigo: "posible_duplicado",
-          detalle: `El Radar ya capturó una carga de ${placa} el ${fecha} por un monto similar`,
-        });
+    if (!anomalias.some((a) => a.codigo === "posible_duplicado")) {
+      // La identidad de un despacho es su NÚMERO DE NOTA, no su placa. El chequeo anterior
+      // filtraba por `placa`, así que el mismo voucher V70S-00043064 entrando dos veces —una
+      // atribuida a BUI-272 y otra a CTV-370— nunca se comparó consigo mismo y no avisó nada.
+      // Se traen los candidatos por FECHA (un día de flota son pocas filas) y, aparte, por
+      // comprobante sin restringir fecha: una foto reenviada días después sigue siendo el
+      // mismo papel. `buscarDuplicado` decide; las reglas viven en un solo sitio.
+      const candidatos = new Map<string, DespachoGuardado>();
+      const sumar = (filas: unknown) => {
+        for (const r of ((filas as Record<string, unknown>[]) ?? [])) {
+          const id = String(r.id ?? "");
+          // Las filas de ESTE mensaje no son un duplicado de sí mismas (un reproceso ya las
+          // retiró; las adicionales del álbum son despachos distintos con su propia nota).
+          if (!id || r.mensaje_id === mensaje.id) continue;
+          candidatos.set(id, {
+            id,
+            placa: (r.placa as string) ?? null,
+            fecha: (r.fecha as string) ?? null,
+            comprobante: (r.comprobante as string) ?? null,
+            monto: r.monto_total == null ? null : Number(r.monto_total),
+            cantidad: r.galones != null ? Number(r.galones) : r.litros != null ? Number(r.litros) : null,
+          });
+        }
+      };
+      const cols = "id, mensaje_id, placa, fecha, comprobante, monto_total, galones, litros";
+      const estados = ["registrado", "pendiente_revision"];
+      const { data: delDia } = await sb.from("radar_combustible").select(cols).eq("fecha", fecha).in("estado", estados);
+      sumar(delDia);
+      if (d.comprobante) {
+        const { data: porComp } = await sb
+          .from("radar_combustible")
+          .select(cols)
+          .eq("comprobante", d.comprobante)
+          .in("estado", estados);
+        sumar(porComp);
       }
+      const dup = buscarDuplicado(
+        { placa, fecha, comprobante: d.comprobante ?? null, monto, cantidad },
+        [...candidatos.values()]
+      );
+      if (dup) anomalias.push({ codigo: "posible_duplicado", detalle: dup.detalle });
     }
   }
 
@@ -1559,7 +1659,7 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
 
 // ── Mantenimiento ────────────────────────────────────────────────────────────
 
-async function accionMantenimiento({ sb, mensaje, datos, confianza, config }: ArgsAccion): Promise<ResultadoAccion> {
+async function accionMantenimiento({ sb, mensaje, datos, confianza, config, previo }: ArgsAccion): Promise<ResultadoAccion> {
   const d = datos as ExtraccionMantenimiento;
   const veh = await matchVehiculo(sb, d.placa);
   const umbral = Number(config.umbral_confianza ?? 0.7);
@@ -1567,7 +1667,13 @@ async function accionMantenimiento({ sb, mensaje, datos, confianza, config }: Ar
   let ordenId: number | null = null;
   let unidadBloqueada = false;
 
-  const puedeAuto = config.acciones_automaticas?.mantenimiento === true && !!veh && confianza >= umbral;
+  // Si este mensaje ya abrió una orden, reprocesarlo no abre otra: serían dos órdenes de
+  // trabajo para el mismo reporte, y con `urgente` volvería a sacar la unidad de circulación.
+  const puedeAuto =
+    config.acciones_automaticas?.mantenimiento === true &&
+    !!veh &&
+    confianza >= umbral &&
+    previo?.ordenMantenimientoId == null;
 
   if (puedeAuto) {
     // Payload espejo del guardado de app/mantenimiento/_tabs/HistorialTab.tsx

@@ -28,6 +28,14 @@
 // perderlos. Y cruzar dos señales del modelo, no una: la lista de recargas que extrajo y la
 // lista de comprobantes que dice haber visto. Si vio dos y extrajo una, el dato se está
 // perdiendo igual — y eso también hay que decirlo.
+//
+// Y COMO AQUÍ VIVE LA IDENTIDAD DE UN DESPACHO, aquí vive también `buscarDuplicado`. El
+// chequeo anterior preguntaba por `placa + fecha + monto`, y la placa es justo lo que no se
+// puede dar por bueno: el mismo voucher V70S-00043064 (CTV370, 7.430 gal, S/ 180.03) entró
+// DOS VECES —una atribuida a BUI-272 y otra a CTV-370— y como las placas no coincidían, el
+// `.eq("placa", …)` no las comparó nunca y no salió ninguna advertencia. El **número de la
+// nota de despacho** es la identidad del papel: dos filas con el mismo comprobante son el
+// mismo despacho, venga con la placa que venga.
 
 /** Una recarga adicional del álbum, con la forma mínima para darle su propia fila. */
 export type RecargaAlbum = {
@@ -194,6 +202,114 @@ export function leerAlbumRecargas(
     incompleto,
     detalle: detalleAlbum(total, adicionales, comprobantes, incompleto),
   };
+}
+
+// ── ¿Este despacho ya está en el ERP? ────────────────────────────────────────
+
+/** Una fila de `radar_combustible` ya guardada, con lo justo para compararla. */
+export type DespachoGuardado = {
+  id: string;
+  placa: string | null;
+  fecha: string | null;
+  comprobante: string | null;
+  monto: number | null;
+  cantidad: number | null;
+};
+
+/** La recarga que se está evaluando ahora. */
+export type LecturaDespacho = {
+  placa: string | null;
+  fecha: string | null;
+  comprobante: string | null;
+  monto: number | null;
+  cantidad: number | null;
+};
+
+export type DuplicadoDespacho = {
+  id: string;
+  /** Por qué se considera el mismo despacho. */
+  por: "comprobante" | "misma_placa" | "otra_placa";
+  detalle: string;
+};
+
+const soles2 = (n: number | null) => (n == null ? "—" : soles(n));
+
+/**
+ * ¿Alguna de las filas guardadas es ESTE mismo despacho? Tres criterios, del más fuerte al
+ * más débil, y el orden importa porque el primero que acierta gana:
+ *
+ *  1. **Mismo comprobante.** Es el nº que imprime el grifo: identifica el papel. No mira placa
+ *     ni fecha — una foto reenviada la semana siguiente sigue siendo el mismo despacho, y una
+ *     mal atribuida a otra unidad también. Este es el criterio que faltaba.
+ *  2. **Misma placa, misma fecha, mismo importe** (±S/ 1): el chequeo de siempre, para cuando
+ *     el comprobante no se pudo leer en alguno de los dos.
+ *  3. **OTRA placa, misma fecha, mismo importe Y misma cantidad**: o es el mismo voucher mal
+ *     atribuido, o dos cargas idénticas al céntimo y al milésimo de galón el mismo día. Se
+ *     exigen los DOS números justamente para que no salte por casualidad: un surtidor entrega
+ *     volumen continuo, y que dos unidades coincidan en importe *y* en 7.430 galones no pasa
+ *     por azar. Con solo el importe no se levanta nada — llenar por S/ 100 redondos es lo
+ *     normal, y ahí sí serían dos cargas distintas.
+ */
+export function buscarDuplicado(
+  lectura: LecturaDespacho,
+  guardados: DespachoGuardado[]
+): DuplicadoDespacho | null {
+  const filas = (guardados ?? []).filter((g) => g?.id);
+  const comp = normComprobante(lectura.comprobante);
+  if (comp) {
+    const porComp = filas.find((g) => normComprobante(g.comprobante) === comp);
+    if (porComp) {
+      return {
+        id: porComp.id,
+        por: "comprobante",
+        detalle:
+          `El comprobante ${lectura.comprobante} ya está capturado${porComp.placa ? ` (a nombre de ${porComp.placa})` : ""}` +
+          `${porComp.fecha ? ` con fecha ${porComp.fecha}` : ""} por ${soles2(porComp.monto)} — es la MISMA nota de despacho, ` +
+          `así que esta lectura la duplicaría. Si las dos filas describen el mismo papel, descarta una.`,
+      };
+    }
+  }
+
+  if (lectura.monto == null || !lectura.fecha) return null;
+  const mismaFecha = filas.filter((g) => g.fecha === lectura.fecha && g.monto != null);
+  const placa = normPlaca(lectura.placa);
+
+  const mismoImporte = (g: DespachoGuardado) => Math.abs((g.monto as number) - (lectura.monto as number)) < 1;
+
+  if (placa) {
+    const igual = mismaFecha.find((g) => normPlaca(g.placa) === placa && mismoImporte(g));
+    if (igual) {
+      return {
+        id: igual.id,
+        por: "misma_placa",
+        detalle: `El Radar ya capturó una carga de ${lectura.placa} el ${lectura.fecha} por ${soles2(igual.monto)}`,
+      };
+    }
+  }
+
+  // Cruce de placas: exige importe Y cantidad, para no acusar dos cargas legítimas del día.
+  if (lectura.cantidad != null) {
+    const cruzado = mismaFecha.find(
+      (g) =>
+        normPlaca(g.placa) !== placa &&
+        mismoImporte(g) &&
+        g.cantidad != null &&
+        Math.abs(g.cantidad - (lectura.cantidad as number)) < 0.001
+    );
+    if (cruzado) {
+      return {
+        id: cruzado.id,
+        por: "otra_placa",
+        detalle:
+          `Ya hay una carga del ${lectura.fecha} por ${soles2(cruzado.monto)} y ${cruzado.cantidad} de cantidad, idéntica a esta ` +
+          `pero a nombre de ${cruzado.placa ?? "otra unidad"} (esta dice ${lectura.placa ?? "sin placa"}). ` +
+          `Coincidir en importe Y en cantidad exacta el mismo día no pasa por azar: casi siempre es el MISMO voucher ` +
+          `atribuido a dos unidades. Confirma cuál es la correcta y descarta la otra.`,
+      };
+    }
+  }
+
+  return null;
 }
 
 function detalleAlbum(
