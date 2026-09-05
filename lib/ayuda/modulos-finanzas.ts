@@ -1186,6 +1186,11 @@ export const MODULOS_FINANZAS: AyudaModulo[] = [
           "Solo lo que **empeora el margen más allá de lo tolerado**. Con la política por defecto (+10 % o +S/ 100, margen mínimo 15 %):\n\n• Cargar por primera vez un costo que faltaba → **no** pide visado. Es un dato que se debía, no un deterioro.\n• Cambiar de S/ 500 a S/ 550 → **no** pide visado. Está dentro de la tolerancia.\n• Cambiar de S/ 550 a S/ 950 → **sí**.\n• Conseguir un proveedor más barato → **nunca** pide visado.\n\nEso último es deliberado: si el cambio bueno costara el mismo trámite que el malo, el operador aprende a esconder los dos.",
       },
       {
+        pregunta: "Subí el precio de un servicio y al cliente no se le pidió conformidad. ¿Falta algo?",
+        respuesta:
+          "No. **Eso se apagó a propósito.** Antes, cada vez que a un servicio ya creado se le subía el precio, el ERP generaba un enlace para que el cliente firmara ese cambio suelto, y quedaba en la pestaña *Conformidades* esperando que alguien se lo mandara.\n\nSe quitó porque duplicaba la firma que ya se pide bien: **la del cierre**. En un contrato fijo, una avería a media semana y dos cambios de unidad son tres enlaces sueltos al mes, de pocos soles cada uno, a la misma persona que dentro de veinte días va a firmar la valorización con todo dentro. El cliente deja de abrirlos — y el día que le llegue el enlace del cierre, que sí importa, ya aprendió a ignorarlos.\n\n**El cambio no se pierde:** el acta de venta se sigue escribiendo igual (quién, cuándo, de cuánto a cuánto y con qué motivo) y se ve en 📜 *Historial*. Lo que el cliente acepta es el importe del mes, en la liquidación.\n\nLa pestaña *Conformidades* se queda como archivo de las que sí se firmaron cuando se emitían: esas sostienen su cobro y no se tocan.",
+      },
+      {
         pregunta: "¿Qué significa “Cuenta de control: cuadrado”?",
         respuesta:
           "Que **el acta y la realidad dicen lo mismo**: para cada servicio, el importe que figura en su ficha coincide con el último importe registrado en su historial.\n\nEs el semáforo más importante de la pantalla y el que menos se mira. Si alguna vez muestra un número en vez de “Cuadrado”, significa que alguien escribió un importe por un camino que no dejó rastro, y hay que encontrarlo antes de endurecer ninguna regla.",

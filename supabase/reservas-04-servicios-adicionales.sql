@@ -102,11 +102,15 @@ comment on column public.reservas.precio_cotizado is
 -- ────────────────────────────────────────────────────────────────────────────
 -- 3) Por qué se cobró distinto
 --
--- El adicional NACE con su precio, así que no dispara el acta de venta ni el
--- enlace de conformidad del cliente (esos viven en el AFTER UPDATE). Este par de
--- columnas es entonces el ÚNICO sitio donde queda registrado el porqué, y es la
--- respuesta a la pregunta que llega tres meses después: "¿por qué esta salida
--- costó S/ 480 si la ruta está a S/ 350?".
+-- El adicional NACE con su precio, así que no dispara el acta de venta (esa vive
+-- en el AFTER UPDATE). Este par de columnas es entonces el ÚNICO sitio donde
+-- queda registrado el porqué, y es la respuesta a la pregunta que llega tres
+-- meses después: "¿por qué esta salida costó S/ 480 si la ruta está a S/ 350?".
+--
+-- Hasta la fase 6 del Pacto el AFTER UPDATE emitía además un enlace de
+-- conformidad para el cliente; ya no (pacto-06-sin-conformidad-de-cambio.sql).
+-- No cambia nada de acá: la razón por la que estas dos columnas existen siempre
+-- fue el acta, que se sigue escribiendo.
 --
 -- `adicional_motivo` guarda una clave de pacto_motivo (la misma lista de un clic
 -- que ya usa Programación) pero SIN FK: pacto_motivo es un catálogo afinable y

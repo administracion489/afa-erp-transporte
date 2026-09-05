@@ -824,7 +824,7 @@ export const GLOSARIO: Record<string, Concepto> = {
     ejemplo:
       "COMPAÑÍA HARD pide una salida extra el 12, el 14 y el 22 de agosto. La RUTA A está contratada a S/ 350, pero esas salidas necesitan una unidad mayor y se acuerdan en S/ 480. Se registran las tres fechas con precio S/ 480 y motivo “el cliente pidió una unidad de mayor capacidad”. En la liquidación de agosto salen en su propio renglón, con el rótulo ADICIONAL y sumadas en “Adicionales autorizados”, no mezcladas con los 22 servicios del contrato.",
     ojo:
-      "Registrarlo como adicional no es un detalle de forma. Un adicional **nace** con su precio, así que no dispara el enlace de conformidad del cliente (ese salta cuando a un servicio ya creado se le SUBE el precio) — por eso el motivo se pide en el momento de crearlo: es el único sitio donde queda escrito por qué esa salida costó S/ 480. Y por eso el precio del adicional tampoco se propone después como referencia de la tarifa contractual.",
+      "Registrarlo como adicional no es un detalle de forma. Un adicional **nace** con su precio, así que no genera un acta de cambio de venta (esa salta cuando a un servicio ya creado se le TOCA el precio) — por eso el motivo se pide en el momento de crearlo: es el único sitio donde queda escrito por qué esa salida costó S/ 480. Y por eso el precio del adicional tampoco se propone después como referencia de la tarifa contractual.",
     verTambien: ["pacto_servicio", "liquidacion_cliente", "conformidad", "adenda"],
   },
 
