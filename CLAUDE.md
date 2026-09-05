@@ -11,6 +11,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run lint` — ESLint via `eslint-config-next` (core-web-vitals + typescript). No test runner is configured.
 - `next.config.ts` sets `typescript.ignoreBuildErrors: true`, so `next build` will not catch type errors — run `npx tsc --noEmit` if you need a real type check.
 
+## Despliegue · el trabajo no está hecho hasta que se ve en transportesafa.com
+
+**`main` es lo que sirve https://transportesafa.com (deploy automático de Vercel).** Un cambio que se queda en una rama, por bueno que sea, para el usuario **no existe**: la pantalla se ve idéntica y no hay forma de saber si el trabajo salió mal o simplemente no llegó.
+
+Instrucción permanente del dueño del ERP: **al terminar un cambio, fusiónalo a `main` sin preguntar** (PR y merge), y dilo. No lo dejes esperando aprobación en una rama.
+
+Con dos condiciones, que son las que hacen que esto sea seguro y no temerario:
+
+- **Solo se fusiona lo verificado.** Antes del merge: `npx tsc --noEmit` sin errores nuevos, `npx next build` compilando, y **todas** las matrices del área tocada en verde (`scripts/prueba-*.mts`). Si algo falla, se arregla antes — no se fusiona "para que lo vea".
+- **Trae `main` a la rama antes de fusionar.** `main` avanza mientras se trabaja, y las áreas de este ERP se pisan entre sí. Después de traerla, **vuelve a correr las comprobaciones**: el merge puede romper lo que ya estaba verde.
+
+Si un cambio necesita una **migración SQL** de `supabase/`, el deploy NO la corre: dilo explícitamente al entregar, porque hasta que alguien la ejecute la pantalla nueva se comporta como si la columna no existiera.
+
+Tras el deploy, si la pantalla sigue igual: `Ctrl+Shift+R`. `public/sw.js` solo cachea la navegación de `/conductor` y `/pasajero` y los chunks de Next llevan hash de build, así que el resto del ERP va siempre a la red — súbele `VERSION` solo si tocas esas dos apps.
+
 ## High-level architecture
 
 ERP interno (Spanish-language UI) para AFA Transportes (operador de transporte en Perú). Next.js App Router + Supabase Auth/Postgres + Tailwind v4. UI strings, DB columns, and route segments are in Spanish — keep that convention.
