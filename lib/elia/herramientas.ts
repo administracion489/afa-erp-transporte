@@ -946,7 +946,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
         let resumenEmpresas: any[] = [];
         if (alcance !== "propia") {
           const [{ data: emp }, { data: vt }, { data: dt }] = await Promise.all([
-            sb.from("empresas_tercerizadas").select("id, razon_social, ruc, estado, venc_autorizacion, venc_habilitacion"),
+            sb.from("empresas_tercerizadas").select("id, razon_social, ruc, estado, venc_autorizacion"),
             (() => {
               let q = sb.from("vehiculos_tercero").select("id, empresa_id, placa, categoria, marca, estado");
               if (input.placa) q = q.ilike("placa", `%${input.placa}%`);
@@ -970,8 +970,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
           for (const e of empresas) {
             for (const [campo, etiqueta] of [
               ["venc_autorizacion", "Autorización de transporte"],
-              ["venc_habilitacion", "Registro SUTRAN"],
-            ] as [string, string][]) {
+              ] as [string, string][]) {
               const dias = diasPara(e[campo]);
               if (dias !== null && dias <= 30) (docsEmpresa[e.id] ||= []).push({ tipo: etiqueta, dias });
             }
@@ -2609,7 +2608,7 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
 
         let qe = sb
           .from("empresas_tercerizadas")
-          .select("id, razon_social, ruc, telefono, contacto_nombre, contacto_telefono, venc_autorizacion, venc_habilitacion, estado");
+          .select("id, razon_social, ruc, telefono, contacto_nombre, contacto_telefono, venc_autorizacion, estado");
         if (input.nombre) qe = qe.ilike("razon_social", `%${input.nombre}%`);
         const [{ data: emp }, { data: dt }, { data: ct }, { data: vt }, servicios] = await Promise.all([
           qe.limit(40),
@@ -2652,7 +2651,6 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
           }
           for (const [campo, etiqueta] of [
             ["venc_autorizacion", "Autorización de transporte"],
-            ["venc_habilitacion", "Registro SUTRAN"],
           ] as [string, string][]) {
             const dias = diasPara(e[campo]);
             if (dias === null) continue;

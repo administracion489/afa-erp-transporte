@@ -52,7 +52,7 @@ function evaluar(docs: DocFila[]): AptitudServicio {
     docsUnidad: docs,
     conductor: { nombre: "Luis Q.", tercerizado: true, vencimiento_licencia: "2028-01-01" },
     empresa: { id: 3, razon_social: "GLOBAL BUS PERU", estado: "activo",
-               venc_autorizacion: "2030-01-01", venc_habilitacion: "2030-01-01" },
+               venc_autorizacion: "2030-01-01" },
   });
 }
 
@@ -96,11 +96,15 @@ titulo("2 · Cargada y sin fecha = CONFORME, no «sin cargar»");
   ok(sobre(a, "Tarjeta de Propiedad").length === 0,
      "la Tarjeta de Propiedad no genera NINGÚN hallazgo", JSON.stringify(sobre(a, "Tarjeta de Propiedad")));
   ok(a.avisos.length === 0, "no queda ni un aviso", a.avisos.map(h => h.texto).join(" · "));
-  // 11 = 8 exigencias del proveedor (SOAT/CAT cuentan como una) + 2 de la empresa
-  // (Autorización MTC y Habilitación SUTRAN, que son suyas y sí vencen) + la licencia.
-  // Se fija el número entero y no solo "la TIVE suma": si mañana desaparece una exigencia
-  // sin que nadie lo pida, este renglón lo dice.
-  ok(a.conformes === 11, "cuenta como conforme (11 exigencias verificadas)", a.conformes);
+  // 10 = 8 exigencias del proveedor (SOAT/CAT cuentan como una) + 1 de la empresa (su
+  // autorización de transporte) + la licencia del conductor.
+  //
+  // Eran 11 hasta que se retiró la "Habilitación SUTRAN" de la empresa: SUTRAN fiscaliza, no
+  // autoriza, y lo que se pedía ahí era en realidad la habilitación VEHICULAR — que es por
+  // placa y hoy es la TUC. Se fija el número ENTERO y no solo "la TIVE suma": este renglón
+  // es el que avisa si mañana desaparece una exigencia sin que nadie lo haya pedido, y de
+  // hecho es el que cazó esta.
+  ok(a.conformes === 10, "cuenta como conforme (10 exigencias verificadas)", a.conformes);
   ok(!/sin cargar|sin fecha/i.test(a.resumen), "el resumen no habla de datos que faltan", a.resumen);
 }
 
@@ -121,6 +125,34 @@ titulo("2 · Cargada y sin fecha = CONFORME, no «sin cargar»");
   ok(h.length === 1 && h[0].veredicto === "sin_registro",
      "…pero se avisa que falta cargarla", h.map(x => x.veredicto).join());
   ok(h[0]?.texto.includes("sin cargar"), "el texto dice «sin cargar»", h[0]?.texto);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+titulo("2b · La empresa tiene UNA exigencia, no dos");
+
+{
+  // Había una segunda, "Habilitación SUTRAN", que no correspondía a nada: SUTRAN fiscaliza,
+  // no autoriza. Lo que se pedía ahí era la habilitación VEHICULAR, que es por placa y hoy
+  // es la TUC. Como exigencia de empresa era un aviso permanente e incumplible.
+  const a = evaluar([...docsBase(), { tipo: "Tarjeta de Propiedad", fecha_vencimiento: null }]);
+  const deEmpresa = hallazgosDe(a).filter(h => h.sujeto === "empresa");
+  ok(!hallazgosDe(a).some(h => /sutran/i.test(h.tipo) || /sutran/i.test(h.texto)),
+     "SUTRAN no aparece por ningún lado", deEmpresa.map(h => h.tipo).join(" · "));
+}
+
+{
+  // Y la que queda sigue vigilándose: si la autorización está vencida, bloquea.
+  const a = evaluarAptitud({
+    fechaServicio: FECHA, hoy: HOY,
+    unidad: { id: 7, placa: "BUI-272", tercerizada: true },
+    docsUnidad: [...docsBase(), { tipo: "Tarjeta de Propiedad", fecha_vencimiento: null }],
+    conductor: { nombre: "Luis Q.", tercerizado: true, vencimiento_licencia: "2028-01-01" },
+    empresa: { id: 3, razon_social: "GLOBAL BUS PERU", estado: "activo",
+               venc_autorizacion: "2026-08-01" },
+  });
+  ok(!a.apto, "una autorización de transporte vencida SIGUE bloqueando");
+  ok(a.bloqueantes[0]?.tipo === "Autorización de transporte",
+     "…y se rotula sin nombrar al MTC, que no siempre es quien la firma", a.bloqueantes[0]?.tipo);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

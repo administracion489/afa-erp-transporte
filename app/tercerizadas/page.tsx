@@ -17,8 +17,13 @@ type Empresa = {
   id: number; razon_social: string; ruc: string | null;
   telefono: string | null; email: string | null;
   contacto_nombre: string | null; contacto_telefono: string | null;
-  autorizacion_mtc: string | null; habilitacion_sutran: string | null;
-  venc_autorizacion: string | null; venc_habilitacion: string | null;
+  autorizacion_mtc: string | null;
+  venc_autorizacion: string | null;
+  // `habilitacion_sutran` / `venc_habilitacion` SIGUEN EN LA BASE pero ya no se leen: SUTRAN
+  // fiscaliza, no autoriza, así que ese par nunca fue una exigencia — era la habilitación
+  // vehicular (hoy la TUC, por placa, en Documentos) puesta en el sitio equivocado. Las
+  // columnas no se borran: los datos que alguien escribió se conservan y se pueden consultar
+  // por SQL. Ver supabase/tercerizadas-autorizacion-ambito.sql.
   // Columnas de tercerizadas-autorizacion-ambito.sql. Opcionales en el tipo porque la app
   // reintenta el SELECT sin ellas si la migración no se corrió (mismo patrón que
   // COLUMNAS_OPCIONALES en lib/reservas-pacto.ts).
@@ -117,8 +122,8 @@ function diasPara(f: string | null): number | null {
 
 type EstDoc = "vigente" | "por_vencer" | "vencido" | "sin_fecha" | "sin_vencimiento";
 
-/** Estado de una FECHA suelta: las habilitaciones MTC/SUTRAN de la empresa, que no son
- *  filas de `documentos_tercero` y por tanto no tienen tipo que consultar. */
+/** Estado de una FECHA suelta: la autorización de la empresa, que no es una fila de
+ *  `documentos_tercero` y por tanto no tiene tipo que consultar. */
 function estadoDoc(f: string | null): Exclude<EstDoc, "sin_vencimiento"> {
   const d = diasPara(f);
   if (d === null) return "sin_fecha";
@@ -196,11 +201,11 @@ const OBLIGATORIOS = Object.entries(TIPOS_DOC_TERCERO).filter(([, v]) => v.oblig
 // adorno. Se reintenta sin ellas y se avisa en el formulario, que es donde hacen falta —
 // mismo criterio que `guardarReservas` con COLUMNAS_OPCIONALES: a un ERP al que le falta un
 // SQL accesorio se le tiene que poder seguir gestionando la flota.
-const COLS_EMP = "id,razon_social,ruc,estado,telefono,email,contacto_nombre,contacto_telefono,autorizacion_mtc,habilitacion_sutran,venc_autorizacion,venc_habilitacion,direccion_fiscal,distrito_fiscal,direccion_cochera,distrito_cochera,lat_cochera,lng_cochera";
+const COLS_EMP = "id,razon_social,ruc,estado,telefono,email,contacto_nombre,contacto_telefono,autorizacion_mtc,venc_autorizacion,direccion_fiscal,distrito_fiscal,direccion_cochera,distrito_cochera,lat_cochera,lng_cochera";
 const COLS_EMP_AUTORIDAD = `${COLS_EMP},autoridad_habilitante,autoridad_emisor`;
 
 // Riesgo de la EMPRESA: documentos obligatorios vencidos/por vencer, licencias y las
-// habilitaciones propias de la empresa (MTC/SUTRAN), que antes no entraban al semáforo.
+// la autorización de transporte propia de la empresa, que antes no entraba al semáforo.
 function calcRiesgo(docs: DocumentoTercero[], conductores: ConductorTercero[], emp?: Empresa | null): Nivel {
   if (emp && emp.estado === "suspendido") return "alto";
   const docVencidos = docs.filter(d => estadoDocumento(d) === "vencido" &&
@@ -210,7 +215,7 @@ function calcRiesgo(docs: DocumentoTercero[], conductores: ConductorTercero[], e
     return d !== null && d < 0;
   }).length;
   const habVencidas = emp
-    ? [emp.venc_autorizacion, emp.venc_habilitacion].filter(f => estadoDoc(f) === "vencido").length
+    ? [emp.venc_autorizacion].filter(f => estadoDoc(f) === "vencido").length
     : 0;
   if (docVencidos > 0 || licVencidas > 0 || habVencidas > 0) return "alto";
   const docPorV = docs.filter(d => estadoDocumento(d) === "por_vencer" &&
@@ -220,7 +225,7 @@ function calcRiesgo(docs: DocumentoTercero[], conductores: ConductorTercero[], e
     return d !== null && d >= 0 && d <= 30;
   }).length;
   const habPorV = emp
-    ? [emp.venc_autorizacion, emp.venc_habilitacion].filter(f => estadoDoc(f) === "por_vencer").length
+    ? [emp.venc_autorizacion].filter(f => estadoDoc(f) === "por_vencer").length
     : 0;
   if (docPorV > 0 || licPorV > 0 || habPorV > 0) return "medio";
   return "ok";
@@ -280,7 +285,6 @@ function calcAptitud(
   // o Municipalidad Provincial): el rótulo lo dice la ficha, no una constante.
   for (const h of [
     { label: `Autorización ${configAutoridad(emp.autoridad_habilitante)?.corto ?? "de transporte"}`, f: emp.venc_autorizacion },
-    { label: "Registro SUTRAN", f: emp.venc_habilitacion },
   ]) {
     const est = estadoDoc(h.f);
     const dias = diasPara(h.f);
@@ -310,8 +314,7 @@ function calcAptitud(
 const FORM_EMP = {
   razon_social: "", ruc: "", telefono: "", email: "",
   contacto_nombre: "", contacto_telefono: "",
-  autorizacion_mtc: "", habilitacion_sutran: "",
-  venc_autorizacion: "", venc_habilitacion: "",
+  autorizacion_mtc: "", venc_autorizacion: "",
   autoridad_habilitante: "", autoridad_emisor: "",
   estado: "activo", observaciones: "",
   direccion_fiscal: "", distrito_fiscal: "",
@@ -789,9 +792,7 @@ export default function EmpresasTercerizadasPage() {
       contacto_nombre: formEmp.contacto_nombre.trim() || null,
       contacto_telefono: formEmp.contacto_telefono.trim() || null,
       autorizacion_mtc: formEmp.autorizacion_mtc.trim() || null,
-      habilitacion_sutran: formEmp.habilitacion_sutran.trim() || null,
       venc_autorizacion: formEmp.venc_autorizacion || null,
-      venc_habilitacion: formEmp.venc_habilitacion || null,
       // El emisor solo tiene sentido para las autoridades que lo piden: guardar "Ica" bajo
       // una autorización de la ATU sería escribir un territorio que nadie autorizó.
       ...(colsAutoridad ? {
@@ -823,9 +824,7 @@ export default function EmpresasTercerizadasPage() {
       contacto_nombre: e.contacto_nombre || "",
       contacto_telefono: e.contacto_telefono || "",
       autorizacion_mtc: e.autorizacion_mtc || "",
-      habilitacion_sutran: e.habilitacion_sutran || "",
       venc_autorizacion: e.venc_autorizacion || "",
-      venc_habilitacion: e.venc_habilitacion || "",
       autoridad_habilitante: e.autoridad_habilitante || "",
       autoridad_emisor: e.autoridad_emisor || "",
       estado: e.estado || "activo", observaciones: e.observaciones || "",
@@ -1468,17 +1467,13 @@ export default function EmpresasTercerizadasPage() {
                   );
                 })()}
 
-                {/* Habilitaciones: chips en línea si ambas están vigentes; tarjetas cuando
-                    hay algo que atender. La de SUTRAN solo aparece si esa ficha la tiene
-                    cargada — SUTRAN fiscaliza, no autoriza, y pedírsela a todo el mundo era
-                    pedir un dato que para la mayoría no existe. */}
+                {/* La autorización: chip en línea si está vigente; tarjeta cuando hay algo
+                    que atender. Era una pareja MTC + SUTRAN; hoy es una sola, porque SUTRAN
+                    fiscaliza y no autoriza. */}
                 {(() => {
                   const habs = [
                     { label: configAutoridad(empActual.autoridad_habilitante)?.corto ?? "Autorización",
                       full: "Autorización de transporte", num: empActual.autorizacion_mtc, venc: empActual.venc_autorizacion },
-                    ...(empActual.habilitacion_sutran || empActual.venc_habilitacion
-                      ? [{ label: "SUTRAN", full: "Registro SUTRAN (heredado)", num: empActual.habilitacion_sutran, venc: empActual.venc_habilitacion }]
-                      : []),
                   ];
                   const hayQueAtender = habs.some(h => ["vencido", "por_vencer"].includes(estadoDoc(h.venc)));
                   if (!hayQueAtender) {
@@ -1538,7 +1533,6 @@ export default function EmpresasTercerizadasPage() {
                     {estadoDoc(empActual.venc_autorizacion) === "vencido" && (
                       <p>· <b>Autorización {configAutoridad(empActual.autoridad_habilitante)?.corto ?? "de transporte"}</b> vencida</p>
                     )}
-                    {estadoDoc(empActual.venc_habilitacion) === "vencido" && <p>· <b>Registro SUTRAN</b> vencido</p>}
                     <button onClick={() => { setTabActiva("documentos"); setFiltroDoc("vencido"); }}
                       className="font-bold underline">Ver documentos →</button>
                   </div>
@@ -2282,22 +2276,6 @@ export default function EmpresasTercerizadasPage() {
                     </p>
                   )}
                 </Campo>
-                {/* SUTRAN sale del formulario porque fiscaliza, no autoriza — pero NO se
-                    borra lo que alguien escribió: la ficha que ya lo tiene lo sigue viendo y
-                    editando, y así nadie pierde un vencimiento que ya estaba vigilado. */}
-                {(formEmp.habilitacion_sutran || formEmp.venc_habilitacion) && (
-                  <>
-                    <Campo label="N° registro SUTRAN (heredado)">
-                      <input className={inputCls("font-mono")} value={formEmp.habilitacion_sutran} onChange={fe("habilitacion_sutran")} />
-                      <p className="text-[10px] text-gray-400 mt-1">
-                        SUTRAN fiscaliza, no autoriza. Se conserva porque ya estaba cargado; puedes vaciarlo.
-                      </p>
-                    </Campo>
-                    <Campo label="Vencimiento registro SUTRAN (heredado)">
-                      <input type="date" className={inputCls()} value={formEmp.venc_habilitacion} onChange={fe("venc_habilitacion")} />
-                    </Campo>
-                  </>
-                )}
               </div>
             </div>
             <Campo label="Observaciones"><input className={inputCls()} value={formEmp.observaciones} onChange={fe("observaciones")} /></Campo>
