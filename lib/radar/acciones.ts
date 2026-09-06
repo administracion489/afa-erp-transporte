@@ -17,6 +17,7 @@ import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro }
 import { elegirOdometro } from "@/lib/odometro-seleccion";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
 import { familiaCombustible, normalizarTipoCombustible } from "@/lib/combustible-tipos";
+import { serieRendimiento, juzgarTramo, type CargaRendimiento } from "@/lib/rendimiento";
 import { leerAlbumRecargas, buscarDuplicado, type RecargaAlbum, type DespachoGuardado } from "./album-recargas";
 import { planificarReproceso, type ArtefactoPrevio, type PlanReproceso } from "./reproceso";
 import {
@@ -1141,32 +1142,63 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     });
   }
 
-  // 5) Consumo excesivo: rendimiento del tramo >30% bajo el promedio del vehículo
+  // 5) Rendimiento del tramo, contra el patrón de la propia unidad.
+  //
+  // El bucle que vivía aquí era la copia del que estaba en /combustible: media sin techo y
+  // SOLO cota inferior. Ahora lo decide lib/rendimiento.ts, con las dos cotas y la mediana.
+  //
+  // La consulta cambia en dos cosas: ya NO filtra `tipo_combustible` (se segmenta por FAMILIA
+  // en TS, porque gasolina regular y premium son el mismo tanque) y ya NO filtra
+  // `kilometraje > 0` — esas filas hacen falta justamente para detectar que el tramo se las
+  // tragó y su combustible no está en el denominador.
   if (veh && km != null && cantidad != null) {
     const { data: prevs } = await sb
       .from("combustible")
-      .select("kilometraje, galones")
+      .select("id, fecha, kilometraje, galones, unidad, tipo_combustible")
       .eq("vehiculo_id", veh.id)
-      .eq("tipo_combustible", tipoComb)
-      .gt("kilometraje", 0)
-      .order("kilometraje", { ascending: true });
-    const regs = (prevs as any[]) ?? [];
-    const rends: number[] = [];
-    for (let i = 1; i < regs.length; i++) {
-      const dkm = Number(regs[i].kilometraje) - Number(regs[i - 1].kilometraje);
-      const qty = Number(regs[i].galones);
-      if (dkm > 0 && qty > 0) rends.push(dkm / qty);
-    }
-    const promedio = rends.length ? rends.reduce((a, b) => a + b) / rends.length : null;
-    const previa = [...regs].reverse().find((r) => Number(r.kilometraje) < km);
-    if (promedio && previa) {
-      const rend = (km - Number(previa.kilometraje)) / cantidad;
-      if (rend > 0 && (promedio - rend) / promedio > 0.3) {
-        anomalias.push({
-          codigo: "consumo_excesivo",
-          detalle: `Rendimiento del tramo ${rend.toFixed(1)} vs promedio ${promedio.toFixed(1)} (más de 30% por debajo)`,
-        });
-      }
+      .order("fecha", { ascending: true });
+
+    const historia: CargaRendimiento[] = ((prevs as any[]) ?? []).map((r) => ({
+      id: r.id,
+      unidad: String(veh.id),
+      fecha: String(r.fecha ?? "").slice(0, 10),
+      kilometraje: r.kilometraje,
+      cantidad: r.galones,
+      unidadCantidad: r.unidad,
+      tipo: r.tipo_combustible,
+    }));
+    // La carga entrante entra como fila virtual: es el tramo que hay que juzgar.
+    const entrante: CargaRendimiento = {
+      id: -1, unidad: String(veh.id), fecha,
+      kilometraje: km, cantidad, unidadCantidad: esLitros ? "litros" : "galones", tipo: tipoComb,
+    };
+    const familia = familiaCombustible(tipoComb);
+    const serie = serieRendimiento(
+      [...historia.filter((h) => familiaCombustible(h.tipo) === familia), entrante]
+    );
+    const suyo = serie.tramos.find((t) => t.cargaId === -1);
+    const hallazgo = suyo ? juzgarTramo(suyo, serie.resumen) : null;
+
+    if (hallazgo?.codigo === "rendimiento_bajo") {
+      // Se conserva el código histórico: `radar_combustible.anomalias` ya tiene filas con él
+      // y /radar-ia lo filtra por nombre. Sigue SIN bloquear el auto-registro.
+      anomalias.push({ codigo: "consumo_excesivo", detalle: hallazgo.detalle });
+    } else if (hallazgo?.codigo === "rendimiento_alto") {
+      // BLOQUEA, pero solo cuando es FÍSICO (superó el techo de la familia), nunca cuando es
+      // la banda estadística: si no, la primera carga tras una parada legítima de un mes
+      // frenaría un voucher bueno, y un bloqueo que sale siempre se vuelve paisaje.
+      //
+      // Por qué bloquea el físico: si el km está mal, el auto-registro lo escribe además en
+      // `lecturas_odometro` (más abajo) y ese km envenena todos los tramos siguientes y el km
+      // de vencimiento de mantenimiento. El Radar ya bloquea por los gemelos exactos de esto
+      // (`trip_como_odometro`, `galones_coinciden_km`). Desbloquear una carga buena cuesta un
+      // clic en /radar-ia con la foto del tablero al lado; auto-registrar un odómetro malo
+      // cuesta una cadena corrompida que nadie vuelve a mirar.
+      anomalias.push({
+        codigo: "rendimiento_implausible",
+        detalle: hallazgo.detalle,
+        ...(hallazgo.fisico ? { bloquea: true } : {}),
+      });
     }
   }
 
@@ -1414,7 +1446,10 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       (a.codigo === "cantidad_no_coincide_texto" && a.bloquea !== false) ||
       // Dos vouchers en la misma ráfaga: hasta que alguien diga cuál describe cuál fila, no se
       // sabe de qué unidad es el gasto — y antes el segundo directamente se perdía.
-      a.codigo === "multiples_recargas_en_cluster"
+      a.codigo === "multiples_recargas_en_cluster" ||
+      // Rindió más de lo físicamente posible: falta una carga por registrar o el odómetro
+      // está mal leído, y ese km se escribiría además en lecturas_odometro.
+      (a.codigo === "rendimiento_implausible" && a.bloquea === true)
   )
     ? "critico"
     : "atencion";
