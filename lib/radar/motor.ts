@@ -22,6 +22,7 @@ import { leccionesCombustible } from "./lecciones-combustible";
 import { ejecutarAccion, crearAlerta, fechaLima, horaLima } from "./acciones";
 import { promptTriage, promptExtraccion, promptExtraccionMedia, type ContextoPrompt } from "./prompts";
 import { transcribirAudio } from "./transcripcion";
+import { miembrosDelMismoRemitente, remitenteUtilizable } from "./cluster-remitente";
 import { CONFIG_DEFECTO, normalizarConfigRadar } from "./config";
 import { LISTA_CATEGORIAS, type CategoriaRadar, type RadarConfig, type ResumenProcesamiento } from "./tipos";
 
@@ -284,12 +285,18 @@ function dentroDeGraciaCluster(mensaje: any): boolean {
 type ResolucionCluster = { primaria: boolean; primariaId?: string; miembros?: any[] };
 
 /**
- * Busca otros mensajes del MISMO remitente en el MISMO grupo, dentro de la ventana, que
+ * Busca otros mensajes de LA MISMA PERSONA en el MISMO grupo, dentro de la ventana, que
  * también "parecen combustible". El más antiguo del grupo se vuelve la "primaria" (la que
  * dispara la extracción combinada); el resto se fusiona en ella sin generar su propia fila.
+ *
+ * **Quién mandó el mensaje se decide en `lib/radar/cluster-remitente.ts`, no con el `.eq()`.**
+ * En producción se fusionaron fotos de VARIOS celulares en una sola recarga: basta con que el
+ * jid llegue vacío o con un valor de relleno para que el filtro empareje a todo el grupo — un
+ * comodín compartido casa con todos. Por eso el jid se valida antes de agrupar y cada
+ * candidato se vuelve a comprobar aquí, cruzando el número con el pushName.
  */
 async function resolverCluster(sb: any, mensaje: any): Promise<ResolucionCluster> {
-  if (!pareceCombustible(mensaje) || !mensaje.remitente_wa || !mensaje.grupo_id) {
+  if (!pareceCombustible(mensaje) || !remitenteUtilizable(mensaje) || !mensaje.grupo_id) {
     return { primaria: true };
   }
   const centro = new Date(mensaje.recibido_en).getTime();
@@ -297,13 +304,18 @@ async function resolverCluster(sb: any, mensaje: any): Promise<ResolucionCluster
   const hasta = new Date(centro + VENTANA_CLUSTER_MS).toISOString();
   const { data } = await sb
     .from("radar_mensajes")
-    .select("id, recibido_en, estado, tipo, texto, transcripcion, media_url, media_mime")
+    // `remitente_wa`/`remitente_nombre` viajan para poder VERIFICAR el remitente, no solo
+    // filtrarlo; `media_nombre` porque es el nombre de archivo que se guarda como evidencia.
+    .select("id, recibido_en, estado, tipo, texto, transcripcion, media_url, media_mime, media_nombre, remitente_wa, remitente_nombre")
     .eq("remitente_wa", mensaje.remitente_wa)
     .eq("grupo_id", mensaje.grupo_id)
     .neq("estado", "fusionado")
     .gte("recibido_en", desde)
     .lte("recibido_en", hasta);
-  const candidatos = ((data as any[]) ?? []).filter((m) => pareceCombustible(m));
+  const candidatos = miembrosDelMismoRemitente(
+    mensaje,
+    ((data as any[]) ?? []).filter((m) => pareceCombustible(m))
+  );
   if (candidatos.length <= 1) return { primaria: true };
 
   candidatos.sort((a, b) => new Date(a.recibido_en).getTime() - new Date(b.recibido_en).getTime());
