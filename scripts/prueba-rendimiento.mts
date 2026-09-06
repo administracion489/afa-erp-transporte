@@ -30,6 +30,9 @@ import {
   textoMotivo,
   etiquetaMotivo,
   mediana,
+  resumirVentana,
+  compararVentanas,
+  variacionPct,
   TECHO_FAMILIA,
   MIN_TRAMOS_CONFIABLE,
   type CargaRendimiento,
@@ -412,6 +415,193 @@ const CWZ: CargaRendimiento[] = [
   chk("descarta ceros y negativos", mediana([0, -5, 4, 6]) === 5);
   chk("sin valores devuelve null", mediana([]) === null);
   chk("el mínimo de tramos confiables es 5", MIN_TRAMOS_CONFIABLE === 5);
+}
+
+// ── 14. COMPARAR DOS VENTANAS · la descomposición del gasto ────────────────
+// Tres causas mueven el gasto y se gestionan de forma opuesta: más km es más trabajo,
+// peor rendimiento es una anomalía, y un precio más alto es del mercado. La ficha las
+// separa en soles, y lo único que no se puede aflojar es que sumen exacto.
+
+/** Cargas de una ventana con km, galones y soles ya cuadrados. */
+function ventana(
+  idBase: number, desde: string, kmPorTramo: number, galPorTramo: number, precio: number, n: number
+): CargaRendimiento[] {
+  const out: CargaRendimiento[] = [];
+  let km = 100000;
+  const d = new Date(desde + "T00:00:00Z");
+  for (let i = 0; i <= n; i++) {
+    out.push({
+      id: idBase + i, unidad: "pV", fecha: d.toISOString().slice(0, 10),
+      kilometraje: km, cantidad: galPorTramo, tipo: "diesel",
+      gasto: Math.round(galPorTramo * precio * 100) / 100,
+    });
+    km += kmPorTramo;
+    d.setUTCDate(d.getUTCDate() + 3);
+  }
+  return out;
+}
+
+const resumir = (cargas: CargaRendimiento[], desde: string, hasta: string) =>
+  resumirVentana(seriesRendimiento(cargas), cargas, desde, hasta);
+
+{
+  // Base: 280 km por tramo, 10 gal, S/ 24.70 → 28 km/gal.
+  const prev = ventana(1000, "2026-07-01", 280, 10, 24.7, 6);
+  // Actual: más km (320/tramo), peor rendimiento (12 gal → 26.67) y precio más alto.
+  const act = ventana(2000, "2026-08-01", 320, 12, 25.74, 6);
+
+  const rp = resumir(prev, "2026-07-01", "2026-07-31");
+  const ra = resumir(act, "2026-08-01", "2026-08-31");
+  const c = compararVentanas(ra, rp);
+
+  chk("la ventana resume solo tramos medidos", rp.cargasMedidas === 6 && ra.cargasMedidas === 6, `${rp.cargasMedidas} / ${ra.cargasMedidas}`);
+  chk("el rendimiento de la ventana es Σkm/Σgal", cerca(rp.rendimiento, 28, 0.01) && cerca(ra.rendimiento, 320 / 12, 0.01), `${rp.rendimiento?.toFixed(2)} → ${ra.rendimiento?.toFixed(2)}`);
+  chk("el precio medio es Σgasto/Σgal", cerca(rp.precioMedio, 24.7, 0.01) && cerca(ra.precioMedio, 25.74, 0.01));
+  chk("es comparable", c.comparable);
+
+  const e = c.efectos!;
+  chk("LOS TRES EFECTOS SUMAN LA DIFERENCIA DE GASTO (al céntimo)",
+    Math.abs(e.km + e.rendimiento + e.precio - e.total) < 0.01,
+    `${(e.km + e.rendimiento + e.precio).toFixed(4)} vs ${e.total.toFixed(4)}`);
+  chk("más km sube el gasto", e.km > 0, e.km.toFixed(2));
+  chk("peor rendimiento sube el gasto", e.rendimiento > 0, e.rendimiento.toFixed(2));
+  chk("precio más alto sube el gasto", e.precio > 0, e.precio.toFixed(2));
+  console.log(`        Δ S/ ${e.total.toFixed(2)} = km ${e.km.toFixed(2)} + rend ${e.rendimiento.toFixed(2)} + precio ${e.precio.toFixed(2)}`);
+}
+
+// ── 15. Cada efecto AISLADO: los otros dos en cero ─────────────────────────
+{
+  // Solo cambian los km.
+  const p = ventana(3000, "2026-07-01", 280, 10, 24.7, 6);
+  const a = ventana(4000, "2026-08-01", 420, 15, 24.7, 6); // 420/15 = 28 km/gal, mismo precio
+  const c = compararVentanas(resumir(a, "2026-08-01", "2026-08-31"), resumir(p, "2026-07-01", "2026-07-31"));
+  chk("solo cambia el km · efecto rendimiento = 0", Math.abs(c.efectos!.rendimiento) < 0.01, c.efectos!.rendimiento.toFixed(4));
+  chk("solo cambia el km · efecto precio = 0", Math.abs(c.efectos!.precio) < 0.01, c.efectos!.precio.toFixed(4));
+  chk("solo cambia el km · todo el cambio es del km", Math.abs(c.efectos!.km - c.efectos!.total) < 0.01);
+}
+{
+  // Solo cambia el PRECIO. Es el caso real: diésel de S/ 24.70 a S/ 25.74 (+4.2 %).
+  // Sin separar el precio, ese aumento se leería como problema operativo.
+  const p = ventana(5000, "2026-07-01", 280, 10, 24.7, 6);
+  const a = ventana(6000, "2026-08-01", 280, 10, 25.74, 6);
+  const c = compararVentanas(resumir(a, "2026-08-01", "2026-08-31"), resumir(p, "2026-07-01", "2026-07-31"));
+  chk("CASO REAL · solo sube el precio: efecto km = 0", Math.abs(c.efectos!.km) < 0.01, c.efectos!.km.toFixed(4));
+  chk("CASO REAL · y NADA se le achaca al rendimiento", Math.abs(c.efectos!.rendimiento) < 0.01, c.efectos!.rendimiento.toFixed(4));
+  chk("CASO REAL · todo el aumento es del precio", Math.abs(c.efectos!.precio - c.efectos!.total) < 0.01, `${c.efectos!.precio.toFixed(2)} de ${c.efectos!.total.toFixed(2)}`);
+  chk("y el rendimiento no se movió", Math.abs(c.variacion.rendimiento ?? 99) < 0.01, String(c.variacion.rendimiento));
+}
+{
+  // Solo cambia el RENDIMIENTO: mismos km, mismo precio, más galones.
+  const p = ventana(7000, "2026-07-01", 280, 10, 24.7, 6);
+  const a = ventana(8000, "2026-08-01", 280, 12, 24.7, 6);
+  const c = compararVentanas(resumir(a, "2026-08-01", "2026-08-31"), resumir(p, "2026-07-01", "2026-07-31"));
+  chk("solo cambia el rendimiento · efecto km = 0", Math.abs(c.efectos!.km) < 0.01, c.efectos!.km.toFixed(4));
+  chk("solo cambia el rendimiento · efecto precio = 0", Math.abs(c.efectos!.precio) < 0.01, c.efectos!.precio.toFixed(4));
+  chk("solo cambia el rendimiento · sube el gasto y se le achaca a él", c.efectos!.rendimiento > 0 && Math.abs(c.efectos!.rendimiento - c.efectos!.total) < 0.01);
+}
+
+// ── 16. Solo entran tramos MEDIDOS, y el gasto total se publica aparte ──────
+{
+  const cargas: CargaRendimiento[] = [
+    { id: 1, unidad: "pW", fecha: "2026-08-01", kilometraje: 10000, cantidad: 10, tipo: "diesel", gasto: 247 },
+    { id: 2, unidad: "pW", fecha: "2026-08-05", kilometraje: 10280, cantidad: 10, tipo: "diesel", gasto: 247 }, // medido
+    { id: 3, unidad: "pW", fecha: "2026-08-09", kilometraje: 0, cantidad: 10, tipo: "diesel", gasto: 300 },     // sin odómetro
+    { id: 4, unidad: "pW", fecha: "2026-08-13", kilometraje: 10560, cantidad: 10, tipo: "diesel", gasto: 247 }, // eslabón saltado
+  ];
+  const r = resumir(cargas, "2026-08-01", "2026-08-31");
+  chk("un solo tramo medido de cuatro cargas", r.cargasMedidas === 1, String(r.cargasMedidas));
+  chk("los galones sin medir NO entran al denominador", r.cantidad === 10, String(r.cantidad));
+  chk("el gasto medido son solo los soles de ese tramo", cerca(r.gasto, 247, 0.01), String(r.gasto));
+  chk("pero gastoTotal trae TODAS las cargas (lo que cuadra con caja)", cerca(r.gastoTotal, 1041, 0.01), String(r.gastoTotal));
+  chk("y son números distintos, que es el punto", r.gasto !== r.gastoTotal);
+  chk("la cobertura declara las cargas sin odómetro", r.cargasSinOdometro === 1, String(r.cargasSinOdometro));
+  chk("el rendimiento no se contamina: 28 km/gal", cerca(r.rendimiento, 28, 0.01), String(r.rendimiento?.toFixed(2)));
+}
+
+// ── 17. Sin base no se compara: nunca −100 % ni Infinity ───────────────────
+{
+  const a = ventana(9000, "2026-08-01", 280, 10, 24.7, 6);
+  const vacia = resumir([], "2026-07-01", "2026-07-31");
+  const c = compararVentanas(resumir(a, "2026-08-01", "2026-08-31"), vacia);
+  chk("periodo anterior vacío → NO comparable", c.comparable === false);
+  chk("sin efectos inventados", c.efectos === null);
+  chk("y con motivo que lo explica", (c.motivo ?? "").includes("periodo anterior"), c.motivo?.slice(0, 60) ?? "null");
+  chk("el motivo dice que NO hay cargas, no solo que no hay tramos", /no tiene ninguna carga/.test(c.motivo ?? ""), c.motivo?.slice(0, 70) ?? "null");
+}
+{
+  // EL CASO REAL DE CWZ-371, y por eso está aquí: julio tiene DOS cargas por S/ 466.75
+  // y cero tramos medibles. Decir solo "no hay tramos medidos" sobre un periodo con
+  // cargas visibles en la tabla hace dudar de la pantalla — el mensaje tiene que nombrar
+  // la plata que sí hay y qué falta para poder medirla.
+  const julio = resumir(CWZ.map(c => ({ ...c, gasto: 100 })), "2026-07-01", "2026-08-07");
+  const agosto = resumir(CWZ.map(c => ({ ...c, gasto: 100 })), "2026-08-08", "2026-09-06");
+  const c = compararVentanas(agosto, julio);
+  chk("CWZ-371 · julio no es comparable", c.comparable === false);
+  chk("CWZ-371 · pero el motivo NOMBRA las cargas que sí hay", /2 carga\(s\) por S\//.test(c.motivo ?? ""), c.motivo?.slice(0, 80) ?? "null");
+  chk("CWZ-371 · y dice cómo arreglarlo", /poner el od[óo]metro/.test(c.motivo ?? ""));
+}
+{
+  // Una sola carga no es lo mismo que cargas sin odómetro: se dicen distinto.
+  const una = resumir([{ id: 1, unidad: "pU", fecha: "2026-07-10", kilometraje: 5000, cantidad: 10, tipo: "diesel", gasto: 247 }], "2026-07-01", "2026-07-31");
+  const buena = resumir(ventana(20000, "2026-08-01", 280, 10, 24.7, 6), "2026-08-01", "2026-08-31");
+  const c = compararVentanas(buena, una);
+  chk("una sola carga: el motivo lo dice así", /una sola carga no hay tramo/.test(c.motivo ?? ""), c.motivo?.slice(0, 70) ?? "null");
+  chk("las variaciones son null, no −100", c.variacion.km === null && c.variacion.rendimiento === null);
+  chk("variacionPct sin base devuelve null", variacionPct(50, 0) === null);
+  chk("variacionPct normal", cerca(variacionPct(110, 100), 10, 0.001));
+  chk("variacionPct a la baja", cerca(variacionPct(90, 100), -10, 0.001));
+  chk("variacionPct con null devuelve null", variacionPct(null, 100) === null && variacionPct(100, null) === null);
+}
+
+// ── 18. Pocos tramos: se compara, pero se dice que es orientativo ──────────
+{
+  const p = ventana(11000, "2026-07-01", 280, 10, 24.7, 2); // 2 tramos
+  const a = ventana(12000, "2026-08-01", 280, 10, 24.7, 6);
+  const c = compararVentanas(resumir(a, "2026-08-01", "2026-08-31"), resumir(p, "2026-07-01", "2026-07-31"));
+  chk("con 2 tramos SÍ se compara (esconderlo sería peor)", c.comparable === true);
+  chk("pero el motivo avisa que es orientativo", /[Oo]rientativo/.test(c.motivo ?? ""), c.motivo?.slice(0, 50) ?? "null");
+  chk("y nombra cuántos tramos hay", (c.motivo ?? "").includes("2 tramo"), c.motivo?.slice(0, 60) ?? "null");
+}
+
+// ── 19. Dos ventanas idénticas: todo en cero, sin ruido ────────────────────
+{
+  const p = ventana(13000, "2026-07-01", 280, 10, 24.7, 6);
+  const a = ventana(14000, "2026-08-01", 280, 10, 24.7, 6);
+  const c = compararVentanas(resumir(a, "2026-08-01", "2026-08-31"), resumir(p, "2026-07-01", "2026-07-31"));
+  chk("periodos idénticos · los tres efectos en 0", [c.efectos!.km, c.efectos!.rendimiento, c.efectos!.precio].every((x) => Math.abs(x) < 0.01));
+  chk("periodos idénticos · variación 0 %", Math.abs(c.variacion.gasto ?? 99) < 0.01 && Math.abs(c.variacion.rendimiento ?? 99) < 0.01);
+}
+
+// ── 20. Bordes de la ventana ───────────────────────────────────────────────
+{
+  const vacia = resumir([], "2026-08-01", "2026-08-31");
+  chk("ventana vacía no revienta", vacia.cargas === 0 && vacia.km === 0);
+  chk("y sus ratios son null, no 0 ni NaN", vacia.rendimiento === null && vacia.precioMedio === null && vacia.costoKm === null);
+  chk("los días se cuentan inclusive", vacia.dias === 31, String(vacia.dias));
+  chk("una ventana de un día cuenta 1", resumir([], "2026-08-05", "2026-08-05").dias === 1);
+
+  // Nada produce Infinity ni NaN.
+  const raros: CargaRendimiento[] = [
+    { id: 1, unidad: "pB", fecha: "2026-08-01", kilometraje: 100, cantidad: 0, tipo: "diesel", gasto: 0 },
+    { id: 2, unidad: "pB", fecha: "2026-08-02", kilometraje: 100, cantidad: 10, tipo: "diesel", gasto: null },
+    { id: 3, unidad: "pB", fecha: "2026-08-03", kilometraje: null, cantidad: null, tipo: null, gasto: undefined },
+  ];
+  const r = resumir(raros, "2026-08-01", "2026-08-31");
+  const sano = [r.km, r.cantidad, r.gasto, r.gastoTotal, r.rendimiento, r.precioMedio, r.costoKm]
+    .every((n) => n === null || Number.isFinite(n));
+  chk("ninguna entrada rara produce Infinity ni NaN", sano);
+  const c = compararVentanas(r, r);
+  chk("comparar una ventana degenerada consigo misma no revienta", c.comparable === false || c.efectos !== null);
+}
+
+// ── 21. La ventana recorta por FECHA de la carga que cierra el tramo ───────
+{
+  const todas = ventana(15000, "2026-07-20", 280, 10, 24.7, 12); // cruza julio → agosto
+  const jul = resumir(todas, "2026-07-01", "2026-07-31");
+  const ago = resumir(todas, "2026-08-01", "2026-08-31");
+  chk("cada carga cae en UNA sola ventana", jul.cargas + ago.cargas === todas.length, `${jul.cargas} + ${ago.cargas} de ${todas.length}`);
+  chk("y los tramos medidos se reparten sin duplicarse", jul.cargasMedidas + ago.cargasMedidas <= todas.length - 1);
+  chk("las dos ventanas miden algo", jul.cargasMedidas > 0 && ago.cargasMedidas > 0, `${jul.cargasMedidas} / ${ago.cargasMedidas}`);
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

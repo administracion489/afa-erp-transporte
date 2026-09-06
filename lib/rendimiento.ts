@@ -136,6 +136,8 @@ export type CargaRendimiento = {
   unidadCantidad?: string | null;
   /** `combustible.tipo_combustible`. Vacío = diésel, como en el resto de la app. */
   tipo?: string | null;
+  /** `combustible.total` — lo que costó. Solo hace falta para comparar ventanas. */
+  gasto?: number | null;
 };
 
 /**
@@ -553,6 +555,8 @@ export function juzgarTramo(t: Tramo, r: ResumenUnidad): Hallazgo | null {
 const fmt = (n: number) => n.toLocaleString("es-PE", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const fmt0 = (n: number) => n.toLocaleString("es-PE", { maximumFractionDigits: 0 });
 const pct = (base: number, v: number) => `${Math.round(Math.abs((base - v) / base) * 100)} %`;
+/** Soles, para los motivos que nombran plata. */
+const fmtS = (n: number) => `S/ ${n.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 function detalleDe(
   motivo: MotivoSinRendimiento,
@@ -615,4 +619,234 @@ export function etiquetaMotivo(motivo: MotivoSinRendimiento): string {
     case "eslabon_saltado": return "tramo incompleto";
     case "implausible": return "implausible";
   }
+}
+
+// ─── COMPARAR DOS VENTANAS ────────────────────────────────────────────────────
+//
+// POR QUÉ, Y ES LO ÚNICO QUE HAY QUE ENTENDER DE ESTA PARTE. Cuando el gasto de
+// combustible sube hay TRES causas posibles, y se gestionan de forma opuesta:
+//
+//   · recorrió más km        → no es anomalía, es más trabajo (y más facturación)
+//   · rinde menos km/gal     → SÍ es anomalía: mecánica, manejo, o una fuga
+//   · el combustible subió   → es del mercado, no de la flota
+//
+// En los datos reales de esta flota el diésel pasó de S/ 24.70 (14/08) a S/ 25.74
+// (03/09): +4.2 % de gasto sin que nadie haya hecho nada mal. Una comparación que
+// solo diga "gastaste más" hace leer ese 4.2 % como problema operativo — y un aviso
+// que salta por algo que nadie puede arreglar se vuelve paisaje, que es exactamente
+// lo que este módulo existe para no repetir.
+//
+// Por eso la diferencia de gasto se DESCOMPONE en esas tres causas, cada una en
+// soles, y suman exacto.
+
+export type ResumenVentana = {
+  desde: string;
+  hasta: string;
+  dias: number;
+  /**
+   * Solo de tramos MEDIDOS: numerador y denominador salen de las mismas filas.
+   * Sumar los galones de una carga cuyo km no se pudo medir inflaría el denominador
+   * y hundiría el rendimiento de la ventana sin decir por qué.
+   */
+  km: number;
+  cantidad: number;
+  gasto: number;
+  /** `Σkm / Σcantidad`. AGREGADO, no el promedio de los tramos: promediar ratios da
+   *  un número que no corresponde a ningún consumo real. */
+  rendimiento: number | null;
+  /** `Σgasto / Σcantidad` — ponderado por galón, que es lo que de verdad se pagó. */
+  precioMedio: number | null;
+  costoKm: number | null;
+  cargas: number;
+  cargasMedidas: number;
+  /** TODAS las cargas de la ventana. Es lo que cuadra con caja, y por eso se publica
+   *  aparte: si solo se enseñara `gasto`, no cuadraría con el KPI de la pantalla y el
+   *  operador concluiría que uno de los dos miente. */
+  gastoTotal: number;
+  cargasSinOdometro: number;
+  familias: string[];
+  label: string;
+};
+
+/** Los tres efectos, en soles. Suman exactamente `total`. */
+export type EfectoGasto = { km: number; rendimiento: number; precio: number; total: number };
+
+export type Variaciones = {
+  km: number | null;
+  cantidad: number | null;
+  gasto: number | null;
+  gastoTotal: number | null;
+  rendimiento: number | null;
+  costoKm: number | null;
+};
+
+export type Comparacion = {
+  actual: ResumenVentana;
+  previa: ResumenVentana;
+  efectos: EfectoGasto | null;
+  variacion: Variaciones;
+  comparable: boolean;
+  /** Por qué no se puede comparar, o por qué el resultado es solo orientativo. */
+  motivo: string | null;
+};
+
+/** Variación relativa, en puntos porcentuales. Sin base no se inventa un 100 %. */
+export function variacionPct(actual: number | null, previa: number | null): number | null {
+  if (actual == null || previa == null || !Number.isFinite(actual) || !Number.isFinite(previa)) return null;
+  if (previa === 0) return null; // sin base no hay variación: un "+100 %" sería inventado
+  return ((actual - previa) / Math.abs(previa)) * 100;
+}
+
+/**
+ * Resume una ventana de fechas. `series` se calcula sobre TODO el historial (el km
+ * entre dos cargas es un hecho del vehículo y no cambia porque se esté filtrando un
+ * mes); aquí solo se recortan los tramos cuya carga cae dentro de [desde, hasta].
+ */
+export function resumirVentana(
+  series: Map<string, Serie>,
+  cargas: CargaRendimiento[],
+  desde: string,
+  hasta: string,
+  label = ""
+): ResumenVentana {
+  const enRango = (f: string) => f >= desde && f <= hasta;
+  const delRango = cargas.filter((c) => enRango(String(c.fecha ?? "").slice(0, 10)));
+  const gastoDe = new Map(delRango.map((c) => [c.id, num(c.gasto)]));
+
+  let km = 0, cantidad = 0, gasto = 0, medidas = 0, sinOdo = 0;
+  const familias = new Set<string>();
+
+  for (const s of series.values()) {
+    for (const t of s.tramos) {
+      if (!gastoDe.has(t.cargaId)) continue; // la carga que CIERRA el tramo manda
+      if (t.motivo === "sin_odometro") sinOdo++;
+      if (t.rendimiento === null || t.km == null || t.cantidad == null) continue;
+      km += t.km;
+      cantidad += t.cantidad;
+      gasto += gastoDe.get(t.cargaId) ?? 0;
+      medidas++;
+      familias.add(s.resumen.familia);
+    }
+  }
+
+  return {
+    desde, hasta,
+    dias: Math.max(0, diasEntre(desde, hasta) + 1),
+    km, cantidad, gasto,
+    rendimiento: cantidad > 0 ? km / cantidad : null,
+    precioMedio: cantidad > 0 ? gasto / cantidad : null,
+    costoKm: km > 0 ? gasto / km : null,
+    cargas: delRango.length,
+    cargasMedidas: medidas,
+    gastoTotal: delRango.reduce((s, c) => s + num(c.gasto), 0),
+    cargasSinOdometro: sinOdo,
+    familias: [...familias].sort(),
+    label,
+  };
+}
+
+/**
+ * Compara dos ventanas y reparte la diferencia de gasto entre sus tres causas.
+ *
+ * `gasto = km × (1/rendimiento) × precio`, y se varía UN factor por vez en orden
+ * **volumen → eficiencia → precio**:
+ *
+ *     efecto_km      = (k₁ − k₀)/r₀ × p₀
+ *     efecto_rend    = k₁ × (1/r₁ − 1/r₀) × p₀
+ *     efecto_precio  = k₁/r₁ × (p₁ − p₀)
+ *
+ * Suman exactamente `g₁ − g₀`; la matriz lo fija al céntimo.
+ *
+ * ES UNA DESCOMPOSICIÓN SECUENCIAL, NO SIMÉTRICA: el residuo de interacción cae en
+ * el ÚLTIMO factor. Por eso el orden está declarado y no se reordena por estética —
+ * el precio va al final porque es el efecto típicamente menor y el más exógeno, así
+ * que es donde menos daño hace que se le acumule el residuo.
+ */
+export function compararVentanas(actual: ResumenVentana, previa: ResumenVentana): Comparacion {
+  const variacion: Variaciones = {
+    km: variacionPct(actual.km, previa.km),
+    cantidad: variacionPct(actual.cantidad, previa.cantidad),
+    gasto: variacionPct(actual.gasto, previa.gasto),
+    gastoTotal: variacionPct(actual.gastoTotal, previa.gastoTotal),
+    rendimiento: variacionPct(actual.rendimiento, previa.rendimiento),
+    costoKm: variacionPct(actual.costoKm, previa.costoKm),
+  };
+
+  const base = { actual, previa, variacion };
+
+  // Sin tramos medidos en alguna de las dos ventanas no hay nada que descomponer, y
+  // decirlo es mejor que publicar un −100 % que nadie puede interpretar.
+  //
+  // El mensaje NOMBRA lo que sí hay. "No hay tramos medidos" sobre un periodo con dos
+  // cargas y S/ 466 de gasto hace dudar de la pantalla: el operador ve cargas en la
+  // tabla y lee que no hay nada. Lo que falta no son cargas, es el PAR con kilometraje
+  // — y eso se puede arreglar en un minuto desde la propia fila.
+  if (!previa.cargasMedidas || !actual.cargasMedidas) {
+    const faltan = [
+      !previa.cargasMedidas ? previa : null,
+      !actual.cargasMedidas ? actual : null,
+    ].filter(Boolean) as ResumenVentana[];
+
+    const detalle = faltan
+      .map((w) => {
+        const cual = w === previa ? "el periodo anterior" : "este periodo";
+        if (!w.cargas) return `${cual} no tiene ninguna carga registrada`;
+        const plata = `${w.cargas} carga(s) por ${fmtS(w.gastoTotal)}`;
+        if (w.cargas === 1) return `${cual} tiene ${plata}, y con una sola carga no hay tramo que medir`;
+        if (w.cargasSinOdometro) return `${cual} tiene ${plata}, pero ${w.cargasSinOdometro} de ellas se guardaron SIN kilometraje`;
+        return `${cual} tiene ${plata}, pero ninguna llega a formar un tramo medible`;
+      })
+      .join("; ");
+
+    return {
+      ...base, efectos: null, comparable: false,
+      motivo:
+        `No se puede comparar: ${detalle}. Un tramo se mide con dos cargas seguidas de la misma unidad que ` +
+        `tengan kilometraje — poner el odómetro que falte en esas filas hace aparecer la comparación.`,
+    };
+  }
+
+  const r0 = previa.rendimiento, r1 = actual.rendimiento;
+  const p0 = previa.precioMedio, p1 = actual.precioMedio;
+  if (!r0 || !r1 || p0 == null || p1 == null) {
+    return { ...base, efectos: null, comparable: false, motivo: "No se puede comparar: falta el rendimiento o el precio de alguno de los dos periodos." };
+  }
+
+  const efKm = ((actual.km - previa.km) / r0) * p0;
+  const efRend = actual.km * (1 / r1 - 1 / r0) * p0;
+  const efPrecio = (actual.km / r1) * (p1 - p0);
+
+  const efectos: EfectoGasto = {
+    km: efKm, rendimiento: efRend, precio: efPrecio,
+    // El total es la diferencia REAL, no la suma de los tres: así, si algún día la
+    // aritmética se desviara, se vería en la pantalla en vez de cuadrar sola.
+    total: actual.gasto - previa.gasto,
+  };
+
+  // Con pocos tramos el número existe pero no es un patrón. Se compara igual —
+  // esconderlo sería peor— y se dice.
+  const flojo = Math.min(actual.cargasMedidas, previa.cargasMedidas) < MIN_TRAMOS_CONFIABLE;
+  const mezcla = actual.familias.length > 1 || previa.familias.length > 1;
+
+  const avisos: string[] = [];
+  if (flojo) {
+    avisos.push(
+      `Orientativo: ${Math.min(actual.cargasMedidas, previa.cargasMedidas)} tramo(s) medido(s) en el periodo más corto ` +
+      `(hacen falta ${MIN_TRAMOS_CONFIABLE} para hablar de un patrón).`
+    );
+  }
+  if (actual.cargasSinOdometro || previa.cargasSinOdometro) {
+    avisos.push(
+      `${actual.cargasSinOdometro + previa.cargasSinOdometro} carga(s) sin kilometraje quedaron fuera de la medición: ` +
+      `ponérselo hace la comparación más exacta.`
+    );
+  }
+  if (mezcla) {
+    avisos.push("Hay más de un combustible en la comparación: el rendimiento agregado mezcla unidades distintas (gal y m³).");
+  }
+  if (Math.abs(actual.dias - previa.dias) > 2) {
+    avisos.push(`Los periodos no duran lo mismo (${actual.dias} vs ${previa.dias} días): los totales no son comparables, los ratios sí.`);
+  }
+
+  return { ...base, efectos, comparable: true, motivo: avisos.length ? avisos.join(" ") : null };
 }
