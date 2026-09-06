@@ -34,6 +34,20 @@ function hoyISO(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/**
+ * ¿La versión que reportó el worker es anterior a la mínima? Sin dato devuelve `false`: no se
+ * acusa de estar desactualizado a un servidor que todavía no ha reportado su versión.
+ */
+function versionMenorQue(version: string | null | undefined, minimo: number[]): boolean {
+  const partes = String(version ?? "").trim().split(".").map((p) => Number.parseInt(p, 10));
+  if (!partes.length || partes.some((n) => !Number.isFinite(n))) return false;
+  for (let i = 0; i < minimo.length; i++) {
+    const suya = partes[i] ?? 0;
+    if (suya !== minimo[i]) return suya < minimo[i];
+  }
+  return false;
+}
+
 function fechaLocalDe(iso: string): string {
   const d = new Date(iso);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -1261,6 +1275,16 @@ function ModalServidor({ estado, onClose }: { estado: RadarEstado | null; onClos
             <p><span className="font-bold text-[#0b315f]">Versión del worker:</span> {estado?.version_worker ?? "sin datos"}{" "}
               <span className="text-xs text-gray-400">(el botón “Generar QR nuevo” necesita 1.1.0 o superior)</span>
             </p>
+            {/* 1.3.0 arregla el remitente vacío que fusionaba fotos de varios celulares en una
+                sola recarga. El ERP ya no las une sin verificar, pero mientras el droplet siga
+                en una versión vieja esos mensajes se procesan sueltos en vez de agruparse. */}
+            {versionMenorQue(estado?.version_worker, [1, 3, 0]) && (
+              <p className="text-xs text-[#8a5a00] bg-[#FFF6E5] border border-[#B07A0F]/25 rounded-lg px-2 py-1.5">
+                Este servidor está en una versión anterior a <b>1.3.0</b>: cuando WhatsApp no manda quién escribió,
+                el mensaje se guarda sin remitente y no se agrupa con el resto de su reporte. Actualízalo en el droplet
+                con <span className="font-mono">git pull &amp;&amp; pm2 restart radar-worker</span>.
+              </p>
+            )}
             <p className="text-xs text-gray-400">El latido lo escribe el worker en la tabla <span className="font-mono">radar_estado</span>. Si está viejo, el proceso no está corriendo o no llega a Supabase.</p>
           </div>
         </div>

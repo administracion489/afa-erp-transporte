@@ -45,7 +45,13 @@ export type FilaMensaje = {
   grupo_id: string | null;
   wa_group_id: string | null;
   grupo_nombre: string | null;
-  remitente_wa: string;
+  /**
+   * Jid del autor, o `null` cuando WhatsApp no lo entrega. NUNCA `""`: un valor de relleno es
+   * IGUAL para todas las personas, y el ERP agrupa las fotos de un reporte por remitente — con
+   * un comodín compartido se fusionan en una sola recarga las fotos de varios celulares
+   * (ver lib/radar/cluster-remitente.ts). Sin remitente, ese mensaje no agrupa con nadie.
+   */
+  remitente_wa: string | null;
   remitente_nombre: string | null;
   tipo: "texto" | "imagen" | "documento" | "audio" | "video" | "otro";
   texto: string | null;

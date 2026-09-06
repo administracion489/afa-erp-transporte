@@ -223,6 +223,28 @@ async function notificarErp(): Promise<void> {
 
 // ── Procesamiento de un mensaje entrante ───────────────────────────────────
 
+/**
+ * El jid de QUIEN mandó el mensaje, o `null` si WhatsApp no lo entrega.
+ *
+ * Antes era `String(msg.key.participant ?? "")`, que ante un `participant` ausente escribía
+ * **cadena vacía** — el mismo valor para todo el mundo. El ERP agrupa las fotos de un reporte
+ * de recarga por remitente + grupo + ±10 min, así que ese comodín compartido fusionaba en una
+ * sola recarga las fotos de VARIOS celulares (pasó en producción: seis tableros de unidades
+ * distintas en una fila). Un remitente desconocido es `null` y no agrupa con nadie.
+ *
+ * Baileys no siempre pone el autor en el mismo sitio: `key.participant` es lo normal en un
+ * grupo, pero con la migración a LID aparece también en `key.participantPn` / `key.participantAlt`
+ * y algunos eventos lo traen en `msg.participant`. Se toma el primero que venga.
+ */
+function remitenteDe(msg: { key?: Record<string, unknown>; participant?: unknown }): string | null {
+  const key = msg?.key ?? {};
+  for (const c of [key.participant, key.participantPn, key.participantAlt, msg?.participant]) {
+    const s = typeof c === "string" ? c.trim() : "";
+    if (s) return s;
+  }
+  return null;
+}
+
 /** Extrae, sube media si corresponde e inserta la fila en radar_mensajes. Devuelve true si insertó. */
 async function procesarMensaje(msg: any): Promise<boolean> {
   if (!msg?.message || !msg.key?.id) return false;
@@ -305,7 +327,7 @@ async function procesarMensaje(msg: any): Promise<boolean> {
     grupo_id: grupo.id,
     wa_group_id: jid,
     grupo_nombre: grupo.nombre,
-    remitente_wa: String(msg.key.participant ?? ""),
+    remitente_wa: remitenteDe(msg),
     remitente_nombre: msg.pushName ? String(msg.pushName) : null,
     tipo,
     texto,
