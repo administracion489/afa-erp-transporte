@@ -22,6 +22,8 @@ import {
 import {
   costoConductorServicio, type RegimenLaboral, type DatosConductor,
 } from "@/lib/costeo-conductor";
+import { familiaCombustible } from "@/lib/combustible-tipos";
+import { serieRendimiento, TECHO_FAMILIA } from "@/lib/rendimiento";
 
 export type ReservaCosteable = {
   id: number;
@@ -65,8 +67,8 @@ export type Presupuesto = {
 export type ContextoCosteo = {
   parametros: ParametrosUnidad | null;
   precios: PreciosCombustible;
-  /** Rendimiento medido de la placa, si se pudo calcular. */
-  rendimientoMedido: { kmGal: number; cargas: number } | null;
+  /** Rendimiento medido de la placa, si se pudo calcular, con LA FAMILIA en que se midió. */
+  rendimientoMedido: { kmGal: number; cargas: number; familia: string } | null;
   /** Precio realmente pagado en la última carga de esa unidad. */
   precioUltimaCarga: { precio: number; fecha: string } | null;
   /** Depreciación contable de esa placa, en soles por kilómetro. */
@@ -102,31 +104,60 @@ function mediana(xs: number[]): number | null {
  * vehículo. Esto es lo que esa placa consume de verdad. Se usa la mediana de las
  * últimas cargas porque un tanque llenado a medias, o un odómetro anotado al día
  * siguiente, distorsionan el promedio y no la mediana.
+ *
+ * La fórmula ya no vive aquí: es lib/rendimiento.ts, la regla ÚNICA del ERP. Este módulo
+ * era el único de los cinco que la tenía bien (mediana + descarte de lo absurdo), así que
+ * el techo de galones del módulo compartido es SU literal, heredado y no reelegido — el
+ * número que sale de aquí entra al presupuesto de cada servicio.
+ *
+ * Lo que sí cambia respecto de la versión anterior, y cada punto es un arreglo: la ventana
+ * de cargas se toma por FECHA y no por odómetro, se mide UNA sola familia, un tramo con
+ * cargas sin kilometraje en medio deja de contarse (su denominador estaba incompleto) y las
+ * cantidades en litros se convierten. `scripts/diagnostico-rendimiento.mts` lista placa por
+ * placa dónde eso mueve el número y por cuál de esas causas.
  */
 export async function rendimientoMedido(
   sb: any, vehiculoId: number, tope = 8
-): Promise<{ kmGal: number; cargas: number } | null> {
+): Promise<{ kmGal: number; cargas: number; familia: string } | null> {
   if (!vehiculoId) return null;
   const { data } = await sb
     .from("combustible")
-    .select("fecha,kilometraje,galones,precio_galon,tipo_combustible")
+    .select("id,fecha,kilometraje,galones,precio_galon,tipo_combustible,unidad")
     .eq("vehiculo_id", vehiculoId)
+    .order("fecha", { ascending: false })
     .order("kilometraje", { ascending: false })
     .limit(tope + 1);
-  const filas = ((data as any[]) ?? []).filter((r) => Number(r.kilometraje) > 0 && Number(r.galones) > 0);
+  const filas = ((data as any[]) ?? []);
   if (filas.length < 2) return null;
 
-  const rend: number[] = [];
-  // Vienen de mayor a menor odómetro: cada fila con la siguiente da un tramo.
-  for (let i = 0; i < filas.length - 1; i++) {
-    const km = Number(filas[i].kilometraje) - Number(filas[i + 1].kilometraje);
-    const gal = Number(filas[i].galones);
-    // Un tramo absurdo (odómetro reiniciado, carga sin recorrido) se descarta en
-    // vez de contaminar la mediana.
-    if (km > 0 && gal > 0 && km / gal < 40) rend.push(km / gal);
+  // UNA sola familia: la mayoritaria de esa placa. Antes no se segmentaba nada, así que la
+  // urea de una unidad entraba al mismo cálculo que su diésel —sus LITROS como denominador
+  // de los km del diésel— y una unidad de GNV podía ver su rendimiento en km/m³ pisado por
+  // una mediana en km/gal.
+  const cuenta = new Map<string, number>();
+  for (const r of filas) {
+    const f = familiaCombustible(r.tipo_combustible);
+    if (TECHO_FAMILIA[f] !== null) cuenta.set(f, (cuenta.get(f) ?? 0) + 1);
   }
-  const m = mediana(rend);
-  return m ? { kmGal: Math.round(m * 100) / 100, cargas: rend.length } : null;
+  const familia = [...cuenta].sort((a, b) => b[1] - a[1])[0]?.[0];
+  if (!familia) return null;
+
+  const { resumen } = serieRendimiento(
+    filas
+      .filter((r) => familiaCombustible(r.tipo_combustible) === familia)
+      .map((r) => ({
+        id: r.id,
+        unidad: String(vehiculoId),
+        fecha: String(r.fecha ?? "").slice(0, 10),
+        kilometraje: r.kilometraje,
+        cantidad: r.galones,
+        unidadCantidad: r.unidad,
+        tipo: r.tipo_combustible,
+      }))
+  );
+  return resumen.mediana
+    ? { kmGal: Math.round(resumen.mediana * 100) / 100, cargas: resumen.n, familia }
+    : null;
 }
 
 /** Lo que de verdad se pagó por el galón en la última carga de esa unidad. */
@@ -307,9 +338,17 @@ export function calcularPresupuesto(ctx: ContextoCosteo, e: EntradaCosteo): Pres
   if (!ctx.parametros) faltantes.push("La unidad no tiene tipo de costeo asignado (Vehículos → tipo de costeo).");
   if (!(km > 0)) faltantes.push("Faltan los kilómetros del recorrido.");
 
-  // El rendimiento MEDIDO de esta placa manda sobre el parámetro del tipo.
+  // El rendimiento MEDIDO de esta placa manda sobre el parámetro del tipo — pero SOLO si es
+  // del mismo combustible que el parámetro. Una mediana en km/m³ (GNV) sustituyendo un
+  // rendimiento en km/gal daría un costo de combustible cuatro veces equivocado, y el
+  // renglón seguiría diciendo "medido" con toda confianza. Mismo criterio de "declara su
+  // fuente" que ya usa el resto del módulo.
+  const rendAplica =
+    ctx.rendimientoMedido && ctx.parametros
+      ? ctx.rendimientoMedido.familia === familiaCombustible(ctx.parametros.tipo_combustible_1)
+      : false;
   const params: ParametrosUnidad | null = ctx.parametros
-    ? { ...ctx.parametros, rendimiento_1: ctx.rendimientoMedido?.kmGal ?? ctx.parametros.rendimiento_1 }
+    ? { ...ctx.parametros, rendimiento_1: (rendAplica ? ctx.rendimientoMedido!.kmGal : null) ?? ctx.parametros.rendimiento_1 }
     : null;
 
   // Y el precio realmente pagado manda sobre el de referencia.
@@ -343,8 +382,8 @@ export function calcularPresupuesto(ctx: ContextoCosteo, e: EntradaCosteo): Pres
   };
 
   if (costo) {
-    const fuenteRend = ctx.rendimientoMedido
-      ? `${ctx.rendimientoMedido.kmGal} km/gal medido en ${ctx.rendimientoMedido.cargas} cargas`
+    const fuenteRend = rendAplica
+      ? `${ctx.rendimientoMedido!.kmGal} km/gal medido en ${ctx.rendimientoMedido!.cargas} tramos`
       : `${params!.rendimiento_1} km/gal del parámetro`;
     const fuentePrecio = ctx.precioUltimaCarga
       ? `S/ ${ctx.precioUltimaCarga.precio.toFixed(2)} de la última carga`

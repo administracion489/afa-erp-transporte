@@ -195,6 +195,8 @@ export type AnomaliaCombustible = {
     | "precio_fuera_de_rango"
     | "km_menor_al_actual"
     | "consumo_excesivo"
+    /** Rindió MÁS de lo posible: una carga que falta por registrar, o un odómetro mal leído. */
+    | "rendimiento_implausible"
     | "recarga_madrugada"
     | "monto_inconsistente"
     | "galones_coinciden_km"

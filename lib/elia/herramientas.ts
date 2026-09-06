@@ -7,6 +7,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { etiquetaEstado, etiquetaAdmin } from "@/lib/estados";
 import { docSinVencimiento, etiquetaTipoDoc, tiposObligatorios } from "@/lib/documentos-estado";
+import { seriesRendimiento, juzgarTramo } from "@/lib/rendimiento";
 import type {
   BloqueUI,
   ServicioUI,
@@ -1339,39 +1340,49 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
             }
           }
 
-          // Rendimiento entre cargas consecutivas (por kilometraje)
-          const conKm = lista.filter((c) => Number(c.kilometraje) > 0).sort((a, b) => Number(a.kilometraje) - Number(b.kilometraje));
-          const deltas: { c: any; rend: number }[] = [];
-          for (let i = 1; i < conKm.length; i++) {
-            const km = Number(conKm[i].kilometraje) - Number(conKm[i - 1].kilometraje);
-            const gal = Number(conKm[i].galones);
-            if (km <= 0 && gal > 0) {
-              anomalias.push({
-                fecha: conKm[i].fecha,
-                placa,
-                conductor: conKm[i].conductor,
-                detalle: `Cargó ${gal.toFixed(1)} gal sin avance de kilometraje registrado`,
-                monto: gastoDe(conKm[i]),
-              });
-              continue;
-            }
-            if (km > 0 && gal > 0) deltas.push({ c: conKm[i], rend: km / gal });
-          }
-          if (deltas.length >= 3) {
-            const prom = deltas.reduce((s, d) => s + d.rend, 0) / deltas.length;
-            (rendimientosPorVehiculo[placa] ||= []).push(prom);
-            for (const d of deltas) {
-              if (d.rend < prom * 0.6)
+          // Rendimiento entre cargas consecutivas. La fórmula la decide lib/rendimiento.ts:
+          // el bucle que había aquí era la cuarta copia, con su propio umbral (0.6 en vez de
+          // 0.7) y su propia puerta (3 tramos en vez de 5).
+          const porId = new Map(lista.map((c: any) => [c.id, c]));
+          const series = seriesRendimiento(
+            lista.map((c: any) => ({
+              id: c.id,
+              unidad: placa,
+              fecha: String(c.fecha ?? "").slice(0, 10),
+              kilometraje: c.kilometraje,
+              cantidad: c.galones,
+              unidadCantidad: c.unidad,
+              tipo: c.tipo_combustible,
+            }))
+          );
+
+          for (const s of series.values()) {
+            if (s.resumen.mediana) (rendimientosPorVehiculo[placa] ||= []).push(s.resumen.mediana);
+            for (const t of s.tramos) {
+              const c = porId.get(t.cargaId);
+              if (!c) continue;
+
+              // Una carga que no aporta km al libro. Antes solo se veía el caso "el odómetro
+              // no avanzó"; ahora también la que se guardó sin kilometraje, que es la que de
+              // verdad deja combustible fuera de toda medición.
+              if (t.motivo === "sin_odometro" || t.motivo === "odometro_retrocede") {
                 anomalias.push({
-                  fecha: d.c.fecha,
-                  placa,
-                  conductor: d.c.conductor,
-                  detalle: `Rendimiento de ${d.rend.toFixed(1)} km/gal, muy por debajo del promedio de la unidad (${prom.toFixed(1)} km/gal)`,
-                  monto: gastoDe(d.c),
+                  fecha: c.fecha, placa, conductor: c.conductor,
+                  detalle: `Cargó ${Number(c.galones).toFixed(1)} gal y ${t.motivo === "sin_odometro" ? "no se registró el kilometraje" : "el odómetro no avanzó"}: ese combustible no entra a ninguna medición`,
+                  monto: gastoDe(c),
                 });
+                continue;
+              }
+
+              const h = juzgarTramo(t, s.resumen);
+              if (h) {
+                anomalias.push({
+                  fecha: c.fecha, placa, conductor: c.conductor,
+                  detalle: h.detalle,
+                  monto: gastoDe(c),
+                });
+              }
             }
-          } else if (deltas.length > 0) {
-            (rendimientosPorVehiculo[placa] ||= []).push(deltas.reduce((s, d) => s + d.rend, 0) / deltas.length);
           }
         }
 
@@ -1410,6 +1421,8 @@ export async function ejecutarToolElia(nombre: string, input: any, ctx: CtxElia)
             notas: [
               "El campo 'conductor' de cada carga es texto libre: puede venir vacío o escrito distinto (agrupa lo evidente y menciónalo si hay '(sin conductor registrado)').",
               "IMPORTANTE: presenta los patrones inusuales como situaciones PARA REVISAR con el responsable; NUNCA acuses a una persona de robo — los datos no prueban intención.",
+              "UN RENDIMIENTO IMPOSIBLEMENTE ALTO NO ES UN BUEN CONDUCTOR: es una carga que FALTA POR REGISTRAR. El combustible se compró y se consumió, pero no está en el libro, así que el costo de esa unidad sale más bajo del real y el margen de sus servicios, más alto. Nunca lo presentes como una buena noticia ni felicites a nadie por él: lo que hay que hacer es buscar el comprobante que falta.",
+              "El rendimiento por vehículo es la MEDIANA de sus tramos, no el promedio, y excluye los tramos que no se pudieron medir (cargas sin kilometraje, odómetro que retrocede, resultados imposibles). Si una unidad tiene pocos tramos, dilo en vez de tratar su número como firme.",
             ],
           }),
           ui: anomalias.length

@@ -342,7 +342,15 @@ export default function AnaliticaVehiculo({ veh, onClose }: { veh: VehiculoAnali
                 <p className="text-sm text-gray-500">Sin registros de combustible este mes.</p>
               ) : (
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
-                  <Kpi label="Rendimiento" valor={eco.rendimientoKmGal != null ? fmtDec(eco.rendimientoKmGal) : "—"} sub="km/gal" color="#0f766e" />
+                  {/* La etiqueta sale de la FAMILIA del combustible: una unidad de GNV rinde
+                      en km/m³ y aquí se imprimía "km/gal" sobre ese número. El sub declara
+                      además cuántos tramos lo sostienen: 2 tramos no son un patrón. */}
+                  <Kpi
+                    label="Rendimiento"
+                    valor={eco.rendimientoKmGal != null ? fmtDec(eco.rendimientoKmGal) : "—"}
+                    sub={eco.rendimientoTramos > 0 ? `${eco.rendimientoLabel} · ${eco.rendimientoTramos} tramo${eco.rendimientoTramos === 1 ? "" : "s"}` : eco.rendimientoLabel}
+                    color="#0f766e"
+                  />
                   <Kpi label="Costo / km" valor={eco.costoPorKm != null ? fmtSoles(eco.costoPorKm) : "—"} color="#991b1b" />
                   <Kpi label="Costo total" valor={fmtSoles(eco.costoTotal)} sub={`${fmtDec(eco.galonesTotal)} gal`} />
                   <Kpi label="Costo / día" valor={fmtSoles(eco.costoPromedioDia)} color="#854d0e" />

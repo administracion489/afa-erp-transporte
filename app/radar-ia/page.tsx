@@ -122,6 +122,7 @@ const ANOMALIA_LABEL: Record<string, string> = {
   precio_fuera_de_rango:  "Precio fuera de rango",
   km_menor_al_actual:     "KM menor al actual",
   consumo_excesivo:       "Consumo excesivo",
+  rendimiento_implausible: "Falta registrar una carga",
   recarga_madrugada:      "Recarga de madrugada",
   monto_inconsistente:    "Monto inconsistente",
   galones_coinciden_km:   "Cantidad = kilometraje",

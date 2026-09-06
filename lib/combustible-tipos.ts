@@ -46,6 +46,20 @@ export const COMBUSTIBLES: Record<string, ConfigCombustible> = {
   gasolina:          { label: "Gasolina",          labelCorto: "Gasolina",    unidad: "galones", unidadLabel: "gal", icon: "⛽", color: "#dc2626", bg: "#fee2e2", precioRef: 18.0, esAditivo: false, rendimientoLabel: "km/gal",  familia: "gasolina", legado: true },
 };
 
+/**
+ * Litros por galón (US), para convertir una cantidad a la unidad de su familia.
+ *
+ * Vive aquí porque este catálogo es el dueño de `unidad` por tipo. Hace falta porque el
+ * Radar guarda LITROS en la columna `combustible.galones` con `unidad: "litros"`
+ * (lib/radar/acciones.ts) y quien calcula rendimiento tiene que mirarlo: sin convertir, un
+ * diésel cargado en litros da un km/gal inflado ×3.785. La plata de esas filas está bien
+ * (`total` = litros × precio/litro); lo único que hay que normalizar es la cantidad.
+ *
+ * El literal equivalente de lib/costeo-propio.ts NO se sustituye por éste: ese módulo está
+ * congelado y scripts/prueba-costeo.mts lo compara al sexto decimal contra una copia literal.
+ */
+export const LITROS_POR_GALON = 3.785;
+
 /** Todos los tipos, incluido el legado (para pintar cualquier fila guardada). */
 export const TIPOS_COMBUSTIBLE = Object.keys(COMBUSTIBLES);
 
