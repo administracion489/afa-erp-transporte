@@ -39,7 +39,12 @@ type LecturaRadar = FilaConFotos & { combustible_id: number | null; comprobante?
 type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo";
 type GranPeriodo = "dia" | "semana" | "mes";
 
-import { COMBUSTIBLES } from "@/lib/combustible-tipos";
+import { COMBUSTIBLES, familiaCombustible } from "@/lib/combustible-tipos";
+import { paginarFilas } from "@/lib/huella";
+import {
+  seriesRendimiento, tramosPorCarga, juzgarTramo, etiquetaMotivo,
+  type CargaRendimiento, type Tramo, type ResumenUnidad,
+} from "@/lib/rendimiento";
 
 // ─── CONFIGURACIÓN DE COMBUSTIBLES ───────────────────────────────────────────
 // El catálogo vive en lib/combustible-tipos.ts: /radar-ia lo necesita para su columna de
@@ -155,12 +160,24 @@ async function cargarLecturasRadar(): Promise<LecturaRadar[]> {
   return res.data as unknown as LecturaRadar[];
 }
 
-function calcRendimiento(curr: Combustible, prev: Combustible | null): number | null {
-  if (!prev || !curr.kilometraje || !prev.kilometraje || !curr.galones) return null;
-  const km = Number(curr.kilometraje) - Number(prev.kilometraje);
-  if (km <= 0) return null;
-  return km / Number(curr.galones);
-}
+/**
+ * El rendimiento vive en lib/rendimiento.ts, no aquí.
+ *
+ * La versión que estaba en este archivo dividía el delta de odómetro entre los galones de
+ * una sola carga SIN NINGÚN TECHO, y el color solo miraba hacia abajo. Con la CWZ-371 eso
+ * publicó 162.9 km/gal en verde —1 592 km de un hueco de registro entre dos cargas—, y esa
+ * fila subió la media de 28.6 a 43.5, dejando SIETE de nueve filas sanas marcadas 🚨.
+ * Ver la cabecera de lib/rendimiento.ts.
+ */
+const cargaParaRendimiento = (r: Combustible, unidad: string): CargaRendimiento => ({
+  id: r.id,
+  unidad,
+  fecha: String(r.fecha ?? "").slice(0, 10),
+  kilometraje: r.kilometraje,
+  cantidad: r.galones,
+  unidadCantidad: r.unidad,
+  tipo: r.tipo_combustible,
+});
 
 // Clave + etiqueta del período (día/semana/mes) para el análisis de gasto y rendimiento.
 function clavePeriodo(fecha: string, gran: GranPeriodo): { key: string; label: string } {
@@ -225,7 +242,13 @@ export default function CombustiblePage() {
     const [vRes, vtRes, cRes, condRes, radRes] = await Promise.all([
       supabase.from("vehiculos").select("*").order("placa"),
       supabase.from("vehiculos_tercero").select("*").order("placa"),
-      supabase.from("combustible").select("*").order("fecha", { ascending: false }).order("id", { ascending: false }),
+      // Paginado, no `select("*")` a secas: PostgREST corta en 1000 filas sin avisar, y una
+      // serie a la que le falte la cabeza pierde sus tramos más viejos EN SILENCIO — que es
+      // justo lo que el módulo de rendimiento no puede permitirse. La misma trampa que ya
+      // documentó lib/huella.ts y que truncó /programacion.
+      paginarFilas(() =>
+        supabase.from("combustible").select("*").order("fecha", { ascending: false }).order("id", { ascending: false })
+      ).then(data => ({ data })),
       supabase.from("conductores").select("id,nombre").order("nombre"),
       cargarLecturasRadar(),
     ]);
@@ -250,43 +273,21 @@ export default function CombustiblePage() {
   const unidadDe = (uid: string) => unidades.find(u => u.uid === uid);
   const placaReg = (r: Combustible) => unidadDe(uidReg(r))?.placa || "—";
 
-  // ── Rendimiento promedio por unidad+tipo ───────────────────────────────────
-
-  const rendimientoPromedio = useMemo(() => {
-    const mapa: Record<string, number | null> = {};
-    unidades.forEach(u => {
-      Object.keys(COMBUSTIBLES).forEach(tipo => {
-        const regs = registros
-          .filter(r => uidReg(r) === u.uid && (r.tipo_combustible || "diesel") === tipo && r.kilometraje > 0)
-          .sort((a, b) => Number(a.kilometraje) - Number(b.kilometraje));
-        if (regs.length < 2) { mapa[`${u.uid}-${tipo}`] = null; return; }
-        const rends: number[] = [];
-        for (let i = 1; i < regs.length; i++) {
-          const km  = Number(regs[i].kilometraje) - Number(regs[i - 1].kilometraje);
-          const qty = Number(regs[i].galones);
-          if (km > 0 && qty > 0) rends.push(km / qty);
-        }
-        mapa[`${u.uid}-${tipo}`] = rends.length > 0 ? rends.reduce((a, b) => a + b) / rends.length : null;
-      });
-    });
-    return mapa;
-  }, [unidades, registros]);
-
-  // Mapa prev registro
-  const prevRegistro = useMemo(() => {
-    const mapa: Record<number, Combustible | null> = {};
-    const ord = [...registros].sort((a, b) => Number(a.kilometraje) - Number(b.kilometraje));
-    ord.forEach((r, i) => {
-      const tipo = r.tipo_combustible || "diesel";
-      const prev = ord.slice(0, i).reverse().find(x =>
-        uidReg(x) === uidReg(r) &&
-        (x.tipo_combustible || "diesel") === tipo &&
-        x.kilometraje < r.kilometraje
-      );
-      mapa[r.id] = prev || null;
-    });
-    return mapa;
-  }, [registros]);
+  // ── Rendimiento ────────────────────────────────────────────────────────────
+  //
+  // Una sola llamada al módulo compartido reemplaza los dos useMemo que había aquí
+  // (`rendimientoPromedio` con su media sin techo, y `prevRegistro` con su cadena ordenada
+  // por kilometraje). El promedio es ahora MEDIANA, los tramos absurdos se descartan
+  // declarando por qué, y las series van por FAMILIA de combustible: `gasolina_regular` y
+  // `gasolina_premium` son el mismo tanque y eran dos cadenas separadas.
+  //
+  // Se calcula sobre `registros` (todo), NO sobre `filtrados`: el km entre dos cargas es un
+  // hecho del vehículo y no cambia porque la pantalla esté filtrando un mes.
+  const seriesRend = useMemo(
+    () => seriesRendimiento(registros.map(r => cargaParaRendimiento(r, uidReg(r)))),
+    [registros]
+  );
+  const rendDeCarga = useMemo(() => tramosPorCarga(seriesRend), [seriesRend]);
 
   // ── Lo que leyó el Radar IA ────────────────────────────────────────────────
 
@@ -444,18 +445,15 @@ export default function CombustiblePage() {
     return { tipo, cfg, cantidad: regs.reduce((s, r) => s + Number(r.galones || 0), 0), costo: regs.reduce((s, r) => s + Number(r.total || 0), 0), cargas: regs.length };
   }).filter(d => d.cargas > 0);
 
-  // Anomalías
+  // Anomalías. El hallazgo de rendimiento lo decide `juzgarTramo`, que ahora mira las DOS
+  // cotas: un rendimiento imposiblemente ALTO es una carga que falta por registrar, y antes
+  // se pintaba verde con ✓.
   const totalAnomalias = registros.filter(r => {
     const tipo = r.tipo_combustible || "diesel";
-    if (COMBUSTIBLES[tipo]?.esAditivo) return false;
-    const prev = prevRegistro[r.id];
-    const rend = calcRendimiento(r, prev);
-    const key  = `${uidReg(r)}-${tipo}`;
-    const promedio = rendimientoPromedio[key];
     const cap  = getCapacidad(unidadDe(uidReg(r)), tipo);
     if (Number(r.galones) > cap * 1.1) return true;
-    if (rend !== null && promedio && promedio > 0 && ((promedio - rend) / promedio) > 0.3) return true;
-    return false;
+    const e = rendDeCarga[r.id];
+    return !!(e && juzgarTramo(e.tramo, e.resumen));
   }).length;
 
   // Meses únicos
@@ -474,20 +472,84 @@ export default function CombustiblePage() {
       (filtroMes  === "todos" || r.fecha?.slice(0, 7) === filtroMes);
   }), [registros, busqueda, filtroFlota, filtroVeh, filtroTipo, filtroMes, unidades]);
 
-  // Datos por vehículo (ambas flotas)
+  // ── Datos por vehículo (ambas flotas) ──────────────────────────────────────
+  //
+  // EL CPK. Antes era `costo del período ÷ vehiculos.kilometraje_actual`, es decir el gasto
+  // de unas semanas dividido entre el odómetro de TODA LA VIDA del vehículo: un número que
+  // no significa nada y que además se pintaba de verde por ser pequeño.
+  //
+  // Ahora es Σ soles de las cargas que cierran tramos MEDIDOS ÷ Σ km de esos tramos —
+  // numerador y denominador de las mismas filas, sin una sola consulta nueva. Se publica con
+  // su cobertura, y sin ningún tramo medido sale "—" en vez de un número sin sentido.
+  //
+  // El CPK contra el odómetro real (lecturas_odometro) NO se calcula aquí: esta pantalla no
+  // tiene período —el filtro de mes admite "todos"— así que el denominador honesto sería la
+  // historia entera de la flota, miles de filas para una columna. Ese número ya existe, es la
+  // definición única del ERP y vive en /mantenimiento → Analítica de vehículo
+  // (`indicadoresEconomicos.costoPorKm`, que sí usa el odómetro).
   const datosVehiculo = unidades.map(v => {
     const regs = registros.filter(r => uidReg(r) === v.uid);
     const costo = regs.reduce((s, r) => s + Number(r.total || 0), 0);
-    const km    = Number(v.kilometraje_actual || 0);
     const tipos = [...new Set(regs.map(r => r.tipo_combustible || "diesel"))];
-    return { vehiculo: v, regs: regs.length, costo, cpk: km > 0 && costo > 0 ? costo / km : null, tipos };
+
+    let kmMedido = 0, solesMedidos = 0;
+    for (const r of regs) {
+      const t = rendDeCarga[r.id]?.tramo;
+      if (t && t.rendimiento !== null && t.km != null) {
+        kmMedido += t.km;
+        solesMedidos += Number(r.total || 0);
+      }
+    }
+    // Una serie por familia: una unidad bimodal (diésel + GLP) tiene dos rendimientos y
+    // promediarlos daría un número que no es de ninguno de los dos.
+    const series = [...seriesRend.values()].filter(s => s.resumen.unidad === v.uid && s.resumen.n > 0);
+
+    return {
+      vehiculo: v, regs: regs.length, costo, tipos, series,
+      cpk: kmMedido > 0 && solesMedidos > 0 ? solesMedidos / kmMedido : null,
+      kmMedido,
+      coberturaCargas: regs.filter(r => rendDeCarga[r.id]?.tramo.rendimiento !== null).length,
+      sinOdometro: regs.filter(r => !Number(r.kilometraje)).length,
+    };
   }).filter(d => d.regs > 0).sort((a, b) => b.costo - a.costo);
 
-  // Datos por conductor
-  const conductoresUsados = [...new Set(registros.map(r => r.conductor).filter(Boolean))] as string[];
+  // ── Datos por conductor ────────────────────────────────────────────────────
+  //
+  // Dos trampas, y las dos hay que declararlas o la columna miente:
+  //
+  // 1. UN TRAMO TIENE DOS CARGAS y puede tener dos conductores. Se atribuye al de la carga
+  //    que CIERRA —los km medidos son los que recorrió antes de llenar— y solo si los dos
+  //    extremos traen el mismo nombre. Con dos nombres distintos no se adivina: se cuenta
+  //    aparte. Es la misma disciplina que `hermano_ambiguo` en liquidaciones, y aquí importa
+  //    más porque el número señala a una persona.
+  // 2. COMPARAR CONDUCTOR CONTRA CONDUCTOR NO SIGNIFICA NADA: quien maneja la van siempre le
+  //    gana a quien maneja el bus. Lo que se compara es el Δ % contra la mediana de LA UNIDAD
+  //    QUE MANEJÓ. Ésa es la columna principal; el km/gal crudo va al lado, de referencia.
+  const conductoresUsados = [...new Set(registros.map(r => r.conductor?.trim()).filter(Boolean))] as string[];
   const datosConductor = conductoresUsados.map(cond => {
-    const regs = registros.filter(r => r.conductor === cond);
-    return { conductor: cond, cargas: regs.length, costo: regs.reduce((s, r) => s + Number(r.total || 0), 0) };
+    const regs = registros.filter(r => r.conductor?.trim() === cond);
+    const desvios: number[] = [];
+    const rends: number[] = [];
+    let ambiguos = 0;
+
+    for (const r of regs) {
+      const ent = rendDeCarga[r.id];
+      if (!ent || ent.tramo.rendimiento === null || !ent.resumen.mediana) continue;
+      const previa = ent.tramo.previaId != null ? registros.find(x => x.id === ent.tramo.previaId) : null;
+      if (previa && previa.conductor?.trim() !== cond) { ambiguos++; continue; }
+      rends.push(ent.tramo.rendimiento);
+      desvios.push((ent.tramo.rendimiento - ent.resumen.mediana) / ent.resumen.mediana);
+    }
+
+    return {
+      conductor: cond,
+      cargas: regs.length,
+      costo: regs.reduce((s, r) => s + Number(r.total || 0), 0),
+      tramos: desvios.length,
+      ambiguos,
+      desvio: desvios.length ? desvios.reduce((a, b) => a + b, 0) / desvios.length : null,
+      rendMedio: rends.length ? rends.reduce((a, b) => a + b, 0) / rends.length : null,
+    };
   }).sort((a, b) => b.costo - a.costo);
 
   // Datos por grifo
@@ -513,18 +575,20 @@ export default function CombustiblePage() {
       b.gasto += Number(r.total || 0);
       b.cargas += 1;
       if (!COMBUSTIBLES[tipo]?.esAditivo) {
-        b.galones += Number(r.galones || 0);
-        const prev = prevRegistro[r.id];
-        if (prev) {
-          const dkm = Number(r.kilometraje) - Number(prev.kilometraje);
-          if (dkm > 0) b.km += dkm;
+        // Solo entran los tramos MEDIDOS: numerador y denominador de las mismas filas. Sumar
+        // los galones de una carga cuyo km no se pudo medir inflaba el denominador y hundía
+        // el rendimiento del período sin decir por qué.
+        const t = rendDeCarga[r.id]?.tramo;
+        if (t && t.rendimiento !== null && t.km != null && t.cantidad != null) {
+          b.km += t.km;
+          b.galones += t.cantidad;
         }
       }
     }
     return Object.values(buckets)
       .map(b => ({ ...b, rendimiento: b.km > 0 && b.galones > 0 ? b.km / b.galones : null }))
       .sort((a, b) => b.key.localeCompare(a.key));
-  }, [filtrados, prevRegistro, granularidad]);
+  }, [filtrados, rendDeCarga, granularidad]);
 
   // ─── RENDER ───────────────────────────────────────────────────────────────
 
@@ -711,12 +775,14 @@ export default function CombustiblePage() {
                 </div>
                 {/* Rendimiento esperado */}
                 {form.vehiculo_id && !fuelCfg.esAditivo && (() => {
-                  const key  = `${form.vehiculo_id}-${form.tipo_combustible}`;
-                  const prom = rendimientoPromedio[key];
-                  return prom ? (
+                  const s = seriesRend.get(`${form.vehiculo_id}|${familiaCombustible(form.tipo_combustible)}`);
+                  return s?.resumen.mediana ? (
                     <div className="ml-auto text-right">
                       <p className="text-[10px] font-bold uppercase" style={{ color: fuelCfg.color + "99" }}>Rendimiento histórico</p>
-                      <p className="font-black" style={{ color: fuelCfg.color }}>{fmtNum(prom, 1)} {fuelCfg.rendimientoLabel}</p>
+                      <p className="font-black" style={{ color: fuelCfg.color }}>{fmtNum(s.resumen.mediana, 1)} {s.resumen.label}</p>
+                      <p className="text-[10px]" style={{ color: fuelCfg.color + "88" }}>
+                        mediana de {s.resumen.n} tramo{s.resumen.n === 1 ? "" : "s"}
+                      </p>
                     </div>
                   ) : null;
                 })()}
@@ -817,17 +883,26 @@ export default function CombustiblePage() {
                     const tipo    = r.tipo_combustible || "diesel";
                     const cfg     = COMBUSTIBLES[tipo] || COMBUSTIBLES.diesel;
                     const unidLbl = r.unidad === "m3" ? "m³" : r.unidad || "gal";
-                    const prev    = prevRegistro[r.id];
-                    const rend    = calcRendimiento(r, prev);
-                    const key     = `${uidReg(r)}-${tipo}`;
-                    const promedio= rendimientoPromedio[key];
+                    const ent     = rendDeCarga[r.id];
+                    const tramo   = ent?.tramo ?? null;
+                    const resumen = ent?.resumen ?? null;
+                    const rend    = tramo?.rendimiento ?? null;
+                    const promedio= resumen?.mediana ?? null;
+                    const hallazgo= ent ? juzgarTramo(ent.tramo, ent.resumen) : null;
                     const uni     = unidadDe(uidReg(r));
                     const cap     = getCapacidad(uni,tipo);
                     const expandido = expandidoId === r.id;
 
                     const anomaliaExceso = Number(r.galones) > cap * 1.1;
-                    const anomaliaRend   = !cfg.esAditivo && rend !== null && promedio && ((promedio - rend) / promedio) > 0.3;
-                    const tieneAnomalia  = anomaliaExceso || anomaliaRend;
+                    const tieneAnomalia  = anomaliaExceso || !!hallazgo;
+                    // Rojo = consumió de más (plata que se fue). Ámbar = rindió de más de lo
+                    // posible, que es una carga SIN REGISTRAR (plata que falta en los libros).
+                    // Son dos cosas distintas y antes eran el mismo cubo — con el segundo caso
+                    // pintado de verde.
+                    const colorRend = !tramo || rend === null ? "#9ca3af"
+                      : hallazgo?.codigo === "rendimiento_bajo" ? "#dc2626"
+                      : hallazgo?.codigo === "rendimiento_alto" ? "#b45309"
+                      : "#166534";
 
                     return (
                       <React.Fragment key={r.id}>
@@ -855,12 +930,22 @@ export default function CombustiblePage() {
                           </td>
                           <td className="p-3 text-xs text-gray-500">{fmtSoles(Number(r.precio_galon || 0))}/{unidLbl}</td>
                           <td className="p-3 font-black text-xs text-red-700">{fmtSoles(Number(r.total || 0))}</td>
+                          {/* El "—" colapsaba cinco casos distintos y cada uno se arregla en
+                              otro lado. Ahora la celda dice CUÁL, y el detalle completo está
+                              al desplegar la fila. */}
                           <td className="p-3 text-xs font-bold">
-                            {!cfg.esAditivo && rend !== null
-                              ? <span style={{ color: promedio && rend < promedio * 0.7 ? "#dc2626" : "#166534" }}>
-                                  {fmtNum(rend, 1)} {cfg.rendimientoLabel}
-                                </span>
-                              : <span className="text-gray-300">—</span>}
+                            {rend !== null ? (
+                              <span style={{ color: colorRend }}>
+                                {fmtNum(rend, 1)} {resumen?.label ?? cfg.rendimientoLabel}
+                              </span>
+                            ) : tramo?.motivo ? (
+                              <span className="text-gray-400 font-medium" title={tramo.detalle}>
+                                {tramo.crudo !== null && (
+                                  <span className="line-through text-gray-300 mr-1">{fmtNum(tramo.crudo, 1)}</span>
+                                )}
+                                {etiquetaMotivo(tramo.motivo)}
+                              </span>
+                            ) : <span className="text-gray-300">—</span>}
                           </td>
                           <td className="p-3 text-xs text-gray-500 max-w-[90px]"><div className="truncate">{r.grifo || "—"}</div></td>
                           <td className="p-3 text-xs text-gray-500 max-w-[90px]"><div className="truncate">{r.conductor || "—"}</div></td>
@@ -897,11 +982,37 @@ export default function CombustiblePage() {
                                 <div className="space-y-1">
                                   <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Rendimiento</p>
                                   {cfg.esAditivo
-                                    ? <p className="text-gray-400 italic">Aditivo — sin cálculo de rendimiento</p>
+                                    ? <p className="text-gray-400 italic">Aditivo — su métrica es el consumo (lt/100km), no el rendimiento</p>
                                     : <>
-                                        <p><span className="text-gray-400">Este tramo:</span> {rend !== null ? <b style={{ color: promedio && rend < promedio * 0.7 ? "#dc2626" : "#166534" }}>{fmtNum(rend, 1)} {cfg.rendimientoLabel}</b> : "—"}</p>
-                                        <p><span className="text-gray-400">Prom. vehículo:</span> {promedio ? <b>{fmtNum(promedio, 1)} {cfg.rendimientoLabel}</b> : "—"}</p>
+                                        <p><span className="text-gray-400">Este tramo:</span>{" "}
+                                          {rend !== null
+                                            ? <b style={{ color: colorRend }}>{fmtNum(rend, 1)} {resumen?.label}</b>
+                                            : <b className="text-gray-500">{tramo?.motivo ? etiquetaMotivo(tramo.motivo) : "—"}</b>}
+                                          {tramo?.km != null && tramo.cantidad != null && (
+                                            <span className="text-gray-400"> · {fmtNum(tramo.km, 0)} km ÷ {fmtNum(tramo.cantidad, 2)}</span>
+                                          )}
+                                        </p>
+                                        <p><span className="text-gray-400">Mediana del vehículo:</span>{" "}
+                                          {promedio
+                                            ? <b>{fmtNum(promedio, 1)} {resumen?.label}</b>
+                                            : <span className="text-gray-400">sin medir aún</span>}
+                                          {resumen && resumen.n > 0 && (
+                                            <span className={resumen.confiable ? "text-gray-400" : "text-amber-600"}>
+                                              {" "}({resumen.n} tramo{resumen.n === 1 ? "" : "s"}{resumen.confiable ? "" : ", aún pocos"})
+                                            </span>
+                                          )}
+                                        </p>
                                         <p><span className="text-gray-400">Cap. tanque:</span> {cap} {unidLbl}</p>
+                                        {/* El porqué del "—", en la fila donde se puede arreglar. */}
+                                        {tramo?.motivo && tramo.detalle && (
+                                          <p className="text-[11px] text-gray-500 leading-snug pt-1">{tramo.detalle}</p>
+                                        )}
+                                        {resumen && resumen.cargasSinOdometro > 0 && (
+                                          <p className="text-[11px] text-amber-700 leading-snug">
+                                            Esta unidad tiene {resumen.cargasSinOdometro} carga(s) sin kilometraje:
+                                            ponérselo mejora todos sus tramos.
+                                          </p>
+                                        )}
                                       </>}
                                 </div>
                                 <div className="space-y-1">
@@ -910,7 +1021,12 @@ export default function CombustiblePage() {
                                     ? <div className="flex items-center gap-1.5 text-green-700"><span>✅</span><span className="font-bold">Sin anomalías</span></div>
                                     : <>
                                         {anomaliaExceso && <div className="rounded-lg px-2 py-1.5 bg-red-50 text-red-700 text-[10px] font-bold">🚨 Carga ({fmtNum(Number(r.galones))} {unidLbl}) supera capacidad ({cap} {unidLbl})</div>}
-                                        {anomaliaRend   && <div className="rounded-lg px-2 py-1.5 bg-red-50 text-red-700 text-[10px] font-bold">🔴 Rendimiento anormal: {fmtNum(rend!, 1)} vs prom. {fmtNum(promedio!, 1)} {cfg.rendimientoLabel}</div>}
+                                        {hallazgo && (
+                                          <div className={`rounded-lg px-2 py-1.5 text-[10px] leading-snug ${hallazgo.codigo === "rendimiento_bajo" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-800"}`}>
+                                            <b>{hallazgo.codigo === "rendimiento_bajo" ? "🔴 Consumió de más" : "🟠 Falta registrar una carga"}</b>
+                                            <div className="font-medium mt-0.5">{hallazgo.detalle}</div>
+                                          </div>
+                                        )}
                                       </>}
                                 </div>
                               </div>
@@ -990,7 +1106,7 @@ export default function CombustiblePage() {
           <table className="w-full text-sm">
             <thead>
               <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                {["Vehículo", "Cargas", "Combustibles usados", "Costo total", "CPK", ""].map(h => (
+                {["Vehículo", "Cargas", "Combustibles usados", "Costo total", "Rendimiento", "CPK combustible", ""].map(h => (
                   <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
@@ -1010,8 +1126,40 @@ export default function CombustiblePage() {
                     </div>
                   </td>
                   <td className="p-3 font-bold text-red-700">{fmtSoles(d.costo)}</td>
-                  <td className="p-3 font-bold" style={{ color: d.cpk ? (d.cpk > 0.5 ? "#dc2626" : "#16a34a") : "#9ca3af" }}>
-                    {d.cpk ? `S/ ${fmtNum(d.cpk, 3)}/km` : "—"}
+                  {/* Mediana, una línea por familia. Con pocos tramos el número sale en gris
+                      diciendo cuántos son: nunca escondido, nunca disfrazado de firme. */}
+                  <td className="p-3">
+                    {d.series.length === 0 ? <span className="text-gray-300">—</span> : (
+                      <div className="space-y-0.5">
+                        {d.series.map(s => (
+                          <div key={s.resumen.familia} className="whitespace-nowrap">
+                            <b className={s.resumen.confiable ? "text-[#166534]" : "text-gray-400"}>
+                              {fmtNum(s.resumen.mediana ?? 0, 1)} {s.resumen.label}
+                            </b>
+                            <span className="text-[10px] text-gray-400 ml-1">
+                              ({s.resumen.n} tramo{s.resumen.n === 1 ? "" : "s"}{s.resumen.confiable ? "" : ", pocos"})
+                            </span>
+                          </div>
+                        ))}
+                        {d.sinOdometro > 0 && (
+                          <div className="text-[10px] text-amber-600">{d.sinOdometro} carga(s) sin km</div>
+                        )}
+                      </div>
+                    )}
+                  </td>
+                  <td className="p-3">
+                    {d.cpk ? (
+                      <>
+                        <b className="text-gray-800">S/ {fmtNum(d.cpk, 3)}/km</b>
+                        <div className="text-[10px] text-gray-400">
+                          medido entre cargas · {d.coberturaCargas} de {d.regs} · {fmtNum(d.kmMedido, 0)} km
+                        </div>
+                      </>
+                    ) : (
+                      <span className="text-gray-400 text-xs">
+                        —<span className="block text-[10px]">sin tramos medidos</span>
+                      </span>
+                    )}
                   </td>
                   <td className="p-3">
                     <button onClick={() => { setFiltroVeh(d.vehiculo.uid); setVista("historial"); }}
@@ -1019,7 +1167,7 @@ export default function CombustiblePage() {
                   </td>
                 </tr>
               ))}
-              {datosVehiculo.length === 0 && <tr><td colSpan={6} className="p-10 text-center text-gray-400">Sin datos</td></tr>}
+              {datosVehiculo.length === 0 && <tr><td colSpan={7} className="p-10 text-center text-gray-400">Sin datos</td></tr>}
             </tbody>
           </table>
         </section>
@@ -1031,25 +1179,52 @@ export default function CombustiblePage() {
           <table className="w-full text-sm">
             <thead>
               <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
-                {["Conductor", "Cargas", "Gasto total", "Prom. por carga", ""].map(h => (
+                {["Conductor", "Cargas", "Gasto total", "Prom. por carga", "vs. su unidad", "Rendimiento", ""].map(h => (
                   <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {datosConductor.length === 0 ? (
-                <tr><td colSpan={5} className="p-10 text-center text-gray-400">Sin conductores en registros</td></tr>
+                <tr><td colSpan={7} className="p-10 text-center text-gray-400">Sin conductores en registros</td></tr>
               ) : datosConductor.map(d => (
                 <tr key={d.conductor} className="border-t hover:bg-gray-50" style={{ borderColor: "#f1f5f9" }}>
                   <td className="p-3 font-bold text-gray-800">👤 {d.conductor}</td>
                   <td className="p-3 text-gray-600">{d.cargas}</td>
                   <td className="p-3 font-bold text-red-700">{fmtSoles(d.costo)}</td>
                   <td className="p-3 text-gray-600">{d.cargas > 0 ? fmtSoles(d.costo / d.cargas) : "—"}</td>
+                  {/* La comparación que significa algo: contra la mediana de la unidad que
+                      manejó, no contra los demás conductores. */}
+                  <td className="p-3">
+                    {d.desvio === null ? (
+                      <span className="text-gray-300">—</span>
+                    ) : (
+                      <>
+                        <b style={{ color: d.desvio < -0.1 ? "#dc2626" : d.desvio > 0.1 ? "#b45309" : "#166534" }}>
+                          {d.desvio > 0 ? "+" : ""}{fmtNum(d.desvio * 100, 1)} %
+                        </b>
+                        <div className="text-[10px] text-gray-400">
+                          {d.tramos} tramo{d.tramos === 1 ? "" : "s"} medido{d.tramos === 1 ? "" : "s"}
+                          {d.ambiguos > 0 && ` · ${d.ambiguos} con cambio de conductor`}
+                        </div>
+                      </>
+                    )}
+                  </td>
+                  <td className="p-3 text-gray-600 text-xs">
+                    {d.rendMedio !== null ? fmtNum(d.rendMedio, 1) : <span className="text-gray-300">—</span>}
+                  </td>
                   <td className="p-3"><button onClick={() => { setVista("historial"); setBusqueda(d.conductor); }} className="text-xs font-bold text-[#0b315f] hover:underline">Ver →</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
+          <p className="px-4 py-3 text-[11px] text-gray-500 border-t leading-snug" style={{ borderColor: "#f1f5f9" }}>
+            <b>vs. su unidad</b> compara cada tramo contra la mediana de la unidad que se manejó, no contra
+            los demás conductores: quien conduce una van siempre rendiría más que quien conduce un bus.
+            Un tramo cuyos dos extremos los cargaron personas distintas no se atribuye a ninguna
+            —se cuenta aparte— porque aquí el número señala a alguien. <b>Una diferencia no es una acusación:</b>{" "}
+            la ruta, el tráfico y el tanque llenado a medias explican la mayoría.
+          </p>
         </section>
       )}
 
