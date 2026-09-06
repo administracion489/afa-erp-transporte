@@ -43,8 +43,11 @@ import { COMBUSTIBLES, familiaCombustible } from "@/lib/combustible-tipos";
 import { paginarFilas } from "@/lib/huella";
 import {
   seriesRendimiento, tramosPorCarga, juzgarTramo, etiquetaMotivo,
+  resumirVentana, compararVentanas, MIN_TRAMOS_CONFIABLE,
   type CargaRendimiento, type Tramo, type ResumenUnidad,
 } from "@/lib/rendimiento";
+import { hoyLima, sumarDias } from "@/lib/odometro-analitica";
+import ComparacionPeriodo from "./ComparacionPeriodo";
 
 // ─── CONFIGURACIÓN DE COMBUSTIBLES ───────────────────────────────────────────
 // El catálogo vive en lib/combustible-tipos.ts: /radar-ia lo necesita para su columna de
@@ -177,6 +180,7 @@ const cargaParaRendimiento = (r: Combustible, unidad: string): CargaRendimiento 
   cantidad: r.galones,
   unidadCantidad: r.unidad,
   tipo: r.tipo_combustible,
+  gasto: r.total,
 });
 
 // Clave + etiqueta del período (día/semana/mes) para el análisis de gasto y rendimiento.
@@ -288,6 +292,85 @@ export default function CombustiblePage() {
     [registros]
   );
   const rendDeCarga = useMemo(() => tramosPorCarga(seriesRend), [seriesRend]);
+
+  // ── La comparación del final: esta ventana contra la anterior ──────────────
+  //
+  // EL FILTRO DE MES MANDA sobre la ventana. Con «agosto» puesto compara agosto contra
+  // julio; con «todos los meses» son los últimos 30 días contra los 30 anteriores. Una
+  // ficha que ignora un filtro que está a la vista en la misma pantalla es la forma más
+  // fácil de leer mal un número.
+  //
+  // El mes anterior es el mes CALENDARIO, no "31 días atrás": restar días haría que el
+  // anterior de febrero fuese un trozo de enero y no enero.
+  //
+  // (Hermana a unificar el día que alguien lo haga: `rangoAnterior` en app/cliente/page.tsx,
+  // que resuelve lo mismo para el selector de periodo de esa pantalla.)
+  const ventanas = useMemo(() => {
+    if (filtroMes !== "todos") {
+      const [y, m] = filtroMes.split("-").map(Number);
+      const finMes = (yy: number, mm: number) => new Date(Date.UTC(yy, mm, 0)).getUTCDate();
+      const prevY = m === 1 ? y - 1 : y, prevM = m === 1 ? 12 : m - 1;
+      const dd = (n: number) => String(n).padStart(2, "0");
+      const nombre = (yy: number, mm: number) =>
+        new Date(Date.UTC(yy, mm - 1, 1)).toLocaleDateString("es-PE", { month: "long", year: "numeric", timeZone: "UTC" });
+      return {
+        actual: { desde: `${y}-${dd(m)}-01`, hasta: `${y}-${dd(m)}-${dd(finMes(y, m))}`, label: nombre(y, m) },
+        previa: { desde: `${prevY}-${dd(prevM)}-01`, hasta: `${prevY}-${dd(prevM)}-${dd(finMes(prevY, prevM))}`, label: nombre(prevY, prevM) },
+      };
+    }
+    const hoy = hoyLima();
+    return {
+      actual: { desde: sumarDias(hoy, -29), hasta: hoy, label: "últimos 30 días" },
+      previa: { desde: sumarDias(hoy, -59), hasta: sumarDias(hoy, -30), label: "30 días anteriores" },
+    };
+  }, [filtroMes]);
+
+  // La ficha mide exactamente lo que la tabla muestra: respeta vehículo, flota, tipo y
+  // búsqueda. El mes es el único filtro que se comporta distinto — define la ventana en
+  // vez de recortarla — así que se quita del universo antes de resumir.
+  const comparacion = useMemo(() => {
+    const universo = registros.filter(r => {
+      const u = unidadDe(uidReg(r));
+      const q = busqueda.toLowerCase();
+      const txt = `${u?.placa || ""} ${r.grifo || ""} ${r.conductor || ""} ${r.tipo_combustible || ""}`.toLowerCase();
+      return txt.includes(q) &&
+        (filtroFlota === "todos" || (u?.tipo ?? "propio") === filtroFlota) &&
+        (filtroVeh === "todos" || uidReg(r) === filtroVeh) &&
+        (filtroTipo === "todos" || (r.tipo_combustible || "diesel") === filtroTipo);
+    }).map(r => cargaParaRendimiento(r, uidReg(r)));
+
+    // Las series se rehacen sobre el universo filtrado: si se filtra un tipo, la cadena
+    // de la otra familia no debe aportar km.
+    const series = seriesRendimiento(universo);
+    const a = resumirVentana(series, universo, ventanas.actual.desde, ventanas.actual.hasta, ventanas.actual.label);
+    const p = resumirVentana(series, universo, ventanas.previa.desde, ventanas.previa.hasta, ventanas.previa.label);
+    return compararVentanas(a, p);
+  }, [registros, unidades, busqueda, filtroFlota, filtroVeh, filtroTipo, ventanas]);
+
+  // Sin filtro de vehículo, el total ESCONDE la anomalía: con diez unidades, una que
+  // empeoró 25 % mueve el agregado un 2.5 % y nadie la ve. Esta lista es "dónde mirar".
+  const porUnidadComparada = useMemo(() => {
+    if (filtroVeh !== "todos") return [];
+    return unidades.map(u => {
+      const suyas = registros
+        .filter(r => uidReg(r) === u.uid && (filtroTipo === "todos" || (r.tipo_combustible || "diesel") === filtroTipo))
+        .map(r => cargaParaRendimiento(r, u.uid));
+      if (!suyas.length) return null;
+      const series = seriesRendimiento(suyas);
+      const a = resumirVentana(series, suyas, ventanas.actual.desde, ventanas.actual.hasta);
+      const p = resumirVentana(series, suyas, ventanas.previa.desde, ventanas.previa.hasta);
+      const c = compararVentanas(a, p);
+      if (!c.comparable || c.variacion.rendimiento === null) return null;
+      return {
+        uid: u.uid, placa: u.placa, tipo: u.tipo, c,
+        firme: Math.min(a.cargasMedidas, p.cargasMedidas) >= MIN_TRAMOS_CONFIABLE,
+      };
+    }).filter(Boolean).sort((x, y) => {
+      // Las firmes primero, y dentro de cada grupo la que más empeoró.
+      if (x!.firme !== y!.firme) return x!.firme ? -1 : 1;
+      return (x!.c.variacion.rendimiento ?? 0) - (y!.c.variacion.rendimiento ?? 0);
+    }) as { uid: string; placa: string; tipo: string; c: ReturnType<typeof compararVentanas>; firme: boolean }[];
+  }, [registros, unidades, filtroVeh, filtroTipo, ventanas]);
 
   // ── Lo que leyó el Radar IA ────────────────────────────────────────────────
 
@@ -867,18 +950,18 @@ export default function CombustiblePage() {
                 <thead>
                   <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
                     <th className="p-3 w-8"></th>
-                    {["Fecha", "Vehículo", "Combustible", "Cantidad", "Precio/ud", "Total", "Rendimiento", "Grifo", "Conductor", "⚠", "Acciones"].map(h => (
+                    {["Fecha", "Vehículo", "Combustible", "Cantidad", "Precio/ud", "Total", "Km", "Rendimiento", "Grifo", "Conductor", "⚠", "Acciones"].map(h => (
                       <th key={h} className="p-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {loading ? (
-                    <tr><td colSpan={12} className="p-10 text-center text-gray-400">
+                    <tr><td colSpan={13} className="p-10 text-center text-gray-400">
                       <div className="flex items-center justify-center gap-2"><div className="w-5 h-5 border-2 border-gray-200 border-t-[#0b315f] rounded-full animate-spin" />Cargando...</div>
                     </td></tr>
                   ) : filtrados.length === 0 ? (
-                    <tr><td colSpan={12} className="p-10 text-center text-gray-400"><p className="text-3xl mb-2">⛽</p><p>No hay registros</p></td></tr>
+                    <tr><td colSpan={13} className="p-10 text-center text-gray-400"><p className="text-3xl mb-2">⛽</p><p>No hay registros</p></td></tr>
                   ) : filtrados.map(r => {
                     const tipo    = r.tipo_combustible || "diesel";
                     const cfg     = COMBUSTIBLES[tipo] || COMBUSTIBLES.diesel;
@@ -930,6 +1013,28 @@ export default function CombustiblePage() {
                           </td>
                           <td className="p-3 text-xs text-gray-500">{fmtSoles(Number(r.precio_galon || 0))}/{unidLbl}</td>
                           <td className="p-3 font-black text-xs text-red-700">{fmtSoles(Number(r.total || 0))}</td>
+                          {/* EL ODÓMETRO SOLO NO DICE NADA: 103,915 no es información, lo
+                              accionable es cuánto recorrió desde la carga anterior. Por eso el
+                              delta va grande y el odómetro pequeño encima. Sin odómetro sale
+                              "—" y NUNCA "0": un cero se lee como "no recorrió". */}
+                          <td className="p-3 text-xs whitespace-nowrap">
+                            {r.kilometraje ? (
+                              <>
+                                <span className="font-mono text-[10px] text-gray-400 block leading-tight">
+                                  {fmtNum(Number(r.kilometraje), 0)}
+                                </span>
+                                {tramo?.km != null ? (
+                                  <b className={tramo.rendimiento !== null ? "text-gray-700" : "text-gray-400"}>
+                                    +{fmtNum(tramo.km, 0)} km
+                                  </b>
+                                ) : (
+                                  <span className="text-gray-300">—</span>
+                                )}
+                              </>
+                            ) : (
+                              <span className="text-gray-300" title="Esta carga se guardó sin kilometraje: su tramo no se puede medir">—</span>
+                            )}
+                          </td>
                           {/* El "—" colapsaba cinco casos distintos y cada uno se arregla en
                               otro lado. Ahora la celda dice CUÁL, y el detalle completo está
                               al desplegar la fila. */}
@@ -962,7 +1067,7 @@ export default function CombustiblePage() {
 
                         {expandido && (
                           <tr style={{ background: "#f8fafc" }} className="border-t">
-                            <td colSpan={12} className="px-6 py-4">
+                            <td colSpan={13} className="px-6 py-4">
                               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
                                 <div className="space-y-1">
                                   <p className="font-bold text-[10px] uppercase tracking-widest text-gray-400">Carga</p>
@@ -1060,6 +1165,16 @@ export default function CombustiblePage() {
               </div>
             )}
           </section>
+
+          {/* ── LA COMPARACIÓN · por qué cambió el gasto ──────────────────────
+              Va al final de las recargas, que es donde se mira después de
+              recorrer la tabla. Compara esta ventana contra la anterior y —lo
+              importante— reparte la diferencia de gasto entre sus TRES causas,
+              porque se gestionan de forma opuesta: más km es más trabajo, peor
+              rendimiento es una anomalía, y un precio más alto es del mercado.
+              Sin separarlas, la subida del diésel de S/ 24.70 a S/ 25.74 se lee
+              como problema operativo. Ver la cabecera de lib/rendimiento.ts. */}
+          <ComparacionPeriodo c={comparacion} porUnidad={porUnidadComparada} onVerUnidad={setFiltroVeh} />
         </>
       )}
 
