@@ -36,5 +36,7 @@ export const config = {
   authDir: process.env.AUTH_DIR?.trim() || "./auth",
   /** Versión del worker (se reporta a radar_estado.version_worker; /radar-ia la muestra
    *  para saber si el servidor ya tiene el código nuevo o quedó en una versión vieja). */
-  version: "1.2.0",
+  // 1.3.0 — el remitente se guarda como null cuando WhatsApp no lo entrega, nunca "" (un
+  // comodín compartido fusionaba las fotos de varios celulares en una sola recarga).
+  version: "1.3.0",
 };
