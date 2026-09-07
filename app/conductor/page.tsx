@@ -2474,7 +2474,12 @@ export default function ConductorApp() {
           alert(`Km leído: ${km.toLocaleString("es-PE")}${data.motivo ? ` (${data.motivo})` : ""}.\nRevísalo y corrige si hace falta.`);
         }
       } else if (dudoso) {
-        alert(`El número leído (${km.toLocaleString("es-PE")}) no cuadra con el kilometraje de esta unidad.\nEscribe el kilometraje mirando el tablero — la foto ya quedó registrada.`);
+        // El conductor no necesita el detalle técnico, pero sí saber QUÉ mirar: "le sobra un
+        // dígito" manda a contar las cifras del tablero, que es donde está el error.
+        const titular = data?.codigo_seleccion === "digito_de_mas"
+          ? `La IA leyó ${km.toLocaleString("es-PE")}, que tiene un dígito de más para esta unidad.`
+          : `El número leído (${km.toLocaleString("es-PE")}) no cuadra con el kilometraje de esta unidad.`;
+        alert(`${titular}\nEscribe el kilometraje mirando el tablero — la foto ya quedó registrada.`);
       } else {
         alert("No se pudo leer el km automáticamente. Escribe el kilometraje a mano — la foto ya quedó registrada.");
       }

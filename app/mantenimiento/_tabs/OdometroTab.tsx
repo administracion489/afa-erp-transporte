@@ -375,8 +375,13 @@ export default function OdometroTab() {
       if (!res.ok || !data.ok) throw new Error(data?.error || `Error ${res.status}`);
       if (!data.km) { alert("La IA no pudo leer el km con seguridad. Ingrésalo manualmente."); }
       else if (data.auto_ok === false) {
-        // No se pre-llena: el número no cuadra con el kilometraje de esta unidad.
-        alert(`El número leído (${Number(data.km).toLocaleString("es-PE")}) no cuadra con el kilometraje de esta unidad${data.motivo_seleccion ? `:\n${data.motivo_seleccion}` : "."}\nRevisa la foto e ingrésalo a mano.`);
+        // No se pre-llena: el número no cuadra con el kilometraje de esta unidad. El titular
+        // sale del CÓDIGO, no de olfatear el motivo: un dígito de más se arregla mirando la
+        // foto cifra por cifra, y decirlo así ahorra deducirlo de dos números grandes.
+        const titular = data.codigo_seleccion === "digito_de_mas"
+          ? `A la lectura de la IA (${Number(data.km).toLocaleString("es-PE")}) le SOBRA UN DÍGITO para esta unidad`
+          : `El número leído (${Number(data.km).toLocaleString("es-PE")}) no cuadra con el kilometraje de esta unidad`;
+        alert(`${titular}${data.motivo_seleccion ? `:\n${data.motivo_seleccion}` : "."}\nRevisa la foto e ingrésalo a mano.`);
       } else {
         setForm(f => ({ ...f, km: String(data.km), fuente: "whatsapp_foto" }));
         alert(

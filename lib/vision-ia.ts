@@ -118,6 +118,7 @@ Devuelve SOLO un JSON:
 "km" es el kilometraje TOTAL del vehículo (entero, sin decimales).
 "trip_km" es el cuentakilómetros PARCIAL/trip. Si la pantalla muestra DOS contadores de km, este campo NUNCA debe ser null: pon aquí el otro número que viste.
 ANTI-INVERSIÓN: en un mismo tablero el TOTAL es SIEMPRE el número MAYOR y va sin decimales; el parcial es el MENOR y suele llevar un decimal (p. ej. "1803.6"). Si el número que ibas a poner en "km" es MENOR que otro número de kilómetros de la pantalla, los estás intercambiando.
+CUENTA LAS CIFRAS: en "texto_leido" transcribe el número del odómetro tal como se ve, dígito a dígito, y comprueba que "km" tiene EXACTAMENTE esas cifras y no una más. Añadir un dígito es el error más caro de esta lectura y el más fácil de cometer: "23980" y "239980" se parecen en una pantalla borrosa y son diez veces distinto en el ERP. Ante un dígito dudoso —un 8 con un segmento apagado, dos cifras pegadas— no lo desdobles: baja la confianza y dilo en "motivo".
 La temperatura ("28.0°C"), la hora ("20:25") y una tasa de consumo ("16.3 L/100km") NO son kilómetros.
 "calidad_imagen"="mala" si la foto está borrosa, con reflejo/brillo que tape dígitos, muy oscura, o el odómetro no es legible; "regular" si se lee con algo de esfuerzo; "buena" si es nítida.
 "motivo" = por qué esa confianza/calidad, en pocas palabras (ej "lectura nítida", "reflejo sobre el último dígito", "foto borrosa").
@@ -131,18 +132,43 @@ export type ContextoLecturaOdometro = {
   digitos?: number | null;   // cuántos dígitos tiene su odómetro (nunca el km exacto: sería copiable)
 };
 
-export async function extraerOdometro(
-  adjunto: Adjunto,
-  // string = solo las lecciones (firma vieja, retrocompatible).
-  ctx?: string | null | ContextoLecturaOdometro
-): Promise<{ km: number; kilometraje: number; trip_km: number | null; confianza: string; calidad_imagen: string; motivo: string; texto_leido: string }> {
-  const c: ContextoLecturaOdometro = typeof ctx === "string" || ctx == null ? { lecciones: ctx ?? null } : ctx;
+/**
+ * LA FORMA DEL NÚMERO ES UN DATO DEL ERP, NO UNA OPINIÓN DEL OPERADOR — y por eso va en su
+ * propio bloque.
+ *
+ * Estaba metida DENTRO del bloque de la guía (`vehiculos.guia_odometro`), que es texto libre
+ * que alguien tiene que escribir a mano en /radar-ia → Configuración. Resultado: en toda unidad
+ * sin guía —la mayoría— el dato se calculaba en el route y se tiraba, y el modelo leía el
+ * tablero sin saber cuántas cifras tenía que devolver. Ese es el hueco por el que entró el
+ * "dígito de más" de la CUP-435: el tablero marca 23.980 y la IA devolvió 239.980 dos veces
+ * seguidas, un número que con esta línea delante es evidentemente imposible.
+ *
+ * Se manda la CANTIDAD de dígitos y jamás el km exacto: un número exacto en el prompt es un
+ * número que el modelo puede copiar cuando no logra leer la foto, y ese eco es indistinguible
+ * de una lectura buena (por eso elegirOdometro trae además un guard anti-eco).
+ */
+function bloqueFormaOdometro(c: ContextoLecturaOdometro): string | null {
+  if (!c.digitos || c.digitos <= 0) return null;
+  return (
+    `FORMA DEL NÚMERO EN ESTA UNIDAD${c.placa ? ` (${c.placa})` : ""}: el odómetro TOTAL es un número de ` +
+    `${c.digitos} dígitos (el ERP lo sabe por el historial de la unidad; el parcial/trip tiene menos).\n` +
+    `Antes de responder, CUENTA las cifras del número que ibas a poner en "km": si te salen más de ` +
+    `${c.digitos}, te sobra un dígito — vuelve a mirar la foto cifra por cifra en vez de confirmar tu ` +
+    `primera lectura. Un dígito de más es el error más frecuente en esta flota. Solo puede tener ` +
+    `${c.digitos + 1} si el odómetro acaba de pasar de ${"9".repeat(c.digitos)} a 1${"0".repeat(c.digitos)} km, ` +
+    `lo que exige un salto enorme desde la última lectura; si no es el caso, es un error de lectura.`
+  );
+}
 
+/** Arma el prompt de lectura de odómetro. Puro (no llama a la IA): así se puede probar. */
+export function promptOdometro(ctx?: string | null | ContextoLecturaOdometro): string {
+  const c: ContextoLecturaOdometro = typeof ctx === "string" || ctx == null ? { lecciones: ctx ?? null } : ctx;
   const bloques: string[] = [PROMPT_ODO];
+  const forma = bloqueFormaOdometro(c);
+  if (forma) bloques.push(forma);
   if (c.guia?.trim()) {
     bloques.push(
-      `Cómo leer el tablero de ESTA unidad${c.placa ? ` (${c.placa})` : ""}, según el operador de AFA: ${c.guia.trim()}` +
-        (c.digitos ? `\nEn esta unidad el odómetro TOTAL es un número de ${c.digitos} dígitos.` : "")
+      `Cómo leer el tablero de ESTA unidad${c.placa ? ` (${c.placa})` : ""}, según el operador de AFA: ${c.guia.trim()}`
     );
   }
   if (c.lecciones?.trim()) {
@@ -150,11 +176,18 @@ export async function extraerOdometro(
       `ERRORES QUE YA COMETISTE en este mismo parque automotor (corregidos por el equipo). Revísalos y no los repitas:\n${c.lecciones.trim()}\nSi tu lectura se parece a alguno de esos casos, baja la confianza y explica por qué en "motivo".`
     );
   }
+  return bloques.join("\n\n");
+}
 
+export async function extraerOdometro(
+  adjunto: Adjunto,
+  // string = solo las lecciones (firma vieja, retrocompatible).
+  ctx?: string | null | ContextoLecturaOdometro
+): Promise<{ km: number; kilometraje: number; trip_km: number | null; confianza: string; calidad_imagen: string; motivo: string; texto_leido: string }> {
   const reqOdo: any = {
     model: MODELO_VISION,
     max_tokens: 300,
-    messages: [{ role: "user", content: [{ type: "text", text: bloques.join("\n\n") }, bloqueAdjunto(adjunto)] }],
+    messages: [{ role: "user", content: [{ type: "text", text: promptOdometro(ctx) }, bloqueAdjunto(adjunto)] }],
   };
   const resp: any = await getAnthropic().messages.create(reqOdo);
   const r = extraerJSON(textoDe(resp));

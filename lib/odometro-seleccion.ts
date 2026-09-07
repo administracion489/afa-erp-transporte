@@ -14,6 +14,12 @@
 //      donde el operador la corrige y donde nace el dataset de aprendizaje).
 //   3. Sin ancla (vehículo sin km vigente) el comportamiento es idéntico al de hoy.
 //   4. Los números sueltos del texto libre solo DESEMPATAN; nunca ganan solos.
+//   5. NO ADIVINA QUÉ DÍGITO SOBRA. Ver `codigo: "digito_de_mas"` más abajo: de 239.980 salen
+//      tres borrados distintos que caen dentro de lo posible (23.980, 23.990, 23.998) y elegir
+//      uno sería escribir un kilometraje al azar. Se NOMBRA el defecto y lo teclea una persona
+//      mirando la foto — el mismo criterio que `cuadre_ambiguo` en el voucher de grifo.
+
+import { RATIO_DIGITO_DE_MAS, PISO_RATIO_DIGITO } from "./odometro";
 
 export type CandidatoOdometro = {
   valor: number;
@@ -21,6 +27,19 @@ export type CandidatoOdometro = {
   decimal: boolean;   // el texto crudo lo mostraba con decimales → huele a parcial
   enBanda: boolean;
 };
+
+/**
+ * Qué le pasa a la lectura, en un código que la pantalla puede enrutar sin olfatear el texto
+ * del motivo (misma regla que los bloqueos de /liquidaciones y las anomalías del Radar):
+ *   - `digito_de_mas`  la IA devolvió MÁS dígitos de los que tiene el odómetro de la unidad.
+ *                      Es el error más frecuente de esta flota y tiene arreglo propio: mirar
+ *                      la foto y teclear el número (nadie puede deducir cuál dígito sobra).
+ *   - `fuera_de_banda` el número es imposible para la unidad por otra razón (retrocede, salta).
+ *   - `eco`            el único número compatible clava el vigente: huele a que el modelo
+ *                      repitió un dato que ya conocía en vez de leer la foto.
+ *   - `parcial`        se registró otro número del tablero porque la IA entregó el trip.
+ */
+export type CodigoOdometro = "digito_de_mas" | "fuera_de_banda" | "eco" | "parcial";
 
 export type VeredictoOdometro = {
   /** El km a registrar. null solo si la IA no leyó nada. */
@@ -31,6 +50,8 @@ export type VeredictoOdometro = {
   /** true = se puede seguir el curso normal; false = hay que mirarlo (no bloquea el registro). */
   autoOk: boolean;
   motivo: string | null;
+  /** null cuando no hay nada que señalar (lectura normal o sin ancla contra qué juzgarla). */
+  codigo: CodigoOdometro | null;
   candidatos: CandidatoOdometro[];
 };
 
@@ -42,6 +63,11 @@ function formaValida(n: number): boolean {
 }
 
 const fmt = (n: number) => Math.round(n).toLocaleString("es-PE");
+
+/** Cuántas cifras tiene un kilometraje. Es la FORMA del número, no su valor. */
+export function digitosDe(n: number): number {
+  return Math.round(Math.abs(Number(n) || 0)).toString().length;
+}
 
 /**
  * Extrae números del texto libre que la IA devuelve como `texto_leido`. Es prosa, no una
@@ -74,7 +100,7 @@ export function elegirOdometro(e: {
 }): VeredictoOdometro {
   const kmIA = e.kmIA != null && Number.isFinite(e.kmIA) && e.kmIA > 0 ? Math.round(e.kmIA) : null;
   const neutro = (motivo: string | null = null, autoOk = true): VeredictoOdometro => ({
-    km: kmIA, kmIA, origen: "ia", autoOk, motivo, candidatos: [],
+    km: kmIA, kmIA, origen: "ia", autoOk, motivo, codigo: null, candidatos: [],
   });
 
   // (1) La abstención del modelo manda: si no leyó un número, aquí no se fabrica uno.
@@ -95,8 +121,18 @@ export function elegirOdometro(e: {
     ? Math.max(e.horasDesdeUltima / 24, 1)
     : 30;
   // Una unidad dada de alta con su odómetro a mano (sin ninguna lectura) no tiene ritmo que
-  // medir: solo se le aplica el piso anti-retroceso, nunca un techo que la deje ciega.
-  const techo = e.hayHistorial ? kmVigente + (e.kmDiaMax > 0 ? e.kmDiaMax : 1500) * dias : Infinity;
+  // medir: no se le aplica el techo de km/día, que la dejaría ciega.
+  const techoRitmo = e.hayHistorial ? kmVigente + (e.kmDiaMax > 0 ? e.kmDiaMax : 1500) * dias : Infinity;
+  // …pero SÍ el de orden de magnitud, que es el mismo que evaluarLectura aplica al escribir y
+  // que no necesita ninguna historia: le basta el km vigente. Sin él, `hayHistorial === false`
+  // dejaba el techo en Infinity y un 239.980 sobre una unidad que va en 23.980 salía "en banda"
+  // → la pantalla lo pre-llenaba como bueno y, al guardarlo, evaluarLectura lo marcaba "Salto
+  // ×10: posible dígito de más". El mismo número, dos veredictos opuestos, con la lectura mala
+  // ya tecleada. Y `hayHistorial` no es solo "unidad nueva": una unidad cuyas lecturas van
+  // TODAS a sospechosa se queda sin ninguna viva, así que el agujero se realimentaba —
+  // el segundo dígito de más entraba tan liso como el primero.
+  const techoRatio = kmVigente >= PISO_RATIO_DIGITO ? kmVigente * RATIO_DIGITO_DE_MAS - 1 : Infinity;
+  const techo = Math.min(techoRitmo, techoRatio);
 
   // ── Candidatos ─────────────────────────────────────────────────────────────────────────
   const bruto: CandidatoOdometro[] = [];
@@ -120,7 +156,7 @@ export function elegirOdometro(e: {
   const kmIAEnBanda = enBanda.some((c) => c.valor === kmIA);
 
   // (3) Lo que la IA eligió encaja con la realidad de la unidad → no se toca nada.
-  if (kmIAEnBanda) return { km: kmIA, kmIA, origen: "ia", autoOk: true, motivo: null, candidatos: bruto };
+  if (kmIAEnBanda) return { km: kmIA, kmIA, origen: "ia", autoOk: true, motivo: null, codigo: null, candidatos: bruto };
 
   // (4) La IA eligió algo imposible. ¿Hay OTRO número del tablero que sí encaje?
   //     Solo los que el modelo designó explícitamente (kilometraje/trip) pueden ganar: un
@@ -129,10 +165,24 @@ export function elegirOdometro(e: {
   const elegibles = designados.length ? designados : [];
 
   if (elegibles.length === 0) {
+    // Cuando el número tiene MÁS CIFRAS que el odómetro de la unidad, el defecto tiene nombre y
+    // arreglo propio: sobra un dígito. Decir solo "imposible para esta unidad" obliga a deducir
+    // qué pasó mirando dos números grandes; decir "leyó 6 dígitos y esta unidad tiene 5" es una
+    // instrucción. Lo que NO se hace es adivinar cuál sobra (ver la regla 5 de la cabecera).
+    const dIA = digitosDe(kmIA), dVig = digitosDe(kmVigente);
+    if (dIA > dVig) {
+      return {
+        km: kmIA, kmIA, origen: "ia", autoOk: false, codigo: "digito_de_mas", candidatos: bruto,
+        motivo:
+          `la IA devolvió ${fmt(kmIA)}: ${dIA} dígitos, y el odómetro de esta unidad tiene ${dVig} ` +
+          `(vigente ${fmt(kmVigente)}). Sobra un dígito — el número está entre ${fmt(piso)} y ` +
+          `${Number.isFinite(techo) ? fmt(techo) : "el que muestre el tablero"}: míralo en la foto y escríbelo`,
+      };
+    }
     const detalle = enBanda.length
       ? `la IA devolvió ${fmt(kmIA)}, imposible para esta unidad (vigente ${fmt(kmVigente)}), y ningún número leído del tablero encaja`
       : `la IA devolvió ${fmt(kmIA)}, imposible para esta unidad (vigente ${fmt(kmVigente)})`;
-    return { km: kmIA, kmIA, origen: "ia", autoOk: false, motivo: detalle, candidatos: bruto };
+    return { km: kmIA, kmIA, origen: "ia", autoOk: false, motivo: detalle, codigo: "fuera_de_banda", candidatos: bruto };
   }
 
   // Desempate: fuera los que se leyeron con decimales (un total no los tiene), y si aún
@@ -147,7 +197,7 @@ export function elegirOdometro(e: {
   // recorrido, y usarla aquí descartaría avances reales como si fueran ecos.
   if (Math.abs(ganador.valor - kmVigente) <= 2) {
     return {
-      km: kmIA, kmIA, origen: "ia", autoOk: false,
+      km: kmIA, kmIA, origen: "ia", autoOk: false, codigo: "eco",
       motivo: `la IA devolvió ${fmt(kmIA)} y el único número compatible (${fmt(ganador.valor)}) coincide con el km vigente — puede ser un eco, no una lectura`,
       candidatos: bruto,
     };
@@ -158,6 +208,7 @@ export function elegirOdometro(e: {
     kmIA,
     origen: "corregido",
     autoOk: true,
+    codigo: "parcial",
     motivo: `la IA devolvió ${fmt(kmIA)} (${ganador.fuente === "trip" ? "el parcial/trip" : "un valor imposible"}); el sistema registró ${fmt(ganador.valor)}, el único número del tablero coherente con el vigente ${fmt(kmVigente)}`,
     candidatos: bruto,
   };

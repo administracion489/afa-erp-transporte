@@ -25,9 +25,14 @@ export type ContextoPrompt = {
    * Se pasa la FORMA (nº de dígitos), nunca el km vigente exacto: un número exacto en el
    * prompt es un número que el modelo puede copiar cuando no logra leer la foto, y un eco así
    * es indistinguible de una lectura buena. Los dígitos bastan para no confundir un parcial
-   * de 4 cifras con un total de 6, que es el error real que se quiere evitar.
+   * de 4 cifras con un total de 6, y para que un dígito de más salte a la vista, que son los
+   * dos errores reales que se quieren evitar.
+   *
+   * `guia` es opcional a propósito: es texto que el operador teclea unidad por unidad, mientras
+   * que los dígitos salen siempre de `kilometraje_actual`. Una unidad puede traer la forma sin
+   * la guía — antes esa fila ni se cargaba, y el modelo leía ese tablero sin ninguna referencia.
    */
-  guiasOdometro?: { placa: string; guia: string; digitos: number | null }[];
+  guiasOdometro?: { placa: string; guia: string | null; digitos: number | null }[];
   leccionesOdometro?: string | null; // correcciones humanas previas de lectura de odómetro (para no repetir errores)
   leccionesCombustible?: string | null; // correcciones humanas previas de lectura de vouchers de grifo (grifo/cantidad/precio/monto)
 };
@@ -478,18 +483,26 @@ Responde únicamente el JSON.`;
 // Guías del operador para leer vouchers/odómetros (definidas en Radar IA > Configuración).
 // La de vouchers solo aplica a "combustible"; la de odómetro aplica a "combustible" Y a
 // "odometro" (una unidad puede reportar SOLO el kilometraje, sin ninguna recarga).
-/** Guías del operador por unidad: dónde mirar el odómetro en ESE tablero. */
+/**
+ * Cómo se lee el odómetro de cada unidad: cuántos dígitos tiene (dato del ERP, siempre que la
+ * unidad tenga kilometraje) y, si alguien la escribió, la guía del operador para ESE tablero.
+ * Entra la unidad que tenga CUALQUIERA de las dos: exigir la guía —texto que hay que teclear a
+ * mano— dejaba fuera a casi toda la flota y con ella la forma del número, que es lo que hace
+ * evidente un dígito de más.
+ */
 function bloqueGuiasOdometro(ctx: ContextoPrompt): string | null {
-  const guias = (ctx.guiasOdometro ?? []).filter((g) => g.guia?.trim());
+  const guias = (ctx.guiasOdometro ?? []).filter((g) => g.placa?.trim() && (g.guia?.trim() || g.digitos));
   if (!guias.length) return null;
   return (
-    `Dónde está la lectura del odómetro en el tablero de cada unidad (cada vehículo es distinto; usa la que corresponda según la placa que identifiques en la imagen o el texto). Si la placa que identificas NO aparece en esta lista, IGNORA todas estas guías: son de otras unidades y describen tableros distintos.\n` +
+    `Cómo se lee el odómetro de cada unidad (cada vehículo es distinto; usa la línea que corresponda a la placa que identifiques en la imagen o el texto). Si la placa que identificas NO aparece en esta lista, IGNORA todas estas líneas: son de otras unidades y describen tableros distintos.\n` +
+    `CUENTA LAS CIFRAS del kilometraje antes de responder: si te salen más dígitos de los que dice la línea de esa placa, te sobra un dígito y lo estás leyendo mal — vuelve a mirar la foto cifra por cifra. Un dígito de más es el error más frecuente en esta flota.\n` +
     guias
       .map((g) => {
         // La forma del número es la señal que desambigua parcial vs total sin dar una
         // cifra copiable: un trip de 4 dígitos no puede ser un total de 6.
-        const forma = g.digitos ? ` (en esta unidad el odómetro TOTAL es un número de ${g.digitos} dígitos)` : "";
-        return `- ${g.placa}${forma}: ${g.guia.trim()}`;
+        const forma = g.digitos ? `el odómetro TOTAL es un número de ${g.digitos} dígitos` : "";
+        const guia = g.guia?.trim() ?? "";
+        return `- ${g.placa}: ${[forma, guia].filter(Boolean).join(" · ")}`;
       })
       .join("\n")
   );
@@ -504,7 +517,7 @@ function lineaGuiasCombustible(ctx: ContextoPrompt): string {
     );
   }
   const guiasOdo = bloqueGuiasOdometro(ctx);
-  if (guiasOdo) bloques.push(`Si lo que ves resulta ser de categoría "combustible" u "odometro", ${guiasOdo}`);
+  if (guiasOdo) bloques.push(`Si lo que ves resulta ser de categoría "combustible" u "odometro":\n${guiasOdo}`);
   return bloques.length ? `\n\n${bloques.join("\n\n")}` : "";
 }
 
