@@ -50,6 +50,8 @@ with huella(orden, modulo, script, objeto, tipo, para_que) as (values
   (3, 'Finanzas · detracciones (07)',  'finanzas-07-detracciones-catalogo.sql',       'cat_detraccion.base_legal',         'columna', 'Catálogo 54 completo y editable. OJO: también corrige los códigos 026/027, que la fase 00 sembró invertidos.'),
   (3, 'Finanzas · caja chica todos (08)','finanzas-08-caja-chica-todo-el-personal.sql','caja_chica_fondos.responsable_tipo','columna', 'Caja chica también para oficina, no solo conductores.'),
   (3, 'Costeo · planilla y presupuesto','costeo-01-planilla-y-presupuesto.sql',        'servicio_costo_estimado',           'tabla',   'Presupuesto por servicio y costo empresa del conductor.'),
+  (3, 'Costeo · identidad del tipo',   'costos-01-identidad-tipo-vehiculo.sql',       'uq_parametros_costos_tipo',         'índice',  'Que `parametros_costos.tipo_vehiculo` identifique a UNA fila. Sin esto, dos tipos con la misma clave se editan a la vez y se leen al azar. La pantalla protege igual sin la migración, comprobándolo en cada guardado.'),
+  (3, 'Puente placa → tipo de costeo', 'vehiculos-tipo-costeo.sql',                   'vehiculos.tipo_vehiculo_costeo',    'columna', 'Vincular cada unidad real con su ficha de costos. Sin esto, una cotización hecha con esa unidad no entra como referencia en /tarifario.'),
   (3, 'Contabilidad · asientos',       'contabilidad-04-plan-asientos.sql',           'asiento',                           'tabla',   'Plan de cuentas y asientos contables.'),
   (3, 'Mantenimiento y odómetro',      'mantenimiento-preventivo.sql',                'lecturas_odometro',                 'tabla',   'Planes del fabricante, órdenes de trabajo y kilometraje.'),
   (3, 'Odómetro de terceros',          'odometro-terceros.sql',                       'lecturas_odometro.vehiculo_tercero_id','columna','Leer el tablero también de las unidades del proveedor.'),
@@ -81,6 +83,13 @@ estado as (
         select 1 from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
          where n.nspname = 'public' and p.proname = h.objeto)
+      -- Un índice no está en information_schema: se pregunta por su nombre en pg_indexes.
+      -- Hace falta porque hay migraciones cuyo único artefacto es un índice (una RESTRICCIÓN,
+      -- no una tabla nueva), y sin esta rama caían en el `else false` de abajo y salían
+      -- "❌ FALTA" para siempre, aunque se hubieran corrido.
+      when 'índice' then exists (
+        select 1 from pg_indexes
+         where schemaname = 'public' and indexname = h.objeto)
       else false
     end as instalado
   from huella h

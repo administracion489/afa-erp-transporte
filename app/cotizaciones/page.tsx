@@ -6,6 +6,7 @@ import { construirPuntos, puntosDesdeTexto, puntosConCoords, firmaRutaFicha, enc
 import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
 import { fmtCoord, urlMapsPunto, parsearParCoordenadas, parsearCoordenada } from "@/lib/coordenadas";
 import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS, driveImg, buildVehsHtml } from "@/lib/pdf-chrome";
+import { componentesCostoKm } from "@/lib/costos/costo-km-parametro";
 
 type FechaMultidia={dia:number;fecha:string;hora_ida:string;hora_fin:string;tipo_noche:"pernocte"|"cochera"|"";destino_nombre:string;destino_lat:string;destino_lng:string;};
 type ParamCosto={tipo_vehiculo:string;nombre:string;capacidad:number;activo:boolean;icono:string|null;grupo_vehiculo:string|null;euronorm:string|null;usa_urea:boolean;consumo_urea_pct:number|null;tipo_combustible_1:string;rendimiento_1:number;pct_uso_1:number;tipo_combustible_2:string|null;rendimiento_2:number|null;pct_uso_2:number|null;n_neumaticos:number;costo_neumatico:number;vida_neumatico_km:number;mantenimiento_km:number;valor_compra:number;residual_pct:number;vida_util_anios:number;km_anio:number;seguro_anual:number;soat_anual:number;revision_semestral:number;permisos_anual:number;otros_fijos_mensual:number;conductor_dia:number;};
@@ -51,10 +52,11 @@ function Campo({label,span,req,hint,children}:{label:string;span?:number;req?:bo
 }
 
 function calcCostoVeh(p:ParamCosto,pr:Record<string,number>,km:number,dias:number,peajes:number,pernocte:number,viaticos:number){
-  const pc1=pr[p.tipo_combustible_1]||0;
-  const combKm=(pc1/p.rendimiento_1)*p.pct_uso_1+(p.tipo_combustible_2&&p.rendimiento_2&&p.pct_uso_2?((pr[p.tipo_combustible_2]||0)/p.rendimiento_2)*p.pct_uso_2:0);
-  const ureaRate=p.usa_urea&&p.tipo_combustible_1==="Diésel"?(1/p.rendimiento_1)*3.785*(p.consumo_urea_pct||0.04)*(pr["UREA"]||0):0;
-  const sub=((combKm+ureaRate)*km)+((p.n_neumaticos*p.costo_neumatico)/p.vida_neumatico_km)*km+p.mantenimiento_km*km+((p.valor_compra*(1-p.residual_pct))/(p.vida_util_anios*p.km_anio))*km+((p.seguro_anual+p.soat_anual+p.revision_semestral*2+p.permisos_anual+p.otros_fijos_mensual*12)/p.km_anio)*km;
+  // Los seis términos del S/km salen de lib/costos/costo-km-parametro.ts, que es donde vive
+  // ahora la fórmula. Lo que NO se toca es el AGRUPAMIENTO de esta suma: en coma flotante,
+  // reordenar los mismos términos puede mover el último decimal, y de aquí sale un precio.
+  const c=componentesCostoKm(p,pr);
+  const sub=((c.combustible+c.urea)*km)+c.neumaticos*km+c.mantenimiento*km+c.depreciacion*km+c.fijos*km;
   const total=(sub+sub*RESERVA)+p.conductor_dia*dias+peajes;
   const base=total+total*OVERHEAD+pernocte+viaticos;
   const pF=(m:number)=>base/(1-m);const fF=(m:number)=>pF(m)*(1+IGV);
