@@ -18,7 +18,15 @@
 //     columna de al lado. La prueba fija las dos mitades: en monomodal no cambia nada (pct_uso_1
 //     vale 1.0, que es toda la flota de hoy) y en bimodal el viejo y el nuevo DIFIEREN.
 //
-// 3 · QUE LA PUERTA DE ESCRITURA SE NIEGA ANTES DE ESCRIBIR. `escribirParametro` es el único
+// 3 · QUE EL RENDIMIENTO MEDIDO NO PISA EL PARAMETRO CUANDO NO PUEDE. `decidirRendimiento`
+//     es lo que decide si la mediana de una placa sustituye al numero tecleado de su tipo en
+//     el presupuesto de un servicio. Antes la unica condicion era la familia del combustible,
+//     asi que UN SOLO TRAMO medido ya pisaba el parametro, un tipo BIMODAL se costeaba a la
+//     mitad, y el renglon firmaba "km/gal" sobre un numero en km/m3. La seccion 6 fija los
+//     tres arreglos Y el lado que no se puede aflojar: una medicion buena tiene que seguir
+//     mandando, o la funcionalidad quedaria apagada sin que nadie se entere.
+//
+// 4 · QUE LA PUERTA DE ESCRITURA SE NIEGA ANTES DE ESCRIBIR. `escribirParametro` es el único
 //     código nuevo que escribe, y lo que protege es el caso en que `tipo_vehiculo` no identifica
 //     a una sola fila. Sin esta sección se estaría reescribiendo `guardarParam` encima de un
 //     guard que podría fallar dejando el bug intacto con más código encima.
@@ -29,6 +37,10 @@ const CKM = requerir("../lib/costos/costo-km-parametro") as typeof import("../li
 const PAR = requerir("../lib/costos/parametros") as typeof import("../lib/costos/parametros");
 const { componentesCostoKm, costoKmDeParametro } = CKM;
 const { escribirParametro } = PAR;
+const APL = requerir("../lib/costos/rendimiento-aplica") as typeof import("../lib/costos/rendimiento-aplica");
+const REND = requerir("../lib/rendimiento") as typeof import("../lib/rendimiento");
+const { decidirRendimiento } = APL;
+const { MIN_TRAMOS_CONFIABLE } = REND;
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -274,6 +286,117 @@ const ESCRITURA = {
   const { sb, log } = sbFalso({ filasClave: [{ id: 7 }], filasUpdate: [{ id: 7 }] });
   await escribirParametro(sb, { ...ESCRITURA, tipo_vehiculo: "  bus_60 gnv  " });
   chk("la clave no se normaliza al escribir", log.acta?.tipo_vehiculo === "  bus_60 gnv  ");
+}
+
+// ── 6 · CUANDO EL RENDIMIENTO MEDIDO PUEDE PISAR AL TECLEADO ──────────────────
+console.log("\n6 · decidirRendimiento: la medicion manda solo cuando puede\n");
+
+const DIESEL = { rendimiento_1: 19, tipo_combustible_1: "Diésel", tipo_combustible_2: null, pct_uso_2: null };
+const GNV    = { rendimiento_1: 3.2, tipo_combustible_1: "GNV",    tipo_combustible_2: null, pct_uso_2: null };
+const BIMODAL= { rendimiento_1: 19, tipo_combustible_1: "Diésel", tipo_combustible_2: "GLP", pct_uso_2: 0.3 };
+
+const midiendo = (o: any = {}) => ({
+  kmGal: 28.5, tramos: 8, familia: "diesel", label: "km/gal", confiable: true, ...o,
+});
+
+// 6a · EL CASO REAL. CWZ-371: 10 cargas, 8 tramos medidos, mediana 28.5, contra un parametro
+//      de 19.00 en el tipo SPRINTER_17_DIESEL.
+{
+  const d = decidirRendimiento(DIESEL, midiendo());
+  chk("CWZ-371: la medicion buena SI manda", d.aplica && d.valor === 28.5, `valor ${d.valor}`);
+  chk("CWZ-371: el renglon nombra los tramos", /28\.5 km\/gal medido en 8 tramos/.test(d.base), d.base);
+  chk("CWZ-371: sin motivo cuando aplica", d.motivo === null);
+}
+
+// 6b · EL BUG 1. Un solo tramo medido pisaba el parametro del tipo en CADA servicio.
+{
+  const uno = decidirRendimiento(DIESEL, midiendo({ tramos: 1, confiable: false, kmGal: 41 }));
+  chk("1 tramo NO manda", !uno.aplica && uno.motivo === "pocos_tramos" && uno.valor === 19);
+  chk("1 tramo: el renglon dice cuantos hay y cuantos faltan",
+      uno.base.includes("1 tramo(s)") && uno.base.includes(String(MIN_TRAMOS_CONFIABLE)), uno.base);
+
+  // La frontera exacta de MIN_TRAMOS_CONFIABLE, por los dos lados.
+  const cuatro = decidirRendimiento(DIESEL, midiendo({ tramos: 4, confiable: false }));
+  const cinco  = decidirRendimiento(DIESEL, midiendo({ tramos: 5, confiable: true }));
+  chk(`${MIN_TRAMOS_CONFIABLE - 1} tramos: no manda`, !cuatro.aplica && cuatro.motivo === "pocos_tramos");
+  chk(`${MIN_TRAMOS_CONFIABLE} tramos: manda`, cinco.aplica && cinco.valor === 28.5);
+}
+
+// 6c · EL BUG 2. El "km/gal" estaba hardcodeado en LAS DOS ramas del renglon.
+{
+  const gnvOk = decidirRendimiento(GNV, midiendo({ familia: "gnv", label: "km/m³", kmGal: 4.1 }));
+  chk("GNV medido: el renglon dice km/m3, no km/gal", gnvOk.aplica && gnvOk.label === "km/m³", gnvOk.base);
+  chk("GNV medido: 'km/gal' no aparece por ningun lado", !gnvOk.base.includes("km/gal"), gnvOk.base);
+
+  const gnvSin = decidirRendimiento(GNV, null);
+  chk("GNV sin medicion: la rama del PARAMETRO tambien dice km/m3",
+      gnvSin.label === "km/m³" && !gnvSin.base.includes("km/gal"), gnvSin.base);
+
+  // Y la familia distinta: una mediana en km/m3 jamas puede sustituir un parametro en km/gal.
+  const cruzado = decidirRendimiento(DIESEL, midiendo({ familia: "gnv", label: "km/m³", kmGal: 4.1 }));
+  chk("GNV medido sobre parametro diesel: no manda", !cruzado.aplica && cruzado.motivo === "familia_distinta");
+  chk("familia distinta: la unidad publicada es la del PARAMETRO", cruzado.label === "km/gal" && cruzado.valor === 19);
+}
+
+// 6d · EL BUG 3. En un tipo bimodal, rendimiento_1 significa "km por galon del combustible 1
+//      SOBRE LOS KM HECHOS CON EL COMBUSTIBLE 1". La mediana medida no sabe de que tanque
+//      salieron los km, asi que sustituirla descuenta pct_uso_1 dos veces.
+{
+  const bi = decidirRendimiento(BIMODAL, midiendo());
+  chk("bimodal: NO manda ni con una medicion perfecta", !bi.aplica && bi.motivo === "tipo_bimodal" && bi.valor === 19);
+  chk("bimodal: el renglon explica el porque", /dos combustibles/.test(bi.base), bi.base);
+
+  // Lo estructural gana sobre lo estadistico: un bimodal no va a poder usar una medicion
+  // NUNCA, y decir eso es mas util que decir que hoy no hay cargas.
+  chk("bimodal sin medicion: sigue siendo tipo_bimodal",
+      decidirRendimiento(BIMODAL, null).motivo === "tipo_bimodal");
+
+  // Un segundo combustible declarado pero sin uso NO es bimodal: la formula no lo suma.
+  chk("pct_uso_2 = 0 no es bimodal",
+      decidirRendimiento({ ...BIMODAL, pct_uso_2: 0 }, midiendo()).aplica);
+  chk("tipo_combustible_2 null no es bimodal",
+      decidirRendimiento({ ...BIMODAL, tipo_combustible_2: null }, midiendo()).aplica);
+}
+
+// 6e · SIN MEDICION.
+{
+  const d = decidirRendimiento(DIESEL, null);
+  chk("sin medicion: se usa el tecleado", !d.aplica && d.motivo === "sin_medicion" && d.valor === 19);
+  chk("sin medicion: el renglon no inventa un porque", d.base === "19 km/gal del parámetro del tipo", d.base);
+}
+
+// 6f · LA INVARIANTE, sobre una rejilla.
+{
+  let malas = 0, sinValor = 0, sinLabel = 0;
+  for (const par of [DIESEL, GNV, BIMODAL, { ...BIMODAL, pct_uso_2: 0 }]) {
+    for (const med of [null, midiendo(), midiendo({ confiable: false, tramos: 2 }),
+                       midiendo({ familia: "gnv", label: "km/m³" }),
+                       midiendo({ familia: "glp", label: "km/gal" })]) {
+      const d = decidirRendimiento(par as any, med);
+      if (d.aplica !== (d.motivo === null)) malas++;
+      if (!Number.isFinite(d.valor)) sinValor++;
+      if (!d.label || !d.base.includes(d.label)) sinLabel++;
+    }
+  }
+  chk("INVARIANTE: aplica === (motivo === null), en las 20 combinaciones", malas === 0, `${malas} fallan`);
+  chk("el valor siempre es un numero finito", sinValor === 0);
+  chk("el renglon siempre lleva la unidad que declara", sinLabel === 0);
+}
+
+// 6g · EL LADO QUE NO SE PUEDE AFLOJAR. Este cambio RESTRINGE cuando se usa lo medido, asi
+//      que el riesgo es apagar la funcionalidad entera sin que nadie lo note: el presupuesto
+//      volveria al parametro tecleado siempre y nadie veria la diferencia hasta cotizar mal.
+{
+  const casos = [
+    ["diesel confiable 8 tramos", DIESEL, midiendo()],
+    ["diesel confiable justo en el minimo", DIESEL, midiendo({ tramos: MIN_TRAMOS_CONFIABLE })],
+    ["diesel confiable con muchos tramos", DIESEL, midiendo({ tramos: 40, kmGal: 27.1 })],
+    ["GNV confiable sobre parametro GNV", GNV, midiendo({ familia: "gnv", label: "km/m³", kmGal: 4.1 })],
+  ] as const;
+  for (const [nombre, par, med] of casos) {
+    const d = decidirRendimiento(par as any, med as any);
+    chk(`sigue mandando: ${nombre}`, d.aplica && d.valor === (med as any).kmGal, d.base);
+  }
 }
 
 console.log(`\n${fallos ? `❌ ${fallos} fallo(s)` : "✅ todo en verde"}\n`);

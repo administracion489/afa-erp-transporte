@@ -28,6 +28,10 @@
 //       son exactos. Es la lista de trabajo que convierte "—" en tramos medibles.
 //   4 · Cuántas filas guardan LITROS en la columna `galones` (el inflado ×3.785).
 //   5 · El diff de `rendimientoMedido`, viejo contra nuevo, con la causa de cada divergencia.
+//   6 · SI ESA MEDIANA LLEGA O NO AL PRESUPUESTO. Tener un número medido no es usarlo:
+//       `decidirRendimiento` exige misma familia, tramos suficientes y un tipo que no sea
+//       bimodal. Esta sección dice, placa por placa, qué rendimiento usaba el presupuesto
+//       ANTES y cuál usa AHORA, y cuánto mueve eso el costo de combustible por km.
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -38,6 +42,7 @@ import { createRequire } from "node:module";
 const requerir = createRequire(import.meta.url);
 const REND = requerir("../lib/rendimiento") as typeof import("../lib/rendimiento");
 const TIPOS = requerir("../lib/combustible-tipos") as typeof import("../lib/combustible-tipos");
+const APL = requerir("../lib/costos/rendimiento-aplica") as typeof import("../lib/costos/rendimiento-aplica");
 
 const REQUERIDOS = ["serieRendimiento", "seriesRendimiento", "normalizarCantidad", "mediana"] as const;
 const faltantes = REQUERIDOS.filter((n) => typeof (REND as any)[n] !== "function");
@@ -94,7 +99,7 @@ const linea = (t: string) => console.log(`\n${t}\n${"─".repeat(t.length)}`);
 const cargas = await traer(
   `combustible?select=id,vehiculo_id,vehiculo_tercero_id,fecha,kilometraje,galones,precio_galon,tipo_combustible,unidad,grifo,conductor&fecha=gte.${DESDE}&order=fecha.asc`
 );
-const propios = await traer("vehiculos?select=id,placa");
+const propios = await traer("vehiculos?select=id,placa,tipo_vehiculo_costeo");
 const terceros = await traer("vehiculos_tercero?select=id,placa");
 
 const placa = new Map<string, string>();
@@ -315,6 +320,98 @@ if (movidas) {
   console.log(`      arreglo, pero el margen de los presupuestos nuevos se mueve con ella.`);
 } else {
   console.log(`\n   Ninguna placa se mueve: el paso 6 es seguro tal cual.`);
+}
+
+// ── 6 · ¿ESA MEDIANA LLEGA AL PRESUPUESTO? — LA OTRA MITAD DE LA CONDICIÓN ───
+//
+// La sección 5 compara CÓMO SE CALCULA la mediana. Ésta compara SI SE USA. Son dos
+// preguntas distintas y las dos mueven el presupuesto: `decidirRendimiento` exige ahora
+// misma familia (como antes), tramos suficientes para fiarse (nuevo) y un tipo que no sea
+// bimodal (nuevo). Una placa cuya mediana no cambió puede aun así cambiar de presupuesto
+// porque antes esa mediana se usaba y ahora no.
+
+linea("6 · ¿la mediana llega al presupuesto? · ANTES vs AHORA");
+
+const parametros = await traer(
+  "parametros_costos?select=tipo_vehiculo,nombre,rendimiento_1,tipo_combustible_1,tipo_combustible_2,pct_uso_2,activo"
+);
+const porTipo = new Map<string, any>(parametros.map((p: any) => [String(p.tipo_vehiculo), p]));
+
+let cambian = 0, siguen = 0, sinTipo = 0, sinParam = 0;
+
+for (const v of propios) {
+  const suyas = cargas.filter((c) => c.vehiculo_id === v.id);
+  if (!v.tipo_vehiculo_costeo) { sinTipo++; continue; }
+  const par = porTipo.get(String(v.tipo_vehiculo_costeo));
+  if (!par) { sinParam++; console.log(`   ${String(v.placa).padEnd(10)} apunta a "${v.tipo_vehiculo_costeo}", que no existe en parametros_costos`); continue; }
+
+  // La misma ventana que usa rendimientoMedido: últimas 9 cargas por fecha, una sola familia.
+  const fams = new Map<string, number>();
+  for (const c of suyas) {
+    const f = TIPOS.familiaCombustible(c.tipo_combustible);
+    if (TECHO_FAMILIA[f] !== null) fams.set(f, (fams.get(f) ?? 0) + 1);
+  }
+  const fam = [...fams].sort((a, b) => b[1] - a[1])[0]?.[0];
+  let med: any = null;
+  if (fam && suyas.length >= 2) {
+    const s2 = serieRendimiento(
+      suyas
+        .filter((c) => TIPOS.familiaCombustible(c.tipo_combustible) === fam)
+        .sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)))
+        .slice(0, 9)
+        .map((c) => ({
+          id: c.id, unidad: `p${v.id}`, fecha: String(c.fecha).slice(0, 10),
+          kilometraje: c.kilometraje, cantidad: c.galones, unidadCantidad: c.unidad, tipo: c.tipo_combustible,
+        }))
+    );
+    if (s2.resumen.mediana !== null) {
+      med = {
+        kmGal: Math.round(s2.resumen.mediana * 100) / 100,
+        tramos: s2.resumen.n,
+        familia: s2.resumen.familia,
+        label: s2.resumen.label,
+        confiable: s2.resumen.confiable,
+      };
+    }
+  }
+
+  // La regla VIEJA: bastaba con que la familia coincidiera.
+  const aplicabaAntes = !!med && med.familia === TIPOS.familiaCombustible(par.tipo_combustible_1);
+  const antes = aplicabaAntes ? med.kmGal : Number(par.rendimiento_1);
+
+  const d = APL.decidirRendimiento(par, med);
+
+  if (d.valor === antes) { siguen++; continue; }
+  cambian++;
+
+  // Qué significa en plata: el costo de combustible por km es precio ÷ rendimiento, así que
+  // el cambio del divisor se traduce directo.
+  const pctCosto = antes > 0 && d.valor > 0 ? ((antes / d.valor) - 1) * 100 : NaN;
+
+  console.log(
+    `   ${String(v.placa).padEnd(10)} ${String(par.nombre ?? par.tipo_vehiculo).slice(0, 26).padEnd(28)}` +
+    ` ${n1(antes).padStart(7)} → ${n1(d.valor).padStart(7)} ${d.label}`
+  );
+  console.log(
+    `      motivo: ${d.motivo ?? "ahora SÍ aplica lo medido"}` +
+    (Number.isFinite(pctCosto) ? `   ·   costo de combustible/km ${pctCosto >= 0 ? "+" : ""}${n1(pctCosto)} %` : "")
+  );
+  console.log(`      ${d.base}`);
+}
+
+console.log(
+  `\n   ${siguen} placa(s) sin cambio · ${cambian} con presupuesto distinto` +
+  (sinTipo ? ` · ${sinTipo} sin categoría de costeo asignada` : "") +
+  (sinParam ? ` · ${sinParam} apuntando a un tipo inexistente` : "")
+);
+if (cambian) {
+  console.log(`\n   ⚠  CONDICIÓN DE MERGE: abrir cada placa de arriba y confirmar que el número`);
+  console.log(`      nuevo es el que debe costear sus servicios. Un motivo "pocos_tramos" se`);
+  console.log(`      cierra registrando cargas con odómetro; "tipo_bimodal" no se cierra nunca.`);
+  console.log(`      Un + en el costo por km es el lado seguro (se costea de más); un − hay que`);
+  console.log(`      mirarlo dos veces, porque un presupuesto corto se descubre tarde.`);
+} else {
+  console.log(`\n   Ninguna placa cambia de presupuesto: el cambio es seguro tal cual.`);
 }
 
 console.log("");
