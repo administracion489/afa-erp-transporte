@@ -1,6 +1,8 @@
 "use client";
 import React, { useEffect, useState, useMemo } from "react";
 import { supabase } from "@/lib/supabase";
+import { componentesCostoKm, costoKmDeParametro } from "@/lib/costos/costo-km-parametro";
+import { escribirParametro } from "@/lib/costos/parametros";
 
 type Combustible = {
   id:number; tipo:string; unidad:string; precio:number;
@@ -62,17 +64,9 @@ const fmtS  = (n:number) => `S/ ${n.toLocaleString("es-PE",{minimumFractionDigit
 const fmtN  = (n:number,d=2) => n.toLocaleString("es-PE",{minimumFractionDigits:d,maximumFractionDigits:d});
 const fmtDt = (s:string) => new Date(s).toLocaleString("es-PE",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});
 
-function calcCostoKm(p:ParamCosto,pr:Record<string,number>):number {
-  const pc1=pr[p.tipo_combustible_1]||0;
-  const combKm=(pc1/p.rendimiento_1)*p.pct_uso_1
-    +(p.tipo_combustible_2&&p.rendimiento_2&&p.pct_uso_2?((pr[p.tipo_combustible_2]||0)/p.rendimiento_2)*p.pct_uso_2:0);
-  const neumKm=(p.n_neumaticos*p.costo_neumatico)/p.vida_neumatico_km;
-  const depKm=(p.valor_compra*(1-p.residual_pct))/(p.vida_util_anios*p.km_anio);
-  const fijKm=(p.seguro_anual+p.soat_anual+p.revision_semestral*2+p.permisos_anual+p.otros_fijos_mensual*12)/p.km_anio;
-  const ureaKm=p.usa_urea&&p.tipo_combustible_1==="Diésel"
-    ?(1/p.rendimiento_1)*3.785*(p.consumo_urea_pct||0.04)*(pr["UREA"]||0):0;
-  return combKm+neumKm+p.mantenimiento_km+depKm+fijKm+ureaKm;
-}
+// El costo por kilómetro vive en lib/costos/costo-km-parametro.ts, no aquí: la misma fórmula
+// estaba escrita tres veces (esta, la de la tabla "Impacto" doce líneas más abajo, y
+// `calcCostoVeh` de /cotizaciones) y la de la tabla estaba mal.
 
 function CeldaEditable({valor,campo,vehId,onGuardado,unidad,step}:{
   valor:number;campo:keyof ParamCosto;vehId:string;
@@ -295,6 +289,9 @@ export default function AjustesCostosPage() {
   const [userEmail,setUserEmail]     =useState("Sistema");
   const [motivo,setMotivo]           =useState("");
   const [alerta,setAlerta]           =useState("");
+  // El fallo NO caduca solo. El verde se va a los 4 s porque es una confirmación; un guardado
+  // que no se hizo hay que leerlo y atenderlo, así que se queda hasta que lo cierres.
+  const [fallo,setFallo]             =useState("");
   const [mostrarForm,setMostrarForm] =useState(false);
 
   useEffect(()=>{supabase.auth.getUser().then(({data})=>{if(data?.user)setUserEmail(data.user.email||"Usuario");});},[]);
@@ -324,10 +321,17 @@ export default function AjustesCostosPage() {
   };
 
   const guardarParam=async(vehId:string,campo:string,vN:number,vA:number)=>{
-    setGuardando(true);
-    await supabase.from("parametros_costos").update({[campo]:vN,updated_by:userEmail}).eq("tipo_vehiculo",vehId);
-    await supabase.from("historial_costos").insert({tabla_origen:"parametros_costos",tipo_vehiculo:vehId,campo_modificado:campo,valor_anterior:vA,valor_nuevo:vN,motivo:motivo||"Actualización manual",cambiado_por:userEmail});
-    mostrarAlerta(`✅ ${vehId} · ${CAMPOS_EDIT.find(c=>c.key===campo)?.label||campo}: ${fmtN(vA)} → ${fmtN(vN)}`);
+    setGuardando(true);setFallo("");
+    const r=await escribirParametro(supabase,{
+      tipo_vehiculo:vehId,
+      patch:{[campo]:vN},
+      acta:{campo_modificado:campo,valor_anterior:vA,valor_nuevo:vN,motivo:motivo||"Actualización manual"},
+      por:userEmail,
+    });
+    // El toast verde ya NO es incondicional. Antes decía "✅ 19.00 → 28.50" aunque el update
+    // no hubiera tocado ninguna fila, y al recargar volvía el 19.00.
+    if(r.ok) mostrarAlerta(`✅ ${vehId} · ${CAMPOS_EDIT.find(c=>c.key===campo)?.label||campo}: ${fmtN(vA)} → ${fmtN(vN)}${r.acta?"":" (sin registrar en el historial)"}`);
+    if(r.error) setFallo(r.error);
     cargar();setGuardando(false);
   };
 
@@ -335,9 +339,15 @@ export default function AjustesCostosPage() {
     setGuardando(true);
     const veh=params.find(p=>p.tipo_vehiculo===vehId);
     const usaUrea=EURO_UREA.includes(veh?.euronorm||"")&&nuevoComb==="Diésel";
-    await supabase.from("parametros_costos").update({tipo_combustible_1:nuevoComb,usa_urea:usaUrea,updated_by:userEmail}).eq("tipo_vehiculo",vehId);
-    await supabase.from("historial_costos").insert({tabla_origen:"parametros_costos",tipo_vehiculo:vehId,campo_modificado:"tipo_combustible_1",valor_anterior:null,valor_nuevo:null,motivo:`Combustible → ${nuevoComb}${motivo?` | ${motivo}`:""}`,cambiado_por:userEmail});
-    mostrarAlerta(`✅ ${vehId} → ${nuevoComb}${usaUrea?" + UREA activada":""}`);
+    setFallo("");
+    const r=await escribirParametro(supabase,{
+      tipo_vehiculo:vehId,
+      patch:{tipo_combustible_1:nuevoComb,usa_urea:usaUrea},
+      acta:{campo_modificado:"tipo_combustible_1",valor_anterior:null,valor_nuevo:null,motivo:`Combustible → ${nuevoComb}${motivo?` | ${motivo}`:""}`},
+      por:userEmail,
+    });
+    if(r.ok) mostrarAlerta(`✅ ${vehId} → ${nuevoComb}${usaUrea?" + UREA activada":""}${r.acta?"":" (sin registrar en el historial)"}`);
+    if(r.error) setFallo(r.error);
     cargar();setGuardando(false);
   };
 
@@ -372,6 +382,17 @@ export default function AjustesCostosPage() {
       </div>
 
       {alerta&&<div className="rounded-xl px-5 py-3 bg-green-50 border border-green-300 text-green-800 font-bold text-sm">{alerta}</div>}
+
+      {fallo&&(
+        <div className="rounded-xl px-5 py-3 bg-red-50 border-2 border-red-300 text-red-800 text-sm flex items-start gap-3">
+          <span className="text-lg leading-none mt-0.5">⚠️</span>
+          <div className="flex-1">
+            <p className="font-black">No se guardó</p>
+            <p className="mt-0.5">{fallo}</p>
+          </div>
+          <button onClick={()=>setFallo("")} className="text-red-400 hover:text-red-600 font-bold text-lg leading-none">✕</button>
+        </div>
+      )}
 
       <div className="bg-white rounded-2xl border shadow-sm px-5 py-4 flex items-center gap-4">
         <div className="flex-shrink-0">
@@ -419,10 +440,13 @@ export default function AjustesCostosPage() {
                 </thead>
                 <tbody className="divide-y divide-gray-50">
                   {params.map(p=>{
-                    const pc=preciosMap[p.tipo_combustible_1]||0;
-                    const combKm=pc/p.rendimiento_1;
-                    const totalKm=calcCostoKm(p,preciosMap);
-                    const ureaKm=p.usa_urea&&p.tipo_combustible_1==="Diésel"?(1/p.rendimiento_1)*3.785*(p.consumo_urea_pct||0.04)*(preciosMap["UREA"]||0):0;
+                    // Antes esta fila calculaba su propio `pc/rendimiento_1`, SIN `pct_uso_1` y sin
+                    // el segundo combustible: en una unidad bimodal publicaba un S/km de combustible
+                    // que no era el que usaba el S/km total de la columna de al lado.
+                    const comp=componentesCostoKm(p,preciosMap);
+                    const combKm=comp.combustible;
+                    const totalKm=costoKmDeParametro(p,preciosMap);
+                    const ureaKm=comp.urea;
                     return(
                       <tr key={p.id} className="hover:bg-gray-50">
                         <td className="px-3 py-2.5 font-bold text-gray-800 text-xs">{p.icono||"🚌"} {p.nombre}</td>
@@ -489,7 +513,7 @@ export default function AjustesCostosPage() {
                     </thead>
                     <tbody className="divide-y divide-gray-50">
                       {vehs.map(p=>{
-                        const costoKm=calcCostoKm(p,preciosMap);
+                        const costoKm=costoKmDeParametro(p,preciosMap);
                         return(
                           <tr key={p.id} className="hover:bg-gray-50">
                             <td className="px-4 py-3 sticky left-0 bg-white z-10 border-r border-gray-100">
