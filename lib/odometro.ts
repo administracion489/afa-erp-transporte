@@ -123,8 +123,21 @@ function targetFlota(flota: Flota | undefined): { tabla: "vehiculos" | "vehiculo
 /** Decide el estado de una lectura nueva frente al km vigente. Función pura. */
 /** Tolerancia de horas por delante para no marcar "futuro" por desfase de reloj. */
 const HORAS_FUTURO_TOLERANCIA = 6;
-/** Factor de salto de orden de magnitud: ×8 sobre el vigente = casi seguro un dígito de más. */
-const RATIO_DIGITO_DE_MAS = 8;
+/**
+ * Factor de salto de orden de magnitud: ×8 sobre el vigente = casi seguro un dígito de más.
+ *
+ * Se EXPORTA porque hay dos módulos que juzgan el mismo número y tienen que decir lo mismo:
+ * el que ESCRIBE (evaluarLectura, aquí) y el que LEE (elegirOdometro, lib/odometro-seleccion.ts,
+ * que decide si el número de la IA se pre-llena en la pantalla). Con el ratio en un solo lado,
+ * la pantalla ofrecía como bueno un número que esta función marcaba "Salto ×10: posible dígito
+ * de más" tres líneas después.
+ */
+export const RATIO_DIGITO_DE_MAS = 8;
+/**
+ * Piso desde el cual el ratio significa algo. En odómetros bajos (unidad nueva) un ×8 legítimo
+ * es posible, y el caso real no se pierde: un dígito de más SIEMPRE deja el vigente alto.
+ */
+export const PISO_RATIO_DIGITO = 5000;
 
 export function evaluarLectura(opts: {
   kmVigente: number | null | undefined;
@@ -225,7 +238,7 @@ export function evaluarLectura(opts: {
   //    de km/día no lo captura por diseño; el ratio sí. Solo con el vigente ya ALTO: en
   //    odómetros bajos (unidad nueva) un ×8 legítimo es posible, así que el piso evita
   //    falsos positivos sin perder el caso real (un dígito de más siempre deja el vigente alto).
-  if (kmBase >= 5000 && kmNuevo >= kmBase * RATIO_DIGITO_DE_MAS) {
+  if (kmBase >= PISO_RATIO_DIGITO && kmNuevo >= kmBase * RATIO_DIGITO_DE_MAS) {
     const veces = Math.round(kmNuevo / kmBase);
     return { estado: "sospechosa", motivo: `Salto ×${veces} (${kmNuevo.toLocaleString("es-PE")}): posible dígito de más` };
   }

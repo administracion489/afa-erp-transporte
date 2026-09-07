@@ -89,6 +89,9 @@ export async function POST(req: NextRequest) {
       trip_km: r.trip_km,
       auto_ok: veredicto.autoOk,
       motivo_seleccion: veredicto.motivo,
+      // La pantalla enruta por CÓDIGO, no olfateando el texto del motivo: "sobra un dígito"
+      // tiene un arreglo distinto de "puede ser un eco" o de "la IA entregó el parcial".
+      codigo_seleccion: veredicto.codigo,
       corregido: veredicto.origen === "corregido",
       confianza: r.confianza,
       calidad_imagen: r.calidad_imagen,
