@@ -604,5 +604,112 @@ const resumir = (cargas: CargaRendimiento[], desde: string, hasta: string) =>
   chk("las dos ventanas miden algo", jul.cargasMedidas > 0 && ago.cargasMedidas > 0, `${jul.cargasMedidas} / ${ago.cargasMedidas}`);
 }
 
+// ── LA UNIDAD BICOMBUSTIBLE ─────────────────────────────────────────────────
+//
+// La CWQ400 es una van BICOMBUSTIBLE: carga GLP casi siempre y gasolina pocas veces (para el
+// aire acondicionado y cuando el motor pide fuerza — subidas, acelerones). Las dos cadenas se
+// miden por separado, así que los km hechos con el OTRO combustible caen igual en el delta del
+// odómetro y NO están en el denominador.
+//
+// La cadena de gasolina es la que se rompe de forma escandalosa: entre dos cargas de gasolina
+// pasan semanas de GLP, así que salen cientos de km/gal → por encima del techo de 40 →
+// `implausible`, que la pantalla titula "Falta registrar una carga" y que en el Radar BLOQUEA el
+// voucher. Es un rojo falso que manda a buscar un repostaje que nunca faltó.
+const cargaBi = (
+  id: number, fecha: string, km: number, cant: number, tipo: string
+): CargaRendimiento => ({ id, unidad: "CWQ400", fecha, kilometraje: km, cantidad: cant, unidadCantidad: "galones", tipo });
+
+{
+  // 1º ene GLP · 5 ene gasolina (5 gal) · 20 ene GLP … · 15 feb gasolina
+  const cargas = [
+    cargaBi(1, "2026-01-01", 10000, 9.4, "glp"),
+    cargaBi(2, "2026-01-05", 10200,  5.0, "gasolina_regular"),
+    cargaBi(3, "2026-01-20", 10840, 9.4, "glp"),
+    cargaBi(4, "2026-02-15", 12300,  5.0, "gasolina_regular"),
+  ];
+  const series = seriesRendimiento(cargas);
+  const porCarga = tramosPorCarga(series);
+
+  // El tramo de GASOLINA: 2100 km / 5 gal = 420 km/gal. Antes: "implausible".
+  const gasolina = porCarga[4].tramo;
+  chk("el tramo de gasolina de una bicombustible NO dice 'falta registrar una carga'",
+    gasolina.motivo === "familia_cruzada", String(gasolina.motivo));
+  chk("…y conserva el número descartado para no esconderlo",
+    gasolina.crudo != null && gasolina.crudo > 100, String(gasolina.crudo));
+  chk("…y el detalle nombra el otro combustible, no un repostaje ausente",
+    /BICOMBUSTIBLE/i.test(gasolina.detalle) && /no est[áa] en esta cuenta/i.test(gasolina.detalle),
+    gasolina.detalle);
+  // No basta con que el texto EVITE hablar de cargas que faltan: tiene que DESMENTIRLO, porque
+  // esa es la conclusión a la que llega solo quien ve un rendimiento imposible.
+  chk("…y desmiente explícitamente que sea una carga sin registrar",
+    /No es una carga que falte registrar/i.test(gasolina.detalle), gasolina.detalle);
+
+  // El tramo de GLP del 20-ene también está contaminado: la gasolina del 5 cae dentro.
+  const glp = porCarga[3].tramo;
+  chk("el tramo de GLP que envuelve un repostaje de gasolina tampoco se publica",
+    glp.motivo === "familia_cruzada" && glp.rendimiento === null, String(glp.motivo));
+
+  chk("la etiqueta corta existe", etiquetaMotivo("familia_cruzada") === "bicombustible");
+  chk("la invariante se mantiene: rendimiento XOR motivo",
+    [...series.values()].every((s) => s.tramos.every((t) => (t.rendimiento != null) !== (t.motivo != null))));
+}
+
+// EL LADO QUE NO SE PUEDE AFLOJAR (1): la UREA no es un segundo combustible. Un camión diésel
+// que carga AdBlue NO es bicombustible — la urea no mueve el bus — y contarla como cruce
+// borraría el rendimiento de media flota.
+{
+  const cargas = [
+    cargaBi(1, "2026-01-01", 10000, 50, "diesel"),
+    cargaBi(2, "2026-01-10", 10300, 20, "urea"),
+    cargaBi(3, "2026-01-20", 10600, 50, "diesel"),
+  ];
+  const t = tramosPorCarga(seriesRendimiento(cargas))[3].tramo;
+  chk("la urea NO cruza el tramo del diésel", t.motivo === null && t.rendimiento === 12,
+    `${t.motivo}/${t.rendimiento}`);
+}
+
+// EL LADO QUE NO SE PUEDE AFLOJAR (2): una unidad de UN solo combustible mide igual que siempre,
+// y un "falta registrar una carga" REAL sigue saliendo. Silenciarlo sería peor que el falso.
+{
+  const cargas = [
+    cargaBi(1, "2026-01-01", 10000, 9.4, "glp"),
+    cargaBi(2, "2026-01-20", 10840, 9.4, "glp"),
+  ];
+  const t = tramosPorCarga(seriesRendimiento(cargas))[2].tramo;
+  chk("sin segundo combustible, el hueco de registro sigue delatándose",
+    t.motivo === "implausible", String(t.motivo));
+
+  // Y sin marcas, la firma vieja da EXACTAMENTE lo mismo: quien ya filtraba por familia antes
+  // de llamar (lib/costeo-servicio.ts) no cambia de comportamiento.
+  const sinMarcas = serieRendimiento(cargas);
+  const conVacio = serieRendimiento(cargas, []);
+  chk("la firma sin marcas se comporta igual que antes",
+    JSON.stringify(sinMarcas) === JSON.stringify(conVacio));
+}
+
+// El borde del intervalo: el combustible de una carga se quema DESPUÉS de su lectura.
+{
+  const cargas = [
+    cargaBi(1, "2026-01-01", 10000, 10, "glp"),
+    cargaBi(2, "2026-01-10", 10300, 10, "glp"),
+  ];
+  const enElCierre = serieRendimiento(cargas, [
+    { id: 9, fecha: "2026-01-10", kilometraje: 10300, familia: "gasolina" },
+  ]);
+  chk("una carga del otro combustible en el km de CIERRE es del tramo siguiente",
+    enElCierre.tramos[1].motivo === null, String(enElCierre.tramos[1].motivo));
+  const enLaApertura = serieRendimiento(cargas, [
+    { id: 9, fecha: "2026-01-01", kilometraje: 10000, familia: "gasolina" },
+  ]);
+  chk("y en el km de APERTURA sí se consumió dentro del tramo",
+    enLaApertura.tramos[1].motivo === "familia_cruzada", String(enLaApertura.tramos[1].motivo));
+  // Sin odómetro se cae a la fecha: sus galones movieron el bus igual.
+  const sinKm = serieRendimiento(cargas, [
+    { id: 9, fecha: "2026-01-05", kilometraje: null, familia: "gasolina" },
+  ]);
+  chk("una carga del otro combustible sin odómetro se ubica por fecha",
+    sinKm.tramos[1].motivo === "familia_cruzada", String(sinKm.tramos[1].motivo));
+}
+
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");
 process.exit(fallos ? 1 : 0);

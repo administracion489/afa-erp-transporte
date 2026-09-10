@@ -18,7 +18,7 @@ import { elegirOdometro } from "@/lib/odometro-seleccion";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
 import { familiaCombustible } from "@/lib/combustible-tipos";
 import { resolverTipoCombustible, revisarTipoContraPrecio } from "./tipo-voucher";
-import { serieRendimiento, juzgarTramo, type CargaRendimiento } from "@/lib/rendimiento";
+import { serieRendimiento, juzgarTramo, TECHO_FAMILIA, type CargaRendimiento } from "@/lib/rendimiento";
 import { leerAlbumRecargas, buscarDuplicado, type RecargaAlbum, type DespachoGuardado } from "./album-recargas";
 import { planificarReproceso, type ArtefactoPrevio, type PlanReproceso } from "./reproceso";
 import {
@@ -1198,8 +1198,26 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       kilometraje: km, cantidad, unidadCantidad: esLitros ? "litros" : "galones", tipo: tipoComb,
     };
     const familia = familiaCombustible(tipoComb);
+    // Las cargas del OTRO combustible de esta misma unidad van como marcas, no como cargas:
+    // una unidad BICOMBUSTIBLE (la CWQ400 carga GLP casi siempre y gasolina de vez en cuando)
+    // hace parte de sus km con el combustible que no está en este denominador. Sin pasarlas, un
+    // tramo de gasolina con miles de km hechos a GLP superaba el techo y se bloqueaba el voucher
+    // con "Falta registrar una carga" — mandando a buscar un repostaje que nunca faltó.
+    // Los aditivos (urea) NO son otro combustible: no mueven el bus.
+    const otrasFamilias = historia
+      .filter((h) => {
+        const f = familiaCombustible(h.tipo);
+        return f !== familia && TECHO_FAMILIA[f] !== null;
+      })
+      .map((h) => ({
+        id: h.id,
+        fecha: h.fecha,
+        kilometraje: h.kilometraje,
+        familia: familiaCombustible(h.tipo),
+      }));
     const serie = serieRendimiento(
-      [...historia.filter((h) => familiaCombustible(h.tipo) === familia), entrante]
+      [...historia.filter((h) => familiaCombustible(h.tipo) === familia), entrante],
+      otrasFamilias
     );
     const suyo = serie.tramos.find((t) => t.cargaId === -1);
     const hallazgo = suyo ? juzgarTramo(suyo, serie.resumen) : null;
