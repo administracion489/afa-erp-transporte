@@ -298,7 +298,13 @@ Desempate: el grifo se llama como una estación de servicio o una petrolera (COE
 
 NO CONFUNDIR MARCA DE KIT GLP CON EL GRIFO: "LANDI RENZO", "BRC", "LOVATO", "TOMASETTO", "ZAVOLI", "OMVL", "AC STAG", "PRINS", "GASITALY" y similares son marcas del KIT DE CONVERSIÓN A GLP del vehículo (se ven en el tablero), NO son el grifo ni el proveedor. Nunca las uses como "grifo"/"proveedor".
 
-EL TIPO SALE DEL PRODUCTO, NUNCA DE LA UNIDAD. "UGL", "U.GAL", "GLN" y "GAL" son la UNIDAD de la línea (galones) y NO dicen qué se compró: la nota de COESTI imprime "040002019 UGL 8.799x 24.640" y en la línea de abajo "MAX-D DIESEL B5 S50 UV" — eso es DIÉSEL despachado en galones, no GLP. El tipo se lee de la DESCRIPCIÓN del producto:
+EL TIPO SALE DEL PRODUCTO, NUNCA DE LA UNIDAD NI DEL GRIFO. "UGL", "U.GAL", "GLN" y "GAL" son la UNIDAD de la línea (galones) y NO dicen qué se compró. **El MISMO grifo despacha combustibles distintos, y la línea se imprime igual en los dos casos** — lo único que cambia es la descripción de abajo:
+    040002019 UGL   8.799x     24.640        040002072 UGL   9.417x      7.550
+      MAX-D DIESEL B5 S50 UV     216.81        GLP-G                      71.10
+    → tipo_combustible = "diesel"             → tipo_combustible = "glp"
+Las dos son notas reales de COESTI. Que "UGL" no signifique GLP **no convierte en diésel** un voucher que dice GLP-G: si la descripción dice GLP, es GLP aunque la unidad sea UGL, aunque el grifo suela vender diésel y aunque la unidad de la flota normalmente cargue otra cosa.
+PRIMERO copia la descripción impresa en "producto_voucher", tal cual, y DESPUÉS deriva "tipo_combustible" de lo que copiaste — en ese orden, nunca al revés. Si los dos campos no concuerdan, el ERP se queda con "producto_voucher" y manda la carga a revisión.
+El tipo se lee de la DESCRIPCIÓN del producto:
 - "MAX-D", "DB5", "B5 S50", "DIESEL", "PETRÓLEO" → diesel
 - "GLP", "GLP-G", "GAS LICUADO" → glp   ·   "GNV", "GAS NATURAL" → gnv
 - "GASOHOL 84/90" o "G-90" → gasolina_regular   ·   "GASOHOL 95/97/98", "PREMIUM", "SÚPER" → gasolina_premium

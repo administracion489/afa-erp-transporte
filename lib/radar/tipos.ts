@@ -217,7 +217,11 @@ export type AnomaliaCombustible = {
     | "cuadre_ambiguo"               // no cuadra y más de una lectura lo explicaría: no se tocó nada
     | "dato_derivado"                // faltaba uno de los tres números y se calculó de los otros dos
     | "cantidad_no_coincide_texto"   // el número extraído contradice la transcripción literal de la IA
-    | "cantidad_precio_invertidos";  // se leyó el precio como cantidad y viceversa (el cuadre no lo ve: es conmutativo)
+    | "cantidad_precio_invertidos"   // se leyó el precio como cantidad y viceversa (el cuadre no lo ve: es conmutativo)
+    // Qué combustible se compró (lib/radar/tipo-voucher.ts):
+    | "tipo_corregido_por_producto"  // la IA dijo un tipo y el producto impreso dice otro: manda el papel
+    | "tipo_no_coincide_con_producto"// el papel la contradice pero nombra varios productos: no se adivina
+    | "tipo_no_coincide_con_precio"; // se pagó el precio de otro combustible (solo avisa: no reescribe el tipo)
   detalle: string;
   /** false = observación informativa (NO bloquea el auto-registro). Ausente o true = bloqueante. */
   bloquea?: boolean;
@@ -227,10 +231,16 @@ export type AnomaliaCombustible = {
    * corrección humana posterior es `leido`, no lo que quedó guardado en la fila.
    */
   correccion?: {
-    campo: "cantidad" | "precio" | "monto";
+    /**
+     * `tipo_combustible` no es un número y entra igual: el campo existe para que quien lea sepa
+     * QUÉ cambió el ERP y con qué valor llegó de la IA, y eso vale igual para "diesel"→"glp" que
+     * para 6.799→8.799. Sin él, corregir a mano un tipo ya corregido le enseñaría a la IA que se
+     * equivocó en algo que nunca dijo (ver `leidoPorIA` en app/radar-ia/page.tsx).
+     */
+    campo: "cantidad" | "precio" | "monto" | "tipo_combustible";
     /** Lo que leyó la IA. null = el campo faltaba y se derivó. */
-    leido: number | null;
-    corregido: number;
+    leido: number | string | null;
+    corregido: number | string;
     /** Si la cantidad se guardó en litros y no en galones (para nombrar el campo). */
     unidad?: string | null;
   };

@@ -16,7 +16,8 @@
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
-import { familiaCombustible, normalizarTipoCombustible } from "@/lib/combustible-tipos";
+import { familiaCombustible } from "@/lib/combustible-tipos";
+import { resolverTipoCombustible, revisarTipoContraPrecio } from "./tipo-voucher";
 import { serieRendimiento, juzgarTramo, type CargaRendimiento } from "@/lib/rendimiento";
 import { leerAlbumRecargas, buscarDuplicado, type RecargaAlbum, type DespachoGuardado } from "./album-recargas";
 import { planificarReproceso, type ArtefactoPrevio, type PlanReproceso } from "./reproceso";
@@ -840,11 +841,15 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   // Placa resuelta (leída del voucher o inferida) y nombre canónico del conductor identificado.
   const placa = placaFormato(d.placa) ?? veh?.placa ?? terc?.placa ?? null;
   const conductorNombre = condMatch?.nombre ?? d.conductor ?? null;
-  // El tipo que la IA leyó, normalizado contra el catálogo del ERP: acepta tanto la clave
-  // (`glp`) como la descripción del producto del voucher (`GLP-G`, `MAX-D DIESEL B5 S50`,
-  // `GASOHOL 95`). `null` cuando no hay señal — la columna sale vacía, que es lo honesto.
-  const tipoLeido =
-    normalizarTipoCombustible(d.tipo_combustible) ?? normalizarTipoCombustible(d.producto_voucher) ?? null;
+  // El tipo, COTEJANDO la conclusión de la IA contra el producto que transcribió del papel.
+  //
+  // Esto era un `??` —`tipo_combustible ?? producto_voucher`— y por eso la nota V97T-00001413 de
+  // COESTI, que imprime "GLP-G" en la línea del producto, se registró como DIÉSEL: con la
+  // conclusión puesta, la transcripción no se miraba nunca. Transcribir es copiar y tipificar es
+  // decidir; cuando discrepan manda el papel. Ver lib/radar/tipo-voucher.ts.
+  const vTipo = resolverTipoCombustible({ declarado: d.tipo_combustible, producto: d.producto_voucher });
+  // `null` cuando no hay señal — la columna sale vacía, que es lo honesto.
+  const tipoLeido = vTipo.tipo;
   // Para los cruces que necesitan SÍ o SÍ un tipo (capacidad de tanque, rendimiento): el diésel
   // es el 90 % de la flota y es el respaldo de toda la app.
   const tipoComb = tipoLeido ?? "diesel";
@@ -866,6 +871,11 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   const umbral = Number(config.umbral_confianza ?? 0.7);
 
   const anomalias: AnomaliaCombustible[] = [];
+
+  // El tipo va PRIMERO, antes que el tanque, el rendimiento y el precio: los tres se comparan
+  // contra el combustible que se creyó comprado, así que un tipo equivocado los hace mentir a los
+  // tres. Es la misma razón por la que el cuadre aritmético va antes que todos los demás.
+  if (vTipo.anomalia) anomalias.push(vTipo.anomalia);
 
   // ── Campos del camino de VISIÓN multi-foto (opcionales; el de texto no los llena) ──
   const consumoTasa = numOpc(d.consumo_l_100km);
@@ -1123,11 +1133,26 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
           correccion: { campo: "cantidad", leido: cantAntes, corregido: inv.cantidad, unidad: unidadCant },
         });
         void precioAntes;
-      } else if (pRef > 0 && Math.abs(precioUnit - pRef) / pRef > 0.2) {
-        anomalias.push({
-          codigo: "precio_fuera_de_rango",
-          detalle: `Precio ${fmtSoles(precioUnit)} se aleja más de 20% del referencial ${fmtSoles(pRef)} (${tipoComb})`,
+      } else {
+        // ¿Y si el precio se sale porque el TIPO está mal? Un GLP guardado como diésel deja el
+        // precio a un 69 % del referencial del diésel y clavado en el del GLP. Va antes de
+        // "precio fuera de rango" por lo mismo que la inversión: ese aviso sería el síntoma, y
+        // manda a discutir el precio de una carga cuyo problema es qué producto se compró.
+        // Es la evidencia que queda cuando la IA no transcribió el producto y el papel no puede
+        // contradecirla — y no reescribe el tipo: un precio no es un producto.
+        const vPrecio = revisarTipoContraPrecio({
+          tipo: tipoComb,
+          precio: precioUnit,
+          referenciales: filas,
+          leido: tipoLeido != null,
         });
+        if (vPrecio.anomalia) anomalias.push(vPrecio.anomalia);
+        else if (pRef > 0 && Math.abs(precioUnit - pRef) / pRef > 0.2) {
+          anomalias.push({
+            codigo: "precio_fuera_de_rango",
+            detalle: `Precio ${fmtSoles(precioUnit)} se aleja más de 20% del referencial ${fmtSoles(pRef)} (${tipoComb})`,
+          });
+        }
       }
     } catch {
       // sin tabla de precios: se omite este chequeo
@@ -1447,6 +1472,14 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       // Dos vouchers en la misma ráfaga: hasta que alguien diga cuál describe cuál fila, no se
       // sabe de qué unidad es el gasto — y antes el segundo directamente se perdía.
       a.codigo === "multiples_recargas_en_cluster" ||
+      // El papel desmiente el tipo y nombra varios productos: no se sabe QUÉ se compró, y de eso
+      // cuelgan el tanque, el precio referencial y el rendimiento de la unidad. Es la forma
+      // `cuadre_ambiguo` de este campo. `tipo_corregido_por_producto` NO entra —deja el tipo
+      // bueno puesto, solo hay que confirmarlo, igual que `lectura_corregida`— y
+      // `tipo_no_coincide_con_precio` tampoco: es una sospecha por un precio, no el papel
+      // contradiciéndose, y ya bloquea el auto-registro. Un rojo crítico sobre una carga que
+      // quizá solo salió cara enseña a ignorar los rojos.
+      a.codigo === "tipo_no_coincide_con_producto" ||
       // Rindió más de lo físicamente posible: falta una carga por registrar o el odómetro
       // está mal leído, y ese km se escribiría además en lecturas_odometro.
       (a.codigo === "rendimiento_implausible" && a.bloquea === true)
