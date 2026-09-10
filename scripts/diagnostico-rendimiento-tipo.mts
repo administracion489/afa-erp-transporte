@@ -1,7 +1,7 @@
 // Qué va a PROPONER la columna «Medido» de /configuracion/costos con los datos reales de esta
 // flota. Solo LEE: no escribe nada, no aplica nada, no toca la base.
 //
-// POR QUÉ EXISTE, Y POR QUÉ REVISARLO ES LA CONDICIÓN DE MERGE
+// POR QUÉ EXISTE, Y CUÁNDO HAY QUE CORRERLO
 //
 // El número que sale de aquí no se queda en una pantalla: en cuanto alguien pulse «Aplicar»,
 // `parametros_costos.rendimiento_1` cambia y con él el costo por kilómetro de esa categoría en
@@ -10,11 +10,11 @@
 // precio ofertado. Una propuesta equivocada no se descubre revisando código: se descubre
 // cuando el servicio ya se prestó.
 //
-// Por eso la regla es la misma que este repo le pone a lib/costeo-servicio.ts: correrlo y
-// mirar tipo por tipo ANTES de fusionar. Lo que hay que buscar en la sección 3 no es que no
-// haya cambios —el sentido de todo esto es que los haya— sino que cada uno sea explicable:
-// una placa que mide lo que uno esperaría de esa unidad, con tramos suficientes, y un salto
-// de S/km que se pueda defender delante de un cliente.
+// Correrlo es la condición para APLICAR la primera propuesta, no para fusionar la pantalla:
+// mientras nadie pulse el botón, esto no mueve ningún número. Lo que hay que buscar en la
+// sección 3 no es que no haya cambios —el sentido de todo esto es que los haya— sino que cada
+// uno sea explicable: una placa que mide lo que uno esperaría de esa unidad, con tramos
+// suficientes, y un salto de S/km que se pueda defender delante de un cliente.
 //
 // USO
 //     npx tsx scripts/diagnostico-rendimiento-tipo.mts
@@ -22,7 +22,7 @@
 // LO QUE CONTESTA
 //   1 · Qué mide cada tipo hoy, con su código y su motivo.
 //   2 · Las propuestas: parámetro → medido, y cuánto mueve el S/km y el S/ por 100 km.
-//   3 · LA CONDICIÓN DE MERGE: el resumen de cuánto se movería el costo si se aplicara todo.
+//   3 · EL VEREDICTO: cuánto se movería el costo si se aplicara todo, y qué mirar una por una.
 //   4 · El puente roto: placas que apuntan a un tipo que no existe en `parametros_costos`.
 //   5 · Las unidades propias SIN categoría de costeo: miden, y su medición no le sirve a nadie.
 import fs from "node:fs";
@@ -148,7 +148,7 @@ if (!propuestas.length) {
 
 // ── 3 · La condición de merge ───────────────────────────────────────────────
 
-linea("3 · LA CONDICIÓN DE MERGE");
+linea("3 · EL VEREDICTO · QUÉ REVISAR ANTES DE APLICAR");
 {
   let sube = 0, baja = 0, peor = { tipo: "", pct: 0 };
   for (const p of propuestas) {
