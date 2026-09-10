@@ -145,6 +145,10 @@ const ANOMALIA_LABEL: Record<string, string> = {
   cuadre_ambiguo:         "No cuadra (ambiguo)",
   cantidad_no_coincide_texto: "Cantidad ≠ transcripción",
   cantidad_precio_invertidos: "Cantidad y precio invertidos",
+  // Qué combustible se compró (lib/radar/tipo-voucher.ts)
+  tipo_corregido_por_producto:  "Tipo corregido por el producto",
+  tipo_no_coincide_con_producto: "Tipo ≠ producto del voucher",
+  tipo_no_coincide_con_precio:  "Tipo ≠ precio pagado",
 };
 
 /**
@@ -152,7 +156,8 @@ const ANOMALIA_LABEL: Record<string, string> = {
  * lo confirme contra la foto. Pintarla del mismo rojo que "Posible duplicado" enseña a
  * ignorarla, que es justo lo contrario de lo que se necesita.
  */
-const ANOMALIA_ES_ARREGLO = (codigo: string) => codigo === "lectura_corregida" || codigo === "dato_derivado";
+const ANOMALIA_ES_ARREGLO = (codigo: string) =>
+  codigo === "lectura_corregida" || codigo === "dato_derivado" || codigo === "tipo_corregido_por_producto";
 
 const TABS = [
   { id: "feed",          label: "Feed" },
@@ -2389,8 +2394,9 @@ export default function RadarIAPage() {
     // voucher atrapó un dígito, la fila ya trae el número arreglado y la lectura original viaja
     // en la anomalía. Sin esto, corregir a mano un valor ya corregido le enseñaría a la IA que
     // se equivocó en algo que nunca leyó — se lee por CÓDIGO, no olfateando el texto del detalle.
-    const leidoPorIA = (campo: "cantidad" | "precio" | "monto", enLaFila: number | null) =>
-      (c.anomalias ?? []).find((a) => a.correccion?.campo === campo)?.correccion?.leido ?? enLaFila;
+    const leidoPorIA = <T,>(campo: "cantidad" | "precio" | "monto" | "tipo_combustible", enLaFila: T) =>
+      ((c.anomalias ?? []).find((a) => a.correccion?.campo === campo)?.correccion?.leido as T | undefined) ??
+      enLaFila;
     const iaCantidad = leidoPorIA("cantidad", ov.esLitros ? c.litros : c.galones);
     const iaPrecio = leidoPorIA("precio", ov.esLitros ? c.precio_litro : c.precio_galon);
     const distinto = (a: unknown, b: unknown) => {
@@ -2404,7 +2410,11 @@ export default function RadarIAPage() {
       { campo: ov.esLitros ? "litros" : "galones", ia: iaCantidad, correcto: ov.cantidad },
       { campo: "precio", ia: iaPrecio,  correcto: ov.precio },
       { campo: "monto",  ia: leidoPorIA("monto", c.monto_total), correcto: ov.monto },
-      { campo: "tipo_combustible", ia: c.tipo_combustible, correcto: ov.tipoCombustible || null },
+      // Por `leidoPorIA`, no por `c.tipo_combustible`: cuando el producto impreso desmintió a la
+      // IA, la fila ya trae el tipo bueno y lo que la IA dijo vive en la anomalía. Sin esto, el
+      // revisor que confirma un "glp" ya corregido le enseñaría a la IA que leyó glp donde había
+      // escrito diesel — el error que nunca cometió, en vez del que sí.
+      { campo: "tipo_combustible", ia: leidoPorIA("tipo_combustible", c.tipo_combustible), correcto: ov.tipoCombustible || null },
       // El odómetro también se aprende: el dígito de más es EL error de lectura de esta flota
       // (ver la sección "Lectura del odómetro" del CLAUDE.md), y cada corrección humana entra al
       // prompt de la próxima foto. El 0 de una fila vieja se manda como "no leyó nada": cero

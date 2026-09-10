@@ -19,6 +19,7 @@ import {
   familiaCombustible,
   normalizarTipoCombustible,
 } from "../lib/combustible-tipos";
+import { resolverTipoCombustible, revisarTipoContraPrecio, tiposEnTexto } from "../lib/radar/tipo-voucher";
 
 let fallos = 0;
 const chk = (nombre: string, ok: boolean, extra = "") => {
@@ -94,6 +95,100 @@ const chk = (nombre: string, ok: boolean, extra = "") => {
   ].map((s) => normalizarTipoCombustible(s));
   chk("todo lo que devuelve el normalizador está en el catálogo",
     salidas.every((s) => s != null && TIPOS_COMBUSTIBLE.includes(s)), salidas.join(","));
+}
+
+// ── 6. LA CONCLUSIÓN DE LA IA CONTRA EL PAPEL (lib/radar/tipo-voucher.ts) ───
+//
+// El caso real: nota V97T-00001413 de COESTI (07/09/2026, CWQ400) que imprime
+//
+//     040002072 UGL   9.417x      7.550
+//       GLP-G                       71.10
+//
+// y entró al ERP como DIÉSEL. Los tres números cuadraban; lo que falló fue el `??` de
+// acciones.ts, que dejaba la transcripción del producto como respaldo de la conclusión de la IA
+// en vez de cotejarlas. El escenario se conserva como prueba de regresión.
+{
+  const real = resolverTipoCombustible({ declarado: "diesel", producto: "GLP-G" });
+  chk("el caso CWQ400: el papel dice GLP-G y manda sobre el 'diesel' de la IA",
+    real.tipo === "glp" && real.fuente === "producto", `${real.tipo}/${real.fuente}`);
+  chk("…y lo dice con su código, no con un rojo genérico",
+    real.anomalia?.codigo === "tipo_corregido_por_producto" && real.anomalia.bloquea === true,
+    String(real.anomalia?.codigo));
+  chk("…y deja escrito lo que la IA había leído, para no enseñarle un error que no cometió",
+    real.anomalia?.correccion?.campo === "tipo_combustible" &&
+      real.anomalia.correccion.leido === "diesel" && real.anomalia.correccion.corregido === "glp");
+  chk("la línea entera del voucher también se resuelve",
+    resolverTipoCombustible({ declarado: "diesel", producto: "040002072 UGL 9.417x 7.550 GLP-G" }).tipo === "glp");
+}
+
+// EL LADO QUE NO SE PUEDE AFLOJAR: corregir el GLP no puede deshacer el arreglo del "UGL",
+// que es el bug espejo (cada voucher de diésel de ese grifo registrado como GLP).
+{
+  const dsl = resolverTipoCombustible({ declarado: "diesel", producto: "MAX-D DIESEL B5 S50 UV" });
+  chk("el diésel de COESTI sigue pasando limpio", dsl.tipo === "diesel" && dsl.anomalia === null);
+  const acuerdo = resolverTipoCombustible({ declarado: "glp", producto: "GLP-G" });
+  chk("cuando los dos coinciden no se levanta nada", acuerdo.tipo === "glp" && acuerdo.anomalia === null);
+  const sinProd = resolverTipoCombustible({ declarado: "diesel", producto: null });
+  chk("sin producto transcrito manda lo que la IA concluyó",
+    sinProd.tipo === "diesel" && sinProd.fuente === "declarado" && sinProd.anomalia === null);
+  const soloProd = resolverTipoCombustible({ declarado: null, producto: "GASOHOL 95" });
+  chk("sin conclusión, el producto la reemplaza (lo único que el `??` sí hacía bien)",
+    soloProd.tipo === "gasolina_premium" && soloProd.anomalia === null);
+  const nada = resolverTipoCombustible({ declarado: null, producto: null });
+  chk("sin ninguno de los dos la columna sale vacía, nunca un diésel inventado",
+    nada.tipo === null && nada.fuente === "sin_dato" && nada.anomalia === null);
+}
+
+// NADIE ADIVINA con dos productos en el papel: un comprobante con diésel + urea normaliza a
+// `urea` por el orden del catálogo, y "corregir" ahí un diésel bien leído sería inventar.
+{
+  chk("el papel con dos líneas nombra los dos productos",
+    tiposEnTexto("MAX-D DIESEL B5 S50 UV / UREA").join(",") === "diesel,urea",
+    tiposEnTexto("MAX-D DIESEL B5 S50 UV / UREA").join(","));
+  chk("un solo producto de varias palabras sigue siendo uno",
+    tiposEnTexto("MAX-D DIESEL B5 S50 UV").join(",") === "diesel");
+  const dos = resolverTipoCombustible({ declarado: "diesel", producto: "MAX-D DIESEL B5 S50 UV / UREA" });
+  chk("con varios productos, el que la IA eligió se respeta: es la línea principal",
+    dos.tipo === "diesel" && dos.anomalia === null, `${dos.tipo}/${dos.anomalia?.codigo}`);
+  const fuera = resolverTipoCombustible({ declarado: "glp", producto: "MAX-D DIESEL B5 S50 UV / UREA" });
+  chk("y si no es ninguno de ellos se NOMBRA sin reescribir nada",
+    fuera.anomalia?.codigo === "tipo_no_coincide_con_producto" && fuera.tipo === "glp",
+    `${fuera.tipo}/${fuera.anomalia?.codigo}`);
+}
+
+// ── 7. EL PRECIO AVISA, NUNCA DECIDE ────────────────────────────────────────
+{
+  const refs = [{ tipo: "diesel", precio: 24.64 }, { tipo: "glp", precio: 7.65 }];
+  const v = revisarTipoContraPrecio({ tipo: "diesel", precio: 7.55, referenciales: refs });
+  chk("un 'diésel' a S/ 7.55 con el GLP a S/ 7.65 se delata solo",
+    v.anomalia?.codigo === "tipo_no_coincide_con_precio", String(v.anomalia?.codigo));
+  chk("…y el tipo NO se reescribe desde el precio (un precio no es un producto)",
+    v.anomalia?.correccion === undefined);
+  chk("…y apaga el 'precio fuera de rango', que ahí sería el síntoma", v.precioExplicado === true);
+  chk("el mensaje no afirma 'se guardó como diésel' cuando la columna quedó vacía",
+    revisarTipoContraPrecio({ tipo: "diesel", precio: 7.55, referenciales: refs, leido: false })
+      .anomalia!.detalle.includes("por defecto"));
+
+  chk("con el tipo correcto no dice nada",
+    revisarTipoContraPrecio({ tipo: "glp", precio: 7.55, referenciales: refs }).anomalia === null);
+  chk("sin referencial no se juzga",
+    revisarTipoContraPrecio({ tipo: "diesel", precio: 7.55, referenciales: [] }).anomalia === null);
+  // Lo que NO se puede aflojar: una carga simplemente cara sigue siendo "precio fuera de rango".
+  const cara = revisarTipoContraPrecio({ tipo: "diesel", precio: 31.5, referenciales: refs });
+  chk("un diésel caro no se convierte en 'otro combustible': ningún candidato lo explica",
+    cara.anomalia === null && cara.precioExplicado === false);
+  // Dos candidatas empatadas = adivinar. Mismo criterio que `cuadre_ambiguo`.
+  const ambiguo = revisarTipoContraPrecio({
+    tipo: "diesel", precio: 7.55,
+    referenciales: [{ tipo: "diesel", precio: 24.64 }, { tipo: "glp", precio: 7.65 }, { tipo: "gnv", precio: 7.5 }],
+  });
+  chk("con dos combustibles que lo explicarían no se propone ninguno", ambiguo.anomalia === null);
+
+  // EL CICLO: lo que la regla del papel corrige tiene que quedar en paz con la del precio, o la
+  // fila saldría con dos rojos que se contradicen sobre el mismo número.
+  const corregido = resolverTipoCombustible({ declarado: "diesel", producto: "GLP-G" });
+  chk("corregido por el papel, el precio ya no protesta",
+    revisarTipoContraPrecio({ tipo: corregido.tipo!, precio: 7.55, referenciales: refs }).anomalia === null);
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");
