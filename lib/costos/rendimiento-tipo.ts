@@ -9,9 +9,15 @@
 // otra tiene siete reglas, y todas están declaradas aquí para que no haya una octava
 // escondida en una pantalla.
 //
-// EL CASO QUE LO MOTIVÓ: el tipo SPRINTER_17_DIESEL dice 19.00 km/gal. Su única placa propia,
-// CWZ-371, mide 28.5 sobre 8 tramos sanos (el 162.9 implausible ya queda fuera solo). El
-// renglón de combustible de ese tipo está 50 % sobrecosteado en toda cotización nueva.
+// EL CASO QUE LO MOTIVÓ: el tipo SPRINTER_17 llevaba 19.00 km/gal tecleados mientras su única
+// placa propia, CWZ-371, medía 28.61 sobre once tramos sanos (el implausible del hueco de
+// registro ya queda fuera solo). El renglón de combustible de ese tipo estaba 50 % por encima
+// del real en toda cotización nueva.
+//
+// Y el desenlace es el argumento entero: el dueño lo corrigió A MANO, yendo a /combustible a
+// leer el número y volviendo a teclearlo aquí. El dato no faltaba; lo que faltaba era ponerlos
+// en la misma pantalla. Un número que solo se alcanza copiándolo entre dos módulos se corrige
+// el día que alguien se acuerda — y las categorías que nadie recuerda se quedan como nacieron.
 //
 // LO QUE ESTE MÓDULO NO HACE, A PROPÓSITO: escribir. Devuelve un número y un motivo; quién
 // lo aplica es una persona, en /configuracion/costos, y la escritura pasa por

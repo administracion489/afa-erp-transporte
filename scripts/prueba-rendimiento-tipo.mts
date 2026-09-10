@@ -14,12 +14,16 @@
 //     flota y no aparece en ninguna de las dos listas es una unidad que la pantalla no explica
 //     en ningún sitio: el operador la busca y no está.
 //
-// 3 · EL CASO QUE LO MOTIVÓ (CWZ-371) VA DENTRO, con sus cargas reales pasadas por el motor de
-//     verdad (`seriesRendimiento`), no con una mediana inventada. Incluye el tramo de 162.9
-//     km/gal que ya dio un susto en producción: tiene que quedar FUERA de la mediana y, sobre
-//     todo, NO contar como "faltan cargas" — si contara, el tipo quedaría bloqueado para
-//     siempre en `revisar_cargas` y esta funcionalidad no serviría justo para el caso que la
-//     motivó.
+// 3 · EL CASO QUE LO MOTIVÓ (CWZ-371) VA DENTRO, con cargas que RECONSTRUYEN su forma —ocho
+//     tramos sanos más el hueco de registro de veinte días— y pasadas por el motor de verdad
+//     (`seriesRendimiento`), no con una mediana inventada. Son cargas de laboratorio, no un
+//     volcado de producción: lo que se fija es el COMPORTAMIENTO, y por eso la matriz corre sin
+//     base de datos. Los números reales de esa placa los mide
+//     `scripts/diagnostico-rendimiento-tipo.mts`, que sí lee la base.
+//
+//     Lo que fija: el tramo del hueco tiene que quedar FUERA de la mediana y, sobre todo, NO
+//     contar como "faltan cargas" — si contara, el tipo quedaría bloqueado para siempre en
+//     `revisar_cargas` y esta funcionalidad no serviría justo para el caso que la motivó.
 //
 // 4 · LA ASIMETRÍA DEL GATE. `rendimiento_alto` (no físico) BLOQUEA la propuesta y
 //     `rendimiento_bajo` NO. No es simetría rota por descuido: el alto es plata que falta en
@@ -59,7 +63,7 @@ function placa(o: Partial<PlacaMedida> = {}): PlacaMedida {
   const n = ++seq;
   return {
     uid: `p${n}`, vehiculoId: n, placa: `AAA-${String(n).padStart(3, "0")}`,
-    flota: "propia", tipoCosteo: "SPRINTER_17_DIESEL",
+    flota: "propia", tipoCosteo: "SPRINTER_17",
     familia: "diesel", label: "km/gal",
     mediana: 28.5, tramos: 8, confiable: true,
     medianaReciente: null, tramosReciente: 0,
@@ -70,7 +74,7 @@ function placa(o: Partial<PlacaMedida> = {}): PlacaMedida {
 }
 
 const SPRINTER = {
-  tipo_vehiculo: "SPRINTER_17_DIESEL", nombre: "Sprinter 17 pax Diésel",
+  tipo_vehiculo: "SPRINTER_17", nombre: "Sprinter 17 pax Diésel",
   rendimiento_1: 19, tipo_combustible_1: "Diésel",
 };
 const BIMODAL = {
@@ -98,7 +102,7 @@ console.log("\n1 · familiaDeParametro");
 }
 
 // ── 2 · EL CASO CWZ-371, CON EL MOTOR DE VERDAD ───────────────────────────────
-console.log("\n2 · CWZ-371: ocho tramos sanos y un 162.9 que no es de nadie");
+console.log("\n2 · CWZ-371: ocho tramos sanos y un implausible que no es de nadie");
 
 /** Cargas de diésel a ~28.5 km/gal, más el hueco de registro que produjo el 162.9. */
 function cargasCwz(): any[] {
@@ -118,7 +122,7 @@ function cargasCwz(): any[] {
 }
 
 const serieCwz = [...seriesRendimiento(cargasCwz() as any).values()][0];
-const cwz = placaMedida(serieCwz, { vehiculoId: 7, placa: "CWZ-371", flota: "propia", tipoCosteo: "SPRINTER_17_DIESEL" }, "2026-01-01");
+const cwz = placaMedida(serieCwz, { vehiculoId: 7, placa: "CWZ-371", flota: "propia", tipoCosteo: "SPRINTER_17" }, "2026-01-01");
 {
   chk("mide 28.5 km/gal", cwz.mediana === 28.5, String(cwz.mediana));
   chk("ocho tramos buenos", cwz.tramos === 8, String(cwz.tramos));
@@ -155,7 +159,7 @@ function cargasConTramo(ultimoKm: number): any[] {
 }
 {
   const alta = placaMedida([...seriesRendimiento(cargasConTramo(201300) as any).values()][0],
-    { vehiculoId: 8, placa: "BBB-111", flota: "propia", tipoCosteo: "SPRINTER_17_DIESEL" }, "2026-01-01");
+    { vehiculoId: 8, placa: "BBB-111", flota: "propia", tipoCosteo: "SPRINTER_17" }, "2026-01-01");
   chk("un tramo de 30 sobre mediana 20 se cuenta como alto", alta.tramosAltos === 1, `altos=${alta.tramosAltos}`);
   const aA = agregarRendimientoTipo(SPRINTER, [alta]);
   chk("y BLOQUEA la propuesta (plata que falta en los libros)", aA.codigo === "revisar_cargas" && !aA.proponible);
@@ -163,7 +167,7 @@ function cargasConTramo(ultimoKm: number): any[] {
   chk("y el detalle dice cuántos tramos y en qué placa", aA.detalle.includes("BBB-111"));
 
   const baja = placaMedida([...seriesRendimiento(cargasConTramo(201130) as any).values()][0],
-    { vehiculoId: 9, placa: "CCC-222", flota: "propia", tipoCosteo: "SPRINTER_17_DIESEL" }, "2026-01-01");
+    { vehiculoId: 9, placa: "CCC-222", flota: "propia", tipoCosteo: "SPRINTER_17" }, "2026-01-01");
   chk("un tramo de 13 sobre mediana 20 se cuenta como bajo", baja.tramosBajos === 1, `bajos=${baja.tramosBajos}`);
   const aB = agregarRendimientoTipo(SPRINTER, [baja]);
   chk("y NO bloquea: es costo real, excluirlo sesgaría la mediana hacia arriba",
@@ -303,14 +307,14 @@ console.log("\n8 · procedenciaDeHistorial");
 console.log("\n9 · agregarPorTipo");
 {
   const ps = [
-    placa({ tipoCosteo: "SPRINTER_17_DIESEL" }),
+    placa({ tipoCosteo: "SPRINTER_17" }),
     placa({ tipoCosteo: "BUS_60_GNV", familia: "gnv", label: "km/m³", mediana: 4 }),
     placa({ tipoCosteo: null }),
     placa({ tipoCosteo: "  " }),
   ];
   const m = agregarPorTipo([SPRINTER, GNV], ps);
   chk("cada tipo recibe sus placas por el texto CRUDO", m.size === 2);
-  chk("el Sprinter mide 28.5", m.get("SPRINTER_17_DIESEL")!.medido === 28.5);
+  chk("el Sprinter mide 28.5", m.get("SPRINTER_17")!.medido === 28.5);
   chk("el GNV publica su unidad, no un 'km/gal' literal", m.get("BUS_60_GNV")!.label === "km/m³");
   chk("una placa sin categoría de costeo no entra a ningún cubo (ni a uno fantasma)",
     !m.has("") && !m.has("  "));
