@@ -2,7 +2,10 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { supabase } from "@/lib/supabase";
 import { componentesCostoKm, costoKmDeParametro } from "@/lib/costos/costo-km-parametro";
-import { escribirParametro } from "@/lib/costos/parametros";
+import { escribirParametro, aplicarRendimientoMedido, registrarDescarte, cargarProcedencias } from "@/lib/costos/parametros";
+import { agregarPorTipo, CAMPO_DESCARTE, type AgregadoTipo, type PlacaMedida, type Procedencia } from "@/lib/costos/rendimiento-tipo";
+import { cargarPlacasMedidas } from "@/lib/costos/rendimiento-flota";
+import ModalRendimientoMedido, { ChipMedido } from "./ModalRendimientoMedido";
 
 type Combustible = {
   id:number; tipo:string; unidad:string; precio:number;
@@ -52,6 +55,16 @@ const CAMPOS_EDIT: {key:keyof ParamCosto;label:string;grupo:string;unidad:string
   {key:"conductor_dia",      label:"Conductor",          grupo:"Mano de obra",    unidad:"S/día",    step:10},
 ];
 const GRUPOS_CAMPOS = [...new Set(CAMPOS_EDIT.map(c=>c.grupo))];
+
+/** Los campos del historial que NO son celdas editables de la tabla. Un código sin etiqueta
+ *  imprime el código crudo, que es lo que le pasó a `multiples_recargas_en_cluster`. */
+const ETIQUETA_CAMPO:Record<string,string> = {
+  [CAMPO_DESCARTE]:"Medición revisada",
+  tipo_combustible_1:"Combustible",
+  euronorm:"Norma Euro",
+  precio:"Precio",
+};
+const etiquetaCampo = (k:string) => CAMPOS_EDIT.find(c=>c.key===k)?.label || ETIQUETA_CAMPO[k] || k;
 
 const COMB_COLOR:Record<string,string> = {Gasolina:"#f97316",Diésel:"#0b315f",GLP:"#8b5cf6",GNV:"#10b981",UREA:"#06b6d4"};
 const COMB_BG:Record<string,string>    = {Gasolina:"#fff7ed",Diésel:"#eef3f8",GLP:"#f5f3ff",GNV:"#ecfdf5",UREA:"#ecfeff"};
@@ -293,6 +306,14 @@ export default function AjustesCostosPage() {
   // que no se hizo hay que leerlo y atenderlo, así que se queda hasta que lo cierres.
   const [fallo,setFallo]             =useState("");
   const [mostrarForm,setMostrarForm] =useState(false);
+  // ── El rendimiento MEDIDO por la flota ─────────────────────────────────────
+  // Se carga APARTE y DESPUÉS: mide sobre la tabla `combustible` entera (paginada), y esta
+  // pantalla tiene que pintar sus parámetros sin esperar a eso. Mientras llega, la columna
+  // dice "midiendo…" en vez de afirmar que no hay medición — nunca se afirma un vacío
+  // mientras se está buscando, el mismo criterio que `estadoFotoRadar` en /combustible.
+  const [placas,setPlacas]           =useState<PlacaMedida[]|null>(null);
+  const [procedencias,setProcedencias]=useState<Map<string,Procedencia>>(new Map());
+  const [tipoAbierto,setTipoAbierto] =useState<string|null>(null);
 
   useEffect(()=>{supabase.auth.getUser().then(({data})=>{if(data?.user)setUserEmail(data.user.email||"Usuario");});},[]);
 
@@ -307,6 +328,26 @@ export default function AjustesCostosPage() {
     setLoading(false);
   };
   useEffect(()=>{cargar();},[]);
+
+  // Best-effort: si falla, la columna MEDIDO se queda vacía y el resto de la pantalla sigue
+  // sirviendo. Un parámetro tecleado sin su medición al lado es peor experiencia, no un dato
+  // equivocado — lo contrario (bloquear la pantalla de costos por una consulta accesoria) sí
+  // lo sería.
+  const cargarMedidos=async()=>{
+    try{
+      const [ps,pr]=await Promise.all([cargarPlacasMedidas(supabase),cargarProcedencias(supabase)]);
+      setPlacas(ps);setProcedencias(pr);
+    }catch{ setPlacas([]); }
+  };
+  useEffect(()=>{cargarMedidos();},[]);
+
+  // El agregado se DERIVA de lo que ya está cargado. Guardar un parámetro recarga `params` y
+  // el veredicto se rehace solo, sin volver a leer la tabla de combustible: los tramos son
+  // hechos del vehículo y no cambian porque alguien teclee un número aquí.
+  const medidos=useMemo(
+    ()=>placas?agregarPorTipo(params,placas,procedencias):new Map<string,AgregadoTipo>(),
+    [params,placas,procedencias]
+  );
 
   const preciosMap=useMemo(()=>{const m:Record<string,number>={};combustibles.forEach(c=>{m[c.tipo]=c.precio;});return m;},[combustibles]);
 
@@ -349,6 +390,33 @@ export default function AjustesCostosPage() {
     if(r.ok) mostrarAlerta(`✅ ${vehId} → ${nuevoComb}${usaUrea?" + UREA activada":""}${r.acta?"":" (sin registrar en el historial)"}`);
     if(r.error) setFallo(r.error);
     cargar();setGuardando(false);
+  };
+
+  // ── Adoptar / descartar el rendimiento medido ──────────────────────────────
+  // Las dos pasan por lib/costos/parametros.ts, que es la única puerta: un `update` propio
+  // aquí sería un segundo camino con las reglas escritas otra vez.
+  const recargarTodo=async()=>{
+    await cargar();
+    try{ setProcedencias(await cargarProcedencias(supabase)); }catch{}
+  };
+
+  const aplicarMedido=async(a:AgregadoTipo,nota:string)=>{
+    setGuardando(true);setFallo("");
+    const r=await aplicarRendimientoMedido(supabase,a,userEmail,nota||undefined);
+    if(r.ok) mostrarAlerta(`✅ ${a.nombre} · Rendimiento: ${fmtN(a.parametro)} → ${fmtN(a.medido as number)} ${a.label||""}${r.acta?"":" (sin registrar en el historial)"}`);
+    if(r.error) setFallo(r.error);
+    setTipoAbierto(null);
+    await recargarTodo();setGuardando(false);
+  };
+
+  const descartarMedido=async(a:AgregadoTipo,nota:string)=>{
+    setGuardando(true);setFallo("");
+    const r=await registrarDescarte(supabase,a,userEmail,nota||undefined);
+    // No dice "guardado": no se guardó ningún parámetro, que es justo lo que se decidió.
+    if(r.ok) mostrarAlerta(`✅ ${a.nombre} · se conserva ${fmtN(a.parametro)} ${a.label||""}. La medición queda registrada como revisada.`);
+    if(r.error) setFallo(r.error);
+    setTipoAbierto(null);
+    await recargarTodo();setGuardando(false);
   };
 
   const cambiarEuro=async(vehId:string,nuevaEuro:string)=>{
@@ -487,6 +555,13 @@ export default function AjustesCostosPage() {
                 </button>
               ))}
             </div>
+            {grupoCampo==="Combustible"&&(
+              <p className="text-[11px] text-gray-500 mt-3 leading-relaxed">
+                La columna <b>Medido</b> es lo que rinden de verdad las unidades propias de cada tipo, calculado
+                sobre las cargas de <b>/combustible</b> con el mismo motor que pinta esa pantalla. Es una propuesta:
+                el número que se costea sigue siendo el tecleado hasta que alguien aplique el otro.
+              </p>
+            )}
           </div>
           {gruposActivos.map(grupo=>{
             const vehs=params.filter(p=>(p.grupo_vehiculo||"Otros")===grupo);
@@ -507,6 +582,10 @@ export default function AjustesCostosPage() {
                         <th className="px-3 py-3 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">Norma Euro</th>
                         <th className="px-3 py-3 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">UREA</th>
                         {camposGrupo.map(c=><th key={c.key} className="px-3 py-3 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap"><div>{c.label}</div><div className="text-[9px] font-normal text-gray-300 normal-case">{c.unidad}</div></th>)}
+                        {/* La columna MEDIDO solo sale con la categoría Combustible puesta: es lo
+                            único que la flota mide, y una columna vacía en las otras cinco
+                            categorías se leería como "aquí tampoco hay medición". */}
+                        {grupoCampo==="Combustible"&&<th className="px-3 py-3 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap"><div>Medido</div><div className="text-[9px] font-normal text-gray-300 normal-case">por la flota</div></th>}
                         <th className="px-3 py-3 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">S/km</th>
                         <th className="px-3 py-3"></th>
                       </tr>
@@ -542,6 +621,19 @@ export default function AjustesCostosPage() {
                               {p.usa_urea?<span className="text-[10px] font-black text-cyan-700 bg-cyan-50 border border-cyan-200 px-2 py-0.5 rounded-full">🧪 Activa</span>:<span className="text-[10px] text-gray-300">—</span>}
                             </td>
                             {camposGrupo.map(c=><td key={c.key} className="px-3 py-2"><CeldaEditable valor={p[c.key] as number} campo={c.key} vehId={p.tipo_vehiculo} unidad={c.unidad} step={c.step} onGuardado={(campo,vN,vA)=>guardarParam(p.tipo_vehiculo,campo,vN,vA)}/></td>)}
+                            {/* NO hay botón de aplicar en la celda. `CeldaEditable` guarda en
+                                `onBlur`, así que un botón pegado al lado invita al clic ciego
+                                sobre el campo que mueve el precio de una categoría entera. El
+                                chip ABRE la evidencia; el botón vive dentro. */}
+                            {grupoCampo==="Combustible"&&(
+                              <td className="px-3 py-2 min-w-[112px]">
+                                {placas===null
+                                  ? <span className="text-[10px] text-gray-300 italic">midiendo…</span>
+                                  : medidos.get(p.tipo_vehiculo)
+                                    ? <ChipMedido a={medidos.get(p.tipo_vehiculo)!} onAbrir={()=>setTipoAbierto(p.tipo_vehiculo)}/>
+                                    : <span className="text-[10px] text-gray-300">—</span>}
+                              </td>
+                            )}
                             <td className="px-3 py-3"><span className="font-black font-mono text-[#0b315f] text-sm">S/ {fmtN(costoKm,4)}</span></td>
                             <td className="px-3 py-2.5"><button onClick={()=>desactivarVeh(p.tipo_vehiculo)} className="text-[10px] text-red-400 hover:text-red-600 border border-red-100 hover:bg-red-50 px-2 py-1 rounded-lg font-bold">Desactivar</button></td>
                           </tr>
@@ -578,7 +670,7 @@ export default function AjustesCostosPage() {
                         <td className="px-4 py-2.5 text-xs text-gray-500 whitespace-nowrap">{fmtDt(h.cambiado_en)}</td>
                         <td className="px-4 py-2.5"><span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${h.tabla_origen==="precios_combustible"?"bg-orange-100 text-orange-700":"bg-blue-100 text-blue-700"}`}>{h.tabla_origen==="precios_combustible"?"⛽ Combustible":"🚌 Vehículo"}</span></td>
                         <td className="px-4 py-2.5 font-bold text-gray-700 text-xs">{h.tipo_vehiculo||h.tipo_combustible||"—"}</td>
-                        <td className="px-4 py-2.5 text-xs text-gray-600">{CAMPOS_EDIT.find(c=>c.key===h.campo_modificado)?.label||h.campo_modificado}</td>
+                        <td className="px-4 py-2.5 text-xs text-gray-600">{etiquetaCampo(h.campo_modificado)}</td>
                         <td className="px-4 py-2.5 font-mono text-xs text-gray-500">{h.valor_anterior!==null?fmtN(h.valor_anterior,2):"—"}</td>
                         <td className="px-4 py-2.5 font-mono font-black text-xs text-[#0b315f]">{h.valor_nuevo!==null?fmtN(h.valor_nuevo,2):"—"}</td>
                         <td className="px-4 py-2.5">{h.valor_anterior&&h.valor_nuevo?<span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${sube?"bg-red-100 text-red-600":"bg-green-100 text-green-600"}`}>{sube?"▲":"▼"} {Math.abs(((h.valor_nuevo-h.valor_anterior)/h.valor_anterior)*100).toFixed(1)}%</span>:"—"}</td>
@@ -592,6 +684,18 @@ export default function AjustesCostosPage() {
             </div>
           )}
         </div>
+      )}
+
+      {tipoAbierto&&medidos.get(tipoAbierto)&&params.find(p=>p.tipo_vehiculo===tipoAbierto)&&(
+        <ModalRendimientoMedido
+          a={medidos.get(tipoAbierto)!}
+          parametro={params.find(p=>p.tipo_vehiculo===tipoAbierto)!}
+          precios={preciosMap}
+          guardando={guardando}
+          onAplicar={n=>aplicarMedido(medidos.get(tipoAbierto)!,n)}
+          onDescartar={n=>descartarMedido(medidos.get(tipoAbierto)!,n)}
+          onCerrar={()=>setTipoAbierto(null)}
+        />
       )}
     </main>
   );
