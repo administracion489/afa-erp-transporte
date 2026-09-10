@@ -32,6 +32,12 @@
 // `COLUMNAS_OPCIONALES` — un ERP al que le falte un SQL accesorio tiene que poder corregir
 // un parámetro igual.
 
+import {
+  CAMPO_DESCARTE, motivoHistorial, procedenciaDeHistorial,
+  type AgregadoTipo, type Procedencia,
+} from "./rendimiento-tipo";
+import { paginarFilas } from "@/lib/huella";
+
 /** Lo que se escribe, y el acta que lo justifica. Los dos van juntos o no va ninguno. */
 export type EscrituraParametro = {
   /** La clave de `parametros_costos`. Se usa CRUDA: se normaliza al crear el tipo y en
@@ -138,4 +144,115 @@ export async function escribirParametro(sb: any, e: EscrituraParametro): Promise
       ? `El parámetro se guardó, pero no quedó registrado en el historial: ${errActa.message}`
       : undefined,
   };
+}
+
+// ─── EL RENDIMIENTO MEDIDO ────────────────────────────────────────────────────
+//
+// Las tres funciones de abajo son el puente entre lo que la flota MIDE
+// (lib/costos/rendimiento-tipo.ts) y lo que el ERP COSTEA. Viven aquí, no en el módulo del
+// agregado, por lo mismo que ese módulo es puro: la matriz tiene que poder correr sin base.
+
+/** Los campos de `historial_costos` que hablan del rendimiento de un tipo. `tipo_combustible_1`
+ *  entra porque CADUCA el sello: ver `procedenciaDeHistorial`. */
+const CAMPOS_PROCEDENCIA = ["rendimiento_1", CAMPO_DESCARTE, "tipo_combustible_1"];
+
+/**
+ * Adopta la medición como parámetro.
+ *
+ * EL MOTIVO NO ES DECORACIÓN: `procedenciaDeHistorial` reconoce una adopción automática por su
+ * prefijo `"Auto:"`, así que quien escribe y quien lee tienen que derivar el texto por el
+ * mismo camino. Por eso lo compone `motivoHistorial` y no la pantalla — es el patrón que este
+ * repo ya pagó tres veces en un día: escribir con una identidad y leer con otra.
+ *
+ * La nota del operador se ANEXA, nunca sustituye: un prefijo pisado dejaría la fila sin
+ * procedencia y el chip volvería a proponer el número que se acaba de aplicar.
+ */
+export async function aplicarRendimientoMedido(
+  sb: any, a: AgregadoTipo, por: string, nota?: string
+): Promise<ResultadoEscritura> {
+  // El candado vive aquí y no solo en el botón: es la última línea antes de mover el S/km de
+  // un tipo. Un agregado que no es proponible es justamente el que no se puede escribir.
+  if (!a.proponible || a.medido === null) {
+    return {
+      ok: false, filas: 0, acta: false,
+      error: `La medición de "${a.tipoVehiculo}" no es aplicable (${a.codigo}). No se escribió nada.`,
+    };
+  }
+  return escribirParametro(sb, {
+    tipo_vehiculo: a.tipoVehiculo,
+    patch: { rendimiento_1: a.medido },
+    acta: {
+      campo_modificado: "rendimiento_1",
+      valor_anterior: a.parametro,
+      valor_nuevo: a.medido,
+      motivo: motivoHistorial(a) + (nota ? ` | ${nota}` : ""),
+    },
+    por,
+  });
+}
+
+/**
+ * Deja constancia de que una persona MIRÓ esta medición y decidió conservar el número tecleado.
+ *
+ * NO ESCRIBE EN `parametros_costos` — no hay nada que cambiar— así que no pasa por
+ * `escribirParametro`: es un registro de DECISIÓN, no de cambio, y por eso `valor_anterior` va
+ * en null. Poner ahí el tecleado pintaría en el historial una variación "19.00 → 28.50" que no
+ * ocurrió, que es peor que no tener historial.
+ *
+ * Es lo único que apaga el chip. Sin esta fila, el mismo número reaparecería cada vez que se
+ * abre la pantalla y en un mes sería paisaje — y el paisaje es lo que hace que el día que el
+ * número cambie de verdad, nadie lo mire.
+ */
+export async function registrarDescarte(
+  sb: any, a: AgregadoTipo, por: string, nota?: string
+): Promise<{ ok: boolean; error?: string }> {
+  if (a.medido === null) {
+    return { ok: false, error: "No hay medición que descartar." };
+  }
+  const { error } = await sb.from("historial_costos").insert({
+    tabla_origen: TABLA,
+    tipo_vehiculo: a.tipoVehiculo,
+    campo_modificado: CAMPO_DESCARTE,
+    valor_anterior: null,
+    valor_nuevo: a.medido,
+    motivo:
+      `Medición revisada y NO adoptada: ${a.medido} ${a.label ?? ""} · se conserva ${a.parametro}` +
+      (nota ? ` | ${nota}` : ""),
+    cambiado_por: por,
+  });
+  return error
+    ? { ok: false, error: `No se pudo registrar la decisión: ${error.message}. El chip va a volver a salir.` }
+    : { ok: true };
+}
+
+/**
+ * La procedencia de cada tipo, derivada del historial. Sin columnas nuevas: el hecho ya está
+ * registrado una vez, y copiarlo obligaría a mantener dos verdades y a explicar por qué
+ * discrepan (la regla de oro de `finanzas-00-fundacion.sql`, aplicada a una decisión).
+ *
+ * Se pide PAGINADO y en orden ascendente estable. La pantalla ya trae un historial, pero
+ * recortado a las 150 filas más nuevas: leer la procedencia de ahí haría que un tipo que no se
+ * toca hace meses PIERDA su sello en cuanto otros tipos empujen sus filas fuera del corte, y
+ * el chip volvería a proponer lo que ya se descartó. Es la misma trampa de leer con una
+ * identidad lo que se escribió con otra, por la puerta del `limit`.
+ */
+export async function cargarProcedencias(sb: any): Promise<Map<string, Procedencia>> {
+  const filas = await paginarFilas(() =>
+    sb.from("historial_costos")
+      .select("tipo_vehiculo,campo_modificado,valor_nuevo,motivo,cambiado_por,cambiado_en")
+      .in("campo_modificado", CAMPOS_PROCEDENCIA)
+      .order("cambiado_en", { ascending: true })
+      .order("id", { ascending: true })
+  );
+
+  const porTipo = new Map<string, any[]>();
+  for (const f of filas as any[]) {
+    const k = String(f.tipo_vehiculo ?? "");
+    if (!k) continue;                       // filas de `precios_combustible`: no son de un tipo
+    if (!porTipo.has(k)) porTipo.set(k, []);
+    porTipo.get(k)!.push(f);
+  }
+  const out = new Map<string, Procedencia>();
+  for (const [k, fs] of porTipo) out.set(k, procedenciaDeHistorial(fs));
+  return out;
 }
