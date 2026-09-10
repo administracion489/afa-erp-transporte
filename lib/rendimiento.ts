@@ -161,6 +161,14 @@ export type MotivoSinRendimiento =
   | "unidad_desconocida"
   /** Hay cargas SIN odómetro dentro del tramo: el denominador está incompleto por construcción. */
   | "eslabon_saltado"
+  /**
+   * La unidad es BICOMBUSTIBLE y dentro del tramo repostó del OTRO combustible: parte de esos
+   * km se hicieron con algo que no está en el denominador. Es `eslabon_saltado` por otra puerta
+   * —el denominador incompleto— pero con un arreglo distinto, y por eso tiene código propio:
+   * el eslabón saltado se arregla poniendo el odómetro que falta, y esto NO se arregla, es
+   * cómo funciona la unidad. Un km/gal por combustible exige medir cada uno por separado.
+   */
+  | "familia_cruzada"
   /** Supera el techo físico de su familia. No es un rendimiento, es un hueco de registro. */
   | "implausible";
 
@@ -298,12 +306,63 @@ export function normalizarCantidad(
 // ─── LA SERIE ─────────────────────────────────────────────────────────────────
 
 /**
+ * Una marca de repostaje de OTRO combustible de la MISMA unidad: lo que hace falta saber para
+ * medir una unidad BICOMBUSTIBLE. No aporta numerador ni denominador — solo dice "aquí entró
+ * combustible que no está en esta cuenta".
+ */
+/**
+ * ¿Esta marca del otro combustible cae DENTRO del tramo `previa → actual`?
+ *
+ * Manda el ODÓMETRO, que es el eje sobre el que se mide: el intervalo es `[kmPrev, km)` porque
+ * el combustible de una carga se quema DESPUÉS de su lectura — una carga de gasolina tomada con
+ * el mismo odómetro que abre el tramo se consumió dentro de él, y la que coincide con el cierre
+ * pertenece ya al siguiente. Sin odómetro (una carga del otro combustible a la que nadie se lo
+ * puso) se cae a la FECHA: sus galones movieron el bus igual, y no mirarla es exactamente el
+ * agujero por el que el tramo se publicaría inflado.
+ */
+function cruzaElTramo(
+  m: MarcaOtraFamilia,
+  kmPrev: number,
+  km: number,
+  fechaPrev: string,
+  fecha: string
+): boolean {
+  const k = num(m.kilometraje);
+  if (k > 0) return k >= kmPrev && k < km;
+  const f = String(m.fecha ?? "");
+  return f >= String(fechaPrev ?? "") && f <= String(fecha ?? "");
+}
+
+export type MarcaOtraFamilia = {
+  id: number;
+  fecha: string;
+  kilometraje: number | null;
+  /** La familia de esa carga, para poder nombrarla en el detalle. */
+  familia: string;
+};
+
+/**
  * Los tramos de UNA unidad y UNA familia, en orden cronológico.
  *
  * Las cargas de otras unidades o familias que lleguen se ignoran: la clave la decide la
  * primera fila. Para un lote mezclado, `seriesRendimiento`.
+ *
+ * `otrasFamilias` es OPCIONAL y sin ella el comportamiento es idéntico al de siempre: quien ya
+ * filtraba por familia antes de llamar sigue midiendo exactamente lo mismo.
  */
-export function serieRendimiento(cargas: CargaRendimiento[]): Serie {
+export function serieRendimiento(
+  cargas: CargaRendimiento[],
+  /**
+   * Los repostajes de la misma unidad y OTRO combustible (una unidad bicombustible: GLP +
+   * gasolina, el caso de la CWQ400). Uno DENTRO de un tramo significa que parte de esos km se
+   * hicieron con combustible que no está en el denominador, así que el tramo no se puede medir.
+   *
+   * **Los ADITIVOS no entran acá** y es la diferencia que evita un falso positivo masivo: un
+   * camión diésel que carga urea no es bicombustible —la urea no mueve el bus— y contarla
+   * borraría el rendimiento de media flota.
+   */
+  otrasFamilias: MarcaOtraFamilia[] = []
+): Serie {
   const primera = cargas[0];
   const familia = familiaCombustible(primera?.tipo);
   const unidad = primera?.unidad ?? "";
@@ -406,6 +465,23 @@ export function serieRendimiento(cargas: CargaRendimiento[]): Serie {
       continue;
     }
 
+    // ¿La unidad repostó del OTRO combustible dentro de este tramo? Va ANTES de `implausible`
+    // por la misma razón que la inversión cantidad↔precio va antes de `precio_fuera_de_rango`:
+    // el techo superado es el SÍNTOMA, no la causa. Un tramo de gasolina de la CWQ400 —que
+    // carga gasolina pocas veces, solo para el aire acondicionado y las subidas— acumula miles
+    // de km hechos con GLP, y salía como "Falta registrar una carga": mandando a buscar un
+    // repostaje que nunca faltó, y en el Radar BLOQUEANDO el voucher por ello.
+    const fechaPrev = previa.fecha;
+    const cruces = otrasFamilias.filter((m) => cruzaElTramo(m, kmPrev, km, fechaPrev, c.fecha));
+    if (cruces.length) {
+      tramos.push({
+        ...base, rendimiento: null, motivo: "familia_cruzada", crudo: valor,
+        detalle: detalleDe("familia_cruzada", { ...base, crudo: valor, cruces }),
+      });
+      previa = c;
+      continue;
+    }
+
     if (valor > techoFamilia) {
       // El rendimiento por sí solo no dice si faltan cargas o si el km está mal. El km/DÍA sí.
       const dias = Math.max(1, diasEntre(previa.fecha, c.fecha));
@@ -455,7 +531,11 @@ export function serieRendimiento(cargas: CargaRendimiento[]): Serie {
       cantidadMedida: buenos.reduce((s, t) => s + num(t.cantidad), 0),
       cargasSinOdometro,
       tramosDescartados: tramos.filter(
-        (t) => t.motivo === "implausible" || t.motivo === "eslabon_saltado" || t.motivo === "odometro_retrocede"
+        (t) =>
+          t.motivo === "implausible" ||
+          t.motivo === "eslabon_saltado" ||
+          t.motivo === "familia_cruzada" ||
+          t.motivo === "odometro_retrocede"
       ).length,
     },
   };
@@ -486,8 +566,30 @@ export function seriesRendimiento(cargas: CargaRendimiento[]): Map<string, Serie
     if (arr) arr.push(c);
     else cubos.set(k, [c]);
   }
+  // Acá —y solo acá— se sabe que una unidad es BICOMBUSTIBLE, porque es el único sitio que ve
+  // todas sus familias a la vez. No se guarda en `vehiculos` a propósito: sería una columna que
+  // alguien tiene que mantener al día, y se DERIVA sola de las cargas (misma regla que el `area`
+  // de caja chica). El día que la CWQ400 deje de cargar gasolina, sus tramos vuelven a medirse
+  // sin que nadie toque una ficha.
+  //
+  // Los ADITIVOS quedan fuera de las marcas: la urea no mueve el bus, así que un camión diésel
+  // que la carga NO es bicombustible. Contarla borraría el rendimiento de media flota.
+  const marcas = new Map<string, MarcaOtraFamilia[]>();
+  for (const c of cargas) {
+    const fam = familiaCombustible(c.tipo);
+    if (techoDeFamilia(fam) === null) continue;
+    const arr = marcas.get(c.unidad);
+    const m: MarcaOtraFamilia = { id: c.id, fecha: c.fecha, kilometraje: c.kilometraje, familia: fam };
+    if (arr) arr.push(m);
+    else marcas.set(c.unidad, [m]);
+  }
+
   const out = new Map<string, Serie>();
-  for (const [k, arr] of cubos) out.set(k, serieRendimiento(arr));
+  for (const [k, arr] of cubos) {
+    const familia = familiaCombustible(arr[0]?.tipo);
+    const otras = (marcas.get(arr[0]?.unidad) ?? []).filter((m) => m.familia !== familia);
+    out.set(k, serieRendimiento(arr, otras));
+  }
   return out;
 }
 
@@ -562,7 +664,7 @@ const fmtS = (n: number) => `S/ ${n.toLocaleString("es-PE", { minimumFractionDig
 
 function detalleDe(
   motivo: MotivoSinRendimiento,
-  t: Partial<Tramo> & { kmPrev?: number; kmMalo?: boolean; dias?: number }
+  t: Partial<Tramo> & { kmPrev?: number; kmMalo?: boolean; dias?: number; cruces?: MarcaOtraFamilia[] }
 ): string {
   switch (motivo) {
     case "aditivo":
@@ -589,6 +691,17 @@ function detalleDe(
         (t.crudo ? ` (saldría ${fmt(t.crudo)}, inflado)` : "") +
         `. Ponles el odómetro y este tramo se puede medir.`
       );
+    case "familia_cruzada": {
+      const otras = [...new Set((t.cruces ?? []).map((m) => m.familia))].join(" y ");
+      return (
+        `Unidad BICOMBUSTIBLE: dentro de este tramo repostó ${t.cruces?.length ?? 0} vez/veces de ` +
+        `${otras || "otro combustible"}, así que parte de estos ${fmt(num(t.km))} km se hicieron con ` +
+        `combustible que no está en esta cuenta` +
+        (t.crudo ? ` (saldría ${fmt(t.crudo)}, inflado)` : "") +
+        `. No es una carga que falte registrar: es que un km/${t.familia === "gnv" ? "m³" : "gal"} ` +
+        `por combustible solo se puede medir en tramos donde la unidad usó uno solo.`
+      );
+    }
     case "implausible":
       return (
         `${fmt0(num(t.km))} km ÷ ${fmt(num(t.cantidad))} = ${fmt(num(t.crudo))} — descartado: supera el ` +
@@ -619,6 +732,7 @@ export function etiquetaMotivo(motivo: MotivoSinRendimiento): string {
     case "odometro_retrocede": return "km no avanza";
     case "unidad_desconocida": return "unidad ?";
     case "eslabon_saltado": return "tramo incompleto";
+    case "familia_cruzada": return "bicombustible";
     case "implausible": return "implausible";
   }
 }

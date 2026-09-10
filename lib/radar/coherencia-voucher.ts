@@ -92,6 +92,17 @@ export type CoherenciaVoucher = {
 export const TOLERANCIA_MINIMA = 0.05;
 export const TOLERANCIA_RELATIVA = 0.004;
 
+// ── Qué tan cerca del precio referencial hay que estar para que cuente como evidencia ────
+// Las usa `detectarInversionCantidadPrecio` (¿el precio y la cantidad están cambiados?) y
+// `revisarTipoContraPrecio` de tipo-voucher.ts (¿este precio es el de OTRO combustible?). Las dos
+// preguntas se contestan con la misma asimetría —un valor clavado en el referencial y el otro
+// claramente fuera— así que comparten los números: dos umbrales que se llamen igual y valgan
+// distinto son dos módulos que discrepan sobre el mismo voucher.
+/** Pegado al referencial: cuenta como "este valor ES el de ese combustible". */
+export const CERCA_REFERENCIAL = 0.08;
+/** Claramente fuera: cuenta como "este valor NO puede ser el de ese combustible". */
+export const LEJOS_REFERENCIAL = 0.2;
+
 export function toleranciaCuadre(monto: number): number {
   return Math.max(TOLERANCIA_MINIMA, TOLERANCIA_RELATIVA * Math.abs(monto));
 }
@@ -434,9 +445,7 @@ export function detectarInversionCantidadPrecio(
   if (Math.abs(c - p) < 1e-9) return null; // iguales: intercambiarlos no cambia nada
 
   const desvio = (v: number) => Math.abs(v - ref) / ref;
-  const CERCA = 0.08; // el valor que ocupa "cantidad" es, en realidad, el precio
-  const LEJOS = 0.2;  // y el que ocupa "precio" no puede serlo
-  if (!(desvio(c) <= CERCA && desvio(p) > LEJOS)) return null;
+  if (!(desvio(c) <= CERCA_REFERENCIAL && desvio(p) > LEJOS_REFERENCIAL)) return null;
 
   return {
     cantidad: p,
