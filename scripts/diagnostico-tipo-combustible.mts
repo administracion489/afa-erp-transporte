@@ -43,6 +43,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolverTipoCombustible, revisarTipoContraPrecio } from "../lib/radar/tipo-voucher";
 import { configCombustible, familiaCombustible } from "../lib/combustible-tipos";
+import { seriesRendimiento, tramosPorCarga, etiquetaMotivo, type CargaRendimiento } from "../lib/rendimiento";
 
 // ── Argumentos ──────────────────────────────────────────────────────────────
 
@@ -104,7 +105,7 @@ console.log(`\nTIPO DE COMBUSTIBLE · cargas guardadas desde ${DESDE}${PLACA ? `
 console.log(APLICAR ? "MODO: --aplicar (VA A ESCRIBIR)" : "MODO: solo lectura");
 
 const cargas = await traer(
-  `combustible?select=id,vehiculo_id,fecha,galones,precio_galon,tipo_combustible,unidad,grifo,observaciones` +
+  `combustible?select=id,vehiculo_id,fecha,kilometraje,galones,precio_galon,tipo_combustible,unidad,grifo,observaciones` +
   `&fecha=gte.${DESDE}&order=fecha.asc`
 );
 const vehiculos = await traer("vehiculos?select=id,placa");
@@ -266,6 +267,70 @@ for (const h of porPrecio) {
     `  #${h.id}  ${h.fecha}  ${(h.placa || "?").padEnd(8)}  ` +
     `${etiqueta(h.guardado).padEnd(18)} → ${etiqueta(h.propuesto).padEnd(18)}  ${h.detalle}`
   );
+}
+
+// ── INVENTARIO DE LA UNIDAD (solo con --placa) ──────────────────────────────
+//
+// Contesta "revísame las cargas de gasolina de la CWQ400", que NO es la misma pregunta que
+// "cuáles están mal clasificadas": una unidad bicombustible puede tener todo bien tipificado y
+// aun así conviene mirar cuántas veces cargó cada combustible, cuándo y por cuánto. Con la
+// gasolina esporádica —aire acondicionado, subidas— el patrón esperado son pocas cargas y
+// pequeñas; muchas cargas de gasolina en una van que anda a GLP es en sí mismo el hallazgo.
+if (PLACA) {
+  const suyas = cargas.filter(
+    (c: any) => (placaDe.get(Number(c.vehiculo_id)) ?? "").replace(/[^A-Z0-9]/gi, "").toUpperCase() === PLACA
+  );
+
+  // El motor de rendimiento decide los veredictos, incluido el `familia_cruzada` de una unidad
+  // bicombustible. Se le pasan TODAS sus cargas para que pueda derivar que lo es.
+  const paraRend: CargaRendimiento[] = suyas.map((c: any) => ({
+    id: Number(c.id),
+    unidad: PLACA,
+    fecha: String(c.fecha ?? "").slice(0, 10),
+    kilometraje: c.kilometraje,
+    cantidad: c.galones,
+    unidadCantidad: c.unidad,
+    tipo: c.tipo_combustible,
+  }));
+  const porCarga = tramosPorCarga(seriesRendimiento(paraRend));
+
+  const familias = [...new Set(suyas.map((c: any) => familiaCombustible(c.tipo_combustible)))].sort();
+  linea(`INVENTARIO DE ${PLACA} — ${suyas.length} carga(s), ${familias.length} combustible(s)`);
+  if (familias.length > 1) {
+    console.log(
+      `  Es una unidad BICOMBUSTIBLE: sus km se reparten entre ${familias.join(" y ")}, así que\n` +
+      `  ningún tramo que envuelva un repostaje del otro combustible se puede medir. Eso sale\n` +
+      `  abajo como "bicombustible", y NO es una carga que falte registrar.\n`
+    );
+  }
+
+  for (const fam of familias) {
+    const delFam = suyas.filter((c: any) => familiaCombustible(c.tipo_combustible) === fam);
+    const gal = delFam.reduce((s: number, c: any) => s + (Number(c.galones) || 0), 0);
+    const soles_ = delFam.reduce(
+      (s: number, c: any) => s + (Number(c.galones) || 0) * (Number(c.precio_galon) || 0), 0
+    );
+    const fechas = delFam.map((c: any) => String(c.fecha ?? "").slice(0, 10)).sort();
+    console.log(
+      `\n  ${etiqueta(delFam[0]?.tipo_combustible).toUpperCase()} — ${delFam.length} carga(s) · ` +
+      `${gal.toFixed(2)} unid. · ${soles(soles_)} · ${fechas[0]} → ${fechas[fechas.length - 1]}`
+    );
+    for (const c of delFam) {
+      const t = porCarga[Number(c.id)]?.tramo;
+      const veredicto = t
+        ? t.rendimiento != null
+          ? `${t.rendimiento.toFixed(1)} km/gal`
+          : etiquetaMotivo(t.motivo!)
+        : "—";
+      const sospecha = hallazgos.find((h) => h.id === Number(c.id));
+      console.log(
+        `    #${String(c.id).padEnd(6)} ${String(c.fecha ?? "").slice(0, 10)}  ` +
+        `${String(Number(c.galones ?? 0).toFixed(3)).padStart(8)} @ ${soles(c.precio_galon).padStart(9)}  ` +
+        `km ${String(c.kilometraje ?? 0).padStart(8)}  ${veredicto.padEnd(18)} ${c.grifo ?? ""}` +
+        (sospecha ? `  ⚠ ${sospecha.evidencia}: sería ${etiqueta(sospecha.propuesto)}` : "")
+      );
+    }
+  }
 }
 
 // Resumen por unidad: es lo que dice si una placa es bicombustible y estaba toda mal clasificada.
