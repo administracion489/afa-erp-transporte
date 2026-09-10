@@ -7,7 +7,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
-import { aceptarLectura } from "@/lib/odometro";
+import { aceptarLectura, registrarLectura } from "@/lib/odometro";
+import { revisarKmTecleado } from "@/lib/odometro-seleccion";
 import AnularLecturaOdometro from "@/components/AnularLecturaOdometro";
 import { normalizarConfigRadar } from "@/lib/radar/config";
 import {
@@ -166,7 +167,11 @@ type TabId = (typeof TABS)[number]["id"];
 
 type VehiculoLite = { id: number; placa: string; categoria: string | null; estado: string | null };
 
-type VehiculoGuiaOdometro = { tipo: "propio" | "tercero"; id: number; placa: string; categoria: string | null; guia_odometro: string | null };
+// `kilometraje_actual` es el km VIGENTE de la unidad (derivado de lecturas_odometro). Viaja
+// hasta la pantalla porque el revisor de una recarga tiene que ver contra qué número compara
+// el odómetro que leyó la IA — un 239.980 sobre una unidad que va en 23.980 solo se nota si
+// los dos están a la vista.
+type VehiculoGuiaOdometro = { tipo: "propio" | "tercero"; id: number; placa: string; categoria: string | null; guia_odometro: string | null; kilometraje_actual: number | null };
 
 // Lectura de odómetro que el Radar registró en lecturas_odometro (ref_origen='radar_ia').
 type RadarLecturaOdometro = {
@@ -656,6 +661,13 @@ type EdicionComb = {
   cantidad: string;   // galones o litros (según esLitros)
   precio: string;     // precio unitario (por galón/litro)
   monto: string;      // monto total
+  /**
+   * Odómetro leído del tablero. Se escribe en `combustible.kilometraje` Y pasa por
+   * `registrarLectura` (la misma puerta que /combustible y que el auto-registro del Radar):
+   * de ese número dependen el km vigente de la unidad, el vencimiento de su mantenimiento y
+   * el rendimiento km/gal de todos sus tramos. Vacío es un dato válido — "sin odómetro".
+   */
+  kilometraje: string;
 };
 
 export type OverrideComb = {
@@ -669,6 +681,8 @@ export type OverrideComb = {
   esLitros: boolean;
   precio: number | null;
   monto: number | null;
+  /** Odómetro confirmado por el revisor. `null` = sin dato (no se registra ninguna lectura). */
+  kilometraje: number | null;
 };
 
 function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, onRegistrar, onDescartar }: {
@@ -721,6 +735,10 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
       cantidad: esLitros ? (c.litros != null ? String(c.litros) : "") : (c.galones != null ? String(c.galones) : ""),
       precio: (esLitros ? c.precio_litro : c.precio_galon) != null ? String(esLitros ? c.precio_litro : c.precio_galon) : "",
       monto: c.monto_total != null ? String(c.monto_total) : "",
+      // El 0 que dejan las filas viejas se muestra VACÍO: cero kilómetros no es una lectura, es
+      // la ausencia de una (lib/rendimiento.ts trata 0 y null como lo mismo), y pre-llenarlo con
+      // un cero invitaría a registrarlo como si fuera el odómetro del tablero.
+      kilometraje: c.kilometraje != null && c.kilometraje > 0 ? String(c.kilometraje) : "",
     };
   };
   const setCampo = (c: RadarCombustible, campo: keyof EdicionComb, valor: string) =>
@@ -754,6 +772,13 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
               const cantEd = numEd(ed.cantidad);
               const precioEd = numEd(ed.precio);
               const montoEd = numEd(ed.monto);
+              // La unidad ELEGIDA en el formulario, no la que trae la fila: el km vigente contra
+              // el que se compara el odómetro es el de la unidad a la que se le va a cargar.
+              const unidadEd = ed.vehiculo
+                ? vehiculosGuia.find((v) => `${v.tipo}:${v.id}` === ed.vehiculo) ?? null
+                : null;
+              const kmEd = numEd(ed.kilometraje);
+              const avisoKm = revisarKmTecleado({ km: kmEd, kmVigente: unidadEd?.kilometraje_actual ?? null });
               const fotos = fotosDe(c);
               const puedeRegistrar = ed.vehiculo !== "" && ed.tipoCombustible !== "" && cantEd != null && (precioEd != null || montoEd != null);
               return (
@@ -900,7 +925,41 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           <CampoEdit label="Monto total">
                             <input type="number" inputMode="decimal" step="0.01" value={ed.monto} onChange={(e) => setCampo(c, "monto", e.target.value)} placeholder="—" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-[#0b315f] outline-none focus:border-[#0b315f] bg-white" />
                           </CampoEdit>
+                          {/* El odómetro que la IA leyó del tablero. No se podía editar en ninguna
+                              pantalla y se registraba igual (`kilometraje: c.kilometraje ?? 0`), así que
+                              un dígito de más viajaba tal cual a la carga — y de ahí al km vigente de la
+                              unidad, a su vencimiento de mantenimiento y al km/gal de todos sus tramos. */}
+                          <CampoEdit label="Odómetro (km)">
+                            <input
+                              type="number" inputMode="numeric" step="1" min="0"
+                              value={ed.kilometraje}
+                              onChange={(e) => setCampo(c, "kilometraje", e.target.value)}
+                              placeholder="—"
+                              className={`w-full border rounded-lg px-2 py-1.5 text-sm font-bold outline-none bg-white ${
+                                avisoKm ? "border-[#F2C94C] text-[#B07A0F] focus:border-[#B07A0F]" : "border-gray-200 text-[#0b315f] focus:border-[#0b315f]"
+                              }`}
+                            />
+                            {/* Los dos números a la vista con etiquetas distintas, y NUNCA un botón
+                                «usar el vigente»: el que manda es el del tablero, y copiar el vigente
+                                sería fabricar una lectura que nadie tomó. */}
+                            <p className="text-[10px] text-gray-400 mt-1 leading-tight">
+                              {!unidadEd
+                                ? "Elige la unidad para ver su km vigente"
+                                : unidadEd.kilometraje_actual != null && unidadEd.kilometraje_actual > 0
+                                  ? `Vigente de ${unidadEd.placa}: ${Number(unidadEd.kilometraje_actual).toLocaleString("es-PE")} km`
+                                  : `${unidadEd.placa} aún no tiene km vigente`}
+                            </p>
+                          </CampoEdit>
                         </div>
+
+                        {avisoKm && (
+                          <p className="text-[11px] font-bold text-[#B07A0F] mt-2">⚠ Odómetro: {avisoKm.aviso}</p>
+                        )}
+                        {kmEd == null && (
+                          <p className="text-[11px] text-gray-400 mt-2">
+                            Sin odómetro la recarga se registra igual, pero el rendimiento km/gal de ese tramo no se puede medir.
+                          </p>
+                        )}
 
                         <div className="flex flex-wrap items-center gap-3 mt-3">
                           {c.conductor && <p className="text-xs text-gray-500 font-semibold">Conductor: <span className="font-bold text-gray-700">{c.conductor}</span></p>}
@@ -917,6 +976,7 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                                 esLitros,
                                 precio: precioEd,
                                 monto: montoEd,
+                                kilometraje: kmEd,
                               })}
                               disabled={!puedeRegistrar || registrando === c.id}
                               className="px-3 py-2 rounded-xl text-xs font-bold bg-[#0b315f] text-white hover:bg-[#1262bd] transition-colors disabled:opacity-40"
@@ -2017,8 +2077,8 @@ export default function RadarIAPage() {
         supabase.from("radar_combustible").select("*").order("created_at", { ascending: false }).limit(60),
         supabase.from("lecturas_odometro").select("*").eq("ref_origen", "radar_ia").order("created_at", { ascending: false }).limit(60),
         supabase.from("radar_alertas").select("*").order("created_at", { ascending: false }).limit(100),
-        supabase.from("vehiculos").select("id, placa, categoria, estado, guia_odometro"),
-        supabase.from("vehiculos_tercero").select("id, placa, categoria, guia_odometro"),
+        supabase.from("vehiculos").select("id, placa, categoria, estado, guia_odometro, kilometraje_actual"),
+        supabase.from("vehiculos_tercero").select("id, placa, categoria, guia_odometro, kilometraje_actual"),
       ]);
       if (rEstado.error) console.warn("radar-ia: error leyendo radar_estado", rEstado.error);
       if (rConfig.error) console.warn("radar-ia: error leyendo radar_config", rConfig.error);
@@ -2037,9 +2097,11 @@ export default function RadarIAPage() {
       setVehiculos(((rVehiculos.data ?? []) as VehiculoLite[]));
       const guiaPropios: VehiculoGuiaOdometro[] = ((rVehiculos.data ?? []) as any[]).map((v) => ({
         tipo: "propio", id: v.id, placa: v.placa, categoria: v.categoria ?? null, guia_odometro: v.guia_odometro ?? null,
+        kilometraje_actual: v.kilometraje_actual != null ? Number(v.kilometraje_actual) : null,
       }));
       const guiaTerceros: VehiculoGuiaOdometro[] = ((rVehTercero.data ?? []) as any[]).map((v) => ({
         tipo: "tercero", id: v.id, placa: v.placa, categoria: v.categoria ?? null, guia_odometro: v.guia_odometro ?? null,
+        kilometraje_actual: v.kilometraje_actual != null ? Number(v.kilometraje_actual) : null,
       }));
       setVehiculosGuia(
         [...guiaPropios, ...guiaTerceros].sort((a, b) => (a.placa ?? "").localeCompare(b.placa ?? ""))
@@ -2343,6 +2405,11 @@ export default function RadarIAPage() {
       { campo: "precio", ia: iaPrecio,  correcto: ov.precio },
       { campo: "monto",  ia: leidoPorIA("monto", c.monto_total), correcto: ov.monto },
       { campo: "tipo_combustible", ia: c.tipo_combustible, correcto: ov.tipoCombustible || null },
+      // El odómetro también se aprende: el dígito de más es EL error de lectura de esta flota
+      // (ver la sección "Lectura del odómetro" del CLAUDE.md), y cada corrección humana entra al
+      // prompt de la próxima foto. El 0 de una fila vieja se manda como "no leyó nada": cero
+      // kilómetros no es una lectura equivocada, es la ausencia de lectura.
+      { campo: "kilometraje", ia: c.kilometraje != null && c.kilometraje > 0 ? c.kilometraje : null, correcto: ov.kilometraje },
     ];
     const filas = campos
       .filter((x) => x.correcto != null && distinto(x.ia, x.correcto))
@@ -2372,18 +2439,25 @@ export default function RadarIAPage() {
     setRegistrandoComb(c.id);
     try {
       const grupo = (c.mensaje_id && grupoPorMensaje[c.mensaje_id]) || "WhatsApp";
-      const fotoUrl = (c.fotos?.[0]?.url) ?? (c.mensaje_id ? mensajesPorId[c.mensaje_id]?.media_url ?? null : null);
+      const msg = c.mensaje_id ? mensajesPorId[c.mensaje_id] ?? null : null;
+      const fotoUrl = (c.fotos?.[0]?.url) ?? msg?.media_url ?? null;
       // Guarda primero las correcciones (dataset de aprendizaje), sin frenar el registro.
       await guardarCorreccionesCombustible(c, ov, fotoUrl);
 
       const destino = ov.tipo === "tercero" ? { vehiculo_tercero_id: ov.vehiculoId } : { vehiculo_id: ov.vehiculoId };
+      const fechaCarga = ov.fecha ?? c.fecha ?? hoyISO();
       // OJO: nunca escribir `total` — es columna generada (galones × precio_galon)
       const { data, error } = await supabase
         .from("combustible")
         .insert({
           ...destino,
-          fecha: ov.fecha ?? c.fecha ?? hoyISO(),
-          kilometraje: c.kilometraje ?? 0,
+          fecha: fechaCarga,
+          // El que confirmó el revisor mirando la foto, no el que leyó la IA. Antes era
+          // `c.kilometraje ?? 0` y no había ningún campo que lo pudiera cambiar: un dígito de
+          // más entraba tal cual a la carga y de ahí al rendimiento km/gal de la unidad.
+          // Vacío sigue siendo 0, que es como el resto del ERP escribe "sin odómetro" en esta
+          // columna (`/combustible` hace lo mismo, y lib/rendimiento.ts lee 0 y null igual).
+          kilometraje: ov.kilometraje ?? 0,
           galones: ov.cantidad,
           precio_galon: precio,
           grifo: ov.grifo ?? c.grifo,
@@ -2407,7 +2481,46 @@ export default function RadarIAPage() {
           vehiculo_tercero_id: ov.tipo === "tercero" ? ov.vehiculoId : null,
         })
         .eq("id", c.id);
-      showToast("Recarga registrada en Combustible");
+
+      // El odómetro consolidado, por la MISMA puerta que el resto del ERP (`registrarLectura`,
+      // como /combustible al crear una carga y como el auto-registro del Radar). Antes esta
+      // rama no lo alimentaba: la recarga que pasaba por revisión —justo la que un humano
+      // miró— dejaba su kilometraje solo dentro de la carga, así que no llegaba a
+      // lecturas_odometro ni al km vigente de la unidad, y no salía en /mantenimiento.
+      // El anti-retroceso decide el estado; acá no se fuerza nada, se REPORTA el veredicto.
+      let notaOdo = "";
+      if (ov.kilometraje != null && ov.kilometraje > 0) {
+        try {
+          const r = await registrarLectura(supabase, {
+            vehiculo_id: ov.vehiculoId,
+            flota: ov.tipo === "tercero" ? "tercero" : "propia",
+            km: ov.kilometraje,
+            fuente: "combustible",
+            fecha: fechaCarga,
+            foto_url: fotoUrl,
+            ref_origen: "radar_ia",
+            capturado_en: msg?.ts_mensaje ?? null,
+            // La hora del mensaje es la del ENVÍO: la foto del tablero pudo tomarse antes.
+            horaEsTope: true,
+            // Por FILA del Radar, nunca por mensaje: una ráfaga con dos vouchers deja dos filas
+            // con el MISMO mensaje_id (insertarRecargasAdicionales), y una clave compartida
+            // haría que la segunda lectura se dedujera "ya registrada" y se perdiera entera.
+            idemKey: `radar_odo_comb_rev:${c.id}`,
+          });
+          if (!r.ok) notaOdo = ` · el odómetro no se pudo registrar (${r.error ?? r.motivo ?? "error"})`;
+          // Dedupe: NO se escribió nada nuevo. Decirlo importa — con dos vouchers de la misma
+          // unidad en una ráfaga comparten la foto del cluster, y sin este aviso la pantalla
+          // diría "registrado" sobre un número que no quedó guardado en ninguna parte.
+          else if (r.duplicada) notaOdo = " · el odómetro NO se guardó: esa lectura ya estaba en el historial";
+          else if (r.estado !== "aceptada") notaOdo = ` · odómetro por revisar: ${r.motivo ?? r.estado}`;
+        } catch (e) {
+          // Nunca tumba el registro: la carga —el gasto— ya está escrita.
+          console.warn("radar-ia: no se pudo registrar la lectura de odómetro", e);
+          notaOdo = " · el odómetro no se pudo registrar";
+        }
+      }
+
+      showToast(`Recarga registrada en Combustible${notaOdo}`, !notaOdo);
       cargar();
     } catch (e) {
       console.warn("radar-ia: error registrando combustible", e);
@@ -2588,9 +2701,10 @@ export default function RadarIAPage() {
     <div className="min-h-screen bg-[#eef3f8]">
       <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
 
-        {/* Toast */}
+        {/* Toast. `max-w` para que un veredicto largo (el motivo con que el odómetro quedó
+            por revisar) envuelva en dos líneas en vez de cruzar la pantalla entera. */}
         {toast && (
-          <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl shadow-lg text-sm font-medium text-white transition-all ${toast.ok ? "bg-[#0b315f]" : "bg-red-600"}`}>
+          <div className={`fixed top-4 right-4 z-50 max-w-sm px-4 py-3 rounded-xl shadow-lg text-sm font-medium text-white transition-all ${toast.ok ? "bg-[#0b315f]" : "bg-red-600"}`}>
             {toast.msg}
           </div>
         )}

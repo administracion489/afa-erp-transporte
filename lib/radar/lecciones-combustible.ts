@@ -19,6 +19,10 @@ const CAMPO_LABEL: Record<string, string> = {
   precio:  "el precio unitario",
   monto:   "el monto total",
   fecha:   "la fecha",
+  // Los dos que el panel de revisión ya escribía sin etiqueta: sin ellas la lección salía con
+  // el nombre crudo de la columna ("Para tipo_combustible leíste…").
+  kilometraje: "el kilometraje del odómetro",
+  tipo_combustible: "el tipo de combustible",
 };
 
 /**

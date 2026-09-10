@@ -70,6 +70,47 @@ export function digitosDe(n: number): number {
 }
 
 /**
+ * Aviso sobre un kilometraje que está EN UN CAMPO DE PANTALLA, antes de guardarlo — el que la
+ * IA pre-llenó o el que acaba de teclear una persona. Lo usa el panel de revisión de
+ * `/radar-ia?tab=combustible`, donde la recarga viene con su odómetro leído del tablero.
+ *
+ * Se limita A PROPÓSITO al salto de orden de magnitud, que es la única rama de
+ * `evaluarLectura` que depende SOLO del km vigente y por tanto no puede dar un falso ámbar:
+ *
+ *   · el vigente es el MÁXIMO histórico, así que nada legítimo lo multiplica por ocho —
+ *     ni una lectura retroactiva ni una unidad que estuvo parada;
+ *   · en cambio "menor al vigente" SÍ puede ser legítimo (un voucher de hace tres días que
+ *     se procesa hoy), y avisarlo aquí sería el ámbar que sale siempre y enseña a ignorarlos.
+ *     De ese lado juzga `registrarLectura` al guardar, con las lecturas vecinas en la mano,
+ *     y devuelve su veredicto para que la pantalla lo diga.
+ *
+ * Comparte constantes con quien escribe (`RATIO_DIGITO_DE_MAS`/`PISO_RATIO_DIGITO`), que es lo
+ * que impide el choque de "bueno para la pantalla, dígito de más para la base".
+ */
+export type AvisoKmTecleado = { codigo: Extract<CodigoOdometro, "digito_de_mas">; aviso: string };
+
+export function revisarKmTecleado(e: {
+  km: number | null | undefined;
+  kmVigente: number | null | undefined;
+}): AvisoKmTecleado | null {
+  const km = Number(e.km);
+  const vigente = Number(e.kmVigente || 0);
+  if (!Number.isFinite(km) || km <= 0) return null;
+  // Sin ancla, o con el odómetro bajo (unidad nueva), un ×8 legítimo existe: no se juzga.
+  if (vigente < PISO_RATIO_DIGITO) return null;
+  if (km < vigente * RATIO_DIGITO_DE_MAS) return null;
+
+  const dKm = digitosDe(km), dVig = digitosDe(vigente);
+  return {
+    codigo: "digito_de_mas",
+    aviso:
+      dKm > dVig
+        ? `${fmt(km)} tiene ${dKm} dígitos y el odómetro de esta unidad tiene ${dVig} (vigente ${fmt(vigente)}): sobra un dígito. Míralo en la foto y escríbelo.`
+        : `${fmt(km)} es ${Math.round(km / vigente)} veces el kilometraje vigente (${fmt(vigente)}): revisa el número en la foto.`,
+  };
+}
+
+/**
  * Extrae números del texto libre que la IA devuelve como `texto_leido`. Es prosa, no una
  * lista ("1431.9 km (pantalla superior) y 1737787 (número mayor inferior)"), por eso lo que
  * salga de aquí solo sirve para desempatar: un número que el modelo nunca designó como
