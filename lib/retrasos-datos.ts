@@ -27,6 +27,8 @@ import {
   type ConfigRetraso, type FixPuntual, type ParadaPuntual, type Veredicto,
 } from "./retrasos";
 import { etaHasta } from "./eta-trafico";
+import { sembrarAvance, leerAvance, type FixAvance, type ParadaAvance } from "./avance-paradas";
+import { paginarFilas } from "./huella";
 
 const admin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -154,6 +156,63 @@ async function fixesDe(r: ReservaCtx): Promise<FixPuntual[]> {
   return [];
 }
 
+/**
+ * Paradas que el bus YA dejó atrás, POR ID, según el motor de avance
+ * (lib/avance-paradas.ts) — el MISMO que pinta el modal del operador y la línea de tiempo
+ * del portal del cliente. Es la respuesta a "¿cuál es el siguiente paradero?" cuando el
+ * conductor no marca, que es lo habitual.
+ *
+ * Cuatro decisiones que no son de estilo:
+ *
+ *  · SOLO `en_curso`. Antes de arrancar, el objetivo es el paradero de ORIGEN y el piso
+ *    tiene que ser 0 por definición; además los fixes previos al inicio son del servicio
+ *    ANTERIOR de la misma unidad y declararían pasados los paraderos de éste.
+ *  · SOLO los fixes de ESTA reserva (`reserva_id`), nunca el respaldo por conductor o
+ *    vehículo que usa `fixesDe`. Por lo mismo: la huella del viaje anterior pasa por los
+ *    mismos paraderos y el piso se dispararía hasta el final de la ruta.
+ *  · LA HUELLA ENTERA, paginada, no una ventana reciente. El motor sube el piso DE A UNA
+ *    parada real (el candado `hayRealAntes` de avance-paradas): sembrado desde la mitad
+ *    del recorrido, las paradas iniciales nunca se declaran pasadas y el piso se queda
+ *    atascado en la primera — o sea, exactamente el bug que esto viene a arreglar.
+ *  · SIN la polilínea (el VETO geométrico), igual que /api/cliente/gps:334. Traerla es una
+ *    llamada a Google por servicio y este camino no paga ETA a propósito. El veto solo
+ *    RESTA veredictos, así que su ausencia no inventa paradas pasadas.
+ *
+ * Best-effort: cualquier fallo devuelve [] y el veredicto sale como siempre, mirando solo
+ * el botón del conductor. Un SQL lento no puede dejar a la torre sin semáforo.
+ */
+async function paradasPasadasDe(r: ReservaCtx, paradas: ParadaPuntual[]): Promise<number[]> {
+  if (r.estado !== "en_curso" || !paradas.length) return [];
+  try {
+    const filas = await paginarFilas(() =>
+      admin.from("ubicaciones_gps").select("lat,lng,created_at,precision_m")
+        .eq("reserva_id", r.id)
+        .order("created_at", { ascending: true }).order("id", { ascending: true }));
+    const huella: FixAvance[] = (filas || [])
+      .map((f: any) => ({
+        lat: Number(f.lat), lng: Number(f.lng), ts: Date.parse(f.created_at),
+        acc: Number.isFinite(Number(f.precision_m)) ? Number(f.precision_m) : 25,
+      }))
+      .filter((p: FixAvance) => Number.isFinite(p.lat) && Number.isFinite(p.lng) && Number.isFinite(p.ts));
+    if (!huella.length) return [];
+
+    // El motor indexa POR POSICIÓN. Se ordena una vez y se devuelve leyendo ESE mismo
+    // array: emparejar por índice contra otra lista es el fallo que documenta CLAUDE.md
+    // ("si un dato se escribe bajo una clave, la lectura tiene que derivar esa clave por
+    // el mismo camino"). Hacia fuera solo viajan ids.
+    const ord = [...paradas].sort((a, b) => (a.orden ?? 0) - (b.orden ?? 0));
+    const pa: ParadaAvance[] = ord.map((p) => ({
+      lat: p.lat == null ? null : Number(p.lat),
+      lng: p.lng == null ? null : Number(p.lng),
+      completada: p.estado === "completada",
+    }));
+    const av = leerAvance(sembrarAvance(pa, huella), pa);
+    return ord.filter((_, i) => av.pasadas[i]).map((p) => p.id);
+  } catch {
+    return [];
+  }
+}
+
 export type OpcionesVeredicto = {
   fecha?: string;
   reservaIds?: number[];
@@ -224,8 +283,16 @@ export async function veredictosDelDia(
     l.push(p); paradasPor.set(p.reserva_id, l);
   }
 
+  // Los fixes RECIENTES (dónde está el bus ahora) y el AVANCE sobre el recorrido (por
+  // dónde ya pasó) son dos preguntas distintas con dos consultas distintas: la primera
+  // mira 15 puntos, la segunda la huella entera y solo de los servicios en curso.
   const fixesPor = new Map<number, FixPuntual[]>();
-  await Promise.all(enFoco.map(async (r) => { fixesPor.set(r.id, await fixesDe(r)); }));
+  const pasadasPor = new Map<number, number[]>();
+  await Promise.all(enFoco.map(async (r) => {
+    const [f, p] = await Promise.all([fixesDe(r), paradasPasadasDe(r, paradasPor.get(r.id) || [])]);
+    fixesPor.set(r.id, f);
+    pasadasPor.set(r.id, p);
+  }));
 
   const esTercero = (r: ReservaCtx) => !!(r.empresa_tercerizada_id || r.vehiculo_tercero_id || r.conductor_tercero_id);
 
@@ -235,6 +302,7 @@ export async function veredictosDelDia(
     const v = evaluarPuntualidad({
       reserva: r, paradas: paradasPor.get(r.id) || [], fixes: fixesPor.get(r.id) || [],
       ahoraMs, ahoraMin, hoy: fecha, cfg, esTercero: esTercero(r),
+      paradasPasadas: pasadasPor.get(r.id),
     });
     veredictos.set(r.id, { reserva_id: r.id, ...v });
     // Entra en la 2ª pasada aunque no haya permiso de pago: la caché de ETA se lee
@@ -262,7 +330,7 @@ export async function veredictosDelDia(
       reserva_id: r.id,
       ...evaluarPuntualidad({
         reserva: r, paradas, fixes, ahoraMs, ahoraMin, hoy: fecha, cfg,
-        esTercero: esTercero(r), eta,
+        esTercero: esTercero(r), eta, paradasPasadas: pasadasPor.get(r.id),
       }),
     });
   }));

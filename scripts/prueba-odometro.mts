@@ -23,7 +23,7 @@
 // lectura legítima (unidad nueva sin historial, salto grande tras una parada larga), y NADIE
 // adivina qué dígito sobra — de 239.980 salen tres borrados posibles dentro de la banda.
 
-import { elegirOdometro, digitosDe } from "../lib/odometro-seleccion";
+import { elegirOdometro, digitosDe, revisarKmTecleado } from "../lib/odometro-seleccion";
 import { evaluarLectura, RATIO_DIGITO_DE_MAS, PISO_RATIO_DIGITO } from "../lib/odometro";
 import { promptOdometro } from "../lib/vision-ia";
 import { promptExtraccionMedia, type ContextoPrompt } from "../lib/radar/prompts";
@@ -139,6 +139,45 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
 }
 {
   chk("digitosDe cuenta cifras, no valores", digitosDe(23980) === 5 && digitosDe(239980) === 6 && digitosDe(0) === 1);
+}
+
+// ── 4b. EL MISMO AVISO EN EL CAMPO DONDE SE TECLEA (revisarKmTecleado) ───────
+// El panel de revisión de /radar-ia?tab=combustible pre-llena el odómetro que la IA leyó del
+// tablero y deja corregirlo. Ese campo tiene que decir lo mismo que dirá la base al guardar,
+// así que comparte las constantes con evaluarLectura en vez de traer un umbral propio.
+{
+  const v = revisarKmTecleado({ km: 239980, kmVigente: 23980 });
+  chk("CUP-435 · el campo avisa del dígito de más antes de guardar", v?.codigo === "digito_de_mas");
+  chk("…y nombra las dos cantidades de dígitos", !!v && /6 d[ií]gitos/.test(v.aviso) && /tiene 5/.test(v.aviso), v?.aviso ?? "");
+
+  chk("un avance normal no levanta ningún ámbar", revisarKmTecleado({ km: 24300, kmVigente: 23980 }) === null);
+  chk("el campo vacío no se juzga", revisarKmTecleado({ km: null, kmVigente: 23980 }) === null);
+  chk("sin km vigente no se juzga", revisarKmTecleado({ km: 239980, kmVigente: 0 }) === null);
+  chk(`bajo el piso del ratio (< ${PISO_RATIO_DIGITO.toLocaleString("es-PE")}) tampoco`,
+    revisarKmTecleado({ km: 7000, kmVigente: 800 }) === null);
+
+  // LO QUE NO SE AVISA A PROPÓSITO: un km MENOR al vigente puede ser legítimo (un voucher de
+  // hace tres días que se procesa hoy). Ese lado lo juzga registrarLectura con las lecturas
+  // vecinas en la mano; un ámbar aquí saldría en filas correctas y enseñaría a ignorarlos.
+  chk("un retroceso NO se pinta en el campo (lo juzga quien escribe)",
+    revisarKmTecleado({ km: 23000, kmVigente: 23980 }) === null);
+}
+{
+  // Y el cruce que importa: lo que el campo deja pasar en silencio, el escritor no puede
+  // marcarlo como dígito de más. Mismo invariante que la sección 4, del otro lado.
+  let choques = 0;
+  for (const vig of [6000, 23980, 174000, 568287]) {
+    for (const f of [1.01, 1.2, 2, 5, 7.9, 8, 10, 100]) {
+      const km = Math.round(vig * f);
+      const enPantalla = revisarKmTecleado({ km, kmVigente: vig });
+      const escritor = evaluarLectura({ kmVigente: vig, kmNuevo: km, kmDiaMax: 1500, horasDesdeUltima: null });
+      if (!enPantalla && /d[ií]gito de m[aá]s/i.test(escritor.motivo ?? "")) {
+        choques++;
+        console.log(`      choque: vigente ${vig} · tecleado ${km} → "${escritor.motivo}"`);
+      }
+    }
+  }
+  chk("ningún número pasa liso por el campo y sale 'dígito de más' al guardarlo", choques === 0, `${choques} choque(s)`);
 }
 
 // ── 5. LA CAUSA: la forma del número tiene que llegar al modelo SIEMPRE ──────
