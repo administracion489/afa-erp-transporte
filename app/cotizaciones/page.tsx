@@ -1101,12 +1101,34 @@ export default function CotizacionesPage(){
     const costoCalc=vehParam?calcCostoVeh(vehParam,preciosDB,kmNum>0?kmNum:1,diasCond,peajesF,pernocteF,viaticosF):null;
     const precioDiaNum=esFijo?Number(form.precio_dia)||costoCalc?.diaEstIGV:null;
     if(guardarTar&&form.tipo_vehiculo&&form.tipo_servicio&&form.equipamiento&&subtotal>0){const{error:tarErr}=await supabase.from("tarifario").upsert({origen:form.origen.trim().toUpperCase(),destino:form.destino.trim().toUpperCase(),tipo_vehiculo:form.tipo_vehiculo,equipamiento:form.equipamiento,tipo_servicio:form.tipo_servicio,modo:form.modo_servicio,precio:esFijo?(precioDiaNum||subtotal)/1.18:subtotal,moneda:"PEN",confidencial:["full_day","multi_dia"].includes(form.tipo_servicio),incluye_guia:false,incluye_peajes:false,incluye_alimentacion:false,notas:`Cotización ${form.numero_cotizacion||""}`.trim(),activo:true},{onConflict:"origen,destino,tipo_vehiculo,equipamiento,tipo_servicio"});if(tarErr)alert("Error al guardar en tarifario: "+tarErr.message);}
-    // Detectar servicios futuros no ejecutados para ofrecer propagación (solo en fijos editados)
+    // Detectar servicios futuros no ejecutados para ofrecer propagación de las direcciones.
+    //
+    // TRES COSAS DEJABAN SERVICIOS FUERA, y las tres en silencio — el operador veía "se
+    // propagó" y una parte de sus servicios seguía con la dirección vieja:
+    //
+    // 1 · SOLO CORRÍA EN LOS FIJOS (`esFijo &&`). Una cotización eventual o multi-día también
+    //     genera varios servicios desde la misma ficha, y ninguno recibía las paradas nuevas.
+    //     Lo que decide si hay que propagar es tener paradas y servicios futuros, no el modo.
+    // 2 · POSTGREST CORTA EN 1000 FILAS. Un contrato fijo largo pasa de ese techo, así que el
+    //     select plano alcanzaba a los primeros 1000 y callaba el resto.
+    // 3 · `.neq("estado", …)` EXCLUÍA LAS FILAS CON `estado` NULL. En SQL `estado <> 'x'` es
+    //     NULL cuando el campo es NULL, y PostgREST descarta lo que no evalúa a true — así que
+    //     los servicios sin estado escrito, que son servicios VIVOS y los que más falta hace
+    //     tocar, quedaban fuera. El filtro se hace en JS, donde "no es ninguno de estos tres"
+    //     significa lo que uno espera que signifique.
     let reservasParaPropagar:{id:number;direccion_servicio:string|null}[]=[];
-    if(esFijo&&cotIdGuardado&&(paradasGuardadas.length>0||paradasRetornoGuardadas.length>0)){
+    if(cotIdGuardado&&(paradasGuardadas.length>0||paradasRetornoGuardadas.length>0)){
       const todayPeru=new Date(Date.now()-5*60*60*1000).toISOString().split("T")[0];
-      const{data:afect}=await supabase.from("reservas").select("id,direccion_servicio").eq("cotizacion_id",cotIdGuardado).gte("fecha_servicio",todayPeru).neq("estado","en_curso").neq("estado","finalizada").neq("estado","cancelada");
-      reservasParaPropagar=afect||[];
+      const afect:{id:number;direccion_servicio:string|null;estado:string|null}[]=[];
+      for(let d=0;d<40000;d+=1000){
+        const{data,error:eLee}=await supabase.from("reservas").select("id,direccion_servicio,estado").eq("cotizacion_id",cotIdGuardado).gte("fecha_servicio",todayPeru).range(d,d+999);
+        if(eLee)break;
+        afect.push(...(data||[]));
+        if(!data||data.length<1000)break;
+      }
+      reservasParaPropagar=afect
+        .filter(r=>!["en_curso","finalizada","cancelada"].includes(r.estado||""))
+        .map(r=>({id:r.id,direccion_servicio:r.direccion_servicio}));
     }
     // ── Sincronizar el CLIENTE a los servicios ya generados desde esta cotización ──────────
     // cliente_id en una reserva es identidad HEREDADA de la cotización (se fija al generar el
@@ -1154,9 +1176,21 @@ export default function CotizacionesPage(){
     const todosIds=reservas.map(r=>r.id);
     const BATCH=100;
 
-    // 1 query: qué reservas ya tienen paradas escaneadas
-    const{data:conActividad}=await supabase.from("paradas").select("reserva_id").in("reserva_id",todosIds).eq("estado","completada");
-    const idsConActividad=new Set((conActividad||[]).map((p:any)=>p.reserva_id));
+    // Qué reservas ya tienen paradas escaneadas. Por LOTES y con paginado, no en una consulta:
+    // con un contrato largo `todosIds` pasa de mil, y un solo `.in()` arma una URL que revienta
+    // y encima devuelve a lo más 1000 filas. Quedarse corto aquí es lo peligroso: una reserva
+    // cuya actividad no se ve entra a `reservasAfectar` y se le pisan las paradas de un servicio
+    // que YA se estaba prestando.
+    const idsConActividad=new Set<number>();
+    for(let i=0;i<todosIds.length;i+=BATCH){
+      const lote=todosIds.slice(i,i+BATCH);
+      for(let d=0;d<20000;d+=1000){
+        const{data,error:eAct}=await supabase.from("paradas").select("reserva_id").in("reserva_id",lote).eq("estado","completada").range(d,d+999);
+        if(eAct)break;
+        (data||[]).forEach((p:any)=>idsConActividad.add(p.reserva_id));
+        if(!data||data.length<1000)break;
+      }
+    }
     const reservasAfectar=reservas.filter(r=>!idsConActividad.has(r.id));
     const saltadas=reservas.length-reservasAfectar.length;
 
