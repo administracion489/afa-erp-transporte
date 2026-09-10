@@ -526,7 +526,21 @@ export async function registrarLectura(
      */
     motivo?: string | null;
   }
-): Promise<{ ok: boolean; estado: EstadoLectura; motivo: string | null; lecturaId?: string; error?: string }> {
+): Promise<{
+  ok: boolean;
+  estado: EstadoLectura;
+  motivo: string | null;
+  lecturaId?: string;
+  error?: string;
+  /**
+   * `true` = no se insertó nada: esta lectura ya existía (misma clave de evento, misma URL de
+   * foto o mismo binario) y lo que se devuelve es la fila de antes. Es información para quien
+   * llama, no un error — pero callarla hace que una pantalla diga "registrado" cuando el
+   * número que acaba de teclear una persona NO quedó guardado (dos vouchers de la misma unidad
+   * en una ráfaga comparten las fotos del cluster y caen justo aquí).
+   */
+  duplicada?: boolean;
+}> {
   const km = Number(l.km);
   if (!l.vehiculo_id || !Number.isFinite(km) || km <= 0) {
     return { ok: false, estado: "rechazada", motivo: "Datos incompletos", error: "Datos incompletos" };
@@ -540,14 +554,14 @@ export async function registrarLectura(
     const { data: yaIdem } = await client
       .from("lecturas_odometro").select("id,estado,motivo")
       .eq("idem_key", l.idemKey).limit(1).maybeSingle();
-    if (yaIdem) return { ok: true, estado: yaIdem.estado, motivo: yaIdem.motivo, lecturaId: yaIdem.id };
+    if (yaIdem) return { ok: true, estado: yaIdem.estado, motivo: yaIdem.motivo, lecturaId: yaIdem.id, duplicada: true };
   }
   // (b) Por foto: la MISMA foto reenviada a otro grupo o el mensaje reprocesado.
   if (l.foto_url) {
     const { data: yaFoto } = await client
       .from("lecturas_odometro").select("id,estado,motivo")
       .eq(fk, l.vehiculo_id).eq("foto_url", l.foto_url).neq("estado", "anulada").limit(1).maybeSingle();
-    if (yaFoto) return { ok: true, estado: yaFoto.estado, motivo: yaFoto.motivo, lecturaId: yaFoto.id };
+    if (yaFoto) return { ok: true, estado: yaFoto.estado, motivo: yaFoto.motivo, lecturaId: yaFoto.id, duplicada: true };
   }
   // (c) Por CONTENIDO de la foto: un reenvío de WhatsApp es un mensaje nuevo, el worker lo sube
   //     con otro nombre y (b) no lo ve — pero el binario es el mismo. El hash lo delata.
@@ -558,7 +572,7 @@ export async function registrarLectura(
       .from("lecturas_odometro").select("id,estado,motivo")
       .eq(fk, l.vehiculo_id).eq("foto_hash", fotoHash).neq("estado", "anulada").limit(1).maybeSingle();
     // Si la columna aún no existe (migración sin correr) el error se ignora: se sigue sin (c).
-    if (!eHash && yaHash) return { ok: true, estado: yaHash.estado, motivo: yaHash.motivo, lecturaId: yaHash.id };
+    if (!eHash && yaHash) return { ok: true, estado: yaHash.estado, motivo: yaHash.motivo, lecturaId: yaHash.id, duplicada: true };
   }
 
   // Momento de CAPTURA de esta lectura (no el de inserción/proceso): al reprocesar una foto
@@ -665,7 +679,7 @@ export async function registrarLectura(
     if (esViolacionUnica(error) && l.idemKey) {
       const { data: yaIdem } = await client
         .from("lecturas_odometro").select("id,estado,motivo").eq("idem_key", l.idemKey).limit(1).maybeSingle();
-      if (yaIdem) return { ok: true, estado: yaIdem.estado, motivo: yaIdem.motivo, lecturaId: yaIdem.id };
+      if (yaIdem) return { ok: true, estado: yaIdem.estado, motivo: yaIdem.motivo, lecturaId: yaIdem.id, duplicada: true };
     }
     return { ok: false, estado: evalr.estado, motivo: evalr.motivo, error: error.message };
   }
