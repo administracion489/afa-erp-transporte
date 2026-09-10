@@ -16,6 +16,7 @@ import {
   guardarReservas, normalizarAsignacion, avisosDe, margenEnVivo, sugerirCosto, type TramoHermano,
   describirResultado,
 } from "@/lib/reservas-pacto";
+import { planDeCancelacion, esCancelacion } from "@/lib/reservas-cancelacion";
 import {
   cargarRutasContratadas, cargarPaxDeCotizaciones, resolverPaxDeServicio,
   normalizarNombreRuta, type CatalogoRutas, type PaxResuelto,
@@ -206,6 +207,15 @@ type Reserva = {
    * 'contrato', que es el default de la base.
    */
   origen_contractual?: string | null;
+  /**
+   * Acuerdo de pago sobre una CANCELACIÓN (supabase/reservas-05-falso-flete.sql). Una
+   * cancelación vale S/ 0.00 y el importe por sí solo no autoriza nada: solo se paga con
+   * esta marca, que alguien escribe DESPUÉS de saber que el servicio se canceló. Opcional
+   * como las de arriba: sin esa migración la columna no llega y se lee como `false`.
+   */
+  falso_flete?: boolean | null;
+  /** La única constancia de por qué salió dinero por un viaje que no se prestó. */
+  falso_flete_motivo?: string | null;
   /** De cuánto se partió al generarlo. Solo para poder mostrar la diferencia. */
   precio_cotizado?: number | null;
   /**
@@ -246,6 +256,15 @@ const FORM_VACIO = {
   // que es la última pantalla del mes y ya no vuelve al servicio. Vacío = "no lo sé",
   // que NO es lo mismo que cero: el CHECK de la base rechaza el cero por eso.
   capacidad_contratada: "",
+  // ── Qué pasa con el dinero de una CANCELACIÓN (lib/reservas-cancelacion.ts) ──
+  // Una cancelación vale S/ 0.00; el importe que quede cargado no se paga ni se cobra,
+  // pero SÍ ensucia `v_costo_servicio` y `v_egresos`, que lo leen sin preguntar si el
+  // servicio se prestó. `cancelacion_decision` es lo que el operador elige al cancelar;
+  // el monto del avance se teclea APARTE y arranca vacío a propósito — heredar el importe
+  // cargado pagaría el servicio completo donde el acuerdo era una fracción.
+  cancelacion_decision: "cero" as "cero" | "falso_flete",
+  cancelacion_monto: "",
+  falso_flete_motivo: "",
   cambio_motivo: "", cambio_nota: "",
 };
 
@@ -285,13 +304,16 @@ const COLS_LISTA =
   "tipo_servicio_detalle,sincronizado_app,fecha_sincronizacion,token_seguimiento," +
   "token_conductor_tercero,token_expira_at,reserva_vinculada_id,direccion_servicio," +
   "lote_generacion,origen,destino,ruta_nombre,origen_contractual,precio_cotizado," +
-  "capacidad_contratada";
+  "capacidad_contratada,falso_flete,falso_flete_motivo";
 
 // Columnas de `reservas` cuya migración es OPCIONAL. PostgREST rechaza el select
 // entero por una columna desconocida, así que pedirlas sin red dejaría la pantalla
 // de Reservas en blanco en cualquier entorno donde el SQL todavía no se corrió.
 // Se reintenta sin ellas: la lista se pinta igual, solo sin el chip de origen.
-const COLS_OPCIONALES = ["origen_contractual", "precio_cotizado", "capacidad_contratada"];
+const COLS_OPCIONALES = [
+  "origen_contractual", "precio_cotizado", "capacidad_contratada",
+  "falso_flete", "falso_flete_motivo",
+];
 
 const quitarColumna = (cols: string, col: string) =>
   cols.split(",").map(c => c.trim()).filter(c => c !== col).join(",");
@@ -1597,6 +1619,15 @@ export default function ReservasPage() {
       // operador guarde cualquier otra cosa, y entonces corregir el contrato en la ficha
       // ya no arreglaría este servicio.
       capacidad_contratada:   r.capacidad_contratada != null ? String(r.capacidad_contratada)   : "",
+      // El acuerdo que YA está escrito manda sobre el default. Sin esto, abrir un servicio
+      // cancelado con falso flete y guardar cualquier otra cosa lo retiraría en silencio —
+      // y con él, el pago acordado al proveedor.
+      cancelacion_decision:   r.falso_flete === true ? "falso_flete" : "cero",
+      // El monto SÍ se precarga cuando el acuerdo ya existe: ahí no es "el importe que dejó
+      // el error", es el avance que alguien pactó y dejó escrito. Lo que nunca se hereda es
+      // el importe de un servicio SIN acuerdo (ver lib/reservas-cancelacion.ts).
+      cancelacion_monto:      r.falso_flete === true && r.costo_proveedor ? String(r.costo_proveedor) : "",
+      falso_flete_motivo:     r.falso_flete_motivo || "",
       // El motivo es de CADA cambio: se arranca en blanco para que no quede pegado el
       // de la edición anterior y termine sustentando algo que no ocurrió.
       cambio_motivo: "", cambio_nota: "",
@@ -1797,6 +1828,35 @@ export default function ReservasPage() {
   /** Solo se manda si cambió: escribirlo siempre pisaría el dato en cada guardado. */
   const paxTocadoForm = paxDelForm !== (reservaEditada?.capacidad_contratada ?? null);
 
+  /**
+   * ── QUÉ PASA CON EL DINERO SI ESTE SERVICIO QUEDA CANCELADO ────────────────────────
+   *
+   * La regla vive entera en lib/reservas-cancelacion.ts (motor puro, con su matriz). Acá
+   * solo se le entrega lo que va a quedar guardado y se pinta lo que devuelve.
+   *
+   * Se juzga contra el FORMULARIO y no contra la base, igual que los avisos: cancelar y
+   * guardar es un solo acto, así que la decisión sobre el importe tiene que ofrecerse en
+   * el mismo momento — que además es el único en que quien cancela sabe si el bus llegó a
+   * salir. Preguntarlo después es preguntárselo a alguien que ya no se acuerda.
+   */
+  const planCancelacion = useMemo(() => planDeCancelacion({
+    estado: form.estado,
+    tipoAsignacion: form.tipo_asignacion,
+    // El costo que la fila tiene HOY, no el del campo: lo que se está decidiendo es qué
+    // hacer con el importe ya cargado. El campo del formulario es justamente el que deja
+    // de mandar cuando el servicio se cancela.
+    costo: reservaEditada?.costo_proveedor ?? 0,
+    precio: form.precio_cliente !== "" ? form.precio_cliente : (reservaEditada?.precio_cliente ?? 0),
+    falsoFleteActual: reservaEditada?.falso_flete ?? false,
+    hermano,
+    decision: form.cancelacion_decision,
+    montoAcordado: form.cancelacion_monto,
+    motivoAcuerdo: form.falso_flete_motivo,
+  }), [
+    form.estado, form.tipo_asignacion, form.precio_cliente, form.cancelacion_decision,
+    form.cancelacion_monto, form.falso_flete_motivo, reservaEditada, hermano,
+  ]);
+
   /** Lo que va a quedar: lo tecleado manda sobre lo guardado, y sobre la cascada. */
   const paxResuelto: PaxResuelto = useMemo(() => {
     if (!reservaEditada) return { pax: null, fuente: null };
@@ -1906,16 +1966,45 @@ export default function ReservasPage() {
       if (!ok) return;
     }
 
+    // CANDADO DEL FALSO FLETE. Pagarle a un proveedor un servicio que no se prestó es la
+    // salida de dinero más fácil de colar, y el motivo es la ÚNICA constancia que queda de
+    // ella. Por eso esto sí BLOQUEA —igual que en /liquidaciones → ModalServicios— mientras
+    // que el resto de la pantalla solo pregunta: aquí no se está despachando un bus, se
+    // está autorizando un pago.
+    if (planCancelacion.bloqueo) { alert(`⚠️ ${planCancelacion.bloqueo}`); return; }
+
+    // Y el retiro del importe se ANUNCIA antes de escribirlo. El default de la pantalla es
+    // ponerlo en S/ 0.00 —el lado reversible del error, el mismo criterio que el
+    // `default false` de la migración— pero sigue siendo plata que sale de una fila: se
+    // dice cuánta y sobre qué, como en el botón de limpieza de /liquidaciones.
+    if (planCancelacion.pide && planCancelacion.resumen) {
+      const ok = confirm(
+        `${planCancelacion.resumen}\n\n` +
+        (planCancelacion.decision === "falso_flete"
+          ? "Se le va a pagar al proveedor un servicio que no se prestó. Queda registrado " +
+            "quién lo autorizó y por qué.\n\n¿Guardar así?"
+          : "Hoy ese importe no se liquida, pero sí está contando en los reportes de margen " +
+            "mientras siga escrito.\n\n¿Guardar así?")
+      );
+      if (!ok) return;
+    }
+
     // CANDADO DEL DOBLE COBRO. La tarifa del día cubre la ida y el retorno, así que el
     // importe va en UN solo tramo. Si se pone en los dos, la liquidación los lee como dos
     // servicios independientes y el día se cobra —o se paga al proveedor— dos veces. Eso
     // es plata real, así que aquí sí se pregunta en lugar de dejarlo pasar.
     const costoHermano = Number(hermano?.costo_proveedor ?? 0);
     const precioHermano = Number(hermano?.precio_cliente ?? 0);
+    // Los dos candados de abajo callan cuando el DÍA ENTERO se cayó: ahí no hay nada que
+    // cobrar dos veces ni ningún costo que falte pactar — el plan de cancelación ya está
+    // retirando los importes. Es el mismo silencio que `avisosDe` aplica a un día caído, y
+    // por la misma razón: un aviso que sale cuando el sistema está haciendo lo correcto
+    // enseña a hacer clic sin leer, y el de al lado es el que avisa del cobro doble.
+    const diaCaido = planCancelacion.codigo === "decidir" || planCancelacion.codigo === "sin_importe";
     const dobles: string[] = [];
-    if (form.tipo_asignacion === "tercerizado" && Number(form.costo_proveedor) > 0 && costoHermano > 0)
+    if (!diaCaido && form.tipo_asignacion === "tercerizado" && Number(form.costo_proveedor) > 0 && costoHermano > 0)
       dobles.push(`costo: ${fmtSoles(Number(form.costo_proveedor))} aquí + ${fmtSoles(costoHermano)} en ${hermano?.codigo ?? "el otro tramo"}`);
-    if (Number(form.precio_cliente) > 0 && precioHermano > 0)
+    if (!diaCaido && Number(form.precio_cliente) > 0 && precioHermano > 0)
       dobles.push(`precio: ${fmtSoles(Number(form.precio_cliente))} aquí + ${fmtSoles(precioHermano)} en ${hermano?.codigo ?? "el otro tramo"}`);
     if (dobles.length) {
       const ok = confirm(
@@ -1937,7 +2026,7 @@ export default function ReservasPage() {
     // Y NO se pregunta cuando el otro tramo ya lleva el costo del día: ese 0 es correcto.
     // Preguntarlo en cada retorno era un rojo permanente y falso, del que se aprende a
     // hacer clic sin leer — y así el aviso deja de servir cuando el problema es real.
-    if (form.tipo_asignacion === "tercerizado" && !(Number(form.costo_proveedor) > 0) && costoHermano <= 0) {
+    if (!diaCaido && form.tipo_asignacion === "tercerizado" && !(Number(form.costo_proveedor) > 0) && costoHermano <= 0) {
       const ok = confirm(
         (hermano
           ? "Ni este tramo ni el otro del mismo día tienen COSTO PACTADO.\n\n"
@@ -2006,6 +2095,17 @@ export default function ReservasPage() {
     const paxEscrito = paxDelForm;
     const paxTocado = paxTocadoForm;
 
+    // El plan de la cancelación va AL FINAL a propósito: sus columnas tienen que ganarle a
+    // `asignPayload.costo_proveedor` y al precio del formulario. Un servicio cancelado vale
+    // S/ 0.00 salvo acuerdo escrito, y esa es la última palabra sobre el importe.
+    //
+    // El estado que se juzgó es `form.estado`, pero el que se escribe es `nuevoEstado` (que
+    // puede subir un `pendiente` a `programada`/`confirmada` por la asignación). Nunca
+    // bajan a cancelada solos, así que el plan no puede quedar desalineado; si algún día
+    // esa promoción cambiara, este patch se aplicaría sobre un servicio que ya no cae.
+    const patchCancelacion = esCancelacion(nuevoEstado) === esCancelacion(form.estado)
+      ? planCancelacion.patch : {};
+
     const res = await guardarReservas(supabase, [editandoId], {
       ...asignPayload,
       ...adminPayload,
@@ -2015,7 +2115,15 @@ export default function ReservasPage() {
       hora_servicio:   form.hora_servicio,
       estado:          nuevoEstado,
       observaciones:   form.observaciones.trim() || null,
-    }, { motivo: form.cambio_motivo || null, nota: form.cambio_nota.trim() || null });
+      ...patchCancelacion,
+    }, {
+      // El motivo del operador manda; el del plan solo rellena el hueco. Al retirar o
+      // acordar un importe sobre una cancelación, `correccion_carga` es literalmente lo
+      // que es, y sin él ese movimiento de plata quedaría en el acta sin explicación.
+      motivo: form.cambio_motivo || (Object.keys(patchCancelacion).length ? planCancelacion.motivo : null),
+      nota: form.cambio_nota.trim()
+        || (Object.keys(patchCancelacion).length ? planCancelacion.nota : null),
+    });
 
     if (!res.ok) { alert(describirResultado(res)); setGuardando(false); return; }
     if (res.aviso) avisar(res.aviso);
@@ -2741,6 +2849,51 @@ export default function ReservasPage() {
     if (estado === "finalizada") {
       setModalFinalizar({ id, motivo: "" });
       return;
+    }
+
+    // ── LA SEGUNDA PUERTA POR LA QUE SE CANCELA ────────────────────────────────────
+    // Este desplegable escribe directo, sin pasar por el formulario. Con un importe ya
+    // cargado eso dejaba el mismo dato sucio que el formulario acaba de aprender a
+    // evitar — la trampa de las ramas duplicadas que este ERP ya pagó con el precio.
+    //
+    // La cancelación SIN importe se queda rápida, que es el 90 % de los casos (un
+    // servicio que se cae con días de antelación no tiene nada cargado). Solo cuando hay
+    // plata de por medio se manda al formulario: es donde vive la decisión completa
+    // —poner en S/ 0.00 o acordar un falso flete—, y un `confirm()` de dos botones no
+    // puede ofrecer tres caminos sin esconder el que paga.
+    //
+    // Quién necesita decisión lo dice EL MISMO motor que el formulario, no una copia de
+    // la condición: dos definiciones de "esto hay que decidirlo" es cómo una de las dos
+    // se queda atrás. El hermano se resuelve por los DOS sentidos del enlace, que se
+    // escribe en dos pasos y a veces queda en un solo lado (lib/liquidacion-hermanos.ts);
+    // si ni así aparece —está fuera de la ventana cargada— el plan lo lee como día caído
+    // y manda al formulario, donde el hermano SÍ se busca en la base y el veredicto se
+    // rehace con la verdad completa. Errar hacia el formulario cuesta un clic; errar
+    // hacia el update directo deja el importe huérfano, que es lo que se está arreglando.
+    const rApagar = reservas.find(r => r.id === id);
+    if (esCancelacion(estado) && rApagar) {
+      const vinc = (rApagar as any).reserva_vinculada_id;
+      const hermanoDeFila =
+        (vinc ? reservas.find(x => x.id === Number(vinc)) : null)
+        ?? reservas.find(x => Number((x as any).reserva_vinculada_id) === rApagar.id)
+        ?? null;
+      const plan = planDeCancelacion({
+        estado,
+        tipoAsignacion: rApagar.tipo_asignacion ?? (rApagar.tipo === "tercerizada" ? "tercerizado" : "propio"),
+        costo: rApagar.costo_proveedor ?? 0,
+        precio: rApagar.precio_cliente ?? 0,
+        falsoFleteActual: rApagar.falso_flete ?? false,
+        hermano: hermanoDeFila,
+      });
+      if (plan.pide) {
+        editarReserva(rApagar);
+        setForm(p => ({ ...p, estado }));
+        setMsgPacto(
+          `Este servicio tiene importe cargado. Una cancelación vale S/ 0.00, así que hay que ` +
+          `decir qué pasa con esa plata antes de guardarla.`
+        );
+        return;
+      }
     }
     await supabase.from("reservas").update({ estado }).eq("id", id);
     setReservas(prev => prev.map(r => r.id === id ? { ...r, estado } : r));
@@ -4649,17 +4802,108 @@ export default function ReservasPage() {
                   </div>
                 )}
 
+                {/* ── QUÉ PASA CON EL DINERO DE ESTA CANCELACIÓN ───────────────────
+                    Se pregunta AQUÍ, al cancelar, porque es el único momento en que quien
+                    cancela sabe si el bus llegó a salir. Hasta ahora el importe se quedaba
+                    escrito en la reserva: no se pagaba en el cierre, pero sí contaba como
+                    costo en `v_costo_servicio` y `v_egresos`, que lo leen sin preguntar si
+                    el servicio se prestó. La limpieza vivía una pantalla más allá
+                    (/liquidaciones → "Poner en S/ 0.00"), o sea que el dato sucio nacía en
+                    el origen y se saneaba en la desembocadura, una vez al mes.
+
+                    La regla entera está en lib/reservas-cancelacion.ts, con su matriz. */}
+                {planCancelacion.pide && (
+                  <div className="rounded-xl border-2 border-amber-300 bg-amber-50 px-3 py-3 space-y-2">
+                    <p className="text-[12px] font-bold text-amber-900">
+                      Este servicio queda cancelado y tiene importe cargado
+                      {planCancelacion.costoSuelto > 0 && <> · costo {fmtSoles(planCancelacion.costoSuelto)}</>}
+                      {planCancelacion.precioSuelto > 0 && <> · precio {fmtSoles(planCancelacion.precioSuelto)}</>}
+                    </p>
+                    <p className="text-[11px] text-amber-800">
+                      Una cancelación vale <b>S/ 0.00</b>. El importe, por sí solo, no autoriza ningún pago:
+                      hay que decir qué pasó.
+                    </p>
+
+                    <label className="flex items-start gap-2 text-[11px] text-gray-700 cursor-pointer">
+                      <input type="radio" className="mt-0.5" name="cancelacion"
+                        checked={planCancelacion.decision === "cero"}
+                        onChange={() => setForm(p => ({ ...p, cancelacion_decision: "cero" }))} />
+                      <span>
+                        <b>El bus no salió</b> — no se paga ni se cobra. El importe se pone en S/ 0.00.
+                      </span>
+                    </label>
+
+                    {/* Solo tercerizado: la flota propia no tiene proveedor a quien pagarle
+                        un avance, y `normalizarAsignacion` ya le pone el costo en cero. */}
+                    {planCancelacion.ofreceFalsoFlete && (
+                      <label className="flex items-start gap-2 text-[11px] text-gray-700 cursor-pointer">
+                        <input type="radio" className="mt-0.5" name="cancelacion"
+                          checked={planCancelacion.decision === "falso_flete"}
+                          onChange={() => setForm(p => ({ ...p, cancelacion_decision: "falso_flete" }))} />
+                        <span>
+                          <b>El proveedor ya había salido y hay acuerdo</b> — falso flete: se le paga el
+                          avance pactado.
+                        </span>
+                      </label>
+                    )}
+
+                    {planCancelacion.decision === "falso_flete" && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pl-5">
+                        {/* El monto se TECLEA, no se hereda: el importe cargado es el del
+                            servicio completo que no se prestó — se pagarían S/ 664.41 donde
+                            el acuerdo eran S/ 120. Marcar y poner el monto son un solo acto. */}
+                        <div>
+                          <label className="block text-[10px] font-bold text-amber-900 mb-0.5">
+                            Avance acordado S/
+                          </label>
+                          <input type="number" min="0" step="0.01" className={inputCls()}
+                            placeholder="0.00" value={form.cancelacion_monto}
+                            onChange={f("cancelacion_monto")} />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-amber-900 mb-0.5">
+                            ¿Por qué se le paga? *
+                          </label>
+                          <input type="text"
+                            className={inputCls() + (form.falso_flete_motivo.trim() ? "" : " border-amber-400 bg-amber-50")}
+                            placeholder="Ej.: ya había salido de cochera"
+                            value={form.falso_flete_motivo} onChange={f("falso_flete_motivo")} />
+                        </div>
+                      </div>
+                    )}
+
+                    {planCancelacion.resumen && (
+                      <p className="text-[11px] font-bold text-amber-900 border-t border-amber-200 pt-2">
+                        Al guardar: {planCancelacion.resumen}
+                      </p>
+                    )}
+                    {planCancelacion.bloqueo && (
+                      <p className="text-[11px] rounded-lg px-3 py-2 bg-red-50 border border-red-200 text-red-700">
+                        {planCancelacion.bloqueo}
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 {/* Lo que va a pasar al guardar, dicho antes de guardar. No bloquea nada:
                     en esta fase la política está en modo observa y el bus sale igual. */}
                 {(() => {
                   const r = reservas.find(x => x.id === editandoId);
+                  // Se juzga lo que va a QUEDAR guardado, plan de cancelación incluido: si
+                  // no, un día caído seguía diciendo "márcalo como falso flete" con la
+                  // casilla ya marcada tres centímetros más arriba, y los importes que el
+                  // plan está a punto de retirar disparaban avisos de dinero que ya no
+                  // existe. Un aviso que contradice a la propia pantalla es peor que ninguno.
+                  const p = planCancelacion.patch as Record<string, any>;
                   const avisos = avisosDe({
                     tipo_asignacion: form.tipo_asignacion,
-                    costo_proveedor: Number(form.costo_proveedor || 0),
-                    precio_cliente: form.precio_cliente !== "" ? Number(form.precio_cliente) : Number(r?.precio_cliente ?? 0),
+                    costo_proveedor: "costo_proveedor" in p ? Number(p.costo_proveedor) : Number(form.costo_proveedor || 0),
+                    precio_cliente: "precio_cliente" in p ? Number(p.precio_cliente)
+                      : form.precio_cliente !== "" ? Number(form.precio_cliente) : Number(r?.precio_cliente ?? 0),
                     cambio_motivo: form.cambio_motivo || null,
                     direccion_servicio: (r as any)?.direccion_servicio ?? null,
                     estado: form.estado ?? r?.estado ?? null,
+                    falso_flete: "falso_flete" in p ? p.falso_flete === true : r?.falso_flete === true,
                   }, r ? { precio_cliente: r.precio_cliente, costo_proveedor: r.costo_proveedor } : null, hermano);
                   if (!avisos.length) return null;
                   return (
