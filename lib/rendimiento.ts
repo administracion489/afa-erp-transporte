@@ -267,8 +267,10 @@ export function techoDeFamilia(familia: string): number | null {
   return familia in TECHO_FAMILIA ? TECHO_FAMILIA[familia] : TECHO_FAMILIA.diesel;
 }
 
-/** Etiqueta de la familia ("km/gal", "km/m³"). Sale del catálogo, no se redacta aquí. */
-function labelDeFamilia(familia: string): string {
+/** Etiqueta de la familia ("km/gal", "km/m³"). Sale del catálogo, no se redacta aquí.
+ *  Exportada porque el presupuesto del servicio (lib/costos/rendimiento-aplica.ts) tiene que
+ *  rotular el rendimiento del PARÁMETRO con su unidad y no con un "km/gal" hardcodeado. */
+export function labelDeFamilia(familia: string): string {
   const tipo = Object.keys(COMBUSTIBLES).find((t) => COMBUSTIBLES[t].familia === familia);
   return tipo ? COMBUSTIBLES[tipo].rendimientoLabel : "km/gal";
 }

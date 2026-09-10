@@ -24,6 +24,7 @@ import {
 } from "@/lib/costeo-conductor";
 import { familiaCombustible } from "@/lib/combustible-tipos";
 import { serieRendimiento, TECHO_FAMILIA } from "@/lib/rendimiento";
+import { decidirRendimiento, type MedicionPlaca } from "@/lib/costos/rendimiento-aplica";
 
 export type ReservaCosteable = {
   id: number;
@@ -67,8 +68,10 @@ export type Presupuesto = {
 export type ContextoCosteo = {
   parametros: ParametrosUnidad | null;
   precios: PreciosCombustible;
-  /** Rendimiento medido de la placa, si se pudo calcular, con LA FAMILIA en que se midió. */
-  rendimientoMedido: { kmGal: number; cargas: number; familia: string } | null;
+  /** Rendimiento medido de la placa, si se pudo calcular, con LA FAMILIA en que se midió,
+   *  su unidad y si tiene tramos suficientes para fiarse. Que exista NO significa que se
+   *  use: eso lo decide `decidirRendimiento` (lib/costos/rendimiento-aplica.ts). */
+  rendimientoMedido: MedicionPlaca | null;
   /** Precio realmente pagado en la última carga de esa unidad. */
   precioUltimaCarga: { precio: number; fecha: string } | null;
   /** Depreciación contable de esa placa, en soles por kilómetro. */
@@ -118,7 +121,7 @@ function mediana(xs: number[]): number | null {
  */
 export async function rendimientoMedido(
   sb: any, vehiculoId: number, tope = 8
-): Promise<{ kmGal: number; cargas: number; familia: string } | null> {
+): Promise<MedicionPlaca | null> {
   if (!vehiculoId) return null;
   const { data } = await sb
     .from("combustible")
@@ -155,8 +158,19 @@ export async function rendimientoMedido(
         tipo: r.tipo_combustible,
       }))
   );
+  // Se devuelve la medición ENTERA, incluida la que no llega a `confiable`: quien decide si
+  // manda sobre el parámetro es `decidirRendimiento`, y el renglón del presupuesto necesita
+  // poder decir "esta placa solo tiene 3 tramos" en vez de callar que existe una medición.
+  // `tramos` y no `cargas`: 10 cargas con un hueco en medio dan 8 tramos, y el texto del
+  // renglón ya decía "tramos" mientras el campo se llamaba al revés.
   return resumen.mediana
-    ? { kmGal: Math.round(resumen.mediana * 100) / 100, cargas: resumen.n, familia }
+    ? {
+        kmGal: Math.round(resumen.mediana * 100) / 100,
+        tramos: resumen.n,
+        familia,
+        label: resumen.label,
+        confiable: resumen.confiable,
+      }
     : null;
 }
 
@@ -338,17 +352,13 @@ export function calcularPresupuesto(ctx: ContextoCosteo, e: EntradaCosteo): Pres
   if (!ctx.parametros) faltantes.push("La unidad no tiene tipo de costeo asignado (Vehículos → tipo de costeo).");
   if (!(km > 0)) faltantes.push("Faltan los kilómetros del recorrido.");
 
-  // El rendimiento MEDIDO de esta placa manda sobre el parámetro del tipo — pero SOLO si es
-  // del mismo combustible que el parámetro. Una mediana en km/m³ (GNV) sustituyendo un
-  // rendimiento en km/gal daría un costo de combustible cuatro veces equivocado, y el
-  // renglón seguiría diciendo "medido" con toda confianza. Mismo criterio de "declara su
-  // fuente" que ya usa el resto del módulo.
-  const rendAplica =
-    ctx.rendimientoMedido && ctx.parametros
-      ? ctx.rendimientoMedido.familia === familiaCombustible(ctx.parametros.tipo_combustible_1)
-      : false;
+  // El rendimiento MEDIDO de esta placa manda sobre el parámetro del tipo, pero solo cuando
+  // se puede: misma familia de combustible, tramos suficientes para fiarse, y un tipo que no
+  // sea bimodal. La regla entera —y el motivo de cada negativa— vive en
+  // lib/costos/rendimiento-aplica.ts, para que el renglón del presupuesto no la redacte.
+  const decision = ctx.parametros ? decidirRendimiento(ctx.parametros, ctx.rendimientoMedido) : null;
   const params: ParametrosUnidad | null = ctx.parametros
-    ? { ...ctx.parametros, rendimiento_1: (rendAplica ? ctx.rendimientoMedido!.kmGal : null) ?? ctx.parametros.rendimiento_1 }
+    ? { ...ctx.parametros, rendimiento_1: decision!.valor }
     : null;
 
   // Y el precio realmente pagado manda sobre el de referencia.
@@ -382,9 +392,10 @@ export function calcularPresupuesto(ctx: ContextoCosteo, e: EntradaCosteo): Pres
   };
 
   if (costo) {
-    const fuenteRend = rendAplica
-      ? `${ctx.rendimientoMedido!.kmGal} km/gal medido en ${ctx.rendimientoMedido!.cargas} tramos`
-      : `${params!.rendimiento_1} km/gal del parámetro`;
+    // Antes las DOS ramas firmaban "km/gal" a mano, así que una unidad de GNV publicaba su
+    // km/m³ rotulado en galones. La unidad la pone ahora `decidirRendimiento` desde el
+    // catálogo, y el texto dice además POR QUÉ no se usó lo medido cuando no se usó.
+    const fuenteRend = decision!.base;
     const fuentePrecio = ctx.precioUltimaCarga
       ? `S/ ${ctx.precioUltimaCarga.precio.toFixed(2)} de la última carga`
       : `S/ ${(precios[params!.tipo_combustible_1] ?? 0).toFixed(2)} de referencia`;
