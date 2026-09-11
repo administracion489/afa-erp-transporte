@@ -36,6 +36,10 @@ import {
   CAMPO_DESCARTE, motivoHistorial, procedenciaDeHistorial,
   type AgregadoTipo, type Procedencia,
 } from "./rendimiento-tipo";
+import {
+  CAMPO_DESCARTE_MANT, CAMPOS_PROCEDENCIA_MANT, motivoHistorialMant, procedenciaMantDeHistorial,
+  type AgregadoMant, type ProcedenciaMant,
+} from "./mantenimiento-tipo";
 import { paginarFilas } from "@/lib/huella";
 
 /** Una fila de `historial_costos`. El historial es POR CAMPO (`campo_modificado`) desde
@@ -250,10 +254,26 @@ export async function registrarDescarte(
  * identidad lo que se escribió con otra, por la puerta del `limit`.
  */
 export async function cargarProcedencias(sb: any): Promise<Map<string, Procedencia>> {
+  return (await cargarProcedenciasCostos(sb)).rendimiento;
+}
+
+/**
+ * Las procedencias de los DOS parámetros medidos, en UNA sola lectura del historial.
+ *
+ * Se leen juntas y no con dos funciones porque es la misma tabla y el mismo recorrido: dos
+ * consultas paginadas para responder la misma pregunta sobre la misma fila es trabajo de más en
+ * una pantalla que ya espera por la medición de la flota.
+ *
+ * Cada derivador ignora los campos que no son suyos, así que traer los cuatro `campo_modificado`
+ * en el mismo `.in()` no mezcla nada.
+ */
+export async function cargarProcedenciasCostos(
+  sb: any
+): Promise<{ rendimiento: Map<string, Procedencia>; mantenimiento: Map<string, ProcedenciaMant> }> {
   const filas = await paginarFilas(() =>
     sb.from("historial_costos")
       .select("tipo_vehiculo,campo_modificado,valor_nuevo,motivo,cambiado_por,cambiado_en")
-      .in("campo_modificado", CAMPOS_PROCEDENCIA)
+      .in("campo_modificado", [...CAMPOS_PROCEDENCIA, ...CAMPOS_PROCEDENCIA_MANT])
       .order("cambiado_en", { ascending: true })
       .order("id", { ascending: true })
   );
@@ -265,7 +285,78 @@ export async function cargarProcedencias(sb: any): Promise<Map<string, Procedenc
     if (!porTipo.has(k)) porTipo.set(k, []);
     porTipo.get(k)!.push(f);
   }
-  const out = new Map<string, Procedencia>();
-  for (const [k, fs] of porTipo) out.set(k, procedenciaDeHistorial(fs));
-  return out;
+  const rendimiento = new Map<string, Procedencia>();
+  const mantenimiento = new Map<string, ProcedenciaMant>();
+  for (const [k, fs] of porTipo) {
+    rendimiento.set(k, procedenciaDeHistorial(fs));
+    mantenimiento.set(k, procedenciaMantDeHistorial(fs));
+  }
+  return { rendimiento, mantenimiento };
+}
+
+// ─── EL MANTENIMIENTO MEDIDO ──────────────────────────────────────────────────
+//
+// Espejo exacto de las dos funciones del rendimiento, y por el mismo motivo: el número se
+// propone, lo firma una persona y la escritura pasa por `escribirParametro`. Con una diferencia
+// de signo que conviene tener presente al leer el `confirm()` de la pantalla: subir
+// `mantenimiento_km` ENCARECE el S/km del tipo y sube el precio ofertado, mientras que bajar el
+// rendimiento lo abarataba. Las dos direcciones mueven dinero; ninguna se aplica sola.
+
+/**
+ * Adopta el mantenimiento medido como parámetro.
+ *
+ * EL MOTIVO NO ES DECORACIÓN: `procedenciaMantDeHistorial` reconoce una adopción automática por
+ * su prefijo `"Auto:"`, así que quien escribe y quien lee derivan el texto por el mismo camino.
+ * Por eso lo compone `motivoHistorialMant` y no la pantalla.
+ */
+export async function aplicarMantenimientoMedido(
+  sb: any, a: AgregadoMant, por: string, nota?: string
+): Promise<ResultadoEscritura> {
+  if (!a.proponible || a.medido === null) {
+    return {
+      ok: false, filas: 0, acta: false,
+      error: `La medición de "${a.tipoVehiculo}" no es aplicable (${a.codigo}). No se escribió nada.`,
+    };
+  }
+  return escribirParametro(sb, {
+    tipo_vehiculo: a.tipoVehiculo,
+    patch: { mantenimiento_km: a.medido },
+    acta: {
+      campo_modificado: "mantenimiento_km",
+      valor_anterior: a.parametro,
+      valor_nuevo: a.medido,
+      motivo: motivoHistorialMant(a) + (nota ? ` | ${nota}` : ""),
+    },
+    por,
+  });
+}
+
+/**
+ * Deja constancia de que una persona MIRÓ esta medición y decidió conservar el número tecleado.
+ *
+ * NO ESCRIBE EN `parametros_costos` —no hay nada que cambiar— así que no pasa por
+ * `escribirParametro`: es un registro de DECISIÓN, no de cambio, y por eso `valor_anterior` va
+ * en null. Es lo único que apaga el chip; sin esta fila el mismo número reaparecería cada vez
+ * que se abre la pantalla y en un mes sería paisaje.
+ */
+export async function registrarDescarteMant(
+  sb: any, a: AgregadoMant, por: string, nota?: string
+): Promise<{ ok: boolean; error?: string }> {
+  if (a.medido === null) {
+    return { ok: false, error: "No hay medición que descartar." };
+  }
+  const { error } = await sb.from("historial_costos").insert({
+    tabla_origen: TABLA,
+    tipo_vehiculo: a.tipoVehiculo,
+    campo_modificado: CAMPO_DESCARTE_MANT,
+    valor_anterior: null,
+    valor_nuevo: a.medido,
+    motivo:
+      `Medición revisada y NO adoptada: ${a.medido} S/km · se conserva ${a.parametro}` +
+      (nota ? ` | ${nota}` : ""),
+    cambiado_por: por,
+  });
+  return error
+    ? { ok: false, error: `No se pudo registrar la decisión: ${error.message}. El chip va a volver a salir.` }
+    : { ok: true };
 }
