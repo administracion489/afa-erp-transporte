@@ -508,6 +508,17 @@ export async function registrarLectura(
     ref_origen?: string | null;
     kmDiaMax?: number;
     forzar?: boolean;          // saltar validación (aceptar desde panel de revisión)
+    /**
+     * Lo contrario de `forzar`: el número NO lo transcribió nadie, lo DEDUJO el ERP, así que
+     * la lectura se guarda (con su foto, en "Lecturas por revisar") pero **nunca se acepta
+     * sola** — no mueve `vehiculos.kilometraje_actual` hasta que una persona la confirme.
+     *
+     * Existe para el Radar, que es el único carril que graba sin nadie delante. En las pantallas
+     * el humano ya está mirando la foto cuando se le propone el número; ahí no hace falta.
+     * Un km deducido que se acepta solo envenena el vencimiento de mantenimiento y el
+     * rendimiento km/gal de todos los tramos siguientes, y nadie se entera.
+     */
+    forzarRevision?: boolean;
     flota?: Flota;             // "propia" (default) | "tercero"
     capturado_en?: string | null; // cuándo se TOMÓ la lectura (no cuándo se insertó)
     /**
@@ -638,13 +649,20 @@ export async function registrarLectura(
 
   const origenIA = l.fuente === "whatsapp_foto" || l.fuente === "whatsapp_manual" || l.fuente === "combustible";
 
-  const evalr: EvalLectura = l.forzar
+  let evalr: EvalLectura = l.forzar
     ? { estado: "aceptada", motivo: null }
     : evaluarLectura({
         kmVigente, kmNuevo: km, kmDiaMax, horasDesdeUltima, origenIA, duplicadoProbable, corroborada,
         fechaLectura: l.capturado_en ?? fecha,
         refAnterior: anterior, refPosterior: posterior,
       });
+
+  // Número deducido por el ERP: se evalúa igual (los otros hallazgos siguen valiendo) pero un
+  // "aceptada" baja a "sospechosa". La lectura existe y se ve en la bandeja con su foto; lo que
+  // no hace es moverle el km vigente a la unidad sin que nadie la haya mirado.
+  if (!l.forzar && l.forzarRevision && evalr.estado === "aceptada") {
+    evalr = { estado: "sospechosa", motivo: evalr.motivo };
+  }
 
   // El motivo del caller (p.ej. "el sistema corrigió el número de la IA") y el aviso de reloj
   // se anteponen al de evaluarLectura para que queden visibles en la bandeja; no alteran el estado.

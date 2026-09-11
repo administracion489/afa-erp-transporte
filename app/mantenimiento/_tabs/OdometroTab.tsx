@@ -385,9 +385,16 @@ export default function OdometroTab() {
       } else {
         setForm(f => ({ ...f, km: String(data.km), fuente: "whatsapp_foto" }));
         alert(
-          data.corregido
-            ? `Leído: ${Number(data.km).toLocaleString("es-PE")} km.\nLa foto mostraba dos contadores: se tomó el total y se descartó el parcial. Revisa antes de registrar.`
-            : `Leído: ${Number(data.km).toLocaleString("es-PE")} km (confianza ${data.confianza}). Revisa antes de registrar.`
+          data.codigo_seleccion === "digito_repetido"
+            // El número no lo transcribió el modelo: lo dedujo el ERP. Se pre-llena porque la
+            // persona tiene la foto delante en este mismo momento, que es cuando cotejarlo
+            // cuesta diez segundos — pero se dicen los DOS números para que pueda cotejarlo.
+            ? `La IA leyó ${Number(data.km_ia).toLocaleString("es-PE")} y le sobra un dígito repetido.\n` +
+              `Se propone ${Number(data.km).toLocaleString("es-PE")} km, el único valor posible para esta unidad.\n\n` +
+              `COMPRUÉBALO CONTRA LA FOTO antes de registrar: lo dedujo el sistema, no lo leyó nadie.`
+            : data.corregido
+              ? `Leído: ${Number(data.km).toLocaleString("es-PE")} km.\nLa foto mostraba dos contadores: se tomó el total y se descartó el parcial. Revisa antes de registrar.`
+              : `Leído: ${Number(data.km).toLocaleString("es-PE")} km (confianza ${data.confianza}). Revisa antes de registrar.`
         );
       }
     } catch (e: any) {

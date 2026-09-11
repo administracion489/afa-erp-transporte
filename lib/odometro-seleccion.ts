@@ -18,6 +18,7 @@
 //      tres borrados distintos que caen dentro de lo posible (23.980, 23.990, 23.998) y elegir
 //      uno sería escribir un kilometraje al azar. Se NOMBRA el defecto y lo teclea una persona
 //      mirando la foto — el mismo criterio que `cuadre_ambiguo` en el voucher de grifo.
+//      EXCEPCIÓN MEDIDA: cuando el dígito que sobra está DUPLICADO, ver `corregirDigitoRepetido`.
 
 import { RATIO_DIGITO_DE_MAS, PISO_RATIO_DIGITO } from "./odometro";
 
@@ -38,8 +39,10 @@ export type CandidatoOdometro = {
  *   - `eco`            el único número compatible clava el vigente: huele a que el modelo
  *                      repitió un dato que ya conocía en vez de leer la foto.
  *   - `parcial`        se registró otro número del tablero porque la IA entregó el trip.
+ *   - `digito_repetido` el dígito que sobraba estaba DUPLICADO y colapsarlo da un único número
+ *                      posible: se propone ese, para que una persona lo confirme contra la foto.
  */
-export type CodigoOdometro = "digito_de_mas" | "fuera_de_banda" | "eco" | "parcial";
+export type CodigoOdometro = "digito_de_mas" | "fuera_de_banda" | "eco" | "parcial" | "digito_repetido";
 
 export type VeredictoOdometro = {
   /** El km a registrar. null solo si la IA no leyó nada. */
@@ -52,8 +55,59 @@ export type VeredictoOdometro = {
   motivo: string | null;
   /** null cuando no hay nada que señalar (lectura normal o sin ancla contra qué juzgarla). */
   codigo: CodigoOdometro | null;
+  /**
+   * El número NO lo transcribió nadie: lo DEDUJO el ERP, así que vale como propuesta y no como
+   * dato. Quien lo reciba debe ponerlo delante de un humano con la foto al lado y no dejar que
+   * mueva `vehiculos.kilometraje_actual` por su cuenta.
+   *
+   * Es la diferencia con `parcial`, que sí es una lectura: ahí el modelo transcribió el número
+   * del tablero y solo lo puso en el campo equivocado. Aquí el ERP reconstruye una cifra que el
+   * modelo nunca escribió, y un km inventado envenena el vencimiento de mantenimiento y el
+   * rendimiento km/gal de todos los tramos siguientes.
+   */
+  confirmar?: boolean;
   candidatos: CandidatoOdometro[];
 };
+
+/**
+ * EL DÍGITO QUE SOBRA ESTÁ DUPLICADO, Y ESO SÍ SE PUEDE DESHACER.
+ *
+ * Medido sobre los cuatro casos reales de esta flota (CUP-435 y B4N-968, agosto-septiembre
+ * 2026), el modelo no inserta un dígito cualquiera: REPITE uno que ya estaba.
+ *
+ *   239.980 → 23.9̶9̶80    (la foto dice 23.980 — verificado)
+ *   233.379 → 23.3̶3̶79     (anterior 23.272 ese mismo día)
+ *   5.600.473 → 56.0̶0̶473   (anterior 559.997 el día antes)
+ *   2.320.206 → sin dígitos adyacentes iguales: NO se toca (la foto dice 23.206)
+ *
+ * La diferencia con borrar un dígito cualquiera es lo que decide que esto sea legítimo y
+ * aquello no, y está MEDIDA, no elegida: borrando cualquier dígito caen en la banda 3, 3, 0 y 4
+ * candidatos; colapsando solo los repetidos caen 1, 1, 0 y 1. La ambigüedad desaparece porque
+ * la hipótesis es concreta ("este dígito se leyó dos veces"), no un barrido de posiciones.
+ *
+ * Dos condiciones, las dos obligatorias, y son el mismo criterio de `coherencia-voucher.ts`:
+ * el arreglo tiene que ser EXACTO (colapsar una repetición, no recortar por donde cuadre) y
+ * ÚNICO (con dos colapsos posibles dentro de la banda, adivinar sería escribir al azar).
+ *
+ * Módulo puro: recibe la banda ya calculada y devuelve un número o null. No decide qué se
+ * hace con él — eso es de `elegirOdometro`, que lo marca `confirmar: true`.
+ */
+export function corregirDigitoRepetido(kmIA: number, piso: number, techo: number): number | null {
+  const s = Math.round(Math.abs(kmIA)).toString();
+  if (s.length < 2) return null;
+  const candidatos = new Set<number>();
+  for (let i = 0; i + 1 < s.length; i++) {
+    // Solo una CORRIDA de dígitos iguales: quitar uno de "99" deshace exactamente el error de
+    // haber leído dos veces el mismo. Quitar un dígito suelto sería el barrido ambiguo.
+    if (s[i] !== s[i + 1]) continue;
+    const v = Number(s.slice(0, i) + s.slice(i + 1));
+    // Sin ceros a la izquierda (un "0" colapsado al frente cambiaría la forma del número) y
+    // dentro de lo que esta unidad puede marcar.
+    if (!Number.isFinite(v) || v <= 0) continue;
+    if (v >= piso && v <= techo) candidatos.add(v);
+  }
+  return candidatos.size === 1 ? [...candidatos][0] : null;
+}
 
 /** Un odómetro plausible tiene entre 3 y 7 dígitos (mismo criterio que ya usaba el Radar). */
 function formaValida(n: number): boolean {
@@ -212,6 +266,20 @@ export function elegirOdometro(e: {
     // instrucción. Lo que NO se hace es adivinar cuál sobra (ver la regla 5 de la cabecera).
     const dIA = digitosDe(kmIA), dVig = digitosDe(kmVigente);
     if (dIA > dVig) {
+      // …salvo que el dígito que sobra esté DUPLICADO y colapsarlo dé un único número posible.
+      // Entonces no es una adivinanza: es deshacer un error concreto, y se PROPONE (nunca se da
+      // por bueno solo — `confirmar: true`).
+      const reparado = corregirDigitoRepetido(kmIA, piso, techo);
+      if (reparado != null) {
+        return {
+          km: reparado, kmIA, origen: "corregido", autoOk: true,
+          codigo: "digito_repetido", confirmar: true, candidatos: bruto,
+          motivo:
+            `la IA devolvió ${fmt(kmIA)} (${dIA} dígitos, y esta unidad tiene ${dVig}): le sobra un ` +
+            `dígito REPETIDO. Colapsarlo da ${fmt(reparado)}, el único valor posible para esta unidad ` +
+            `(vigente ${fmt(kmVigente)}) — confírmalo contra la foto antes de registrarlo`,
+        };
+      }
       return {
         km: kmIA, kmIA, origen: "ia", autoOk: false, codigo: "digito_de_mas", candidatos: bruto,
         motivo:
