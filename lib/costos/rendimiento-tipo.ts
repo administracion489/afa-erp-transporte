@@ -499,3 +499,80 @@ export function procedenciaDeHistorial(
   }
   return out;
 }
+
+// ─── LA FICHA CONTRA LOS TANQUES DE LA UNIDAD ─────────────────────────────────
+//
+// POR QUÉ EXISTE. En `/vehiculos` y en `/tercerizadas` se elige la «Categoría de costeo» de
+// una placa desde un desplegable que solo mostraba `nombre (clave)`. Con eso se le asignó
+// MINIVAN_10 a una unidad que carga GLP sin que nada dijera que esa ficha costea en otro
+// combustible — y el S/km de una categoría es `precio ÷ rendimiento`, así que con el
+// combustible equivocado el renglón no está un 10 % desviado: está multiplicado por la razón
+// entre dos precios que en esta flota se diferencian como 3 a 1.
+//
+// El dato para detectarlo ya estaba en el MISMO formulario: la capacidad de tanque que la
+// unidad declara por familia. Por eso esto no lee la base ni mide nada — cruza dos campos que
+// la persona tiene delante, que es la misma idea que la columna «Medido» de /configuracion/costos.
+//
+// NO DECIDE NADA NI ESCRIBE: devuelve un código. Una unidad bicombustible declara dos tanques
+// y con cualquiera que calce la ficha está bien; y la ausencia de tanques declarados NO es una
+// discrepancia —es que nadie los llenó todavía—, que es la misma regla de no afirmar un vacío
+// mientras no hay evidencia.
+
+export type CodigoCotejo =
+  /** La familia de la ficha está entre los tanques que la unidad declara. */
+  | "coincide"
+  /** La unidad no declara ningún tanque de la familia con la que se le costea. */
+  | "discrepa"
+  /** La placa no tiene categoría de costeo asignada. */
+  | "sin_ficha"
+  /** La unidad no declaró ninguna capacidad de tanque: no hay con qué cotejar. */
+  | "sin_tanques"
+  /** El combustible de la ficha no está en el catálogo (mismo caso que `familia_desconocida`). */
+  | "familia_desconocida";
+
+export type CotejoFichaUnidad = {
+  codigo: CodigoCotejo;
+  /** La familia con la que COSTEA la ficha. */
+  familiaFicha: string | null;
+  /** Las familias que la unidad declara poder cargar. */
+  familiasUnidad: string[];
+  detalle: string;
+};
+
+/**
+ * ¿El combustible de la ficha de costeo calza con lo que esa unidad puede cargar?
+ *
+ * @param tipoCombustibleFicha  `parametros_costos.tipo_combustible_1` — el texto del catálogo ("Diésel").
+ * @param familiasDeclaradas    Las claves de `capacidad_tanque` con valor > 0.
+ */
+export function cotejarFichaConTanques(
+  tipoCombustibleFicha: string | null | undefined,
+  familiasDeclaradas: string[]
+): CotejoFichaUnidad {
+  const familias = [...new Set(familiasDeclaradas.map((f) => String(f ?? "").trim().toLowerCase()).filter(Boolean))];
+  const crudo = String(tipoCombustibleFicha ?? "").trim();
+  const base = { familiaFicha: null as string | null, familiasUnidad: familias };
+
+  if (!crudo) {
+    return { ...base, codigo: "sin_ficha", detalle: "Esta unidad no tiene categoría de costeo asignada, así que se cotiza con lo que se teclee a mano." };
+  }
+  const familia = familiaDeParametro(crudo);
+  if (!familia) {
+    return { ...base, codigo: "familia_desconocida",
+      detalle: `El combustible de la ficha ("${crudo}") no está en el catálogo, así que no se puede cotejar con el tanque de la unidad.` };
+  }
+  if (!familias.length) {
+    return { ...base, familiaFicha: familia, codigo: "sin_tanques",
+      detalle: "La unidad no declara ninguna capacidad de tanque, así que no hay con qué comprobar que la ficha costee el combustible correcto." };
+  }
+  if (familias.includes(familia)) {
+    return { ...base, familiaFicha: familia, codigo: "coincide", detalle: "" };
+  }
+  return { ...base, familiaFicha: familia, codigo: "discrepa",
+    detalle:
+      `Esta ficha costea en ${crudo}, pero la unidad declara tanque de ${familias.join(", ")}. ` +
+      "El costo por km es precio ÷ rendimiento, así que con el combustible equivocado el renglón " +
+      "sale mal por la diferencia entre dos precios, no por un porcentaje. Corrígelo en el " +
+      "desplegable Combustible de /configuracion/costos, o revisa si esta unidad va en otra categoría.",
+  };
+}

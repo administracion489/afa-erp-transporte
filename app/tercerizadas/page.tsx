@@ -4,6 +4,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { paginarFilas } from "@/lib/huella";
 import OdometroTerceroModal from "./_components/OdometroTerceroModal";
+import AvisoFichaCombustible from "@/components/flota/AvisoFichaCombustible";
+import { FAMILIAS_TANQUE, parseCapacidadTanque as parseCapTanqueT, capacidadTanqueAForm as capTanqueTAForm, faltaColumnaTanque } from "@/lib/combustible-tipos";
 import { DISTRITOS_LIMA, distanciaDistritos, etiquetaDistancia } from "@/lib/distritos-lima";
 import { ambitoTipoDoc, docSinVencimiento, etiquetaTipoDoc } from "@/lib/documentos-estado";
 import {
@@ -42,10 +44,13 @@ type VehiculoTercero = {
   descripcion_unidad?: string | null;
   tipo_vehiculo_costeo?: string | null;
   kilometraje_actual?: number | null;
+  /** {diesel: 100, glp: 25} — por FAMILIA. La columna existía desde
+   *  `radar-ia-combustible-multifoto.sql` y esta pantalla no tenía dónde llenarla. */
+  capacidad_tanque?: Record<string, number> | null;
   direccion_cochera?: string | null; distrito_cochera?: string | null; // override — si es null, usa el de la empresa
 };
 
-type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null };
+type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null; tipo_combustible_1?: string | null };
 
 type ConductorTercero = {
   id: number; empresa_id: number; nombre: string; dni: string | null;
@@ -351,6 +356,11 @@ export default function EmpresasTercerizadasPage() {
   const [mostrarFormDoc,  setMostrarFormDoc]  = useState(false);
   const [editEmpId,   setEditEmpId]   = useState<number | null>(null);
   const [editVehId,   setEditVehId]   = useState<number | null>(null);
+  // La capacidad de tanque de una unidad de TERCERO. La columna existe en `vehiculos_tercero`
+  // desde `radar-ia-combustible-multifoto.sql` y los dos lectores del ERP la consultan, pero
+  // esta pantalla no tenía dónde llenarla: el control de «esta carga excede el tanque» caía
+  // siempre al estimado por categoría y no había forma de corregirlo desde ningún sitio.
+  const [capTanqueT, setCapTanqueT] = useState<Record<string, string>>({});
   const [editCondId,  setEditCondId]  = useState<number | null>(null);
   const [editDocId,   setEditDocId]   = useState<number | null>(null);
   const [formEmp,  setFormEmp]  = useState(FORM_EMP);
@@ -567,7 +577,7 @@ export default function EmpresasTercerizadasPage() {
   // Capa 3: los parámetros de costeo solo viajan si alguien abre el formulario de vehículo.
   useEffect(() => {
     if (!mostrarFormVeh || paramsVeh.length > 0) return;
-    supabase.from("parametros_costos").select("tipo_vehiculo,nombre,grupo_vehiculo")
+    supabase.from("parametros_costos").select("tipo_vehiculo,nombre,grupo_vehiculo,tipo_combustible_1")
       .eq("activo", true).order("grupo_vehiculo").order("capacidad")
       .then(({ data }: any) => setParamsVeh(data || []));
   }, [mostrarFormVeh, paramsVeh.length]);
@@ -927,12 +937,21 @@ export default function EmpresasTercerizadasPage() {
       descripcion_unidad: formVeh.descripcion_unidad.trim() || null,
       tipo_vehiculo_costeo: formVeh.tipo_vehiculo_costeo || null,
       distrito_cochera: formVeh.distrito_cochera || null,
+      capacidad_tanque: parseCapTanqueT(capTanqueT),
     };
-    const { error } = editVehId
-      ? await supabase.from("vehiculos_tercero").update(payload).eq("id", editVehId)
-      : await supabase.from("vehiculos_tercero").insert(payload);
+    // Mismo patrón que /vehiculos: la columna va siempre (para poder VACIARLA) y si la
+    // migración accesoria no se corrió se reintenta sin ella, diciéndolo.
+    const escribir = (datos: Record<string, unknown>) => editVehId
+      ? supabase.from("vehiculos_tercero").update(datos).eq("id", editVehId)
+      : supabase.from("vehiculos_tercero").insert(datos);
+    let { error } = await escribir(payload);
+    if (error && faltaColumnaTanque(error)) {
+      const { capacidad_tanque: _omitida, ...sinTanque } = payload;
+      ({ error } = await escribir(sinTanque));
+      if (!error) alert("Se guardó, pero la capacidad de tanque no: falta correr supabase/radar-ia-combustible-multifoto.sql.");
+    }
     if (error) { alert(error.message); setGuardando(false); return; }
-    setFormVeh(FORM_VEH); setEditVehId(null); setMostrarFormVeh(false);
+    setFormVeh(FORM_VEH); setCapTanqueT({}); setEditVehId(null); setMostrarFormVeh(false);
     await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]);
     setGuardando(false);
   };
@@ -1586,7 +1605,7 @@ export default function EmpresasTercerizadasPage() {
                       ops={[["todos", "Todos"], ["disponible", "Disponibles"], ["ocupado", "Ocupados"], ["inactivo", "Inactivos"]]} />
                     <Segmented valor={vistaFlota} onChange={v => setVistaFlota(v)}
                       ops={[["tabla", "☰ Tabla"], ["fichas", "▦ Fichas"]] as ["tabla" | "fichas", string][]} />
-                    <button onClick={() => { setFormVeh(FORM_VEH); setEditVehId(null); setMostrarFormVeh(v => !v); }}
+                    <button onClick={() => { setFormVeh(FORM_VEH); setCapTanqueT({}); setEditVehId(null); setMostrarFormVeh(v => !v); }}
                       className="px-4 py-2 rounded-xl text-xs font-bold text-white" style={{ background: "#0b315f" }}>
                       + Agregar vehículo
                     </button>
@@ -1608,8 +1627,15 @@ export default function EmpresasTercerizadasPage() {
                           <select className={inputCls()} value={formVeh.tipo_vehiculo_costeo}
                             onChange={e => setFormVeh(p => ({ ...p, tipo_vehiculo_costeo: e.target.value }))}>
                             <option value="">— sin asignar —</option>
-                            {paramsVeh.map(p => <option key={p.tipo_vehiculo} value={p.tipo_vehiculo}>{p.nombre} ({p.tipo_vehiculo})</option>)}
+                            {/* El COMBUSTIBLE va en la etiqueta: es lo que decide el S/km de la ficha. */}
+                            {paramsVeh.map(p => (
+                              <option key={p.tipo_vehiculo} value={p.tipo_vehiculo}>
+                                {p.nombre} ({p.tipo_vehiculo}){p.tipo_combustible_1 ? ` · ${p.tipo_combustible_1}` : ""}
+                              </option>
+                            ))}
                           </select>
+                          <AvisoFichaCombustible capTanque={capTanqueT}
+                            tipoCombustibleFicha={paramsVeh.find(x => x.tipo_vehiculo === formVeh.tipo_vehiculo_costeo)?.tipo_combustible_1} />
                         </Campo>
                         <Campo label="Capacidad pax">
                           <input type="number" className={inputCls()} placeholder="45"
@@ -1692,12 +1718,33 @@ export default function EmpresasTercerizadasPage() {
                           />
                         </Campo>
                       </div>
+                      {/* Capacidad de tanque — la columna existe en `vehiculos_tercero` y hasta
+                          ahora no había ninguna pantalla para llenarla, así que las cargas de una
+                          unidad de tercero se juzgaban siempre contra el estimado de su categoría.
+                          Las claves son las FAMILIAS del catálogo: es como las busca quien lee. */}
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-2">Capacidad de tanque</p>
+                        <p className="text-[11px] text-gray-500 mb-2">
+                          Capacidad máxima por tipo de combustible. Sirve para detectar cargas que exceden el tanque
+                          y para avisar si la categoría de costeo elegida arriba costea otro combustible. Déjalo vacío
+                          para usar el estimado por categoría. Con kit GLP, pon la capacidad real del kit.
+                        </p>
+                        <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
+                          {FAMILIAS_TANQUE.map(t => (
+                            <Campo key={t.familia} label={`${t.label} (${t.unidadLabel})`}>
+                              <input type="number" min="0" step="0.1" className={inputCls()} placeholder="—"
+                                value={capTanqueT[t.familia] ?? ""}
+                                onChange={e => setCapTanqueT(p => ({ ...p, [t.familia]: e.target.value }))} />
+                            </Campo>
+                          ))}
+                        </div>
+                      </div>
                       <div className="flex gap-2">
                         <button onClick={guardarVehiculo} disabled={guardando}
                           className="px-4 py-2 rounded-xl text-xs font-bold text-white" style={{ background: "#0b315f" }}>
                           {guardando ? "..." : editVehId ? "Actualizar" : "Guardar"}
                         </button>
-                        <button onClick={() => { setFormVeh(FORM_VEH); setEditVehId(null); setMostrarFormVeh(false); }}
+                        <button onClick={() => { setFormVeh(FORM_VEH); setCapTanqueT({}); setEditVehId(null); setMostrarFormVeh(false); }}
                           className="px-4 py-2 rounded-xl text-xs font-bold border text-gray-600">Cancelar</button>
                       </div>
                     </div>
@@ -1754,7 +1801,7 @@ export default function EmpresasTercerizadasPage() {
                                     <div className="flex gap-1.5" onClick={ev => ev.stopPropagation()}>
                                       <button onClick={() => setModalOdoVeh(v)} title="Odómetro" className="hover:opacity-70">📷</button>
                                       <button title="Editar" className="text-gray-400 hover:text-gray-800"
-                                        onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}>✏️</button>
+                                        onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "" }); setCapTanqueT(capTanqueTAForm(v.capacidad_tanque)); setEditVehId(v.id); setMostrarFormVeh(true); }}>✏️</button>
                                       <button className="text-red-400 hover:text-red-600" title="Eliminar"
                                         onClick={async () => { if (!confirm(`¿Eliminar la unidad ${v.placa}?`)) return; await supabase.from("vehiculos_tercero").delete().eq("id", v.id); await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]); }}>✕</button>
                                     </div>
@@ -1833,7 +1880,7 @@ export default function EmpresasTercerizadasPage() {
                                   style={{ background: v.estado === "disponible" ? "#dcfce7" : "#f3f4f6", color: v.estado === "disponible" ? "#166534" : "#4b5563" }}>
                                   {v.estado}
                                 </span>
-                                <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "" }); setEditVehId(v.id); setMostrarFormVeh(true); }}
+                                <button onClick={() => { setFormVeh({ placa: v.placa, categoria: v.categoria || "BUS", marca: v.marca || "", modelo: v.modelo || "", capacidad: v.capacidad ? String(v.capacidad) : "", estado: v.estado, foto_externa_url: v.foto_externa_url || "", foto_interna_url: v.foto_interna_url || "", descripcion_unidad: v.descripcion_unidad || "", tipo_vehiculo_costeo: v.tipo_vehiculo_costeo || "", distrito_cochera: v.distrito_cochera || "" }); setCapTanqueT(capTanqueTAForm(v.capacidad_tanque)); setEditVehId(v.id); setMostrarFormVeh(true); }}
                                   className="text-xs font-bold text-gray-500 hover:text-gray-800">✏️</button>
                                 <button onClick={async () => { if (!confirm("¿Eliminar?")) return; await supabase.from("vehiculos_tercero").delete().eq("id", v.id); await Promise.all([refrescarDetalle(empresaSel), cargarIndice()]); }}
                                   className="text-xs font-bold text-red-400 hover:text-red-600">✕</button>

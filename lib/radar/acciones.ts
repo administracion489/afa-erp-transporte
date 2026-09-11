@@ -16,7 +16,7 @@
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
-import { familiaCombustible } from "@/lib/combustible-tipos";
+import { familiaCombustible, capacidadTanqueDe } from "@/lib/combustible-tipos";
 import { resolverTipoCombustible, revisarTipoContraPrecio } from "./tipo-voucher";
 import { serieRendimiento, juzgarTramo, TECHO_FAMILIA, type CargaRendimiento } from "@/lib/rendimiento";
 import { leerAlbumRecargas, buscarDuplicado, type RecargaAlbum, type DespachoGuardado } from "./album-recargas";
@@ -100,26 +100,6 @@ function numOpc(v: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-// ── Capacidad de tanque estimada por categoría del vehículo ──────────────────
-// Copiado de la constante CAPACIDAD_TANQUE de app/combustible/page.tsx (misma heurística).
-
-const CAPACIDAD_TANQUE: Record<string, Record<string, number>> = {
-  BUS:     { diesel: 100, gnv: 150, glp: 80,  gasolina: 80,  urea: 30 },
-  MINIBUS: { diesel: 60,  gnv: 80,  glp: 50,  gasolina: 50,  urea: 15 },
-  VAN:     { diesel: 20,  gnv: 40,  glp: 25,  gasolina: 20,  urea: 10 },
-  AUTO:    { diesel: 12,  gnv: 30,  glp: 15,  gasolina: 12,  urea: 5  },
-  DEFAULT: { diesel: 80,  gnv: 100, glp: 60,  gasolina: 60,  urea: 20 },
-};
-
-function getCapacidad(categoria: string | null | undefined, tipo: string): number {
-  if (!categoria) return CAPACIDAD_TANQUE.DEFAULT[tipo] || 80;
-  const cat = categoria.toUpperCase();
-  for (const [k, v] of Object.entries(CAPACIDAD_TANQUE)) {
-    if (cat.includes(k)) return v[tipo] || v.diesel || 80;
-  }
-  return CAPACIDAD_TANQUE.DEFAULT[tipo] || 80;
-}
-
 // Marcas de KIT DE CONVERSIÓN A GLP (se ven en el tablero) — NUNCA son el grifo/estación.
 // Si la IA las devuelve como grifo/proveedor, se descartan (trampa "LANDI RENZO" del caso CWQ-400).
 const MARCAS_KIT_GLP = [
@@ -133,15 +113,16 @@ function esMarcaKitGLP(s?: string | null): boolean {
 }
 
 /**
- * Capacidad del tanque para (vehículo, tipo). Usa la capacidad EDITABLE por vehículo si el
- * operador la configuró (vehiculos.capacidad_tanque jsonb { diesel, glp, gnv, ... }); si no,
- * cae a la heurística por categoría. Editable resuelve el caso GLP: un kit convertido tiene
- * ~20-30 gal, no los 80 que asumía la heurística de un bus.
+ * Capacidad del tanque para (vehículo, tipo) — la resuelve `lib/combustible-tipos.ts`.
+ *
+ * Este cuerpo hacía `veh?.capacidad_tanque?.[tipo]` y llevaba su propia copia de la heurística
+ * por categoría. Las dos cosas estaban mal por la misma razón: `capacidad_tanque` se ESCRIBE
+ * con la clave de la FAMILIA y aquí se buscaba con el TIPO leído del voucher, así que un
+ * `gasolina_premium` no encontraba la capacidad que el operador había configurado y encima
+ * remataba en el tanque de diésel. Ver la cabecera del catálogo.
  */
 function capacidadTanque(veh: VehiculoMatch | null, tipo: string): number {
-  const editable = veh?.capacidad_tanque?.[tipo];
-  if (editable != null && Number(editable) > 0) return Number(editable);
-  return getCapacidad(veh?.categoria, tipo);
+  return capacidadTanqueDe(veh, tipo);
 }
 
 // ── Empresas que el ERP conoce como suyas (para el guard de identidad del voucher) ──

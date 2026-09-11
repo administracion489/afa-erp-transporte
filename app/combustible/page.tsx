@@ -39,7 +39,7 @@ type LecturaRadar = FilaConFotos & { combustible_id: number | null; comprobante?
 type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo";
 type GranPeriodo = "dia" | "semana" | "mes";
 
-import { COMBUSTIBLES, familiaCombustible } from "@/lib/combustible-tipos";
+import { COMBUSTIBLES, familiaCombustible, capacidadTanqueDe } from "@/lib/combustible-tipos";
 import { paginarFilas } from "@/lib/huella";
 import {
   seriesRendimiento, tramosPorCarga, juzgarTramo, etiquetaMotivo,
@@ -55,30 +55,16 @@ import ComparacionPeriodo from "./ComparacionPeriodo";
 // caras. Ahí están además los grados de gasolina (regular/premium) y `familia`, que es con
 // lo que se compara tanque, precio referencial y rendimiento.
 
-const CAPACIDAD_TANQUE: Record<string, Record<string, number>> = {
-  BUS:     { diesel: 100, gnv: 150, glp: 80,  gasolina: 80,  urea: 30 },
-  MINIBUS: { diesel: 60,  gnv: 80,  glp: 50,  gasolina: 50,  urea: 15 },
-  VAN:     { diesel: 20,  gnv: 40,  glp: 25,  gasolina: 20,  urea: 10 },
-  AUTO:    { diesel: 12,  gnv: 30,  glp: 15,  gasolina: 12,  urea: 5  },
-  DEFAULT: { diesel: 80,  gnv: 100, glp: 60,  gasolina: 60,  urea: 20 },
-};
-
+// La capacidad del tanque y su heurística por categoría viven en lib/combustible-tipos.ts:
+// esta tabla estaba copiada LITERAL en lib/radar/acciones.ts, y las dos buscaban la capacidad
+// declarada por TIPO cuando el formulario de la unidad la escribe por FAMILIA — así que en una
+// carga de `gasolina_regular` o `gasolina_premium` la capacidad configurada no se encontraba
+// nunca y el control caía al tanque de DIÉSEL.
 function getCapacidad(
   vehOCat: string | { categoria?: string | null; capacidad_tanque?: Record<string, number> | null } | null | undefined,
   tipo: string
 ): number {
-  // La capacidad EDITABLE por vehículo (vehiculos.capacidad_tanque) tiene prioridad sobre la heurística.
-  if (vehOCat && typeof vehOCat === "object") {
-    const edit = vehOCat.capacidad_tanque?.[tipo];
-    if (edit != null && Number(edit) > 0) return Number(edit);
-  }
-  const categoria = typeof vehOCat === "string" ? vehOCat : vehOCat?.categoria ?? undefined;
-  if (!categoria) return CAPACIDAD_TANQUE.DEFAULT[tipo] || 80;
-  const cat = categoria.toUpperCase();
-  for (const [k, v] of Object.entries(CAPACIDAD_TANQUE)) {
-    if (cat.includes(k)) return v[tipo] || v.diesel || 80;
-  }
-  return CAPACIDAD_TANQUE.DEFAULT[tipo] || 80;
+  return capacidadTanqueDe(vehOCat, tipo);
 }
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────

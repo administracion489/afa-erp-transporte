@@ -3,6 +3,8 @@
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { docSinVencimiento, etiquetaTipoDoc } from "@/lib/documentos-estado";
+import { FAMILIAS_TANQUE, parseCapacidadTanque as parseCapTanque, capacidadTanqueAForm as capTanqueAForm, faltaColumnaTanque } from "@/lib/combustible-tipos";
+import AvisoFichaCombustible from "@/components/flota/AvisoFichaCombustible";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -20,7 +22,7 @@ type Vehiculo = {
   tipo_vehiculo_costeo: string | null;
 };
 
-type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null };
+type ParamVeh = { tipo_vehiculo: string; nombre: string; grupo_vehiculo: string | null; tipo_combustible_1?: string | null };
 
 type DocVehiculo = {
   id: number; vehiculo_id: number; tipo: string; numero: string | null;
@@ -104,28 +106,9 @@ const FORM_V = {
   tipo_vehiculo_costeo: "",
 };
 
-// Tipos de combustible con su unidad, para editar la capacidad del tanque por vehículo.
-const TIPOS_TANQUE: { tipo: string; label: string; unidad: string }[] = [
-  { tipo: "diesel",   label: "Diésel",   unidad: "gal" },
-  { tipo: "gasolina", label: "Gasolina", unidad: "gal" },
-  { tipo: "glp",      label: "GLP",      unidad: "gal" },
-  { tipo: "gnv",      label: "GNV",      unidad: "m³"  },
-  { tipo: "urea",     label: "Urea",     unidad: "lt"  },
-];
-// {diesel:"100", glp:"25"} → {diesel:100, glp:25}; todo vacío → null.
-function parseCapTanque(cap: Record<string, string>): Record<string, number> | null {
-  const out: Record<string, number> = {};
-  for (const [k, v] of Object.entries(cap || {})) {
-    const n = Number(v);
-    if (v !== "" && Number.isFinite(n) && n > 0) out[k] = n;
-  }
-  return Object.keys(out).length ? out : null;
-}
-function capTanqueAForm(cap: Record<string, number> | null | undefined): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(cap || {})) out[k] = String(v);
-  return out;
-}
+// El catálogo de familias del tanque vive en lib/combustible-tipos.ts (`FAMILIAS_TANQUE`):
+// esta copia de cinco filas escritas a mano dejó de decir lo mismo que el catálogo el día que
+// se abrió la gasolina por octanaje, y quien LEE la capacidad la busca por familia.
 
 const FORM_D = {
   vehiculo_id: "", tipo: "SOAT", numero: "", fecha_emision: "",
@@ -341,7 +324,7 @@ export default function VehiculosPage() {
     const [{ data: vData }, { data: dData }, { data: pData }] = await Promise.all([
       supabase.from("vehiculos").select("*").order("placa"),
       supabase.from("documentos_vehiculo").select("*").order("fecha_vencimiento"),
-      supabase.from("parametros_costos").select("tipo_vehiculo,nombre,grupo_vehiculo").eq("activo", true).order("grupo_vehiculo").order("capacidad"),
+      supabase.from("parametros_costos").select("tipo_vehiculo,nombre,grupo_vehiculo,tipo_combustible_1").eq("activo", true).order("grupo_vehiculo").order("capacidad"),
     ]);
     const vList = (vData || []) as Vehiculo[];
     const dList = (dData || []) as DocVehiculo[];
@@ -373,13 +356,22 @@ export default function VehiculosPage() {
       proximo_mantenimiento_km: formV.proximo_km ? Number(formV.proximo_km) : null,
       observaciones: formV.observaciones.trim() || null,
       tipo_vehiculo_costeo: formV.tipo_vehiculo_costeo || null,
-      // Solo se incluye si hay algún valor: así, si la migración de capacidad_tanque aún no
-      // corrió, guardar un vehículo SIN capacidad configurada no rompe (no envía la columna nueva).
-      ...(capT ? { capacidad_tanque: capT } : {}),
+      // La columna va SIEMPRE, incluso en null. Antes solo se incluía si traía valor —para no
+      // romper si la migración accesoria no se había corrido— y eso dejaba una capacidad que no
+      // se podía BORRAR: al vaciar los campos el payload dejaba de llevarla y el número viejo
+      // seguía escrito. La migración se protege reintentando sin ella, que es el patrón de
+      // `COLUMNAS_OPCIONALES` (lib/reservas-pacto.ts): se suelta la columna que el error NOMBRA.
+      capacidad_tanque: capT,
     };
-    const { error } = editandoId
-      ? await supabase.from("vehiculos").update(payload).eq("id", editandoId)
-      : await supabase.from("vehiculos").insert(payload);
+    const escribir = (datos: Record<string, unknown>) => editandoId
+      ? supabase.from("vehiculos").update(datos).eq("id", editandoId)
+      : supabase.from("vehiculos").insert(datos);
+    let { error } = await escribir(payload);
+    if (error && faltaColumnaTanque(error)) {
+      const { capacidad_tanque: _omitida, ...sinTanque } = payload;
+      ({ error } = await escribir(sinTanque));
+      if (!error) alert("Se guardó, pero la capacidad de tanque no: falta correr supabase/radar-ia-combustible-multifoto.sql.");
+    }
     if (error) { alert(error.message); setGuardando(false); return; }
     setFormV(FORM_V); setCapTanque({}); setEditandoId(null); setMostrarFormV(false);
     cargarTodo(); setGuardando(false);
@@ -562,8 +554,16 @@ export default function VehiculosPage() {
               <Campo label="Categoría de costeo" hint="Vincula esta unidad a su ficha de costos — así las cotizaciones que la usan sirven de referencia en Tarifario">
                 <select className={inputCls()} value={formV.tipo_vehiculo_costeo} onChange={fv("tipo_vehiculo_costeo")}>
                   <option value="">— sin asignar —</option>
-                  {paramsVeh.map(p => <option key={p.tipo_vehiculo} value={p.tipo_vehiculo}>{p.nombre} ({p.tipo_vehiculo})</option>)}
+                  {/* El COMBUSTIBLE va en la etiqueta: es lo que decide el S/km de la ficha, y sin
+                      verlo se elige una categoría que costea otro combustible sin enterarse. */}
+                  {paramsVeh.map(p => (
+                    <option key={p.tipo_vehiculo} value={p.tipo_vehiculo}>
+                      {p.nombre} ({p.tipo_vehiculo}){p.tipo_combustible_1 ? ` · ${p.tipo_combustible_1}` : ""}
+                    </option>
+                  ))}
                 </select>
+                <AvisoFichaCombustible capTanque={capTanque}
+                  tipoCombustibleFicha={paramsVeh.find(p => p.tipo_vehiculo === formV.tipo_vehiculo_costeo)?.tipo_combustible_1} />
               </Campo>
               <Campo label="Estado">
                 <select className={inputCls()} value={formV.estado} onChange={fv("estado")}>
@@ -667,12 +667,12 @@ export default function VehiculosPage() {
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Capacidad de tanque</p>
             <p className="text-xs text-gray-500 mb-3">Capacidad máxima por tipo de combustible. Sirve para detectar cargas que exceden el tanque (Radar IA y registro manual). Déjalo vacío para usar el estimado por categoría. Para GLP a gas, usa la capacidad real del kit (no la del tanque original).</p>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-              {TIPOS_TANQUE.map((t) => (
-                <Campo key={t.tipo} label={`${t.label} (${t.unidad})`}>
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
+              {FAMILIAS_TANQUE.map((t) => (
+                <Campo key={t.familia} label={`${t.label} (${t.unidadLabel})`}>
                   <input type="number" min="0" step="0.1" className={inputCls()} placeholder="—"
-                    value={capTanque[t.tipo] ?? ""}
-                    onChange={(e) => setCapTanque((p) => ({ ...p, [t.tipo]: e.target.value }))} />
+                    value={capTanque[t.familia] ?? ""}
+                    onChange={(e) => setCapTanque((p) => ({ ...p, [t.familia]: e.target.value }))} />
                 </Campo>
               ))}
             </div>
