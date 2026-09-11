@@ -207,7 +207,9 @@ type Guion = {
 };
 
 function sbFalso(g: Guion) {
-  const log = { updates: 0, inserts: 0, patch: null as any, acta: null as any };
+  // `acta` es la PRIMERA fila y `actas` todas: la puerta manda un array (un acta por columna
+  // escrita, porque el historial es por campo) y con un solo campo ese array tiene un elemento.
+  const log = { updates: 0, inserts: 0, patch: null as any, acta: null as any, actas: [] as any[] };
   const encadenable = (valor: any): any => ({
     eq() { return this; },
     select() { return this; },
@@ -218,7 +220,12 @@ function sbFalso(g: Guion) {
       return {
         select: () => encadenable({ data: g.filasClave ?? [], error: g.errorSelect ?? null }),
         update: (patch: any) => { log.updates++; log.patch = patch; return encadenable({ data: g.filasUpdate ?? [], error: g.errorUpdate ?? null }); },
-        insert: (acta: any) => { log.inserts++; log.acta = acta; return Promise.resolve({ error: g.errorInsert ?? null }); },
+        insert: (acta: any) => {
+          log.inserts++;
+          log.actas = Array.isArray(acta) ? acta : [acta];
+          log.acta = log.actas[0] ?? null;
+          return Promise.resolve({ error: g.errorInsert ?? null });
+        },
       };
     },
   };
@@ -240,6 +247,33 @@ const ESCRITURA = {
   chk("1 fila: se escribió el patch y el firmante", log.patch?.rendimiento_1 === 28.5 && log.patch?.updated_by === ESCRITURA.por);
   chk("1 fila: el acta lleva los dos valores", log.acta?.valor_anterior === 19 && log.acta?.valor_nuevo === 28.5);
   chk("1 fila: el acta apunta a parametros_costos", log.acta?.tabla_origen === "parametros_costos");
+  chk("1 campo: UNA sola acta", log.actas.length === 1);
+}
+{
+  // VARIOS CAMPOS A LA VEZ (la ficha del tipo: nombre · capacidad · grupo · ícono). El historial
+  // es POR CAMPO, así que hay un acta por columna escrita — y todas en UN insert: o entran
+  // todas o no entra ninguna, y así el historial no describe media edición.
+  const { sb, log } = sbFalso({ filasClave: [{ id: 7 }], filasUpdate: [{ id: 7 }] });
+  const r = await escribirParametro(sb, {
+    tipo_vehiculo: "SUV_6_GLP",
+    patch: { nombre: "SUV 6 pax GLP Euro III", capacidad: 7 },
+    acta: [
+      { campo_modificado: "nombre",    valor_anterior: null, valor_nuevo: null, motivo: "Nombre: «SUV 6 pax GLP» → «SUV 6 pax GLP Euro III»" },
+      { campo_modificado: "capacidad", valor_anterior: 6,    valor_nuevo: 7,    motivo: "Capacidad: «6 pax» → «7 pax»" },
+    ],
+    por: "administracion@afatoursperu.com",
+  });
+  chk("ficha: ok con las dos actas", r.ok && r.acta);
+  chk("ficha: UN solo insert con DOS filas", log.inserts === 1 && log.actas.length === 2);
+  chk("ficha: cada acta nombra su campo",
+    log.actas.map((a: any) => a.campo_modificado).join(",") === "nombre,capacidad");
+  chk("ficha: la de la capacidad conserva sus dos números",
+    log.actas[1]?.valor_anterior === 6 && log.actas[1]?.valor_nuevo === 7);
+  chk("ficha: las dos llevan la misma clave y el mismo firmante",
+    log.actas.every((a: any) => a.tipo_vehiculo === "SUV_6_GLP" && a.cambiado_por === "administracion@afatoursperu.com"));
+  chk("ficha: el patch va entero, con el firmante",
+    log.patch?.nombre === "SUV 6 pax GLP Euro III" && log.patch?.capacidad === 7 && !!log.patch?.updated_by);
+  chk("ficha: la CLAVE nunca viaja en el patch", !("tipo_vehiculo" in (log.patch ?? {})));
 }
 {
   // LA CLAVE DUPLICADA. Lo único que importa: no se escribió NADA.
