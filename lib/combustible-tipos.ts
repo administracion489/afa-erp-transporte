@@ -77,6 +77,126 @@ export function familiaCombustible(tipo?: string | null): string {
   return configCombustible(tipo).familia;
 }
 
+// ── EL TANQUE DE LA UNIDAD ───────────────────────────────────────────────────
+//
+// SE DECLARA POR FAMILIA Y SE CONSULTABA POR TIPO. Ese desajuste estaba vivo en producción:
+// `/vehiculos` escribe `capacidad_tanque` con las claves de la FAMILIA (`{diesel: 100,
+// gasolina: 80}`) y los dos lectores —`getCapacidad` de /combustible y `capacidadTanque` de
+// lib/radar/acciones.ts— buscaban por el TIPO leído del voucher. Con `diesel`, `glp`, `gnv` y
+// `urea` la familia y el tipo se escriben igual y nadie lo notó; con `gasolina_regular` y
+// `gasolina_premium` la capacidad editada **no se encontraba nunca** y el control caía a la
+// heurística por categoría — que además, al no tener esa clave, remataba en `v.diesel`. O sea:
+// una carga de gasolina en un bus se comparaba contra el tanque de DIÉSEL.
+//
+// Es el patrón que este repo ya pagó tres veces en un día (ver CLAUDE.md, "escribir con una
+// identidad y leer con otra"), y por eso la resolución vive AQUÍ y en una sola función: quien
+// escribe y quien lee derivan la clave por el mismo camino.
+//
+// NO ES UN "TIPO DE COMBUSTIBLE DEL VEHÍCULO". Un tanque declarado dice qué PUEDE cargar esa
+// unidad y cuánto le entra; una unidad bicombustible declara dos y sigue sin afirmar qué se
+// despachó en ningún voucher concreto. Esa distinción es la que impide que el ERP "corrija" un
+// repostaje de gasolina al GLP de la ficha — ver `normalizarTipoCombustible` aquí abajo.
+
+/**
+ * Las familias que puede declarar un tanque, para la ficha de la unidad.
+ *
+ * DERIVADA del catálogo, nunca una lista aparte: `/vehiculos` llevaba su propia copia de cinco
+ * filas escrita a mano, así que el día que el catálogo abrió la gasolina por octanaje las dos
+ * dejaron de decir lo mismo. Deriva incluye `biodiesel`, que existe en el catálogo y no estaba
+ * en esa copia.
+ */
+export const FAMILIAS_TANQUE: { familia: string; label: string; unidadLabel: string }[] = [
+  ...new Set(TIPOS_COMBUSTIBLE.map((t) => COMBUSTIBLES[t].familia)),
+].map((f) => ({ familia: f, label: configCombustible(f).label, unidadLabel: configCombustible(f).unidadLabel }));
+
+/**
+ * Capacidad estimada por CATEGORÍA de vehículo, cuando la unidad no declaró la suya.
+ *
+ * Estaba copiada LITERAL en `app/combustible/page.tsx` y en `lib/radar/acciones.ts` — la
+ * cabecera de este archivo ya lo confesaba y nadie la había movido. Sus claves son FAMILIAS,
+ * que es justo lo que el desajuste de arriba no respetaba.
+ */
+export const CAPACIDAD_TANQUE_CATEGORIA: Record<string, Record<string, number>> = {
+  BUS:     { diesel: 100, gnv: 150, glp: 80,  gasolina: 80,  urea: 30 },
+  MINIBUS: { diesel: 60,  gnv: 80,  glp: 50,  gasolina: 50,  urea: 15 },
+  VAN:     { diesel: 20,  gnv: 40,  glp: 25,  gasolina: 20,  urea: 10 },
+  AUTO:    { diesel: 12,  gnv: 30,  glp: 15,  gasolina: 12,  urea: 5  },
+  DEFAULT: { diesel: 80,  gnv: 100, glp: 60,  gasolina: 60,  urea: 20 },
+};
+
+/** Lo que la unidad DECLARÓ para ese tipo, o null. Lo más específico gana. */
+export function capacidadDeclarada(
+  cap: Record<string, number> | null | undefined,
+  tipo?: string | null
+): number | null {
+  if (!cap) return null;
+  const positivo = (v: unknown) => (v != null && Number(v) > 0 ? Number(v) : null);
+  // El TIPO exacto primero (una declaración más fina que la familia manda sobre ella), y
+  // después la FAMILIA, que es como la escriben hoy las dos fichas de unidad.
+  return positivo(cap[String(tipo ?? "").trim().toLowerCase()]) ?? positivo(cap[familiaCombustible(tipo)]);
+}
+
+/**
+ * La capacidad con la que se juzga una carga: lo declarado por la unidad, y si no, el
+ * estimado de su categoría. **Un solo sitio**, porque los dos lectores que había discrepaban
+ * en cómo resolvían la clave y solo uno de los dos se arreglaría al tocar el otro.
+ */
+export function capacidadTanqueDe(
+  veh: { categoria?: string | null; capacidad_tanque?: Record<string, number> | null } | string | null | undefined,
+  tipo?: string | null
+): number {
+  const familia = familiaCombustible(tipo);
+  if (veh && typeof veh === "object") {
+    const declarada = capacidadDeclarada(veh.capacidad_tanque, tipo);
+    if (declarada !== null) return declarada;
+  }
+  const categoria = typeof veh === "string" ? veh : veh?.categoria ?? "";
+  const cat = String(categoria ?? "").toUpperCase();
+  // POR LA CLAVE MÁS LARGA, no por el orden del objeto. `"MINIBUS".includes("BUS")` es true, y
+  // como BUS venía primero en la tabla, TODO minibús se juzgaba contra el tanque de un bus —100
+  // gal en vez de 60—, así que una carga de 70 gal en un minibús no levantaba nada. Es la misma
+  // trampa que el match del grifo resolvió con "nunca contiene, exacto o con longitud mínima".
+  const fila =
+    Object.entries(CAPACIDAD_TANQUE_CATEGORIA)
+      .filter(([k]) => k !== "DEFAULT" && cat.includes(k))
+      .sort((a, b) => b[0].length - a[0].length)[0]?.[1] ??
+    CAPACIDAD_TANQUE_CATEGORIA.DEFAULT;
+  // Por FAMILIA, no por tipo: sin esto un `gasolina_premium` no encontraba clave y remataba
+  // en el tanque de diésel, que en un bus son 100 gal contra los 80 que le tocan.
+  return fila[familia] ?? fila.diesel ?? 80;
+}
+
+/** `{diesel:"100", glp:""}` → `{diesel:100}`; todo vacío → null (la columna es nullable). */
+export function parseCapacidadTanque(cap: Record<string, string>): Record<string, number> | null {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(cap || {})) {
+    const n = Number(v);
+    if (v !== "" && Number.isFinite(n) && n > 0) out[k] = n;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** El camino de vuelta, para llenar el formulario al editar. */
+export function capacidadTanqueAForm(cap: Record<string, number> | null | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(cap || {})) out[k] = String(v);
+  return out;
+}
+
+/**
+ * ¿El error dice que `capacidad_tanque` no existe? (`radar-ia-combustible-multifoto.sql` sin correr).
+ *
+ * Existe para poder MANDAR SIEMPRE la columna y reintentar sin ella, en vez de mandarla solo
+ * cuando trae valor. Esa segunda forma —la que tenía /vehiculos— protege la migración pero deja
+ * un dato que NO SE PUEDE BORRAR: al vaciar los campos el payload deja de llevar la columna y la
+ * capacidad vieja se queda escrita, así que un 80 tecleado por error es corregible a otro número
+ * pero no retirable. Un formulario en el que un campo no se puede vaciar miente sobre lo guardado.
+ */
+export function faltaColumnaTanque(error: { message?: string } | null | undefined): boolean {
+  const m = String(error?.message ?? "").toLowerCase();
+  return m.includes("capacidad_tanque") && m.includes("does not exist");
+}
+
 // ── Normalización de lo que imprime un voucher ───────────────────────────────
 
 /**
