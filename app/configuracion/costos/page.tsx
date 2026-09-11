@@ -5,7 +5,9 @@ import { componentesCostoKm, costoKmDeParametro } from "@/lib/costos/costo-km-pa
 import { escribirParametro, aplicarRendimientoMedido, registrarDescarte, cargarProcedencias } from "@/lib/costos/parametros";
 import { agregarPorTipo, CAMPO_DESCARTE, type AgregadoTipo, type PlacaMedida, type Procedencia } from "@/lib/costos/rendimiento-tipo";
 import { cargarPlacasMedidas } from "@/lib/costos/rendimiento-flota";
+import { GRUPOS_VEHICULO, ICONOS_VEHICULO, ETIQUETA_FICHA, type ActaFicha, type FichaTipo } from "@/lib/costos/ficha-tipo";
 import ModalRendimientoMedido, { ChipMedido } from "./ModalRendimientoMedido";
+import ModalFichaTipo from "./ModalFichaTipo";
 
 type Combustible = {
   id:number; tipo:string; unidad:string; precio:number;
@@ -34,8 +36,10 @@ type Historial = {
 
 const EURO_NORMS  = ["Euro II","Euro III","Euro IV","Euro V","Euro VI"];
 const EURO_UREA   = ["Euro V","Euro VI"];
-const GRUPOS_VEH  = ["Ligeros","Vans","Buses","Otros"];
-const ICONOS_VEH  = ["🚗","🚙","🚐","🚌","🏎️","🚚","🚛","🚑"];
+// Los grupos y los íconos viven en lib/costos/ficha-tipo.ts: el alta y la edición de la ficha
+// tienen que ofrecer la MISMA lista, y dos copias es como una se queda atrás.
+const GRUPOS_VEH  = [...GRUPOS_VEHICULO];
+const ICONOS_VEH  = [...ICONOS_VEHICULO];
 
 const CAMPOS_EDIT: {key:keyof ParamCosto;label:string;grupo:string;unidad:string;step:number;desc?:string}[] = [
   {key:"rendimiento_1",      label:"Rendimiento",        grupo:"Combustible",     unidad:"km/unidad",step:0.5, desc:"Km por galón (Diésel/GLP/Gasolina) o m³ (GNV)"},
@@ -63,6 +67,7 @@ const ETIQUETA_CAMPO:Record<string,string> = {
   tipo_combustible_1:"Combustible",
   euronorm:"Norma Euro",
   precio:"Precio",
+  ...ETIQUETA_FICHA,   // nombre · capacidad · grupo_vehiculo · icono
 };
 const etiquetaCampo = (k:string) => CAMPOS_EDIT.find(c=>c.key===k)?.label || ETIQUETA_CAMPO[k] || k;
 
@@ -314,6 +319,9 @@ export default function AjustesCostosPage() {
   const [placas,setPlacas]           =useState<PlacaMedida[]|null>(null);
   const [procedencias,setProcedencias]=useState<Map<string,Procedencia>>(new Map());
   const [tipoAbierto,setTipoAbierto] =useState<string|null>(null);
+  // La ficha (nombre · capacidad · grupo · ícono) del tipo que se está editando. Se guarda la
+  // CLAVE y no la fila: al recargar, la fila es otro objeto y el modal se quedaría con la vieja.
+  const [fichaAbierta,setFichaAbierta]=useState<string|null>(null);
 
   useEffect(()=>{supabase.auth.getUser().then(({data})=>{if(data?.user)setUserEmail(data.user.email||"Usuario");});},[]);
 
@@ -350,6 +358,9 @@ export default function AjustesCostosPage() {
   );
 
   const preciosMap=useMemo(()=>{const m:Record<string,number>={};combustibles.forEach(c=>{m[c.tipo]=c.precio;});return m;},[combustibles]);
+  /** Solo para avisar de un nombre repetido al editar la ficha. Estable: si no, el plan del
+   *  modal se recalcularía en cada tecla por una lista que no cambió. */
+  const nombresTipos=useMemo(()=>params.map(p=>({tipo_vehiculo:p.tipo_vehiculo,nombre:p.nombre})),[params]);
 
   function mostrarAlerta(msg:string){setAlerta(msg);setTimeout(()=>setAlerta(""),4000);}
 
@@ -372,6 +383,21 @@ export default function AjustesCostosPage() {
     // El toast verde ya NO es incondicional. Antes decía "✅ 19.00 → 28.50" aunque el update
     // no hubiera tocado ninguna fila, y al recargar volvía el 19.00.
     if(r.ok) mostrarAlerta(`✅ ${vehId} · ${CAMPOS_EDIT.find(c=>c.key===campo)?.label||campo}: ${fmtN(vA)} → ${fmtN(vN)}${r.acta?"":" (sin registrar en el historial)"}`);
+    if(r.error) setFallo(r.error);
+    cargar();setGuardando(false);
+  };
+
+  // ── La ficha del tipo ──────────────────────────────────────────────────────
+  // Pasa por `escribirParametro` como todo lo demás: es la única puerta, y es la que comprueba
+  // que la clave exista y sea única ANTES de escribir. El plan (qué cambia y qué acta queda) lo
+  // arma `planDeFicha`; aquí solo se escribe y se cuenta lo que pasó.
+  const guardarFicha=async(vehId:string,patch:Record<string,unknown>,actas:ActaFicha[],resumen:string)=>{
+    setGuardando(true);setFallo("");
+    const r=await escribirParametro(supabase,{tipo_vehiculo:vehId,patch,acta:actas,por:userEmail});
+    if(r.ok){
+      setFichaAbierta(null);
+      mostrarAlerta(`✅ ${vehId} · ${resumen}${r.acta?"":" (sin registrar en el historial)"}`);
+    }
     if(r.error) setFallo(r.error);
     cargar();setGuardando(false);
   };
@@ -539,7 +565,7 @@ export default function AjustesCostosPage() {
       {tab==="vehiculos"&&(
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <p className="text-sm text-gray-500">{params.length} vehículos activos · Clic en celda para editar · El dropdown cambia combustible y activa/desactiva UREA automáticamente</p>
+            <p className="text-sm text-gray-500">{params.length} vehículos activos · Clic en celda para editar · Clic en el nombre para cambiar la ficha (nombre, pax, grupo, ícono) · El dropdown cambia combustible y activa/desactiva UREA automáticamente</p>
             <button onClick={()=>setMostrarForm(v=>!v)} className="px-5 py-2.5 rounded-xl font-bold text-sm text-white hover:opacity-90" style={{background:mostrarForm?"#6b7280":"#0b315f"}}>
               {mostrarForm?"✕ Cancelar":"➕ Agregar vehículo"}
             </button>
@@ -595,14 +621,21 @@ export default function AjustesCostosPage() {
                         const costoKm=costoKmDeParametro(p,preciosMap);
                         return(
                           <tr key={p.id} className="hover:bg-gray-50">
+                            {/* La ficha se edita desde aquí. El nombre, la capacidad, el grupo y
+                                el ícono solo se podían teclear en el alta: un "SUV 6 pax GLP"
+                                mal escrito se leía en el cotizador, el comparativo y el
+                                tarifario, y no se corregía en ninguna pantalla del ERP. */}
                             <td className="px-4 py-3 sticky left-0 bg-white z-10 border-r border-gray-100">
-                              <div className="flex items-center gap-1.5">
+                              <button onClick={()=>setFichaAbierta(p.tipo_vehiculo)}
+                                title={`Editar la ficha de ${p.tipo_vehiculo}`}
+                                className="group flex items-center gap-1.5 w-full text-left hover:bg-blue-50 rounded-lg px-1.5 py-1 -mx-1.5 transition-colors">
                                 <span className="text-lg">{p.icono||"🚌"}</span>
-                                <div>
-                                  <div className="font-bold text-gray-800 text-xs">{p.nombre}</div>
+                                <div className="min-w-0">
+                                  <div className="font-bold text-gray-800 text-xs truncate">{p.nombre}</div>
                                   <div className="text-[10px] text-gray-400">{p.capacidad} pax</div>
                                 </div>
-                              </div>
+                                <span className="text-[10px] text-blue-400 opacity-0 group-hover:opacity-100 ml-auto pl-1">✏️</span>
+                              </button>
                             </td>
                             <td className="px-3 py-2.5">
                               <select value={p.tipo_combustible_1} onChange={e=>cambiarComb(p.tipo_vehiculo,e.target.value)}
@@ -685,6 +718,21 @@ export default function AjustesCostosPage() {
           )}
         </div>
       )}
+
+      {fichaAbierta&&params.find(p=>p.tipo_vehiculo===fichaAbierta)&&(()=>{
+        const p=params.find(x=>x.tipo_vehiculo===fichaAbierta)!;
+        const ficha:FichaTipo={tipo_vehiculo:p.tipo_vehiculo,nombre:p.nombre,capacidad:p.capacidad,icono:p.icono,grupo_vehiculo:p.grupo_vehiculo};
+        return(
+          <ModalFichaTipo
+            ficha={ficha}
+            otros={nombresTipos}
+            nota={motivo}
+            guardando={guardando}
+            onGuardar={(patch,actas,resumen)=>guardarFicha(p.tipo_vehiculo,patch,actas,resumen)}
+            onCerrar={()=>setFichaAbierta(null)}
+          />
+        );
+      })()}
 
       {tipoAbierto&&medidos.get(tipoAbierto)&&params.find(p=>p.tipo_vehiculo===tipoAbierto)&&(
         <ModalRendimientoMedido

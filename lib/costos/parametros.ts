@@ -38,6 +38,15 @@ import {
 } from "./rendimiento-tipo";
 import { paginarFilas } from "@/lib/huella";
 
+/** Una fila de `historial_costos`. El historial es POR CAMPO (`campo_modificado`) desde
+ *  siempre, así que un patch que toca varias columnas deja varias. */
+export type ActaParametro = {
+  campo_modificado: string;
+  valor_anterior: number | null;
+  valor_nuevo: number | null;
+  motivo: string;
+};
+
 /** Lo que se escribe, y el acta que lo justifica. Los dos van juntos o no va ninguno. */
 export type EscrituraParametro = {
   /** La clave de `parametros_costos`. Se usa CRUDA: se normaliza al crear el tipo y en
@@ -45,13 +54,11 @@ export type EscrituraParametro = {
   tipo_vehiculo: string;
   /** Las columnas a escribir. `updated_by` lo pone esta función. */
   patch: Record<string, unknown>;
-  /** La fila de `historial_costos`. Sin acta no se escribe: es la razón de ser de la tabla. */
-  acta: {
-    campo_modificado: string;
-    valor_anterior: number | null;
-    valor_nuevo: number | null;
-    motivo: string;
-  };
+  /** La fila de `historial_costos`, o UNA POR CAMPO cuando el patch toca varias columnas (la
+   *  ficha del tipo: nombre, capacidad, grupo, ícono). Sin acta no se escribe: es la razón de
+   *  ser de la tabla. Un acta resumen dejaría un cambio de capacidad sin sus dos números, que
+   *  es justo lo que la columna "Variación" del historial lee. */
+  acta: ActaParametro | ActaParametro[];
   /** Quién firma. El correo de la persona, nunca un literal de sistema. */
   por: string;
 };
@@ -61,8 +68,9 @@ export type ResultadoEscritura = {
   ok: boolean;
   /** Filas que tenían esa clave. 0 = no existe · 2+ = clave duplicada, no se escribió nada. */
   filas: number;
-  /** Si quedó el acta. Puede ser false con `ok: true`: el parámetro se guardó y la auditoría
-   *  no. La pantalla tiene que decirlo — callarlo sería prometer una trazabilidad que no hay. */
+  /** Si quedaron TODAS las actas. Puede ser false con `ok: true`: el parámetro se guardó y la
+   *  auditoría no. La pantalla tiene que decirlo — callarlo sería prometer una trazabilidad
+   *  que no hay. */
   acta: boolean;
   /** Qué salió mal, en el idioma del operador y nombrando el arreglo. */
   error?: string;
@@ -124,17 +132,22 @@ export async function escribirParametro(sb: any, e: EscrituraParametro): Promise
     };
   }
 
-  // 3 · EL ACTA. Solo aquí, y solo porque se escribió exactamente una fila. Insertarla antes
-  //     dejaría en el historial un cambio que no ocurrió, que es peor que no tener historial.
-  const { error: errActa } = await sb.from("historial_costos").insert({
-    tabla_origen: TABLA,
-    tipo_vehiculo: clave,
-    campo_modificado: e.acta.campo_modificado,
-    valor_anterior: e.acta.valor_anterior,
-    valor_nuevo: e.acta.valor_nuevo,
-    motivo: e.acta.motivo,
-    cambiado_por: e.por,
-  });
+  // 3 · EL ACTA (o una por campo). Solo aquí, y solo porque se escribió exactamente una fila.
+  //     Insertarlas antes dejaría en el historial un cambio que no ocurrió, que es peor que no
+  //     tener historial. Van en un solo insert: o entran todas o no entra ninguna, y así el
+  //     historial no describe media edición.
+  const actas = Array.isArray(e.acta) ? e.acta : [e.acta];
+  const { error: errActa } = actas.length
+    ? await sb.from("historial_costos").insert(actas.map(a => ({
+        tabla_origen: TABLA,
+        tipo_vehiculo: clave,
+        campo_modificado: a.campo_modificado,
+        valor_anterior: a.valor_anterior,
+        valor_nuevo: a.valor_nuevo,
+        motivo: a.motivo,
+        cambiado_por: e.por,
+      })))
+    : { error: null };
 
   return {
     ok: true,
