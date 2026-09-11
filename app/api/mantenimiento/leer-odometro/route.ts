@@ -93,6 +93,9 @@ export async function POST(req: NextRequest) {
       // tiene un arreglo distinto de "puede ser un eco" o de "la IA entregó el parcial".
       codigo_seleccion: veredicto.codigo,
       corregido: veredicto.origen === "corregido",
+      // El número lo DEDUJO el ERP (no lo transcribió el modelo): se pre-llena para que la
+      // persona lo coteje contra la foto, nunca para que pase de largo.
+      confirmar: veredicto.confirmar === true,
       confianza: r.confianza,
       calidad_imagen: r.calidad_imagen,
       motivo: r.motivo,

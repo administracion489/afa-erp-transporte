@@ -47,7 +47,8 @@ const CASO_ODOMETRO = `
 LECTURA DEL TABLERO (aplica a las categorías "odometro" y "combustible"): si ves una foto del tablero sin ningún dato de recarga (sin monto, sin grifo, sin galones/litros), la categoría es "odometro". Al leerlo:
 - El odómetro TOTAL es el número MAYOR de kilómetros de la pantalla y va sin decimales. El "Trip"/parcial es el MENOR y casi siempre lleva un decimal (p. ej. "1803.6").
 - Nunca conviertas el parcial en el total ni al revés. Si dudas de cuál es cuál, pon los DOS: el mayor en "kilometraje" y el otro en "trip_km".
-- "16.3 L/100km" es una tasa de consumo, y la temperatura ("28.0°C") y la hora ("20:25") no son kilómetros.`;
+- "16.3 L/100km" es una tasa de consumo, y la temperatura ("28.0°C") y la hora ("20:25") no son kilómetros.
+- CUENTA LAS CIFRAS Y NO REPITAS NINGUNA. El error medido en esta flota no es inventar un dígito cualquiera: es leer DOS VECES el mismo. Casos reales, tablero → lo que se devolvió mal: 23980→239980 · 23379→233379 · 560473→5600473. Si tu número tiene dos cifras iguales seguidas ("99", "33", "00"), vuelve a contarlas sobre la imagen antes de responder. Si no puedes decidir si son una o dos, deja "kilometraje" en null y dilo en "observaciones": una lectura menos no cuesta nada, un kilometraje diez veces mayor contamina el mantenimiento y el rendimiento de la unidad.`;
 
 /** Bloque de "errores que ya cometiste" para inyectar en la lectura de odómetro. */
 function lineaLeccionesOdometro(ctx: ContextoPrompt): string {

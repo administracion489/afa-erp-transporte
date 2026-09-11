@@ -2468,7 +2468,10 @@ export default function ConductorApp() {
       if (data && km && data.calidad_imagen !== "mala" && !dudoso) {
         setKm(String(km));
         setFoto((prev) => (prev ? { ...prev, kmOcr: km } : prev));
-        if (data.corregido) {
+        if (data.codigo_seleccion === "digito_repetido") {
+          // El conductor tiene el tablero delante: es el mejor momento del ERP para cotejar.
+          alert(`La IA leyó ${Number(data.km_ia).toLocaleString("es-PE")} y le sobra un dígito repetido.\nPusimos ${km.toLocaleString("es-PE")} km.\n\nMira el tablero y confírmalo antes de continuar.`);
+        } else if (data.corregido) {
           alert(`Km leído: ${km.toLocaleString("es-PE")}.\nOjo: la foto muestra dos contadores y se tomó el total (el otro número es el parcial). Verifícalo.`);
         } else if (data.confianza !== "alta") {
           alert(`Km leído: ${km.toLocaleString("es-PE")}${data.motivo ? ` (${data.motivo})` : ""}.\nRevísalo y corrige si hace falta.`);
