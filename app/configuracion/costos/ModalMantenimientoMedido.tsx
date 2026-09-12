@@ -216,14 +216,14 @@ export default function ModalMantenimientoMedido({
           {/* 1b · CONTRA SU GEMELA NUEVA — solo en las fichas usadas */}
           {comp && equilibrio && gemela && (
             <Bloque
-              titulo="Contra su gemela Premium"
+              titulo="Contra su gemela Full Equipo"
               nota="Los seis renglones del S/km, lado a lado. Sin verlos, que la unidad de más de 10 años cueste más parece un error de la pantalla."
             >
               <table className="w-full text-xs">
                 <thead>
                   <tr className="text-[10px] text-gray-400 uppercase">
                     <th className="text-left font-black pb-1">Renglón</th>
-                    <th className="text-right font-black pb-1">Premium</th>
+                    <th className="text-right font-black pb-1">Full Equipo</th>
                     <th className="text-right font-black pb-1">Esta (estándar)</th>
                     <th className="text-right font-black pb-1">Δ</th>
                   </tr>
@@ -269,8 +269,8 @@ export default function ModalMantenimientoMedido({
                     <p className="text-[11px] text-gray-500 mt-1.5 leading-relaxed">
                       <b>No es una medición</b>, y por eso no hay botón: es el número que no afirma ninguna de las
                       dos cosas mientras no haya órdenes de trabajo suficientes. El que manda es el de arriba, y
-                      cuando exista se aplica ese. Con el equilibrio puesto, Premium y Estándar cuestan igual y el
-                      Premium se vende más caro <b>por el margen</b>, no por el costo.
+                      cuando exista se aplica ese. Con el equilibrio puesto, Full Equipo y Estándar cuestan igual y el
+                      Full Equipo se vende más caro <b>por el margen</b>, no por el costo.
                     </p>
                   </>
                 ) : (

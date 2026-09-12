@@ -1,4 +1,4 @@
-// Matriz de lib/costos/nivel-servicio.ts — la palabra única (Premium/Estándar) sobre las dos
+// Matriz de lib/costos/nivel-servicio.ts — la palabra única (Full Equipo/Estándar) sobre las dos
 // columnas que NO se funden.
 //
 //     npx tsx scripts/prueba-nivel-servicio.mts
@@ -27,11 +27,11 @@ const linea = (t: string) => console.log(`\n${t}\n${"─".repeat(t.length)}`);
 /** La flota real de AFA: trece categorías con gemela, más dos casos que no la tienen. */
 const F = (tipo: string, nombre: string) => ({ tipo_vehiculo: tipo, nombre });
 const FLOTA = [
-  F("SPRINTER_17", "Sprinter 17 pax Diésel · Premium (<10 años)"),
+  F("SPRINTER_17", "Sprinter 17 pax Diésel · Full Equipo (<10 años)"),
   F("SPRINTER_17_ESTANDAR", "Sprinter 17 pax Diésel · Estándar (>10 años)"),
-  F("BUS_50", "Bus 50 pax Diésel · Premium (<10 años)"),
+  F("BUS_50", "Bus 50 pax Diésel · Full Equipo (<10 años)"),
   F("BUS_50_ESTANDAR", "Bus 50 pax Diésel · Estándar (>10 años)"),
-  F("MINIVAN_10", "Minivan 10 pax · Premium (<10 años)"),   // sin gemela estándar
+  F("MINIVAN_10", "Minivan 10 pax · Full Equipo (<10 años)"),   // sin gemela estándar
 ];
 const CLAVES = FLOTA.map(f => f.tipo_vehiculo);
 
@@ -41,37 +41,37 @@ linea("1 · LOS VALORES DE LA BASE NO SE RENOMBRAN");
 console.log("`full_equipo`/`basico` están escritos en vehiculos, cotizaciones y en el ÍNDICE ÚNICO");
 console.log("del tarifario. Cambiarlos dejaría huérfana la lista de precios entera.\n");
 
-ok(equipamientoDeNivel("premium") === "full_equipo", "premium  → 'full_equipo'");
+ok(equipamientoDeNivel("full_equipo") === "full_equipo", "full_equipo → 'full_equipo' (coincide, y AUN ASÍ se convierte)");
 ok(equipamientoDeNivel("estandar") === "basico", "estandar → 'basico'");
-ok(nivelDeEquipamiento("full_equipo") === "premium", "'full_equipo' → premium");
+ok(nivelDeEquipamiento("full_equipo") === "full_equipo", "'full_equipo' → full_equipo");
 ok(nivelDeEquipamiento("basico") === "estandar", "'basico' → estandar");
 ok(
   NIVELES.every(n => nivelDeEquipamiento(equipamientoDeNivel(n)) === n),
   "la conversión es un ciclo cerrado en los dos sentidos",
 );
 ok(
-  nivelDeEquipamiento(null) === "premium" && nivelDeEquipamiento(undefined) === "premium" &&
-  nivelDeEquipamiento("") === "premium",
-  "sin valor → PREMIUM, nunca estándar",
+  nivelDeEquipamiento(null) === "full_equipo" && nivelDeEquipamiento(undefined) === "full_equipo" &&
+  nivelDeEquipamiento("") === "full_equipo",
+  "sin valor → FULL EQUIPO, nunca estándar",
   "vehiculos.equipamiento nació con default full_equipo: media flota lo tiene implícito y " +
   "degradarla en el PDF del cliente sería afirmar algo que nadie marcó",
 );
 ok(
-  nivelDeEquipamiento("cualquier_cosa") === "premium",
+  nivelDeEquipamiento("cualquier_cosa") === "full_equipo",
   "un valor desconocido tampoco degrada",
 );
-ok(etiquetaNivel("basico") === "ESTÁNDAR" && etiquetaNivel(null) === "PREMIUM",
+ok(etiquetaNivel("basico") === "ESTÁNDAR" && etiquetaNivel(null) === "FULL EQUIPO",
    "la etiqueta de documento sale del mismo sitio", `${etiquetaNivel(null)} / ${etiquetaNivel("basico")}`);
 
 // ── 2 · El filtro particiona ─────────────────────────────────────────────────
 
 linea("2 · EL FILTRO PARTICIONA: NINGUNA FICHA SE PIERDE");
 
-ok(nivelDeFicha("SPRINTER_17") === "premium", "una ficha sin sufijo es premium");
+ok(nivelDeFicha("SPRINTER_17") === "full_equipo", "una ficha sin sufijo es full equipo");
 ok(nivelDeFicha("SPRINTER_17_ESTANDAR") === "estandar", "el sufijo _ESTANDAR la hace estándar");
-ok(nivelDeFicha(null) === "premium", "sin ficha elegida no se inventa un nivel estándar");
+ok(nivelDeFicha(null) === "full_equipo", "sin ficha elegida no se inventa un nivel estándar");
 
-const prem = fichasDelNivel(FLOTA, "premium");
+const prem = fichasDelNivel(FLOTA, "full_equipo");
 const est = fichasDelNivel(FLOTA, "estandar");
 ok(prem.length + est.length === FLOTA.length, "las dos listas suman la flota entera",
    `${prem.length} + ${est.length} = ${FLOTA.length}`);
@@ -91,13 +91,13 @@ linea("3 · CAMBIAR DE NIVEL NO PIERDE EL BUS");
 
 const p1 = planDeNivel("SPRINTER_17", "estandar", FLOTA);
 ok(p1.codigo === "cambia" && p1.clave === "SPRINTER_17_ESTANDAR",
-   "premium → estándar pasa a la GEMELA, no a vacío", `${p1.codigo} · ${p1.clave}`);
+   "full equipo → estándar pasa a la GEMELA, no a vacío", `${p1.codigo} · ${p1.clave}`);
 
-const p2 = planDeNivel("BUS_50_ESTANDAR", "premium", FLOTA);
+const p2 = planDeNivel("BUS_50_ESTANDAR", "full_equipo", FLOTA);
 ok(p2.codigo === "cambia" && p2.clave === "BUS_50",
    "y al revés también", `${p2.codigo} · ${p2.clave}`);
 
-const p3 = planDeNivel("BUS_50", "premium", FLOTA);
+const p3 = planDeNivel("BUS_50", "full_equipo", FLOTA);
 ok(p3.codigo === "ya_en_nivel" && p3.clave === "BUS_50",
    "si ya está en el nivel no se toca nada");
 
@@ -141,12 +141,12 @@ ok(fichaEquivalente("MINIVAN_10", "estandar", CLAVES) === null,
 
 linea("4 · LA PLACA CONTRA EL NIVEL DEL SERVICIO");
 
-const c1 = cotejarUnidadConNivel("full_equipo", "premium", true);
-ok(c1.codigo === "coincide" && c1.detalle === "", "placa premium + servicio premium → silencio");
+const c1 = cotejarUnidadConNivel("full_equipo", "full_equipo", true);
+ok(c1.codigo === "coincide" && c1.detalle === "", "placa full equipo + servicio full equipo → silencio");
 
-const c2 = cotejarUnidadConNivel("basico", "premium", true);
+const c2 = cotejarUnidadConNivel("basico", "full_equipo", true);
 ok(c2.codigo === "discrepa" && c2.detalle.length > 40,
-   "placa básica + servicio premium → se DICE, con el daño concreto");
+   "placa básica + servicio full equipo → se DICE, con el daño concreto");
 ok(/PDF|papel|ANEXO|imprime/i.test(c2.detalle),
    "…y el detalle nombra que eso llega al PDF del cliente", c2.detalle.slice(0, 90) + "…");
 
@@ -157,18 +157,18 @@ ok(c3.codigo === "sin_dato" && c3.detalle === "",
 );
 ok(
   cotejarUnidadConNivel(null, "estandar", true).codigo === "discrepa",
-  "con dato, un null SÍ se juzga (es premium por defecto) contra un servicio estándar",
+  "con dato, un null SÍ se juzga (es full equipo por defecto) contra un servicio estándar",
 );
 
 // ── 5 · Lo que la pantalla necesita ──────────────────────────────────────────
 
 linea("5 · LA CONFIGURACIÓN QUE COMPARTEN LAS CUATRO PANTALLAS");
 ok(
-  NIVEL_CFG.premium.label === "Premium" && NIVEL_CFG.estandar.label === "Estándar",
+  NIVEL_CFG.full_equipo.label === "Full Equipo" && NIVEL_CFG.estandar.label === "Estándar",
   "una sola palabra por nivel en todo el ERP",
 );
 ok(
-  !/años|antigüedad|10/.test(NIVEL_CFG.premium.sub + NIVEL_CFG.estandar.sub),
+  !/años|antigüedad|10/.test(NIVEL_CFG.full_equipo.sub + NIVEL_CFG.estandar.sub),
   "el subtítulo NO afirma la antigüedad",
   "el equipamiento no sabe la edad del bus: eso lo declara el nombre de la ficha",
 );

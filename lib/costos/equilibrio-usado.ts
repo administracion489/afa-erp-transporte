@@ -42,6 +42,12 @@ import {
  * `cotizaciones.tipo_vehiculo`. El NOMBRE visible sí cambió dos veces —`· Estándar (usado)` y
  * después `· Estándar (>10 años)`, ver `costos-03`— y por eso nada empareja por el nombre.
  */
+// OJO AL LEER ESTE MÓDULO: sus identificadores (`clavePremiumDe`, `ParFlota.premium`,
+// `totalPremium`) conservan la palabra «premium», que es como se llamaba el nivel superior
+// cuando se escribió. **En pantalla ese nivel se llama «Full Equipo»** — ver `NIVEL_CFG` en
+// nivel-servicio.ts, que es el único sitio que decide los nombres visibles. Renombrarlos aquí
+// sería mover una decena de símbolos internos sin cambiar nada de lo que ve nadie; lo que sí
+// importa es que ninguna de estas cadenas llegue a la UI, y no llega.
 export const SUFIJO_USADO = "_ESTANDAR";
 
 export function esUsado(tipoVehiculo: string | null | undefined): boolean {
