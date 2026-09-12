@@ -605,7 +605,7 @@ export default function HistorialTab() {
         {filtrados.length > 0 && (
           <div className="px-4 py-3 text-xs text-gray-400 border-t flex justify-between" style={{ borderColor: "#f1f5f9" }}>
             <span>{filtrados.length} de {total} registros · Costo total: {fmtSoles(costoTotal)}</span>
-            <span>AFA ERP · Mantenimiento</span>
+            <span>Mantenimiento</span>
           </div>
         )}
       </section>

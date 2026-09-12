@@ -258,8 +258,11 @@ export function tarifaHoraMecanico(ins: InsumosManoObra): TarifaHora {
 
   return {
     tarifa: 0, fuente: "sin_tarifa", base: "",
-    falta: "No hay con qué valorizar una hora propia. En /mantenimiento → Configuración, pon el " +
-           "sueldo básico del mecánico (lo exacto) o una tarifa por hora del taller (lo aproximado).",
+    // El sitio se NOMBRA tal como está rotulado en pantalla. Un mensaje que manda a una pestaña
+    // que no existe con ese nombre es peor que no decir nada: se busca, no se encuentra, y se
+    // concluye que el ERP está roto.
+    falta: "No hay con qué valorizar una hora propia. En /mantenimiento → Próximos → «Mano de obra " +
+           "del taller», pon el sueldo básico del mecánico (lo exacto) o una tarifa por hora (lo aproximado).",
   };
 }
 

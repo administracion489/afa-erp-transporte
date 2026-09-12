@@ -12,6 +12,13 @@ type EmpresaPerfil = {
   email: string | null;
   web: string | null;
   slogan: string | null;
+  /**
+   * Autorización del regulador de transporte que se imprime al pie de los documentos
+   * operativos (la orden de trabajo, entre otros). Es un dato de CADA empresa y un número
+   * legal: por eso no tiene valor por defecto — sin llenarlo, la línea sencillamente no se
+   * imprime. Heredar el de otra empresa sería una afirmación legal falsa en un papel firmado.
+   */
+  autorizacion_mtc: string | null;
   logo_url: string | null;
   logo_claro_url: string | null;
   color_primario: string | null;
@@ -47,6 +54,7 @@ const PERFIL_VACIO: EmpresaPerfil = {
   email: "",
   web: "",
   slogan: "",
+  autorizacion_mtc: "",
   logo_url: null,
   logo_claro_url: null,
   color_primario: "#0b315f",
@@ -275,6 +283,7 @@ CREATE TABLE IF NOT EXISTS empresa_perfil (
   email              TEXT,
   web                TEXT,
   slogan             TEXT,
+  autorizacion_mtc   TEXT,
   logo_url           TEXT,
   logo_claro_url     TEXT,
   color_primario     TEXT DEFAULT '#0b315f',
@@ -415,9 +424,8 @@ export default function PerfilEmpresaPage() {
       return;
     }
     setGuardando(true);
-    const { error } = await supabase.from("empresa_perfil").upsert(
-      {
-        id: 1,
+    const fila = {
+      id: 1,
         nombre: perfil.nombre || null,
         razon_social: perfil.razon_social || null,
         ruc: perfil.ruc || null,
@@ -426,17 +434,29 @@ export default function PerfilEmpresaPage() {
         email: perfil.email || null,
         web: perfil.web || null,
         slogan: perfil.slogan || null,
+        autorizacion_mtc: perfil.autorizacion_mtc || null,
         color_primario: perfil.color_primario || "#0b315f",
         regimen_tributario: perfil.regimen_tributario || "General",
         moneda: perfil.moneda || "PEN",
         zona_horaria: perfil.zona_horaria || "America/Lima",
         updated_at: new Date().toISOString(),
-      },
-      { onConflict: "id" }
-    );
+    };
+
+    let { error } = await supabase.from("empresa_perfil").upsert(fila, { onConflict: "id" });
+    // `autorizacion_mtc` es de una migración accesoria. Sin ella el resto del perfil tiene que
+    // poder guardarse igual, y se DICE qué no se guardó: un dato que parece guardarse y no llega
+    // al papel es peor que un error a la cara.
+    let faltaMtc = false;
+    if (error && (error.code === "PGRST204" || /autorizacion_mtc/i.test(error.message || ""))) {
+      faltaMtc = true;
+      const { autorizacion_mtc: _omitido, ...resto } = fila;
+      ({ error } = await supabase.from("empresa_perfil").upsert(resto, { onConflict: "id" }));
+    }
     setGuardando(false);
     if (error) {
       mostrarToast("Error al guardar: " + error.message, "error");
+    } else if (faltaMtc) {
+      mostrarToast("Guardado ✓ — la autorización de transporte NO: falta correr supabase/empresa-01-autorizacion-transporte.sql", "error");
     } else {
       mostrarToast("Cambios guardados correctamente");
       cargar();
@@ -646,6 +666,22 @@ export default function PerfilEmpresaPage() {
                 placeholder="Transporte seguro y puntual en el Perú"
                 value={perfil.slogan || ""}
                 onChange={campo("slogan")}
+                onFocus={(e) => (e.target.style.borderColor = "#0b315f")}
+                onBlur={(e) => (e.target.style.borderColor = "#e5e7eb")}
+              />
+            </CampoForm>
+
+            {/* Sin valor por defecto a propósito: es un número legal de CADA empresa, y heredar
+                el de otra sería una afirmación falsa en un papel firmado. Vacío = no se imprime. */}
+            <CampoForm
+              label="Autorización del regulador de transporte"
+              hint="Se imprime al pie de la orden de trabajo. Vacío: no se imprime esa línea."
+            >
+              <input
+                style={inputStyle}
+                placeholder="R.D. N° 0000-0000-MTC-15"
+                value={perfil.autorizacion_mtc || ""}
+                onChange={campo("autorizacion_mtc")}
                 onFocus={(e) => (e.target.style.borderColor = "#0b315f")}
                 onBlur={(e) => (e.target.style.borderColor = "#e5e7eb")}
               />

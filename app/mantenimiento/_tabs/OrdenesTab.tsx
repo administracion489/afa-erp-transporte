@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { abrirImprimible } from "@/lib/documentos-servicio";
+import { empresaConDefectos, type PerfilEmpresa } from "@/lib/empresa-perfil";
 import { cotejarFacturaConOT, type ItemCosto } from "@/lib/mantenimiento/costo-ot";
 import {
   repartoDeOT, facturasDeOT, valorizarManoObraPropia,
@@ -208,6 +209,9 @@ export default function OrdenesTab() {
   const [lineas,       setLineas]       = useState<LineaGuardada[]>([]);
   const [tarifaTaller, setTarifaTaller] = useState<TarifaHora | null>(null);
   const [lineaEditada, setLineaEditada] = useState<{ otId: number; id?: number | string } | null>(null);
+  /** Quién emite la orden impresa. NUNCA un literal: este ERP se vende, y la OT de un comprador
+   *  no puede salir con el nombre —ni con la autorización de transporte— de otra empresa. */
+  const [perfil, setPerfil] = useState<PerfilEmpresa | null>(null);
 
   // Form OT
   const FORM_OT_VACIO = { vehiculo_id: "", plantilla_id: "", km_apertura: "", fecha_apertura: new Date().toISOString().split("T")[0], fecha_programada: "", mecanico: "", taller_proveedor_id: "", taller: "", costo_total: "", estado: "abierta", observaciones: "" };
@@ -230,7 +234,7 @@ export default function OrdenesTab() {
 
   const cargarDatos = async () => {
     setLoading(true);
-    const [vRes, plRes, chPlRes, otRes, chOtRes, pfRes, tlRes] = await Promise.all([
+    const [vRes, plRes, chPlRes, otRes, chOtRes, pfRes, tlRes, empRes] = await Promise.all([
       supabase.from("vehiculos").select("id,placa,categoria,kilometraje_actual,nro_serie").order("placa"),
       supabase.from("plantillas_mantenimiento").select("*").order("nombre"),
       supabase.from("checklist_plantilla").select("*").order("orden"),
@@ -238,6 +242,7 @@ export default function OrdenesTab() {
       supabase.from("checklist_ot").select("*"),
       supabase.from("planes_mantenimiento").select("id,marca,modelo,motor,intervalo_base_km,intervalo_base_meses"),
       supabase.from("proveedores").select("id,nombre,telefono,direccion,tipo,estado").eq("tipo", "taller").order("nombre"),
+      supabase.from("empresa_perfil").select("*").eq("id", 1).maybeSingle(),
     ]);
     setVehiculos(vRes.data    || []);
     setPlantillas(plRes.data  || []);
@@ -246,6 +251,7 @@ export default function OrdenesTab() {
     setChecklistOT(chOtRes.data || []);
     setPlanesFab(pfRes.data   || []);
     setTalleres(tlRes.data    || []);
+    setPerfil((empRes as any)?.data ?? null);
 
     // Las líneas cuelgan de las órdenes ya cargadas: sin ellas no hay a qué preguntarle.
     const ids = ((otRes.data as OrdenTrabajo[] | null) ?? []).map(o => o.id);
@@ -462,6 +468,14 @@ export default function OrdenesTab() {
   // ── Descargar OT en PDF (para entregar al conductor/taller) ──────────────────
 
   const generarPdfOT = (ot: OrdenTrabajo) => {
+    // Quién emite la orden. `empresaConDefectos` es el mismo escalón que usan la cotización y la
+    // liquidación: manda `empresa_perfil` y los valores de respaldo solo entran si está vacío.
+    const emp = empresaConDefectos(perfil);
+    // La AUTORIZACIÓN no tiene respaldo y por eso se compone aparte: es un número legal de cada
+    // empresa, y si no está configurada la línea se imprime SIN ella en vez de heredar la ajena —
+    // el documento estaría afirmando una habilitación que su emisor no tiene.
+    const pieEmpresa = [emp.nombre, emp.autorizacion, emp.telefono ? "Tel: " + emp.telefono : ""]
+      .filter(Boolean).map(esc).join(" · ");
     const veh = vehiculos.find(v => v.id === ot.vehiculo_id);
     const pl = plantillas.find(p => p.id === ot.plantilla_id);
     const plan = ot.plan_mantenimiento_id ? planesFab.find(p => p.id === ot.plan_mantenimiento_id) : null;
@@ -519,7 +533,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#1e293b;margin
 
     const body = `<div class="hd">
   <div><h1>Orden de Trabajo #${ot.id}${ot.origen === "automatica" ? '<span class="chip" style="background:#e0e7ff;color:#3730a3">🤖 Auto</span>' : ""}</h1>
-    <p>AFA Tours Peru SAC · Mantenimiento preventivo${pl ? " · " + esc(pl.nombre) : ""}</p></div>
+    <p>${esc(emp.nombre)} · Mantenimiento preventivo${pl ? " · " + esc(pl.nombre) : ""}</p></div>
   <div class="hd-right"><p style="font-size:11px;font-weight:800;color:#0b315f">${esc(veh?.placa || "—")}</p>
     <p>${esc(veh?.categoria || "")}</p></div>
 </div>
@@ -550,10 +564,10 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
   <div class="firma">Conductor<br/>Nombre y firma</div>
   <div class="firma">Taller / Mecánico<br/>Nombre y firma</div>
 </div>
-<p class="ft">AFA Transportes · R.D. N° 1946-2009-MTC-15 · Tel: 966707225 / 01-3453707 · Generado ${fmtFecha(new Date().toISOString())}</p>`;
+<p class="ft">${pieEmpresa} · Generado ${fmtFecha(new Date().toISOString())}</p>`;
 
     abrirImprimible(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/>
-<title>OT #${ot.id} — ${esc(veh?.placa || "AFA")}</title><style>${css}</style></head>
+<title>OT #${ot.id} — ${esc(veh?.placa || emp.nombre)}</title><style>${css}</style></head>
 <body>${body}<script>window.onload=()=>window.print()<\/script></body></html>`);
   };
 

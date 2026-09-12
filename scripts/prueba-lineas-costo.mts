@@ -162,7 +162,9 @@ const nada: Insumos = { tarifa_hora: null, mecanico: null, regimen: null, horas_
 const t3 = tarifaHoraMecanico(nada);
 ok(t3.fuente === "sin_tarifa" && t3.tarifa === 0 && !!t3.falta,
    "SIN NINGUNA DE LAS DOS NO SE INVENTA UN S/HORA", t3.falta ?? "");
-ok(/Configuración/.test(t3.falta ?? ""), "…y se NOMBRA dónde se arregla");
+// Se comprueba que NOMBRA la pantalla, y con el rótulo que esa pantalla tiene de verdad: un
+// mensaje que manda a una pestaña inexistente hace concluir que el ERP está roto.
+ok(/\/mantenimiento → Próximos/.test(t3.falta ?? ""), "…y se NOMBRA dónde se arregla");
 
 // Un sueldo en 0 no es un sueldo: cae a la tarifa en vez de valorizar la hora en cero.
 const sueldoCero: Insumos = { tarifa_hora: 25, mecanico: { ...MECANICO, sueldo_basico: 0 }, regimen: REGIMEN, horas_mes: null };
