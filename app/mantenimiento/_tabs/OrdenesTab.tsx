@@ -3,8 +3,15 @@
 import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { abrirImprimible } from "@/lib/documentos-servicio";
-import { totalDeOT, cotejarFacturaConOT, type ItemCosto } from "@/lib/mantenimiento/costo-ot";
-import { guardarCostoItem, guardarCostoOT, sincronizarLibro, registrarFacturaTaller, urlFactura } from "@/lib/mantenimiento/ot-factura";
+import { cotejarFacturaConOT, type ItemCosto } from "@/lib/mantenimiento/costo-ot";
+import {
+  repartoDeOT, facturasDeOT, valorizarManoObraPropia,
+  TIPOS_LINEA, ORIGENES_LINEA, type TipoLinea, type OrigenLinea, type TarifaHora,
+} from "@/lib/mantenimiento/lineas-costo";
+import {
+  guardarCostoItem, guardarCostoOT, sincronizarLibro, registrarFacturaTaller, urlFactura,
+  cargarLineas, guardarLinea, borrarLinea, tarifaDeTaller, type LineaGuardada,
+} from "@/lib/mantenimiento/ot-factura";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -194,7 +201,13 @@ export default function OrdenesTab() {
   // Lo que el costo NO pudo hacer: sin ancla con el libro, o sin la migración corrida. Se dice,
   // porque un costo que parece guardarse y no llega al egreso es peor que un error.
   const [avisoCosto,      setAvisoCosto]      = useState("");
-  const [facturaOT,       setFacturaOT]       = useState<OrdenTrabajo | null>(null);
+  const [facturaOT,       setFacturaOT]       = useState<{ ot: OrdenTrabajo; lineaId?: number | string | null } | null>(null);
+  // Las líneas de costo de todas las OT a la vista, y con qué se valoriza una hora de casa.
+  // Las dos son de `mantenimiento-06-lineas-de-costo.sql`, accesoria: sin ella llegan vacías y la
+  // pantalla se comporta exactamente como antes (un costo plano, todo desembolso).
+  const [lineas,       setLineas]       = useState<LineaGuardada[]>([]);
+  const [tarifaTaller, setTarifaTaller] = useState<TarifaHora | null>(null);
+  const [lineaEditada, setLineaEditada] = useState<{ otId: number; id?: number | string } | null>(null);
 
   // Form OT
   const FORM_OT_VACIO = { vehiculo_id: "", plantilla_id: "", km_apertura: "", fecha_apertura: new Date().toISOString().split("T")[0], fecha_programada: "", mecanico: "", taller_proveedor_id: "", taller: "", costo_total: "", estado: "abierta", observaciones: "" };
@@ -233,7 +246,22 @@ export default function OrdenesTab() {
     setChecklistOT(chOtRes.data || []);
     setPlanesFab(pfRes.data   || []);
     setTalleres(tlRes.data    || []);
+
+    // Las líneas cuelgan de las órdenes ya cargadas: sin ellas no hay a qué preguntarle.
+    const ids = ((otRes.data as OrdenTrabajo[] | null) ?? []).map(o => o.id);
+    const [ls, tf] = await Promise.all([cargarLineas(ids), tarifaDeTaller()]);
+    setLineas(ls);
+    setTarifaTaller(tf);
     setLoading(false);
+  };
+
+  /** Las líneas y el reparto de UNA orden, derivados por el mismo camino en toda la pantalla. */
+  const repartoDe = (ot: OrdenTrabajo, items?: ChecklistOT[]) => {
+    const ls = lineas.filter(l => l.orden_trabajo_id === ot.id);
+    const its = (items ?? checklistOT.filter(c => c.orden_trabajo_id === ot.id))
+      .map(i => ({ id: i.id, costo: i.costo ?? null }));
+    return { lineas: ls, items: its, reparto: repartoDeOT(ls, its, ot.costo_total),
+             facturas: facturasDeOT(ot.documento_compra_id, ls) };
   };
 
   useEffect(() => { cargarDatos(); }, []);
@@ -295,7 +323,9 @@ export default function OrdenesTab() {
     const itemsDeLaOT = editandoOtId
       ? checklistOT.filter(c => c.orden_trabajo_id === editandoOtId).map(c => ({ id: c.id, costo: c.costo ?? null }))
       : [];
-    const totalDerivado = totalDeOT(itemsDeLaOT, formOT.costo_total ? Number(formOT.costo_total) : null).total;
+    const lineasDeLaOT = editandoOtId ? lineas.filter(l => l.orden_trabajo_id === editandoOtId) : [];
+    const repartoForm = repartoDeOT(lineasDeLaOT, itemsDeLaOT, formOT.costo_total ? Number(formOT.costo_total) : null);
+    const totalDerivado = repartoForm.total;
 
     const payload = {
       vehiculo_id:    Number(formOT.vehiculo_id),
@@ -322,7 +352,7 @@ export default function OrdenesTab() {
         id: editandoOtId, estado: payload.estado, km_cierre: prev?.km_cierre ?? null,
         costo_total: totalDerivado, mantenimiento_id: prev?.mantenimiento_id ?? null,
         documento_compra_id: prev?.documento_compra_id ?? null,
-      }, totalDerivado);
+      }, repartoForm, facturasDeOT(prev?.documento_compra_id ?? null, lineasDeLaOT));
       if (r.aviso) setAvisoCosto(r.aviso);
     } else {
       const { data } = await supabase.from("ordenes_trabajo").insert(payload).select().single();
@@ -374,17 +404,30 @@ export default function OrdenesTab() {
     if (error) { alert("Error al cerrar: " + error.message); setGuardando(false); return; }
 
     const veh = vehiculos.find(v => v.id === ot.vehiculo_id);
-    // El costo que se asienta es el DERIVADO (suma de ítems, o el tecleado), el mismo que enseña
-    // la pantalla. Tomar `ot.costo_total` a secas ignoraría los costos por ítem.
-    const totalCierre = totalDeOT(
-      checklistOT.filter(c => c.orden_trabajo_id === ot.id).map(c => ({ id: c.id, costo: c.costo ?? null })),
-      ot.costo_total).total;
-    const { data: mant, error: eMant } = await supabase.from("mantenimiento").insert({
+    // El costo que se asienta es el DERIVADO (líneas, ítems o tecleado), el mismo que enseña la
+    // pantalla. Y se asienta REPARTIDO: `costo` lleva solo el desembolso —que es lo que
+    // `v_egresos` cuenta— y lo pagado por otra vía va a `costo_imputado`, que no es egreso pero
+    // sí costo del vehículo.
+    const { reparto: repCierre, facturas: facCierre } = repartoDe(ot);
+    const filaLibro: Record<string, unknown> = {
       vehiculo_id: ot.vehiculo_id, fecha: hoy, tipo: "preventivo", kilometraje: km,
       descripcion: `OT #${ot.id}${veh ? " — " + veh.placa : ""}`,
-      proveedor: ot.taller || null, costo: totalCierre, estado: "finalizado",
+      proveedor: ot.taller || null, costo: repCierre.desembolsado, estado: "finalizado",
       proximo_km: 0, observaciones: ot.observaciones || null,
-    }).select("id").single();
+      costo_imputado: repCierre.imputado,
+      documento_compra_id: facCierre.principal,
+    };
+    let { data: mant, error: eMant } = await supabase.from("mantenimiento").insert(filaLibro).select("id").single();
+    if (eMant && /costo_imputado|documento_compra_id/i.test(eMant.message)) {
+      // Se sueltan las columnas accesorias antes que perder el asiento entero. Lo que se pierde
+      // se dice: sin `costo_imputado`, la mano de obra propia no cuenta para el S/km medido.
+      const { costo_imputado: _ci, documento_compra_id: _dc, ...base } = filaLibro;
+      const r2 = await supabase.from("mantenimiento").insert(base).select("id").single();
+      mant = r2.data; eMant = r2.error;
+      if (!eMant && repCierre.imputado > 0) setAvisoCosto(
+        "La orden se cerró, pero el costo de casa (mano de obra propia) no llegó al libro: " +
+        "falta correr supabase/mantenimiento-06-lineas-de-costo.sql. Hasta entonces no cuenta para el S/km medido.");
+    }
     if (eMant) {
       // La OT sí quedó cerrada; que falle el ancla no debe bloquear al usuario, pero
       // sí avisarle — si no, el "próximo mantenimiento" queda desfasado en silencio.
@@ -569,17 +612,42 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
    * cerrada en S/ 0.00 se quedaba en cero en el egreso, en el margen del servicio y en el S/km
    * medido de su categoría, aunque el costo se corrigiera después.
    */
-  const propagarTotal = async (ot: OrdenTrabajo, items: ChecklistOT[], tecleado?: number | null) => {
-    const t = totalDeOT(items.map(i => ({ id: i.id, costo: i.costo ?? null })),
-                        tecleado !== undefined ? tecleado : ot.costo_total);
+  const propagarTotal = async (ot: OrdenTrabajo, items: ChecklistOT[], tecleado?: number | null, lineasNuevas?: LineaGuardada[]) => {
+    const ls = (lineasNuevas ?? lineas).filter(l => l.orden_trabajo_id === ot.id);
+    const its = items.map(i => ({ id: i.id, costo: i.costo ?? null }));
+    const teclea = tecleado !== undefined ? tecleado : ot.costo_total;
+    const t = repartoDeOT(ls, its, teclea);
     const r = await guardarCostoOT(
       { id: ot.id, estado: ot.estado, km_cierre: ot.km_cierre ?? null, costo_total: ot.costo_total,
         mantenimiento_id: ot.mantenimiento_id ?? null, documento_compra_id: ot.documento_compra_id ?? null },
-      items.map(i => ({ id: i.id, costo: i.costo ?? null })),
-      tecleado !== undefined ? tecleado : ot.costo_total);
+      its, teclea, ls);
     if (!r.ok) { alert(r.error); return; }
-    if (r.aviso) setAvisoCosto(r.aviso);
+    setAvisoCosto(r.aviso ?? "");
     setOrdenes(prev => prev.map(o => o.id === ot.id ? { ...o, costo_total: t.total } : o));
+  };
+
+  // ── Líneas de costo ────────────────────────────────────────────────────────
+  // Una orden la pagan varios bolsillos: el repuesto en un sitio, la mano de obra en otro, y —con
+  // mecánico propio— una parte que no sale de la caja. Cada renglón es una línea con su tipo, su
+  // origen, su proveedor y su comprobante; el reparto entre egreso e imputado sale de `origen`.
+
+  const guardarLineaOT = async (ot: OrdenTrabajo, datos: Parameters<typeof guardarLinea>[1], lineaId?: number | string | null) => {
+    const r = await guardarLinea(ot.id, datos, lineaId);
+    if (!r.ok) { alert(r.error); return; }
+    const ls = await cargarLineas([ot.id]);
+    const nuevas = [...lineas.filter(l => l.orden_trabajo_id !== ot.id), ...ls];
+    setLineas(nuevas);
+    setLineaEditada(null);
+    await propagarTotal(ot, checklistOT.filter(c => c.orden_trabajo_id === ot.id), undefined, nuevas);
+  };
+
+  const borrarLineaOT = async (ot: OrdenTrabajo, lineaId: number | string) => {
+    if (!confirm("¿Quitar esta línea de costo de la orden?")) return;
+    const r = await borrarLinea(lineaId);
+    if (!r.ok) { alert(r.error); return; }
+    const nuevas = lineas.filter(l => l.id !== lineaId);
+    setLineas(nuevas);
+    await propagarTotal(ot, checklistOT.filter(c => c.orden_trabajo_id === ot.id), undefined, nuevas);
   };
 
   // Foto de evidencia por ítem — subida desde el ERP (no desde el app del conductor,
@@ -805,8 +873,9 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                 detalle, y entonces el ERP tendría dos números para el mismo dinero. */}
             {(() => {
               const itemsOT = editandoOtId ? checklistOT.filter(c => c.orden_trabajo_id === editandoOtId) : [];
-              const t = totalDeOT(itemsOT.map(i => ({ id: i.id, costo: i.costo ?? null })), formOT.costo_total ? Number(formOT.costo_total) : null);
-              const derivado = t.origen === "items";
+              const lineasOT = editandoOtId ? lineas.filter(l => l.orden_trabajo_id === editandoOtId) : [];
+              const t = repartoDeOT(lineasOT, itemsOT.map(i => ({ id: i.id, costo: i.costo ?? null })), formOT.costo_total ? Number(formOT.costo_total) : null);
+              const derivado = t.origen === "items" || t.origen === "lineas";
               return (
                 <Campo label={derivado ? "Costo total S/ · derivado" : "Costo total S/"}>
                   <input type="number" className={inputCls()} placeholder="0.00"
@@ -1006,7 +1075,7 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                         mantenimiento — que es la fila que `v_egresos` cuenta, la que cruza
                         `v_costo_servicio` y con la que se mide el S/km de la categoría. */}
                     {(() => {
-                      const t = totalDeOT(items.map(i => ({ id: i.id, costo: i.costo ?? null })), ot.costo_total);
+                      const { reparto: t, lineas: lsOT, facturas } = repartoDe(ot, items);
                       const cerrada = String(ot.estado).toLowerCase() === "cerrada";
                       const sinAncla = cerrada && !ot.mantenimiento_id;
                       return (
@@ -1017,14 +1086,31 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                               <p className="font-black text-lg" style={{ color: t.origen === "sin_dato" ? "#d1d5db" : "#991b1b" }}>
                                 {t.origen === "sin_dato" ? "—" : fmtSoles(t.total)}
                                 <span className="ml-2 text-[10px] font-bold uppercase text-gray-400">
-                                  {t.origen === "items" ? `suma de ${t.itemsConCosto} ítem(s)` : t.origen === "tecleado" ? "total tecleado" : "sin costo"}
+                                  {t.origen === "lineas" ? `${lsOT.length} línea(s)` : t.origen === "items" ? `suma de ${t.itemsSueltos} ítem(s)` : t.origen === "tecleado" ? "total tecleado" : "sin costo"}
                                 </span>
                               </p>
                             </div>
-                            <button onClick={() => setFacturaOT(ot)}
+                            {/* LOS DOS NÚMEROS, CON ETIQUETAS DISTINTAS. El de casa no es egreso —la
+                                planilla ya lo pagó— pero sí es costo del vehículo; enseñar solo el
+                                total haría creer que salió esa plata de la caja. */}
+                            {t.imputado > 0 && (
+                              <div className="flex items-center gap-4 px-3 py-1 rounded-lg" style={{ background: "#eff6ff" }}>
+                                <div>
+                                  <p className="text-[9px] font-black uppercase tracking-wider text-gray-400">Salió de caja</p>
+                                  <p className="font-bold text-sm text-red-800">{fmtSoles(t.desembolsado)}</p>
+                                </div>
+                                <div>
+                                  <p className="text-[9px] font-black uppercase tracking-wider text-gray-400">De casa (no es egreso)</p>
+                                  <p className="font-bold text-sm text-blue-800">{fmtSoles(t.imputado)}</p>
+                                </div>
+                              </div>
+                            )}
+                            <button onClick={() => setFacturaOT({ ot })}
                               className="px-3 py-1.5 rounded-lg text-xs font-bold border hover:bg-white"
-                              style={{ borderColor: ot.documento_compra_id ? "#86efac" : "#e5e7eb", color: ot.documento_compra_id ? "#166534" : "#374151" }}>
-                              {ot.documento_compra_id ? `🧾 Factura enlazada (CxP #${ot.documento_compra_id})` : "🧾 Registrar factura del taller"}
+                              style={{ borderColor: facturas.ids.length ? "#86efac" : "#e5e7eb", color: facturas.ids.length ? "#166534" : "#374151" }}>
+                              {facturas.ids.length
+                                ? `🧾 ${facturas.ids.length} factura(s) · CxP ${facturas.ids.map(i => "#" + i).join(" ")}`
+                                : "🧾 Registrar factura del taller"}
                             </button>
                             {cerrada && ot.mantenimiento_id && (
                               <span className="text-[11px] text-green-700">✓ Asentado en el libro de mantenimiento</span>
@@ -1034,6 +1120,69 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                             )}
                           </div>
                           <p className="text-[11px] text-gray-400 mt-1.5">{t.detalle}</p>
+                          {facturas.detalle && (
+                            <p className="text-[11px] text-gray-500 mt-1">{facturas.detalle}</p>
+                          )}
+
+                          {/* ── LÍNEAS DE COSTO ─────────────────────────────────────────
+                              Los materiales por un lado y la mano de obra por otro, cada uno con
+                              su proveedor y su comprobante. Y la hora del mecánico de casa, que
+                              cuenta para el costo del vehículo y NO para el egreso. */}
+                          <div className="mt-3 pt-3 border-t" style={{ borderColor: "#e5e7eb" }}>
+                            <div className="flex items-center justify-between mb-2">
+                              <p className="text-[10px] font-black uppercase tracking-wider text-gray-400">
+                                Desglose · materiales, mano de obra y servicios
+                              </p>
+                              <button onClick={() => setLineaEditada({ otId: ot.id })}
+                                className="text-[11px] font-bold px-2.5 py-1 rounded-lg border hover:bg-white" style={{ borderColor: "#e5e7eb" }}>
+                                + Agregar línea
+                              </button>
+                            </div>
+                            {lsOT.length === 0 && lineaEditada?.otId !== ot.id && (
+                              <p className="text-[11px] text-gray-400">
+                                Sin desglose. Úsalo cuando el repuesto se compra en un sitio y la mano de obra se paga en
+                                otro, o cuando el trabajo lo hace el mecánico de casa.
+                              </p>
+                            )}
+                            {lsOT.map(l => {
+                              const cfg = TIPOS_LINEA.find(x => x.valor === l.tipo);
+                              const propia = l.origen === "propio";
+                              return (
+                                <div key={String(l.id)} className="flex flex-wrap items-center gap-2 py-1.5 border-b last:border-0" style={{ borderColor: "#f1f5f9" }}>
+                                  <span className="text-xs">{cfg?.icono ?? "•"}</span>
+                                  <span className="text-xs font-medium text-gray-800 flex-1 min-w-[140px]">
+                                    {l.concepto || cfg?.label}
+                                    {l.horas ? <span className="text-gray-400"> · {l.horas} h × {fmtSoles(l.tarifa_hora ?? 0)}</span> : null}
+                                  </span>
+                                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-lg"
+                                    style={propia ? { background: "#dbeafe", color: "#1e40af" } : { background: "#f3f4f6", color: "#4b5563" }}>
+                                    {propia ? "DE CASA" : "COMPRADO"}
+                                  </span>
+                                  <span className="text-xs font-bold font-mono" style={{ color: propia ? "#1e40af" : "#991b1b" }}>{fmtSoles(l.monto)}</span>
+                                  {!propia && (
+                                    <button onClick={() => setFacturaOT({ ot, lineaId: l.id })}
+                                      className="text-[10px] font-bold px-2 py-0.5 rounded-lg border hover:bg-white"
+                                      style={{ borderColor: l.documento_compra_id ? "#86efac" : "#e5e7eb", color: l.documento_compra_id ? "#166534" : "#6b7280" }}>
+                                      {l.documento_compra_id ? `🧾 CxP #${l.documento_compra_id}` : "🧾 Factura"}
+                                    </button>
+                                  )}
+                                  <button onClick={() => setLineaEditada({ otId: ot.id, id: l.id })}
+                                    className="text-[11px] text-gray-400 hover:text-gray-700 px-1">✎</button>
+                                  <button onClick={() => borrarLineaOT(ot, l.id)}
+                                    className="text-[11px] text-gray-300 hover:text-red-500 px-1">✕</button>
+                                </div>
+                              );
+                            })}
+                            {lineaEditada?.otId === ot.id && (
+                              <FormLinea
+                                tarifa={tarifaTaller}
+                                talleres={talleres}
+                                inicial={lineaEditada.id ? lsOT.find(l => l.id === lineaEditada.id) ?? null : null}
+                                onCancelar={() => setLineaEditada(null)}
+                                onGuardar={datos => guardarLineaOT(ot, datos, lineaEditada.id ?? null)}
+                              />
+                            )}
+                          </div>
                           {sinAncla && (
                             <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 mt-2">
                               ⚠ Esta orden se cerró sin vínculo con el libro de mantenimiento, así que corregir su costo
@@ -1275,15 +1424,22 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
         </div>
       )}
 
-      {facturaOT && (
-        <ModalFacturaTaller
-          ot={facturaOT} talleres={talleres}
-          placa={vehiculos.find(v => v.id === facturaOT.vehiculo_id)?.placa || null}
-          total={totalDeOT(checklistOT.filter(c => c.orden_trabajo_id === facturaOT.id).map(i => ({ id: i.id, costo: i.costo ?? null })), facturaOT.costo_total).total}
-          onCerrar={() => setFacturaOT(null)}
-          onListo={(aviso) => { setFacturaOT(null); if (aviso) setAvisoCosto(aviso); cargarDatos(); }}
-        />
-      )}
+      {facturaOT && (() => {
+        const lineaFac = facturaOT.lineaId ? lineas.find(l => l.id === facturaOT.lineaId) ?? null : null;
+        const { reparto, items: itemsFac } = repartoDe(facturaOT.ot);
+        return (
+          <ModalFacturaTaller
+            ot={facturaOT.ot} talleres={talleres} linea={lineaFac} items={itemsFac}
+            placa={vehiculos.find(v => v.id === facturaOT.ot.vehiculo_id)?.placa || null}
+            // El importe contra el que se coteja la factura es el de la LÍNEA cuando la factura
+            // respalda un renglón: comparar la factura del repuesto contra el costo entero de la
+            // orden daría un desacuerdo falso cada vez que hay dos proveedores.
+            total={lineaFac ? lineaFac.monto : reparto.desembolsado}
+            onCerrar={() => setFacturaOT(null)}
+            onListo={(aviso) => { setFacturaOT(null); if (aviso) setAvisoCosto(aviso); cargarDatos(); }}
+          />
+        );
+      })()}
     </main>
   );
 }
@@ -1297,11 +1453,14 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
 // crédito fiscal del IGV. `documentos_compra` se suma aparte, así que enlazarlo no duplica nada.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function ModalFacturaTaller({ ot, talleres, placa, total, onCerrar, onListo }: {
+function ModalFacturaTaller({ ot, talleres, placa, total, linea, items, onCerrar, onListo }: {
   ot: OrdenTrabajo; talleres: Proveedor[]; placa: string | null; total: number;
+  /** La línea que esta factura respalda. Con dos proveedores, el comprobante es del renglón. */
+  linea: LineaGuardada | null;
+  items: ItemCosto[];
   onCerrar: () => void; onListo: (aviso?: string) => void;
 }) {
-  const tallerDir = talleres.find(t => t.id === ot.taller_proveedor_id) || null;
+  const tallerDir = talleres.find(t => t.id === (linea?.proveedor_id ?? ot.taller_proveedor_id)) || null;
   const [f, setF] = useState({
     ruc_emisor: (tallerDir as any)?.ruc || "",
     razon_social: tallerDir?.nombre || ot.taller || "",
@@ -1325,12 +1484,14 @@ function ModalFacturaTaller({ ot, talleres, placa, total, onCerrar, onListo }: {
   const guardar = async () => {
     setError(""); setGuardando(true);
     const r = await registrarFacturaTaller(
-      { id: ot.id, estado: ot.estado, km_cierre: ot.km_cierre ?? null, costo_total: total,
+      { id: ot.id, estado: ot.estado, km_cierre: ot.km_cierre ?? null, costo_total: ot.costo_total,
         mantenimiento_id: ot.mantenimiento_id ?? null, documento_compra_id: ot.documento_compra_id ?? null },
       { ruc_emisor: f.ruc_emisor, razon_social: f.razon_social, tipo_comprobante: f.tipo_comprobante,
         serie: f.serie, numero: f.numero, fecha_emision: f.fecha_emision,
         total: Number(f.total || 0), igv: f.igv ? Number(f.igv) : null,
-        proveedor_id: ot.taller_proveedor_id ?? null, vehiculo_placa: placa, archivo });
+        proveedor_id: linea?.proveedor_id ?? ot.taller_proveedor_id ?? null,
+        vehiculo_placa: placa, archivo, linea_id: linea?.id ?? null },
+      items);
     setGuardando(false);
     if (!r.ok) { setError(r.error || "No se pudo registrar"); return; }
     onListo(r.accion === "existente"
@@ -1342,12 +1503,21 @@ function ModalFacturaTaller({ ot, talleres, placa, total, onCerrar, onListo }: {
     <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={onCerrar}>
       <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-auto" onClick={e => e.stopPropagation()}>
         <div className="px-6 py-4 border-b">
-          <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Factura del taller · OT #{ot.id}</p>
+          <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">
+            Factura del taller · OT #{ot.id}{linea ? ` · línea «${linea.concepto || linea.tipo}»` : ""}
+          </p>
           <h3 className="font-black text-lg text-[#0b315f]">Registrar como Cuenta por Pagar</h3>
           <p className="text-xs text-gray-400 mt-1">
             Entra a Tesorería → CxP: se aprueba, se paga en lote y se concilia con el banco.
             <b> No duplica el gasto</b> — el egreso de mantenimiento ya se cuenta por la orden.
           </p>
+          {linea && (
+            <p className="text-[11px] text-gray-500 mt-1.5">
+              Se coteja contra los <b>{fmtSoles(total)}</b> de esa línea, no contra el total de la orden:
+              con dos proveedores, comparar la factura del repuesto contra el costo entero daría un
+              desacuerdo que no existe.
+            </p>
+          )}
         </div>
 
         <div className="p-6 space-y-3">
@@ -1398,6 +1568,129 @@ function ModalFacturaTaller({ ot, talleres, placa, total, onCerrar, onListo }: {
             {guardando ? "Registrando…" : "Registrar factura"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+// ═══════════════════════════════════════════════════════════════════════════════
+// UNA LÍNEA DE COSTO · qué es, de dónde sale, a quién y con qué papel
+//
+// Los cuatro datos que antes no existían y que un costo plano no puede contestar: con el
+// repuesto comprado en un sitio y la mano de obra pagada en otro, «el costo de la orden» y «la
+// factura de la orden» son dos ficciones. Y con mecánico propio hay una parte que NO salió de la
+// caja: `origen` es lo único que decide si ese sol entra a `v_egresos` o solo al costo por km.
+//
+// LA HORA PROPIA SE VALORIZA, NO SE TECLEA. El monto sale de horas × tarifa y la tarifa la
+// resuelve `tarifaHoraMecanico` por cascada, con su fuente a la vista: el costo empresa real del
+// mecánico cuando su sueldo está configurado, la tarifa de taller si no. Sin ninguna de las dos
+// el campo queda bloqueado y se NOMBRA qué llenar — un S/hora inventado se multiplica por las
+// horas de cada orden y termina moviendo el precio de venta de una categoría entera.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function FormLinea({ inicial, tarifa, talleres, onGuardar, onCancelar }: {
+  inicial: LineaGuardada | null;
+  tarifa: TarifaHora | null;
+  talleres: Proveedor[];
+  onGuardar: (datos: {
+    concepto: string; tipo: TipoLinea; origen: OrigenLinea; monto: number;
+    horas?: number | null; tarifa_hora?: number | null; tarifa_fuente?: string | null;
+    proveedor_id?: number | null;
+  }) => void;
+  onCancelar: () => void;
+}) {
+  const [tipo, setTipo]       = useState<TipoLinea>(inicial?.tipo ?? "material");
+  const [origen, setOrigen]   = useState<OrigenLinea>(inicial?.origen ?? "comprado");
+  const [concepto, setConcepto] = useState(inicial?.concepto ?? "");
+  const [monto, setMonto]     = useState(inicial ? String(inicial.monto) : "");
+  const [horas, setHoras]     = useState(inicial?.horas != null ? String(inicial.horas) : "");
+  const [proveedorId, setProveedorId] = useState(inicial?.proveedor_id ? String(inicial.proveedor_id) : "");
+
+  // Mano de obra de casa: el monto es DERIVADO y el campo va en solo lectura, por lo mismo que
+  // el total de la orden cuando hay ítems con costo — dos números para el mismo dinero no.
+  const esPropia = origen === "propio" && tipo === "mano_obra";
+  // Se valoriza con la tarifa YA resuelta (la cascada corrió en el cargador, una sola vez): así
+  // la pantalla no vuelve a decidir cuál de los dos métodos manda.
+  const val = esPropia
+    ? valorizarManoObraPropia(Number(horas) || 0,
+        { tarifa_hora: tarifa?.falta ? null : (tarifa?.tarifa ?? null), mecanico: null, regimen: null, horas_mes: null })
+    : null;
+  const montoFinal = esPropia ? (val?.monto ?? 0) : Number(monto) || 0;
+
+  const puede = montoFinal > 0 || (!esPropia && monto.trim() !== "");
+
+  return (
+    <div className="mt-2 rounded-xl border p-3 space-y-2" style={{ background: "#fff", borderColor: "#c7d2fe" }}>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">Qué es</label>
+          <select className={inputCls("text-xs")} value={tipo} onChange={e => setTipo(e.target.value as TipoLinea)}>
+            {TIPOS_LINEA.map(t => <option key={t.valor} value={t.valor}>{t.icono} {t.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">De dónde sale</label>
+          <select className={inputCls("text-xs")} value={origen} onChange={e => setOrigen(e.target.value as OrigenLinea)}>
+            {ORIGENES_LINEA.map(o => <option key={o.valor} value={o.valor}>{o.label}</option>)}
+          </select>
+        </div>
+        <div className="col-span-2">
+          <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">Concepto</label>
+          <input className={inputCls("text-xs")} value={concepto} onChange={e => setConcepto(e.target.value)}
+            placeholder={tipo === "mano_obra" ? "Cambio de embrague" : "Kit de embrague"} />
+        </div>
+      </div>
+
+      <p className="text-[10px] text-gray-400">{ORIGENES_LINEA.find(o => o.valor === origen)?.ayuda}</p>
+
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+        {esPropia && (
+          <div>
+            <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">Horas</label>
+            <input type="number" step="0.5" className={inputCls("text-xs font-mono")} value={horas}
+              onChange={e => setHoras(e.target.value)} placeholder="6" />
+          </div>
+        )}
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+            {esPropia ? "Monto S/ · derivado" : "Monto S/ (sin IGV)"}
+          </label>
+          <input type="number" step="0.01" className={inputCls("text-xs font-mono")}
+            value={esPropia ? (montoFinal ? montoFinal.toFixed(2) : "") : monto}
+            onChange={e => setMonto(e.target.value)} readOnly={esPropia}
+            style={esPropia ? { background: "#f9fafb", color: "#6b7280" } : undefined} placeholder="0.00" />
+        </div>
+        {origen === "comprado" && (
+          <div>
+            <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">Proveedor</label>
+            <select className={inputCls("text-xs")} value={proveedorId} onChange={e => setProveedorId(e.target.value)}>
+              <option value="">— Sin registrar —</option>
+              {talleres.map(t => <option key={t.id} value={t.id}>{t.nombre}</option>)}
+            </select>
+          </div>
+        )}
+      </div>
+
+      {esPropia && (
+        tarifa?.falta
+          ? <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">⚠ {tarifa.falta}</p>
+          : <p className="text-[11px] text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-1.5">
+              S/ {(tarifa?.tarifa ?? 0).toFixed(2)} por hora · {tarifa?.base}
+            </p>
+      )}
+
+      <div className="flex justify-end gap-2">
+        <button onClick={onCancelar} className="px-3 py-1.5 rounded-lg text-xs font-bold border text-gray-600 hover:bg-gray-50">Cancelar</button>
+        <button disabled={!puede}
+          onClick={() => onGuardar({
+            concepto, tipo, origen, monto: montoFinal,
+            horas: esPropia ? Number(horas) || 0 : null,
+            tarifa_hora: esPropia ? (tarifa?.tarifa ?? null) : null,
+            tarifa_fuente: esPropia ? (tarifa?.fuente ?? null) : null,
+            proveedor_id: origen === "comprado" && proveedorId ? Number(proveedorId) : null,
+          })}
+          className="px-3 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-50 hover:opacity-90" style={{ background: "#0b315f" }}>
+          {inicial ? "Guardar línea" : "Agregar línea"}
+        </button>
       </div>
     </div>
   );

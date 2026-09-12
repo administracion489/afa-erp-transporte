@@ -118,7 +118,7 @@ export type CodigoSincro =
 export type PlanSincro = {
   codigo: CodigoSincro;
   /** Lo que hay que escribir en `mantenimiento`. Vacío cuando no hay nada que hacer. */
-  patch: { costo?: number; kilometraje?: number; documento_compra_id?: number | null };
+  patch: { costo?: number; costo_imputado?: number; kilometraje?: number; documento_compra_id?: number | null };
   detalle: string;
 };
 
@@ -133,6 +133,8 @@ export type FilaMantenimiento = {
   costo: number | null;
   kilometraje: number | null;
   documento_compra_id: number | null;
+  /** Lo que costó sin que saliera plata (mano de obra propia, almacén). De `mantenimiento-06`. */
+  costo_imputado?: number | null;
 };
 
 /**
@@ -151,9 +153,15 @@ export type FilaMantenimiento = {
  *  · **Sin ancla no se inventa una fila.** Insertar una nueva cuando el FK falta duplicaría el
  *    egreso de una OT que ya lo tiene asentado — el error caro, y en la dirección que no vuelve.
  *    Se NOMBRA y lo resuelve la migración de adopción, que es donde hay con qué buscarla.
+ *
+ * `total` ES EL DESEMBOLSO, NO EL COSTO ENTERO DE LA ORDEN. Desde `mantenimiento-06`, lo que se
+ * pagó por otra vía —la hora del mecánico de planilla, el repuesto de almacén— viaja aparte en
+ * `imputado` y va a su propia columna: `v_egresos` lee `mantenimiento.costo` y contar ahí un
+ * sueldo que la planilla ya pagó sería el mismo sol dos veces. Omitirlo deja el comportamiento
+ * anterior intacto, que es lo que hacen las órdenes sin líneas de costo.
  */
 export function planDeSincronizacion(
-  ot: EstadoOT, total: number, fila: FilaMantenimiento | null
+  ot: EstadoOT, total: number, fila: FilaMantenimiento | null, imputado?: number
 ): PlanSincro {
   if (String(ot.estado || "").toLowerCase() !== "cerrada") {
     return {
@@ -172,6 +180,9 @@ export function planDeSincronizacion(
 
   const patch: PlanSincro["patch"] = {};
   if (aCentimos(n(fila.costo)) !== aCentimos(total)) patch.costo = aCentimos(total);
+  if (imputado !== undefined && aCentimos(n(fila.costo_imputado)) !== aCentimos(imputado)) {
+    patch.costo_imputado = aCentimos(imputado);
+  }
   if (ot.km_cierre != null && n(fila.kilometraje) !== n(ot.km_cierre)) patch.kilometraje = n(ot.km_cierre);
   if ((fila.documento_compra_id ?? null) !== (ot.documento_compra_id ?? null)) {
     patch.documento_compra_id = ot.documento_compra_id ?? null;
@@ -182,6 +193,7 @@ export function planDeSincronizacion(
   }
   const partes: string[] = [];
   if (patch.costo !== undefined) partes.push(`costo S/ ${aCentimos(n(fila.costo)).toFixed(2)} → S/ ${patch.costo.toFixed(2)}`);
+  if (patch.costo_imputado !== undefined) partes.push(`costo de casa S/ ${aCentimos(n(fila.costo_imputado)).toFixed(2)} → S/ ${patch.costo_imputado.toFixed(2)}`);
   if (patch.kilometraje !== undefined) partes.push(`km ${n(fila.kilometraje).toLocaleString("es-PE")} → ${patch.kilometraje.toLocaleString("es-PE")}`);
   if (patch.documento_compra_id !== undefined) partes.push(patch.documento_compra_id ? "se enlaza la factura" : "se suelta la factura");
   return { codigo: "actualiza", patch, detalle: partes.join(" · ") };

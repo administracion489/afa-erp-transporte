@@ -18,7 +18,9 @@ import { serieMantenimiento, type OtMantenimiento, type PlacaMantenimiento } fro
 
 /** Las columnas de `mantenimiento` que hacen falta para medir. Nunca `select("*")`: esta
  *  pantalla no muestra órdenes, solo las mide. */
-const COLS_MANTENIMIENTO = "id,vehiculo_id,fecha,kilometraje,costo,estado,tipo,descripcion";
+const COLS_MANTENIMIENTO = "id,vehiculo_id,fecha,kilometraje,costo,costo_imputado,estado,tipo,descripcion";
+/** Las mismas sin la columna de `mantenimiento-06`, que el deploy no corre. */
+const COLS_SIN_IMPUTADO = "id,vehiculo_id,fecha,kilometraje,costo,estado,tipo,descripcion";
 
 type FilaVehiculo = { id: number; placa: string | null; anio?: number | null; tipo_vehiculo_costeo: string | null };
 
@@ -72,10 +74,27 @@ export async function cargarPlacasMantenimiento(sb: any, hoy: string = hoyLima()
   //     le falte la cabeza pierde sus tramos más viejos — el mismo silencio que ya truncó la
   //     huella del GPS y las reservas de /programacion. El orden tiene que ser ESTABLE para que
   //     las páginas no se solapen ni salten filas.
-  const filas = await paginarFilas(() =>
+  //
+  //     EL COSTO QUE SE MIDE ES EL DESEMBOLSO **MÁS** EL IMPUTADO, y esa suma es la mitad que
+  //     hace honesto el mecánico propio. `mantenimiento.costo` solo lleva lo que salió de la
+  //     caja; la hora del mecánico de planilla y el repuesto de almacén viven en
+  //     `costo_imputado` (mantenimiento-06) porque `v_egresos` no puede contarlos —ya los pagó
+  //     la planilla—. Pero el kilómetro SÍ los costó: sin sumarlos, el día que AFA contrate un
+  //     mecánico el S/km medido bajaría sin que el costo real hubiera bajado, la columna
+  //     «Medido» propondría ese número y el precio ofertado de la categoría bajaría con él.
+  //     Un costo corto se descubre cuando el servicio ya se prestó.
+  //
+  //     Se reintenta sin la columna: `mantenimiento-06` es accesoria y el deploy no la corre.
+  let filas = await paginarFilas(() =>
     sb.from("mantenimiento").select(COLS_MANTENIMIENTO)
       .order("fecha", { ascending: true }).order("id", { ascending: true })
   );
+  if (!filas.length) {
+    filas = await paginarFilas(() =>
+      sb.from("mantenimiento").select(COLS_SIN_IMPUTADO)
+        .order("fecha", { ascending: true }).order("id", { ascending: true })
+    );
+  }
 
   const porUnidad = new Map<string, OtMantenimiento[]>();
   for (const r of filas as any[]) {
@@ -87,7 +106,7 @@ export async function cargarPlacasMantenimiento(sb: any, hoy: string = hoyLima()
       id: r.id,
       fecha: String(r.fecha ?? "").slice(0, 10),
       km: r.kilometraje != null ? Number(r.kilometraje) : null,
-      costo: Number(r.costo || 0),
+      costo: Number(r.costo || 0) + Number(r.costo_imputado || 0),
       estado: r.estado ?? null,
       tipo: r.tipo ?? null,
       descripcion: r.descripcion ?? null,
