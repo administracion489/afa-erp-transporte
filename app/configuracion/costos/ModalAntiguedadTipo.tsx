@@ -150,7 +150,7 @@ export default function ModalAntiguedadTipo({
                 <p className="text-[11px] font-black text-gray-500 uppercase tracking-wider">Cómo se separa</p>
               </div>
               <div className="p-4 text-xs text-gray-600 space-y-2 leading-relaxed">
-                <p><b>1 ·</b> Duplica la categoría con <b>➕ Agregar vehículo</b>: una <b>Premium (0 km)</b> y una <b>Estándar (usado)</b>.</p>
+                <p><b>1 ·</b> Duplica la categoría con <b>➕ Agregar vehículo</b>: una <b>{"Premium (<10 años)"}</b> y una <b>{"Estándar (>10 años)"}</b>.</p>
                 <p><b>2 ·</b> En la estándar, cuatro números cambian y <b>no solo uno</b>: el <b>valor de compra</b> es lo que se pagó de verdad (no el 0 km), la <b>vida útil</b> es la que le QUEDA (no 10 años otra vez), el <b>residual</b> es un % de lo que se pagó, y el <b>mantenimiento S/km</b> sube — esa es la columna Medido de la categoría 🔧 Mantenimiento.</p>
                 <p><b>3 ·</b> Reasigna cada placa en <b>/vehiculos → Editar → Categoría de costeo</b>.</p>
                 <p className="text-amber-700">
