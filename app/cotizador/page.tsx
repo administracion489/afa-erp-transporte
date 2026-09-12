@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { calcularCostoUnidad, escenariosPrecio, type ParametrosUnidad } from "@/lib/costeo-propio";
+import { emparejarFlota } from "@/lib/costos/equilibrio-usado";
 
 // ══════════════════════════════════════════════════════════════════
 // TIPOS
@@ -1157,7 +1158,12 @@ export default function CotizadorPage(){
                 {/* Precios */}
                 {modo==="eventual"?(
                   <div className="grid grid-cols-3 gap-3">
-                    {[{label:"⛔ Mínimo (15%)",val:resultado.totalMin15,sinIgv:resultado.sinIGV15,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Estándar (20%)",val:resultado.totalEst20,sinIgv:resultado.sinIGV20,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Premium (25%)",val:resultado.totalAlto25,sinIgv:resultado.sinIGV25,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
+                    {/* LOS TRES CUADROS SON MÁRGENES, NO CLASES DE BUS. Se llamaban
+                        "Estándar" y "Premium", los mismos nombres que las fichas de la unidad,
+                        así que con un bus premium elegido la pantalla ofrecía además un "precio
+                        estándar": dos ejes distintos con el mismo nombre. La unidad decide el
+                        COSTO; el margen decide el PRECIO. */}
+                    {[{label:"⛔ Margen mínimo (15%)",val:resultado.totalMin15,sinIgv:resultado.sinIGV15,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Margen objetivo (20%)",val:resultado.totalEst20,sinIgv:resultado.sinIGV20,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Margen alto (25%)",val:resultado.totalAlto25,sinIgv:resultado.sinIGV25,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
                       <div key={k.label} className="rounded-2xl p-4 border-2" style={{background:k.bg,borderColor:k.border}}>
                         <p className="text-[10px] font-bold uppercase text-gray-400">{k.label}</p>
                         <p className="font-black text-xl mt-1" style={{color:k.color}}>{fmt(k.val)}</p>
@@ -1169,7 +1175,7 @@ export default function CotizadorPage(){
                 ):(
                   <div className="space-y-3">
                     <div className="grid grid-cols-3 gap-3">
-                      {[{label:"⛔ Día mín. (15%)",val:resultado.diaMinIGV,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Día est. (20%)",val:resultado.diaEstIGV,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Día prem. (25%)",val:resultado.diaAltoIGV,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
+                      {[{label:"⛔ Día · margen mín. (15%)",val:resultado.diaMinIGV,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Día · margen objetivo (20%)",val:resultado.diaEstIGV,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Día · margen alto (25%)",val:resultado.diaAltoIGV,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
                         <div key={k.label} className="rounded-2xl p-4 border-2" style={{background:k.bg,borderColor:k.border}}>
                           <p className="text-[10px] font-bold uppercase text-gray-400">{k.label}</p>
                           <p className="font-black text-xl mt-1" style={{color:k.color}}>{fmt(k.val)}</p>
@@ -1237,23 +1243,52 @@ export default function CotizadorPage(){
 
                 {/* Comparativo */}
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                  <div className="px-5 py-4 border-b"><h2 className="font-black text-[#0b315f] text-sm">Comparativo flota · {kmRuta} km · margen 20%</h2></div>
+                  <div className="px-5 py-4 border-b">
+                    <h2 className="font-black text-[#0b315f] text-sm">Comparativo flota · {kmRuta} km · margen 20%</h2>
+                    {/* La usada va PEGADA a su gemela, no suelta en la lista ordenada por
+                        capacidad: con las dos separadas por cinco filas, que una cueste más que
+                        la otra se lee como un error de la pantalla en vez de como lo que es. */}
+                    <p className="text-[11px] text-gray-400 mt-0.5">Cada categoría Estándar va debajo de su Premium, con la diferencia de precio entre las dos.</p>
+                  </div>
                   {Object.entries(grupos).map(([grupo,vehs])=>{
                     const gc=GRUPO_CFG[grupo]||GRUPO_CFG.Otros;
                     return(<div key={grupo}><div className="px-4 py-2 text-[10px] font-black uppercase tracking-wider border-b" style={{background:gc.color+"15",color:gc.color}}>{grupo}</div>
                     <table className="w-full text-sm"><thead><tr className="bg-gray-50 border-b">{["Vehículo","Cap.",modo==="eventual"?"Total (20%)":"Día (20%)",modo==="eventual"?"S/pax":"Mes ×26","Mín 15%","UREA"].map(h=><th key={h} className="px-3 py-2 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">{h}</th>)}</tr></thead>
                     <tbody className="divide-y divide-gray-50">
-                      {vehs.map(v=>{
-                        const item=comparativo.find(c=>c.v.tipo_vehiculo===v.tipo_vehiculo);
-                        if(!item?.r)return null;const r=item.r;const act=v.tipo_vehiculo===idxVeh;
-                        return(<tr key={v.tipo_vehiculo} onClick={()=>setIdxVeh(v.tipo_vehiculo)} className={`cursor-pointer transition-colors ${act?"bg-blue-50 border-l-2 border-l-[#0b315f]":"hover:bg-gray-50"}`}>
-                          <td className="px-3 py-2.5"><span className={`text-xs ${act?"font-black text-[#0b315f]":"font-semibold text-gray-600"}`}>{v.icono||"🚌"} {v.nombre}</span>{act&&<span className="ml-1 text-[9px] font-black bg-[#0b315f] text-white px-1.5 py-0.5 rounded">SEL</span>}</td>
-                          <td className="px-3 py-2.5 text-xs text-gray-500">{v.capacidad}p</td>
-                          <td className="px-3 py-2.5 text-xs font-black text-[#0b315f] font-mono">{fmt(modo==="eventual"?r.totalEst20:r.diaEstIGV)}</td>
-                          <td className="px-3 py-2.5 text-xs font-bold text-gray-500 font-mono">{modo==="eventual"?`S/ ${fmtN(r.precioPax20,0)}`:fmt(r.mesEstIGV)}</td>
-                          <td className="px-3 py-2.5 text-xs text-amber-600 font-mono">{fmt(modo==="eventual"?r.totalMin15:r.diaMinIGV)}</td>
-                          <td className="px-3 py-2.5 text-center">{v.usa_urea?<span className="text-[10px] text-cyan-600 font-bold">🧪</span>:<span className="text-gray-200 text-xs">—</span>}</td>
-                        </tr>);
+                      {emparejarFlota(vehs).flatMap(par=>{
+                        // El precio de la gemela nueva, para poder restar. Si la premium no
+                        // calcula (falta un parámetro), la usada se pinta igual SIN Δ: inventar
+                        // una diferencia contra un número que no existe es peor que no darla.
+                        const base=comparativo.find(c=>c.v.tipo_vehiculo===par.premium.tipo_vehiculo)?.r;
+                        const baseVal=base?(modo==="eventual"?base.totalEst20:base.diaEstIGV):null;
+                        const filas=[par.premium,...(par.usada?[par.usada]:[])];
+                        return filas.map((v,i)=>{
+                          const item=comparativo.find(c=>c.v.tipo_vehiculo===v.tipo_vehiculo);
+                          if(!item?.r)return null;const r=item.r;const act=v.tipo_vehiculo===idxVeh;
+                          const val=modo==="eventual"?r.totalEst20:r.diaEstIGV;
+                          const esGemela=i===1;
+                          const delta=esGemela&&baseVal!==null?val-baseVal:null;
+                          return(<tr key={v.tipo_vehiculo} onClick={()=>setIdxVeh(v.tipo_vehiculo)} className={`cursor-pointer transition-colors ${act?"bg-blue-50 border-l-2 border-l-[#0b315f]":"hover:bg-gray-50"}`}>
+                            <td className={`px-3 py-2.5 ${esGemela?"pl-7":""}`}>
+                              {esGemela&&<span className="text-gray-300 mr-1 text-xs">↳</span>}
+                              <span className={`text-xs ${act?"font-black text-[#0b315f]":esGemela?"font-semibold text-gray-500":"font-semibold text-gray-600"}`}>{v.icono||"🚌"} {v.nombre}</span>
+                              {act&&<span className="ml-1 text-[9px] font-black bg-[#0b315f] text-white px-1.5 py-0.5 rounded">SEL</span>}
+                            </td>
+                            <td className="px-3 py-2.5 text-xs text-gray-500">{v.capacidad}p</td>
+                            <td className="px-3 py-2.5 text-xs font-black text-[#0b315f] font-mono">
+                              {fmt(val)}
+                              {/* El Δ NO se pinta de rojo/verde: una usada más cara no es una
+                                  alarma ni una usada más barata una felicitación — es el reparto
+                                  entre capital y taller, y el color lo convertiría en juicio. */}
+                              {delta!==null&&Math.abs(delta)>=0.005&&(
+                                <span className="ml-1.5 text-[9px] font-bold text-gray-400">{delta>0?"+":""}{fmtN(delta,0)}</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5 text-xs font-bold text-gray-500 font-mono">{modo==="eventual"?`S/ ${fmtN(r.precioPax20,0)}`:fmt(r.mesEstIGV)}</td>
+                            <td className="px-3 py-2.5 text-xs text-amber-600 font-mono">{fmt(modo==="eventual"?r.totalMin15:r.diaMinIGV)}</td>
+                            <td className="px-3 py-2.5 text-center">{v.usa_urea?<span className="text-[10px] text-cyan-600 font-bold">🧪</span>:<span className="text-gray-200 text-xs">—</span>}</td>
+                          </tr>);
+                        });
                       })}
                     </tbody></table></div>);
                   })}

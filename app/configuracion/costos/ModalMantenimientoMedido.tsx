@@ -18,6 +18,7 @@ import {
   etiquetaMant, MIN_TRAMOS_MANT, DIAS_RECIENTE,
   type AgregadoMant, type PlacaMantenimiento, type MotivoFueraOt,
 } from "@/lib/costos/mantenimiento-tipo";
+import { compararPar, mantenimientoDeEquilibrio } from "@/lib/costos/equilibrio-usado";
 
 const fmtN = (n: number, d = 2) => n.toLocaleString("es-PE", { minimumFractionDigits: d, maximumFractionDigits: d });
 const fmtS = (n: number) => `S/ ${fmtN(n)}`;
@@ -108,11 +109,14 @@ function FilaPlaca({ p, voto }: { p: PlacaMantenimiento; voto: string }) {
 }
 
 export default function ModalMantenimientoMedido({
-  a, parametro, precios, guardando, onAplicar, onDescartar, onCerrar,
+  a, parametro, precios, gemela, guardando, onAplicar, onDescartar, onCerrar,
 }: {
   a: AgregadoMant;
   parametro: ParametrosCostoKm;
   precios: PreciosCombustible;
+  /** La ficha PREMIUM de la que esta usada es gemela. Solo llega cuando esta es una `_ESTANDAR`
+   *  y su premium sigue activa; en cualquier otro caso el bloque de equilibrio no se pinta. */
+  gemela?: { nombre: string; parametro: ParametrosCostoKm } | null;
   guardando?: boolean;
   onAplicar: (nota: string) => void;
   onDescartar: (nota: string) => void;
@@ -120,6 +124,12 @@ export default function ModalMantenimientoMedido({
 }) {
   const [nota, setNota] = useState("");
   const t = tonoMant(a.codigo);
+
+  // El punto de equilibrio solo tiene sentido contra una gemela: es "el mantenimiento al que
+  // esta ficha cuesta lo mismo por km que la nueva". Sin gemela no hay con qué comparar y el
+  // bloque entero desaparece — no se afirma nada sobre una ficha que no tiene contra quién.
+  const comp = gemela ? compararPar(gemela.parametro, parametro, precios) : null;
+  const equilibrio = gemela ? mantenimientoDeEquilibrio(gemela.parametro, parametro, precios) : null;
 
   // EL IMPACTO SE CALCULA CON LA MISMA FÓRMULA QUE PINTA LA TABLA DE AL LADO
   // (lib/costos/costo-km-parametro.ts). Escribir aquí un cálculo propio sería otra copia de la
@@ -202,6 +212,73 @@ export default function ModalMantenimientoMedido({
 
             <p className="text-xs text-gray-600 mt-3 leading-relaxed">{a.detalle}</p>
           </Bloque>
+
+          {/* 1b · CONTRA SU GEMELA NUEVA — solo en las fichas usadas */}
+          {comp && equilibrio && gemela && (
+            <Bloque
+              titulo="Contra su gemela Premium"
+              nota="Los seis renglones del S/km, lado a lado. Sin verlos, que la unidad de más de 10 años cueste más parece un error de la pantalla."
+            >
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-[10px] text-gray-400 uppercase">
+                    <th className="text-left font-black pb-1">Renglón</th>
+                    <th className="text-right font-black pb-1">Premium</th>
+                    <th className="text-right font-black pb-1">Esta (estándar)</th>
+                    <th className="text-right font-black pb-1">Δ</th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono">
+                  {comp.filas.filter((f) => f.premium > 0 || f.usada > 0).map((f) => (
+                    <tr key={f.clave} className="border-t border-gray-50">
+                      <td className="py-1.5 font-sans text-gray-600">{f.label}</td>
+                      <td className="py-1.5 text-right text-gray-500">{fmtN(f.premium, 4)}</td>
+                      <td className="py-1.5 text-right text-gray-700">{fmtN(f.usada, 4)}</td>
+                      {/* Sin color: una usada más cara no es una alarma ni una más barata un
+                          logro — es el reparto entre capital y taller. El color lo volvería juicio. */}
+                      <td className="py-1.5 text-right font-bold text-gray-500">
+                        {f.delta >= 0 ? "+" : ""}{fmtN(f.delta, 4)}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr className="border-t-2 border-gray-200">
+                    <td className="py-1.5 font-sans font-black text-gray-700">S/km total</td>
+                    <td className="py-1.5 text-right font-black text-[#0b315f]">{fmtN(comp.totalPremium, 4)}</td>
+                    <td className="py-1.5 text-right font-black text-[#0b315f]">{fmtN(comp.totalUsada, 4)}</td>
+                    <td className="py-1.5 text-right font-black text-gray-600">
+                      {comp.delta >= 0 ? "+" : ""}{fmtN(comp.delta, 4)}
+                      {comp.deltaPct !== null && ` (${comp.deltaPct >= 0 ? "+" : ""}${(comp.deltaPct * 100).toFixed(0)} %)`}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5">
+                <p className="text-[10px] font-black text-gray-500 uppercase tracking-wider">Punto de equilibrio</p>
+                {equilibrio.codigo === "equilibrio" && equilibrio.mantenimiento !== null ? (
+                  <>
+                    <p className="text-sm text-gray-700 mt-1">
+                      <b className="font-mono text-base">{fmtN(equilibrio.mantenimiento)}</b> S/km de mantenimiento
+                      dejan esta ficha costando <b>lo mismo</b> por km que {gemela.nombre}. Hoy tiene{" "}
+                      <b className="font-mono">{fmtN(equilibrio.actual)}</b>
+                      {equilibrio.brecha !== null && Math.abs(equilibrio.brecha) >= 0.005 && (
+                        <> — está {equilibrio.brecha > 0 ? "por encima" : "por debajo"}, así que hoy el ERP dice
+                        que esta unidad cuesta {equilibrio.brecha > 0 ? "más" : "menos"} por kilómetro que la nueva.</>
+                      )}
+                    </p>
+                    <p className="text-[11px] text-gray-500 mt-1.5 leading-relaxed">
+                      <b>No es una medición</b>, y por eso no hay botón: es el número que no afirma ninguna de las
+                      dos cosas mientras no haya órdenes de trabajo suficientes. El que manda es el de arriba, y
+                      cuando exista se aplica ese. Con el equilibrio puesto, Premium y Estándar cuestan igual y el
+                      Premium se vende más caro <b>por el margen</b>, no por el costo.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-gray-600 mt-1 leading-relaxed">{equilibrio.detalle}</p>
+                )}
+              </div>
+            </Bloque>
+          )}
 
           {/* 2 · QUIÉN LO MIDE */}
           <Bloque titulo="Quién lo mide" nota="Solo votan las unidades propias: a un tercero se le paga una factura por servicio, y su taller no es de AFA.">

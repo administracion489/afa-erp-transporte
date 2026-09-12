@@ -13,6 +13,7 @@ import {
   type AgregadoMant, type AntiguedadTipo, type PlacaMantenimiento, type ProcedenciaMant,
 } from "@/lib/costos/mantenimiento-tipo";
 import { cargarPlacasMantenimiento } from "@/lib/costos/mantenimiento-flota";
+import { clavePremiumDe } from "@/lib/costos/equilibrio-usado";
 import { GRUPOS_VEHICULO, ICONOS_VEHICULO, ETIQUETA_FICHA, type ActaFicha, type FichaTipo } from "@/lib/costos/ficha-tipo";
 import ModalRendimientoMedido, { ChipMedido } from "./ModalRendimientoMedido";
 import ModalMantenimientoMedido, { ChipMantenimiento } from "./ModalMantenimientoMedido";
@@ -854,17 +855,24 @@ export default function AjustesCostosPage() {
         />
       )}
 
-      {mantAbierto&&medidosMant.get(mantAbierto)&&params.find(p=>p.tipo_vehiculo===mantAbierto)&&(
+      {mantAbierto&&medidosMant.get(mantAbierto)&&params.find(p=>p.tipo_vehiculo===mantAbierto)&&(()=>{
+        // La gemela PREMIUM de una ficha usada, para el punto de equilibrio. Se busca por la
+        // CLAVE (`clavePremiumDe`), nunca por el nombre: el nombre es texto que se edita desde
+        // el modal de ficha, y emparejar por ahí sería emparejar por casualidad.
+        const clavePrem=clavePremiumDe(mantAbierto);
+        const prem=clavePrem?params.find(p=>p.tipo_vehiculo===clavePrem):undefined;
+        return(
         <ModalMantenimientoMedido
           a={medidosMant.get(mantAbierto)!}
           parametro={params.find(p=>p.tipo_vehiculo===mantAbierto)!}
           precios={preciosMap}
+          gemela={prem?{nombre:prem.nombre,parametro:prem}:null}
           guardando={guardando}
           onAplicar={n=>aplicarMant(medidosMant.get(mantAbierto)!,n)}
           onDescartar={n=>descartarMant(medidosMant.get(mantAbierto)!,n)}
           onCerrar={()=>setMantAbierto(null)}
-        />
-      )}
+        />);
+      })()}
 
       {edadAbierta&&antiguedades.get(edadAbierta)&&params.find(p=>p.tipo_vehiculo===edadAbierta)&&(
         <ModalAntiguedadTipo
