@@ -1,6 +1,7 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { NIVEL_CFG, nivelDeEquipamiento } from "@/lib/costos/nivel-servicio";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TIPOS
@@ -437,8 +438,8 @@ function FormTarifa({
       {/* Equipamiento */}
       <div className="grid grid-cols-2 gap-3">
         {[
-          { val: "full_equipo", label: "⭐ Full Equipo", sub: "AC, TV, USB, GPS cliente", color: "#0b315f", bg: "#eef3f8" },
-          { val: "basico",      label: "📦 Básico",      sub: "Estándar — cumple ley",    color: "#4b5563", bg: "#f3f4f6" },
+          { val: "full_equipo", label: `${NIVEL_CFG.premium.icono} ${NIVEL_CFG.premium.label}`,  sub: NIVEL_CFG.premium.sub,  color: "#0b315f", bg: "#eef3f8" },
+          { val: "basico",      label: `${NIVEL_CFG.estandar.icono} ${NIVEL_CFG.estandar.label}`, sub: NIVEL_CFG.estandar.sub, color: "#4b5563", bg: "#f3f4f6" },
         ].map(e => {
           const act = form.equipamiento === e.val;
           return (
@@ -881,8 +882,8 @@ export default function TarifarioPage() {
           {/* Equipamiento */}
           <div className="flex rounded-xl border overflow-hidden flex-shrink-0">
             {[
-              { val: "full_equipo", icon: "⭐", label: "Full Equipo" },
-              { val: "basico",      icon: "📦", label: "Básico"      },
+              { val: "full_equipo", icon: NIVEL_CFG.premium.icono,  label: NIVEL_CFG.premium.label  },
+              { val: "basico",      icon: NIVEL_CFG.estandar.icono, label: NIVEL_CFG.estandar.label },
             ].map(e => (
               <button key={e.val} onClick={() => setEquip(e.val as Equip)}
                 className="px-4 py-2 text-xs font-bold transition-all"
@@ -932,7 +933,7 @@ export default function TarifarioPage() {
                 <th className="border border-gray-200 px-4 py-2 text-left bg-gray-50 sticky left-0 z-10 min-w-[200px]" rowSpan={2}>
                   <div className="font-bold text-gray-700">Ruta</div>
                   <div className="text-[10px] text-gray-400 font-normal mt-0.5">
-                    {tabCfg.icon} {tabCfg.servicios.find(s => s.id === servActivo)?.label} · {equip === "full_equipo" ? "⭐ Full Equipo" : "📦 Básico"}
+                    {tabCfg.icon} {tabCfg.servicios.find(s => s.id === servActivo)?.label} · {NIVEL_CFG[nivelDeEquipamiento(equip)].icono} {NIVEL_CFG[nivelDeEquipamiento(equip)].label}
                   </div>
                 </th>
                 {gruposVeh.map(g => (
@@ -990,7 +991,7 @@ export default function TarifarioPage() {
         </div>
 
         <div className="px-4 py-3 text-xs text-gray-400 border-t flex justify-between">
-          <span>{rutas.length} rutas · {tabCfg.icon} {tabCfg.servicios.find(s => s.id === servActivo)?.label} · {equip === "full_equipo" ? "⭐ Full Equipo" : "📦 Básico"}</span>
+          <span>{rutas.length} rutas · {tabCfg.icon} {tabCfg.servicios.find(s => s.id === servActivo)?.label} · {NIVEL_CFG[nivelDeEquipamiento(equip)].icono} {NIVEL_CFG[nivelDeEquipamiento(equip)].label}</span>
           <span>AFA ERP · Tarifario {modo === "eventual" ? "EVENTUAL" : "FIJO"}</span>
         </div>
       </div>
@@ -1052,7 +1053,7 @@ export default function TarifarioPage() {
                     </td>
                     <td className="p-3 text-xs text-gray-600">{veh?.icon} {t.capacidad_custom || veh?.label || t.tipo_vehiculo}</td>
                     <td className="p-3">
-                      <span className="text-[10px] font-bold">{t.equipamiento === "full_equipo" ? "⭐ Full" : "📦 Básico"}</span>
+                      <span className="text-[10px] font-bold">{NIVEL_CFG[nivelDeEquipamiento(t.equipamiento)].icono} {NIVEL_CFG[nivelDeEquipamiento(t.equipamiento)].label}</span>
                     </td>
                     <td className="p-3 font-black font-mono">
                       {t.confidencial ? <span className="text-purple-700">🔒 Conf.</span> : fmtP(t.precio, t.moneda)}

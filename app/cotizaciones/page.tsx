@@ -7,6 +7,10 @@ import { buildFichaRutaHtml, type FichaRutaDatos } from "@/lib/ficha-ruta-html";
 import { fmtCoord, urlMapsPunto, parsearParCoordenadas, parsearCoordenada } from "@/lib/coordenadas";
 import { LOGO_DEFAULT, buildHeaderPDFHtml, buildFooterPDFHtml, sharedCSS, driveImg, buildVehsHtml } from "@/lib/pdf-chrome";
 import { componentesCostoKm } from "@/lib/costos/costo-km-parametro";
+import {
+  NIVELES, NIVEL_CFG, nivelDeEquipamiento, equipamientoDeNivel, nivelDeFicha, fichasDelNivel,
+  planDeNivel, cotejarUnidadConNivel, etiquetaNivel, type NivelServicio,
+} from "@/lib/costos/nivel-servicio";
 
 type FechaMultidia={dia:number;fecha:string;hora_ida:string;hora_fin:string;tipo_noche:"pernocte"|"cochera"|"";destino_nombre:string;destino_lat:string;destino_lng:string;};
 type ParamCosto={tipo_vehiculo:string;nombre:string;capacidad:number;activo:boolean;icono:string|null;grupo_vehiculo:string|null;euronorm:string|null;usa_urea:boolean;consumo_urea_pct:number|null;tipo_combustible_1:string;rendimiento_1:number;pct_uso_1:number;tipo_combustible_2:string|null;rendimiento_2:number|null;pct_uso_2:number|null;n_neumaticos:number;costo_neumatico:number;vida_neumatico_km:number;mantenimiento_km:number;valor_compra:number;residual_pct:number;vida_util_anios:number;km_anio:number;seguro_anual:number;soat_anual:number;revision_semestral:number;permisos_anual:number;otros_fijos_mensual:number;conductor_dia:number;};
@@ -944,7 +948,7 @@ export default function CotizacionesPage(){
     if(skipDescRef.current){skipDescRef.current=false;return;}
     const servLbl=form.modo_servicio==="fijo"?"SERVICIO DE TRANSPORTE DE PERSONAL":"SERVICIO DE TRANSPORTE TURÍSTICO";
     const tipoNom=paramsDB.find(p=>p.tipo_vehiculo===form.tipo_vehiculo)?.nombre||"";
-    const equipLbl=form.equipamiento==="full_equipo"?"FULL EQUIPO":form.equipamiento==="basico"?"BASICO":"";
+    const equipLbl=etiquetaNivel(form.equipamiento);   // PREMIUM / ESTÁNDAR, la misma palabra que la pantalla
     const autoDesc=tipoNom?`${servLbl} - ${tipoNom}${equipLbl?" "+equipLbl:""}`:servLbl;
     setItems(prev=>{const n=[...prev];if(n[0])n[0]={...n[0],descripcion:autoDesc};return n;});
   },[form.modo_servicio,form.tipo_vehiculo,form.equipamiento,mostrarForm]);
@@ -977,7 +981,38 @@ export default function CotizacionesPage(){
     });
   },[form.origen,form.destino,origenPlace,destinoPlace,mostrarForm]);
 
-  const gruposVeh=useMemo(()=>{const m:Record<string,ParamCosto[]>={};paramsDB.forEach(v=>{const g=v.grupo_vehiculo||"Otros";if(!m[g])m[g]=[];m[g].push(v);});return m;},[paramsDB]);
+  // ── NIVEL DE SERVICIO ───────────────────────────────────────────────────────
+  // El nivel se DERIVA de `form.equipamiento`, que es lo que se guarda: un estado propio al lado
+  // sería un segundo sitio donde vive la misma decisión, que es el bug que esto viene a cerrar.
+  const nivel=nivelDeEquipamiento(form.equipamiento);
+  const [avisoNivel,setAvisoNivel]=useState("");
+
+  /** El selector de «Vehículo de tarifa» solo ofrece las fichas del nivel elegido. */
+  const fichasNivel=useMemo(()=>fichasDelNivel(paramsDB,nivel),[paramsDB,nivel]);
+  const gruposVeh=useMemo(()=>{const m:Record<string,ParamCosto[]>={};fichasNivel.forEach(v=>{const g=v.grupo_vehiculo||"Otros";if(!m[g])m[g]=[];m[g].push(v);});return m;},[fichasNivel]);
+
+  /** Cambiar de nivel arrastra la ficha a su gemela; `planDeNivel` declara el motivo si no puede. */
+  const cambiarNivel=(n:NivelServicio)=>{
+    const plan=planDeNivel(form.tipo_vehiculo,n,paramsDB);
+    setForm(p=>({...p,equipamiento:equipamientoDeNivel(n),
+      ...(plan.codigo==="cambia"||plan.codigo==="sin_gemela"||plan.codigo==="nivel_vacio"?{tipo_vehiculo:plan.clave||""}:{})}));
+    setAvisoNivel(plan.codigo==="sin_gemela"||plan.codigo==="nivel_vacio"?plan.detalle:"");
+  };
+
+  /** Elegir una ficha declara su nivel: nunca queda un nivel que contradiga a la unidad de tarifa. */
+  const elegirFicha=(clave:string)=>{
+    setForm(p=>({...p,tipo_vehiculo:clave,equipamiento:equipamientoDeNivel(nivelDeFicha(clave))}));
+    setAvisoNivel("");
+  };
+
+  /**
+   * La PLACA contra el nivel. Solo se juzga la flota propia: `vehiculos_tercero` no tiene columna
+   * `equipamiento`, así que de 86 unidades no hay dato y afirmar ahí sería inventar.
+   */
+  const cotejoUnidad=useMemo(()=>{
+    const propia=form.vehiculo_flota_id?flota.find(v=>v.id===Number(form.vehiculo_flota_id)):null;
+    return cotejarUnidadConNivel(propia?.equipamiento,nivel,!!propia);
+  },[form.vehiculo_flota_id,flota,nivel]);
   const updItem=(i:number,k:keyof ItemCot,v:string|number)=>setItems(p=>p.map((it,idx)=>idx===i?{...it,[k]:Number.isNaN(Number(v))?v:Number(v)}:it));
   const addItem=()=>setItems(p=>[...p,{...ITEM_VACIO}]);const delItem=(i:number)=>setItems(p=>p.filter((_,idx)=>idx!==i));
   const{subtotal,igv,total}=calcItems(items,form.incluye_igv);
@@ -1550,18 +1585,25 @@ export default function CotizacionesPage(){
             </div>
 
             {/* ── TIPO DE MOVILIDAD ── */}
+            {/* NIVEL DE SERVICIO · una sola palabra para lo que antes se decidía dos veces.
+                Se llamaba «Tipo de movilidad · Full Equipo / Básico» y abajo, en «Vehículo de
+                tarifa», seguían saliendo las fichas `· Estándar (>10 años)`: dos nombres para la
+                misma decisión comercial, y ninguno acotaba al otro. Lo que se guarda sigue siendo
+                `equipamiento` — ver lib/costos/nivel-servicio.ts. */}
             <div className="rounded-2xl border-2 p-4" style={{borderColor:"#e9d5ff",background:"#faf5ff"}}>
-              <p className="text-[10px] font-bold uppercase tracking-widest mb-3" style={{color:"#7c3aed"}}>Tipo de movilidad</p>
+              <p className="text-[10px] font-bold uppercase tracking-widest mb-3" style={{color:"#7c3aed"}}>Nivel de servicio</p>
               <div className="flex gap-2">
-                {[{val:"full_equipo",label:"⭐ Full Equipo",sub:"AC · TV · USB · GPS",color:"#7c3aed",bg:"#f5f3ff"},{val:"basico",label:"📦 Básico",sub:"Estándar — cumple ley",color:"#4b5563",bg:"#f3f4f6"}].map(e=>{
-                  const act=form.equipamiento===e.val;
+                {NIVELES.map(n=>{
+                  const cfg=NIVEL_CFG[n];const act=nivel===n;
                   return(
-                    <button key={e.val} onClick={()=>setForm(p=>({...p,equipamiento:e.val}))} className="flex-1 flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 transition-all" style={{background:act?e.bg:"white",borderColor:act?e.color:"#e5e7eb",color:act?e.color:"#9ca3af"}}>
-                      <div><p className="font-bold text-xs">{e.label}</p><p className="text-[10px] opacity-70">{e.sub}</p></div>
+                    <button key={n} onClick={()=>cambiarNivel(n)} className="flex-1 flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 transition-all" style={{background:act?cfg.bg:"white",borderColor:act?cfg.color:"#e5e7eb",color:act?cfg.color:"#9ca3af"}}>
+                      <div><p className="font-bold text-xs">{cfg.icono} {cfg.label}</p><p className="text-[10px] opacity-70">{cfg.sub}</p></div>
                     </button>
                   );
                 })}
               </div>
+              {avisoNivel&&<p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">⚠ {avisoNivel}</p>}
+              {cotejoUnidad.codigo==="discrepa"&&<p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">⚠ {cotejoUnidad.detalle}</p>}
             </div>
 
             {/* ── VEHÍCULOS ── */}
@@ -1569,7 +1611,7 @@ export default function CotizacionesPage(){
               <button className="w-full flex items-center justify-between px-4 py-3 transition-colors hover:bg-gray-50" style={{background:"#f9fafb"}} onClick={()=>setVehExpandido(v=>!v)}>
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-black text-gray-700">🚌 Vehículo de tarifa</span>
-                  <span className="text-[10px] text-gray-400 font-normal">({paramsDB.length} disponibles)</span>
+                  <span className="text-[10px] text-gray-400 font-normal">({fichasNivel.length} de nivel {NIVEL_CFG[nivel].label})</span>
                   {form.tipo_vehiculo&&<span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{background:"#eef3f8",color:"#0b315f"}}>{paramsDB.find(v=>v.tipo_vehiculo===form.tipo_vehiculo)?.nombre||form.tipo_vehiculo}</span>}
                   {!form.tipo_vehiculo&&<span className="text-[10px] text-amber-600 font-semibold">Sin asignar</span>}
                 </div>
@@ -1582,7 +1624,7 @@ export default function CotizacionesPage(){
                       <p className="text-[9px] font-black uppercase tracking-wider mb-1" style={{color:gc.color}}>{grupo}</p>
                       <div className="grid grid-cols-3 md:grid-cols-5 gap-1.5">
                         {vehs.map(v=>{const act=form.tipo_vehiculo===v.tipo_vehiculo;return(
-                          <button key={v.tipo_vehiculo} onClick={()=>{setForm(p=>({...p,tipo_vehiculo:v.tipo_vehiculo}));setVehExpandido(false);}} className="flex flex-col items-center px-1 py-2 rounded-xl border-2 transition-all text-center" style={{background:act?gc.bg:"white",borderColor:act?gc.color:"#e5e7eb",color:act?gc.color:"#9ca3af"}}>
+                          <button key={v.tipo_vehiculo} onClick={()=>{elegirFicha(v.tipo_vehiculo);setVehExpandido(false);}} className="flex flex-col items-center px-1 py-2 rounded-xl border-2 transition-all text-center" style={{background:act?gc.bg:"white",borderColor:act?gc.color:"#e5e7eb",color:act?gc.color:"#9ca3af"}}>
                             <span className="text-base">{v.icono||"🚌"}</span>
                             <span className="text-[8px] font-bold leading-tight">{v.nombre}</span>
                             {v.usa_urea&&<span className="text-[7px] text-cyan-600 font-bold">🧪</span>}
