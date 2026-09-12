@@ -4,6 +4,10 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { calcularCostoUnidad, escenariosPrecio, type ParametrosUnidad } from "@/lib/costeo-propio";
 import { emparejarFlota } from "@/lib/costos/equilibrio-usado";
+import {
+  NIVELES, NIVEL_CFG, equipamientoDeNivel, nivelDeFicha, fichasDelNivel, planDeNivel,
+  type NivelServicio,
+} from "@/lib/costos/nivel-servicio";
 
 // ══════════════════════════════════════════════════════════════════
 // TIPOS
@@ -874,15 +878,21 @@ export default function CotizadorPage(){
       const f=pR.data||[];const pr:Record<string,number>={};
       (cR.data||[]).forEach((c:any)=>{pr[c.tipo]=Number(c.precio);});
       setFlota(f);setPrecios(pr);
+      // El nivel sale de la ficha elegida, no de un default suelto: el orden de la consulta
+      // decide cuál cae primero y podría ser una `_ESTANDAR`, dejando el botón en Premium con
+      // una unidad de más de diez años seleccionada — la contradicción que este arreglo mata.
       const bus=f.find((v:ParamCosto)=>v.grupo_vehiculo==="Buses")||f[0];
-      if(bus)setIdxVeh(bus.tipo_vehiculo);
+      if(bus){setIdxVeh(bus.tipo_vehiculo);setNivel(nivelDeFicha(bus.tipo_vehiculo));}
       setDbReady(true);
     }
     cargar();
   },[]);
 
   const [idxVeh,    setIdxVeh]    =useState("");
-  const [equip,     setEquip]     =useState<"full_equipo"|"basico">("full_equipo");
+  // El nivel de servicio (Premium / Estándar). Lo que se GUARDA sigue siendo `equipamiento`
+  // (`full_equipo`/`basico`): ver la cabecera de lib/costos/nivel-servicio.ts.
+  const [nivel,     setNivel]     =useState<NivelServicio>("premium");
+  const [avisoNivel,setAvisoNivel]=useState("");
   const [modo,      setModo]      =useState<"eventual"|"fijo">("eventual");
   const [tipoServEv,setTipoServEv]=useState("solo_ida");
   const [tipoServFj,setTipoServFj]=useState("transporte_personal");
@@ -902,11 +912,35 @@ export default function CotizadorPage(){
   const enOf=enHorario();
   const veh=flota.find(v=>v.tipo_vehiculo===idxVeh);
 
+  // EL SELECTOR SE FILTRA POR NIVEL; EL COMPARATIVO DE ABAJO NO. Son dos cosas distintas: aquí
+  // se ELIGE una unidad —y ofrecer las del otro nivel es justo el bug que se reportó—, y allá se
+  // COMPARAN los dos niveles con su Δ, que es la única pantalla donde esa diferencia se ve.
+  // Filtrar el comparativo borraría la respuesta a «¿por qué una cuesta más que la otra?».
+  const flotaNivel=useMemo(()=>fichasDelNivel(flota,nivel),[flota,nivel]);
+
   const grupos=useMemo(()=>{
     const m:Record<string,ParamCosto[]>={};
-    flota.forEach(v=>{const g=v.grupo_vehiculo||"Otros";if(!m[g])m[g]=[];m[g].push(v);});
+    flotaNivel.forEach(v=>{const g=v.grupo_vehiculo||"Otros";if(!m[g])m[g]=[];m[g].push(v);});
     return m;
-  },[flota]);
+  },[flotaNivel]);
+
+  /**
+   * Cambiar de nivel es cambiar de nivel, no perder el bus: se pasa a la gemela de la misma
+   * capacidad. `planDeNivel` decide y DECLARA el motivo cuando no puede (lib/costos/nivel-servicio).
+   */
+  const cambiarNivel=useCallback((n:NivelServicio)=>{
+    setNivel(n);
+    const plan=planDeNivel(idxVeh,n,flota);
+    if(plan.codigo==="cambia"||plan.codigo==="sin_gemela"||plan.codigo==="nivel_vacio")setIdxVeh(plan.clave||"");
+    setAvisoNivel(plan.codigo==="sin_gemela"||plan.codigo==="nivel_vacio"?plan.detalle:"");
+  },[idxVeh,flota]);
+
+  /** Elegir una fila del comparativo ARRASTRA el nivel: nunca queda una selección que la rejilla no pueda enseñar. */
+  const elegirFicha=useCallback((clave:string)=>{
+    setIdxVeh(clave);
+    setNivel(nivelDeFicha(clave));
+    setAvisoNivel("");
+  },[]);
 
   // Pernocte y viáticos: vienen de meta si es multi-día, si no se ingresan aparte
   const esMultiDia=tipoServ==="multi_dia";
@@ -938,7 +972,7 @@ export default function CotizadorPage(){
       origen:metaRuta.origen||null,destino:metaRuta.destino||null,
       km:kmRuta,tipo:modo==="fijo"?"transporte_personal":"eventual",
       estado:"pendiente",modo_servicio:modo,tipo_servicio:tipoServ,
-      tipo_vehiculo:veh.tipo_vehiculo,equipamiento:equip,
+      tipo_vehiculo:veh.tipo_vehiculo,equipamiento:equipamientoDeNivel(nivel),
       precio_cliente:modo==="eventual"?resultado.totalEst20:resultado.diaEstIGV,
       costo_estimado:resultado.baseCosto,
       margen_estimado:modo==="eventual"?resultado.totalEst20-resultado.baseCosto:resultado.diaEstIGV-resultado.baseCosto,
@@ -1093,23 +1127,27 @@ export default function CotizadorPage(){
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
               <div className="flex items-center justify-between mb-3">
                 <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider">🚌 Vehículo</p>
+                {/* ESTE BOTÓN AHORA FILTRA. Antes solo se guardaba al crear la cotización, así
+                    que parecía un filtro y no lo era: con «Full Equipo» puesto seguían saliendo
+                    abajo las trece categorías de más de diez años. */}
                 <div className="flex rounded-xl border overflow-hidden flex-shrink-0">
-                  {[{val:"full_equipo",icon:"⭐",label:"Full Equipo"},{val:"basico",icon:"📦",label:"Básico"}].map(e=>(
-                    <button key={e.val} onClick={()=>setEquip(e.val as "full_equipo"|"basico")}
+                  {NIVELES.map(n=>(
+                    <button key={n} onClick={()=>cambiarNivel(n)}
                       className="px-2.5 py-1 text-[10px] font-bold transition-all"
-                      style={{background:equip===e.val?"#0b315f":"white",color:equip===e.val?"white":"#0b315f"}}>
-                      {e.icon} {e.label}
+                      style={{background:nivel===n?"#0b315f":"white",color:nivel===n?"white":"#0b315f"}}>
+                      {NIVEL_CFG[n].icono} {NIVEL_CFG[n].label}
                     </button>
                   ))}
                 </div>
               </div>
+              {avisoNivel&&<p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 mb-2">⚠ {avisoNivel}</p>}
               <div className="space-y-3">
                 {Object.entries(grupos).map(([grupo,vehs])=>{
                   const gc=GRUPO_CFG[grupo]||GRUPO_CFG.Otros;
                   return(<div key={grupo}><p className="text-[9px] font-black uppercase tracking-wider mb-1.5" style={{color:gc.color}}>{grupo}</p>
                   <div className="grid grid-cols-2 gap-1.5">
                     {vehs.map(v=>{const act=v.tipo_vehiculo===idxVeh;return(
-                      <button key={v.tipo_vehiculo} onClick={()=>setIdxVeh(v.tipo_vehiculo)}
+                      <button key={v.tipo_vehiculo} onClick={()=>elegirFicha(v.tipo_vehiculo)}
                         className="flex flex-col items-center px-2 py-2 rounded-xl border-2 transition-all text-center"
                         style={{background:act?gc.bg:"white",borderColor:act?gc.color:"#e5e7eb",color:act?gc.color:"#9ca3af"}}>
                         <span className="text-xl">{v.icono||"🚌"}</span>
@@ -1280,7 +1318,12 @@ export default function CotizadorPage(){
                     {/* La usada va PEGADA a su gemela, no suelta en la lista ordenada por
                         capacidad: con las dos separadas por cinco filas, que una cueste más que
                         la otra se lee como un error de la pantalla en vez de como lo que es. */}
-                    <p className="text-[11px] text-gray-400 mt-0.5">Cada categoría Estándar va debajo de su Premium, con la diferencia de precio entre las dos. Todos los importes de esta tabla van SIN IGV, igual que los tres cuadros de arriba.</p>
+                    {/* El comparativo enseña LOS DOS NIVELES aunque arriba haya uno filtrado, y es
+                        a propósito: es la única pantalla donde la diferencia de precio entre
+                        gemelas se ve. Hacer clic en una fila del otro nivel mueve también el
+                        botón de arriba (`elegirFicha`), así que nunca queda seleccionada una
+                        unidad que la rejilla no pueda mostrar. */}
+                    <p className="text-[11px] text-gray-400 mt-0.5">Cada categoría Estándar va debajo de su Premium, con la diferencia de precio entre las dos. Aquí salen <b>los dos niveles</b> aunque arriba tengas uno filtrado — es donde se comparan; al elegir una fila, el nivel de arriba la sigue. Todos los importes van SIN IGV, igual que los tres cuadros.</p>
                   </div>
                   {Object.entries(grupos).map(([grupo,vehs])=>{
                     const gc=GRUPO_CFG[grupo]||GRUPO_CFG.Otros;
@@ -1302,7 +1345,7 @@ export default function CotizadorPage(){
                           const val=r.sinIGV20;   // eventual → total del evento; fijo → precio/día. Los dos, sin IGV.
                           const esGemela=i===1;
                           const delta=esGemela&&baseVal!==null?val-baseVal:null;
-                          return(<tr key={v.tipo_vehiculo} onClick={()=>setIdxVeh(v.tipo_vehiculo)} className={`cursor-pointer transition-colors ${act?"bg-blue-50 border-l-2 border-l-[#0b315f]":"hover:bg-gray-50"}`}>
+                          return(<tr key={v.tipo_vehiculo} onClick={()=>elegirFicha(v.tipo_vehiculo)} className={`cursor-pointer transition-colors ${act?"bg-blue-50 border-l-2 border-l-[#0b315f]":"hover:bg-gray-50"}`}>
                             <td className={`px-3 py-2.5 ${esGemela?"pl-7":""}`}>
                               {esGemela&&<span className="text-gray-300 mr-1 text-xs">↳</span>}
                               <span className={`text-xs ${act?"font-black text-[#0b315f]":esGemela?"font-semibold text-gray-500":"font-semibold text-gray-600"}`}>{v.icono||"🚌"} {v.nombre}</span>
