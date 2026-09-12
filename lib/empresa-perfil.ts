@@ -28,6 +28,8 @@ export type PerfilEmpresa = {
   email?: string | null;
   direccion?: string | null;
   web?: string | null;
+  /** Autorización del regulador de transporte, para el pie de los documentos operativos. */
+  autorizacion_mtc?: string | null;
 };
 
 /**
@@ -49,5 +51,17 @@ export function empresaConDefectos(p?: PerfilEmpresa | null) {
     web: v(p?.web, EMPRESA_DEFECTO.web),
     direccion: v(p?.direccion, EMPRESA_DEFECTO.direccion),
     logo: String(p?.logo_url ?? "").trim() || null,
+    /**
+     * LA ÚNICA SIN VALOR POR DEFECTO, Y NO ES UN OLVIDO.
+     *
+     * Un teléfono o una web heredados de otra empresa son un dato viejo que se nota y se
+     * corrige. Una AUTORIZACIÓN DEL REGULADOR heredada es un número legal ajeno impreso en un
+     * papel que alguien firma: el documento estaría afirmando una habilitación que su emisor no
+     * tiene. Vacío significa vacío, y el documento omite la línea entera en vez de inventarla.
+     *
+     * Es la misma regla que el PAX contratado de la liquidación y el km vigente del odómetro:
+     * sin dato no se cae a otro número, se calla.
+     */
+    autorizacion: String(p?.autorizacion_mtc ?? "").trim() || "",
   };
 }

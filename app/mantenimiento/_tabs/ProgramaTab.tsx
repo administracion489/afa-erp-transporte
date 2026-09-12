@@ -5,6 +5,9 @@ import * as XLSX from "xlsx";
 import { supabase } from "@/lib/supabase";
 import { kmPorDia } from "@/lib/odometro";
 import { abrirImprimible } from "@/lib/documentos-servicio";
+import { tarifaHoraMecanico, HORAS_MES_DEFECTO, type InsumosManoObra } from "@/lib/mantenimiento/lineas-costo";
+import { cargarInsumosManoObraConEstado, type EstadoInsumos } from "@/lib/mantenimiento/ot-factura";
+import { empresaConDefectos, type PerfilEmpresa } from "@/lib/empresa-perfil";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -31,6 +34,15 @@ type Config = {
   correos_alerta: string; umbral_km: number; umbral_dias: number;
   km_dia_max: number; alertas_activas: boolean;
   umbral_ot_km: number; umbral_ot_dias: number; ot_automatica_activa: boolean;
+  // Con qué se valoriza una hora del mecánico de casa (mantenimiento-06). Van como TEXTO, no
+  // como number: vacío tiene que poder escribirse como `null`. Con `number`, un sueldo tecleado
+  // por error sería corregible a otro número pero NO retirable — el mismo agujero que tuvo
+  // `capacidad_tanque` hasta que se le mandó la columna siempre.
+  mecanico_nombre: string;
+  mecanico_sueldo_basico: string;
+  mecanico_asignacion: boolean;
+  mecanico_horas_mes: string;
+  tarifa_hora_mecanico: string;
 };
 
 type Venc = {
@@ -87,9 +99,23 @@ export default function ProgramaTab() {
   const [cfg, setCfg]             = useState<Config>({
     correos_alerta: "", umbral_km: 500, umbral_dias: 7, km_dia_max: 1500, alertas_activas: true,
     umbral_ot_km: 100, umbral_ot_dias: 2, ot_automatica_activa: true,
+    mecanico_nombre: "", mecanico_sueldo_basico: "", mecanico_asignacion: false,
+    mecanico_horas_mes: "", tarifa_hora_mecanico: "",
   });
   const [loading, setLoading]   = useState(true);
   const [guardandoCfg, setGuardandoCfg] = useState(false);
+  /**
+   * Los factores del régimen laboral vigente, de `v_taller_mano_obra`. NO se teclean aquí: la
+   * empresa elige su régimen en Finanzas (`config_laboral`) y las tasas viven en
+   * `config_laboral_regimen` con su fecha de vigencia. Esta pantalla solo los USA para enseñar el
+   * S/hora que va a salir mientras alguien escribe el sueldo — con el MISMO motor que después
+   * valoriza la línea de la OT, nunca con una segunda fórmula.
+   */
+  const [insumosTaller, setInsumosTaller] = useState<InsumosManoObra | null>(null);
+  const [estadoTaller, setEstadoTaller]   = useState<EstadoInsumos>("ok");
+  /** Quién emite el documento. NUNCA un literal: este ERP se vende, y el PDF de un comprador no
+   *  puede salir con el nombre de otra empresa. `empresa_perfil` es la fuente. */
+  const [perfil, setPerfil] = useState<PerfilEmpresa | null>(null);
 
   // Export
   const [exportOpen, setExportOpen]       = useState(false);
@@ -110,7 +136,7 @@ export default function ProgramaTab() {
   const cargar = async () => {
     setLoading(true);
     const desde = addMeses(hoyLima(), -4);
-    const [vRes, tRes, eRes, mRes, lRes, cRes, pRes] = await Promise.all([
+    const [vRes, tRes, eRes, mRes, lRes, cRes, pRes, empRes] = await Promise.all([
       supabase.from("vehiculos").select("id,placa,categoria,marca,modelo,anio,color,nro_serie,kilometraje_actual").order("placa"),
       supabase.from("vehiculos_tercero").select("id,placa,categoria,marca,modelo").order("placa"),
       // `*` a propósito: los override por unidad son columnas nuevas (ver
@@ -121,10 +147,12 @@ export default function ProgramaTab() {
       supabase.from("lecturas_odometro").select("vehiculo_id,km,fecha").not("vehiculo_id", "is", null).eq("estado", "aceptada").gte("fecha", desde),
       supabase.from("config_mantenimiento").select("*").eq("id", 1).maybeSingle(),
       supabase.from("planes_mantenimiento").select("id,marca,modelo,motor,intervalo_base_km,intervalo_base_meses").order("marca"),
+      supabase.from("empresa_perfil").select("*").eq("id", 1).maybeSingle(),
     ]);
     setVehiculos(vRes.data || []);
     setTerceros(tRes.data || []);
     setPlanes(pRes.data || []);
+    setPerfil((empRes as any)?.data ?? null);
     setEnrol((eRes.data || []).map((e: any) => ({ ...e, plan: Array.isArray(e.plan) ? e.plan[0] : e.plan })));
     setMants(mRes.data || []);
     setLecturas(lRes.data || []);
@@ -137,7 +165,21 @@ export default function ProgramaTab() {
       umbral_ot_km: cRes.data.umbral_ot_km ?? 100,
       umbral_ot_dias: cRes.data.umbral_ot_dias ?? 2,
       ot_automatica_activa: cRes.data.ot_automatica_activa ?? true,
+      // Vacío es un dato: significa «no configurado», y por eso no se rellena con un 0 ni con el
+      // default de horas. El placeholder del campo enseña el default sin escribirlo.
+      mecanico_nombre: cRes.data.mecanico_nombre ?? "",
+      mecanico_sueldo_basico: cRes.data.mecanico_sueldo_basico != null ? String(cRes.data.mecanico_sueldo_basico) : "",
+      mecanico_asignacion: cRes.data.mecanico_asignacion ?? false,
+      mecanico_horas_mes: cRes.data.mecanico_horas_mes != null ? String(cRes.data.mecanico_horas_mes) : "",
+      tarifa_hora_mecanico: cRes.data.tarifa_hora_mecanico != null ? String(cRes.data.tarifa_hora_mecanico) : "",
     });
+
+    // Best-effort, y APARTE de la consulta de arriba: sin `mantenimiento-06` la vista no existe y
+    // devuelve null, y entonces el bloque de mano de obra dice qué SQL falta en vez de romper la
+    // pestaña entera de Próximos, que no tiene nada que ver.
+    const taller = await cargarInsumosManoObraConEstado();
+    setInsumosTaller(taller.insumos);
+    setEstadoTaller(taller.estado);
     setLoading(false);
   };
 
@@ -219,20 +261,56 @@ export default function ProgramaTab() {
       umbral_ot_km: Number(cfg.umbral_ot_km) || 0,
       umbral_ot_dias: Number(cfg.umbral_ot_dias) || 0,
       ot_automatica_activa: cfg.ot_automatica_activa,
+      // SIEMPRE se mandan, incluso en null: vaciar un sueldo tecleado por error tiene que poder
+      // BORRARLO. Incluirlas solo cuando traen valor es lo que dejó `capacidad_tanque` como un
+      // dato corregible pero no retirable.
+      mecanico_nombre: cfg.mecanico_nombre.trim() || null,
+      mecanico_sueldo_basico: numOrNull(cfg.mecanico_sueldo_basico),
+      mecanico_asignacion: cfg.mecanico_asignacion,
+      mecanico_horas_mes: numOrNull(cfg.mecanico_horas_mes),
+      tarifa_hora_mecanico: numOrNull(cfg.tarifa_hora_mecanico),
       updated_at: new Date().toISOString(),
     };
-    let { error } = await supabase.from("config_mantenimiento").update(campos).eq("id", 1);
-    let faltanColumnas = false;
-    if (error && (error.code === "PGRST204" || /column .* does not exist|Could not find the/i.test(error.message || ""))) {
-      faltanColumnas = true;
-      const { umbral_ot_km, umbral_ot_dias, ot_automatica_activa, ...resto } = campos;
-      ({ error } = await supabase.from("config_mantenimiento").update(resto).eq("id", 1));
+
+    // Se sueltan los GRUPOS de columnas accesorias que el error nombra, no un juego fijo, y se
+    // dice qué se perdió con cada uno (COLUMNAS_OPCIONALES de lib/reservas-pacto.ts). Con un solo
+    // reintento, una base a la que le falte `mantenimiento-06` perdía además la OT automática —
+    // que sí estaba migrada— y el mensaje acusaba al SQL equivocado.
+    const OPCIONALES: { cols: string[]; sql: string; pierde: string }[] = [
+      { cols: ["umbral_ot_km", "umbral_ot_dias", "ot_automatica_activa"],
+        sql: "supabase/mantenimiento-ot-automatica.sql", pierde: "la OT automática" },
+      { cols: ["mecanico_nombre", "mecanico_sueldo_basico", "mecanico_asignacion", "mecanico_horas_mes", "tarifa_hora_mecanico"],
+        sql: "supabase/mantenimiento-06-lineas-de-costo.sql", pierde: "la mano de obra del taller" },
+    ];
+
+    let payload: any = campos;
+    const perdidos: { sql: string; pierde: string }[] = [];
+    let error: any = null;
+    for (let intento = 0; intento <= OPCIONALES.length; intento++) {
+      ({ error } = await supabase.from("config_mantenimiento").update(payload).eq("id", 1));
+      if (!error) break;
+      const msg = String(error.message || "");
+      const esColumna = error.code === "PGRST204" || /column .* does not exist|Could not find the/i.test(msg);
+      // El grupo culpable es el que el error NOMBRA; si el mensaje no nombra ninguno (PostgREST a
+      // veces solo dice "Could not find the column"), se suelta el que quede sin soltar.
+      const grupo = esColumna
+        ? (OPCIONALES.find(g => !perdidos.some(p => p.sql === g.sql) && g.cols.some(c => msg.includes(c)))
+           ?? OPCIONALES.find(g => !perdidos.some(p => p.sql === g.sql)))
+        : null;
+      if (!grupo) break;
+      perdidos.push({ sql: grupo.sql, pierde: grupo.pierde });
+      payload = { ...payload };
+      for (const c of grupo.cols) delete payload[c];
     }
+
     setGuardandoCfg(false);
-    if (error) alert("Error al guardar: " + error.message);
-    else alert(faltanColumnas
-      ? "Guardado ✓ — pero la OT automática NO se guardó: falta correr supabase/mantenimiento-ot-automatica.sql"
-      : "Configuración guardada ✓");
+    if (error) { alert("Error al guardar: " + error.message); return; }
+    if (perdidos.length) {
+      alert("Guardado ✓ — pero " + perdidos.map(p => `${p.pierde} NO se guardó (falta correr ${p.sql})`).join(", y "));
+    } else {
+      alert("Configuración guardada ✓");
+    }
+    cargar();
   };
 
   // ── Edición del programa por unidad ───────────────────────────────────────────
@@ -409,7 +487,7 @@ export default function ProgramaTab() {
     wsProg["!cols"] = [{ wch: 12 }, { wch: 28 }, { wch: 22 }, { wch: 16 }, { wch: 14 }, { wch: 16 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 10 }];
     XLSX.utils.book_append_sheet(wb, wsVeh, "Vehículos");
     XLSX.utils.book_append_sheet(wb, wsProg, "Próximos Mantenimientos");
-    XLSX.writeFile(wb, `Mantenimiento Preventivo AFA — ${hoyLima()}.xlsx`);
+    XLSX.writeFile(wb, `Mantenimiento Preventivo — ${empresaConDefectos(perfil).nombre} — ${hoyLima()}.xlsx`);
     setExportOpen(false);
   };
 
@@ -419,6 +497,10 @@ export default function ProgramaTab() {
   const generarPDF = () => {
     const sel100 = vehiculos.filter(v => sel.has(v.id));
     if (sel100.length === 0) { alert("Selecciona al menos un vehículo"); return; }
+
+    // Quién emite. Se resuelve con `empresaConDefectos`, el mismo escalón que usan la cotización
+    // y la liquidación: manda `empresa_perfil`, y solo si está vacío caen los valores de respaldo.
+    const emp = empresaConDefectos(perfil);
 
     const vencMap = new Map(vencimientos.map(x => [x.vehiculo.id, x]));
     const ultMant: Record<number, Mant> = {};
@@ -470,7 +552,7 @@ tbody tr:nth-child(even){background:#f8fafc}
 
     const body = `<div class="hd">
   <div><h1>Programa de Mantenimiento Preventivo</h1>
-  <p>AFA Tours Peru SAC · Próximo servicio por km y por tiempo (lo que ocurra primero)</p></div>
+  <p>${esc(emp.nombre)} · Próximo servicio por km y por tiempo (lo que ocurra primero)</p></div>
   <div style="text-align:right;font-size:9px;color:#64748b">
     Emitido: <b>${fmtFecha(hoyLima())}</b><br/>Unidades: <b>${sel100.length}</b>
   </div>
@@ -487,10 +569,10 @@ tbody tr:nth-child(even){background:#f8fafc}
   <th class="r">Próximo km</th><th class="r">Faltan km</th>
   <th class="r">Próxima fecha</th><th class="r">Faltan días</th><th>Estado</th>
 </tr></thead><tbody>${filas}</tbody></table>
-<p class="ft">Umbrales de aviso: ≤ ${cfg.umbral_km} km / ≤ ${cfg.umbral_dias} días · Generado por el ERP AFA Transportes</p>`;
+<p class="ft">Umbrales de aviso: ≤ ${cfg.umbral_km} km / ≤ ${cfg.umbral_dias} días · Generado por ${esc(emp.nombre)}</p>`;
 
     abrirImprimible(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/>
-<title>Programa de Mantenimiento AFA — ${hoyLima()}</title><style>${css}</style></head>
+<title>Programa de Mantenimiento — ${esc(emp.nombre)} — ${hoyLima()}</title><style>${css}</style></head>
 <body>${body}<script>window.onload=()=>window.print()<\/script></body></html>`);
     setExportOpen(false);
   };
@@ -644,7 +726,7 @@ tbody tr:nth-child(even){background:#f8fafc}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="md:col-span-2">
             <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Correos destinatarios (separados por coma)</label>
-            <input className={inputCls()} placeholder="administracion@afatoursperu.com, jefe.flota@..."
+            <input className={inputCls()} placeholder="flota@tuempresa.com, jefe.taller@tuempresa.com"
               value={cfg.correos_alerta} onChange={e => setCfg(c => ({ ...c, correos_alerta: e.target.value }))} />
           </div>
           <div>
@@ -703,6 +785,125 @@ tbody tr:nth-child(even){background:#f8fafc}
             </div>
           </div>
         </div>
+
+        {/* ── MANO DE OBRA DEL TALLER ──────────────────────────────────────────
+            Con qué se valoriza una hora del mecánico PROPIO en el desglose de una orden de
+            trabajo. Son los dos métodos de `tarifaHoraMecanico`, y aquí se ven como lo que son:
+            escalones de una cascada, no una alternativa — el de arriba manda sobre el de abajo.
+
+            El S/hora se calcula con el MISMO motor que después valoriza la línea de la OT
+            (`lib/mantenimiento/lineas-costo.ts`, que a su vez usa la única casa de la fórmula del
+            costo empresa, `lib/costeo-conductor.ts`). Reimplementar la cuenta aquí para «enseñar
+            una vista previa» son dos motores que contestan la misma pregunta, que es literalmente
+            el bug del semáforo de puntualidad. */}
+        {(() => {
+          const regimen = insumosTaller?.regimen ?? null;
+          const enVivo = tarifaHoraMecanico({
+            tarifa_hora: numOrNull(cfg.tarifa_hora_mecanico),
+            horas_mes: numOrNull(cfg.mecanico_horas_mes),
+            regimen,
+            mecanico: regimen ? {
+              tipo_contrato: "planilla",
+              sueldo_basico: numOrNull(cfg.mecanico_sueldo_basico),
+              tiene_asignacion: cfg.mecanico_asignacion,
+              rmv: insumosTaller?.mecanico?.rmv ?? 0,
+              asignacion_familiar_pct: insumosTaller?.mecanico?.asignacion_familiar_pct ?? 0,
+              sctr_mensual: insumosTaller?.mecanico?.sctr_mensual ?? 0,
+            } : null,
+          });
+          return (
+            <div className="rounded-xl border bg-gray-50 p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">🔧</span>
+                <div>
+                  <p className="text-sm font-bold text-gray-800">Mano de obra del taller</p>
+                  <p className="text-[11px] text-gray-500">
+                    Solo hace falta si alguna orden de trabajo lleva horas de un mecánico <b>propio</b>.
+                    Lo que se paga a un taller tercero se teclea como importe en su línea y no usa nada de esto.
+                    Esa hora no se cuenta como gasto nuevo —la planilla ya la pagó— pero sí entra al costo por
+                    kilómetro de la unidad.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="md:col-span-1">
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Mecánico</label>
+                  <input className={inputCls("bg-white")} placeholder="Nombre del mecánico"
+                    value={cfg.mecanico_nombre} onChange={e => setCfg(c => ({ ...c, mecanico_nombre: e.target.value }))} />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Sueldo básico mensual S/</label>
+                  <input type="number" step="0.01" className={inputCls("font-mono bg-white")} placeholder="Sin configurar"
+                    value={cfg.mecanico_sueldo_basico} onChange={e => setCfg(c => ({ ...c, mecanico_sueldo_basico: e.target.value }))} />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Horas de taller al mes</label>
+                  <input type="number" className={inputCls("font-mono bg-white")} placeholder={String(HORAS_MES_DEFECTO)}
+                    value={cfg.mecanico_horas_mes} onChange={e => setCfg(c => ({ ...c, mecanico_horas_mes: e.target.value }))} />
+                  <p className="text-[10px] text-gray-400 mt-1">Vacío = {HORAS_MES_DEFECTO} (26 días × 8 h)</p>
+                </div>
+                <div className="flex items-start">
+                  <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer mt-1">
+                    <input type="checkbox" checked={cfg.mecanico_asignacion}
+                      onChange={e => setCfg(c => ({ ...c, mecanico_asignacion: e.target.checked }))} />
+                    Le corresponde asignación familiar
+                  </label>
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                    …o una tarifa por hora S/ (respaldo)
+                  </label>
+                  <input type="number" step="0.01" className={inputCls("font-mono bg-white")} placeholder="Sin configurar"
+                    value={cfg.tarifa_hora_mecanico} onChange={e => setCfg(c => ({ ...c, tarifa_hora_mecanico: e.target.value }))} />
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    Se usa solo mientras no haya sueldo arriba. Es una opinión que envejece: se teclea una vez
+                    y se queda mientras el sueldo sube.
+                  </p>
+                </div>
+              </div>
+
+              {/* EL RESULTADO, CON SU FUENTE DECLARADA. Es el mismo número que va a salir en la
+                  línea de la OT — no una estimación de esta pantalla. */}
+              {estadoTaller === "sin_vista" ? (
+                <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  ⚠ Falta correr <b>supabase/mantenimiento-06-lineas-de-costo.sql</b> en Supabase: hasta entonces
+                  estos campos no se guardan y una orden de trabajo no puede llevar horas propias.
+                </p>
+              ) : estadoTaller === "sin_regimen" ? (
+                <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  ⚠ La empresa todavía no tiene <b>régimen laboral</b> configurado, así que no se puede calcular el
+                  costo empresa del mecánico. Se arregla en la configuración laboral (tabla <code>config_laboral</code>);
+                  mientras tanto, usa la tarifa por hora.
+                </p>
+              ) : enVivo.falta ? (
+                <p className="text-[11px] text-gray-500 bg-white border rounded-lg px-3 py-2">
+                  Sin tarifa: una hora propia no se puede valorizar todavía. Llena el sueldo (lo exacto) o la
+                  tarifa por hora (lo aproximado). <b>No se inventa un número</b> — ese S/hora multiplica las horas
+                  de cada orden y termina moviendo el costo por kilómetro de toda una categoría de flota.
+                </p>
+              ) : (
+                <div className="rounded-lg border bg-white px-3 py-2">
+                  <p className="text-sm">
+                    <span className="font-black text-lg" style={{ color: "#0b315f" }}>S/ {enVivo.tarifa.toFixed(2)}</span>
+                    <span className="text-gray-500"> por hora</span>
+                    <span className="ml-2 text-[10px] font-bold uppercase px-2 py-0.5 rounded-lg"
+                      style={enVivo.fuente === "costo_empresa"
+                        ? { background: "#dcfce7", color: "#166534" }
+                        : { background: "#f3f4f6", color: "#4b5563" }}>
+                      {enVivo.fuente === "costo_empresa" ? "costo empresa real" : "tarifa tecleada"}
+                    </span>
+                  </p>
+                  <p className="text-[11px] text-gray-500 mt-1">{enVivo.base}</p>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    Es un <b>piso</b>: solo se imputan las horas que alguien carga a una orden. El resto del mes del
+                    mecánico (esperas, traslados, el taller barrido) no lo absorbe ninguna unidad.
+                  </p>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         <button onClick={guardarConfig} disabled={guardandoCfg}
           className="px-6 py-2.5 rounded-xl font-bold text-sm text-white disabled:opacity-60 hover:opacity-90" style={{ background: "#0b315f" }}>

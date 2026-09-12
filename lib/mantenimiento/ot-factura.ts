@@ -143,12 +143,26 @@ export async function borrarLinea(lineaId: number | string): Promise<Resultado> 
  * devuelve los insumos vacíos, y entonces `tarifaHoraMecanico` dice `sin_tarifa` en vez de
  * inventar un S/hora.
  */
+export type EstadoInsumos =
+  | "ok"
+  | "sin_vista"     // falta la migración: la vista no existe
+  | "sin_regimen";  // la vista existe pero la empresa no tiene régimen laboral configurado
+
 export async function cargarInsumosManoObra(): Promise<InsumosManoObra> {
+  return (await cargarInsumosManoObraConEstado()).insumos;
+}
+
+/**
+ * Lo mismo, diciendo POR QUÉ no hay insumos. Las dos causas se arreglan en sitios distintos —una
+ * es un SQL sin correr, la otra es la ficha laboral de la empresa— y una pantalla que las
+ * colapsara mandaría a la mitad de los casos al lugar equivocado.
+ */
+export async function cargarInsumosManoObraConEstado(): Promise<{ insumos: InsumosManoObra; estado: EstadoInsumos }> {
   const vacio: InsumosManoObra = { tarifa_hora: null, mecanico: null, regimen: null, horas_mes: null };
   const { data, error } = await supabase.from("v_taller_mano_obra").select("*").maybeSingle();
-  if (error || !data) return vacio;
+  if (error || !data) return { insumos: vacio, estado: "sin_vista" };
   const p: any = data;
-  return {
+  const insumos: InsumosManoObra = {
     tarifa_hora: p.tarifa_hora_mecanico != null ? Number(p.tarifa_hora_mecanico) : null,
     horas_mes: p.horas_mes != null ? Number(p.horas_mes) : null,
     mecanico: {
@@ -170,6 +184,7 @@ export async function cargarInsumosManoObra(): Promise<InsumosManoObra> {
       vacaciones_dias: Number(p.vacaciones_dias ?? 30),
     } : null,
   };
+  return { insumos, estado: insumos.regimen ? "ok" : "sin_regimen" };
 }
 
 export async function tarifaDeTaller(): Promise<TarifaHora> {
