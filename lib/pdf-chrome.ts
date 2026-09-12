@@ -73,7 +73,7 @@ export function buildVehsHtml(vehiculos: VehiculoPDF[], cp: string, opts?: { img
       : "";
     const sep = idx > 0 ? `<div style="height:1px;background:#e5e7eb;margin:10px 0 12px;"></div>` : "";
     // El MISMO rótulo que la pantalla y que la descripción del ítem: el cliente no puede leer
-    // «FULL EQUIPO» en el anexo de una cotización que se le vendió como Premium.
+    // un rótulo en el anexo distinto del nivel con el que se le vendió el servicio.
     const tipoEquip = etiquetaNivel(veh.equipamiento);
     const lbl = vehiculos.length > 1
       ? `<p style="font-size:10px;font-weight:900;color:${cp};margin:0 0 5px;">${esc((veh.categoria || "UNIDAD").toUpperCase())} ${tipoEquip}${veh.capacidad_pasajeros ? " DE " + veh.capacidad_pasajeros + " PASAJEROS" : ""}</p>`

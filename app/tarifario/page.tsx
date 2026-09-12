@@ -438,7 +438,7 @@ function FormTarifa({
       {/* Equipamiento */}
       <div className="grid grid-cols-2 gap-3">
         {[
-          { val: "full_equipo", label: `${NIVEL_CFG.premium.icono} ${NIVEL_CFG.premium.label}`,  sub: NIVEL_CFG.premium.sub,  color: "#0b315f", bg: "#eef3f8" },
+          { val: "full_equipo", label: `${NIVEL_CFG.full_equipo.icono} ${NIVEL_CFG.full_equipo.label}`,  sub: NIVEL_CFG.full_equipo.sub,  color: "#0b315f", bg: "#eef3f8" },
           { val: "basico",      label: `${NIVEL_CFG.estandar.icono} ${NIVEL_CFG.estandar.label}`, sub: NIVEL_CFG.estandar.sub, color: "#4b5563", bg: "#f3f4f6" },
         ].map(e => {
           const act = form.equipamiento === e.val;
@@ -882,7 +882,7 @@ export default function TarifarioPage() {
           {/* Equipamiento */}
           <div className="flex rounded-xl border overflow-hidden flex-shrink-0">
             {[
-              { val: "full_equipo", icon: NIVEL_CFG.premium.icono,  label: NIVEL_CFG.premium.label  },
+              { val: "full_equipo", icon: NIVEL_CFG.full_equipo.icono,  label: NIVEL_CFG.full_equipo.label  },
               { val: "basico",      icon: NIVEL_CFG.estandar.icono, label: NIVEL_CFG.estandar.label },
             ].map(e => (
               <button key={e.val} onClick={() => setEquip(e.val as Equip)}

@@ -209,7 +209,7 @@ console.log("\n4 · LOS SEIS RENGLONES: la evidencia sin la cual el resultado pa
 console.log("\n5 · EL CASO QUE LO MOTIVÓ: Sprinter 17, con los números que salieron en pantalla");
 
 {
-  // Premium y usada tal como quedaron tras costos-02. Seguros de laboratorio (el dump de
+  // Full equipo y usada tal como quedaron tras costos-02. Seguros de laboratorio (el dump de
   // producción no los traía), así que lo que se fija es el COMPORTAMIENTO, no el céntimo.
   const premium = ficha({ rendimiento_1: 28.61, mantenimiento_km: 0.85, valor_compra: 140000, residual_pct: 0.18, vida_util_anios: 10, km_anio: 60000 });
   const usada = ficha({ rendimiento_1: 25.75, mantenimiento_km: 1.36, valor_compra: 35000, residual_pct: 0.30, vida_util_anios: 5, km_anio: 60000, vida_neumatico_km: 58500, seguro_anual: 3000 });
@@ -234,7 +234,7 @@ console.log("\n6 · EL HISTORIAL: un equilibrio NO puede leerse como una medici�
 {
   const premium = ficha();
   const e = mantenimientoDeEquilibrio(premium, usadaDe(premium), PRECIOS);
-  const motivo = motivoEquilibrio(e, "Sprinter 17 pax Diésel · Premium");
+  const motivo = motivoEquilibrio(e, "Sprinter 17 pax Diésel · Full Equipo");
   chk("el motivo NO empieza por «Auto:»", !motivo.startsWith("Auto:"), motivo.slice(0, 40));
   chk("y dice que no es medido", /no medido|Valor de arranque/i.test(motivo));
 

@@ -879,7 +879,7 @@ export default function CotizadorPage(){
       (cR.data||[]).forEach((c:any)=>{pr[c.tipo]=Number(c.precio);});
       setFlota(f);setPrecios(pr);
       // El nivel sale de la ficha elegida, no de un default suelto: el orden de la consulta
-      // decide cuál cae primero y podría ser una `_ESTANDAR`, dejando el botón en Premium con
+      // decide cuál cae primero y podría ser una `_ESTANDAR`, dejando el botón en Full Equipo con
       // una unidad de más de diez años seleccionada — la contradicción que este arreglo mata.
       const bus=f.find((v:ParamCosto)=>v.grupo_vehiculo==="Buses")||f[0];
       if(bus){setIdxVeh(bus.tipo_vehiculo);setNivel(nivelDeFicha(bus.tipo_vehiculo));}
@@ -889,9 +889,9 @@ export default function CotizadorPage(){
   },[]);
 
   const [idxVeh,    setIdxVeh]    =useState("");
-  // El nivel de servicio (Premium / Estándar). Lo que se GUARDA sigue siendo `equipamiento`
+  // El nivel de servicio (Full Equipo / Estándar). Lo que se GUARDA sigue siendo `equipamiento`
   // (`full_equipo`/`basico`): ver la cabecera de lib/costos/nivel-servicio.ts.
-  const [nivel,     setNivel]     =useState<NivelServicio>("premium");
+  const [nivel,     setNivel]     =useState<NivelServicio>("full_equipo");
   const [avisoNivel,setAvisoNivel]=useState("");
   const [modo,      setModo]      =useState<"eventual"|"fijo">("eventual");
   const [tipoServEv,setTipoServEv]=useState("solo_ida");
@@ -1199,7 +1199,7 @@ export default function CotizadorPage(){
                 {modo==="eventual"?(
                   <div className="grid grid-cols-3 gap-3">
                     {/* LOS TRES CUADROS SON MÁRGENES, NO CLASES DE BUS. Se llamaban
-                        "Estándar" y "Premium", los mismos nombres que las fichas de la unidad,
+                        "Estándar" y "Premium", los mismos nombres que entonces llevaban las fichas de la unidad,
                         así que con un bus premium elegido la pantalla ofrecía además un "precio
                         estándar": dos ejes distintos con el mismo nombre. La unidad decide el
                         COSTO; el margen decide el PRECIO.

@@ -93,7 +93,7 @@ for (const par of pares) {
 
   console.log(`${par.clave}`);
   console.log(
-    `  S/km   premium ${n4(c.totalPremium)}   usada ${n4(c.totalUsada)}   ` +
+    `  S/km   full equipo ${n4(c.totalPremium)}   usada ${n4(c.totalUsada)}   ` +
     `Δ ${c.delta >= 0 ? "+" : ""}${n4(c.delta)}` +
     (c.deltaPct !== null ? ` (${c.deltaPct >= 0 ? "+" : ""}${(c.deltaPct * 100).toFixed(1)} %)` : "")
   );
@@ -166,8 +166,8 @@ if (problemas.length) {
 
 linea("DESPUÉS DE APLICARLO");
 console.log(
-  "Premium (<10 años) y Estándar (>10 años) van a costar lo MISMO por km, así que en el cotizador\n" +
-  "saldrán al mismo precio con el mismo margen. Que el Premium se venda más caro es una decisión\n" +
+  "Full Equipo (<10 años) y Estándar (>10 años) van a costar lo MISMO por km, así que en el cotizador\n" +
+  "saldrán al mismo precio con el mismo margen. Que el Full Equipo se venda más caro es una decisión\n" +
   "de margen, no de costo.\n" +
   "El número real lo trae la columna «Medido» de 🔧 Mantenimiento en /configuracion/costos:\n" +
   "  npx tsx scripts/diagnostico-mantenimiento-tipo.mts"

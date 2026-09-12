@@ -1,4 +1,4 @@
-// lib/costos/nivel-servicio.ts — PREMIUM y ESTÁNDAR: una sola palabra para el nivel de servicio,
+// lib/costos/nivel-servicio.ts — FULL EQUIPO y ESTÁNDAR: una sola palabra para el nivel de servicio,
 // sobre DOS columnas que siguen siendo distintas. Módulo PURO: no lee la base.
 //
 // ─────────────────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@
 //
 // `full_equipo`/`basico` son valores escritos en tres tablas, y en `tarifario` forman parte del
 // índice único `(origen,destino,tipo_vehiculo,equipamiento,tipo_servicio)`. Renombrarlos a
-// `premium`/`estandar` dejaría huérfana cada fila del tarifario — que es la lista de precios —,
+// otra cosa dejaría huérfana cada fila del tarifario — que es la lista de precios —,
 // o sea *escribir con una identidad y leer con otra*, el patrón que este repo ya pagó cuatro
 // veces. Es exactamente la lección de `costos-03`: ahí cambió el NOMBRE de la ficha y la clave
 // `_ESTANDAR` se quedó igual.
@@ -36,12 +36,23 @@
 // «(<10 años)» vive en el nombre de la ficha, donde es cierto por construcción.
 import { esUsado, clavePremiumDe, claveUsadaDe } from "./equilibrio-usado";
 
-export type NivelServicio = "premium" | "estandar";
+/**
+ * Los dos niveles, con el nombre COMERCIAL que usa AFA con sus clientes: «Full Equipo» y
+ * «Estándar». Nunca «Premium» — esa palabra no se usa al vender y tenerla en pantalla obligaba a
+ * traducirla mentalmente en cada cotización.
+ *
+ * OJO CON LA TRAMPA QUE DEJA ESTE NOMBRE: `full_equipo` coincide por casualidad con el valor
+ * guardado en la columna `equipamiento`, pero `estandar` NO — ahí el valor guardado es `basico`.
+ * Así que la conversión sigue siendo obligatoria y pasa siempre por `equipamientoDeNivel`; darla
+ * por identidad porque "se llaman igual" escribiría `"estandar"` dentro del índice único del
+ * tarifario y dejaría huérfana esa fila de precios.
+ */
+export type NivelServicio = "full_equipo" | "estandar";
 
 /** Los dos valores que de verdad están escritos en la base. No se renombran. */
 export type Equipamiento = "full_equipo" | "basico";
 
-export const NIVELES: NivelServicio[] = ["premium", "estandar"];
+export const NIVELES: NivelServicio[] = ["full_equipo", "estandar"];
 
 export const NIVEL_CFG: Record<NivelServicio, {
   /** Lo que se lee en pantalla. Una sola palabra para todo el ERP. */
@@ -54,20 +65,20 @@ export const NIVEL_CFG: Record<NivelServicio, {
   color: string;
   bg: string;
 }> = {
-  premium:  { label: "Premium",  icono: "⭐", sub: "AC · TV · USB · GPS",  equipamiento: "full_equipo", color: "#7c3aed", bg: "#f5f3ff" },
-  estandar: { label: "Estándar", icono: "📦", sub: "Cumple ley",           equipamiento: "basico",      color: "#4b5563", bg: "#f3f4f6" },
+  full_equipo: { label: "Full Equipo", icono: "⭐", sub: "AC · TV · USB · GPS", equipamiento: "full_equipo", color: "#7c3aed", bg: "#f5f3ff" },
+  estandar:    { label: "Estándar",    icono: "📦", sub: "Cumple ley",          equipamiento: "basico",      color: "#4b5563", bg: "#f3f4f6" },
 };
 
 /**
  * El nivel que declara una columna `equipamiento`.
  *
- * El respaldo es PREMIUM y no es una elección estética: `vehiculos.equipamiento` nació con
+ * El respaldo es FULL EQUIPO y no es una elección estética: `vehiculos.equipamiento` nació con
  * `default 'full_equipo'` y media flota tiene el valor implícito, así que tratar el null como
  * básico degradaría en pantalla a unidades que nadie marcó — y el nivel se imprime en el PDF
  * del cliente.
  */
 export function nivelDeEquipamiento(equip: string | null | undefined): NivelServicio {
-  return equip === "basico" ? "estandar" : "premium";
+  return equip === "basico" ? "estandar" : "full_equipo";
 }
 
 export function equipamientoDeNivel(nivel: NivelServicio): Equipamiento {
@@ -79,7 +90,7 @@ export function equipamientoDeNivel(nivel: NivelServicio): Equipamiento {
  * se re-deduce mirando el nombre, que es texto editable desde `ModalFichaTipo`.
  */
 export function nivelDeFicha(tipoVehiculo: string | null | undefined): NivelServicio {
-  return esUsado(tipoVehiculo) ? "estandar" : "premium";
+  return esUsado(tipoVehiculo) ? "estandar" : "full_equipo";
 }
 
 /**
@@ -127,7 +138,7 @@ export type PlanNivel = {
  * obligando a rebuscar la categoría; es lo que el operador quiere decir al pulsar el botón.
  *
  * Y las dos salidas que NO se pueden tomar cuando no hay gemela:
- *  · dejar la ficha del otro nivel puesta → la pantalla diría «Premium» y el costo saldría de una
+ *  · dejar la ficha del otro nivel puesta → la pantalla diría «Full Equipo» y el costo saldría de una
  *    ficha de más de diez años, en silencio. Es el bug de arriba por otra puerta.
  *  · soltarla sin decir nada → el operador ve el selector vacío y cree que la pantalla se rompió.
  * Se suelta y se NOMBRA qué categoría falta, que es lo único accionable (crearla, o elegir otra).
@@ -174,7 +185,7 @@ export type CotejoNivel = { codigo: CodigoCotejoNivel; detalle: string };
  * Hace falta porque la unidad de flota se puede elegir ANTES que el nivel: al revés, `selVeh` ya
  * escribe el nivel desde la placa y no hay contradicción posible. El daño es concreto y llega al
  * cliente: `lib/pdf-chrome.ts` imprime en el ANEXO 1 el nivel de la PLACA y su
- * `descripcion_unidad`, así que se vende «Premium» y el papel dice «cumple ley».
+ * `descripcion_unidad`, así que se vende «Full Equipo» y el papel dice «cumple ley».
  *
  * SIN DATO NO SE AFIRMA NADA, y ese caso es la mayoría: `vehiculos_tercero` **no tiene** columna
  * `equipamiento` —86 de las 89 unidades—, así que juzgar ahí sería inventar el nivel de casi

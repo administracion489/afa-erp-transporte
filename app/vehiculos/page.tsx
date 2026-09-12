@@ -71,7 +71,7 @@ const ICONO_CAT: Record<string, string> = { AUTO: "🚗", SUV: "🚙", VAN: "�
 // El NOMBRE sale de lib/costos/nivel-servicio.ts para que sea el mismo en /cotizador,
 // /cotizaciones, /tarifario y aquí. El VALOR de la columna (`full_equipo`/`basico`) no se toca.
 const EQUIP_CFG = {
-  full_equipo: { label: NIVEL_CFG.premium.label,  icon: NIVEL_CFG.premium.icono,  desc: "AC · TV · WiFi · reclinables · bodega · GPS", color: "#0b315f", bg: "#eef3f8" },
+  full_equipo: { label: NIVEL_CFG.full_equipo.label,  icon: NIVEL_CFG.full_equipo.icono,  desc: "AC · TV · WiFi · reclinables · bodega · GPS", color: "#0b315f", bg: "#eef3f8" },
   basico:      { label: NIVEL_CFG.estandar.label, icon: NIVEL_CFG.estandar.icono, desc: "Servicio estándar sin equipamiento premium",   color: "#4b5563", bg: "#f3f4f6" },
 };
 
@@ -508,7 +508,7 @@ export default function VehiculosPage() {
           { label: "Aptos",         valor: aptos,     color: "#166534", bg: "#dcfce7" },
           { label: "No aptos",      valor: noAptos,   color: "#991b1b", bg: "#fee2e2" },
           { label: "Disponibles",   valor: disponi,   color: "#1d4ed8", bg: "#dbeafe" },
-          { label: `${NIVEL_CFG.premium.icono} ${NIVEL_CFG.premium.label}`, valor: fullEquip, color: "#0b315f", bg: "#eef3f8" },
+          { label: `${NIVEL_CFG.full_equipo.icono} ${NIVEL_CFG.full_equipo.label}`, valor: fullEquip, color: "#0b315f", bg: "#eef3f8" },
           { label: "📦 Básico",     valor: basico,    color: "#4b5563", bg: "#f3f4f6" },
           { label: "Docs vencidos", valor: docVenc,   color: "#991b1b", bg: "#fee2e2" },
           { label: "Por vencer",    valor: docPorV,   color: "#854d0e", bg: "#fef9c3" },
@@ -793,7 +793,7 @@ export default function VehiculosPage() {
           </select>
           <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroEquip} onChange={e => setFiltroEquip(e.target.value)}>
             <option value="todos">Todo nivel</option>
-            <option value="full_equipo">{NIVEL_CFG.premium.icono} {NIVEL_CFG.premium.label}</option>
+            <option value="full_equipo">{NIVEL_CFG.full_equipo.icono} {NIVEL_CFG.full_equipo.label}</option>
             <option value="basico">{NIVEL_CFG.estandar.icono} {NIVEL_CFG.estandar.label}</option>
           </select>
           <select className="border rounded-xl px-4 py-2.5 text-sm" value={filtroEst} onChange={e => setFiltroEst(e.target.value)}>
@@ -960,7 +960,7 @@ export default function VehiculosPage() {
             </table>
           </div>
           <div className="px-4 py-3 text-xs text-gray-400 border-t flex justify-between" style={{ borderColor: "#f1f5f9" }}>
-            <span>{filtrados.length} de {total} vehículos · {fullEquip} {NIVEL_CFG.premium.label} · {basico} {NIVEL_CFG.estandar.label}</span>
+            <span>{filtrados.length} de {total} vehículos · {fullEquip} {NIVEL_CFG.full_equipo.label} · {basico} {NIVEL_CFG.estandar.label}</span>
             <span>AFA ERP · Flota</span>
           </div>
         </section>
