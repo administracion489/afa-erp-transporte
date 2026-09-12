@@ -42,13 +42,35 @@ async function traer(ruta: string): Promise<any[]> {
   return (await r.json()) as any[];
 }
 
+/**
+ * Los `numeric` de Postgres a número de verdad.
+ *
+ * NO ES PARANOIA: la fórmula del S/km suma sus seis renglones con `+`, y si uno solo llega como
+ * TEXTO ese `+` concatena en vez de sumar — "2.0000" convierte el total en una cadena y el SQL
+ * que este script imprime saldría con un mantenimiento inventado. Es un UPDATE sobre dinero:
+ * cuesta seis líneas asegurarlo y no hay forma de notarlo mirando el número, porque
+ * `"3.14" + "2.00"` no falla, miente.
+ */
+const NUMERICOS = [
+  "rendimiento_1", "pct_uso_1", "rendimiento_2", "pct_uso_2", "consumo_urea_pct",
+  "n_neumaticos", "costo_neumatico", "vida_neumatico_km", "mantenimiento_km",
+  "valor_compra", "residual_pct", "vida_util_anios", "km_anio",
+  "seguro_anual", "soat_anual", "revision_semestral", "permisos_anual", "otros_fijos_mensual",
+];
+function aNumeros<T extends Record<string, any>>(fila: T): T {
+  const out: any = { ...fila };
+  for (const k of NUMERICOS) if (out[k] !== null && out[k] !== undefined) out[k] = Number(out[k]);
+  return out as T;
+}
+
 const n2 = (n: number) => n.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const n4 = (n: number) => n.toLocaleString("es-PE", { minimumFractionDigits: 4, maximumFractionDigits: 4 });
 const linea = (t: string) => console.log(`\n${t}\n${"─".repeat(t.length)}`);
 /** Comillas simples duplicadas: el motivo lleva acentos y paréntesis, nunca comillas raras. */
 const sql = (s: string) => s.replace(/'/g, "''");
 
-const params = await traer("parametros_costos?select=*&activo=eq.true&order=grupo_vehiculo.asc,capacidad.asc");
+const params = (await traer("parametros_costos?select=*&activo=eq.true&order=grupo_vehiculo.asc,capacidad.asc"))
+  .map(aNumeros);
 const precios: Record<string, number> = {};
 for (const c of await traer("precios_combustible?select=tipo,precio")) precios[c.tipo] = Number(c.precio);
 
@@ -91,6 +113,23 @@ for (const par of pares) {
     `  mantenimiento  tecleado ${n2(e.actual)}  →  equilibrio ${n2(e.mantenimiento)} S/km   ` +
     `· está ${lado}`
   );
+
+  // SE COMPRUEBA CONTRA LA FÓRMULA, NO CONTRA LA CONFIANZA. Se mete el número en la ficha y se
+  // vuelve a calcular: si las dos no empatan, el SQL de esa fila NO se emite. La matriz ya fija
+  // esta invariante con fixtures; aquí se repite sobre los datos reales, porque lo que sale de
+  // este script es un UPDATE sobre dinero y un dato raro de producción (un parámetro en cero,
+  // un numeric que llegó como texto) es justo lo que las fixtures no pueden traer.
+  const verif = costoKmDeParametro({ ...(usada as any), mantenimiento_km: e.mantenimiento }, precios) - c.totalPremium;
+  if (!Number.isFinite(verif) || Math.abs(verif) >= 0.01) {
+    console.log(`  ⚠ NO se emite SQL para esta ficha: al aplicar el equilibrio sigue desviada ${n4(verif)} S/km.`);
+    problemas.push({
+      clave: usada.tipo_vehiculo, codigo: "verificacion_fallida",
+      detalle: `Aplicando ${n2(e.mantenimiento)} S/km la ficha queda ${n4(verif)} S/km de su gemela en vez de empatar. ` +
+        "Revisa los parámetros de las dos fichas antes de tocar nada: hay un número que la fórmula no está leyendo como número.",
+    });
+    continue;
+  }
+
   aplicables.push({ usada, premium, eq: e.mantenimiento, motivo: motivoEquilibrio(e, premium.nombre) });
 }
 
