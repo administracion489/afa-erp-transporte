@@ -238,8 +238,18 @@ export function conIgv(monto: number, igvPct = POLITICA_DEFECTO.igvPct): number 
 export type EscenariosPrecio = {
   sinIgv: { min: number; est: number; alto: number };
   conIgv: { min: number; est: number; alto: number };
-  /** Precio por asiento en el escenario estimado. Sirve para comparar contra la competencia. */
+  /** Precio por asiento en el escenario estimado, CON IGV. Sirve para comparar contra la competencia. */
   precioPax: number;
+  /**
+   * El mismo asiento SIN IGV.
+   *
+   * Existe porque el cotizador publica sus precios sin IGV (la base imponible es lo que se
+   * negocia; el IGV no es de AFA) y el por-pax tenía que seguirlos: dejarlo con IGV mientras
+   * el total de al lado va sin él pone dos bases distintas en la misma tarjeta, que es el
+   * error que nadie detecta mirando. Se deriva aquí y no en la pantalla por lo mismo que
+   * `precioPax`: una división que decide un precio no se escribe dos veces.
+   */
+  precioPaxSinIgv: number;
 };
 
 export function escenariosPrecio(
@@ -258,5 +268,10 @@ export function escenariosPrecio(
     est: conIgv(sin.est, igvPct),
     alto: conIgv(sin.alto, igvPct),
   };
-  return { sinIgv: sin, conIgv: con, precioPax: con.est / Math.max(capacidad || 1, 1) };
+  const asientos = Math.max(capacidad || 1, 1);
+  return {
+    sinIgv: sin, conIgv: con,
+    precioPax: con.est / asientos,
+    precioPaxSinIgv: sin.est / asientos,
+  };
 }
