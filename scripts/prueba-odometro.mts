@@ -23,7 +23,7 @@
 // lectura legítima (unidad nueva sin historial, salto grande tras una parada larga), y NADIE
 // adivina qué dígito sobra — de 239.980 salen tres borrados posibles dentro de la banda.
 
-import { elegirOdometro, digitosDe, revisarKmTecleado } from "../lib/odometro-seleccion";
+import { elegirOdometro, digitosDe, corregirDigitoRepetido, revisarKmTecleado } from "../lib/odometro-seleccion";
 import { evaluarLectura, RATIO_DIGITO_DE_MAS, PISO_RATIO_DIGITO } from "../lib/odometro";
 import { promptOdometro } from "../lib/vision-ia";
 import { promptExtraccionMedia, type ContextoPrompt } from "../lib/radar/prompts";
@@ -43,12 +43,16 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
 // ── 1. El caso CUP-435: 23.980 en el tablero, 239.980 en el JSON ─────────────
 {
   const v = leer({ kmIA: 239980, tripIA: 388, kmVigente: 23980 });
-  chk("CUP-435 · el dígito de más no se da por bueno", v.autoOk === false);
-  chk("CUP-435 · el defecto se NOMBRA con su código", v.codigo === "digito_de_mas", String(v.codigo));
+  chk("CUP-435 · el número inflado de la IA NUNCA es el que se registra", v.km !== 239980, `km=${v.km}`);
+  chk("CUP-435 · el defecto se NOMBRA con su código", v.codigo === "digito_repetido", String(v.codigo));
   chk("CUP-435 · el motivo dice las dos cantidades de dígitos",
     !!v.motivo && /6 d[ií]gitos/.test(v.motivo) && /tiene 5/.test(v.motivo), v.motivo ?? "");
-  chk("CUP-435 · NO se inventa el número corregido (tres borrados caben en la banda)",
-    v.km === 239980 && v.origen === "ia", `km=${v.km} origen=${v.origen}`);
+  // Aquí SÍ se propone un número, y es el de la foto — pero solo porque el dígito que sobraba
+  // estaba repetido (sección 7). Lo que sigue prohibido es recortar por donde cuadre: 23.990 y
+  // 23.998 también caben en la banda y no son la lectura.
+  chk("CUP-435 · se propone 23,980, que es lo que dice la foto", v.km === 23980, `km=${v.km}`);
+  chk("CUP-435 · y NO uno de los otros borrados que también caben", v.km !== 23990 && v.km !== 23998);
+  chk("CUP-435 · marcado para que lo confirme una persona", v.confirmar === true);
   // El parcial (388.0) tampoco puede colarse como total: está por debajo del vigente.
   chk("CUP-435 · el trip no se promueve a total", v.km !== 388);
 }
@@ -58,10 +62,11 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
   // `hayHistorial:false` no es solo "unidad nueva": es también la unidad cuyas lecturas van
   // TODAS a sospechosa. Por eso la segunda lectura mala entraba igual de lisa que la primera.
   const v = leer({ kmIA: 239980, tripIA: 388, kmVigente: 23980, hayHistorial: false });
-  chk("sin historial vivo · el dígito de más SIGUE sin darse por bueno", v.autoOk === false);
-  chk("sin historial vivo · y sigue nombrándose", v.codigo === "digito_de_mas", String(v.codigo));
+  chk("sin historial vivo · el número inflado SIGUE sin registrarse", v.km !== 239980, `km=${v.km}`);
+  chk("sin historial vivo · y sigue nombrándose", v.codigo === "digito_repetido", String(v.codigo));
 
   // La segunda lectura mala: mismo día siguiente, mismo error. Antes entraba idéntica.
+  // Sin cifras repetidas útiles no hay nada que proponer: bloqueo limpio, como debe ser.
   const v2 = leer({ kmIA: 240310, kmVigente: 23980, hayHistorial: false, horasDesdeUltima: null });
   chk("sin historial vivo · la SEGUNDA lectura inflada tampoco pasa", v2.autoOk === false, String(v2.codigo));
 }
@@ -101,10 +106,13 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
 }
 
 // ── 4. LA CONSISTENCIA QUE ESTABA ROTA: quien lee y quien escribe dicen lo mismo ──
-// El bug de fondo no era un umbral flojo, era que había DOS: elegirOdometro (que decide si el
+// El bug de fondo no era un umbral flojo, era que había DOS: elegirOdometro (que decide QUÉ
 // número se pre-llena en la pantalla) no aplicaba el guard de orden de magnitud que
-// evaluarLectura (que decide si se guarda) aplica desde siempre. Un número no puede ser bueno
-// para la pantalla y "posible dígito de más" para la base.
+// evaluarLectura (que decide si se guarda) aplica desde siempre.
+//
+// El invariante se fija sobre el número que el lector DEVUELVE (`veredicto.km`), que es el que
+// de verdad se registra — no sobre el que la IA propuso. Es la corrección de un error de la
+// prueba anterior: comparaba el veredicto del número corregido contra el juicio del crudo.
 {
   const vigentes = [6000, 23980, 174000, 568287];
   const factores = [1.01, 1.2, 2, 5, 7.9, 8, 10, 100];
@@ -117,16 +125,17 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
           kmIA: km, tripIA: null, textoLeido: null, kmVigente: vig,
           kmDiaMax: 1500, horasDesdeUltima: null, hayHistorial,
         });
-        const escritor = evaluarLectura({ kmVigente: vig, kmNuevo: km, kmDiaMax: 1500, horasDesdeUltima: null });
+        const registrado = lector.km ?? km;
+        const escritor = evaluarLectura({ kmVigente: vig, kmNuevo: registrado, kmDiaMax: 1500, horasDesdeUltima: null });
         const escritorAcusaDigito = /d[ií]gito de m[aá]s/i.test(escritor.motivo ?? "");
         if (lector.autoOk && escritorAcusaDigito) {
           choques++;
-          console.log(`      choque: vigente ${vig} · lectura ${km} · historial=${hayHistorial} → "${escritor.motivo}"`);
+          console.log(`      choque: vigente ${vig} · IA ${km} · registra ${registrado} · historial=${hayHistorial} → "${escritor.motivo}"`);
         }
       }
     }
   }
-  chk("ningún número es bueno para la pantalla y 'dígito de más' para la base", choques === 0, `${choques} choque(s)`);
+  chk("lo que el lector deja registrar nunca es 'dígito de más' para la base", choques === 0, `${choques} choque(s)`);
 }
 {
   // Y el ratio se lee del mismo sitio en los dos módulos (una constante, no dos literales).
@@ -225,8 +234,82 @@ const leer = (e: Partial<Parameters<typeof elegirOdometro>[0]> & { kmIA: number 
   chk("Radar · la unidad sin guía NI dígitos no ocupa una línea vacía", !conFlota.includes("SIN-DAT"));
   chk("Radar · también manda contar las cifras", /CUENTA LAS CIFRAS/.test(conFlota));
 
+  // Sin unidades que declarar no se pinta el bloque POR UNIDAD (la regla general de contar las
+  // cifras vive en CASO_ODOMETRO y sí va siempre: no afirma nada de ninguna placa).
   const sinFlota = promptExtraccionMedia({ ...base, guiasOdometro: [] });
-  chk("Radar · sin unidades que declarar, no se inventa el bloque", !/CUENTA LAS CIFRAS/.test(sinFlota));
+  chk("Radar · sin unidades que declarar, no se inventa el bloque",
+    !sinFlota.includes("Cómo se lee el odómetro de cada unidad"));
+}
+
+// ── 7. EL DÍGITO QUE SOBRA ESTÁ DUPLICADO, y eso sí se puede deshacer ───────
+// Los cuatro casos reales de la flota (capturas del 06/09 y del 11/09). El modelo no inserta
+// una cifra cualquiera: REPITE una que ya estaba. Colapsar esa repetición da UN solo valor
+// dentro de la banda, mientras que borrar un dígito cualquiera da 3, 3, 0 y 4 — que es por lo
+// que lo segundo no se hace y lo primero sí.
+{
+  const casos = [
+    { placa: "CUP-435", ia: 239980,  ant: 23980,  horas: 24, espera: 23980,  foto: 23980 },  // verificado contra la foto
+    { placa: "CUP-435", ia: 233379,  ant: 23272,  horas: 15, espera: 23379,  foto: null  },
+    { placa: "B4N-968", ia: 5600473, ant: 559997, horas: 24, espera: 560473, foto: null  },
+    { placa: "CUP-435", ia: 2320206, ant: 23206,  horas: 24, espera: null,   foto: 23206 },  // sin cifras repetidas
+  ];
+  for (const c of casos) {
+    const v = leer({ kmIA: c.ia, kmVigente: c.ant, horasDesdeUltima: c.horas });
+    if (c.espera == null) {
+      chk(`${c.placa} · ${c.ia.toLocaleString("es-PE")} no tiene cifras repetidas → NO se toca`,
+        v.origen === "ia" && v.codigo === "digito_de_mas" && v.km === c.ia, `codigo=${v.codigo} km=${v.km}`);
+      continue;
+    }
+    chk(`${c.placa} · ${c.ia.toLocaleString("es-PE")} → ${c.espera.toLocaleString("es-PE")} colapsando la repetición`,
+      v.km === c.espera && v.origen === "corregido" && v.codigo === "digito_repetido", `km=${v.km} codigo=${v.codigo}`);
+    chk(`${c.placa} · …y se marca para que lo CONFIRME una persona`, v.confirmar === true);
+    if (c.foto != null) {
+      chk(`${c.placa} · …y coincide con lo que dice la foto (${c.foto.toLocaleString("es-PE")})`, v.km === c.foto);
+    }
+  }
+}
+{
+  // La condición dura: con DOS colapsos posibles dentro de la banda no se elige ninguno.
+  // 1123 → "11" da 123 y "22" no existe; se fabrica un caso con dos corridas que ambas caben.
+  const dos = corregirDigitoRepetido(115500, 11500, 15600); // "11"→15500, "55"→11500, "00"→11550
+  chk("con varios colapsos posibles dentro de la banda, no se elige ninguno", dos === null, String(dos));
+  // Y un colapso que se sale de la banda tampoco cuenta como candidato.
+  chk("un colapso fuera de la banda no vale", corregirDigitoRepetido(239980, 23956, 25480) === 23980);
+  chk("sin cifras repetidas no hay candidato", corregirDigitoRepetido(2320206, 23183, 24706) === null);
+}
+{
+  // El lado que NO se puede aflojar: una lectura legítima no puede convertirse en "corregida"
+  // solo porque tenga dos cifras iguales seguidas. Si el número de la IA cabe en la banda,
+  // manda tal cual — el colapso vive DESPUÉS de descartarlo por imposible.
+  const legitimo = leer({ kmIA: 23990, kmVigente: 23980 });
+  chk("un km legítimo CON cifras repetidas se acepta tal cual",
+    legitimo.km === 23990 && legitimo.origen === "ia" && legitimo.codigo === null, `km=${legitimo.km}`);
+  // Y sin ancla no se deduce nada (regla 2 del módulo).
+  chk("sin km vigente no se colapsa nada", leer({ kmIA: 239980, kmVigente: 0 }).origen === "ia");
+}
+
+// ── 8. Y un número DEDUCIDO no se acepta solo ───────────────────────────────
+// El Radar graba sin nadie mirando la foto. `forzarRevision` es lo que hace que la lectura
+// exista en la bandeja (con su foto y el número ya corregido) sin mover el km vigente.
+{
+  const conRevision = evaluarLectura({ kmVigente: 23980, kmNuevo: 23980 + 60, horasDesdeUltima: 24 });
+  chk("el caso base de esa lectura sería 'aceptada'", conRevision.estado === "aceptada", conRevision.estado);
+  // La bajada a sospechosa la hace registrarLectura (toca BD); aquí se fija el contrato que usa:
+  // un veredicto con confirmar=true es el que la dispara.
+  const v = leer({ kmIA: 239980, kmVigente: 23980 });
+  chk("el veredicto del dígito repetido es el que pide revisión", v.confirmar === true && v.origen === "corregido");
+  const parcial = leer({ kmIA: 1803, tripIA: 174159, kmVigente: 174000 });
+  chk("el rescate del trip NO pide revisión (ese número sí lo transcribió el modelo)",
+    parcial.origen === "corregido" && !parcial.confirmar, `confirmar=${parcial.confirmar}`);
+}
+
+// ── 9. El prompt nombra el patrón real, no uno genérico ─────────────────────
+{
+  const p = promptOdometro({ digitos: 5, placa: "CUP-435" });
+  chk("el prompt prohíbe REPETIR un dígito", /NO REPITAS UN D[IÍ]GITO/.test(p));
+  chk("…con los casos medidos de esta flota", p.includes("23980→239980") && p.includes("560473→5600473"));
+  const radar = promptExtraccionMedia({ fechaHoy: "2026-09-11", horaAhora: "00:15" });
+  chk("Radar · también lo prohíbe", /NO REPITAS NINGUNA/.test(radar));
 }
 
 console.log(fallos ? `\n${fallos} prueba(s) fallaron` : "\nTodo en verde");

@@ -1668,6 +1668,10 @@ async function accionOdometro({ sb, mensaje, datos, confianza, config }: ArgsAcc
       // la IA (auditoría sin columnas nuevas). ref_origen sigue siendo "radar_ia" para no
       // sacar la lectura del panel de /radar-ia, que filtra por ese valor exacto.
       motivo: kmCorregido ? `Corregido por el sistema: ${veredicto.motivo}` : null,
+      // Aquí no hay nadie mirando la foto. Un número que el ERP DEDUJO (el dígito repetido) se
+      // guarda para revisarlo, no se da por bueno: a diferencia del parcial/trip —que el modelo
+      // sí transcribió del tablero— esta cifra no la escribió nadie.
+      forzarRevision: veredicto.confirmar === true,
     });
     if (res.ok && res.estado === "aceptada") {
       // Registrada, pero hay dos casos que igual conviene que un humano revise: la PRIMERA
