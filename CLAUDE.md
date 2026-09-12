@@ -362,6 +362,16 @@ La fórmula estaba escrita **cinco veces**, con tres umbrales y dos criterios de
 - **Pendiente conocido, sin mezclar decisiones**: con vida útil de 10 años, el `residual_pct = 0.30` describe una unidad de 22 años valiendo el 30 % de lo que se pagó a los 12. Si resulta alto, bajarlo sube la depreciación ~0.03 S/km en un bus; es un ajuste de celda.
 - **El script del equilibrio es el termómetro de esta decisión**: después de `costos-04` las Estándar quedan POR DEBAJO del equilibrio, y tanto él como el modal lo dicen con esas palabras. La afirmación que hace el ERP es medible en cualquier momento.
 
+### El precio que se DECIDE es sin IGV; el que se GUARDA es con IGV
+
+`app/cotizador/page.tsx` + `precioPaxSinIgv` en `lib/costeo-propio.ts`. Los tres cuadros de margen imprimían el importe **con IGV** en grande y el sin IGV en una línea gris de 11 px, y el comparativo de flota entero (Total 20 % · S/pax · Mín 15 % · Mes ×26) iba con IGV sin decirlo en ninguna cabecera. Está invertido: **grande el sin IGV, con IGV debajo en pequeño**, y la tabla entera en sin IGV con `s/IGV` en cada cabecera.
+
+- **El IGV no es de AFA**: se cobra, se retiene un rato y se le entrega a SUNAT. Lo que se negocia, lo que sostiene el margen (`costo/(1−margen)` se calcula **antes** del IGV) y lo único comparable contra un competidor —que cotiza sin IGV— es la base imponible. Con el número bruto arriba, ese 18 % se lee como precio propio y toda comparación sale 18 % desviada.
+- **LOS DOS SIGUEN A LA VISTA.** No se escondió el con IGV: es el que el cliente paga y el que va en la factura. Lo que cambió es cuál se lee primero.
+- **El bloque «→ Enviar a Cotizaciones» SIGUE en con IGV, y sus etiquetas lo dicen** (`Total c/IGV`, `Precio/día c/IGV`). No es una incoherencia: es el importe que se **escribe** en `cotizaciones.precio_cliente` / `precio_dia`, que en todo el ERP es con IGV. Enseñar ahí el sin IGV para que "cuadre" con los cuadros de arriba haría que el número visible y el guardado fueran distintos, que es el error caro de esta pantalla — leer dos bases rotuladas no lo es.
+- **El por-pax se DERIVA en el motor, no en la pantalla** (`precioPaxSinIgv`, aditivo — `prueba-costeo.mts` compara `precioPax` sin tocar y sigue en verde al sexto decimal). Dejarlo con IGV mientras el total de al lado va sin él pone dos bases en la misma tarjeta, que es lo que nadie detecta mirando. De paso muere el `precioPax20/1.18` hardcodeado de `app/cotizaciones/page.tsx`, que era una tercera definición del mismo asiento.
+- **El Δ del comparativo se calcula sobre `sinIGV20` en las dos puntas**: una diferencia entre dos números que la tabla ya no enseña no se puede verificar contra ella.
+
 ### La FICHA del tipo se edita; la CLAVE no (`lib/costos/ficha-tipo.ts`)
 
 `lib/costos/ficha-tipo.ts` (motor PURO) + `ModalFichaTipo.tsx` + la primera columna de `/configuracion/costos → Flota / Vehículos`. Matriz: `npx tsx scripts/prueba-ficha-tipo.mts`.

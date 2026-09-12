@@ -60,7 +60,7 @@ function calcCostoVeh(p:ParamCosto,pr:Record<string,number>,km:number,dias:numbe
   const total=(sub+sub*RESERVA)+p.conductor_dia*dias+peajes;
   const base=total+total*OVERHEAD+pernocte+viaticos;
   const pF=(m:number)=>base/(1-m);const fF=(m:number)=>pF(m)*(1+IGV);
-  return{baseCosto:base,totalMin15:fF(0.15),totalEst20:fF(0.20),totalAlto25:fF(0.25),sinIGV15:pF(0.15),sinIGV20:pF(0.20),sinIGV25:pF(0.25),precioPax20:fF(0.20)/(p.capacidad||1),diaEstIGV:fF(0.20),diaMinIGV:fF(0.15),mesEstIGV:fF(0.20)*26};
+  return{baseCosto:base,totalMin15:fF(0.15),totalEst20:fF(0.20),totalAlto25:fF(0.25),sinIGV15:pF(0.15),sinIGV20:pF(0.20),sinIGV25:pF(0.25),precioPax20:fF(0.20)/(p.capacidad||1),precioPax20Sin:pF(0.20)/(p.capacidad||1),diaEstIGV:fF(0.20),diaMinIGV:fF(0.15),mesEstIGV:fF(0.20)*26};
 }
 
 function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peajes,pernocte,viaticos,modoServ,tarifas,paramsDB,preciosDB,onAplicar}:{origen:string;destino:string;tipoVehId:string;tipoServ:string;equip:string;km:number;dias:number;peajes:number;pernocte:number;viaticos:number;modoServ:ModoServ;tarifas:Tarifa[];paramsDB:ParamCosto[];preciosDB:Record<string,number>;onAplicar:(sinIGV:number,fuente:string,costo?:number)=>void;}){
@@ -106,7 +106,7 @@ function SugerenciaEnVivo({origen,destino,tipoVehId,tipoServ,equip,km,dias,peaje
             <p className="text-[9px] font-black text-blue-300 uppercase mb-1">🔧 Estándar 20%</p>
             {km>0&&costo?(<>
               <p className="font-black text-lg text-white font-mono">{fmtS(dispEst)}</p>
-              <p className="text-[9px] text-blue-300/70">{esFijo?`~${fmtS(dispEst*26)}/mes`:`${fmtS(costo.precioPax20/1.18)}/pax`}</p>
+              <p className="text-[9px] text-blue-300/70">{esFijo?`~${fmtS(dispEst*26)}/mes`:`${fmtS(costo.precioPax20Sin)}/pax`}</p>
               <button onClick={()=>onAplicar(dispEst,"cotizador",costo.baseCosto)} className="mt-2 w-full py-1 rounded-lg text-[10px] font-black text-white bg-blue-500 hover:bg-blue-400">✓ Usar estándar</button>
             </>):<p className="text-white/25 text-xs mt-1">Ingresa km</p>}
           </div>

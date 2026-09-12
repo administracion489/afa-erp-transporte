@@ -29,9 +29,11 @@ type Resultado = {
   costoDirectos:number; costoDirectoTotal:number; overhead:number;
   baseCosto:number; costoKm:number;
   totalMin15:number; totalEst20:number; totalAlto25:number;
-  sinIGV15:number; sinIGV20:number; sinIGV25:number; precioPax20:number;
+  sinIGV15:number; sinIGV20:number; sinIGV25:number;
+  /** Por asiento, en las DOS bases. La pantalla publica la de sin IGV; ver `escenariosPrecio`. */
+  precioPax20:number; precioPax20Sin:number;
   diaEst:number; diaEstIGV:number; diaMinIGV:number; diaAltoIGV:number;
-  mesEstIGV:number;
+  mesEst:number; mesEstIGV:number;
 };
 
 type PlaceResult = { address:string; lat:number; lng:number; placeId:string; };
@@ -80,10 +82,10 @@ function calcular(p:ParamCosto, pr:Record<string,number>, km:number, dias:number
     overhead:c.overhead, baseCosto:c.baseCosto, costoKm:c.costoKm,
     totalMin15:e.conIgv.min, totalEst20:e.conIgv.est, totalAlto25:e.conIgv.alto,
     sinIGV15:e.sinIgv.min,  sinIGV20:e.sinIgv.est,  sinIGV25:e.sinIgv.alto,
-    precioPax20:e.precioPax,
+    precioPax20:e.precioPax, precioPax20Sin:e.precioPaxSinIgv,
     diaEst:e.sinIgv.est, diaEstIGV:e.conIgv.est,
     diaMinIGV:e.conIgv.min, diaAltoIGV:e.conIgv.alto,
-    mesEstIGV:e.conIgv.est * MESES_DIAS,
+    mesEst:e.sinIgv.est * MESES_DIAS, mesEstIGV:e.conIgv.est * MESES_DIAS,
   };
 }
 
@@ -1162,28 +1164,52 @@ export default function CotizadorPage(){
                         "Estándar" y "Premium", los mismos nombres que las fichas de la unidad,
                         así que con un bus premium elegido la pantalla ofrecía además un "precio
                         estándar": dos ejes distintos con el mismo nombre. La unidad decide el
-                        COSTO; el margen decide el PRECIO. */}
+                        COSTO; el margen decide el PRECIO.
+
+                        EL NÚMERO GRANDE ES SIN IGV, y el con IGV va debajo en pequeño. Lo que se
+                        negocia con el cliente y lo que sostiene el margen es la BASE IMPONIBLE:
+                        el IGV no es de AFA, se recauda y se entrega. Con el número grande en
+                        bruto, el 18 % se lee como parte del precio propio y cada comparación
+                        contra la competencia —que cotiza sin IGV— sale 18 % desviada. Los dos
+                        siguen a la vista: el de arriba para decidir, el de abajo para la
+                        factura. */}
                     {[{label:"⛔ Margen mínimo (15%)",val:resultado.totalMin15,sinIgv:resultado.sinIGV15,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Margen objetivo (20%)",val:resultado.totalEst20,sinIgv:resultado.sinIGV20,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Margen alto (25%)",val:resultado.totalAlto25,sinIgv:resultado.sinIGV25,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
                       <div key={k.label} className="rounded-2xl p-4 border-2" style={{background:k.bg,borderColor:k.border}}>
                         <p className="text-[10px] font-bold uppercase text-gray-400">{k.label}</p>
-                        <p className="font-black text-xl mt-1" style={{color:k.color}}>{fmt(k.val)}</p>
-                        <p className="text-[11px] text-gray-400 mt-1">Sin IGV: {fmt(k.sinIgv)}</p>
-                        {k.label.includes("20%")&&<p className="text-[10px] text-green-600 font-bold mt-0.5">S/ {fmtN(resultado.precioPax20,0)}/pax</p>}
+                        <p className="font-black text-xl mt-1 leading-tight" style={{color:k.color}}>
+                          {fmt(k.sinIgv)} <span className="text-[10px] font-bold text-gray-400 uppercase align-middle">sin IGV</span>
+                        </p>
+                        <p className="text-[11px] text-gray-400 mt-1">Con IGV: {fmt(k.val)}</p>
+                        {k.label.includes("20%")&&<p className="text-[10px] text-green-600 font-bold mt-0.5">S/ {fmtN(resultado.precioPax20Sin,0)}/pax</p>}
                       </div>
                     ))}
                   </div>
                 ):(
                   <div className="space-y-3">
                     <div className="grid grid-cols-3 gap-3">
-                      {[{label:"⛔ Día · margen mín. (15%)",val:resultado.diaMinIGV,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Día · margen objetivo (20%)",val:resultado.diaEstIGV,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Día · margen alto (25%)",val:resultado.diaAltoIGV,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
+                      {/* Misma inversión que en eventual: grande sin IGV, con IGV debajo. El modo
+                          fijo no tenía siquiera la línea sin IGV, así que el precio/día del
+                          contrato solo se podía comparar contra el de un competidor dividiendo
+                          entre 1.18 a mano. */}
+                      {[{label:"⛔ Día · margen mín. (15%)",val:resultado.diaMinIGV,sinIgv:resultado.sinIGV15,color:"#ef4444",bg:"#fef2f2",border:"#fecaca"},{label:"✅ Día · margen objetivo (20%)",val:resultado.diaEstIGV,sinIgv:resultado.sinIGV20,color:"#16a34a",bg:"#f0fdf4",border:"#86efac"},{label:"⭐ Día · margen alto (25%)",val:resultado.diaAltoIGV,sinIgv:resultado.sinIGV25,color:"#6d28d9",bg:"#faf5ff",border:"#d8b4fe"}].map(k=>(
                         <div key={k.label} className="rounded-2xl p-4 border-2" style={{background:k.bg,borderColor:k.border}}>
                           <p className="text-[10px] font-bold uppercase text-gray-400">{k.label}</p>
-                          <p className="font-black text-xl mt-1" style={{color:k.color}}>{fmt(k.val)}</p>
+                          <p className="font-black text-xl mt-1 leading-tight" style={{color:k.color}}>
+                            {fmt(k.sinIgv)} <span className="text-[10px] font-bold text-gray-400 uppercase align-middle">sin IGV</span>
+                          </p>
+                          <p className="text-[11px] text-gray-400 mt-1">Con IGV: {fmt(k.val)}</p>
                         </div>
                       ))}
                     </div>
                     <div className="rounded-2xl border-2 border-green-300 bg-green-50 p-5 flex items-center justify-between">
-                      <div><p className="text-[11px] font-bold text-green-600 uppercase">Estimado mensual (20% · ×26 días)</p><p className="font-black text-3xl text-green-700 mt-1">{fmt(resultado.mesEstIGV)}</p><p className="text-xs text-green-600 mt-1">{fmt(resultado.diaEstIGV)}/día × 26 = {fmt(resultado.mesEstIGV)}/mes</p></div>
+                      <div>
+                        <p className="text-[11px] font-bold text-green-600 uppercase">Estimado mensual (20% · ×26 días)</p>
+                        <p className="font-black text-3xl text-green-700 mt-1 leading-tight">
+                          {fmt(resultado.mesEst)} <span className="text-[11px] font-bold text-green-600/70 uppercase align-middle">sin IGV</span>
+                        </p>
+                        <p className="text-xs text-green-600 mt-1">{fmt(resultado.diaEst)}/día × 26 = {fmt(resultado.mesEst)}/mes</p>
+                        <p className="text-xs text-green-600/70 mt-0.5">Con IGV: {fmt(resultado.mesEstIGV)}/mes ({fmt(resultado.diaEstIGV)}/día)</p>
+                      </div>
                       <div className="text-4xl">📅</div>
                     </div>
                   </div>
@@ -1227,9 +1253,15 @@ export default function CotizadorPage(){
                   ):(
                     <div className="p-5">
                       <h3 className="font-black text-white text-base mb-1">→ Enviar a Cotizaciones</h3>
-                      <p className="text-white/60 text-xs mb-4">{modo==="fijo"?`FIJO · ${fmt(resultado.diaEstIGV)}/día · mes ${fmt(resultado.mesEstIGV)}`:`EVENTUAL · total ${fmt(resultado.totalEst20)}`} · {kmRuta} km</p>
+                      {/* ESTE BLOQUE SIGUE EN CON IGV, y sus etiquetas lo DICEN. Es lo único de la
+                          pantalla que no es una referencia para negociar: es el importe que se va
+                          a GUARDAR en la cotización (`precio_cliente`, `precio_dia`), y ese campo
+                          es con IGV en todo el ERP. Enseñar aquí el sin IGV para que "cuadre" con
+                          los cuadros de arriba haría que el número visible y el guardado fueran
+                          distintos — el error caro de esta pantalla, no el de leer dos bases. */}
+                      <p className="text-white/60 text-xs mb-4">{modo==="fijo"?`FIJO · ${fmt(resultado.diaEstIGV)}/día · mes ${fmt(resultado.mesEstIGV)} · c/IGV`:`EVENTUAL · total ${fmt(resultado.totalEst20)} c/IGV`} · {kmRuta} km</p>
                       <div className="grid grid-cols-3 gap-3 mb-4">
-                        {(modo==="eventual"?[{label:"Costo base",val:fmt(resultado.baseCosto),color:"#fca5a5"},{label:"Sin IGV",val:fmt(resultado.sinIGV20),color:"#fcd34d"},{label:"Total final",val:fmt(resultado.totalEst20),color:"#6ee7b7"}]:[{label:"Precio/día",val:fmt(resultado.diaEstIGV),color:"#6ee7b7"},{label:"Mes est.",val:fmt(resultado.mesEstIGV),color:"#a78bfa"},{label:"Costo/día",val:fmt(resultado.baseCosto),color:"#fca5a5"}]).map(k=>(
+                        {(modo==="eventual"?[{label:"Costo base",val:fmt(resultado.baseCosto),color:"#fca5a5"},{label:"Sin IGV",val:fmt(resultado.sinIGV20),color:"#fcd34d"},{label:"Total c/IGV",val:fmt(resultado.totalEst20),color:"#6ee7b7"}]:[{label:"Precio/día c/IGV",val:fmt(resultado.diaEstIGV),color:"#6ee7b7"},{label:"Mes est. c/IGV",val:fmt(resultado.mesEstIGV),color:"#a78bfa"},{label:"Costo/día",val:fmt(resultado.baseCosto),color:"#fca5a5"}]).map(k=>(
                           <div key={k.label} className="bg-white/10 rounded-xl p-3 text-center"><p className="text-white/50 text-[10px] font-bold uppercase">{k.label}</p><p className="font-black text-sm mt-0.5" style={{color:k.color}}>{k.val}</p></div>
                         ))}
                       </div>
@@ -1244,28 +1276,30 @@ export default function CotizadorPage(){
                 {/* Comparativo */}
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                   <div className="px-5 py-4 border-b">
-                    <h2 className="font-black text-[#0b315f] text-sm">Comparativo flota · {kmRuta} km · margen 20%</h2>
+                    <h2 className="font-black text-[#0b315f] text-sm">Comparativo flota · {kmRuta} km · margen 20% · <span className="text-gray-400">sin IGV</span></h2>
                     {/* La usada va PEGADA a su gemela, no suelta en la lista ordenada por
                         capacidad: con las dos separadas por cinco filas, que una cueste más que
                         la otra se lee como un error de la pantalla en vez de como lo que es. */}
-                    <p className="text-[11px] text-gray-400 mt-0.5">Cada categoría Estándar va debajo de su Premium, con la diferencia de precio entre las dos.</p>
+                    <p className="text-[11px] text-gray-400 mt-0.5">Cada categoría Estándar va debajo de su Premium, con la diferencia de precio entre las dos. Todos los importes de esta tabla van SIN IGV, igual que los tres cuadros de arriba.</p>
                   </div>
                   {Object.entries(grupos).map(([grupo,vehs])=>{
                     const gc=GRUPO_CFG[grupo]||GRUPO_CFG.Otros;
                     return(<div key={grupo}><div className="px-4 py-2 text-[10px] font-black uppercase tracking-wider border-b" style={{background:gc.color+"15",color:gc.color}}>{grupo}</div>
-                    <table className="w-full text-sm"><thead><tr className="bg-gray-50 border-b">{["Vehículo","Cap.",modo==="eventual"?"Total (20%)":"Día (20%)",modo==="eventual"?"S/pax":"Mes ×26","Mín 15%","UREA"].map(h=><th key={h} className="px-3 py-2 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">{h}</th>)}</tr></thead>
+                    <table className="w-full text-sm"><thead><tr className="bg-gray-50 border-b">{["Vehículo","Cap.",modo==="eventual"?"Total (20%) s/IGV":"Día (20%) s/IGV",modo==="eventual"?"S/pax s/IGV":"Mes ×26 s/IGV","Mín 15% s/IGV","UREA"].map(h=><th key={h} className="px-3 py-2 text-left text-[10px] font-black text-gray-400 uppercase whitespace-nowrap">{h}</th>)}</tr></thead>
                     <tbody className="divide-y divide-gray-50">
                       {emparejarFlota(vehs).flatMap(par=>{
                         // El precio de la gemela nueva, para poder restar. Si la premium no
                         // calcula (falta un parámetro), la usada se pinta igual SIN Δ: inventar
                         // una diferencia contra un número que no existe es peor que no darla.
                         const base=comparativo.find(c=>c.v.tipo_vehiculo===par.premium.tipo_vehiculo)?.r;
-                        const baseVal=base?(modo==="eventual"?base.totalEst20:base.diaEstIGV):null;
+                        // Sin IGV en las dos puntas: el Δ es la diferencia entre lo que se
+                        // publica arriba, no entre dos números que la tabla ya no enseña.
+                        const baseVal=base?base.sinIGV20:null;
                         const filas=[par.premium,...(par.usada?[par.usada]:[])];
                         return filas.map((v,i)=>{
                           const item=comparativo.find(c=>c.v.tipo_vehiculo===v.tipo_vehiculo);
                           if(!item?.r)return null;const r=item.r;const act=v.tipo_vehiculo===idxVeh;
-                          const val=modo==="eventual"?r.totalEst20:r.diaEstIGV;
+                          const val=r.sinIGV20;   // eventual → total del evento; fijo → precio/día. Los dos, sin IGV.
                           const esGemela=i===1;
                           const delta=esGemela&&baseVal!==null?val-baseVal:null;
                           return(<tr key={v.tipo_vehiculo} onClick={()=>setIdxVeh(v.tipo_vehiculo)} className={`cursor-pointer transition-colors ${act?"bg-blue-50 border-l-2 border-l-[#0b315f]":"hover:bg-gray-50"}`}>
@@ -1284,8 +1318,8 @@ export default function CotizadorPage(){
                                 <span className="ml-1.5 text-[9px] font-bold text-gray-400">{delta>0?"+":""}{fmtN(delta,0)}</span>
                               )}
                             </td>
-                            <td className="px-3 py-2.5 text-xs font-bold text-gray-500 font-mono">{modo==="eventual"?`S/ ${fmtN(r.precioPax20,0)}`:fmt(r.mesEstIGV)}</td>
-                            <td className="px-3 py-2.5 text-xs text-amber-600 font-mono">{fmt(modo==="eventual"?r.totalMin15:r.diaMinIGV)}</td>
+                            <td className="px-3 py-2.5 text-xs font-bold text-gray-500 font-mono">{modo==="eventual"?`S/ ${fmtN(r.precioPax20Sin,0)}`:fmt(r.mesEst)}</td>
+                            <td className="px-3 py-2.5 text-xs text-amber-600 font-mono">{fmt(r.sinIGV15)}</td>
                             <td className="px-3 py-2.5 text-center">{v.usa_urea?<span className="text-[10px] text-cyan-600 font-bold">🧪</span>:<span className="text-gray-200 text-xs">—</span>}</td>
                           </tr>);
                         });
