@@ -818,19 +818,21 @@ tbody tr:nth-child(even){background:#f8fafc}
                 <div>
                   <p className="text-sm font-bold text-gray-800">Mano de obra del taller</p>
                   <p className="text-[11px] text-gray-500">
-                    Solo hace falta si alguna orden de trabajo lleva horas de un mecánico <b>propio</b>.
-                    Lo que se paga a un taller tercero se teclea como importe en su línea y no usa nada de esto.
-                    Esa hora no se cuenta como gasto nuevo —la planilla ya la pagó— pero sí entra al costo por
-                    kilómetro de la unidad.
+                    Es el <b>respaldo</b>: la tarifa que se usa cuando la línea de una orden no dice quién hizo
+                    el trabajo. Lo normal es elegir a la persona en la propia orden, y entonces su hora sale de
+                    su <b>costo empresa real</b> — para eso se le pone el sueldo en <b>Personal Adm.</b> Esa hora
+                    no se cuenta como gasto nuevo —la planilla ya la pagó— pero sí entra al costo por kilómetro
+                    de la unidad.
                   </p>
                 </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="md:col-span-1">
-                  <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Mecánico</label>
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Mecánico (respaldo)</label>
                   <input className={inputCls("bg-white")} placeholder="Nombre del mecánico"
                     value={cfg.mecanico_nombre} onChange={e => setCfg(c => ({ ...c, mecanico_nombre: e.target.value }))} />
+                  <p className="text-[10px] text-gray-400 mt-1">Con dos o más, cada uno va en Personal Adm. con su sueldo.</p>
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Sueldo básico mensual S/</label>

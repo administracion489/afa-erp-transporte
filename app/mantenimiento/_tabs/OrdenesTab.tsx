@@ -6,12 +6,12 @@ import { abrirImprimible } from "@/lib/documentos-servicio";
 import { empresaConDefectos, type PerfilEmpresa } from "@/lib/empresa-perfil";
 import { cotejarFacturaConOT, type ItemCosto } from "@/lib/mantenimiento/costo-ot";
 import {
-  repartoDeOT, facturasDeOT, valorizarManoObraPropia,
-  TIPOS_LINEA, ORIGENES_LINEA, type TipoLinea, type OrigenLinea, type TarifaHora,
+  repartoDeOT, facturasDeOT, valorizarManoObraPropia, tarifaHoraDe, personasValorizables, modoDePersona,
+  TIPOS_LINEA, ORIGENES_LINEA, type TipoLinea, type OrigenLinea, type TarifaHora, type PersonaTaller,
 } from "@/lib/mantenimiento/lineas-costo";
 import {
   guardarCostoItem, guardarCostoOT, sincronizarLibro, registrarFacturaTaller, urlFactura,
-  cargarLineas, guardarLinea, borrarLinea, tarifaDeTaller, type LineaGuardada,
+  cargarLineas, guardarLinea, borrarLinea, tarifaDeTaller, cargarPersonalTaller, type LineaGuardada,
 } from "@/lib/mantenimiento/ot-factura";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
@@ -208,6 +208,9 @@ export default function OrdenesTab() {
   // pantalla se comporta exactamente como antes (un costo plano, todo desembolso).
   const [lineas,       setLineas]       = useState<LineaGuardada[]>([]);
   const [tarifaTaller, setTarifaTaller] = useState<TarifaHora | null>(null);
+  /** El equipo interno que puede valorizar una hora. Con `mantenimiento-07` sin correr llega
+   *  vacío y la línea cae a la tarifa única del taller, que es el comportamiento anterior. */
+  const [personal, setPersonal] = useState<PersonaTaller[]>([]);
   const [lineaEditada, setLineaEditada] = useState<{ otId: number; id?: number | string } | null>(null);
   /** Quién emite la orden impresa. NUNCA un literal: este ERP se vende, y la OT de un comprador
    *  no puede salir con el nombre —ni con la autorización de transporte— de otra empresa. */
@@ -255,9 +258,10 @@ export default function OrdenesTab() {
 
     // Las líneas cuelgan de las órdenes ya cargadas: sin ellas no hay a qué preguntarle.
     const ids = ((otRes.data as OrdenTrabajo[] | null) ?? []).map(o => o.id);
-    const [ls, tf] = await Promise.all([cargarLineas(ids), tarifaDeTaller()]);
+    const [ls, tf, pers] = await Promise.all([cargarLineas(ids), tarifaDeTaller(), cargarPersonalTaller()]);
     setLineas(ls);
     setTarifaTaller(tf);
+    setPersonal(pers);
     setLoading(false);
   };
 
@@ -1167,6 +1171,10 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                                   <span className="text-xs font-medium text-gray-800 flex-1 min-w-[140px]">
                                     {l.concepto || cfg?.label}
                                     {l.horas ? <span className="text-gray-400"> · {l.horas} h × {fmtSoles(l.tarifa_hora ?? 0)}</span> : null}
+                                    {(() => {
+                                      const q = personal.find(x => x.id === l.personal_administrativo_id);
+                                      return q ? <span className="text-gray-400"> · {q.nombre}</span> : null;
+                                    })()}
                                   </span>
                                   <span className="text-[10px] font-bold px-2 py-0.5 rounded-lg"
                                     style={propia ? { background: "#dbeafe", color: "#1e40af" } : { background: "#f3f4f6", color: "#4b5563" }}>
@@ -1190,6 +1198,7 @@ ${filasGrupo || '<p style="color:#94a3b8;text-align:center">Sin ítems en el che
                             {lineaEditada?.otId === ot.id && (
                               <FormLinea
                                 tarifa={tarifaTaller}
+                                personal={personal}
                                 talleres={talleres}
                                 inicial={lineaEditada.id ? lsOT.find(l => l.id === lineaEditada.id) ?? null : null}
                                 onCancelar={() => setLineaEditada(null)}
@@ -1601,14 +1610,15 @@ function ModalFacturaTaller({ ot, talleres, placa, total, linea, items, onCerrar
 // horas de cada orden y termina moviendo el precio de venta de una categoría entera.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function FormLinea({ inicial, tarifa, talleres, onGuardar, onCancelar }: {
+function FormLinea({ inicial, tarifa, personal, talleres, onGuardar, onCancelar }: {
   inicial: LineaGuardada | null;
   tarifa: TarifaHora | null;
+  personal: PersonaTaller[];
   talleres: Proveedor[];
   onGuardar: (datos: {
     concepto: string; tipo: TipoLinea; origen: OrigenLinea; monto: number;
     horas?: number | null; tarifa_hora?: number | null; tarifa_fuente?: string | null;
-    proveedor_id?: number | null;
+    proveedor_id?: number | null; personal_administrativo_id?: number | null;
   }) => void;
   onCancelar: () => void;
 }) {
@@ -1618,15 +1628,28 @@ function FormLinea({ inicial, tarifa, talleres, onGuardar, onCancelar }: {
   const [monto, setMonto]     = useState(inicial ? String(inicial.monto) : "");
   const [horas, setHoras]     = useState(inicial?.horas != null ? String(inicial.horas) : "");
   const [proveedorId, setProveedorId] = useState(inicial?.proveedor_id ? String(inicial.proveedor_id) : "");
+  const [personaId, setPersonaId] = useState(inicial?.personal_administrativo_id ? String(inicial.personal_administrativo_id) : "");
 
   // Mano de obra de casa: el monto es DERIVADO y el campo va en solo lectura, por lo mismo que
   // el total de la orden cuando hay ítems con costo — dos números para el mismo dinero no.
   const esPropia = origen === "propio" && tipo === "mano_obra";
-  // Se valoriza con la tarifa YA resuelta (la cascada corrió en el cargador, una sola vez): así
-  // la pantalla no vuelve a decidir cuál de los dos métodos manda.
+
+  // QUIÉN HIZO EL TRABAJO DECIDE CUÁNTO CUESTA LA HORA. Con dos personas, valorizar las de una
+  // con la tarifa de la otra costea el S/km de la categoría según a quién le tocó la orden.
+  const elegibles = personasValorizables(personal);
+  const persona = elegibles.find(p => String(p.id) === personaId) ?? null;
+
+  // La cascada la resuelve el MISMO motor que el resto del módulo: con persona, su costo
+  // empresa; sin persona, la tarifa del taller ya resuelta en el cargador.
+  const tarifaLinea: TarifaHora | null = esPropia
+    ? (persona
+        ? tarifaHoraDe(persona, { tarifa_hora: null, mecanico: null, regimen: null, horas_mes: null })
+        : tarifa)
+    : null;
+
   const val = esPropia
     ? valorizarManoObraPropia(Number(horas) || 0,
-        { tarifa_hora: tarifa?.falta ? null : (tarifa?.tarifa ?? null), mecanico: null, regimen: null, horas_mes: null })
+        { tarifa_hora: tarifaLinea?.falta ? null : (tarifaLinea?.tarifa ?? null), mecanico: null, regimen: null, horas_mes: null })
     : null;
   const montoFinal = esPropia ? (val?.monto ?? 0) : Number(monto) || 0;
 
@@ -1659,6 +1682,17 @@ function FormLinea({ inicial, tarifa, talleres, onGuardar, onCancelar }: {
       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
         {esPropia && (
           <div>
+            <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">Quién hizo el trabajo</label>
+            <select className={inputCls("text-xs")} value={personaId} onChange={e => setPersonaId(e.target.value)}>
+              <option value="">— Tarifa del taller —</option>
+              {elegibles.map(p => (
+                <option key={p.id} value={p.id}>{p.nombre}{p.cargo ? ` · ${p.cargo}` : ""}</option>
+              ))}
+            </select>
+          </div>
+        )}
+        {esPropia && (
+          <div>
             <label className="block text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">Horas</label>
             <input type="number" step="0.5" className={inputCls("text-xs font-mono")} value={horas}
               onChange={e => setHoras(e.target.value)} placeholder="6" />
@@ -1685,11 +1719,18 @@ function FormLinea({ inicial, tarifa, talleres, onGuardar, onCancelar }: {
       </div>
 
       {esPropia && (
-        tarifa?.falta
-          ? <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">⚠ {tarifa.falta}</p>
+        tarifaLinea?.falta
+          ? <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">⚠ {tarifaLinea.falta}</p>
           : <p className="text-[11px] text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-1.5">
-              S/ {(tarifa?.tarifa ?? 0).toFixed(2)} por hora · {tarifa?.base}
+              S/ {(tarifaLinea?.tarifa ?? 0).toFixed(2)} por hora · {tarifaLinea?.base}
             </p>
+      )}
+      {esPropia && !elegibles.length && (
+        <p className="text-[11px] text-gray-500">
+          Nadie del equipo interno tiene sueldo configurado, así que se usa la tarifa del taller para todos.
+          Para que cada persona se valorice con lo que de verdad cuesta su hora, ponle su sueldo en
+          <b> Personal Adm.</b>
+        </p>
       )}
 
       <div className="flex justify-end gap-2">
@@ -1698,9 +1739,10 @@ function FormLinea({ inicial, tarifa, talleres, onGuardar, onCancelar }: {
           onClick={() => onGuardar({
             concepto, tipo, origen, monto: montoFinal,
             horas: esPropia ? Number(horas) || 0 : null,
-            tarifa_hora: esPropia ? (tarifa?.tarifa ?? null) : null,
-            tarifa_fuente: esPropia ? (tarifa?.fuente ?? null) : null,
+            tarifa_hora: esPropia ? (tarifaLinea?.tarifa ?? null) : null,
+            tarifa_fuente: esPropia ? (tarifaLinea?.fuente ?? null) : null,
             proveedor_id: origen === "comprado" && proveedorId ? Number(proveedorId) : null,
+            personal_administrativo_id: esPropia && persona ? persona.id : null,
           })}
           className="px-3 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-50 hover:opacity-90" style={{ background: "#0b315f" }}>
           {inicial ? "Guardar línea" : "Agregar línea"}

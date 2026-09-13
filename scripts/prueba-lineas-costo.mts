@@ -8,13 +8,15 @@
 //   2 · Sin líneas, el reparto es BYTE A BYTE el de antes (aditivo: omitirlas no cambia nada).
 //   3 · Una línea anclada a un ítem lo SUSTITUYE; un ítem sin línea NO se pierde.
 //   4 · La hora de casa se valoriza por cascada, con su fuente declarada — y sin datos, nada.
+//   4b· Con dos personas, cada hora cuesta lo suyo — y quien va por recibo NO se imputa.
 //   5 · Con dos facturas, NINGUNA representa a la orden en el libro.
 import { createRequire } from "node:module";
 const requerir = createRequire(import.meta.url);
 const M = requerir("../lib/mantenimiento/lineas-costo") as typeof import("../lib/mantenimiento/lineas-costo");
 const C = requerir("../lib/mantenimiento/costo-ot") as typeof import("../lib/mantenimiento/costo-ot");
 
-const { repartoDeOT, valorizarManoObraPropia, tarifaHoraMecanico, facturasDeOT, HORAS_MES_DEFECTO } = M;
+const { repartoDeOT, valorizarManoObraPropia, tarifaHoraMecanico, facturasDeOT, HORAS_MES_DEFECTO,
+        tarifaHoraDe, modoDePersona, personasValorizables } = M;
 const { totalDeOT } = C;
 
 type Linea = import("../lib/mantenimiento/lineas-costo").LineaCosto;
@@ -176,6 +178,59 @@ ok(v.monto === Math.round(6 * t2.tarifa * 100) / 100 && v.horas === 6,
    "valorizar son horas × tarifa, al céntimo, y se guardan LOS DOS factores", `S/ ${v.monto}`);
 ok(valorizarManoObraPropia(6, nada).monto === 0,
    "sin tarifa, el monto es 0 y la línea queda sin valorizar — nunca un número inventado");
+
+// ── 4b · CADA PERSONA CUESTA LO SUYO ─────────────────────────────────────────
+
+linea("4b · CON DOS PERSONAS, CADA HORA SE VALORIZA CON SU PROPIO COSTO");
+
+type Persona = import("../lib/mantenimiento/lineas-costo").PersonaTaller;
+const P = (p: Partial<Persona> & { id: number; nombre: string }): Persona => ({
+  tipo_contrato: "planilla", sueldo_basico: 1800, honorario_dia: null, tiene_asignacion: false,
+  horas_mes: null, rmv: 1130, asignacion_familiar_pct: 0.10, sctr_mensual: 20, regimen: REGIMEN, ...p,
+});
+
+const CARO  = P({ id: 1, nombre: "Mecánico jefe", sueldo_basico: 2800 });
+const JUNIOR= P({ id: 2, nombre: "Ayudante",      sueldo_basico: 1300 });
+
+const tCaro = tarifaHoraDe(CARO, nada);
+const tJr   = tarifaHoraDe(JUNIOR, nada);
+ok(tCaro.fuente === "costo_empresa" && tJr.fuente === "costo_empresa",
+   "las dos salen de su costo empresa, no de una tarifa común");
+ok(tCaro.tarifa > tJr.tarifa,
+   "…y el que gana más cuesta más la hora", `S/ ${tCaro.tarifa.toFixed(2)} vs S/ ${tJr.tarifa.toFixed(2)}`);
+ok(/Mecánico jefe/.test(tCaro.base), "…y la base NOMBRA a quién se está costeando");
+
+// El divisor propio: media jornada NO abarata la hora a la mitad.
+const MEDIO = P({ id: 3, nombre: "Medio tiempo", sueldo_basico: 1800, horas_mes: 104 });
+ok(Math.abs(tarifaHoraDe(MEDIO, nada).tarifa - tarifaHoraDe(P({ id: 4, nombre: "x" }), nada).tarifa * 2) < 1e-9,
+   "las horas del mes son de la PERSONA: media jornada cuesta el doble la hora");
+
+// SOLO PLANILLA IMPUTA.
+const PORRECIBO = P({ id: 5, nombre: "Tercero", tipo_contrato: "honorarios", sueldo_basico: null, honorario_dia: 150 });
+ok(modoDePersona(PORRECIBO) === "se_paga", "quien va por recibo NO imputa: se le paga");
+const tRecibo = tarifaHoraDe(PORRECIBO, { ...soloTarifa });
+ok(tRecibo.fuente === "sin_tarifa" && /Comprado/.test(tRecibo.falta ?? ""),
+   "…y se manda a registrar la línea como COMPRADO, no como hora propia", tRecibo.falta?.slice(0, 70) + "…");
+ok(tRecibo.tarifa === 0,
+   "…aunque haya una tarifa de taller configurada: contarla como propia la dejaría fuera de v_egresos");
+
+// CON PERSONA ELEGIDA Y SIN SU SUELDO NO SE CAE A LA TARIFA DE OTRO.
+const SINSUELDO = P({ id: 6, nombre: "Nuevo", sueldo_basico: null });
+const tSin = tarifaHoraDe(SINSUELDO, soloTarifa);
+ok(tSin.fuente === "sin_tarifa" && /Nuevo/.test(tSin.falta ?? ""),
+   "sin su sueldo NO se usa la tarifa del taller: se nombra a quién le falta el dato");
+
+// Sin persona elegida, el comportamiento anterior intacto.
+ok(tarifaHoraDe(null, soloTarifa).tarifa === 25,
+   "sin persona elegida manda la configuración del taller — el comportamiento de antes");
+
+// Solo se ofrece a quien se puede costear.
+{
+  const todos = [CARO, JUNIOR, PORRECIBO, SINSUELDO];
+  const util = personasValorizables(todos).map(p => p.nombre);
+  ok(util.length === 3 && !util.includes("Nuevo"),
+     "el selector lista solo a quien el ERP sabe costear", util.join(" · "));
+}
 
 // ── 5 · LAS FACTURAS ─────────────────────────────────────────────────────────
 
