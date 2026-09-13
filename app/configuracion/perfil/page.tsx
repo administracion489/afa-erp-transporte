@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "@/lib/supabase";
+import { empresaConDefectos } from "@/lib/empresa-perfil";
 
 type EmpresaPerfil = {
   id: number;
@@ -538,6 +539,31 @@ export default function PerfilEmpresaPage() {
       >
         {/* ── Columna izquierda ── */}
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+          {/* LO QUE FALTA PARA LOS DOCUMENTOS.
+              Desde que los valores de respaldo dejaron de ser los de una empresa concreta
+              (ver lib/empresa-perfil.ts), un campo vacío ya no se rellena solo: el documento
+              omite esa línea. Eso es lo correcto —mejor sin dato que con el de otro— pero hay
+              que DECIRLO aquí, que es donde se arregla. Un dato que desaparece del papel sin
+              avisar se descubre cuando el cliente pregunta. */}
+          {(() => {
+            const faltan = empresaConDefectos(perfil).faltan;
+            if (!faltan.length) return null;
+            return (
+              <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 16, padding: "14px 18px" }}>
+                <p style={{ fontSize: 13, fontWeight: 800, color: "#92400e", margin: 0 }}>
+                  ⚠ Faltan {faltan.length} dato(s) que salen impresos
+                </p>
+                <p style={{ fontSize: 12, color: "#92400e", margin: "6px 0 0", lineHeight: 1.5 }}>
+                  {faltan.join(" · ")}
+                </p>
+                <p style={{ fontSize: 11, color: "#a16207", margin: "8px 0 0", lineHeight: 1.5 }}>
+                  Tus cotizaciones, liquidaciones y órdenes de trabajo se imprimen <b>sin esa línea</b>.
+                  No se rellena con el dato de otra empresa a propósito.
+                </p>
+              </div>
+            );
+          })()}
 
           {/* Información principal */}
           <Seccion titulo="Información Principal">

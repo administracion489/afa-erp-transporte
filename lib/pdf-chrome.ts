@@ -41,20 +41,38 @@ export function buildHeaderPDFHtml(logoUrl: string, cp: string, titulo: string, 
 }
 
 /**
- * El membrete va CENTRADO en la banda. Sin `justify-content` el flex arranca a la izquierda y
- * los cuatro datos se apilaban contra el margen con la mitad derecha de la banda en azul vacío;
- * centrado, el pie queda simétrico como la banda que lo pinta. El `wrap` sigue puesto: cuando el
- * domicilio es largo el membrete pasa a dos líneas, y cada una se centra por su cuenta.
+ * El pie del documento OMITE lo que no tiene dato, en vez de imprimir su rótulo vacío.
+ *
+ * Antes los cuatro campos iban siempre, así que un perfil a medio llenar imprimía
+ * `⌂ Dir.: | ✆ | ✉ | ☏` — cuatro iconos y tres barras sin nada al lado, que se lee como un
+ * documento roto. Y era el caso NORMAL: `empresa_perfil` nace vacía, y desde que los valores
+ * de respaldo dejaron de ser los de una empresa concreta (ver `lib/empresa-perfil.ts`), un
+ * campo sin llenar llega aquí como cadena vacía a propósito.
+ *
+ * Callar el rótulo es lo mismo que hace la autorización del regulador: sin dato no se inventa
+ * nada, tampoco el hueco donde iría.
+ *
+ * Y lo que queda va CENTRADO en la banda. Sin `justify-content` el flex arranca a la izquierda
+ * y los datos se apilaban contra el margen con la mitad derecha de la banda en azul vacío;
+ * centrado, el pie queda simétrico como la banda que lo pinta — y con la omisión de arriba eso
+ * pasa a ser lo que sostiene el pie de un perfil a medio llenar: dos datos alineados a la
+ * izquierda dejan tres cuartos de banda vacíos, y eso sí se lee como un documento roto. El
+ * `wrap` sigue puesto: con un domicilio largo el membrete pasa a dos líneas y cada una se
+ * centra por su cuenta.
  */
 export function buildFooterPDFHtml(cp: string, empDir: string, empTel: string, empEmail: string, empWeb: string): string {
+  const partes = [
+    { icono: "&#8962;", texto: empDir ? `Dir.: ${empDir}` : "" },
+    { icono: "&#9990;", texto: empTel },
+    { icono: "&#9993;", texto: empEmail },
+    { icono: "&#9741;", texto: empWeb },
+  ].filter(p => String(p.texto ?? "").trim());
+
+  if (!partes.length) return `<div class="pdf-footer" style="background:${cp};padding:9px 20px;"></div>`;
+
+  const sep = `<span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>`;
   return `<div class="pdf-footer" style="background:${cp};padding:9px 20px;display:flex;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap;">
-    <span style="color:white;font-size:8.5px;">&#8962; Dir.: ${empDir}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9990; ${empTel}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9993; ${empEmail}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9741; ${empWeb}</span>
+    ${partes.map(p => `<span style="color:white;font-size:8.5px;">${p.icono} ${p.texto}</span>`).join(sep)}
   </div>`;
 }
 
