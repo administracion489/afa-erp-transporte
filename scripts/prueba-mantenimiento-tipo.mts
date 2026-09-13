@@ -42,7 +42,8 @@ const CKM = requerir("../lib/costos/costo-km-parametro") as typeof import("../li
 const {
   serieMantenimiento, agregarMantenimientoTipo, agregarMantenimientoPorTipo,
   cotejarAntiguedadTipo, procedenciaMantDeHistorial, motivoHistorialMant,
-  etiquetaMant, pareceNeumatico, PASO_MANTENIMIENTO, MIN_TRAMOS_MANT, CAMPO_DESCARTE_MANT,
+  etiquetaMant, pareceNeumatico, estimarPorPlan,
+  PASO_MANTENIMIENTO, MIN_TRAMOS_MANT, CAMPO_DESCARTE_MANT,
 } = MANT;
 const { costoKmDeParametro } = CKM;
 
@@ -220,9 +221,23 @@ const casos: { nombre: string; placas: PlacaMantenimiento[]; param?: typeof BUS5
   { nombre: "solo unidades de tercero",
     placas: [placa([], { flota: "tercero", otsTotales: 0 })], espera: "solo_terceros" },
   { nombre: "propia sin órdenes", placas: [placa([])], espera: "sin_mantenimiento" },
+  // Estos tres NO declaran intervalo de plan, así que el estimado no se dispara y el código sigue
+  // siendo el motivo seco: es la forma de fijar que sin intervalo el comportamiento es el de antes.
   { nombre: "órdenes sin kilometraje",
     placas: [placa([ot({ km: null, costo: 900 }), ot({ km: 0, costo: 800, fecha: "2026-02-10" })])],
     espera: "sin_kilometraje" },
+  { nombre: "una sola orden con kilometraje",
+    placas: [placa([ot({ km: 120000, costo: 900 })])],
+    espera: "una_sola_orden" },
+  { nombre: "kilometrajes que no encadenan",
+    placas: [placa([
+      ot({ fecha: "2026-01-10", km: 120000, costo: 900 }),
+      ot({ fecha: "2026-02-10", km: 110000, costo: 800 }),
+    ])],
+    espera: "kilometraje_incoherente" },
+  { nombre: "una sola orden PREVENTIVA, con el intervalo del plan declarado",
+    placas: [placa([ot({ km: 120000, costo: 900 })], { intervaloPlanKm: 5000 })],
+    espera: "estimado_por_plan" },
   { nombre: "pocos tramos", placas: [placa(cadena(3))], espera: "pocos_registros" },
   { nombre: "medido", placas: [placa(cadena(7))], espera: "medido" },
   { nombre: "ya coincide",
@@ -276,6 +291,114 @@ for (const c of casos) {
   const procViejo = { ...proc, descartado: medido + PASO_MANTENIMIENTO * 3 };
   chk("si la medición se mueve, vuelve a proponerse",
     agregarMantenimientoTipo(BUS50, [p], procViejo).codigo === "medido");
+}
+
+// ══ 3b · EL CASO REPORTADO: "TENGO 1 OT CON KM Y ME DICE QUE NO TIENE KM" ════
+console.log("\n3b · UNA SOLA ORDEN: un rojo que decía tres cosas, y el intervalo del plan");
+
+{
+  // EL DEFECTO, tal como se vio en /configuracion/costos → 🔧 Mantenimiento. Una unidad con UNA
+  // orden con kilometraje recibía el texto de `sin_kilometraje` — el ERP mandando a rellenar en
+  // el Historial un odómetro que ya estaba puesto.
+  const a = agregarMantenimientoTipo(BUS50, [placa([ot({ km: 120000, costo: 900 })])]);
+  chk("una orden CON kilometraje ya no dice «sin kilometraje»", a.codigo !== "sin_kilometraje", a.codigo);
+  chk("dice que falta la SEGUNDA orden", a.codigo === "una_sola_orden");
+  chk("y no manda a corregir nada", !/se completa en/i.test(a.detalle) && /no falta ningún dato/i.test(a.detalle));
+
+  // Y el caso opuesto sigue diciendo lo suyo: ahí el odómetro sí falta.
+  const sinKm = agregarMantenimientoTipo(BUS50, [placa([ot({ km: null, costo: 900 })])]);
+  chk("sin ningún odómetro SÍ manda al Historial",
+    sinKm.codigo === "sin_kilometraje" && /Historial/.test(sinKm.detalle));
+
+  // El tercero: hay dos lecturas y una es falsa. No falta un dato, sobra un número mal.
+  const incoh = agregarMantenimientoTipo(BUS50, [placa([
+    ot({ fecha: "2026-01-10", km: 120000, costo: 900 }),
+    ot({ fecha: "2026-02-10", km: 110000, costo: 800 }),
+  ])]);
+  chk("dos odómetros que no encadenan tienen su propio código",
+    incoh.codigo === "kilometraje_incoherente" && /número equivocado/i.test(incoh.detalle));
+
+  // Los tres motivos llegan a la placa observada, no solo al tipo: el modal los lista por unidad.
+  chk("el motivo viaja también en la placa observada",
+    agregarMantenimientoTipo(BUS50, [placa([ot({ km: 120000, costo: 900 })])])
+      .observadas[0].motivo === "una_sola_orden");
+}
+
+{
+  // EL INTERVALO DEL PLAN convierte ese "no se puede medir nada" en un número. Servicio cada
+  // 5 000 km a S/ 900 → 0.18 S/km del servicio programado.
+  const p = placa([ot({ km: 120000, costo: 900 })], { intervaloPlanKm: 5000 });
+  const a = agregarMantenimientoTipo(BUS50, [p]);
+  chk("con el intervalo declarado, hay número", a.plan !== null && cerca(a.plan.soleskm, 0.18), `${a.plan?.soleskm}`);
+  chk("el código lo declara", a.codigo === "estimado_por_plan");
+  chk("y SIGUE nombrando por qué no hay medición", /segunda orden|cierra la orden siguiente|UNA orden/i.test(a.detalle));
+
+  // LO QUE NO SE PUEDE AFLOJAR NUNCA: este número no se propone. Mide el servicio programado, no
+  // todo el mantenimiento; aplicarlo recortaría el renglón de taller de toda la categoría.
+  chk("NO es proponible", !a.proponible);
+  chk("y NO ocupa `medido`: el chip lo publicaría como «gastado de verdad»", a.medido === null);
+  chk("el detalle dice que mide otra cosa", /OTRA COSA|solo el servicio programado/i.test(a.detalle));
+
+  // Un correctivo no tiene periodicidad: dividirlo entre el intervalo le inventaría una.
+  const soloCorrectivo = placa([ot({ km: 120000, costo: 900, tipo: "correctivo" })], { intervaloPlanKm: 5000 });
+  chk("un correctivo NO se proyecta sobre el intervalo",
+    agregarMantenimientoTipo(BUS50, [soloCorrectivo]).plan === null);
+
+  // Una OT abierta por el plan nace en S/ 0.00: contarla partiría el promedio por la mitad.
+  const conCero = placa([ot({ km: 120000, costo: 900 }), ot({ fecha: "2026-03-10", km: null, costo: 0 })],
+    { intervaloPlanKm: 5000 });
+  chk("la orden preventiva en S/ 0.00 no entra al promedio",
+    cerca(agregarMantenimientoTipo(BUS50, [conCero]).plan?.soleskm ?? null, 0.18));
+
+  // Una orden preventiva SIN odómetro sí entra: ahí está la gracia del estimado.
+  const sinOdometro = placa([ot({ km: null, costo: 900 })], { intervaloPlanKm: 5000 });
+  chk("una preventiva sin odómetro también se proyecta",
+    agregarMantenimientoTipo(BUS50, [sinOdometro]).plan !== null);
+
+  // Las anuladas y las futuras quedan fuera por donde ya quedaban: la serie.
+  const conRuido = placa([
+    ot({ km: 120000, costo: 900 }),
+    ot({ fecha: "2026-03-10", km: null, costo: 5000, estado: "cancelado" }),
+    ot({ fecha: "2026-12-01", km: null, costo: 8000, estado: "pendiente" }),
+  ], { intervaloPlanKm: 5000 });
+  chk("la anulada y la futura no inflan el estimado",
+    cerca(agregarMantenimientoTipo(BUS50, [conRuido]).plan?.soleskm ?? null, 0.18));
+}
+
+{
+  // SIN INTERVALO, EL COMPORTAMIENTO ES EL DE ANTES, byte a byte. `intervaloPlanKm` es opcional
+  // y omitirla no puede cambiar ningún veredicto ya existente.
+  for (const ots of [cadena(7), cadena(3), [ot({ km: null, costo: 900 })], []]) {
+    const conCampo = agregarMantenimientoTipo(BUS50, [placa(ots, { intervaloPlanKm: null })]);
+    const sinCampo = agregarMantenimientoTipo(BUS50, [placa(ots)]);
+    chk(`omitir el intervalo no cambia nada (${ots.length} OT)`,
+      conCampo.codigo === sinCampo.codigo && conCampo.medido === sinCampo.medido && conCampo.plan === null);
+  }
+
+  // Con medición de verdad, el estimado por plan se PUBLICA pero no toca el código: el medido
+  // mide lo que hay que medir y manda.
+  const conAmbos = agregarMantenimientoTipo(BUS50, [placa(cadena(7), { intervaloPlanKm: 5000 })]);
+  chk("con tramos medidos, el medido sigue mandando", conAmbos.codigo === "medido" && conAmbos.proponible);
+  chk("y el estimado por plan se publica igual, como evidencia", conAmbos.plan !== null);
+}
+
+{
+  // Agrupa Σ soles ÷ Σ km, nunca promediando tasas: la unidad con seis servicios registrados no
+  // puede pesar lo mismo que la que tiene uno.
+  const muchos = placa(Array.from({ length: 6 }, (_, i) =>
+    ot({ fecha: `2026-0${i + 1}-10`, km: null, costo: 600 })), { intervaloPlanKm: 5000 });
+  const uno = placa([ot({ km: null, costo: 3000 })], { intervaloPlanKm: 5000 });
+  const e = estimarPorPlan([muchos, uno]);
+  const promedioDeTasas = (600 / 5000 + 3000 / 5000) / 2;
+  chk("con dos placas se agrupa, no se promedia",
+    e !== null && !cerca(e.soleskm, promedioDeTasas, 0.005), `${e?.soleskm} vs ${promedioDeTasas}`);
+  chk("agrupado = 6 600 / 35 000", cerca(e?.soleskm ?? null, 6600 / 35000), `${e?.soleskm}`);
+
+  // Una unidad de tercero no aporta: no se le paga el mantenimiento, se le paga una factura.
+  chk("las de tercero no entran al estimado",
+    estimarPorPlan([placa([ot({ km: null, costo: 900 })], { flota: "tercero", intervaloPlanKm: 5000 })]) === null);
+  // Sin intervalo no hay estimado, y nunca un cero disfrazado.
+  chk("sin intervalo no se devuelve nada", estimarPorPlan([placa([ot({ km: null, costo: 900 })])]) === null);
 }
 
 // ══ 4 · EL NEUMÁTICO QUE YA SE COBRA APARTE ══════════════════════════════════
