@@ -14,10 +14,22 @@ export const LOGO_DEFAULT = "/logoafacotizacion-removebg-preview.png";
 export const esc = (s: unknown): string =>
   String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
+/**
+ * El logo se dimensiona contra el RECUADRO BLANCO, que es lo que se ve, no contra la banda.
+ * La tarjeta blanca se estira a los 65px de la banda, así que lo único que limitaba el logo
+ * era su propio `max-height`: con 46px y 8px de padding arriba y abajo sobraban 9px de blanco
+ * por lado y el logo se leía pequeño dentro de su propio recuadro. Con 5px de padding quedan
+ * 55px útiles y el tope sube a 54 — el logo de AFA (754×331) pasa de 105×46 a 123×54, un 38 %
+ * más de área, y conserva 5.5px de blanco arriba y abajo: crece SIN pasar el recuadro.
+ * Horizontalmente la tarjeta se ajusta al logo (entre 140 y 175), así que el hueco blanco de la
+ * derecha —41px con el logo anterior— deja de ser mayor que el margen de los otros tres lados.
+ * `justify-content:center` es para el logo de OTRA empresa (este ERP se vende): uno cuadrado no
+ * llega al mínimo de 140 y sin eso quedaría pegado al borde izquierdo con todo el blanco detrás.
+ */
 export function buildHeaderPDFHtml(logoUrl: string, cp: string, titulo: string, subtitulo: string): string {
   return `<div class="pdf-header" style="background:${cp};display:flex;align-items:stretch;height:65px;">
-    <div style="background:white;border-radius:0 20px 20px 0;padding:8px 20px 8px 14px;display:flex;align-items:center;min-width:140px;max-width:160px;flex-shrink:0;">
-      <img src="${logoUrl}" style="max-height:46px;max-width:130px;object-fit:contain;"/>
+    <div style="background:white;border-radius:0 20px 20px 0;padding:5px 18px 5px 14px;display:flex;align-items:center;justify-content:center;min-width:140px;max-width:175px;flex-shrink:0;">
+      <img src="${logoUrl}" style="max-height:54px;max-width:140px;object-fit:contain;"/>
     </div>
     <div style="flex:1;display:flex;align-items:center;justify-content:flex-end;padding:0 24px;">
       <div style="text-align:right;">
@@ -28,8 +40,14 @@ export function buildHeaderPDFHtml(logoUrl: string, cp: string, titulo: string, 
   </div>`;
 }
 
+/**
+ * El membrete va CENTRADO en la banda. Sin `justify-content` el flex arranca a la izquierda y
+ * los cuatro datos se apilaban contra el margen con la mitad derecha de la banda en azul vacío;
+ * centrado, el pie queda simétrico como la banda que lo pinta. El `wrap` sigue puesto: cuando el
+ * domicilio es largo el membrete pasa a dos líneas, y cada una se centra por su cuenta.
+ */
 export function buildFooterPDFHtml(cp: string, empDir: string, empTel: string, empEmail: string, empWeb: string): string {
-  return `<div class="pdf-footer" style="background:${cp};padding:9px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+  return `<div class="pdf-footer" style="background:${cp};padding:9px 20px;display:flex;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap;">
     <span style="color:white;font-size:8.5px;">&#8962; Dir.: ${empDir}</span>
     <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
     <span style="color:white;font-size:8.5px;">&#9990; ${empTel}</span>
