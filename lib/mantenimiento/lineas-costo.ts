@@ -39,6 +39,25 @@
 // Un costo corto no se discute antes de vender: se descubre cuando el servicio ya se prestó.
 //
 // ══════════════════════════════════════════════════════════════════════════════
+// LA HORA DE CASA LA HACE UNA PERSONA, Y CADA PERSONA CUESTA LO SUYO
+//
+// La primera versión guardaba UN sueldo en `config_mantenimiento`, así que con dos mecánicos las
+// horas de los dos salían a la misma tarifa: el caro se costeaba barato y el barato caro, y el
+// S/km de la categoría dependía de a quién le tocó la orden. Ahora la línea DECLARA quién hizo
+// el trabajo (`personal_administrativo_id`) y se valoriza con el costo empresa de esa persona.
+//
+// Y esa persona no es una entidad nueva: es `personal_administrativo`, donde ya vive con su
+// nombre, su cargo y su tipo de contrato. Una tabla `mecanicos` sería el sueldo de alguien
+// escrito en tres sitios — lo que prohíbe la regla de oro.
+//
+// SOLO PLANILLA IMPUTA. `origen = propio` significa «ya estaba pagado», y eso es cierto de quien
+// está en planilla: su sueldo sale el 30 pase lo que pase. NO de quien va por honorarios, a
+// quien se le paga POR el trabajo — su línea es `comprado` con el importe de su recibo, o esa
+// plata se quedaría fuera de `v_egresos`, que es justo donde tiene que estar. Es el mismo
+// criterio de `modoCostoConductor`, que no imputa al conductor de service porque su costo ya va
+// dentro de la factura del proveedor.
+//
+// ══════════════════════════════════════════════════════════════════════════════
 // EL COSTO DE LA HORA PROPIA SE RESUELVE POR CASCADA, Y CADA ESCALÓN DECLARA SU FUENTE
 //
 // Son los dos métodos que pidió el dueño, y son escalones del mismo camino, no una alternativa:
@@ -91,6 +110,8 @@ export type LineaCosto = {
   documento_compra_id?: number | null;
   /** Cuando la línea nació del costo tecleado en un ítem del checklist. */
   checklist_ot_id?: number | null;
+  /** Quién hizo el trabajo. Es lo que permite que cada persona se valorice con SU costo. */
+  personal_administrativo_id?: number | null;
 };
 
 const n = (v: unknown): number => {
@@ -325,5 +346,111 @@ export function facturasDeOT(
     detalle: `Esta orden tiene ${ids.length} comprobantes. El libro de mantenimiento guarda uno solo, ` +
              `así que no guarda ninguno: elegir uno haría creer que los demás no existen. Cada factura ` +
              `se aprueba, se paga y se concilia por su cuenta en Cuentas por Pagar.`,
+  };
+}
+
+
+// ── Quién hizo el trabajo ────────────────────────────────────────────────────
+
+/**
+ * Una persona del equipo interno que puede valorizar una hora, con sus insumos de planilla.
+ * Espejo de `v_personal_planilla`, que publica los datos y no calcula nada.
+ */
+export type PersonaTaller = {
+  id: number;
+  nombre: string;
+  cargo?: string | null;
+  /** planilla · plazo_fijo → imputa. honorarios · practicante → se paga, no se imputa. */
+  tipo_contrato: string | null;
+  sueldo_basico: number | null;
+  honorario_dia: number | null;
+  tiene_asignacion: boolean;
+  /** Horas de taller al mes de ESTA persona. null = la jornada del taller. */
+  horas_mes: number | null;
+  rmv: number;
+  asignacion_familiar_pct: number;
+  sctr_mensual: number;
+  regimen: RegimenLaboral | null;
+};
+
+export type ModoPersona =
+  | "imputa"        // planilla: su sueldo ya salió, su hora es costo imputado
+  | "se_paga"       // honorarios: se le paga POR el trabajo → la línea va como `comprado`
+  | "sin_sueldo";   // no se puede valorizar: falta su sueldo o su importe por día
+
+/**
+ * CÓMO SE IMPUTA UNA PERSONA, Y NO TODAS SE IMPUTAN.
+ *
+ * Es el espejo de `modoCostoConductor` para el taller, y la razón es idéntica: `propio` quiere
+ * decir «ya estaba pagado». De quien está en planilla es verdad. De quien va por recibo no — a
+ * esa persona se le paga POR esta orden, así que su importe es un DESEMBOLSO y su línea tiene
+ * que ser `comprado`, o se quedaría fuera de `v_egresos`.
+ */
+export function modoDePersona(p: PersonaTaller | null | undefined): ModoPersona {
+  if (!p) return "sin_sueldo";
+  const t = String(p.tipo_contrato ?? "").toLowerCase();
+  if (t === "honorarios" || t === "practicante" || t === "eventual") {
+    return n(p.honorario_dia) > 0 ? "se_paga" : "sin_sueldo";
+  }
+  return n(p.sueldo_basico) > 0 && p.regimen ? "imputa" : "sin_sueldo";
+}
+
+/** Las personas que el ERP sabe valorizar. Quien no aparece es porque le falta el sueldo. */
+export function personasValorizables(personas: PersonaTaller[]): PersonaTaller[] {
+  return (personas ?? []).filter(p => modoDePersona(p) !== "sin_sueldo");
+}
+
+/**
+ * EL S/HORA DE UNA PERSONA CONCRETA.
+ *
+ * Misma cascada que `tarifaHoraMecanico` —costo empresa primero, tarifa tecleada de respaldo—
+ * pero con los datos de ESA persona y su propio divisor de horas: con dos mecánicos, uno de
+ * medio tiempo repartiendo su sueldo entre la jornada completa costaría la mitad de lo que
+ * cuesta. Sin persona elegida cae a la configuración del taller, que es el comportamiento
+ * anterior intacto.
+ */
+export function tarifaHoraDe(
+  persona: PersonaTaller | null | undefined, ins: InsumosManoObra
+): TarifaHora {
+  if (!persona) return tarifaHoraMecanico(ins);
+
+  const modo = modoDePersona(persona);
+  if (modo === "se_paga") {
+    return {
+      tarifa: 0, fuente: "sin_tarifa", base: "",
+      falta: `${persona.nombre} va por recibo por honorarios: se le paga POR este trabajo, así que ` +
+             `su importe es un desembolso. Cambia el origen de la línea a «Comprado» y pon lo que ` +
+             `dice su recibo — imputarlo como hora propia lo dejaría fuera de los egresos.`,
+    };
+  }
+  if (modo === "sin_sueldo") {
+    // Con persona elegida y sin su sueldo NO se cae a la tarifa del taller: eso costearía sus
+    // horas al precio de otro y nadie lo notaría. Se nombra a quién le falta el dato.
+    return {
+      tarifa: 0, fuente: "sin_tarifa", base: "",
+      falta: `Falta el sueldo de ${persona.nombre} en /personal-administrativo. Sin él, su hora se ` +
+             `valorizaría con la tarifa de otra persona, que es peor que no valorizarla.`,
+    };
+  }
+
+  const horasMes = Math.max(1, Math.round(n(persona.horas_mes) || n(ins.horas_mes) || HORAS_MES_DEFECTO));
+  const mes = costoEmpresaMes({
+    tipo_contrato: "planilla",
+    sueldo_basico: persona.sueldo_basico,
+    tiene_asignacion: persona.tiene_asignacion,
+    rmv: persona.rmv,
+    asignacion_familiar_pct: persona.asignacion_familiar_pct,
+    sctr_mensual: persona.sctr_mensual,
+  }, persona.regimen!);
+
+  if (mes.falta || !(mes.total > 0)) {
+    return { tarifa: 0, fuente: "sin_tarifa", base: "", falta: mes.falta ?? `No se pudo calcular el costo de ${persona.nombre}.` };
+  }
+  return {
+    tarifa: mes.total / horasMes,
+    fuente: "costo_empresa",
+    base: `${persona.nombre} · ${persona.regimen!.nombre} · costo empresa S/ ${mes.total.toFixed(2)} al mes ` +
+          `(${mes.factor.toFixed(2)}× el básico) ÷ ${horasMes} horas`,
+    falta: null,
   };
 }

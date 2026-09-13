@@ -63,6 +63,7 @@ const FORM_VACIO = {
   nombre: "", dni: "", cargo: "", departamento: "Administración",
   fecha_nacimiento: "", email: "", telefono: "", direccion: "",
   fecha_ingreso: "", tipo_contrato: "planilla", fecha_venc_contrato: "",
+  sueldo_basico: "", asignacion_familiar: false, honorario_dia: "", horas_mes: "",
   sistema_pensionario: "afp", afp_nombre: "Integra", essalud_numero: "",
   sctr_salud_venc: "", sctr_pension_venc: "",
   examen_medico_venc: "", antecedentes_venc: "",
@@ -211,6 +212,12 @@ export default function PersonalAdministrativoPage() {
       direccion: form.direccion.trim() || null, fecha_ingreso: form.fecha_ingreso || null,
       tipo_contrato: form.tipo_contrato || null,
       fecha_venc_contrato: form.tipo_contrato === "plazo_fijo" ? (form.fecha_venc_contrato || null) : null,
+      // Se mandan SIEMPRE, incluso vacíos: un sueldo tecleado por error tiene que poder
+      // RETIRARSE, no solo corregirse. Si falta `mantenimiento-07` se sueltan y se avisa.
+      sueldo_basico: form.sueldo_basico.trim() === "" ? null : Number(form.sueldo_basico),
+      asignacion_familiar: form.asignacion_familiar,
+      honorario_dia: form.honorario_dia.trim() === "" ? null : Number(form.honorario_dia),
+      horas_mes: form.horas_mes.trim() === "" ? null : Number(form.horas_mes),
       sistema_pensionario: form.sistema_pensionario || null,
       afp_nombre: form.sistema_pensionario === "afp" ? form.afp_nombre : null,
       essalud_numero: form.essalud_numero.trim() || null,
@@ -223,10 +230,27 @@ export default function PersonalAdministrativoPage() {
       foto_url: form.foto_url.trim() || null, estado: form.estado,
       observaciones: form.observaciones.trim() || null,
     };
-    const { error } = editandoId
-      ? await supabase.from("personal_administrativo").update(payload).eq("id", editandoId)
-      : await supabase.from("personal_administrativo").insert(payload);
+    const escribir = (f: any) => editandoId
+      ? supabase.from("personal_administrativo").update(f).eq("id", editandoId)
+      : supabase.from("personal_administrativo").insert(f);
+
+    let { error } = await escribir(payload);
+
+    // Los campos de remuneración son de `mantenimiento-07`, una migración accesoria que el
+    // deploy no corre. Sin ella la ficha se guarda igual —el resto de los datos del trabajador
+    // no puede perderse por eso— y se AVISA nombrando el SQL: un sueldo que parece guardarse y
+    // no llega deja sus horas sin poder valorizarse y nadie entiende por qué.
+    let faltaRemuneracion = false;
+    if (error && /sueldo_basico|asignacion_familiar|honorario_dia|horas_mes/i.test(error.message || "")) {
+      faltaRemuneracion = true;
+      const { sueldo_basico: _a, asignacion_familiar: _b, honorario_dia: _c, horas_mes: _d, ...resto } = payload;
+      ({ error } = await escribir(resto));
+    }
+
     if (error) { alert(error.message); setGuardando(false); return; }
+    if (faltaRemuneracion) alert(
+      "Guardado ✓ — pero la remuneración NO: falta correr supabase/mantenimiento-07-mecanicos.sql. " +
+      "Hasta entonces las horas de esta persona no se pueden valorizar en una orden de trabajo.");
     limpiar(); cargarDatos(); setGuardando(false);
   };
 
@@ -237,6 +261,10 @@ export default function PersonalAdministrativoPage() {
       fecha_nacimiento: p.fecha_nacimiento || "", email: p.email || "",
       telefono: p.telefono || "", direccion: p.direccion || "",
       fecha_ingreso: p.fecha_ingreso || "", tipo_contrato: p.tipo_contrato || "planilla",
+      sueldo_basico: (p as any).sueldo_basico != null ? String((p as any).sueldo_basico) : "",
+      asignacion_familiar: !!(p as any).asignacion_familiar,
+      honorario_dia: (p as any).honorario_dia != null ? String((p as any).honorario_dia) : "",
+      horas_mes: (p as any).horas_mes != null ? String((p as any).horas_mes) : "",
       fecha_venc_contrato: p.fecha_venc_contrato || "",
       sistema_pensionario: p.sistema_pensionario || "afp",
       afp_nombre: p.afp_nombre || "Integra", essalud_numero: p.essalud_numero || "",
@@ -407,6 +435,53 @@ export default function PersonalAdministrativoPage() {
           </div>
 
           {/* Contrato */}
+          {/* ── REMUNERACIÓN ─────────────────────────────────────────────────
+              Estos campos son los mismos que `conductores` tiene desde siempre, con los mismos
+              nombres, porque alimentan la MISMA función (`costoEmpresaMes`). Sin ellos, una hora
+              de esta persona no se puede valorizar en una orden de trabajo: el selector de
+              «quién hizo el trabajo» lista solo a quien el ERP sabe costear. */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Remuneración</p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {form.tipo_contrato === "honorarios" || form.tipo_contrato === "practicante" ? (
+                <Campo label="Importe por día S/">
+                  <input type="number" step="0.01" className={inputCls("font-mono")} placeholder="Sin configurar"
+                    value={form.honorario_dia} onChange={f("honorario_dia")} />
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    Va por recibo: se le paga POR el trabajo, así que su línea en una orden se registra
+                    como <b>Comprado</b> con el importe del recibo, no como hora propia.
+                  </p>
+                </Campo>
+              ) : (
+                <>
+                  <Campo label="Sueldo básico mensual S/">
+                    <input type="number" step="0.01" className={inputCls("font-mono")} placeholder="Sin configurar"
+                      value={form.sueldo_basico} onChange={f("sueldo_basico")} />
+                    <p className="text-[10px] text-gray-400 mt-1">
+                      Con esto el ERP calcula su costo empresa real y puede valorizar sus horas de taller.
+                    </p>
+                  </Campo>
+                  <Campo label="Horas de trabajo al mes">
+                    <input type="number" className={inputCls("font-mono")} placeholder="208"
+                      value={form.horas_mes} onChange={f("horas_mes")} />
+                    <p className="text-[10px] text-gray-400 mt-1">
+                      Vacío = la jornada del taller. Ponlo solo si es de medio tiempo: repartir su sueldo
+                      entre la jornada completa abarataría su hora a la mitad.
+                    </p>
+                  </Campo>
+                  <Campo label="Asignación familiar">
+                    <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer mt-2">
+                      <input type="checkbox" checked={form.asignacion_familiar}
+                        onChange={e => setForm(p => ({ ...p, asignacion_familiar: e.target.checked }))} />
+                      Le corresponde
+                    </label>
+                    <p className="text-[10px] text-gray-400 mt-1">Es remuneración: entra a EsSalud, gratificación y CTS.</p>
+                  </Campo>
+                </>
+              )}
+            </div>
+          </div>
+
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 border-b pb-1 mb-3">Contrato laboral — SUNAFIL / MTPE</p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

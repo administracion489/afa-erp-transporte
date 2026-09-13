@@ -17,10 +17,12 @@ import {
 import {
   repartoDeOT, facturasDeOT, tarifaHoraMecanico,
   type LineaCosto, type RepartoOT, type FacturasOT, type InsumosManoObra, type TarifaHora,
+  type PersonaTaller,
 } from "./lineas-costo";
 
 const SQL_COSTO = "supabase/mantenimiento-05-costo-factura-cxp.sql";
 const SQL_LINEAS = "supabase/mantenimiento-06-lineas-de-costo.sql";
+const SQL_MECANICOS = "supabase/mantenimiento-07-mecanicos.sql";
 
 /** ¿El error viene de una columna de esta migración que no se corrió? */
 function faltaColumna(msg: string | null | undefined, col: string): boolean {
@@ -62,7 +64,9 @@ export type OTParaCosto = {
 
 // ── Las líneas de costo ──────────────────────────────────────────────────────
 
-const COLS_LINEA = "id,orden_trabajo_id,tipo,origen,concepto,monto,horas,tarifa_hora,tarifa_fuente,proveedor_id,documento_compra_id,checklist_ot_id,observacion";
+const COLS_LINEA = "id,orden_trabajo_id,tipo,origen,concepto,monto,horas,tarifa_hora,tarifa_fuente,proveedor_id,documento_compra_id,checklist_ot_id,observacion,personal_administrativo_id";
+/** Las mismas sin la columna de `mantenimiento-07`, que el deploy no corre. */
+const COLS_LINEA_SIN_PERSONA = "id,orden_trabajo_id,tipo,origen,concepto,monto,horas,tarifa_hora,tarifa_fuente,proveedor_id,documento_compra_id,checklist_ot_id,observacion";
 
 export type LineaGuardada = LineaCosto & { orden_trabajo_id: number; tarifa_fuente?: string | null; observacion?: string | null };
 
@@ -74,8 +78,14 @@ export type LineaGuardada = LineaCosto & { orden_trabajo_id: number; tarifa_fuen
  */
 export async function cargarLineas(otIds: number[]): Promise<LineaGuardada[]> {
   if (!otIds.length) return [];
-  const { data, error } = await supabase.from("ot_costo_linea")
+  let { data, error } = await supabase.from("ot_costo_linea")
     .select(COLS_LINEA).in("orden_trabajo_id", otIds).order("id", { ascending: true });
+  // Sin `mantenimiento-07` no existe la columna de quién hizo el trabajo: las líneas se leen
+  // igual y se valorizan con la tarifa del taller, que es el comportamiento anterior.
+  if (error) {
+    ({ data, error } = await supabase.from("ot_costo_linea")
+      .select(COLS_LINEA_SIN_PERSONA).in("orden_trabajo_id", otIds).order("id", { ascending: true }));
+  }
   if (error) return [];
   return ((data as any[]) ?? []).map(r => ({
     id: r.id, orden_trabajo_id: Number(r.orden_trabajo_id),
@@ -88,6 +98,7 @@ export async function cargarLineas(otIds: number[]): Promise<LineaGuardada[]> {
     documento_compra_id: r.documento_compra_id != null ? Number(r.documento_compra_id) : null,
     checklist_ot_id: r.checklist_ot_id != null ? Number(r.checklist_ot_id) : null,
     observacion: r.observacion ?? null,
+    personal_administrativo_id: r.personal_administrativo_id != null ? Number(r.personal_administrativo_id) : null,
   }));
 }
 
@@ -101,6 +112,7 @@ export type DatosLinea = {
   tarifa_fuente?: string | null;
   proveedor_id?: number | null;
   observacion?: string | null;
+  personal_administrativo_id?: number | null;
 };
 
 export async function guardarLinea(
@@ -116,18 +128,33 @@ export async function guardarLinea(
     tarifa_fuente: datos.tarifa_fuente ?? null,
     proveedor_id: datos.proveedor_id ?? null,
     observacion: datos.observacion?.trim() || null,
+    personal_administrativo_id: datos.personal_administrativo_id ?? null,
   };
-  const q = lineaId
-    ? supabase.from("ot_costo_linea").update(fila).eq("id", lineaId).select("id").single()
-    : supabase.from("ot_costo_linea").insert(fila).select("id").single();
-  const { data, error } = await q;
+  const escribir = (f: Record<string, unknown>) => lineaId
+    ? supabase.from("ot_costo_linea").update(f).eq("id", lineaId).select("id").single()
+    : supabase.from("ot_costo_linea").insert(f).select("id").single();
+
+  let { data, error } = await escribir(fila);
+
+  // Sin `mantenimiento-07` no existe la columna de quién hizo el trabajo. Se suelta y la línea
+  // se guarda igual: el importe es lo que no se puede perder; de quién son esas horas es un
+  // extra. Se avisa nombrando el SQL, como todo lo accesorio de este módulo.
+  let avisoPersona: string | undefined;
+  if (error && faltaColumna(error.message, "personal_administrativo_id")) {
+    const { personal_administrativo_id: _omitido, ...sinPersona } = fila;
+    ({ data, error } = await escribir(sinPersona));
+    if (!error && datos.personal_administrativo_id) {
+      avisoPersona = `La línea se guardó, pero no quedó registrado quién hizo el trabajo: falta correr ${SQL_MECANICOS}.`;
+    }
+  }
+
   if (error) {
     if (/ot_costo_linea/i.test(error.message) && /does not exist|schema cache/i.test(error.message)) {
       return { ok: false, error: `Falta correr ${SQL_LINEAS} en Supabase: la tabla de líneas de costo todavía no existe, así que esta línea no se guardó.` };
     }
     return { ok: false, error: error.message };
   }
-  return { ok: true, id: Number((data as any).id) };
+  return { ok: true, id: Number((data as any).id), aviso: avisoPersona };
 }
 
 export async function borrarLinea(lineaId: number | string): Promise<Resultado> {
@@ -185,6 +212,41 @@ export async function cargarInsumosManoObraConEstado(): Promise<{ insumos: Insum
     } : null,
   };
   return { insumos, estado: insumos.regimen ? "ok" : "sin_regimen" };
+}
+
+/**
+ * EL PERSONAL QUE PUEDE VALORIZAR UNA HORA, de `v_personal_planilla`.
+ *
+ * La vista trae al equipo interno ACTIVO con los factores del régimen vigente y no calcula nada.
+ * Se devuelve COMPLETO —`personasValorizables` filtra en el motor puro, que es donde vive la
+ * regla— y sin la migración devuelve `[]`: el selector sale vacío y la pantalla dice qué falta,
+ * en vez de romper la orden de trabajo.
+ */
+export async function cargarPersonalTaller(): Promise<PersonaTaller[]> {
+  const { data, error } = await supabase.from("v_personal_planilla").select("*").order("nombre");
+  if (error || !data) return [];
+  return ((data as any[]) ?? []).map(p => ({
+    id: Number(p.personal_id),
+    nombre: String(p.nombre ?? ""),
+    cargo: p.cargo ?? null,
+    tipo_contrato: p.tipo_contrato ?? null,
+    sueldo_basico: p.sueldo_basico != null ? Number(p.sueldo_basico) : null,
+    honorario_dia: p.honorario_dia != null ? Number(p.honorario_dia) : null,
+    tiene_asignacion: !!p.tiene_asignacion,
+    horas_mes: p.horas_mes != null ? Number(p.horas_mes) : null,
+    rmv: Number(p.rmv ?? 0),
+    asignacion_familiar_pct: Number(p.asignacion_familiar_pct ?? 0),
+    sctr_mensual: Number(p.sctr_mensual ?? 0),
+    regimen: p.regimen ? {
+      regimen: p.regimen, nombre: String(p.regimen_nombre ?? p.regimen),
+      essalud_pct: Number(p.essalud_pct ?? 0), usa_sis: !!p.usa_sis,
+      sis_aporte_mensual: Number(p.sis_aporte_mensual ?? 0),
+      gratificaciones_sueldos: Number(p.gratificaciones_sueldos ?? 0),
+      bonif_extraordinaria_pct: Number(p.bonif_extraordinaria_pct ?? 0),
+      cts_sueldos_anio: Number(p.cts_sueldos_anio ?? 0),
+      vacaciones_dias: Number(p.vacaciones_dias ?? 30),
+    } : null,
+  }));
 }
 
 export async function tarifaDeTaller(): Promise<TarifaHora> {
