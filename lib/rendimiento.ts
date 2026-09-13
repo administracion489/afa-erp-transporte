@@ -804,6 +804,98 @@ export function movilesPorCarga(
   return out;
 }
 
+// ─── EL SALTO QUE NO CABE EN UN TANQUE ────────────────────────────────────────
+//
+// Si entre esta carga y la anterior la unidad recorrió MÁS km de los que da un tanque lleno,
+// pasó una de dos cosas: se hizo una carga que nadie registró (lo habitual), o el kilometraje
+// está mal tecleado. Las dos ensucian lo mismo —el rendimiento de la unidad, su costo por km y
+// el vencimiento de su mantenimiento— y las dos se arreglan en el momento de guardar, con la
+// persona delante, en vez de un mes después buscando por qué la mediana se movió.
+//
+// EL CANDADO NO BLOQUEA: PIDE EL MOTIVO. Una lectura que no llega a ser fila desaparece de
+// donde se corrige, así que la salida de este ERP es siempre la misma —la de `falso_flete_motivo`
+// y `adicional_motivo`—: se guarda, pero con el porqué escrito, y el motivo es obligatorio.
+//
+// NO ES UN TERCER JUEZ DEL MISMO NÚMERO. Sobre este km ya opinan `evaluarLectura` (anti-retroceso
+// y dígito de más) y `KM_DIA_MAX`. Éste mira lo que ninguno de los dos mira —cuánto camina la
+// unidad con un tanque— y por eso vive aquí, junto a la mediana que necesita, y no en una pantalla.
+
+/**
+ * Cuánto puede pasarse un tramo del tanque teórico antes de que valga la pena preguntar.
+ *
+ * ES EL ÚNICO UMBRAL DE ESTE MÓDULO QUE NO SE MIDIÓ NI SE HEREDA, y se dice para que nadie lo
+ * cite como si tuviera respaldo: es el colchón que evita que la variación normal del rendimiento
+ * y un tanque llevado hasta la reserva disparen el candado en filas buenas. Si sale seguido sobre
+ * cargas correctas, se sube — y entonces sí habrá con qué medirlo.
+ */
+export const MARGEN_SALTO_TANQUE = 1.15;
+
+export type VeredictoSalto =
+  /** El salto cabe en un tanque: nada que preguntar. */
+  | { estado: "ok" }
+  /**
+   * No hay con qué juzgar: sin mediana fiable de esa unidad y familia, o sin capacidad de
+   * tanque. NO se inventa un techo — sería el mismo error que el `Infinity` de `elegirOdometro`,
+   * que daba por buena una lectura ×10 porque no tenía contra qué compararla.
+   */
+  | { estado: "sin_base"; motivo: "sin_mediana" | "sin_tanque" | "sin_km_previo" }
+  /** El salto no cabe en un tanque. `kmMax` es el techo y `tanques` cuántos haría falta. */
+  | {
+      estado: "salto";
+      delta: number;
+      kmMax: number;
+      tanques: number;
+      detalle: string;
+    };
+
+/**
+ * ¿El salto de kilometraje de esta carga cabe en un tanque de esta unidad?
+ *
+ * Puro: recibe la capacidad y la mediana ya resueltas, igual que `lib/costeo-propio.ts` recibe
+ * sus parámetros. Quien llama decide de dónde salen.
+ */
+export function revisarSaltoKm(args: {
+  km: number | null | undefined;
+  kmPrevio: number | null | undefined;
+  /** Capacidad del tanque en la unidad de la familia (`capacidadTanqueDe`). */
+  capacidad: number | null | undefined;
+  /** Mediana de la unidad+familia, y si es FIABLE (`resumen.mediana` / `resumen.confiable`). */
+  mediana: number | null | undefined;
+  medianaConfiable: boolean;
+  label?: string;
+}): VeredictoSalto {
+  const km = num(args.km);
+  const prev = num(args.kmPrevio);
+  if (km <= 0 || prev <= 0 || km <= prev) return { estado: "sin_base", motivo: "sin_km_previo" };
+
+  const cap = num(args.capacidad);
+  if (cap <= 0) return { estado: "sin_base", motivo: "sin_tanque" };
+
+  // Con una mediana de uno o dos tramos el techo saldría de un número que no es un patrón, y el
+  // candado dispararía sobre cargas buenas. Es el mismo guard que `decidirRendimiento` aplica
+  // antes de dejar que una medición pise un parámetro.
+  const med = num(args.mediana);
+  if (med <= 0 || !args.medianaConfiable) return { estado: "sin_base", motivo: "sin_mediana" };
+
+  const delta = km - prev;
+  const kmMax = cap * med * MARGEN_SALTO_TANQUE;
+  if (delta <= kmMax) return { estado: "ok" };
+
+  const tanques = delta / (cap * med);
+  const label = args.label ?? "km/gal";
+  return {
+    estado: "salto",
+    delta,
+    kmMax,
+    tanques,
+    detalle:
+      `${fmt0(delta)} km desde la carga anterior, y con un tanque de ${fmt(cap)} a ${fmt(med)} ${label} ` +
+      `esta unidad hace como mucho ${fmt0(kmMax)} km — harían falta ${fmt(tanques)} tanques. ` +
+      `Lo normal es que falte por registrar una carga de ese periodo; si no, el kilometraje está mal tecleado. ` +
+      `Escribe qué pasó y se guarda igual.`,
+  };
+}
+
 // ─── EL JUICIO ────────────────────────────────────────────────────────────────
 
 /**

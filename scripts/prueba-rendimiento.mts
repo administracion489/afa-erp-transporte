@@ -35,6 +35,7 @@ import {
   variacionPct,
   ventanaMovil,
   movilesPorCarga,
+  revisarSaltoKm,
   TECHO_FAMILIA,
   MIN_TRAMOS_CONFIABLE,
   type CargaRendimiento,
@@ -889,6 +890,48 @@ const cargaBi = (
   const porCarga = movilesPorCarga(seriesRendimiento(cargas));
   chk("movilesPorCarga aplana lo mismo que ventanaMovil",
     porCarga[cargas[cargas.length - 1].id]?.rendimiento === ultimo?.rendimiento);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TANDA 2 · D) EL SALTO DE KM QUE NO CABE EN UN TANQUE
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  console.log("\n── Tanda 2 · salto de km ──────────────────────────────────────");
+
+  // Una unidad con tanque de 25 gal a 28 km/gal hace ~700 km con un tanque, ~805 con el margen.
+  const arg = (km: number, extra: Partial<Parameters<typeof revisarSaltoKm>[0]> = {}) =>
+    revisarSaltoKm({ km, kmPrevio: 10000, capacidad: 25, mediana: 28, medianaConfiable: true, ...extra });
+
+  chk("un tramo normal no pregunta nada", arg(10600).estado === "ok", arg(10600).estado);
+  chk("justo bajo el techo tampoco", arg(10800).estado === "ok", arg(10800).estado);
+
+  // EL CASO QUE MOTIVÓ EL PUNTO 4: un salto que no cabe en un tanque.
+  const v = arg(10900);
+  chk("un salto de 900 km con un tanque de ~700 SÍ pregunta", v.estado === "salto", v.estado);
+  if (v.estado === "salto") {
+    chk("…y nombra los km y el techo", v.delta === 900 && Math.round(v.kmMax) === 805,
+      `${v.delta} / ${Math.round(v.kmMax)}`);
+    chk("…y dice cuántos tanques harían falta", cerca(v.tanques, 900 / 700, 0.01), String(v.tanques));
+    chk("…y el detalle propone la causa habitual, no acusa al odómetro",
+      /falte por registrar una carga/i.test(v.detalle) && /mal tecleado/i.test(v.detalle));
+  }
+
+  // SIN BASE NO SE INVENTA UN TECHO — el error de `elegirOdometro` con su `Infinity`.
+  chk("sin mediana fiable no se juzga",
+    arg(99999, { medianaConfiable: false }).estado === "sin_base", arg(99999, { medianaConfiable: false }).estado);
+  chk("…y el motivo lo declara",
+    (arg(99999, { medianaConfiable: false }) as { motivo: string }).motivo === "sin_mediana");
+  chk("sin capacidad de tanque tampoco",
+    (arg(99999, { capacidad: 0 }) as { motivo: string }).motivo === "sin_tanque");
+  chk("sin km previo tampoco",
+    (arg(99999, { kmPrevio: 0 }) as { motivo: string }).motivo === "sin_km_previo");
+  chk("un odómetro que no avanza no es un salto: lo juzga el motor, no este candado",
+    arg(9000).estado === "sin_base", arg(9000).estado);
+
+  // La unidad de la etiqueta la pone quien llama: un GNV no se explica en galones.
+  const gnv = revisarSaltoKm({ km: 11000, kmPrevio: 10000, capacidad: 30, mediana: 4, medianaConfiable: true, label: "km/m³" });
+  chk("el detalle usa la unidad de la familia, no un km/gal fijo",
+    gnv.estado === "salto" && /km\/m³/.test(gnv.detalle), gnv.estado === "salto" ? gnv.detalle.slice(0, 60) : gnv.estado);
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");
