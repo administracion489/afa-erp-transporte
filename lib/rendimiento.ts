@@ -138,6 +138,20 @@ export type CargaRendimiento = {
   tipo?: string | null;
   /** `combustible.total` — lo que costó. Solo hace falta para comparar ventanas. */
   gasto?: number | null;
+  /**
+   * `combustible.tanque_lleno` — TRI-ESTADO, y los tres significan cosas distintas:
+   *
+   *   · `true`       — alguien AFIRMA que el tanque quedó a tope. Es un ANCLA del método.
+   *   · `false`      — se afirma que NO (no había crédito, el grifo no tenía stock).
+   *   · `null`       — la columna existe y nadie lo sabe.
+   *   · `undefined`  — el campo NO VIAJA. Es el modo legado, y se comporta EXACTAMENTE
+   *                    como antes: cada carga es su propia ancla. Todos los que llaman hoy
+   *                    caen aquí, y la matriz fija que el resultado es idéntico byte a byte.
+   *
+   * `null` y `false` NO son lo mismo aunque ninguno de los dos ancle: uno se arregla
+   * marcando la casilla y el otro no se arregla, así que tienen motivo propio.
+   */
+  tanqueLleno?: boolean | null;
 };
 
 /**
@@ -169,6 +183,20 @@ export type MotivoSinRendimiento =
    * cómo funciona la unidad. Un km/gal por combustible exige medir cada uno por separado.
    */
   | "familia_cruzada"
+  /**
+   * Esta carga NO llenó el tanque, así que no cierra una medición: su combustible se suma al
+   * del próximo tanque lleno y se mide de ancla a ancla. NO es un descarte — el dato no se
+   * pierde, cambia de tramo. Por eso su km queda en `null`: los kilómetros de esta carga los
+   * publica el tramo que la absorbe, y contarlos aquí también sería contarlos dos veces.
+   */
+  | "tanque_parcial"
+  /**
+   * Nadie declaró si el tanque quedó lleno. Se comporta como `tanque_parcial` —su combustible
+   * se absorbe igual, que es correcto tanto si fue llena como si fue parcial— pero el motivo es
+   * otro porque el arreglo es otro: esto se cierra marcando la casilla, y `tanque_parcial` no
+   * se cierra nunca.
+   */
+  | "tanque_desconocido"
   /** Supera el techo físico de su familia. No es un rendimiento, es un hueco de registro. */
   | "implausible";
 
@@ -192,6 +220,29 @@ export type Tramo = {
   crudo: number | null;
   /** Ids de las cargas sin odómetro que el tramo se tragó. */
   saltadas: number[];
+  /**
+   * ¿Los km de este tramo son de fiar, AUNQUE no publique rendimiento?
+   *
+   * ES LA PIEZA QUE SEPARA EL COSTO POR KM DEL RENDIMIENTO, y sin ella el CPK heredaba todos
+   * los filtros del rendimiento: cada condición nueva (tanque lleno, familia sin cruzar,
+   * eslabón no saltado) le quitaba base al CPK, que es justo la métrica que tiene que poder
+   * calcularse para TODA la flota sin importar el combustible.
+   *
+   * Un tramo `familia_cruzada`, `eslabon_saltado` o `implausible-por-hueco-de-registro` no
+   * puede decir cuánto rinde la unidad, pero SÍ sabe cuántos km recorrió: el odómetro avanzó
+   * esa cantidad y nada lo discute. Los únicos km que no son de fiar son los que el propio
+   * motor ya declara mal tecleados — `odometro_retrocede` y el `implausible` cuyo km/día es
+   * imposible (el mismo `kmMalo` que ya decidía si la lectura sirve de base para el siguiente).
+   */
+  kmConfiable: boolean;
+  /**
+   * Ids de las cargas que este tramo ABSORBIÓ: las que no llenaron el tanque (o no lo
+   * declararon) entre su ancla de apertura y la de cierre. Su combustible está dentro de
+   * `cantidad` y su plata tiene que entrar al numerador del CPK, o el costo saldría corto.
+   */
+  absorbidas: number[];
+  /** De `cantidad`, cuánto aportaron las cargas absorbidas. Para poder decirlo en pantalla. */
+  cantidadAbsorbida: number;
   techo: number | null;
   detalle: string;
 };
@@ -402,6 +453,32 @@ export function serieRendimiento(
   let saltadasPendientes: number[] = [];
   let cargasSinOdometro = 0;
 
+  // ── EL MÉTODO TANQUE LLENO A TANQUE LLENO ──────────────────────────────────
+  //
+  // Si el tanque queda LLENO en A y LLENO en B, lo despachado entre A y B es exactamente lo
+  // consumido: el nivel restante en B —que nadie mide— se cancela solo. `previa` deja de ser
+  // "la carga anterior" y pasa a ser "el ANCLA anterior".
+  //
+  // LO QUE HAY EN MEDIO NO ROMPE NADA, y es lo que hace que esto valga la pena. Una carga
+  // intermedia (parcial, o de la que no se sabe) se ABSORBE: su combustible se suma al
+  // denominador del tramo que cierra en la próxima ancla. La cuenta sale bien tanto si fue
+  // parcial como si fue llena y nadie lo dijo —consumo(A→U) + consumo(U→B) = G_U + G_B— así
+  // que no hace falta adivinar cuál de las dos era. Invalidar los dos tramos que tocan una
+  // parcial habría tirado dato bueno y habría perdido su combustible de toda cuenta.
+  //
+  // NO ES LO MISMO QUE `eslabon_saltado`, aunque se parezca, y la diferencia hay que tenerla
+  // escrita: ahí lo que falta es el KM (dato desconocido, y hay una persona que puede ponerlo),
+  // por eso el tramo se bloquea; aquí el COMBUSTIBLE se conoce y la operación es legítima, no
+  // un error que arreglar. Acumular lo conocido es correcto; acumular lo desconocido no.
+  //
+  // `usaTanque` es lo que mantiene intacto a todo el que llama hoy: sin el campo, cada carga
+  // es su propia ancla y el resultado es idéntico byte a byte al de siempre.
+  const usaTanque = cargas.some((c) => c.tanqueLleno !== undefined);
+  const esAncla = (c: CargaRendimiento) => !usaTanque || c.tanqueLleno === true;
+  let absorbidasPendientes: number[] = [];
+  let cantidadAbsorbida = 0;
+  let absorbidaSinCantidad = false;
+
   for (const c of ord) {
     const km = num(c.kilometraje);
     const cantidad = normalizarCantidad(c.cantidad, c.unidadCantidad, familia);
@@ -416,10 +493,31 @@ export function serieRendimiento(
       continue;
     }
 
+    // No cierra medición: su combustible viaja al tramo de la próxima ancla. El km se deja en
+    // `null` a propósito — lo publica el tramo que la absorbe, y contarlo aquí también lo
+    // contaría DOS VECES en el costo por km.
+    if (!esAncla(c)) {
+      const motivo: MotivoSinRendimiento = c.tanqueLleno === false ? "tanque_parcial" : "tanque_desconocido";
+      absorbidasPendientes.push(c.id);
+      if (cantidad === null) absorbidaSinCantidad = true;
+      else cantidadAbsorbida += cantidad;
+      tramos.push({
+        ...tramoSin(c, unidad, familia, motivo, previa?.id ?? null, []),
+        cantidad,
+      });
+      continue;
+    }
+
     if (!previa) {
       tramos.push(tramoSin(c, unidad, familia, "primera_carga", null, saltadasPendientes));
       previa = c;
       saltadasPendientes = [];
+      // Lo absorbido antes de la PRIMERA ancla no tiene tramo que lo reclame: se descarta con
+      // su ancla, no se arrastra al primer tramo medible, o ese saldría con combustible de
+      // kilómetros que nadie midió.
+      absorbidasPendientes = [];
+      cantidadAbsorbida = 0;
+      absorbidaSinCantidad = false;
       continue;
     }
 
@@ -427,18 +525,31 @@ export function serieRendimiento(
     const delta = km - kmPrev;
     const saltadas = saltadasPendientes;
     saltadasPendientes = [];
+    const absorbidas = absorbidasPendientes;
+    const absorbido = cantidadAbsorbida;
+    const faltaCantidadAbsorbida = absorbidaSinCantidad;
+    absorbidasPendientes = [];
+    cantidadAbsorbida = 0;
+    absorbidaSinCantidad = false;
+
+    // El denominador del método es TODO lo despachado después del ancla anterior: esta carga
+    // más lo que absorbió por el camino.
+    const cantidadTramo = cantidad === null || faltaCantidadAbsorbida ? null : cantidad + absorbido;
 
     const base = {
       cargaId: c.id, previaId: previa.id, unidad, familia, fecha: c.fecha,
-      km: delta, cantidad, crudo: null as number | null, saltadas,
+      km: delta, cantidad: cantidadTramo, crudo: null as number | null, saltadas,
+      kmConfiable: true, absorbidas, cantidadAbsorbida: absorbido,
       techo: techoFamilia,
     };
 
     // El orden de los descartes importa: primero lo que impide medir, después lo que hace la
     // medición inválida. Un tramo sin cantidad no puede ser "implausible": no hay división.
-    if (cantidad === null) {
+    if (cantidadTramo === null) {
+      // Una absorbida sin cantidad deja el denominador incompleto igual que la de cierre, pero
+      // el dato que falta está en OTRA fila: `sin_cantidad` es el motivo correcto de las dos.
       const motivo: MotivoSinRendimiento =
-        num(c.cantidad) > 0 ? "unidad_desconocida" : "sin_cantidad";
+        cantidad === null && num(c.cantidad) > 0 ? "unidad_desconocida" : "sin_cantidad";
       tramos.push({ ...base, rendimiento: null, motivo, detalle: detalleDe(motivo, base) });
       previa = c;
       continue;
@@ -446,7 +557,7 @@ export function serieRendimiento(
 
     if (delta <= 0) {
       tramos.push({
-        ...base, rendimiento: null, motivo: "odometro_retrocede",
+        ...base, rendimiento: null, motivo: "odometro_retrocede", kmConfiable: false,
         detalle: detalleDe("odometro_retrocede", { ...base, kmPrev }),
       });
       // El km malo NO se convierte en la base del siguiente tramo: eso propagaría el error.
@@ -454,7 +565,7 @@ export function serieRendimiento(
       continue;
     }
 
-    const valor = delta / cantidad;
+    const valor = delta / cantidadTramo;
 
     if (saltadas.length) {
       tramos.push({
@@ -488,6 +599,10 @@ export function serieRendimiento(
       const kmMalo = delta / dias > KM_DIA_MAX;
       tramos.push({
         ...base, rendimiento: null, motivo: "implausible", crudo: valor,
+        // El MISMO `kmMalo` que decide si la lectura sirve de base decide si sus km entran al
+        // costo por km: "faltan cargas" deja un km bueno (el odómetro avanzó de verdad), "el km
+        // está mal tecleado" no. Un solo juicio, dos consumidores — no dos criterios.
+        kmConfiable: !kmMalo,
         detalle: detalleDe("implausible", { ...base, crudo: valor, kmMalo, dias }),
       });
       // Una lectura imposible NO se convierte en la base del tramo siguiente: eso propagaría
@@ -552,7 +667,8 @@ function tramoSin(
   const t: Tramo = {
     cargaId: c.id, previaId, unidad, familia, fecha: c.fecha,
     km: null, cantidad: null, rendimiento: null, motivo, crudo: null,
-    saltadas, techo: techoDeFamilia(familia), detalle: "",
+    saltadas, kmConfiable: false, absorbidas: [], cantidadAbsorbida: 0,
+    techo: techoDeFamilia(familia), detalle: "",
   };
   return { ...t, detalle: detalleDe(motivo, t) };
 }
@@ -600,6 +716,184 @@ export function tramosPorCarga(series: Map<string, Serie>): Record<number, { tra
     for (const t of s.tramos) out[t.cargaId] = { tramo: t, resumen: s.resumen };
   }
   return out;
+}
+
+// ─── LA VENTANA MÓVIL ─────────────────────────────────────────────────────────
+//
+// POR QUÉ, Y ES LO ÚNICO QUE HAY QUE ENTENDER DE ESTA PARTE. Fila por fila el ruido tapa la
+// señal: un tanque que cortó antes, una semana de cerro y un tramo de carretera mueven cada
+// número lo suficiente como para que una degradación real de 10 % no se vea en ninguno. Y la
+// MEDIANA de la unidad —que es la referencia con la que se juzga cada tramo— se mueve despacio
+// a propósito: son meses de historia, así que una caída reciente queda diluida dentro de ella
+// justo mientras está ocurriendo.
+//
+// La ventana pooled de las últimas N mediciones es lo que separa las dos cosas: comparada
+// contra la mediana histórica, un motor que empeoró se ve en ~2 semanas en vez de esperar el
+// cierre de mes.
+//
+// TRES DECISIONES:
+//
+//   · ES UN RATIO AGRUPADO (Σkm / Σcantidad), NO un promedio de rendimientos. Promediar ratios
+//     le da el mismo peso a un tramo de 80 km que a uno de 900, y el resultado no corresponde
+//     a ningún consumo real. Es el mismo criterio de `ResumenVentana.rendimiento`.
+//   · SE CUENTAN TRAMOS PUBLICABLES, no cargas. Diez cargas con un hueco en medio dan ocho
+//     tramos, y los descartados no tienen número que promediar.
+//   · LA VENTANA ES DE LA SERIE, o sea por `(unidad, familia)`. Por unidad a secas, una
+//     bicombustible volvería a mezclar sus dos combustibles en un solo número.
+//
+// El umbral de alarma NO vive aquí: `desviacion` publica el dato y quien pinta decide, porque
+// el ruido irreducible depende de la familia —en gases licuados la válvula corta al ~80 % por
+// norma y el volumen varía con la temperatura, así que hay un 3-5 % que no se puede quitar— y
+// un umbral único para las cuatro familias sería ciego en diésel y ruidoso en GLP y GNV.
+
+export type PuntoMovil = {
+  /** La carga que CIERRA la ventana: es la fila junto a la que se pinta. */
+  cargaId: number;
+  fecha: string;
+  /** `Σkm / Σcantidad` de los últimos `n` tramos publicables, este incluido. */
+  rendimiento: number;
+  /** Cuántos tramos entraron. Menos de `n` al principio de la serie: la ventana no se inventa. */
+  tramos: number;
+  km: number;
+  cantidad: number;
+  /** `(movil − mediana) / mediana`. Null sin mediana: no hay contra qué comparar. */
+  desviacion: number | null;
+};
+
+/**
+ * La ventana móvil de cada carga de una serie, indexada por `cargaId` para que la fila la
+ * encuentre sin volver a recorrer nada.
+ *
+ * `n` por defecto es `MIN_TRAMOS_CONFIABLE`, HEREDADO y no reelegido: es el mismo mínimo con
+ * el que este módulo ya decide que un patrón es un patrón. Un 5 nuevo y suelto sería un umbral
+ * inventado, y este repo mide los suyos o los hereda literales.
+ */
+export function ventanaMovil(serie: Serie, n: number = MIN_TRAMOS_CONFIABLE): Map<number, PuntoMovil> {
+  const out = new Map<number, PuntoMovil>();
+  const buenos = serie.tramos.filter((t) => t.rendimiento !== null && t.km != null && t.cantidad != null);
+  const med = serie.resumen.mediana;
+
+  for (let i = 0; i < buenos.length; i++) {
+    const ventana = buenos.slice(Math.max(0, i - n + 1), i + 1);
+    const km = ventana.reduce((s, t) => s + num(t.km), 0);
+    const cantidad = ventana.reduce((s, t) => s + num(t.cantidad), 0);
+    if (!(cantidad > 0)) continue;
+    const rendimiento = km / cantidad;
+    out.set(buenos[i].cargaId, {
+      cargaId: buenos[i].cargaId,
+      fecha: buenos[i].fecha,
+      rendimiento,
+      tramos: ventana.length,
+      km,
+      cantidad,
+      desviacion: med && med > 0 ? (rendimiento - med) / med : null,
+    });
+  }
+  return out;
+}
+
+/** Las ventanas móviles de un lote entero, ya aplanadas por carga (espejo de `tramosPorCarga`). */
+export function movilesPorCarga(
+  series: Map<string, Serie>,
+  n: number = MIN_TRAMOS_CONFIABLE
+): Record<number, PuntoMovil> {
+  const out: Record<number, PuntoMovil> = {};
+  for (const s of series.values()) {
+    for (const [id, p] of ventanaMovil(s, n)) out[id] = p;
+  }
+  return out;
+}
+
+// ─── EL SALTO QUE NO CABE EN UN TANQUE ────────────────────────────────────────
+//
+// Si entre esta carga y la anterior la unidad recorrió MÁS km de los que da un tanque lleno,
+// pasó una de dos cosas: se hizo una carga que nadie registró (lo habitual), o el kilometraje
+// está mal tecleado. Las dos ensucian lo mismo —el rendimiento de la unidad, su costo por km y
+// el vencimiento de su mantenimiento— y las dos se arreglan en el momento de guardar, con la
+// persona delante, en vez de un mes después buscando por qué la mediana se movió.
+//
+// EL CANDADO NO BLOQUEA: PIDE EL MOTIVO. Una lectura que no llega a ser fila desaparece de
+// donde se corrige, así que la salida de este ERP es siempre la misma —la de `falso_flete_motivo`
+// y `adicional_motivo`—: se guarda, pero con el porqué escrito, y el motivo es obligatorio.
+//
+// NO ES UN TERCER JUEZ DEL MISMO NÚMERO. Sobre este km ya opinan `evaluarLectura` (anti-retroceso
+// y dígito de más) y `KM_DIA_MAX`. Éste mira lo que ninguno de los dos mira —cuánto camina la
+// unidad con un tanque— y por eso vive aquí, junto a la mediana que necesita, y no en una pantalla.
+
+/**
+ * Cuánto puede pasarse un tramo del tanque teórico antes de que valga la pena preguntar.
+ *
+ * ES EL ÚNICO UMBRAL DE ESTE MÓDULO QUE NO SE MIDIÓ NI SE HEREDA, y se dice para que nadie lo
+ * cite como si tuviera respaldo: es el colchón que evita que la variación normal del rendimiento
+ * y un tanque llevado hasta la reserva disparen el candado en filas buenas. Si sale seguido sobre
+ * cargas correctas, se sube — y entonces sí habrá con qué medirlo.
+ */
+export const MARGEN_SALTO_TANQUE = 1.15;
+
+export type VeredictoSalto =
+  /** El salto cabe en un tanque: nada que preguntar. */
+  | { estado: "ok" }
+  /**
+   * No hay con qué juzgar: sin mediana fiable de esa unidad y familia, o sin capacidad de
+   * tanque. NO se inventa un techo — sería el mismo error que el `Infinity` de `elegirOdometro`,
+   * que daba por buena una lectura ×10 porque no tenía contra qué compararla.
+   */
+  | { estado: "sin_base"; motivo: "sin_mediana" | "sin_tanque" | "sin_km_previo" }
+  /** El salto no cabe en un tanque. `kmMax` es el techo y `tanques` cuántos haría falta. */
+  | {
+      estado: "salto";
+      delta: number;
+      kmMax: number;
+      tanques: number;
+      detalle: string;
+    };
+
+/**
+ * ¿El salto de kilometraje de esta carga cabe en un tanque de esta unidad?
+ *
+ * Puro: recibe la capacidad y la mediana ya resueltas, igual que `lib/costeo-propio.ts` recibe
+ * sus parámetros. Quien llama decide de dónde salen.
+ */
+export function revisarSaltoKm(args: {
+  km: number | null | undefined;
+  kmPrevio: number | null | undefined;
+  /** Capacidad del tanque en la unidad de la familia (`capacidadTanqueDe`). */
+  capacidad: number | null | undefined;
+  /** Mediana de la unidad+familia, y si es FIABLE (`resumen.mediana` / `resumen.confiable`). */
+  mediana: number | null | undefined;
+  medianaConfiable: boolean;
+  label?: string;
+}): VeredictoSalto {
+  const km = num(args.km);
+  const prev = num(args.kmPrevio);
+  if (km <= 0 || prev <= 0 || km <= prev) return { estado: "sin_base", motivo: "sin_km_previo" };
+
+  const cap = num(args.capacidad);
+  if (cap <= 0) return { estado: "sin_base", motivo: "sin_tanque" };
+
+  // Con una mediana de uno o dos tramos el techo saldría de un número que no es un patrón, y el
+  // candado dispararía sobre cargas buenas. Es el mismo guard que `decidirRendimiento` aplica
+  // antes de dejar que una medición pise un parámetro.
+  const med = num(args.mediana);
+  if (med <= 0 || !args.medianaConfiable) return { estado: "sin_base", motivo: "sin_mediana" };
+
+  const delta = km - prev;
+  const kmMax = cap * med * MARGEN_SALTO_TANQUE;
+  if (delta <= kmMax) return { estado: "ok" };
+
+  const tanques = delta / (cap * med);
+  const label = args.label ?? "km/gal";
+  return {
+    estado: "salto",
+    delta,
+    kmMax,
+    tanques,
+    detalle:
+      `${fmt0(delta)} km desde la carga anterior, y con un tanque de ${fmt(cap)} a ${fmt(med)} ${label} ` +
+      `esta unidad hace como mucho ${fmt0(kmMax)} km — harían falta ${fmt(tanques)} tanques. ` +
+      `Lo normal es que falte por registrar una carga de ese periodo; si no, el kilometraje está mal tecleado. ` +
+      `Escribe qué pasó y se guarda igual.`,
+  };
 }
 
 // ─── EL JUICIO ────────────────────────────────────────────────────────────────
@@ -684,6 +978,18 @@ function detalleDe(
       );
     case "unidad_desconocida":
       return "La cantidad está en una unidad que no se sabe convertir a la de este combustible.";
+    case "tanque_parcial":
+      return (
+        "Esta carga NO llenó el tanque, así que no cierra una medición: el método mide de tanque " +
+        "lleno a tanque lleno. Su combustible se suma al del próximo tanque lleno y ahí se mide — " +
+        "no se pierde, se cuenta en el otro tramo."
+      );
+    case "tanque_desconocido":
+      return (
+        "Nadie declaró si el tanque quedó lleno en esta carga, así que no puede cerrar una " +
+        "medición. Su combustible se suma igual al próximo tanque lleno. Marca la casilla " +
+        "«tanque lleno» en la carga y el tramo se puede medir desde aquí."
+      );
     case "eslabon_saltado":
       return (
         `${t.saltadas?.length ?? 0} carga(s) de esta unidad dentro del tramo no tienen kilometraje, ` +
@@ -733,6 +1039,8 @@ export function etiquetaMotivo(motivo: MotivoSinRendimiento): string {
     case "unidad_desconocida": return "unidad ?";
     case "eslabon_saltado": return "tramo incompleto";
     case "familia_cruzada": return "bicombustible";
+    case "tanque_parcial": return "tanque parcial";
+    case "tanque_desconocido": return "¿tanque lleno?";
     case "implausible": return "implausible";
   }
 }
@@ -772,7 +1080,28 @@ export type ResumenVentana = {
   rendimiento: number | null;
   /** `Σgasto / Σcantidad` — ponderado por galón, que es lo que de verdad se pagó. */
   precioMedio: number | null;
+  /**
+   * Σ km de los tramos con `kmConfiable` — el conjunto ①, MÁS AMPLIO que el de `km`.
+   * Un tramo bicombustible, uno con un eslabón saltado o uno con un hueco de registro no dicen
+   * cuánto rinde la unidad, pero sus kilómetros se recorrieron y cuentan para el costo por km.
+   */
+  kmRecorrido: number;
+  /** Σ soles de las cargas que cierran esos tramos, más las que absorbieron por el camino. */
+  gastoDelKm: number;
+  /**
+   * `gastoDelKm / kmRecorrido` — LA MÉTRICA PRINCIPAL DEL MÓDULO, y la única comparable entre
+   * unidades con combustibles distintos: un km/gal y un km/m³ no se pueden poner en la misma
+   * columna, y soles por kilómetro sí.
+   *
+   * NO se calcula sobre los tramos medidos, y ese es el arreglo entero: heredando el filtro del
+   * rendimiento, cada condición nueva (tanque lleno, familia sin cruzar) le quitaba base al CPK
+   * —y encima lo SUBÍA, porque quitaba km del denominador dejando soles de otras cargas en el
+   * numerador— justo a la métrica que tiene que servir para toda la flota.
+   */
   costoKm: number | null;
+  /** Qué parte del gasto de la ventana entró al CPK. Sin esto, un CPK con poca cobertura se
+   *  lee como si describiera todo el periodo. */
+  coberturaCosto: number | null;
   cargas: number;
   cargasMedidas: number;
   /** TODAS las cargas de la ventana. Es lo que cuadra con caja, y por eso se publica
@@ -830,12 +1159,26 @@ export function resumirVentana(
   const gastoDe = new Map(delRango.map((c) => [c.id, num(c.gasto)]));
 
   let km = 0, cantidad = 0, gasto = 0, medidas = 0, sinOdo = 0;
+  // El plano del COSTO POR KM, aparte del plano del rendimiento y con otro conjunto de tramos.
+  let kmRecorrido = 0, gastoDelKm = 0;
   const familias = new Set<string>();
 
   for (const s of series.values()) {
     for (const t of s.tramos) {
       if (!gastoDe.has(t.cargaId)) continue; // la carga que CIERRA el tramo manda
       if (t.motivo === "sin_odometro") sinOdo++;
+
+      // ① COSTO POR KM: todo tramo cuyos km son de fiar, publique rendimiento o no. Las cargas
+      //    absorbidas (parciales) aportan su plata aquí: sin ellas el costo saldría corto.
+      if (t.kmConfiable && t.km != null && t.km > 0) {
+        kmRecorrido += t.km;
+        gastoDelKm += gastoDe.get(t.cargaId) ?? 0;
+        for (const id of t.absorbidas) gastoDelKm += gastoDe.get(id) ?? 0;
+      }
+
+      // ③ RENDIMIENTO: solo lo publicable. `km`, `cantidad` y `gasto` NO cambian de base —
+      //    la descomposición de `compararVentanas` se apoya en los tres y tiene que seguir
+      //    sumando exacto.
       if (t.rendimiento === null || t.km == null || t.cantidad == null) continue;
       km += t.km;
       cantidad += t.cantidad;
@@ -845,16 +1188,21 @@ export function resumirVentana(
     }
   }
 
+  const gastoTotal = delRango.reduce((s, c) => s + num(c.gasto), 0);
+
   return {
     desde, hasta,
     dias: Math.max(0, diasEntre(desde, hasta) + 1),
     km, cantidad, gasto,
     rendimiento: cantidad > 0 ? km / cantidad : null,
     precioMedio: cantidad > 0 ? gasto / cantidad : null,
-    costoKm: km > 0 ? gasto / km : null,
+    kmRecorrido,
+    gastoDelKm,
+    costoKm: kmRecorrido > 0 ? gastoDelKm / kmRecorrido : null,
+    coberturaCosto: gastoTotal > 0 ? gastoDelKm / gastoTotal : null,
     cargas: delRango.length,
     cargasMedidas: medidas,
-    gastoTotal: delRango.reduce((s, c) => s + num(c.gasto), 0),
+    gastoTotal,
     cargasSinOdometro: sinOdo,
     familias: [...familias].sort(),
     label,

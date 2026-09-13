@@ -33,6 +33,9 @@ import {
   resumirVentana,
   compararVentanas,
   variacionPct,
+  ventanaMovil,
+  movilesPorCarga,
+  revisarSaltoKm,
   TECHO_FAMILIA,
   MIN_TRAMOS_CONFIABLE,
   type CargaRendimiento,
@@ -709,6 +712,226 @@ const cargaBi = (
   ]);
   chk("una carga del otro combustible sin odómetro se ubica por fecha",
     sinKm.tramos[1].motivo === "familia_cruzada", String(sinKm.tramos[1].motivo));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TANDA 2 · A) TANQUE LLENO A TANQUE LLENO
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  console.log("\n── Tanda 2 · método tanque lleno ──────────────────────────────");
+
+  // Base: 3 cargas, 100 km y 10 gal cada tramo → 10 km/gal limpio.
+  const base = (tl: (boolean | null | undefined)[]): CargaRendimiento[] =>
+    [0, 1, 2].map((i) => ({
+      id: i + 1, unidad: "p1", fecha: `2026-03-0${i + 1}`,
+      kilometraje: 1000 + i * 100, cantidad: 10, tipo: "diesel",
+      ...(tl[i] === undefined ? {} : { tanqueLleno: tl[i] }),
+    }));
+
+  // LO QUE NO SE PUEDE AFLOJAR: sin el campo, el resultado es el de siempre.
+  const legado = serieRendimiento(base([undefined, undefined, undefined]));
+  chk("sin `tanqueLleno` el comportamiento es idéntico al de siempre",
+    legado.tramos.map((t) => t.motivo ?? "ok").join("|") === "primera_carga|ok|ok",
+    legado.tramos.map((t) => t.motivo ?? "ok").join("|"));
+  chk("…y su número no se mueve", cerca(legado.tramos[1].rendimiento, 10), String(legado.tramos[1].rendimiento));
+
+  // Todas llenas: igual que el legado.
+  const llenas = serieRendimiento(base([true, true, true]));
+  chk("con todas llenas mide igual que el legado",
+    cerca(llenas.tramos[1].rendimiento, 10) && cerca(llenas.tramos[2].rendimiento, 10),
+    `${llenas.tramos[1].rendimiento} / ${llenas.tramos[2].rendimiento}`);
+
+  // LA PARCIAL DEL MEDIO NO ROMPE NADA: se absorbe y el tramo ancla→ancla mide 200 km / 20 gal.
+  const conParcial = serieRendimiento(base([true, false, true]));
+  chk("la carga parcial no cierra medición", conParcial.tramos[1].motivo === "tanque_parcial",
+    String(conParcial.tramos[1].motivo));
+  chk("…y sus km quedan en null para no contarse dos veces", conParcial.tramos[1].km === null,
+    String(conParcial.tramos[1].km));
+  chk("el tramo ancla→ancla abarca los DOS tramos", conParcial.tramos[2].km === 200,
+    String(conParcial.tramos[2].km));
+  chk("…y absorbe el combustible de la parcial", conParcial.tramos[2].cantidad === 20,
+    String(conParcial.tramos[2].cantidad));
+  chk("…así que el rendimiento NO se infla", cerca(conParcial.tramos[2].rendimiento, 10),
+    String(conParcial.tramos[2].rendimiento));
+  chk("…y declara a quién absorbió", conParcial.tramos[2].absorbidas.join(",") === "2",
+    conParcial.tramos[2].absorbidas.join(","));
+
+  // EL BUG QUE ESTO EVITA: invalidar los dos tramos que tocan una parcial perdería su
+  // combustible de toda cuenta. Aquí el denominador lo conserva entero.
+  chk("el combustible de la parcial NO se pierde",
+    conParcial.resumen.cantidadMedida === 20, String(conParcial.resumen.cantidadMedida));
+
+  // `null` se absorbe igual que la parcial —la cuenta sale bien fuera llena o parcial— pero
+  // con motivo propio, porque se arregla en otro sitio.
+  const desconocida = serieRendimiento(base([true, null, true]));
+  chk("la carga sin declarar tiene motivo propio", desconocida.tramos[1].motivo === "tanque_desconocido",
+    String(desconocida.tramos[1].motivo));
+  chk("…y se absorbe igual que la parcial", cerca(desconocida.tramos[2].rendimiento, 10),
+    String(desconocida.tramos[2].rendimiento));
+  chk("…y su motivo manda a marcar la casilla",
+    /tanque lleno/i.test(textoMotivo("tanque_desconocido", desconocida.tramos[1])));
+
+  // Sin ancla previa no hay tramo que medir: es `primera_carga`, no un número inventado.
+  const arrancaParcial = serieRendimiento(base([false, true, true]));
+  chk("lo absorbido antes de la primera ancla no se arrastra",
+    arrancaParcial.tramos[1].motivo === "primera_carga" && arrancaParcial.tramos[1].km === null,
+    `${arrancaParcial.tramos[1].motivo}/${arrancaParcial.tramos[1].km}`);
+  chk("…y el primer tramo medible no hereda su combustible",
+    arrancaParcial.tramos[2].cantidad === 10, String(arrancaParcial.tramos[2].cantidad));
+
+  chk("la invariante se mantiene con tanque",
+    [...llenas.tramos, ...conParcial.tramos, ...desconocida.tramos]
+      .every((t) => (t.rendimiento !== null) !== (t.motivo !== null)));
+  for (const m of ["tanque_parcial", "tanque_desconocido"] as MotivoSinRendimiento[]) {
+    chk(`${m} tiene etiqueta corta`, etiquetaMotivo(m).length > 0, etiquetaMotivo(m));
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TANDA 2 · B) EL COSTO POR KM NO HEREDA EL FILTRO DEL RENDIMIENTO
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  console.log("\n── Tanda 2 · costo por km (conjunto ①) ────────────────────────");
+
+  // Una bicombustible: el tramo de GLP cruza una carga de gasolina, así que NO publica
+  // rendimiento. Sus km se recorrieron igual y su plata se gastó igual.
+  const cargas: CargaRendimiento[] = [
+    { id: 1, unidad: "p1", fecha: "2026-04-01", kilometraje: 1000, cantidad: 10, tipo: "glp", gasto: 70 },
+    { id: 2, unidad: "p1", fecha: "2026-04-10", kilometraje: 1200, cantidad: 10, tipo: "glp", gasto: 70 },
+  ];
+  const cruzada = serieRendimiento(cargas, [
+    { id: 9, fecha: "2026-04-05", kilometraje: 1100, familia: "gasolina" },
+  ]);
+  chk("el tramo bicombustible no publica rendimiento", cruzada.tramos[1].motivo === "familia_cruzada",
+    String(cruzada.tramos[1].motivo));
+  chk("…pero sus km SÍ son de fiar", cruzada.tramos[1].kmConfiable === true,
+    String(cruzada.tramos[1].kmConfiable));
+
+  const series = new Map([["p1|glp", cruzada]]);
+  const v = resumirVentana(series, cargas, "2026-04-01", "2026-04-30");
+  chk("el rendimiento de la ventana es null (no hay tramo publicable)", v.rendimiento === null,
+    String(v.rendimiento));
+  chk("PERO el costo por km existe", v.costoKm !== null, String(v.costoKm));
+  chk("…con los km del tramo descartado", v.kmRecorrido === 200, String(v.kmRecorrido));
+  chk("…y S/ 70 / 200 km = 0.35", cerca(v.costoKm, 0.35, 0.001), String(v.costoKm));
+  chk("…y declara su cobertura", cerca(v.coberturaCosto, 0.5, 0.001), String(v.coberturaCosto));
+
+  // Un km MALO (dígito de más) sí queda fuera: ahí el odómetro no avanzó de verdad.
+  const malo: CargaRendimiento[] = [
+    { id: 1, unidad: "p2", fecha: "2026-04-01", kilometraje: 1000, cantidad: 10, tipo: "diesel", gasto: 250 },
+    { id: 2, unidad: "p2", fecha: "2026-04-03", kilometraje: 1000000, cantidad: 10, tipo: "diesel", gasto: 250 },
+  ];
+  const sMalo = seriesRendimiento(malo);
+  const vMalo = resumirVentana(sMalo, malo, "2026-04-01", "2026-04-30");
+  chk("un km imposible NO entra al costo por km", vMalo.kmRecorrido === 0, String(vMalo.kmRecorrido));
+  chk("…y el costo por km sale null en vez de un número absurdo", vMalo.costoKm === null,
+    String(vMalo.costoKm));
+
+  // La plata de una carga ABSORBIDA entra al numerador: si no, el costo saldría corto.
+  const conParcial: CargaRendimiento[] = [
+    { id: 1, unidad: "p3", fecha: "2026-05-01", kilometraje: 1000, cantidad: 10, tipo: "diesel", gasto: 250, tanqueLleno: true },
+    { id: 2, unidad: "p3", fecha: "2026-05-05", kilometraje: 1100, cantidad: 10, tipo: "diesel", gasto: 250, tanqueLleno: false },
+    { id: 3, unidad: "p3", fecha: "2026-05-09", kilometraje: 1200, cantidad: 10, tipo: "diesel", gasto: 250, tanqueLleno: true },
+  ];
+  const vPar = resumirVentana(seriesRendimiento(conParcial), conParcial, "2026-05-01", "2026-05-31");
+  chk("el costo por km cuenta los km del tramo ancla→ancla", vPar.kmRecorrido === 200,
+    String(vPar.kmRecorrido));
+  chk("…y la plata de la parcial absorbida", vPar.gastoDelKm === 500, String(vPar.gastoDelKm));
+  chk("…dando S/ 2.50 por km", cerca(vPar.costoKm, 2.5, 0.001), String(vPar.costoKm));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TANDA 2 · C) VENTANA MÓVIL
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  console.log("\n── Tanda 2 · ventana móvil ────────────────────────────────────");
+
+  // 8 tramos a 10 km/gal y después una caída sostenida a 8: la mediana histórica apenas se
+  // mueve, la ventana móvil lo ve.
+  const rend = [10, 10, 10, 10, 10, 10, 10, 10, 8, 8, 8, 8, 8];
+  const cargas: CargaRendimiento[] = [{ id: 1, unidad: "p1", fecha: "2026-01-01", kilometraje: 10000, cantidad: 10, tipo: "diesel" }];
+  let km = 10000;
+  rend.forEach((r, i) => {
+    km += r * 10;
+    cargas.push({
+      id: i + 2, unidad: "p1", fecha: `2026-01-${String(i + 2).padStart(2, "0")}`,
+      kilometraje: km, cantidad: 10, tipo: "diesel",
+    });
+  });
+  const serie = serieRendimiento(cargas);
+  const mov = ventanaMovil(serie);
+
+  const primeros = mov.get(2);
+  chk("la ventana no se inventa: al principio cuenta los tramos que hay",
+    primeros?.tramos === 1, String(primeros?.tramos));
+  const ultimo = mov.get(cargas[cargas.length - 1].id);
+  chk("la ventana llena tiene 5 tramos", ultimo?.tramos === MIN_TRAMOS_CONFIABLE, String(ultimo?.tramos));
+  chk("…y ya marca la caída sostenida", cerca(ultimo?.rendimiento ?? null, 8, 0.01),
+    String(ultimo?.rendimiento));
+  chk("es un ratio AGRUPADO (Σkm/Σcantidad), no un promedio de ratios",
+    ultimo?.km === 400 && ultimo?.cantidad === 50, `${ultimo?.km}/${ultimo?.cantidad}`);
+
+  // Y ESTE ES EL ARGUMENTO ENTERO: la mediana histórica no la ve todavía.
+  chk("la mediana histórica sigue en 10 mientras la unidad ya rinde 8",
+    cerca(serie.resumen.mediana, 10, 0.01), String(serie.resumen.mediana));
+  chk("…y la desviación de la ventana lo DICE (−20 %)",
+    cerca(ultimo?.desviacion ?? null, -0.2, 0.01), String(ultimo?.desviacion));
+
+  // Solo tramos publicables, y solo de su propia serie.
+  const conHueco = serieRendimiento([
+    { id: 1, unidad: "p9", fecha: "2026-02-01", kilometraje: 1000, cantidad: 10, tipo: "diesel" },
+    { id: 2, unidad: "p9", fecha: "2026-02-02", kilometraje: 1100, cantidad: 0, tipo: "diesel" },
+    { id: 3, unidad: "p9", fecha: "2026-02-03", kilometraje: 1200, cantidad: 10, tipo: "diesel" },
+  ]);
+  const movHueco = ventanaMovil(conHueco);
+  chk("un tramo sin número no entra a la ventana", !movHueco.has(2), String([...movHueco.keys()]));
+  chk("…y el siguiente sí, con lo que hay", movHueco.get(3)?.tramos === 1, String(movHueco.get(3)?.tramos));
+
+  const porCarga = movilesPorCarga(seriesRendimiento(cargas));
+  chk("movilesPorCarga aplana lo mismo que ventanaMovil",
+    porCarga[cargas[cargas.length - 1].id]?.rendimiento === ultimo?.rendimiento);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TANDA 2 · D) EL SALTO DE KM QUE NO CABE EN UN TANQUE
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  console.log("\n── Tanda 2 · salto de km ──────────────────────────────────────");
+
+  // Una unidad con tanque de 25 gal a 28 km/gal hace ~700 km con un tanque, ~805 con el margen.
+  const arg = (km: number, extra: Partial<Parameters<typeof revisarSaltoKm>[0]> = {}) =>
+    revisarSaltoKm({ km, kmPrevio: 10000, capacidad: 25, mediana: 28, medianaConfiable: true, ...extra });
+
+  chk("un tramo normal no pregunta nada", arg(10600).estado === "ok", arg(10600).estado);
+  chk("justo bajo el techo tampoco", arg(10800).estado === "ok", arg(10800).estado);
+
+  // EL CASO QUE MOTIVÓ EL PUNTO 4: un salto que no cabe en un tanque.
+  const v = arg(10900);
+  chk("un salto de 900 km con un tanque de ~700 SÍ pregunta", v.estado === "salto", v.estado);
+  if (v.estado === "salto") {
+    chk("…y nombra los km y el techo", v.delta === 900 && Math.round(v.kmMax) === 805,
+      `${v.delta} / ${Math.round(v.kmMax)}`);
+    chk("…y dice cuántos tanques harían falta", cerca(v.tanques, 900 / 700, 0.01), String(v.tanques));
+    chk("…y el detalle propone la causa habitual, no acusa al odómetro",
+      /falte por registrar una carga/i.test(v.detalle) && /mal tecleado/i.test(v.detalle));
+  }
+
+  // SIN BASE NO SE INVENTA UN TECHO — el error de `elegirOdometro` con su `Infinity`.
+  chk("sin mediana fiable no se juzga",
+    arg(99999, { medianaConfiable: false }).estado === "sin_base", arg(99999, { medianaConfiable: false }).estado);
+  chk("…y el motivo lo declara",
+    (arg(99999, { medianaConfiable: false }) as { motivo: string }).motivo === "sin_mediana");
+  chk("sin capacidad de tanque tampoco",
+    (arg(99999, { capacidad: 0 }) as { motivo: string }).motivo === "sin_tanque");
+  chk("sin km previo tampoco",
+    (arg(99999, { kmPrevio: 0 }) as { motivo: string }).motivo === "sin_km_previo");
+  chk("un odómetro que no avanza no es un salto: lo juzga el motor, no este candado",
+    arg(9000).estado === "sin_base", arg(9000).estado);
+
+  // La unidad de la etiqueta la pone quien llama: un GNV no se explica en galones.
+  const gnv = revisarSaltoKm({ km: 11000, kmPrevio: 10000, capacidad: 30, mediana: 4, medianaConfiable: true, label: "km/m³" });
+  chk("el detalle usa la unidad de la familia, no un km/gal fijo",
+    gnv.estado === "salto" && /km\/m³/.test(gnv.detalle), gnv.estado === "salto" ? gnv.detalle.slice(0, 60) : gnv.estado);
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");
