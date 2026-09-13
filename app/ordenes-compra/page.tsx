@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { buildHeaderPDFHtml, buildFooterPDFHtml } from "@/lib/pdf-chrome";
 import { empresaConDefectos } from "@/lib/empresa-perfil";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
@@ -225,27 +226,14 @@ function generarOCPdf(
     .wm{position:fixed;top:45%;left:0;right:0;text-align:center;font-size:110px;font-weight:900;color:#dc262618;transform:rotate(-24deg);z-index:0;letter-spacing:8px}
     @media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}`;
 
-  const header = `<div class="pdf-header" style="background:${cp};display:flex;align-items:stretch;height:65px;">
-    <div style="background:white;border-radius:0 20px 20px 0;padding:8px 20px 8px 14px;display:flex;align-items:center;min-width:140px;max-width:160px;flex-shrink:0;">
-      <img src="${logoUrl}" style="max-height:46px;max-width:130px;object-fit:contain;"/>
-    </div>
-    <div style="flex:1;display:flex;align-items:center;justify-content:flex-end;padding:0 24px;">
-      <div style="text-align:right;">
-        <p style="font-size:16px;font-weight:900;color:white;margin:0;letter-spacing:.3px;">ORDEN DE COMPRA</p>
-        <p style="font-size:9.5px;color:rgba(255,255,255,0.72);margin:3px 0 0;">N° ${oc.numero || "#" + oc.id} · Emitida: ${fmtFecha(oc.fecha_emision)}</p>
-      </div>
-    </div>
-  </div>`;
+  // El membrete se pide a lib/pdf-chrome, que es donde vive. Estaba COPIADO literal aquí, así
+  // que la orden de compra y la cotización son el mismo papel de la misma empresa y dejaban de
+  // parecerlo en cuanto alguien tocaba uno de los dos — que es justo lo que pasó al agrandar el
+  // logo y centrar el pie: la cotización cambiaba y esta hoja se quedaba con el membrete viejo.
+  const header = buildHeaderPDFHtml(logoUrl, cp, "ORDEN DE COMPRA",
+    `N° ${oc.numero || "#" + oc.id} · Emitida: ${fmtFecha(oc.fecha_emision)}`);
 
-  const footer = `<div class="pdf-footer" style="background:${cp};padding:9px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-    <span style="color:white;font-size:8.5px;">&#8962; Dir.: ${empDir}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9990; ${empTel}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9993; ${empEmail}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9741; ${empWeb}</span>
-  </div>`;
+  const footer = buildFooterPDFHtml(cp, empDir, empTel, empEmail, empWeb);
 
   const win = window.open("", "_blank");
   if (!win) { alert("El navegador bloqueó la ventana emergente. Permite pop-ups para imprimir."); return; }
