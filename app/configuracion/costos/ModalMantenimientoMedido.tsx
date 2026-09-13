@@ -32,8 +32,16 @@ export const TONO_MANT: Record<string, { fg: string; bg: string; borde: string; 
   revisar_neumaticos: { fg: "#b45309", bg: "#fffbeb", borde: "#fde68a", icono: "⚠️" },
   varias_placas:      { fg: "#1d4ed8", bg: "#eff6ff", borde: "#bfdbfe", icono: "👥" },
   sin_placas:         { fg: "#9ca3af", bg: "#f9fafb", borde: "#e5e7eb", icono: "—" },
+  // El estimado por plan NO es verde: verde es "hay un número que puedes aplicar", y este no se
+  // aplica nunca. Su tono es el del dato de referencia, con un icono propio (el plan del
+  // fabricante) para que no se confunda de un vistazo con el medido.
+  estimado_por_plan:  { fg: "#1d4ed8", bg: "#eff6ff", borde: "#bfdbfe", icono: "📋" },
   sin_mantenimiento:  { fg: "#9ca3af", bg: "#f9fafb", borde: "#e5e7eb", icono: "—" },
   sin_kilometraje:    { fg: "#9ca3af", bg: "#f9fafb", borde: "#e5e7eb", icono: "—" },
+  una_sola_orden:     { fg: "#6b7280", bg: "#f9fafb", borde: "#e5e7eb", icono: "…" },
+  // Aquí sí hay algo mal escrito en la base, y se arregla hoy: es el único de los "no se midió"
+  // que merece ámbar.
+  kilometraje_incoherente: { fg: "#b45309", bg: "#fffbeb", borde: "#fde68a", icono: "⚠️" },
   pocos_registros:    { fg: "#6b7280", bg: "#f9fafb", borde: "#e5e7eb", icono: "…" },
   solo_terceros:      { fg: "#9ca3af", bg: "#f9fafb", borde: "#e5e7eb", icono: "—" },
 };
@@ -46,6 +54,10 @@ export function tonoMant(c: string) {
 export function ChipMantenimiento({ a, onAbrir }: { a: AgregadoMant; onAbrir: () => void }) {
   const t = tonoMant(a.codigo);
   const hayQueMirar = a.medido !== null;
+  // El estimado por plan tiene número pero NO es el medido, así que se pinta por su propio
+  // camino y con su propio rótulo. Meterlo en `hayQueMirar` lo publicaría en el mismo sitio y con
+  // la misma tipografía que "gastado de verdad", que es exactamente lo que no puede pasar.
+  const soloPlan = !hayQueMirar && a.plan !== null;
   return (
     <button
       onClick={onAbrir}
@@ -55,15 +67,19 @@ export function ChipMantenimiento({ a, onAbrir }: { a: AgregadoMant; onAbrir: ()
     >
       <div className="flex items-center gap-1.5">
         <span className="text-[11px] leading-none">{t.icono}</span>
-        {hayQueMirar
-          ? <span className="font-mono font-black text-xs">{fmtN(a.medido as number)}</span>
+        {hayQueMirar || soloPlan
+          ? <span className="font-mono font-black text-xs">
+              {fmtN(soloPlan ? (a.plan as NonNullable<AgregadoMant["plan"]>).soleskm : (a.medido as number))}
+            </span>
           : <span className="text-[10px] font-bold">{etiquetaMant(a.codigo)}</span>}
       </div>
-      {hayQueMirar && (
+      {(hayQueMirar || soloPlan) && (
         <div className="text-[9px] font-bold mt-0.5 truncate">
-          {a.codigo === "medido" && a.desvio !== null
-            ? `${a.desvio > 0 ? "▲" : "▼"} ${Math.abs(a.desvio * 100).toFixed(0)} % · ver`
-            : etiquetaMant(a.codigo)}
+          {soloPlan
+            ? "solo lo programado"
+            : a.codigo === "medido" && a.desvio !== null
+              ? `${a.desvio > 0 ? "▲" : "▼"} ${Math.abs(a.desvio * 100).toFixed(0)} % · ver`
+              : etiquetaMant(a.codigo)}
         </div>
       )}
     </button>
@@ -141,7 +157,11 @@ export default function ModalMantenimientoMedido({
   const compDespues = componentesCostoKm(conMedido, precios);
   const hayImpacto = a.medido !== null && Math.abs(despues - antes) > 0.00005;
 
-  const fueraTodas = a.aportan.flatMap((p) => p.serie.fuera.map((f) => ({ ...f, placa: p.placa })));
+  // Las órdenes que no entraron al número, de TODAS las placas y no solo de las que votan. Con
+  // las observadas fuera, una unidad cuya única orden es la cabecera no enseñaba esa orden en
+  // ninguna parte de la pantalla — y es justo la que contesta "¿pero yo no tenía una OT con km?".
+  const fueraTodas = [...a.aportan, ...a.observadas.map((o) => o.placa)]
+    .flatMap((p) => p.serie.fuera.map((f) => ({ ...f, placa: p.placa })));
 
   const aplicar = () => {
     if (a.medido === null) return;
@@ -210,8 +230,42 @@ export default function ModalMantenimientoMedido({
               </p>
             )}
 
-            <p className="text-xs text-gray-600 mt-3 leading-relaxed">{a.detalle}</p>
+            <p className="text-xs text-gray-600 mt-3 leading-relaxed whitespace-pre-line">{a.detalle}</p>
           </Bloque>
+
+          {/* 1a · EL SERVICIO PROGRAMADO, PROYECTADO SOBRE EL INTERVALO DEL PLAN.
+              Va en su PROPIO bloque y nunca en la tarjeta «Gastado de verdad»: mide otra cosa. */}
+          {a.plan && (
+            <Bloque
+              titulo="Lo que dice el plan del fabricante"
+              nota="Un tercer número, con su propia etiqueta. No sustituye a ninguno de los dos de arriba y no tiene botón."
+            >
+              <div className="flex items-baseline gap-3 flex-wrap">
+                <span className="font-mono font-black text-2xl text-[#1d4ed8]">{fmtN(a.plan.soleskm)}</span>
+                <span className="text-[11px] text-gray-500">
+                  S/km · servicio cada {fmtKm(a.plan.intervaloKm)} · {a.plan.ots} orden(es) preventiva(s) a{" "}
+                  {fmtS(a.plan.costoServicio)} de media
+                </span>
+              </div>
+              <p className="text-[11px] text-gray-400 mt-1">
+                {a.plan.placas.join(", ")}
+              </p>
+              <p className="text-[11px] text-gray-600 mt-3 leading-relaxed">
+                Esto es <b>solo el servicio programado</b>: no lleva correctivos ni mantenimiento mayor, así que
+                está por debajo del costo real <b>por construcción</b> — no por falta de datos. Por eso no se
+                propone: el parámetro de la izquierda es <b>todo</b> el mantenimiento por kilómetro, y adoptar
+                uno como el otro recortaría el renglón de taller y abarataría el precio ofertado de toda esta
+                categoría. La distancia entre las dos cifras es lo que el parámetro está absorbiendo de lo no
+                programado.
+              </p>
+              {a.plan.neumaticos > 0 && (
+                <p className="text-[11px] text-amber-700 mt-2 leading-relaxed">
+                  {a.plan.neumaticos} de esas órdenes parece <b>compra de llantas</b>, y este tipo ya las cobra en
+                  su propio renglón: esa parte estaría contada dos veces.
+                </p>
+              )}
+            </Bloque>
+          )}
 
           {/* 1b · CONTRA SU GEMELA NUEVA — solo en las fichas usadas */}
           {comp && equilibrio && gemela && (

@@ -179,6 +179,14 @@ export type ResumenMant = {
   neumaticosCosto: number;
   /** La tasa si esas OT no estuvieran. Se enseña al lado; nunca se propone sola. */
   soleskmSinNeumaticos: number | null;
+  /** Órdenes PREVENTIVAS ocurridas, no anuladas y con costo. Es lo único que el intervalo del
+   *  plan del fabricante sabe proyectar (ver `estimarPorPlan`): un correctivo no tiene
+   *  periodicidad, y dividirlo entre 5 000 km le inventaría una. NO dependen del odómetro —
+   *  ahí está la gracia: se cuentan aunque la orden no tenga kilometraje. */
+  preventivasOts: number;
+  preventivasCosto: number;
+  /** De esas, cuántas parecen compra de llantas. Se NOMBRAN, no se descuentan (ver arriba). */
+  preventivasNeumaticos: number;
   desde: string | null;
   hasta: string | null;
 };
@@ -218,6 +226,7 @@ export function serieMantenimiento(ots: OtMantenimiento[], hoy: string): SerieMa
 
   let ancla: OtMantenimiento | null = null;
   let pendientes: OtMantenimiento[] = [];   // OT sin km esperando al tramo que las recoja
+  const prev = { ots: 0, costo: 0, neum: 0 };   // las preventivas, para el estimado por plan
 
   const soltarPendientes = (motivo: MotivoFueraOt, detalle: string) => {
     for (const p of pendientes) {
@@ -240,6 +249,20 @@ export function serieMantenimiento(ots: OtMantenimiento[], hoy: string): SerieMa
     if (String(o.fecha) > hoy) {
       fuera.push({ id: o.id, fecha: o.fecha, costo, motivo: "futura", detalle: "programada, todavía no ocurrió" });
       continue;
+    }
+
+    // LAS PREVENTIVAS SE CUENTAN AQUÍ, y el sitio no es casual: las dos reglas que de verdad
+    // importan —"se anuló, esa plata nunca salió" y "está programada, todavía no ocurrió"— acaban
+    // de aplicarse dos líneas arriba. Contarlas en un segundo recorrido obligaría a repetirlas, y
+    // la copia es siempre la que se queda atrás. Va ANTES del filtro de kilometraje a propósito:
+    // el estimado por plan existe justamente para la orden que no tiene odómetro.
+    //
+    // Con `costo > 0`: una OT abierta automáticamente por el plan nace en S/ 0.00 y recibe su
+    // costo después. Contarla con cero partiría el promedio por la mitad.
+    if (String(o.tipo ?? "").toLowerCase() === "preventivo" && costo > 0) {
+      prev.ots++;
+      prev.costo += costo;
+      if (pareceNeumatico(o.descripcion)) prev.neum++;
     }
 
     const km = Number(o.km ?? 0);
@@ -299,10 +322,13 @@ export function serieMantenimiento(ots: OtMantenimiento[], hoy: string): SerieMa
   // Lo que quedó colgando al final no tiene tramo que lo recoja.
   soltarPendientes("sin_kilometraje", "no hay ninguna orden con kilometraje después de ella");
 
-  return { tramos, fuera, resumen: resumirMant(tramos, fuera, orden, hoy) };
+  return { tramos, fuera, resumen: resumirMant(tramos, fuera, orden, hoy, prev) };
 }
 
-function resumirMant(tramos: TramoMant[], fuera: OtFuera[], orden: OtMantenimiento[], hoy: string): ResumenMant {
+function resumirMant(
+  tramos: TramoMant[], fuera: OtFuera[], orden: OtMantenimiento[], hoy: string,
+  prev: { ots: number; costo: number; neum: number }
+): ResumenMant {
   const km = tramos.reduce((s, t) => s + t.km, 0);
   const costo = tramos.reduce((s, t) => s + t.costo, 0);
   const ots = tramos.reduce((s, t) => s + t.ots, 0);
@@ -339,6 +365,9 @@ function resumirMant(tramos: TramoMant[], fuera: OtFuera[], orden: OtMantenimien
     neumaticosOts: neum.length,
     neumaticosCosto: red2(neumCosto),
     soleskmSinNeumaticos: km > 0 && neum.length ? red4((costo - neumCosto) / km) : null,
+    preventivasOts: prev.ots,
+    preventivasCosto: red2(prev.costo),
+    preventivasNeumaticos: prev.neum,
     desde: tramos[0]?.desde ?? null,
     hasta: tramos[tramos.length - 1]?.hasta ?? null,
   };
@@ -367,7 +396,91 @@ export type PlacaMantenimiento = {
   /** Cuántas OT tiene en total, incluidas las que no midieron nada. */
   otsTotales: number;
   serie: SerieMant;
+  /** Cada cuántos km le toca servicio, según el plan del fabricante al que está enrolada
+   *  (`vehiculos_plan.intervalo_km_override` ?? `planes_mantenimiento.intervalo_base_km`).
+   *
+   *  ES OPCIONAL Y OMITIRLA DEJA EL COMPORTAMIENTO INTACTO, byte a byte: sin intervalo no hay
+   *  estimado por plan y el agregado responde exactamente lo que respondía antes. Misma regla
+   *  que `otrasFamilias` en `seriesRendimiento`; la matriz lo fija. */
+  intervaloPlanKm?: number | null;
 };
+
+// ─── EL INTERVALO DEL PLAN: UN DATO DECLARADO QUE NADIE ESTABA CRUZANDO ───────
+//
+// POR QUÉ EXISTE. Con UNA sola orden de trabajo no hay tramo —un tramo son dos odómetros— y este
+// módulo decía, con razón, que no podía medir nada. Pero el ERP sabe algo más que no estaba
+// mirando: `planes_mantenimiento.intervalo_base_km` declara que a esa unidad le toca servicio
+// cada 5 000 km. Con eso, el costo de un servicio preventivo dividido entre su intervalo SÍ es un
+// S/km defendible, y convierte un "no se puede medir nada" en un número.
+//
+// LAS TRES COSAS QUE LO ACOTAN, Y NINGUNA ES OPCIONAL:
+//
+// 1 · SOLO PREVENTIVAS. Un correctivo no tiene periodicidad: dividirlo entre 5 000 km le
+//     inventaría una, y el número saldría de una avería que quizá no se repite nunca.
+//
+// 2 · MIDE OTRA COSA QUE `mantenimiento_km`, Y POR ESO NO SE PROPONE JAMÁS. El parámetro es
+//     TODO el mantenimiento por km; esto es solo el servicio programado. Aunque los dos números
+//     coincidieran por casualidad, adoptar uno como el otro sería un error de categoría — y como
+//     el correctivo y el mantenimiento mayor quedan fuera por construcción, el estimado está
+//     SIEMPRE por debajo. Aplicarlo recortaría el renglón de taller y abarataría el precio
+//     ofertado de toda la categoría: un costo corto no se discute antes de vender, se descubre
+//     cuando el servicio ya se prestó.
+//
+// 3 · ES UN PISO DEL PISO. El medido ya es un piso (solo cuenta lo asentado); este además deja
+//     fuera todo lo no programado. El detalle lo dice con esas palabras: es lo que se está
+//     absorbiendo, no lo que cuesta mantener la unidad.
+
+export type EstimadoPlan = {
+  /** `Σ costo preventivo ÷ Σ (servicios × intervalo)`. Nunca null: sin datos no se devuelve. */
+  soleskm: number;
+  /** El intervalo con el que se proyectó. Con varias placas es el ponderado — que en el caso
+   *  normal (todas con el mismo plan) es exactamente el del plan. */
+  intervaloKm: number;
+  /** Cuántas órdenes preventivas con costo lo sustentan. */
+  ots: number;
+  /** Lo que cuesta un servicio, en promedio. Es el número que una persona puede verificar. */
+  costoServicio: number;
+  /** De esas, cuántas parecen compra de llantas — que este tipo ya cobra en su propio renglón. */
+  neumaticos: number;
+  placas: string[];
+};
+
+/**
+ * El S/km del SERVICIO PROGRAMADO de un tipo, proyectando el costo de sus órdenes preventivas
+ * sobre el intervalo que declara el plan del fabricante.
+ *
+ * Se agrupa Σ soles ÷ Σ km igual que `tasaAgrupada`, nunca promediando tasas: una unidad con seis
+ * servicios registrados no puede pesar lo mismo que otra con uno. Devuelve `null` en cuanto falta
+ * cualquiera de las dos mitades — un cero se leería como "el servicio programado es gratis".
+ */
+export function estimarPorPlan(placas: PlacaMantenimiento[]): EstimadoPlan | null {
+  // No recibe `hoy`: las anuladas y las futuras ya quedaron fuera al construir la serie, y
+  // volver a filtrarlas aquí sería una segunda definición de "esta orden ocurrió".
+  let soles = 0, km = 0, ots = 0, neum = 0;
+  const nombres: string[] = [];
+  for (const p of placas) {
+    // SOLO LAS PROPIAS, por lo mismo que en la medición: a un tercero no se le paga el
+    // mantenimiento, se le paga una factura, y `mantenimiento` ni siquiera tiene sus órdenes.
+    if (p.flota !== "propia") continue;
+    const intervalo = Number(p.intervaloPlanKm ?? 0);
+    const r = p.serie.resumen;
+    if (!(intervalo > 0) || !(r.preventivasOts > 0) || !(r.preventivasCosto > 0)) continue;
+    soles += r.preventivasCosto;
+    km += r.preventivasOts * intervalo;
+    ots += r.preventivasOts;
+    neum += r.preventivasNeumaticos;
+    nombres.push(p.placa);
+  }
+  if (!(km > 0) || !(soles > 0)) return null;
+  return {
+    soleskm: red4(soles / km),
+    intervaloKm: Math.round(km / ots),
+    ots,
+    costoServicio: red2(soles / ots),
+    neumaticos: neum,
+    placas: nombres,
+  };
+}
 
 // ─── EL AGREGADO DEL TIPO ─────────────────────────────────────────────────────
 
@@ -395,10 +508,21 @@ export type CodigoMant =
   | "varias_placas"
   /** Ninguna unidad apunta a este tipo. */
   | "sin_placas"
+  /** No hay tramo medible, pero el plan del fabricante declara cada cuántos km toca servicio y
+   *  hay órdenes preventivas con costo. Trae número —en `plan`, NUNCA en `medido`— y NO se
+   *  propone: mide el servicio programado, que es otra cosa que `mantenimiento_km`. */
+  | "estimado_por_plan"
   /** Hay placas propias, ninguna con órdenes de trabajo. */
   | "sin_mantenimiento"
-  /** Hay órdenes, pero sin kilometraje no se puede medir ningún tramo. */
+  /** Hay órdenes, y NINGUNA tiene kilometraje anotado. Se arregla en /mantenimiento → Historial. */
   | "sin_kilometraje"
+  /** Hay UNA orden con kilometraje. No falta nada por corregir: el tramo lo cierra la siguiente.
+   *  Vive aparte de `sin_kilometraje` porque aquel manda a rellenar un odómetro que aquí ya
+   *  está puesto — el mismo rojo diciendo dos cosas con arreglos distintos. */
+  | "una_sola_orden"
+  /** Hay dos o más con kilometraje y sus odómetros no son coherentes (retrocede, o el salto es
+   *  imposible). Lo que falta no es un dato: hay un número mal, y se corrige en el Historial. */
+  | "kilometraje_incoherente"
   /** Hay tramos, ninguna placa llega a MIN_TRAMOS_MANT. */
   | "pocos_registros"
   /** La única evidencia es de flota ajena. */
@@ -422,6 +546,13 @@ export type AgregadoMant = {
   medido: number | null;
   /** La misma tasa sin las órdenes que parecen llantas. Solo con `revisar_neumaticos`. */
   medidoSinNeumaticos: number | null;
+  /** El servicio programado proyectado sobre el intervalo del plan. **NO OCUPA `medido`**, y eso
+   *  es deliberado: `medido` significa "gastado de verdad, medido entre dos odómetros", y meter
+   *  aquí otro número haría que el chip y el modal lo publicaran como si lo fuera — escribir bajo
+   *  una identidad y leer con otra, el patrón que este repo ya pagó seis veces. Es EVIDENCIA:
+   *  se publica siempre que se pueda calcular y no mueve el código salvo cuando no hay nada
+   *  medido (`estimado_por_plan`). */
+  plan: EstimadoPlan | null;
   /** Tasa de los últimos DIAS_RECIENTE días. EVIDENCIA: no mueve la propuesta. */
   reciente: number | null;
   /** `(medido − parametro) / parametro`. null si `parametro <= 0` — jamás Infinity. */
@@ -439,6 +570,37 @@ export type AgregadoMant = {
   procedencia: ProcedenciaMant;
   /** De dónde salió, y si no salió, DÓNDE se arregla. Ninguna pantalla lo redacta. */
   detalle: string;
+};
+
+/**
+ * POR QUÉ UNA PLACA CON ÓRDENES NO MIDIÓ NINGÚN TRAMO. Se DERIVA de lo que su propia serie ya
+ * declaró en `fuera`; no se olfatea nada nuevo.
+ *
+ * ESTO ERA UN SOLO ROJO DICIENDO TRES COSAS, y el error se reportó desde la pantalla: una unidad
+ * con UNA orden con kilometraje recibía el texto de `sin_kilometraje` —"sin kilometraje no se
+ * puede medir ningún tramo… se completa en /mantenimiento → Historial"—, o sea el ERP mandando a
+ * rellenar un odómetro que ya estaba puesto. Los tres casos tienen arreglos distintos:
+ *
+ *  · `sin_kilometraje`        → falta el dato. Se teclea en el Historial.
+ *  · `una_sola_orden`         → NO falta nada. El tramo lo cierra la siguiente orden.
+ *  · `kilometraje_incoherente`→ el dato está, pero uno de los números es falso. Se corrige.
+ *
+ * Es exhaustivo por construcción: `serieMantenimiento` mete en `fuera` una `cabecera` por cada
+ * re-ancla, así que una orden con kilometraje deja SIEMPRE rastro de uno de los dos tipos.
+ */
+function porQueNoMidio(p: PlacaMantenimiento): CodigoMant {
+  const f = p.serie.fuera;
+  // Dos o más lecturas que no se pueden encadenar: el retroceso o el salto imposible SOLO
+  // aparecen con un ancla previa, así que este caso implica ≥ 2 órdenes con odómetro.
+  if (f.some((x) => x.motivo === "tramo_implausible")) return "kilometraje_incoherente";
+  if (f.some((x) => x.motivo === "cabecera")) return "una_sola_orden";
+  return "sin_kilometraje";
+}
+
+const MOTIVO_HEREDA: Record<string, string> = {
+  sin_kilometraje: "sus órdenes no tienen kilometraje",
+  una_sola_orden: "solo tiene una orden con kilometraje: falta la siguiente para cerrar el tramo",
+  kilometraje_incoherente: "sus órdenes con kilometraje no encadenan",
 };
 
 /** La tasa agrupada de varias placas: Σ soles ÷ Σ km. NO es el promedio de sus tasas — eso le
@@ -468,6 +630,7 @@ export function agregarMantenimientoTipo(
     parametro: parametro.mantenimiento_km,
     medido: null as number | null,
     medidoSinNeumaticos: null as number | null,
+    plan: estimarPorPlan(placas),
     reciente: null as number | null,
     desvio: null as number | null,
     soles: 0,
@@ -511,8 +674,9 @@ export function agregarMantenimientoTipo(
       continue;
     }
     if (p.serie.resumen.tramos === 0) {
-      observadas.push({ placa: p, motivo: "sin_kilometraje" });
-      heredan.push({ placa: p.placa, flota: "propia", motivo: "sus órdenes no tienen kilometraje" });
+      const motivo = porQueNoMidio(p);
+      observadas.push({ placa: p, motivo });
+      heredan.push({ placa: p.placa, flota: "propia", motivo: MOTIVO_HEREDA[motivo] });
       continue;
     }
     conTramos.push(p);
@@ -542,20 +706,52 @@ export function agregarMantenimientoTipo(
         { medido: g.tasa, soles: g.soles, km: g.km, tramos: g.tramos,
           desvio: desvioDe(parametro.mantenimiento_km, g.tasa) });
     }
-    const orden: CodigoMant[] = ["sin_kilometraje", "sin_mantenimiento", "solo_terceros"];
+    // El motivo más ACCIONABLE primero: un número mal se corrige hoy, un odómetro que falta se
+    // teclea hoy, y "solo hay una orden" no tiene nada que hacer más que esperar a la siguiente.
+    const orden: CodigoMant[] = [
+      "kilometraje_incoherente", "sin_kilometraje", "una_sola_orden", "sin_mantenimiento", "solo_terceros",
+    ];
     const motivo = orden.find((m) => observadas.some((o) => o.motivo === m)) ?? "sin_mantenimiento";
     const textos: Record<string, string> = {
       sin_kilometraje:
-        "Las unidades de este tipo tienen órdenes de trabajo, pero sin kilometraje no se puede medir " +
-        "ningún tramo: hacen falta dos órdenes seguidas con el odómetro anotado. Se completa en " +
+        "Las unidades de este tipo tienen órdenes de trabajo, pero ninguna con el odómetro anotado, así que " +
+        "no hay ningún tramo que medir: hacen falta dos órdenes seguidas con kilometraje. Se completa en " +
         "/mantenimiento → Historial.",
+      una_sola_orden:
+        "Solo hay UNA orden de trabajo con kilometraje, y un tramo son dos odómetros: el trecho lo cierra la " +
+        "orden siguiente. No falta ningún dato por corregir — con anotar el kilometraje del próximo servicio, " +
+        "esta categoría empieza a medirse sola.",
+      kilometraje_incoherente:
+        "Hay dos o más órdenes con kilometraje, pero sus odómetros no encadenan: alguno retrocede o el salto " +
+        "entre dos fechas es imposible. Aquí no falta un dato, hay un número equivocado — se corrige en " +
+        "/mantenimiento → Historial y el tramo se mide solo.",
       sin_mantenimiento:
         "Las unidades propias de este tipo no tienen ninguna orden de trabajo registrada. Mientras el " +
         "mantenimiento se pague sin asentarlo, el S/km de esta categoría solo puede ser el que alguien teclee.",
       solo_terceros:
         "Las únicas unidades con este tipo son de tercero. Su mantenimiento no entra: a un proveedor se le " +
-        "paga por factura, y su taller no es de AFA.",
+        "paga por factura, y su taller no es de esta empresa.",
     };
+
+    // EL INTERVALO DEL PLAN CONVIERTE ESE "NO SE PUEDE MEDIR NADA" EN UN NÚMERO. Gana sobre el
+    // motivo seco porque trae una cifra verificable — pero SIGUE NOMBRANDO por qué no hay
+    // medición, que es lo que dice dónde se arregla.
+    if (base.plan) {
+      const pl = base.plan;
+      return no("estimado_por_plan",
+        `${textos[motivo]}\n\n` +
+        `Con lo que SÍ está declarado —servicio cada ${fmtKm(pl.intervaloKm)} km en el plan del fabricante— ` +
+        `y ${pl.ots} orden(es) preventiva(s) por ${fmtS(pl.costoServicio)} de media, el servicio programado ` +
+        `sale a ${fmt4(pl.soleskm)} S/km, contra los ${fmt4(parametro.mantenimiento_km)} tecleados.\n\n` +
+        "NO se propone, y no es por prudencia: mide OTRA COSA. El parámetro es todo el mantenimiento por " +
+        "kilómetro; esto es solo el servicio programado, sin correctivos ni mantenimiento mayor, así que está " +
+        "por debajo por construcción. La diferencia entre las dos cifras es, justamente, lo que el parámetro " +
+        "está absorbiendo de lo no programado." +
+        (pl.neumaticos > 0
+          ? ` Ojo además: ${pl.neumaticos} de esas órdenes parece compra de llantas, y este tipo ya las cobra en su propio renglón.`
+          : ""));
+    }
+
     return no(motivo, textos[motivo]);
   }
 
@@ -684,8 +880,11 @@ const ETIQUETAS_MANT: Record<CodigoMant, string> = {
   revisar_neumaticos: "revisa las llantas",
   varias_placas: "lo miden varias unidades",
   sin_placas: "ninguna unidad lo mide",
+  estimado_por_plan: "estimado por el plan",
   sin_mantenimiento: "sin órdenes registradas",
   sin_kilometraje: "órdenes sin kilometraje",
+  una_sola_orden: "falta la segunda orden",
+  kilometraje_incoherente: "kilometrajes que no encadenan",
   pocos_registros: "pocos tramos",
   solo_terceros: "solo unidades de tercero",
 };

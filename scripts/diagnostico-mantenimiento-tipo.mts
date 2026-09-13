@@ -114,7 +114,16 @@ for (const p of params) {
   if (a.medido !== null) {
     console.log(`  ${" ".repeat(20)} evidencia: S/ ${n2(a.soles)} en ${a.km.toLocaleString("es-PE")} km · ${a.tramos} tramo(s)`);
   }
-  console.log(`  ${" ".repeat(20)} ${a.detalle}`);
+  // El estimado por plan se imprime SIEMPRE que exista, también cuando hay medición: es el único
+  // sitio donde se ve cuánto del mantenimiento de esa categoría es servicio programado y cuánto
+  // no. Nunca se propone — va rotulado para que no se confunda con el medido.
+  if (a.plan) {
+    console.log(
+      `  ${" ".repeat(20)} plan del fabricante: ${n2(a.plan.soleskm)} S/km SOLO PROGRAMADO ` +
+      `(servicio cada ${a.plan.intervaloKm.toLocaleString("es-PE")} km · ${a.plan.ots} preventiva(s) a S/ ${n2(a.plan.costoServicio)}) — no proponible`
+    );
+  }
+  console.log(`  ${" ".repeat(20)} ${a.detalle.replace(/\n+/g, " ")}`);
 }
 
 // ── 2 · Las propuestas ──────────────────────────────────────────────────────

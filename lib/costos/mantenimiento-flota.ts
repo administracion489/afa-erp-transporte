@@ -113,10 +113,60 @@ export async function cargarPlacasMantenimiento(sb: any, hoy: string = hoyLima()
     });
   }
 
+  // 3 · EL INTERVALO DEL PLAN. Es lo que permite publicar un S/km del servicio programado cuando
+  //     todavía no hay dos odómetros que encadenen (ver `estimarPorPlan`). Best-effort: si estas
+  //     tablas no están o fallan, cada placa se queda sin intervalo y el agregado responde
+  //     exactamente lo que respondía antes.
+  const intervalos = await cargarIntervalosPlan(sb);
+
   const out: PlacaMantenimiento[] = [];
   for (const [uid, u] of unidades) {
     const ots = porUnidad.get(uid) ?? [];
-    out.push({ ...u, otsTotales: ots.length, serie: serieMantenimiento(ots, hoy) });
+    out.push({
+      ...u,
+      otsTotales: ots.length,
+      serie: serieMantenimiento(ots, hoy),
+      intervaloPlanKm: u.flota === "propia" ? intervalos.get(u.vehiculoId) ?? null : null,
+    });
   }
+  return out;
+}
+
+/**
+ * Cada cuántos km le toca servicio a cada vehículo propio, según el plan al que está enrolado.
+ *
+ * LA CASCADA ES LA QUE YA DECLARA EL SQL: `vehiculos_plan.intervalo_km_override` manda sobre
+ * `planes_mantenimiento.intervalo_base_km` para ESA unidad (así lo dice el COMMENT de la columna
+ * en `mantenimiento-programa-editable.sql`, y así lo resuelven `/api/mantenimiento/alertas` y la
+ * pestaña Programa). Aquí se lee igual; el día que esa cascada cambie, cambia en los tres.
+ *
+ * CON DOS PLANES ACTIVOS QUE NO DICEN LO MISMO, NO SE ELIGE NINGUNO. Dos intervalos distintos
+ * para la misma unidad son dos periodicidades y quedarse con una sería adivinar cuál —el mismo
+ * criterio que `cuadre_ambiguo` en el voucher y que `paxDeFichaPorNombre` con dos fichas. Sin
+ * intervalo, esa placa simplemente no aporta al estimado.
+ */
+async function cargarIntervalosPlan(sb: any): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  try {
+    const { data, error } = await sb
+      .from("vehiculos_plan")
+      .select("vehiculo_id,activo,intervalo_km_override,plan:planes_mantenimiento(intervalo_base_km)");
+    if (error || !data) return out;
+
+    const ambiguas = new Set<number>();
+    for (const e of data as any[]) {
+      if (e?.activo === false) continue;
+      const vid = Number(e?.vehiculo_id);
+      if (!Number.isFinite(vid)) continue;
+      // El `plan` embebido llega como objeto o como array de uno según la versión de PostgREST.
+      const plan = Array.isArray(e?.plan) ? e.plan[0] : e?.plan;
+      const km = Number(e?.intervalo_km_override ?? plan?.intervalo_base_km ?? 0);
+      if (!(km > 0)) continue;
+      if (ambiguas.has(vid)) continue;
+      const previo = out.get(vid);
+      if (previo !== undefined && previo !== km) { out.delete(vid); ambiguas.add(vid); continue; }
+      out.set(vid, km);
+    }
+  } catch { /* best-effort: sin intervalo, el estimado por plan simplemente no se publica */ }
   return out;
 }
