@@ -28,15 +28,31 @@ export function buildHeaderPDFHtml(logoUrl: string, cp: string, titulo: string, 
   </div>`;
 }
 
+/**
+ * El pie del documento OMITE lo que no tiene dato, en vez de imprimir su rótulo vacío.
+ *
+ * Antes los cuatro campos iban siempre, así que un perfil a medio llenar imprimía
+ * `⌂ Dir.: | ✆ | ✉ | ☏` — cuatro iconos y tres barras sin nada al lado, que se lee como un
+ * documento roto. Y era el caso NORMAL: `empresa_perfil` nace vacía, y desde que los valores
+ * de respaldo dejaron de ser los de una empresa concreta (ver `lib/empresa-perfil.ts`), un
+ * campo sin llenar llega aquí como cadena vacía a propósito.
+ *
+ * Callar el rótulo es lo mismo que hace la autorización del regulador: sin dato no se inventa
+ * nada, tampoco el hueco donde iría.
+ */
 export function buildFooterPDFHtml(cp: string, empDir: string, empTel: string, empEmail: string, empWeb: string): string {
+  const partes = [
+    { icono: "&#8962;", texto: empDir ? `Dir.: ${empDir}` : "" },
+    { icono: "&#9990;", texto: empTel },
+    { icono: "&#9993;", texto: empEmail },
+    { icono: "&#9741;", texto: empWeb },
+  ].filter(p => String(p.texto ?? "").trim());
+
+  if (!partes.length) return `<div class="pdf-footer" style="background:${cp};padding:9px 20px;"></div>`;
+
+  const sep = `<span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>`;
   return `<div class="pdf-footer" style="background:${cp};padding:9px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-    <span style="color:white;font-size:8.5px;">&#8962; Dir.: ${empDir}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9990; ${empTel}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9993; ${empEmail}</span>
-    <span style="color:rgba(255,255,255,0.4);font-size:9px;">|</span>
-    <span style="color:white;font-size:8.5px;">&#9741; ${empWeb}</span>
+    ${partes.map(p => `<span style="color:white;font-size:8.5px;">${p.icono} ${p.texto}</span>`).join(sep)}
   </div>`;
 }
 

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { empresaConDefectos } from "@/lib/empresa-perfil";
 
 // Contenido por defecto (se muestra si la tabla no existe o está vacía)
 const CONTENIDO_DEFAULT = `
@@ -136,9 +137,12 @@ export default function PrivacidadPage() {
     });
   }, []);
 
-  const empNombre = empresa?.nombre || "AFA TOURS PERU S.A.C.";
-  const empRuc    = empresa?.ruc    || "20602117091";
-  const empEmail  = empresa?.email  || "admin@transportesafa.com";
+  // Es una página PÚBLICA y legal: el nombre y el RUC que salen aquí son los del responsable
+  // del tratamiento de datos. Heredar los de otra empresa sería atribuirle esa responsabilidad.
+  const emp       = empresaConDefectos(empresa);
+  const empNombre = emp.razonSocial;
+  const empRuc    = emp.ruc;
+  const empEmail  = emp.email;
   const updStr    = updatedAt
     ? new Date(updatedAt).toLocaleDateString("es-PE", { day: "2-digit", month: "long", year: "numeric" })
     : "mayo de 2026";

@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { empresaConDefectos } from "@/lib/empresa-perfil";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
 
@@ -162,12 +163,16 @@ function generarOCPdf(
 ) {
   const cp = empresa?.color_primario || "#0b315f";
   const logoUrl = empresa?.logo_url || LOGO_OC_DEFAULT;
-  const empNombre = empresa?.razon_social || empresa?.nombre || "AFA Tours Peru S.A.C.";
-  const empRuc = empresa?.ruc || "20602117091";
-  const empTel = empresa?.telefono || "(01) 3453707 – 966 707 225";
-  const empEmail = empresa?.email || "transporte@afatoursperu.com";
-  const empDir = empresa?.direccion || "Mza. F Lote. 2 Asc. Trabajadores Unidos Chacrasana · Lima";
-  const empWeb = empresa?.web || "www.afatoursperu.com";
+  // Quién emite la orden de compra. Antes eran seis literales con los datos de AFA; ahora sale
+  // del escalón único, y lo que el perfil no tiene llega VACÍO a propósito — el pie del PDF
+  // omite esa línea en vez de imprimir el dato de otra empresa.
+  const emp = empresaConDefectos(empresa);
+  const empNombre = emp.razonSocial;
+  const empRuc = emp.ruc;
+  const empTel = emp.telefono;
+  const empEmail = emp.email;
+  const empDir = emp.direccion;
+  const empWeb = emp.web;
   const moneda = oc.moneda || "PEN";
   const vehLabel = (id: number | null) => {
     const v = vehiculos.find(x => x.id === id);
