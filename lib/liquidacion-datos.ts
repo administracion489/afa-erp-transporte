@@ -379,7 +379,7 @@ export async function cargarDocumentoLiquidacion(
       nombre: nombreContraparte,
       ruc: cp.ruc || cp.dni || null,
       area: lado === "cliente" ? (cab.area_solicitante || sede?.area_solicitante || null) : (cab.responsable_afa || null),
-      usuario: lado === "cliente" ? (cab.usuario_solicita || sede?.usuario_solicita || null) : (emp.razon_social || emp.nombre || "AFA TOURS PERU S.A.C."),
+      usuario: lado === "cliente" ? (cab.usuario_solicita || sede?.usuario_solicita || null) : empresaConDefectos(emp).razonSocial,
       cargo: lado === "cliente" ? (cab.cargo_solicita || sede?.cargo_solicita || null) : (cab.cargo_responsable || null),
       cuentaDetraccion: cab.cuenta_detraccion || null,
     },
@@ -415,19 +415,18 @@ export async function cargarDocumentoLiquidacion(
         ? [
             // La única que va rubricada. Las dos siguientes son del cliente y quedan en
             // blanco a propósito: son las que él firma al dar la conformidad.
-            { rol: "Gerente General", entidad: (emp.razon_social || emp.nombre || "AFA TOURS PERU S.A.C.").toUpperCase(), firmaUrl },
+            { rol: "Gerente General", entidad: empresaConDefectos(emp).razonSocial.toUpperCase(), firmaUrl },
             { rol: "Usuario", entidad: String(nombreContraparte).toUpperCase() },
             { rol: "Área solicitante", entidad: String(cab.area_solicitante || sede?.nombre || "—").toUpperCase() },
           ]
         : [
             { rol: "Proveedor", entidad: String(nombreContraparte).toUpperCase() },
-            { rol: "Jefe de Operaciones", entidad: (emp.razon_social || emp.nombre || "AFA TOURS PERU S.A.C.").toUpperCase() },
-            { rol: "Administración", entidad: (emp.razon_social || emp.nombre || "AFA TOURS PERU S.A.C.").toUpperCase() },
+            { rol: "Jefe de Operaciones", entidad: empresaConDefectos(emp).razonSocial.toUpperCase() },
+            { rol: "Administración", entidad: empresaConDefectos(emp).razonSocial.toUpperCase() },
           ],
-    // Con los huecos rellenos: hoy `empresa_perfil` tiene la dirección, el teléfono y el
-    // correo vacíos, y pasarlos tal cual dejaba el pie del documento con tres rayas. Los
-    // valores son los que ya imprime el PDF de la cotización, para que los papeles que AFA
-    // envía digan lo mismo salgan de donde salgan.
+    // Resuelto por el escalón único (`lib/empresa-perfil.ts`): lo que el perfil no tiene llega
+    // VACÍO a propósito, y el pie del documento omite esa línea en vez de imprimir el dato de
+    // otra empresa. Antes aquí había tres literales con la razón social de AFA.
     empresa: (() => {
       const e = empresaConDefectos(emp);
       return { nombre: e.nombre, ruc: e.ruc, logo: e.logo, direccion: e.direccion,
