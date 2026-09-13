@@ -761,15 +761,38 @@ const cargaBi = (
   chk("el combustible de la parcial NO se pierde",
     conParcial.resumen.cantidadMedida === 20, String(conParcial.resumen.cantidadMedida));
 
-  // `null` se absorbe igual que la parcial —la cuenta sale bien fuera llena o parcial— pero
-  // con motivo propio, porque se arregla en otro sitio.
-  const desconocida = serieRendimiento(base([true, null, true]));
-  chk("la carga sin declarar tiene motivo propio", desconocida.tramos[1].motivo === "tanque_desconocido",
-    String(desconocida.tramos[1].motivo));
-  chk("…y se absorbe igual que la parcial", cerca(desconocida.tramos[2].rendimiento, 10),
-    String(desconocida.tramos[2].rendimiento));
-  chk("…y su motivo manda a marcar la casilla",
-    /tanque lleno/i.test(textoMotivo("tanque_desconocido", desconocida.tramos[1])));
+  // ── LA TRANSICIÓN DE LA MIGRACIÓN, Y ES EL CASO QUE NO SE PUEDE AFLOJAR ──
+  //
+  // `combustible-01-tanque-lleno.sql` NO hace backfill (escribir `true` en miles de filas
+  // afirmaría algo que nadie declaró), así que el día que se corre TODO el histórico pasa a
+  // `null` de golpe. Si `null` no anclara, ese día la flota entera se quedaría sin un solo
+  // tramo medido: medianas en null, la columna «Medido» de /configuracion/costos vacía y el
+  // presupuesto de cada servicio cayendo al parámetro tecleado. Correr un SQL accesorio
+  // apagaría el módulo — por eso SOLO un `false` explícito deja de anclar.
+  const antesDelSql = serieRendimiento(base([undefined, undefined, undefined]));
+  const despuesDelSql = serieRendimiento(base([null, null, null]));
+  chk("correr la migración NO cambia ni un tramo medido",
+    despuesDelSql.resumen.n === antesDelSql.resumen.n && despuesDelSql.resumen.n === 2,
+    `${antesDelSql.resumen.n} → ${despuesDelSql.resumen.n}`);
+  chk("…ni la mediana de la unidad",
+    despuesDelSql.resumen.mediana === antesDelSql.resumen.mediana, String(despuesDelSql.resumen.mediana));
+  chk("…ni los motivos de sus tramos",
+    despuesDelSql.tramos.map(t => t.motivo ?? "ok").join("|") === antesDelSql.tramos.map(t => t.motivo ?? "ok").join("|"),
+    despuesDelSql.tramos.map(t => t.motivo ?? "ok").join("|"));
+
+  // Pero la premisa no se esconde: el tramo DECLARA si las dos anclas lo confirmaron.
+  chk("un tramo medido sobre `null` NO se declara confirmado",
+    despuesDelSql.tramos[1].tanqueConfirmado === false, String(despuesDelSql.tramos[1].tanqueConfirmado));
+  chk("…y uno con las dos anclas marcadas SÍ",
+    llenas.tramos[1].tanqueConfirmado === true, String(llenas.tramos[1].tanqueConfirmado));
+  chk("…y basta con que UNA de las dos no lo declare para que deje de estarlo",
+    serieRendimiento(base([true, null, true])).tramos[2].tanqueConfirmado === false);
+
+  // Un `null` en medio ancla igual: se mide de él al siguiente, como siempre.
+  const conNull = serieRendimiento(base([true, null, true]));
+  chk("una carga sin declarar sigue anclando (mide, no absorbe)",
+    conNull.tramos[1].motivo === null && conNull.tramos[1].km === 100,
+    `${conNull.tramos[1].motivo}/${conNull.tramos[1].km}`);
 
   // Sin ancla previa no hay tramo que medir: es `primera_carga`, no un número inventado.
   const arrancaParcial = serieRendimiento(base([false, true, true]));
@@ -780,11 +803,10 @@ const cargaBi = (
     arrancaParcial.tramos[2].cantidad === 10, String(arrancaParcial.tramos[2].cantidad));
 
   chk("la invariante se mantiene con tanque",
-    [...llenas.tramos, ...conParcial.tramos, ...desconocida.tramos]
+    [...llenas.tramos, ...conParcial.tramos, ...conNull.tramos, ...despuesDelSql.tramos]
       .every((t) => (t.rendimiento !== null) !== (t.motivo !== null)));
-  for (const m of ["tanque_parcial", "tanque_desconocido"] as MotivoSinRendimiento[]) {
-    chk(`${m} tiene etiqueta corta`, etiquetaMotivo(m).length > 0, etiquetaMotivo(m));
-  }
+  chk("tanque_parcial tiene etiqueta corta", etiquetaMotivo("tanque_parcial").length > 0,
+    etiquetaMotivo("tanque_parcial"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

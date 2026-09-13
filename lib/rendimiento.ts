@@ -139,17 +139,26 @@ export type CargaRendimiento = {
   /** `combustible.total` — lo que costó. Solo hace falta para comparar ventanas. */
   gasto?: number | null;
   /**
-   * `combustible.tanque_lleno` — TRI-ESTADO, y los tres significan cosas distintas:
+   * `combustible.tanque_lleno` — TRI-ESTADO, y **solo `false` cambia el comportamiento**:
    *
-   *   · `true`       — alguien AFIRMA que el tanque quedó a tope. Es un ANCLA del método.
+   *   · `true`       — alguien AFIRMA que el tanque quedó a tope. ANCLA, confirmada.
    *   · `false`      — se afirma que NO (no había crédito, el grifo no tenía stock).
-   *   · `null`       — la columna existe y nadie lo sabe.
-   *   · `undefined`  — el campo NO VIAJA. Es el modo legado, y se comporta EXACTAMENTE
-   *                    como antes: cada carga es su propia ancla. Todos los que llaman hoy
-   *                    caen aquí, y la matriz fija que el resultado es idéntico byte a byte.
+   *                    Es lo ÚNICO que no ancla: su combustible se absorbe en el próximo lleno.
+   *   · `null`       — la columna existe y nadie lo declaró. ANCLA igual, **por la política**
+   *                    de la empresa (cargar siempre a tope), y el tramo lo DECLARA con
+   *                    `tanqueConfirmado: false` en vez de callarlo.
+   *   · `undefined`  — el campo no viaja (la migración no se corrió). Idéntico a `null`.
    *
-   * `null` y `false` NO son lo mismo aunque ninguno de los dos ancle: uno se arregla
-   * marcando la casilla y el otro no se arregla, así que tienen motivo propio.
+   * **POR QUÉ `null` ANCLA, Y NO ES UNA CONCESIÓN.** La migración no hace backfill —escribir
+   * `true` en miles de filas afirmaría algo que nadie declaró— así que el día que se corre,
+   * TODO el histórico pasa a `null` de golpe. Con `null` sin anclar, ese día la flota entera
+   * se queda sin un solo tramo medido: medianas en null, la columna «Medido» de
+   * /configuracion/costos vacía y el presupuesto de cada servicio cayendo al parámetro
+   * tecleado. O sea: correr un SQL accesorio apagaría el módulo.
+   *
+   * Anclar en `null` deja el comportamiento EXACTAMENTE como está hoy —que es la premisa
+   * con la que ya se venía midiendo— y la única diferencia la introduce una persona cuando
+   * marca que una carga NO llenó. La premisa no se esconde: viaja en `tanqueConfirmado`.
    */
   tanqueLleno?: boolean | null;
 };
@@ -190,13 +199,6 @@ export type MotivoSinRendimiento =
    * publica el tramo que la absorbe, y contarlos aquí también sería contarlos dos veces.
    */
   | "tanque_parcial"
-  /**
-   * Nadie declaró si el tanque quedó lleno. Se comporta como `tanque_parcial` —su combustible
-   * se absorbe igual, que es correcto tanto si fue llena como si fue parcial— pero el motivo es
-   * otro porque el arreglo es otro: esto se cierra marcando la casilla, y `tanque_parcial` no
-   * se cierra nunca.
-   */
-  | "tanque_desconocido"
   /** Supera el techo físico de su familia. No es un rendimiento, es un hueco de registro. */
   | "implausible";
 
@@ -243,6 +245,14 @@ export type Tramo = {
   absorbidas: number[];
   /** De `cantidad`, cuánto aportaron las cargas absorbidas. Para poder decirlo en pantalla. */
   cantidadAbsorbida: number;
+  /**
+   * ¿Los DOS extremos del tramo declararon explícitamente «el tanque quedó lleno»?
+   *
+   * `false` no invalida nada — el tramo se mide igual, con la política de la empresa como
+   * premisa— pero la distingue de una medición en la que una persona lo confirmó. Es la misma
+   * disciplina de `CostoUnidad.fuentes`: el número sale, y dice sobre qué se apoya.
+   */
+  tanqueConfirmado: boolean;
   techo: number | null;
   detalle: string;
 };
@@ -471,10 +481,11 @@ export function serieRendimiento(
   // por eso el tramo se bloquea; aquí el COMBUSTIBLE se conoce y la operación es legítima, no
   // un error que arreglar. Acumular lo conocido es correcto; acumular lo desconocido no.
   //
-  // `usaTanque` es lo que mantiene intacto a todo el que llama hoy: sin el campo, cada carga
-  // es su propia ancla y el resultado es idéntico byte a byte al de siempre.
-  const usaTanque = cargas.some((c) => c.tanqueLleno !== undefined);
-  const esAncla = (c: CargaRendimiento) => !usaTanque || c.tanqueLleno === true;
+  // SOLO UN `false` EXPLÍCITO DEJA DE ANCLAR. `null` y `undefined` anclan igual, y eso es lo
+  // que mantiene intacto todo lo que ya se venía midiendo: la migración no hace backfill, así
+  // que el día que se corre TODO el histórico pasa a `null` de golpe — con `null` sin anclar,
+  // ese día la flota entera se quedaría sin un solo tramo medido. Ver `CargaRendimiento.tanqueLleno`.
+  const esAncla = (c: CargaRendimiento) => c.tanqueLleno !== false;
   let absorbidasPendientes: number[] = [];
   let cantidadAbsorbida = 0;
   let absorbidaSinCantidad = false;
@@ -497,7 +508,7 @@ export function serieRendimiento(
     // `null` a propósito — lo publica el tramo que la absorbe, y contarlo aquí también lo
     // contaría DOS VECES en el costo por km.
     if (!esAncla(c)) {
-      const motivo: MotivoSinRendimiento = c.tanqueLleno === false ? "tanque_parcial" : "tanque_desconocido";
+      const motivo: MotivoSinRendimiento = "tanque_parcial";
       absorbidasPendientes.push(c.id);
       if (cantidad === null) absorbidaSinCantidad = true;
       else cantidadAbsorbida += cantidad;
@@ -540,6 +551,9 @@ export function serieRendimiento(
       cargaId: c.id, previaId: previa.id, unidad, familia, fecha: c.fecha,
       km: delta, cantidad: cantidadTramo, crudo: null as number | null, saltadas,
       kmConfiable: true, absorbidas, cantidadAbsorbida: absorbido,
+      // Confirmado solo si las DOS anclas lo afirmaron. Con `null` en cualquiera de las dos el
+      // tramo se mide igual, apoyado en la política, y esto es lo que lo dice.
+      tanqueConfirmado: previa.tanqueLleno === true && c.tanqueLleno === true,
       techo: techoFamilia,
     };
 
@@ -668,6 +682,7 @@ function tramoSin(
     cargaId: c.id, previaId, unidad, familia, fecha: c.fecha,
     km: null, cantidad: null, rendimiento: null, motivo, crudo: null,
     saltadas, kmConfiable: false, absorbidas: [], cantidadAbsorbida: 0,
+    tanqueConfirmado: false,
     techo: techoDeFamilia(familia), detalle: "",
   };
   return { ...t, detalle: detalleDe(motivo, t) };
@@ -984,12 +999,6 @@ function detalleDe(
         "lleno a tanque lleno. Su combustible se suma al del próximo tanque lleno y ahí se mide — " +
         "no se pierde, se cuenta en el otro tramo."
       );
-    case "tanque_desconocido":
-      return (
-        "Nadie declaró si el tanque quedó lleno en esta carga, así que no puede cerrar una " +
-        "medición. Su combustible se suma igual al próximo tanque lleno. Marca la casilla " +
-        "«tanque lleno» en la carga y el tramo se puede medir desde aquí."
-      );
     case "eslabon_saltado":
       return (
         `${t.saltadas?.length ?? 0} carga(s) de esta unidad dentro del tramo no tienen kilometraje, ` +
@@ -1040,7 +1049,6 @@ export function etiquetaMotivo(motivo: MotivoSinRendimiento): string {
     case "eslabon_saltado": return "tramo incompleto";
     case "familia_cruzada": return "bicombustible";
     case "tanque_parcial": return "tanque parcial";
-    case "tanque_desconocido": return "¿tanque lleno?";
     case "implausible": return "implausible";
   }
 }

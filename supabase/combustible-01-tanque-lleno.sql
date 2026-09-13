@@ -25,16 +25,25 @@
 -- NULLABLE y SIN DEFAULT, y el default vive en el FORMULARIO, que es donde hay alguien que lo
 -- está afirmando.
 --
--- Lo que hace el motor con cada estado (lib/rendimiento.ts):
---   true   → ANCLA: cierra una medición.
---   false  → se ABSORBE: su combustible se suma al del próximo tanque lleno. No se pierde.
---   null   → se absorbe igual (la cuenta sale bien fuera llena o parcial) pero con motivo
---            propio `tanque_desconocido`, porque se arregla marcando la casilla.
+-- Lo que hace el motor con cada estado (lib/rendimiento.ts), y SOLO UNO cambia algo:
+--   true   → ANCLA: cierra una medición, y el tramo queda declarado como CONFIRMADO.
+--   null   → ANCLA igual, por la política de la empresa (cargar siempre a tope). El tramo se
+--            mide y declara `tanqueConfirmado: false`, para no esconder sobre qué se apoya.
+--   false  → lo ÚNICO que no ancla: su combustible se ABSORBE y se suma al del próximo tanque
+--            lleno, que es donde se mide. No se pierde.
 --
 -- NO HAY BACKFILL, y es deliberado: escribir `true` en el histórico afirmaría de miles de
--- cargas algo que nadie declaró, y el motor ya trata la ausencia del campo como el modo
--- LEGADO (cada carga es su propia ancla, resultado idéntico al de siempre). El histórico
--- sigue midiéndose exactamente como hasta hoy hasta que alguien empiece a marcar.
+-- cargas algo que nadie declaró.
+--
+-- POR ESO `null` TIENE QUE ANCLAR, y no es una concesión: sin backfill, el día que se corre
+-- este SQL TODO el histórico pasa a `null` de golpe. Si `null` no anclara, ese día la flota
+-- entera se quedaría sin un solo tramo medido — medianas en null, la columna «Medido» de
+-- /configuracion/costos vacía y el presupuesto de cada servicio cayendo al parámetro tecleado.
+-- O sea: correr un SQL accesorio apagaría el módulo. Anclar en `null` deja el comportamiento
+-- EXACTAMENTE como está hoy (que es la premisa con la que ya se venía midiendo) y la única
+-- diferencia la introduce una persona el día que marca que una carga NO llenó el tanque.
+-- `scripts/prueba-rendimiento.mts` fija esa transición: correr la migración no mueve ni un
+-- tramo medido ni una mediana.
 --
 -- Correr una vez en el editor SQL de Supabase. Todo IF NOT EXISTS / nullable → seguro de
 -- correr antes o después del deploy del código. EL DEPLOY NO LA CORRE.
