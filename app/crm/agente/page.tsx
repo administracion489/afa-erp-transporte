@@ -250,7 +250,7 @@ export default function AgenteIAPage() {
                   rows={4}
                   value={agente.persona}
                   onChange={(e) => set("persona", e.target.value)}
-                  placeholder="Eres el asistente comercial de AFA Transportes. Hablas español peruano, cordial y profesional…"
+                  placeholder="Eres el asistente comercial de la empresa. Hablas español peruano, cordial y profesional…"
                 />
               </div>
               <div>
@@ -260,7 +260,7 @@ export default function AgenteIAPage() {
                   rows={3}
                   value={agente.empresa_contexto}
                   onChange={(e) => set("empresa_contexto", e.target.value)}
-                  placeholder="Qué hace AFA, qué servicios ofrece, zonas de cobertura…"
+                  placeholder="Qué hace la empresa, qué servicios ofrece, zonas de cobertura…"
                 />
               </div>
               <div className="w-40">
@@ -480,7 +480,7 @@ export default function AgenteIAPage() {
 
               <div>
                 <label className={label}>Firma (se añade al final del mensaje)</label>
-                <input className={input} value={agente.firma} onChange={(e) => set("firma", e.target.value)} placeholder="— AFA Transportes" />
+                <input className={input} value={agente.firma} onChange={(e) => set("firma", e.target.value)} placeholder="— Nombre de tu empresa" />
               </div>
             </div>
           )}

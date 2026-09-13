@@ -411,7 +411,7 @@ export default function CampanasPage() {
             <>
               <div className="md:col-span-2">
                 <label className={label}>Asunto</label>
-                <input className={input} value={asunto} onChange={(e) => setAsunto(e.target.value)} placeholder="Novedades de AFA Transportes" />
+                <input className={input} value={asunto} onChange={(e) => setAsunto(e.target.value)} placeholder="Novedades de tu empresa" />
               </div>
               <div className="md:col-span-2">
                 <label className={label}>Cuerpo (HTML; usa {"{{nombre}}"} o {"{{empresa}}"})</label>
