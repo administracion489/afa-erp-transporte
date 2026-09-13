@@ -31,7 +31,12 @@ with huella(orden, modulo, script, objeto, tipo, para_que) as (values
   (1, 'Tercerizadas',                  '(base)',                                      'empresas_tercerizadas',             'tabla',   'Proveedores, su flota y sus conductores.'),
   (1, 'Documentos de tercerizadas',    '(base)',                                      'documentos_tercero',                'tabla',   'Los papeles de las unidades del proveedor.'),
 
-  -- ── LO DE ESTA SESIÓN ────────────────────────────────────────────────────────
+  -- ── LO MÁS RECIENTE ──────────────────────────────────────────────────────────
+  (2, 'Empresa · autorización',        'empresa-01-autorizacion-transporte.sql',      'empresa_perfil.autorizacion_mtc',   'columna', 'Que el pie de la orden de trabajo imprima TU autorización de transporte. Sin esto no se puede guardar; el papel sale sin esa línea.'),
+  (2, 'OT · costo al libro y factura', 'mantenimiento-05-costo-factura-cxp.sql',      'ordenes_trabajo.mantenimiento_id',  'columna', 'Que corregir el costo DESPUÉS de cerrar una OT llegue al egreso y al S/km medido, y que la factura del taller entre como CxP. Sin esto el costo se congela al cerrar.'),
+  (2, 'OT · líneas de costo',          'mantenimiento-06-lineas-de-costo.sql',        'ot_costo_linea',                    'tabla',   'Repuesto en un sitio y mano de obra en otro, cada uno con su proveedor y su factura; y las horas del mecánico propio, que cuentan para el costo por km y NO como egreso.'),
+  (2, 'Taller · valorizar la hora',    'mantenimiento-06-lineas-de-costo.sql',        'v_taller_mano_obra',                'vista',   'Los insumos para calcular cuánto vale una hora del mecánico de casa. Sin esto, una línea «Propio» no se puede valorizar.'),
+  (2, 'Mantenimiento · OT automática', 'mantenimiento-ot-automatica.sql',             'ordenes_trabajo.origen',            'columna', 'Que el cron abra sola una orden de trabajo al llegar al umbral. Sin esto, esa parte de la configuración no se guarda.'),
   (2, 'Autorización y ámbito',         'tercerizadas-autorizacion-ambito.sql',        'empresas_tercerizadas.autoridad_habilitante', 'columna', 'Quién autoriza a cada proveedor y hasta dónde puede circular. SIN ESTO no se puede guardar la autoridad.'),
   (2, 'Nombres TUC/TIVE (opcional)',   'documentos-tive-y-nombres.sql',               'fn_norm_tipo_doc',                  'función', 'Limpieza de nombres y de fechas inventadas en la tarjeta de propiedad. El ERP funciona igual sin ella.'),
 
@@ -90,6 +95,11 @@ estado as (
       when 'índice' then exists (
         select 1 from pg_indexes
          where schemaname = 'public' and indexname = h.objeto)
+      -- Una vista sí está en information_schema, pero en `views`, no en `tables`. Se pregunta
+      -- aparte para que la columna "se comprueba mirando" diga la verdad sobre qué es el objeto.
+      when 'vista' then exists (
+        select 1 from information_schema.views
+         where table_schema = 'public' and table_name = h.objeto)
       else false
     end as instalado
   from huella h
@@ -122,3 +132,123 @@ order by instalado, orden, modulo;   -- lo que falta primero; false ordena antes
 -- · Si un script falla a mitad: el editor SQL de Supabase envuelve el bloque en una
 --   transacción, así que o entra todo o no entra nada. Arregla la causa y vuelve a correrlo
 --   entero — los scripts del repo son idempotentes salvo aviso en contrario.
+
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- BLOQUE 2 · LAS MIGRACIONES QUE NO CREAN NADA, SOLO MUEVEN DATOS
+--
+-- CÓRRELO APARTE, DESPUÉS DEL DE ARRIBA. Es otra consulta: selecciona desde aquí hasta el final
+-- y dale Run. También SOLO LEE.
+--
+-- ─────────────────────────────────────────────────────────────────────────────
+-- POR QUÉ HACE FALTA UN SEGUNDO BLOQUE, Y POR QUÉ NO PUEDE DECIR «INSTALADO»
+--
+-- El bloque de arriba le pregunta al catálogo de Postgres si existe una tabla o una columna. Eso
+-- funciona con una migración que crea algo — pero `costos-02`, `costos-03`, `costos-04`,
+-- `costos-05` y `pacto-06` **no crean nada**: hacen INSERT y UPDATE sobre filas que ya existían.
+-- Para ellas el catálogo se ve idéntico antes y después, así que no hay huella que buscar.
+--
+-- Lo único que se puede hacer es mirar QUÉ DICEN LOS DATOS HOY, y eso no es lo mismo que saber
+-- si el script corrió: alguien pudo editar esa ficha a mano cinco minutos después y dejarla como
+-- estaba. Por eso estas filas responden **«la base dice esto»** y no «✅ instalado». La lectura
+-- correcta es al revés: si el resultado ya es el que querías, da igual quién lo puso.
+--
+-- SI ALGUNA CONSULTA FALLA con `relation "..." does not exist`, esa es la respuesta: ese módulo
+-- no está instalado y su migración de datos no pudo correr.
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+with
+-- Las fichas de costeo, emparejadas: cada Estándar con su gemela Full Equipo por la CLAVE
+-- (`<CLAVE>_ESTANDAR`), nunca por el nombre — el nombre es texto editable desde el modal.
+pares as (
+  select p.tipo_vehiculo                as clave_full,
+         p.nombre                       as nombre_full,
+         p.mantenimiento_km             as mant_full,
+         p.vida_util_anios              as vida_full,
+         e.tipo_vehiculo                as clave_est,
+         e.nombre                       as nombre_est,
+         e.mantenimiento_km             as mant_est,
+         e.vida_util_anios              as vida_est
+    from public.parametros_costos p
+    join public.parametros_costos e on e.tipo_vehiculo = p.tipo_vehiculo || '_ESTANDAR'
+   where p.activo = true and e.activo = true
+),
+hechos(orden, verificacion, script, resultado, que_significa) as (
+
+  -- ── costos-02 · ¿existen las fichas de unidad usada? ──────────────────────────
+  select 1,
+         'Fichas de unidad usada (clave `_ESTANDAR`)',
+         'costos-02-categorias-estandar-usado.sql',
+         (select count(*)::text || ' ficha(s) Estándar activas, emparejadas con su gemela'
+            from pares),
+         'Si sale 0, `costos-02` no corrió: el cotizador solo ofrece unidades Full Equipo.'
+
+  -- ── costos-05 · ¿queda la palabra «Premium» en algún nombre? ──────────────────
+  union all
+  select 2,
+         'La palabra comercial en el nombre de la ficha',
+         'costos-05-nombres-full-equipo.sql',
+         (select (count(*) filter (where nombre ilike '%premium%'))::text || ' con «Premium» · ' ||
+                 (count(*) filter (where nombre like '%Full Equipo%'))::text || ' con «Full Equipo»'
+            from public.parametros_costos where activo = true),
+         'Con «Premium» en 0 y «Full Equipo» > 0, `costos-05` corrió. Si sigues leyendo «Premium» en el selector, falta.'
+
+  -- ── costos-03 · ¿el nombre declara el criterio de antigüedad? ─────────────────
+  union all
+  select 3,
+         'El paréntesis de antigüedad en el nombre',
+         'costos-03-nombres-por-antiguedad.sql',
+         (select count(*)::text || ' ficha(s) dicen «(>10 años)»'
+            from public.parametros_costos
+           where activo = true and nombre like '%(>10 años)%'),
+         'Es el criterio con el que se decide a qué ficha va una placa. En 0 con fichas Estándar existentes, `costos-03` no corrió.'
+
+  -- ── costos-04 · ¿la Estándar cuesta lo mismo de taller que su gemela? ─────────
+  --    Es la DECISIÓN PROVISIONAL del dueño: igualar mantenimiento y vida útil hasta tener
+  --    datos reales. Se mira el estado, no el sello, porque el sello lo pisa cualquier edición.
+  union all
+  select 4,
+         'Mantenimiento y vida útil de la Estándar vs. su gemela',
+         'costos-04-estandar-provisional.sql',
+         (select (count(*) filter (where mant_est is not distinct from mant_full
+                                     and vida_est is not distinct from vida_full))::text
+                 || ' de ' || count(*)::text || ' par(es) igualados'
+            from pares),
+         'Igualados = la decisión provisional está puesta y la Estándar sale MÁS BARATA. Sin igualar, la Estándar cuesta más que la nueva y el cotizador lo enseña al revés de lo que esperas.'
+
+  -- ── pacto-06 · ¿se sigue emitiendo el enlace de conformidad por cambio? ───────
+  union all
+  select 5,
+         'Enlace de conformidad al cliente por cada cambio de precio',
+         'pacto-06-sin-conformidad-de-cambio.sql',
+         (select case when count(*) = 0 then 'sin política registrada'
+                      when bool_or(coalesce(exige_conformidad_cliente, true)) then 'SIGUE EMITIENDO enlaces'
+                      else 'apagado' end
+            from public.pacto_politica),
+         'Apagado es lo correcto: el cliente firma una vez al mes en la valorización. Si sigue emitiendo, se le pide la misma plata por dos puertas.'
+)
+select orden as "#",
+       verificacion  as "qué se verifica",
+       resultado     as "la base dice",
+       script        as "script que lo produce",
+       que_significa as "cómo se lee"
+  from hechos
+ order by orden;
+
+-- ── Y EL ESTADO DE LAS ÓRDENES DE TRABAJO, que es donde vive el dinero del taller ───
+-- Requiere `mantenimiento-05` y `mantenimiento-06`. Si falla, es que no están corridas.
+select count(*)                                                        as ot_totales,
+       count(*) filter (where estado = 'cerrada')                      as cerradas,
+       count(*) filter (where estado = 'cerrada' and mantenimiento_id is null)
+                                                                       as "cerradas SIN ancla al libro",
+       count(*) filter (where coalesce(costo_total, 0) = 0 and estado = 'cerrada')
+                                                                       as "cerradas sin costo tecleado",
+       (select count(*) from public.ot_costo_linea)                    as lineas_de_costo,
+       (select count(*) from public.ot_costo_linea where origen = 'propio')
+                                                                       as "líneas de casa (no son egreso)",
+       (select coalesce(sum(costo_imputado), 0) from public.mantenimiento)
+                                                                       as "S/ imputado en el libro"
+  from public.ordenes_trabajo;
+-- Cómo se lee: «cerradas SIN ancla» debería ser 0 — esas no propagan su costo al egreso y se
+-- arreglan a mano en /mantenimiento → Historial. «S/ imputado» estará en 0 hasta que exista un
+-- mecánico propio con horas cargadas a alguna orden.
