@@ -544,7 +544,7 @@ export default function PerfilEmpresaPage() {
             <CampoForm label="Nombre de la empresa">
               <input
                 style={inputStyle}
-                placeholder="AFA Transportes"
+                placeholder="Nombre comercial de tu empresa"
                 value={perfil.nombre || ""}
                 onChange={campo("nombre")}
                 onFocus={(e) => (e.target.style.borderColor = "#0b315f")}
@@ -555,7 +555,7 @@ export default function PerfilEmpresaPage() {
             <CampoForm label="Razón social" hint="Tal como aparece en SUNAT">
               <input
                 style={inputStyle}
-                placeholder="AFA TOURS S.A.C."
+                placeholder="TU EMPRESA S.A.C."
                 value={perfil.razon_social || ""}
                 onChange={campo("razon_social")}
                 onFocus={(e) => (e.target.style.borderColor = "#0b315f")}
@@ -652,7 +652,7 @@ export default function PerfilEmpresaPage() {
             <CampoForm label="Sitio web">
               <input
                 style={inputStyle}
-                placeholder="https://www.afatours.com.pe"
+                placeholder="https://www.tuempresa.com"
                 value={perfil.web || ""}
                 onChange={campo("web")}
                 onFocus={(e) => (e.target.style.borderColor = "#0b315f")}

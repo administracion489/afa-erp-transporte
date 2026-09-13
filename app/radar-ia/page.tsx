@@ -1648,7 +1648,7 @@ function FilaGrupo({ g, onToggle, onGuardar, onEliminar }: {
                 value={contexto}
                 onChange={(e) => setContexto(e.target.value)}
                 rows={2}
-                placeholder='Ej: "Red de apoyo entre transportistas independientes, NO es la flota de AFA. Marcar oportunidad_comercial solo si alguien pide un servicio que AFA podría cubrir."'
+                placeholder='Ej: "Red de apoyo entre transportistas independientes, NO es la flota propia. Marcar oportunidad_comercial solo si alguien pide un servicio que la empresa podría cubrir."'
                 className="w-full mt-1 border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-[#0b315f] transition-colors bg-white"
               />
             </div>
@@ -1945,7 +1945,7 @@ function TabConfiguracion({ config, guardando, onGuardar, vehiculosGuia, onGuard
             <textarea
               value={cfg.correos_alerta ?? ""}
               onChange={(e) => set("correos_alerta", e.target.value || null)}
-              placeholder="operaciones@afatoursperu.com, administracion@afatoursperu.com"
+              placeholder="operaciones@tuempresa.com, administracion@tuempresa.com"
               rows={2}
               className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-[#0b315f] transition-colors resize-none"
             />

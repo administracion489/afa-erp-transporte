@@ -543,7 +543,7 @@ export default function ConfigOperacionesPage() {
                 <input className={input + " w-auto flex-1 min-w-[160px]"} placeholder="Texto del botón (ej. Abrir app conductor)"
                   maxLength={25} value={nuevaTpl.botonTexto}
                   onChange={(e) => setNuevaTpl((p) => p && { ...p, botonTexto: e.target.value })} />
-                <input className={input + " w-auto flex-1 min-w-[220px]"} placeholder="https://transportesafa.com/conductor"
+                <input className={input + " w-auto flex-1 min-w-[220px]"} placeholder="https://tudominio.com/conductor"
                   value={nuevaTpl.botonUrl}
                   onChange={(e) => setNuevaTpl((p) => p && { ...p, botonUrl: e.target.value })} />
               </div>

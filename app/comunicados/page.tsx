@@ -328,7 +328,7 @@ export default function ComunicadosPage() {
             <>
               <div className="md:col-span-2">
                 <label className={label}>Asunto del correo</label>
-                <input className={input} value={asunto} onChange={(e) => setAsunto(e.target.value)} placeholder="Horarios de sus paraderos — AFA Transportes" />
+                <input className={input} value={asunto} onChange={(e) => setAsunto(e.target.value)} placeholder="Horarios de sus paraderos — tu empresa" />
               </div>
               <div className="md:col-span-2">
                 <label className={label}>Cuerpo del correo (HTML; usa {"{{nombre}}"} o {"{{empresa}}"})</label>
