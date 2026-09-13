@@ -43,7 +43,29 @@ export type PerfilEmpresa = {
   web?: string | null;
   /** Autorización del regulador de transporte, para el pie de los documentos operativos. */
   autorizacion_mtc?: string | null;
+  /** Cuentas donde cobra la empresa, `[{banco, cuenta, cci}]`. De `empresa-02`. */
+  cuentas_bancarias?: CuentaBancaria[] | null;
 };
+
+/** Una cuenta de cobro. `cuenta` y `cci` son texto: llevan guiones y ceros a la izquierda. */
+export type CuentaBancaria = { banco: string; cuenta: string; cci: string };
+
+/**
+ * Las cuentas utilizables: las que tienen banco Y algún número.
+ *
+ * Una fila con solo el rótulo del banco no dice dónde pagar, así que no se imprime — el mismo
+ * criterio que el resto del perfil: sin dato no se enseña el hueco donde iría.
+ */
+export function cuentasUtiles(v: unknown): CuentaBancaria[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map(c => ({
+      banco:  String((c as any)?.banco  ?? "").trim(),
+      cuenta: String((c as any)?.cuenta ?? "").trim(),
+      cci:    String((c as any)?.cci    ?? "").trim(),
+    }))
+    .filter(c => c.banco && (c.cuenta || c.cci));
+}
 
 /** Los campos que salen impresos, con el rótulo que usa /configuracion/perfil. */
 const CAMPOS_IMPRESOS: { clave: keyof PerfilEmpresa; label: string }[] = [
@@ -66,6 +88,8 @@ export type EmpresaResuelta = {
   direccion: string;
   logo: string | null;
   autorizacion: string;
+  /** Las cuentas de cobro que se pueden imprimir. Vacío = el PDF omite el bloque entero. */
+  cuentas: CuentaBancaria[];
   /** Los campos impresos que siguen vacíos, con su rótulo. Vacío = el perfil está completo. */
   faltan: string[];
   /** `true` cuando el nombre que se va a imprimir es el aviso, no el de una empresa. */
@@ -102,6 +126,7 @@ export function empresaConDefectos(p?: PerfilEmpresa | null): EmpresaResuelta {
      * habilitación que su emisor no tiene.
      */
     autorizacion: v(p?.autorizacion_mtc),
+    cuentas: cuentasUtiles(p?.cuentas_bancarias),
     faltan,
     sinConfigurar: !nombre,
   };

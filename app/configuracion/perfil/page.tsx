@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "@/lib/supabase";
-import { empresaConDefectos } from "@/lib/empresa-perfil";
+import { empresaConDefectos, type CuentaBancaria } from "@/lib/empresa-perfil";
 
 type EmpresaPerfil = {
   id: number;
@@ -19,7 +19,15 @@ type EmpresaPerfil = {
    * legal: por eso no tiene valor por defecto — sin llenarlo, la línea sencillamente no se
    * imprime. Heredar el de otra empresa sería una afirmación legal falsa en un papel firmado.
    */
+  /**
+   * Autorización del regulador de transporte que se imprime al pie de los documentos
+   * operativos (la orden de trabajo, entre otros). Es un dato de CADA empresa y un número
+   * legal: por eso no tiene valor por defecto — sin llenarlo, la línea sencillamente no se
+   * imprime. Heredar el de otra empresa sería una afirmación legal falsa en un papel firmado.
+   */
   autorizacion_mtc: string | null;
+  /** Cuentas donde cobra la empresa. Se imprimen en la cotización; vacío = no se imprime. */
+  cuentas_bancarias: CuentaBancaria[] | null;
   logo_url: string | null;
   logo_claro_url: string | null;
   color_primario: string | null;
@@ -56,6 +64,7 @@ const PERFIL_VACIO: EmpresaPerfil = {
   web: "",
   slogan: "",
   autorizacion_mtc: "",
+  cuentas_bancarias: [],
   logo_url: null,
   logo_claro_url: null,
   color_primario: "#0b315f",
@@ -419,6 +428,14 @@ export default function PerfilEmpresaPage() {
     }
   }
 
+  /** Cambia un campo de UNA cuenta sin tocar las demás. */
+  function setCuenta(i: number, patch: Partial<CuentaBancaria>) {
+    setPerfil(p => ({
+      ...p,
+      cuentas_bancarias: (p.cuentas_bancarias || []).map((c, j) => (j === i ? { ...c, ...patch } : c)),
+    }));
+  }
+
   async function guardar() {
     if (errorRuc) {
       mostrarToast("Corrige el RUC antes de guardar", "error");
@@ -436,6 +453,8 @@ export default function PerfilEmpresaPage() {
         web: perfil.web || null,
         slogan: perfil.slogan || null,
         autorizacion_mtc: perfil.autorizacion_mtc || null,
+        // Se manda SIEMPRE, incluso vacío: borrar la última cuenta tiene que poder borrarla.
+        cuentas_bancarias: (perfil.cuentas_bancarias || []).filter(c => (c.banco || "").trim()),
         color_primario: perfil.color_primario || "#0b315f",
         regimen_tributario: perfil.regimen_tributario || "General",
         moneda: perfil.moneda || "PEN",
@@ -448,16 +467,16 @@ export default function PerfilEmpresaPage() {
     // poder guardarse igual, y se DICE qué no se guardó: un dato que parece guardarse y no llega
     // al papel es peor que un error a la cara.
     let faltaMtc = false;
-    if (error && (error.code === "PGRST204" || /autorizacion_mtc/i.test(error.message || ""))) {
+    if (error && (error.code === "PGRST204" || /autorizacion_mtc|cuentas_bancarias/i.test(error.message || ""))) {
       faltaMtc = true;
-      const { autorizacion_mtc: _omitido, ...resto } = fila;
+      const { autorizacion_mtc: _o1, cuentas_bancarias: _o2, ...resto } = fila;
       ({ error } = await supabase.from("empresa_perfil").upsert(resto, { onConflict: "id" }));
     }
     setGuardando(false);
     if (error) {
       mostrarToast("Error al guardar: " + error.message, "error");
     } else if (faltaMtc) {
-      mostrarToast("Guardado ✓ — la autorización de transporte NO: falta correr supabase/empresa-01-autorizacion-transporte.sql", "error");
+      mostrarToast("Guardado ✓ — la autorización de transporte y las cuentas bancarias NO: falta correr supabase/empresa-01-autorizacion-transporte.sql y empresa-02-cuentas-bancarias.sql", "error");
     } else {
       mostrarToast("Cambios guardados correctamente");
       cargar();
@@ -712,6 +731,60 @@ export default function PerfilEmpresaPage() {
                 onBlur={(e) => (e.target.style.borderColor = "#e5e7eb")}
               />
             </CampoForm>
+          </Seccion>
+
+          {/* ── CUENTAS BANCARIAS ───────────────────────────────────────────
+              Estaban ESCRITAS A MANO dentro del HTML del PDF de la cotización, con el número de
+              cuenta y el CCI de una empresa concreta. De todos los literales que tenía ese
+              archivo este era el peor: los demás imprimían un nombre equivocado, este manda el
+              dinero al destinatario equivocado.
+
+              Y esta pantalla ya lo prometía: /cotizaciones/plantillas dice desde siempre «se
+              usarán las cuentas configuradas en Perfil Empresa». Aquí están. */}
+          <Seccion titulo="Cuentas Bancarias">
+            <p style={{ fontSize: 12, color: "#6b7280", marginTop: -8, marginBottom: 16, lineHeight: 1.5 }}>
+              Se imprimen en la cotización, bajo «Nuestras cuentas bancarias». <b>Sin cuentas, ese
+              bloque no se imprime</b> — nunca sale un ejemplo, que sería plata mandada a donde no es.
+            </p>
+
+            {(perfil.cuentas_bancarias || []).map((c, i) => (
+              <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 8, marginBottom: 10, alignItems: "end" }}>
+                <div>
+                  <label style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", display: "block", marginBottom: 4 }}>Banco y moneda</label>
+                  <input style={inputStyle} placeholder="BCP — Soles" value={c.banco || ""}
+                    onChange={e => setCuenta(i, { banco: e.target.value })} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", display: "block", marginBottom: 4 }}>N° de cuenta</label>
+                  <input style={{ ...inputStyle, fontFamily: "monospace" }} placeholder="000-0000000-0-00" value={c.cuenta || ""}
+                    onChange={e => setCuenta(i, { cuenta: e.target.value })} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", display: "block", marginBottom: 4 }}>CCI</label>
+                  <input style={{ ...inputStyle, fontFamily: "monospace" }} placeholder="00000000000000000000" value={c.cci || ""}
+                    onChange={e => setCuenta(i, { cci: e.target.value })} />
+                </div>
+                <button onClick={() => setPerfil(p => ({ ...p, cuentas_bancarias: (p.cuentas_bancarias || []).filter((_, j) => j !== i) }))}
+                  title="Quitar esta cuenta"
+                  style={{ border: "1px solid #e5e7eb", background: "white", borderRadius: 12, padding: "10px 12px", cursor: "pointer", color: "#9ca3af", fontWeight: 700 }}>✕</button>
+              </div>
+            ))}
+
+            {!(perfil.cuentas_bancarias || []).length && (
+              <p style={{ fontSize: 12, color: "#9ca3af", margin: "0 0 12px" }}>
+                Sin cuentas configuradas. La cotización se imprime sin ese bloque.
+              </p>
+            )}
+
+            <button onClick={() => setPerfil(p => ({ ...p, cuentas_bancarias: [...(p.cuentas_bancarias || []), { banco: "", cuenta: "", cci: "" }] }))}
+              style={{ border: "1px solid #e5e7eb", background: "white", borderRadius: 12, padding: "10px 16px", cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#374151" }}>
+              + Agregar cuenta
+            </button>
+
+            <p style={{ fontSize: 11, color: "#9ca3af", marginTop: 12, lineHeight: 1.5 }}>
+              Una plantilla de PDF puede cobrar en otras cuentas: se marca «usar bancos propios»
+              en <b>Cotizaciones → Plantillas</b>. Sin esa marca manda esta lista.
+            </p>
           </Seccion>
 
           {/* Configuración regional */}
