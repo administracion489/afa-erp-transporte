@@ -217,6 +217,14 @@ export default function CombustiblePage() {
   const [guardando,   setGuardando]   = useState(false);
   const [editandoId,  setEditandoId]  = useState<number | null>(null);
   const [mostrarForm, setMostrarForm] = useState(false);
+  // QUIÉN AFIRMA EL TANQUE NO ES SIEMPRE QUIEN GUARDA, y por eso la fuente no se puede fijar en
+  // el payload. Abrir una carga vieja para corregirle el precio no es afirmar nada sobre el
+  // tanque: la casilla sale marcada por el DEFAULT del formulario, o sea por la política de la
+  // empresa. Sellar eso como `operador` —la afirmación más fuerte del CHECK— convertiría las 56
+  // filas del histórico en declaraciones que nadie hizo, que es justo lo que esta columna existe
+  // para evitar. `operador` solo cuando una persona MUEVE la casilla; una fuente ya escrita se
+  // conserva, para no degradar a `politica` un `false` que sí afirmó alguien.
+  const [tanqueFuente, setTanqueFuente] = useState<string | null>(null);
   const [expandidoId, setExpandidoId] = useState<number | null>(null);
   const [vista,       setVista]       = useState<VistaActiva>("historial");
   const [granularidad,setGranularidad]= useState<GranPeriodo>("mes");
@@ -459,7 +467,7 @@ export default function CombustiblePage() {
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
-  const limpiar = () => { setForm(FORM_VACIO); setEditandoId(null); setMostrarForm(false); };
+  const limpiar = () => { setForm(FORM_VACIO); setEditandoId(null); setTanqueFuente(null); setMostrarForm(false); };
 
   const guardar = async () => {
     if (!form.vehiculo_id || !form.fecha) { alert("Selecciona vehículo y fecha"); return; }
@@ -507,9 +515,10 @@ export default function CombustiblePage() {
     const payload = {
       ...base,
       tanque_lleno: form.tanque_lleno,
-      // `operador`: lo afirma quien está tecleando. No es lo mismo que un `true` heredado de la
-      // política de la empresa, y el rendimiento construido sobre cada uno tiene que poder decirlo.
-      tanque_lleno_fuente: "operador",
+      // `operador` solo si una persona movió la casilla; si no, la afirmación es de la POLÍTICA
+      // de la empresa y se dice así. Un `true` que alguien miró y uno que salió del default no
+      // valen lo mismo, y el rendimiento construido sobre cada uno tiene que poder declararlo.
+      tanque_lleno_fuente: tanqueFuente ?? "politica",
       km_salto_motivo: form.km_salto_motivo.trim() || null,
     };
 
@@ -586,6 +595,7 @@ export default function CombustiblePage() {
       tanque_lleno:     r.tanque_lleno ?? true,
       km_salto_motivo:  r.km_salto_motivo || "",
     });
+    setTanqueFuente(r.tanque_lleno_fuente ?? null);
     setEditandoId(r.id); setMostrarForm(true);
     verLoQueLeyoElRadar(r.id);
     setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
@@ -995,7 +1005,7 @@ export default function CombustiblePage() {
               style={{ background: form.tanque_lleno ? "#f8fafc" : "#fffbeb", borderColor: form.tanque_lleno ? "#e2e8f0" : "#fcd34d" }}>
               <label className="flex items-start gap-3 cursor-pointer">
                 <input type="checkbox" className="mt-0.5 w-4 h-4 accent-[#0b315f]" checked={form.tanque_lleno}
-                  onChange={e => setForm(p => ({ ...p, tanque_lleno: e.target.checked }))} />
+                  onChange={e => { setForm(p => ({ ...p, tanque_lleno: e.target.checked })); setTanqueFuente("operador"); }} />
                 <span className="text-sm">
                   <b className="text-gray-800">El tanque quedó lleno</b>
                   <span className="block text-xs text-gray-500 mt-0.5">
