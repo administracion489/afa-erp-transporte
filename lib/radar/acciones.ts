@@ -16,7 +16,10 @@
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
-import { familiaCombustible, capacidadTanqueDe } from "@/lib/combustible-tipos";
+import {
+  familiaCombustible, capacidadTanqueDe,
+  tipoDeEtiquetaPrecio, precioReferencialDe, revisarPrecioUnitario, unidadDeCarga,
+} from "@/lib/combustible-tipos";
 import { resolverTipoCombustible, revisarTipoContraPrecio } from "./tipo-voucher";
 import { serieRendimiento, juzgarTramo, TECHO_FAMILIA, type CargaRendimiento } from "@/lib/rendimiento";
 import { leerAlbumRecargas, buscarDuplicado, type RecargaAlbum, type DespachoGuardado } from "./album-recargas";
@@ -1092,9 +1095,16 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       const { data: precios } = await sb.from("precios_combustible").select("tipo, precio");
       // El referencial es por FAMILIA: `gasolina_premium` y `gasolina_regular` comparten la
       // fila de gasolina si el operador no cargó una por grado.
-      const filas = ((precios as any[]) ?? []).map((p) => ({ tipo: String(p.tipo ?? "").toLowerCase(), precio: Number(p.precio) }));
-      const ref = filas.find((p) => p.tipo === tipoComb) ?? filas.find((p) => p.tipo === familiaCombustible(tipoComb));
-      const pRef = ref ? ref.precio : 0;
+      //
+      // LA CLAVE SE DERIVA CON `tipoDeEtiquetaPrecio`, NO CON `.toLowerCase()`. La tabla guarda
+      // `Diésel` CON TILDE, así que el `"diésel" === "diesel"` de antes era falso SIEMPRE: el
+      // diésel de toda la flota resolvía `pRef = 0` y ni este ±20 % ni `revisarTipoContraPrecio`
+      // se aplicaron nunca a una carga de diésel. Ver el puente en lib/combustible-tipos.ts.
+      const filas = ((precios as any[]) ?? []).map((p) => ({
+        tipo: tipoDeEtiquetaPrecio(p.tipo) ?? String(p.tipo ?? "").toLowerCase(),
+        precio: Number(p.precio),
+      }));
+      const pRef = precioReferencialDe(filas, tipoComb);
 
       // Antes del "precio fuera de rango": ¿no estarán la cantidad y el precio intercambiados?
       // El cuadre aritmético es CIEGO a esto (la multiplicación es conmutativa), así que hace
@@ -1128,11 +1138,24 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
           leido: tipoLeido != null,
         });
         if (vPrecio.anomalia) anomalias.push(vPrecio.anomalia);
-        else if (pRef > 0 && Math.abs(precioUnit - pRef) / pRef > 0.2) {
-          anomalias.push({
-            codigo: "precio_fuera_de_rango",
-            detalle: `Precio ${fmtSoles(precioUnit)} se aleja más de 20% del referencial ${fmtSoles(pRef)} (${tipoComb})`,
-          });
+        else {
+          // ¿Y si el número no puede ser un precio de ESTA unidad? El ±20 % juzga el MERCADO y
+          // se mueve todos los meses; esto juzga la MAGNITUD y no se mueve nunca. Va antes por
+          // la misma razón que los dos de arriba: con la unidad equivocada, "se aleja del
+          // referencial" es el síntoma. Y aquí el detalle es exacto — dice qué unidad encaja.
+          const vUnidad = revisarPrecioUnitario({ tipo: tipoComb, precio: precioUnit, unidad: unidadDeCarga(tipoComb, unidadCant) });
+          if (vUnidad.estado === "parece_otra_unidad" || vUnidad.estado === "fuera_de_banda") {
+            anomalias.push({
+              codigo: "precio_fuera_de_rango",
+              detalle: vUnidad.detalle,
+              bloquea: vUnidad.estado === "parece_otra_unidad",
+            });
+          } else if (pRef > 0 && Math.abs(precioUnit - pRef) / pRef > 0.2) {
+            anomalias.push({
+              codigo: "precio_fuera_de_rango",
+              detalle: `Precio ${fmtSoles(precioUnit)} se aleja más de 20% del referencial ${fmtSoles(pRef)} (${tipoComb})`,
+            });
+          }
         }
       }
     } catch {
@@ -1176,7 +1199,10 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     // La carga entrante entra como fila virtual: es el tramo que hay que juzgar.
     const entrante: CargaRendimiento = {
       id: -1, unidad: String(veh.id), fecha,
-      kilometraje: km, cantidad, unidadCantidad: esLitros ? "litros" : "galones", tipo: tipoComb,
+      // Misma derivación que la fila que se va a escribir: si el motor juzga el tramo con una
+      // unidad y la fila se guarda con otra, el veredicto del Radar y el de /combustible dejan
+      // de hablar del mismo número.
+      kilometraje: km, cantidad, unidadCantidad: unidadDeCarga(tipoComb, esLitros ? "litros" : "galones"), tipo: tipoComb,
     };
     const familia = familiaCombustible(tipoComb);
     // Las cargas del OTRO combustible de esta misma unidad van como marcas, no como cargas:
@@ -1276,6 +1302,31 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     });
   }
 
+  // ── ¿QUEDÓ LLENO EL TANQUE? (lib/radar/tanque-lleno.ts) ───────────────────
+  //
+  // El rendimiento se mide de tanque lleno a tanque lleno, y una carga PARCIAL no declarada
+  // infla el número exactamente igual que una carga comprada y no registrada — las dos salen
+  // como `rendimiento_alto`, y solo la segunda es plata que falta en los libros.
+  //
+  // El Radar NO escribe `combustible.tanque_lleno`: sigue entrando en `null`, que ANCLA por la
+  // política de la empresa, igual que hasta hoy. Lo único que cambia es que cuando la aguja del
+  // tablero dice que NO quedó lleno —la excepción que el dueño nombró: sin saldo de crédito, el
+  // grifo sin stock— la carga va a revisión en vez de auto-registrarse midiendo mal ese tramo.
+  // Un `false` puesto por una máquina deja de anclar en silencio, y un tramo que deja de medirse
+  // no se nota en ninguna pantalla: por eso lo confirma una persona.
+  const nivelTanque = d.nivel_tanque ?? null;
+  if (nivelTanque === "parcial") {
+    anomalias.push({
+      codigo: "carga_parcial_probable",
+      detalle:
+        "La aguja del tablero NO marca el tanque lleno después de cargar. Si fue una carga parcial " +
+        "hay que decirlo: el rendimiento se mide de tanque lleno a tanque lleno, y una parcial sin " +
+        "declarar lo infla igual que una carga que nadie registró. Confírmalo con la foto y marca " +
+        "la casilla «tanque lleno» como corresponda.",
+      bloquea: true,
+    });
+  }
+
   // Todas las fotos del cluster (voucher/surtidor/tablero) que la IA procesó, para el panel de
   // revisión. Fallback a la foto propia del mensaje si el motor no las pasó.
   const fotosEvidencia: { url: string; mime: string | null; nombre: string | null }[] =
@@ -1284,6 +1335,31 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       : mensaje.media_url
         ? [{ url: mensaje.media_url, mime: mensaje.media_mime ?? null, nombre: mensaje.media_nombre ?? null }]
         : [];
+
+  /**
+   * Inserta en `radar_combustible` soltando la columna ACCESORIA que el error NOMBRA.
+   *
+   * Dos de los campos de esta fila viven en migraciones que el deploy no corre (`fotos`, de
+   * radar-ia-combustible-revision.sql, y `nivel_tanque`, de combustible-02). Que falte un SQL
+   * accesorio no puede hacer que una recarga leída se pierda entera: es el patrón de
+   * `COLUMNAS_OPCIONALES` (lib/reservas-pacto.ts), y se suelta LA QUE EL ERROR NOMBRA, no un
+   * juego fijo — con un juego fijo el mensaje acaba acusando a la migración equivocada.
+   */
+  const insertarRadar = async (fila: Record<string, unknown>, devolverId = false) => {
+    const OPCIONALES = ["fotos", "nivel_tanque"];
+    let payload = { ...fila };
+    for (let intento = 0; intento <= OPCIONALES.length; intento++) {
+      const q = sb.from("radar_combustible").insert(payload);
+      const { data, error } = devolverId ? await q.select("id").single() : await q;
+      if (!error) return { data, quitadas: Object.keys(fila).filter((k) => !(k in payload)) };
+      const msg = String(error.message ?? "");
+      const culpable = OPCIONALES.find((c) => c in payload && msg.includes(c) && /does not exist/i.test(msg));
+      if (!culpable) throw new Error(`radar_combustible: ${error.message}`);
+      const { [culpable]: _fuera, ...resto } = payload;
+      payload = resto;
+    }
+    throw new Error("radar_combustible: no se pudo insertar");
+  };
 
   // Fila base para radar_combustible (se inserta SIEMPRE, con el estado que corresponda)
   const filaRadar: Record<string, unknown> = {
@@ -1313,6 +1389,9 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     proveedor,
     anomalias,
     fotos: fotosEvidencia,
+    // Lo que la IA vio en el indicador de nivel. PROPONE la casilla del panel de revisión; no
+    // decide nada por su cuenta. Columna de `combustible-02-nivel-tanque-radar.sql`.
+    nivel_tanque: nivelTanque,
   };
 
   // ¿Se puede registrar automáticamente en la tabla real `combustible`?
@@ -1350,7 +1429,10 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
         conductor: conductorNombre,
         observaciones,
         tipo_combustible: tipoComb,
-        unidad: esLitros ? "litros" : "galones",
+        // La unidad se DERIVA del producto (lib/combustible-tipos.ts). El `esLitros ?
+        // "litros" : "galones"` que había aquí rotulaba en GALONES cada carga de GNV —el
+        // 70 % de la flota— con un número que son METROS CÚBICOS.
+        unidad: unidadDeCarga(tipoComb, esLitros ? "litros" : "galones"),
       })
       .select("id")
       .single();
@@ -1375,10 +1457,7 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       });
     }
 
-    const { error: errRadar } = await sb
-      .from("radar_combustible")
-      .insert({ ...filaRadar, estado: "registrado", combustible_id: combustibleId });
-    if (errRadar) throw new Error(`radar_combustible: ${errRadar.message}`);
+    await insertarRadar({ ...filaRadar, estado: "registrado", combustible_id: combustibleId });
 
     return {
       accion: "combustible_registrado",
@@ -1388,12 +1467,9 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
   }
 
   // Queda en revisión: registrar + alertar con los motivos
-  const { data: rcIns, error: errRadar } = await sb
-    .from("radar_combustible")
-    .insert({ ...filaRadar, estado: "pendiente_revision", combustible_id: null })
-    .select("id")
-    .single();
-  if (errRadar) throw new Error(`radar_combustible: ${errRadar.message}`);
+  const { data: rcIns } = await insertarRadar(
+    { ...filaRadar, estado: "pendiente_revision", combustible_id: null }, true
+  );
 
   // El dígito que corrigió la aritmética se guarda como LECCIÓN, igual que si lo hubiera
   // corregido una persona en la pantalla: leccionesCombustible() la inyecta en el prompt de

@@ -22,7 +22,8 @@
 // y el combustible. Ver [[project_radar_combustible_multifoto]].
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { seriesRendimiento } from "@/lib/rendimiento";
+import { seriesRendimiento, normalizarCantidad } from "@/lib/rendimiento";
+import { familiaCombustible, configCombustible } from "@/lib/combustible-tipos";
 
 // ─── TIPOS ───────────────────────────────────────────────────────────────────
 
@@ -546,7 +547,13 @@ export type IndicadoresEconomicos = {
   costoTotal: number;
   costoPorKm: number | null;       // costo combustible / km recorridos (odómetro)
   costoPromedioDia: number | null;
-  galonesTotal: number;
+  /**
+   * Cantidad cargada POR FAMILIA, cada una en SU unidad. Era un `galonesTotal: number` que
+   * sumaba `galones` a secas: en una unidad de GNV eso son metros cúbicos, y en una fila del
+   * Radar pueden ser litros — tres magnitudes distintas apiladas y publicadas como "gal".
+   * Lo único agregable entre combustibles es `costoTotal`.
+   */
+  cantidadPorFamilia: { familia: string; cantidad: number; unidadLabel: string }[];
   nRegistros: number;
 };
 
@@ -573,7 +580,13 @@ export function indicadoresEconomicos(
     .sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)));
 
   const costoTotal = regs.reduce((s, c) => s + Number(c.total || 0), 0);
-  const galonesTotal = regs.reduce((s, c) => s + Number(c.galones || 0), 0);
+  // Por familia y normalizada a su unidad: la que no se sabe convertir no se suma a ninguna.
+  const porFamilia = new Map<string, number>();
+  for (const c of regs) {
+    const fam = familiaCombustible(c.tipo_combustible);
+    const q = normalizarCantidad(c.galones, (c as any).unidad, fam);
+    if (q != null) porFamilia.set(fam, (porFamilia.get(fam) ?? 0) + q);
+  }
 
   // La familia con más cargas manda: un bimodal tiene DOS rendimientos y promediarlos daría
   // un número que no es de ninguno de los dos.
@@ -602,7 +615,13 @@ export function indicadoresEconomicos(
     costoTotal: Math.round(costoTotal * 100) / 100,
     costoPorKm: kmRecorridoPeriodo && kmRecorridoPeriodo > 0 ? Math.round((costoTotal / kmRecorridoPeriodo) * 100) / 100 : null,
     costoPromedioDia: Math.round((costoTotal / nDias) * 100) / 100,
-    galonesTotal: Math.round(galonesTotal * 100) / 100,
+    cantidadPorFamilia: [...porFamilia.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([familia, cantidad]) => ({
+        familia,
+        cantidad: Math.round(cantidad * 100) / 100,
+        unidadLabel: configCombustible(familia).unidadLabel,
+      })),
     nRegistros: regs.length,
   };
 }

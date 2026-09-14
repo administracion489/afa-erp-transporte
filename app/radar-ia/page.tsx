@@ -25,8 +25,9 @@ import {
   type RadarOportunidad,
   type SeveridadAlerta,
 } from "@/lib/radar/tipos";
-import { COMBUSTIBLES, TIPOS_PARA_ELEGIR, configCombustible } from "@/lib/combustible-tipos";
+import { COMBUSTIBLES, TIPOS_PARA_ELEGIR, configCombustible, unidadDeCarga } from "@/lib/combustible-tipos";
 import { fotosDeLectura, type FotoLeida } from "@/lib/radar/fotos-lectura";
+import { proponerTanqueLleno } from "@/lib/radar/tanque-lleno";
 
 // ── Helpers puros ────────────────────────────────────────────────────────────
 
@@ -148,6 +149,8 @@ const ANOMALIA_LABEL: Record<string, string> = {
   // Qué combustible se compró (lib/radar/tipo-voucher.ts)
   tipo_corregido_por_producto:  "Tipo corregido por el producto",
   tipo_no_coincide_con_producto: "Tipo ≠ producto del voucher",
+  // ¿Quedó lleno el tanque? (lib/radar/tanque-lleno.ts)
+  carga_parcial_probable: "Carga parcial (aguja)",
   tipo_no_coincide_con_precio:  "Tipo ≠ precio pagado",
 };
 
@@ -673,6 +676,11 @@ type EdicionComb = {
    * el rendimiento km/gal de todos sus tramos. Vacío es un dato válido — "sin odómetro".
    */
   kilometraje: string;
+  /**
+   * ¿Quedó lleno el tanque? Tri-estado como la columna: `""` = nadie lo tocó (manda la
+   * propuesta de la aguja, y si no la hay, la política). `"si"`/`"no"` = lo afirmó el revisor.
+   */
+  tanqueLleno: "" | "si" | "no";
 };
 
 export type OverrideComb = {
@@ -688,6 +696,12 @@ export type OverrideComb = {
   monto: number | null;
   /** Odómetro confirmado por el revisor. `null` = sin dato (no se registra ninguna lectura). */
   kilometraje: number | null;
+  /**
+   * `combustible.tanque_lleno` y su fuente. `null` = nadie lo afirmó y la columna se queda en
+   * null, que ANCLA por la política de la empresa — el comportamiento de siempre.
+   */
+  tanqueLleno: boolean | null;
+  tanqueFuente: "operador" | "ia_aguja" | null;
 };
 
 function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, onRegistrar, onDescartar }: {
@@ -744,6 +758,8 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
       // la ausencia de una (lib/rendimiento.ts trata 0 y null como lo mismo), y pre-llenarlo con
       // un cero invitaría a registrarlo como si fuera el odómetro del tablero.
       kilometraje: c.kilometraje != null && c.kilometraje > 0 ? String(c.kilometraje) : "",
+      // Vacío = no lo ha tocado nadie. El default visible lo pone la aguja (ver `propTanque`).
+      tanqueLleno: "",
     };
   };
   const setCampo = (c: RadarCombustible, campo: keyof EdicionComb, valor: string) =>
@@ -768,7 +784,10 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
               const unidad = unidadDe(c);
               const placaMatch = unidad?.placa ?? null;
               const esTercero = unidad?.tipo === "tercero";
-              const cantidad = c.galones != null ? `${c.galones} gal` : c.litros != null ? `${c.litros} lt` : "—";
+              // La unidad la pone el PRODUCTO: un "9.4 gal" sobre una carga de GNV son m³.
+              const cantidad = c.galones != null
+                ? `${c.galones} ${configCombustible(c.tipo_combustible).unidad === "m3" ? "m³" : "gal"}`
+                : c.litros != null ? `${c.litros} lt` : "—";
               const precio = c.precio_galon != null ? `${fmtSoles(c.precio_galon)}/gal` : c.precio_litro != null ? `${fmtSoles(c.precio_litro)}/lt` : "—";
               // Edición del revisor (perezosa) — solo se usa en el bloque expandido.
               const ed = edicionDe(c);
@@ -786,6 +805,21 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
               const avisoKm = revisarKmTecleado({ km: kmEd, kmVigente: unidadEd?.kilometraje_actual ?? null });
               const fotos = fotosDe(c);
               const puedeRegistrar = ed.vehiculo !== "" && ed.tipoCombustible !== "" && cantEd != null && (precioEd != null || montoEd != null);
+              // ── ¿Quedó lleno el tanque? (lib/radar/tanque-lleno.ts) ────────
+              // La AGUJA propone el valor por defecto (es una observación del tanque); el
+              // importe redondo y la cantidad ≈ capacidad se enseñan como indicios y no mueven
+              // la casilla. Decide quien revisa, y entonces la fuente es `operador`.
+              const propTanque = proponerTanqueLleno({
+                vehiculo: unidadEd,
+                tipo: ed.tipoCombustible || c.tipo_combustible,
+                cantidad: cantEd,
+                unidad: esLitros ? "litros" : "galones",
+                monto: montoEd,
+                nivelAguja: c.nivel_tanque,
+              });
+              const tanqueMarcado = ed.tanqueLleno === "" ? (propTanque.porDefecto ?? true) : ed.tanqueLleno === "si";
+              const tanqueFuente: "operador" | "ia_aguja" | null =
+                ed.tanqueLleno !== "" ? "operador" : propTanque.fuente;
               return (
                 <FragmentoFilaCombustible key={c.id}>
                   <tr
@@ -966,6 +1000,28 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                           </p>
                         )}
 
+                        {/* EL TANQUE. El rendimiento se mide de lleno a lleno: una carga parcial
+                            sin declarar infla el número igual que una carga que nadie registró,
+                            y las dos salen como el mismo rojo. Aquí es donde se separan. */}
+                        <div className="mt-3 rounded-xl border px-3 py-2.5"
+                          style={{ background: tanqueMarcado ? "#f8fafc" : "#fffbeb", borderColor: tanqueMarcado ? "#e2e8f0" : "#fcd34d" }}>
+                          <label className="flex items-start gap-2.5 cursor-pointer">
+                            <input type="checkbox" className="mt-0.5 w-4 h-4 accent-[#0b315f]" checked={tanqueMarcado}
+                              onChange={(e) => setCampo(c, "tanqueLleno", e.target.checked ? "si" : "no")} />
+                            <span className="text-xs">
+                              <b className="text-gray-800">El tanque quedó lleno</b>
+                              <span className="block text-[11px] text-gray-500 mt-0.5">
+                                {tanqueMarcado
+                                  ? "Es la política de la empresa. Desmárcalo solo si esta vez no se cargó a tope (sin crédito, el grifo sin stock)."
+                                  : "Carga PARCIAL: no cierra una medición de rendimiento. Su combustible no se pierde — se suma al del próximo tanque lleno."}
+                              </span>
+                              {propTanque.indicios.map((ind) => (
+                                <span key={ind.codigo} className="block text-[11px] text-[#B07A0F] mt-1">• {ind.detalle}</span>
+                              ))}
+                            </span>
+                          </label>
+                        </div>
+
                         <div className="flex flex-wrap items-center gap-3 mt-3">
                           {c.conductor && <p className="text-xs text-gray-500 font-semibold">Conductor: <span className="font-bold text-gray-700">{c.conductor}</span></p>}
                           {c.comprobante && <p className="text-xs text-gray-500 font-semibold">Comprobante: <span className="font-mono">{c.comprobante}</span></p>}
@@ -982,6 +1038,10 @@ function TabCombustible({ registros, vehiculosGuia, mensajesPorId, registrando, 
                                 precio: precioEd,
                                 monto: montoEd,
                                 kilometraje: kmEd,
+                                // `null` cuando nadie lo afirmó y no hay aguja: la columna se
+                                // queda en null, que ANCLA por la política. Igual que hoy.
+                                tanqueLleno: tanqueFuente === null ? null : tanqueMarcado,
+                                tanqueFuente,
                               })}
                               disabled={!puedeRegistrar || registrando === c.id}
                               className="px-3 py-2 rounded-xl text-xs font-bold bg-[#0b315f] text-white hover:bg-[#1262bd] transition-colors disabled:opacity-40"
@@ -2477,11 +2537,26 @@ export default function RadarIAPage() {
           // de GLP cuyo tipo la IA no leyó entraba al libro como diésel, y de ahí a la
           // capacidad de tanque, al precio referencial y al rendimiento del vehículo.
           tipo_combustible: ov.tipoCombustible || c.tipo_combustible || "diesel",
-          unidad: ov.esLitros ? "litros" : "galones",
+          // La unidad se DERIVA del producto, igual que en el auto-registro del Radar y que en
+          // el formulario de /combustible. El `esLitros ? "litros" : "galones"` rotulaba en
+          // GALONES cada carga de GNV —el 70 % de la flota— con un número que son m³, y con la
+          // unidad mal escrita ni el rendimiento ni la banda de precio pueden juzgarla.
+          unidad: unidadDeCarga(ov.tipoCombustible || c.tipo_combustible, ov.esLitros ? "litros" : "galones"),
         })
         .select("id")
         .single();
       if (error || !data) throw error ?? new Error("no se pudo insertar en combustible");
+      // ¿Quedó lleno el tanque? Va en una escritura APARTE y best-effort a propósito: es de una
+      // migración accesoria (`combustible-01-tanque-lleno.sql`) y una recarga confirmada contra
+      // la foto no se puede perder porque falte un SQL. Solo se escribe cuando alguien lo
+      // AFIRMÓ —el revisor, o la aguja del tablero—; si nadie lo hizo, la columna se queda en
+      // null, que ANCLA por la política de la empresa, que es el comportamiento de siempre.
+      if (ov.tanqueFuente !== null) {
+        await supabase
+          .from("combustible")
+          .update({ tanque_lleno: ov.tanqueLleno, tanque_lleno_fuente: ov.tanqueFuente })
+          .eq("id", (data as any).id);
+      }
       await supabase
         .from("radar_combustible")
         .update({

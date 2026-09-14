@@ -204,6 +204,7 @@ const FORMA_COMBUSTIBLE_MEDIA = `{
   "vio_nota": boolean,                  // ¿viste una foto de la nota/comprobante de grifo?
   "vio_surtidor": boolean,              // ¿viste una foto del surtidor?
   "vio_tablero": boolean,               // ¿viste una foto del tablero/odómetro?
+  "nivel_tanque": "lleno"|"parcial"|"no_visible",  // el INDICADOR DE NIVEL del tablero DESPUÉS de cargar. "no_visible" si no se ve o no hay foto de tablero: no lo deduzcas de la cantidad
   "fuentes": {                          // de qué foto salió cada campo (para poder cruzar y auditar)
     "galones": "surtidor"|"nota"|"tablero"|"texto"|"calculado"|null,
     "monto_total": "surtidor"|"nota"|"texto"|"calculado"|null,
@@ -314,6 +315,12 @@ En Perú el GLP se despacha en GALONES: con GLP la cantidad va en "galones", nun
 
 Si NO se pudo leer la cantidad/importe pero SÍ había una foto de la nota o del surtidor, igual marca vio_nota/vio_surtidor en true y deja los números en null (para distinguir "foto ilegible" de "dato ausente").
 Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.
+
+EL INDICADOR DE NIVEL DEL TABLERO ("nivel_tanque"):
+En la misma foto del tablero donde está el odómetro sale la aguja (o las barras) del combustible, y esa foto se toma DESPUÉS de cargar. Dice algo que ningún otro dato del voucher dice: si el tanque quedó a tope. Reglas:
+- "lleno" SOLO si la aguja está en el tope (F / la última barra encendida / prácticamente en el máximo).
+- "parcial" SOLO si se ve con claridad que NO llegó al tope. La política de la empresa es cargar completo, así que esto es la excepción y hay que verla, no suponerla.
+- "no_visible" en todo lo demás: sin foto de tablero, aguja tapada por el reflejo, foto recortada, o duda. **Nunca lo deduzcas de la cantidad despachada ni del importe** — el ERP ya mira esos dos por su cuenta y tu trabajo aquí es SOLO reportar lo que se ve en la aguja.
 
 UN ÁLBUM PUEDE TRAER DOS DESPACHOS, NO SOLO DOS FOTOS:
 Antes de combinar nada, cuenta cuántas NOTAS DE DESPACHO distintas hay. Un conductor que cierra turno fotografía los vouchers del DÍA y los manda juntos, así que la ráfaga puede ser una recarga contada en varias fotos… o dos recargas completas. Los discriminantes, en este orden: **nº de comprobante distinto**, **placa distinta**, **importe o fecha/hora distintos**. Cualquiera de los tres y son DOS despachos.

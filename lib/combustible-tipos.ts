@@ -29,21 +29,36 @@ export type ConfigCombustible = {
   rendimientoLabel: string;
   /** Con qué se compara: capacidad de tanque, precio referencial, rendimiento. */
   familia: "diesel" | "gasolina" | "glp" | "gnv" | "urea" | "biodiesel";
+  /**
+   * Banda de PLAUSIBILIDAD FÍSICA del precio unitario, en la unidad canónica de la familia.
+   *
+   * NO es el precio de mercado —ese es `precios_combustible`, que AFA mantiene al día y contra
+   * el que ya se juzga el ±20 %—. Esta banda contesta otra pregunta: **¿este número puede ser
+   * un precio de ESTA unidad?** Un S/ 1.78 escrito en una fila de diésel y un S/ 25 en una de
+   * GNV son órdenes de magnitud, no variaciones de mercado: lo que está mal es la unidad.
+   *
+   * Los límites no se midieron ni se heredan de otro módulo, y se declara: son deliberadamente
+   * anchos —admiten con holgura todo lo que la flota ha pagado— y aun así lo bastante estrechos
+   * para que el MISMO número expresado en otra unidad caiga fuera (un diésel a S/ 26/gal son
+   * S/ 6.87/litro, por debajo del piso de 8). Ese es el único trabajo que hacen; el juicio fino
+   * lo sigue haciendo el referencial.
+   */
+  rangoPrecio: { min: number; max: number };
   /** Valor histórico que sigue en la base pero ya no se propone de primera. */
   legado?: boolean;
 };
 
 export const COMBUSTIBLES: Record<string, ConfigCombustible> = {
-  diesel:            { label: "Diésel",            labelCorto: "Diésel",      unidad: "galones", unidadLabel: "gal", icon: "🛢️", color: "#1d4ed8", bg: "#dbeafe", precioRef: 16.5, esAditivo: false, rendimientoLabel: "km/gal",  familia: "diesel" },
-  glp:               { label: "GLP",               labelCorto: "GLP",         unidad: "galones", unidadLabel: "gal", icon: "🔵", color: "#7c3aed", bg: "#ede9fe", precioRef: 7.65, esAditivo: false, rendimientoLabel: "km/gal",  familia: "glp" },
-  gnv:               { label: "GNV",               labelCorto: "GNV",         unidad: "m3",      unidadLabel: "m³",  icon: "💨", color: "#0f766e", bg: "#f0fdfa", precioRef: 1.78, esAditivo: false, rendimientoLabel: "km/m³",   familia: "gnv" },
-  gasolina_regular:  { label: "Gasolina regular",  labelCorto: "G. Regular",  unidad: "galones", unidadLabel: "gal", icon: "⛽", color: "#dc2626", bg: "#fee2e2", precioRef: 17.0, esAditivo: false, rendimientoLabel: "km/gal",  familia: "gasolina" },
-  gasolina_premium:  { label: "Gasolina premium",  labelCorto: "G. Premium",  unidad: "galones", unidadLabel: "gal", icon: "⛽", color: "#b91c1c", bg: "#fee2e2", precioRef: 19.5, esAditivo: false, rendimientoLabel: "km/gal",  familia: "gasolina" },
-  urea:              { label: "Urea (AdBlue)",     labelCorto: "Urea",        unidad: "litros",  unidadLabel: "lt",  icon: "🧪", color: "#854d0e", bg: "#fef9c3", precioRef: 5.50, esAditivo: true,  rendimientoLabel: "lt/100km", familia: "urea" },
-  biodiesel:         { label: "Biodiésel",         labelCorto: "Biodiésel",   unidad: "galones", unidadLabel: "gal", icon: "🌿", color: "#166534", bg: "#dcfce7", precioRef: 15.0, esAditivo: false, rendimientoLabel: "km/gal",  familia: "biodiesel" },
+  diesel:            { label: "Diésel",            labelCorto: "Diésel",      unidad: "galones", unidadLabel: "gal", icon: "🛢️", color: "#1d4ed8", bg: "#dbeafe", precioRef: 16.5, esAditivo: false, rendimientoLabel: "km/gal",  rangoPrecio: { min: 8, max: 45 }, familia: "diesel" },
+  glp:               { label: "GLP",               labelCorto: "GLP",         unidad: "galones", unidadLabel: "gal", icon: "🔵", color: "#7c3aed", bg: "#ede9fe", precioRef: 7.65, esAditivo: false, rendimientoLabel: "km/gal",  rangoPrecio: { min: 3, max: 20 }, familia: "glp" },
+  gnv:               { label: "GNV",               labelCorto: "GNV",         unidad: "m3",      unidadLabel: "m³",  icon: "💨", color: "#0f766e", bg: "#f0fdfa", precioRef: 1.78, esAditivo: false, rendimientoLabel: "km/m³",   rangoPrecio: { min: 0.8, max: 6 }, familia: "gnv" },
+  gasolina_regular:  { label: "Gasolina regular",  labelCorto: "G. Regular",  unidad: "galones", unidadLabel: "gal", icon: "⛽", color: "#dc2626", bg: "#fee2e2", precioRef: 17.0, esAditivo: false, rendimientoLabel: "km/gal",  rangoPrecio: { min: 8, max: 45 }, familia: "gasolina" },
+  gasolina_premium:  { label: "Gasolina premium",  labelCorto: "G. Premium",  unidad: "galones", unidadLabel: "gal", icon: "⛽", color: "#b91c1c", bg: "#fee2e2", precioRef: 19.5, esAditivo: false, rendimientoLabel: "km/gal",  rangoPrecio: { min: 8, max: 45 }, familia: "gasolina" },
+  urea:              { label: "Urea (AdBlue)",     labelCorto: "Urea",        unidad: "litros",  unidadLabel: "lt",  icon: "🧪", color: "#854d0e", bg: "#fef9c3", precioRef: 5.50, esAditivo: true,  rendimientoLabel: "lt/100km", rangoPrecio: { min: 1.5, max: 20 }, familia: "urea" },
+  biodiesel:         { label: "Biodiésel",         labelCorto: "Biodiésel",   unidad: "galones", unidadLabel: "gal", icon: "🌿", color: "#166534", bg: "#dcfce7", precioRef: 15.0, esAditivo: false, rendimientoLabel: "km/gal",  rangoPrecio: { min: 8, max: 45 }, familia: "biodiesel" },
   // Legado: las filas que ya están guardadas como "gasolina" sin grado. Se sigue pintando
   // igual; solo deja de ofrecerse cuando hay que ELEGIR uno (ver TIPOS_PARA_ELEGIR).
-  gasolina:          { label: "Gasolina",          labelCorto: "Gasolina",    unidad: "galones", unidadLabel: "gal", icon: "⛽", color: "#dc2626", bg: "#fee2e2", precioRef: 18.0, esAditivo: false, rendimientoLabel: "km/gal",  familia: "gasolina", legado: true },
+  gasolina:          { label: "Gasolina",          labelCorto: "Gasolina",    unidad: "galones", unidadLabel: "gal", icon: "⛽", color: "#dc2626", bg: "#fee2e2", precioRef: 18.0, esAditivo: false, rendimientoLabel: "km/gal",  rangoPrecio: { min: 8, max: 45 }, familia: "gasolina", legado: true },
 };
 
 /**
@@ -236,4 +251,177 @@ export function normalizarTipoCombustible(texto?: string | null): string | null 
   }
   if (/\b(PREMIUM|SUPER)\b/.test(t)) return "gasolina_premium";
   return null;
+}
+
+// ── EL PUENTE CON `precios_combustible` ──────────────────────────────────────
+//
+// EL ERROR QUE ESTO MATA, Y LLEVABA MESES VIVO: `precios_combustible.tipo` guarda la etiqueta
+// capitalizada y CON TILDE (`Diésel`, `Biodiésel`), y los dos sitios que la cruzaban contra
+// `combustible.tipo_combustible` (minúscula y sin tilde) comparaban con un simple
+// `.toLowerCase()`. `"diésel" !== "diesel"`, así que para el DIÉSEL:
+//
+//   · `lib/radar/acciones.ts` resolvía `pRef = 0` y el control de precio ±20 % **nunca se
+//     aplicó a ninguna carga de diésel** — ni él ni `revisarTipoContraPrecio`, que también
+//     recibe esas filas;
+//   · `sincronizarPrecioDesdeCarga` lo salvaba con un `MAPA_TIPO` escrito a mano, que era una
+//     TERCERA lista de tipos y ya se había quedado atrás: `gasolina_regular` y
+//     `gasolina_premium` no estaban, así que una carga de gasolina por octanaje no actualizaba
+//     el precio vigente que lee el Cotizador.
+//
+// Es *escribir con una identidad y leer con otra* otra vez, y la salida es la de siempre: UNA
+// derivación de la clave, la del catálogo. `normalizarTipoCombustible` ya sabía hacerlo —lee
+// "Diésel", "GLP", "Gasohol 90"— y nadie la había apuntado a esta tabla. Por eso no hace falta
+// ninguna columna nueva ni ninguna migración: la etiqueta ya contiene su propio código.
+
+/** El código del catálogo que le corresponde a una etiqueta de `precios_combustible.tipo`. */
+export function tipoDeEtiquetaPrecio(etiqueta?: string | null): string | null {
+  return normalizarTipoCombustible(etiqueta);
+}
+
+export type FilaPrecioRef = { tipo: string; precio: number };
+
+/**
+ * La fila de `precios_combustible` que le toca a un tipo de carga. **Lo más específico gana**,
+ * igual que en `capacidadDeclarada`: primero el tipo exacto (`gasolina_premium` si alguien dio
+ * de alta esa fila) y después la FAMILIA (`Gasolina`), que es como está cargada hoy la tabla.
+ *
+ * Devuelve la fila y no solo el número para que quien escriba sepa a cuál actualizar, y quien
+ * lea pueda decir contra qué comparó.
+ */
+export function filaPrecioReferencial<T extends FilaPrecioRef>(
+  filas: readonly T[] | null | undefined,
+  tipo?: string | null
+): { fila: T; exacto: boolean } | null {
+  if (!filas?.length) return null;
+  const buscado = String(tipo ?? "").trim().toLowerCase();
+  const familia = familiaCombustible(tipo);
+  let porFamilia: T | null = null;
+  for (const f of filas) {
+    const cod = tipoDeEtiquetaPrecio(f.tipo);
+    if (!cod) continue;
+    if (buscado && cod === buscado) return { fila: f, exacto: true };
+    if (!porFamilia && familiaCombustible(cod) === familia) porFamilia = f;
+  }
+  return porFamilia ? { fila: porFamilia, exacto: false } : null;
+}
+
+/** El precio referencial de un tipo, o 0 si la tabla no lo tiene (como antes). */
+export function precioReferencialDe(
+  filas: readonly FilaPrecioRef[] | null | undefined,
+  tipo?: string | null
+): number {
+  const r = filaPrecioReferencial(filas, tipo);
+  return r ? Number(r.fila.precio) || 0 : 0;
+}
+
+// ── ¿ESTE NÚMERO PUEDE SER UN PRECIO DE ESTA UNIDAD? ─────────────────────────
+
+/** Factor para pasar de la unidad de una fila a la unidad canónica de su familia. */
+export function factorAUnidadCanonica(unidadFila: string | null | undefined, tipo?: string | null): number | null {
+  const canonica = configCombustible(tipo).unidad;
+  const u = String(unidadFila ?? "").trim().toLowerCase();
+  if (!u) return 1;                        // sin declarar: se asume la canónica, como en todo el ERP
+  if (u === canonica) return 1;
+  if (u === "litros" && canonica === "galones") return LITROS_POR_GALON;   // S//lt → S//gal
+  if (u === "galones" && canonica === "litros") return 1 / LITROS_POR_GALON;
+  return null;                             // m³ no se convierte a nada: es otra magnitud
+}
+
+export type VeredictoPrecioUnidad =
+  | { estado: "ok" }
+  | { estado: "sin_base"; motivo: "sin_precio" | "unidad_desconocida" }
+  /** El precio no cabe en la banda de la unidad declarada, pero sí en la de OTRA. Es exacto. */
+  | { estado: "parece_otra_unidad"; unidadProbable: "galones" | "litros"; detalle: string }
+  /** Fuera de banda y sin otra unidad que lo explique. */
+  | { estado: "fuera_de_banda"; min: number; max: number; detalle: string };
+
+/**
+ * El control de unidad del punto E del plan: **avisa, nunca bloquea**.
+ *
+ * Lo que lo hace útil es que la banda se aplica en la unidad DE LA FILA, no en la del catálogo:
+ * con eso deja de ser un "está caro" y pasa a decir *«esto parece un precio por litro y la fila
+ * dice galones»*, que es exacto y accionable. El caso al revés (galones declarado litros) sale
+ * por el mismo camino.
+ *
+ * No sustituye al ±20 % contra `precios_combustible`: ese juzga el MERCADO y se mueve todos los
+ * meses; éste juzga la MAGNITUD y no se mueve nunca. Son dos preguntas distintas y las dos hacen
+ * falta — el caso GLP↔litros solo lo ve el referencial, y el caso GNV↔galón solo lo ve la banda.
+ */
+export function revisarPrecioUnitario(args: {
+  tipo?: string | null;
+  precio: number | null | undefined;
+  /** `combustible.unidad` de la fila. Vacío = la canónica de la familia. */
+  unidad?: string | null;
+}): VeredictoPrecioUnidad {
+  const precio = Number(args.precio);
+  if (!Number.isFinite(precio) || precio <= 0) return { estado: "sin_base", motivo: "sin_precio" };
+
+  const cfg = configCombustible(args.tipo);
+  const factor = factorAUnidadCanonica(args.unidad, args.tipo);
+  if (factor === null) return { estado: "sin_base", motivo: "unidad_desconocida" };
+
+  // La banda, expresada en la unidad de la FILA.
+  const min = cfg.rangoPrecio.min / factor;
+  const max = cfg.rangoPrecio.max / factor;
+  if (precio >= min && precio <= max) return { estado: "ok" };
+
+  const uFila = String(args.unidad ?? "").trim().toLowerCase() || cfg.unidad;
+  const etiqueta = (u: string) => (u === "m3" ? "m³" : u === "litros" ? "litro" : "galón");
+
+  // ¿Cabe en la banda de la OTRA unidad de la misma familia? Solo galones↔litros: el m³ es otra
+  // magnitud y no se convierte, así que ahí nunca se afirma cuál sería la unidad correcta.
+  for (const otra of ["galones", "litros"] as const) {
+    if (otra === uFila || cfg.unidad === "m3") continue;
+    const f = factorAUnidadCanonica(otra, args.tipo);
+    if (f === null) continue;
+    const lo = cfg.rangoPrecio.min / f;
+    const hi = cfg.rangoPrecio.max / f;
+    if (precio >= lo && precio <= hi) {
+      return {
+        estado: "parece_otra_unidad",
+        unidadProbable: otra,
+        detalle:
+          `S/ ${precio.toFixed(2)} está fuera de lo que cuesta un ${etiqueta(uFila)} de ${cfg.label} ` +
+          `(S/ ${min.toFixed(2)}–${max.toFixed(2)}), pero encaja como precio por ${etiqueta(otra)} ` +
+          `(S/ ${lo.toFixed(2)}–${hi.toFixed(2)}). Revisa la unidad de la carga.`,
+      };
+    }
+  }
+
+  return {
+    estado: "fuera_de_banda",
+    min, max,
+    detalle:
+      `S/ ${precio.toFixed(2)} por ${etiqueta(uFila)} no es un precio posible de ${cfg.label} ` +
+      `(S/ ${min.toFixed(2)}–${max.toFixed(2)}). Revisa el tipo de combustible y la unidad.`,
+  };
+}
+
+/**
+ * La unidad con la que se GUARDA una carga. **Se deriva del producto, no se elige.**
+ *
+ * Es el punto B del plan de unidades: `combustible.unidad` se persiste por fila —aunque sea
+ * derivable— para que un cambio futuro de convención no reinterprete el histórico, y su valor
+ * sale del catálogo, que es el único sitio que sabe en qué se vende cada combustible.
+ *
+ * La ÚNICA excepción es real y hay que conservarla: un producto de familia galonera puede venir
+ * despachado en litros y el voucher lo dice. Eso no es una convención, es un hecho del papel.
+ *
+ * EL FALLO QUE CIERRA: `registrarCombustible` del Radar escribía `esLitros ? "litros" :
+ * "galones"` **para todo**, así que cada carga de GNV que entraba por WhatsApp quedaba rotulada
+ * en GALONES con un número que son METROS CÚBICOS. El GNV es ~70 % de la flota, y con la unidad
+ * mal escrita ni el rendimiento ni la banda de precio pueden juzgarla. El formulario de
+ * /combustible ya lo hacía bien (`cambiarTipo` copia `cfg.unidad`); el que faltaba era el Radar.
+ */
+export function unidadDeCarga(
+  tipo?: string | null,
+  declarada?: string | null
+): "galones" | "litros" | "m3" {
+  const canonica = configCombustible(tipo).unidad;
+  const d = String(declarada ?? "").trim().toLowerCase();
+  // Un gas no se vende por litro en Perú: si el producto es de m³, manda el m³ pase lo que pase.
+  if (canonica === "m3") return "m3";
+  if (d === "litros" || d === "lt") return "litros";
+  if (d === "galones" || d === "gal") return "galones";
+  return canonica;
 }

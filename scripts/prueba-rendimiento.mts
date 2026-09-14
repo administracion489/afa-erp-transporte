@@ -956,5 +956,94 @@ const cargaBi = (
     gnv.estado === "salto" && /km\/m³/.test(gnv.detalle), gnv.estado === "salto" ? gnv.detalle.slice(0, 60) : gnv.estado);
 }
 
+// ── Tanda 3 · LA BICOMBUSTIBLE LLEGA AL PRESUPUESTO ─────────────────────────
+//
+// `lib/costeo-servicio.ts` pre-filtra por familia y durante meses NO le pasó `otrasFamilias`
+// a `serieRendimiento`. Estas pruebas reproducen EXACTAMENTE lo que ese módulo arma —la
+// ventana por fecha, el filtro de la familia dominante y las marcas de la otra— y fijan las
+// dos mitades: que una unidad de un solo combustible no se mueve ni un decimal, y que en una
+// bicombustible el error va SIEMPRE hacia el lado seguro.
+console.log("\n── Tanda 3 · la bicombustible en el presupuesto ─────────────────");
+{
+  /** Lo que arma `rendimientoMedido`: la familia dominante + las marcas de las demás. */
+  const comoElPresupuesto = (filas: { id: number; fecha: string; km: number; q: number; tipo: string }[]) => {
+    const cuenta = new Map<string, number>();
+    for (const r of filas) {
+      const f = r.tipo === "urea" ? "urea" : r.tipo === "glp" ? "glp" : r.tipo === "gnv" ? "gnv" : r.tipo.startsWith("gasolina") ? "gasolina" : "diesel";
+      if (TECHO_FAMILIA[f] !== null) cuenta.set(f, (cuenta.get(f) ?? 0) + 1);
+    }
+    const fam = [...cuenta].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "diesel";
+    const famDe = (t: string) => (t === "urea" ? "urea" : t === "glp" ? "glp" : t === "gnv" ? "gnv" : t.startsWith("gasolina") ? "gasolina" : "diesel");
+    const cargas: CargaRendimiento[] = filas
+      .filter((r) => famDe(r.tipo) === fam)
+      .map((r) => ({ id: r.id, unidad: "U1", fecha: r.fecha, kilometraje: r.km, cantidad: r.q, tipo: r.tipo }));
+    const otras = filas
+      .filter((r) => famDe(r.tipo) !== fam && TECHO_FAMILIA[famDe(r.tipo)] !== null)
+      .map((r) => ({ id: r.id, fecha: r.fecha, kilometraje: r.km, familia: famDe(r.tipo) }));
+    return { sin: serieRendimiento(cargas), con: serieRendimiento(cargas, otras), fam, otras };
+  };
+
+  // (a) UNA UNIDAD DE UN SOLO COMBUSTIBLE NO SE PUEDE MOVER. Es la mitad que protege a la
+  //     flota entera: el 90 % de las placas no es bicombustible y su presupuesto no cambia.
+  const mono = comoElPresupuesto([
+    { id: 1, fecha: "2026-08-01", km: 10000, q: 10, tipo: "diesel" },
+    { id: 2, fecha: "2026-08-08", km: 10300, q: 10, tipo: "diesel" },
+    { id: 3, fecha: "2026-08-15", km: 10600, q: 10, tipo: "diesel" },
+    { id: 4, fecha: "2026-08-22", km: 10900, q: 10, tipo: "diesel" },
+  ]);
+  chk("mono-combustible: no hay marcas que pasar", mono.otras.length === 0);
+  chk("…y la mediana es idéntica con y sin el parámetro",
+    mono.sin.resumen.mediana === mono.con.resumen.mediana, `${mono.sin.resumen.mediana} / ${mono.con.resumen.mediana}`);
+  chk("…y los tramos también", mono.sin.resumen.n === mono.con.resumen.n);
+
+  // (b) UN CAMIÓN DIÉSEL QUE CARGA UREA NO ES BICOMBUSTIBLE. Contar el aditivo borraría el
+  //     rendimiento de media flota: la urea no mueve el bus.
+  const conUrea = comoElPresupuesto([
+    { id: 1, fecha: "2026-08-01", km: 10000, q: 10, tipo: "diesel" },
+    { id: 2, fecha: "2026-08-05", km: 10150, q: 20, tipo: "urea" },
+    { id: 3, fecha: "2026-08-08", km: 10300, q: 10, tipo: "diesel" },
+    { id: 4, fecha: "2026-08-15", km: 10600, q: 10, tipo: "diesel" },
+  ]);
+  chk("la urea NO entra como otra familia", conUrea.otras.length === 0);
+  chk("…y el rendimiento del diésel sale intacto", conUrea.con.resumen.mediana === 30);
+
+  // (c) LA CWQ400: GLP casi siempre, gasolina de vez en cuando. El tramo que contiene la
+  //     carga de gasolina tiene km que NO están en su denominador → sale inflado.
+  const bi = comoElPresupuesto([
+    { id: 1, fecha: "2026-08-01", km: 10000, q: 10, tipo: "glp" },
+    { id: 2, fecha: "2026-08-08", km: 10100, q: 10, tipo: "glp" },
+    { id: 3, fecha: "2026-08-12", km: 10250, q: 5,  tipo: "gasolina_regular" },
+    { id: 4, fecha: "2026-08-20", km: 10600, q: 10, tipo: "glp" },   // ← tramo cruzado: 500 km/10
+    { id: 5, fecha: "2026-08-27", km: 10700, q: 10, tipo: "glp" },
+  ]);
+  chk("la familia dominante es el GLP", bi.fam === "glp");
+  chk("…y la carga de gasolina sí viaja como marca", bi.otras.length === 1);
+  const cruzado = bi.con.tramos.find((t) => t.cargaId === 4);
+  // Sin las marcas el tramo mide 500 km ÷ 10 gal = 50 km/gal, que ya supera el techo del GLP:
+  // sale `implausible`, que la pantalla titula «Falta registrar una carga» y que en el Radar
+  // BLOQUEA el voucher. O sea, el rojo mandaba a buscar un repostaje que nunca faltó.
+  const sinMarcas = bi.sin.tramos.find((t) => t.cargaId === 4);
+  chk("EL BUG: sin las marcas el tramo cruzado da 50 km/gal y sale como si faltara una carga",
+    sinMarcas?.crudo === 50 && sinMarcas?.motivo === "implausible", `${sinMarcas?.crudo} · ${sinMarcas?.motivo}`);
+  chk("…y con ellas se DECLARA `familia_cruzada` en vez de medirse",
+    cruzado?.motivo === "familia_cruzada" && cruzado?.rendimiento === null, String(cruzado?.motivo));
+  chk("…el detalle desmiente que falte una carga por registrar",
+    /no es una carga que falte/i.test(cruzado?.detalle ?? ""), (cruzado?.detalle ?? "").slice(0, 70));
+
+  // LA DIRECCIÓN, que es lo único que decide si el cambio es seguro: la mediana NO puede
+  // subir. Si subiera, el presupuesto costearía MENOS combustible del real — el error que
+  // solo se descubre cuando el servicio ya se prestó.
+  const antes = bi.sin.resumen.mediana!;
+  const despues = bi.con.resumen.mediana;
+  chk("la mediana BAJA (o desaparece): nunca sube",
+    despues === null || despues <= antes, `${antes} → ${despues}`);
+  chk("…y aquí baja a lo que la unidad rinde de verdad", despues === 10, String(despues));
+  chk("el tramo cruzado NO cuenta como una carga que falta (`rendimiento_alto`)",
+    juzgarTramo(cruzado!, bi.con.resumen) === null);
+  // Sus KM sí son de fiar: el CPK de una bicombustible sale correcto sin ningún caso especial.
+  chk("pero sus KM siguen siendo de fiar (el costo por km no pierde base)",
+    cruzado?.kmConfiable === true && cruzado?.km === 500, `${cruzado?.kmConfiable} · ${cruzado?.km}`);
+}
+
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");
 process.exit(fallos ? 1 : 0);
