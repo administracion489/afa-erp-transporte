@@ -178,6 +178,12 @@ export type RadarCombustible = {
   anomalias: AnomaliaCombustible[];
   /** Fotos que la IA procesó (voucher/surtidor/tablero): [{ url, mime, nombre }]. Vacío en filas viejas. */
   fotos: RadarFoto[] | null;
+  /**
+   * El indicador de nivel del tablero DESPUÉS de cargar, tal como lo leyó la IA. PROPONE el
+   * valor de `combustible.tanque_lleno` en el panel de revisión; no decide nada por su cuenta.
+   * `null` en filas viejas y si no se corrió `combustible-02-nivel-tanque-radar.sql`.
+   */
+  nivel_tanque?: "lleno" | "parcial" | "no_visible" | null;
   combustible_id: number | null;
   created_at: string;
 };
@@ -221,7 +227,9 @@ export type AnomaliaCombustible = {
     // Qué combustible se compró (lib/radar/tipo-voucher.ts):
     | "tipo_corregido_por_producto"  // la IA dijo un tipo y el producto impreso dice otro: manda el papel
     | "tipo_no_coincide_con_producto"// el papel la contradice pero nombra varios productos: no se adivina
-    | "tipo_no_coincide_con_precio"; // se pagó el precio de otro combustible (solo avisa: no reescribe el tipo)
+    | "tipo_no_coincide_con_precio"  // se pagó el precio de otro combustible (solo avisa: no reescribe el tipo)
+    // ¿Quedó lleno el tanque? (lib/radar/tanque-lleno.ts):
+    | "carga_parcial_probable";      // la aguja del tablero NO marca lleno: ese tramo no se mide igual
   detalle: string;
   /** false = observación informativa (NO bloquea el auto-registro). Ausente o true = bloqueante. */
   bloquea?: boolean;
@@ -330,6 +338,8 @@ export type ExtraccionCombustible = {
   vio_nota?: boolean | null;           // se vio una foto de nota/comprobante de grifo
   vio_surtidor?: boolean | null;       // se vio una foto del surtidor
   vio_tablero?: boolean | null;        // se vio una foto del tablero/odómetro
+  /** El indicador de nivel del tablero DESPUÉS de cargar. Propone `combustible.tanque_lleno`. */
+  nivel_tanque?: "lleno" | "parcial" | "no_visible" | null;
   fuentes?: Record<string, string | null> | null;          // de qué foto salió cada campo clave (galones→surtidor, etc.)
   confianza_campos?: Record<string, number | null> | null; // 0..1 por campo clave
   /**
