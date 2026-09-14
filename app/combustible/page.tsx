@@ -44,7 +44,7 @@ type LecturaRadar = FilaConFotos & { combustible_id: number | null; comprobante?
 type VistaActiva = "historial" | "analisis" | "por_vehiculo" | "por_conductor" | "por_grifo" | "por_tipo";
 type GranPeriodo = "dia" | "semana" | "mes";
 
-import { COMBUSTIBLES, familiaCombustible, capacidadTanqueDe } from "@/lib/combustible-tipos";
+import { COMBUSTIBLES, familiaCombustible, capacidadTanqueDe, revisarPrecioUnitario } from "@/lib/combustible-tipos";
 import { paginarFilas } from "@/lib/huella";
 import {
   seriesRendimiento, tramosPorCarga, juzgarTramo, etiquetaMotivo,
@@ -341,6 +341,21 @@ export default function CombustiblePage() {
 
   const faltaMotivoSalto = saltoKm.estado === "salto" && !form.km_salto_motivo.trim();
 
+  // ── ¿ESTE PRECIO PUEDE SER DE ESTA UNIDAD? ────────────────────────────────
+  //
+  // El control de unidad del plan: se juzga MIENTRAS se teclea y **no bloquea**. Es la banda
+  // física, no el mercado — el ±20 % contra `precios_combustible` es otra pregunta y vive en
+  // el Radar. Lo valioso es que cuando el número encaja en la banda de la OTRA unidad, lo DICE:
+  // «esto parece un precio por litro y la carga dice galones», que es exacto y accionable.
+  const precioSospechoso = useMemo(() => {
+    const v = revisarPrecioUnitario({
+      tipo: form.tipo_combustible,
+      precio: Number(form.precio_galon),
+      unidad: form.unidad,
+    });
+    return v.estado === "parece_otra_unidad" || v.estado === "fuera_de_banda" ? v.detalle : null;
+  }, [form.tipo_combustible, form.precio_galon, form.unidad]);
+
   // ── La comparación del final: esta ventana contra la anterior ──────────────
   //
   // EL FILTRO DE MES MANDA sobre la ventana. Con «agosto» puesto compara agosto contra
@@ -552,6 +567,9 @@ export default function CombustiblePage() {
       tipoCombustible: form.tipo_combustible,
       precio:          Number(form.precio_galon),
       fecha:           form.fecha,
+      // La unidad de ESTA carga: la ficha del cotizador vive en la unidad canónica de la
+      // familia, así que un precio por litro se convierte antes de escribirse (o no se escribe).
+      unidad:          form.unidad,
       actualizadoPor:  authData?.user?.email || undefined,
     });
 
@@ -1050,9 +1068,19 @@ export default function CombustiblePage() {
                   <p className="text-xs text-red-600 mt-1 font-bold">⚠ Supera capacidad del tanque</p>
                 )}
               </Campo>
+              {/* EL PRECIO DELATA LA UNIDAD EQUIVOCADA, y es lo único que la delata al teclear.
+                  La banda es de plausibilidad FÍSICA, no de mercado: dice si el número puede ser
+                  un precio de ESTA unidad. Avisa y NO bloquea — igual que el resto de los
+                  controles de esta pantalla, una carga que no llega a ser fila desaparece de
+                  donde se corrige. */}
               <Campo label={`Precio S/ por ${fuelCfg.unidadLabel} · Ref: ${fmtSoles(fuelCfg.precioRef)}`}>
-                <input type="number" min="0" className={inputCls()} placeholder={String(fuelCfg.precioRef)} value={form.precio_galon}
+                <input type="number" min="0"
+                  className={inputCls(precioSospechoso ? "border-amber-400 bg-amber-50" : "")}
+                  placeholder={String(fuelCfg.precioRef)} value={form.precio_galon}
                   onChange={e => setForm(p => ({ ...p, precio_galon: e.target.value }))} />
+                {precioSospechoso && (
+                  <p className="text-[11px] text-amber-800 mt-1 leading-snug">{precioSospechoso}</p>
+                )}
               </Campo>
               <Campo label="Grifo / Estación">
                 <input className={inputCls()} placeholder="Ej: Primax - Ate" value={form.grifo}

@@ -18,6 +18,13 @@ import {
   configCombustible,
   familiaCombustible,
   normalizarTipoCombustible,
+  tipoDeEtiquetaPrecio,
+  filaPrecioReferencial,
+  precioReferencialDe,
+  factorAUnidadCanonica,
+  revisarPrecioUnitario,
+  unidadDeCarga,
+  LITROS_POR_GALON,
 } from "../lib/combustible-tipos";
 import { resolverTipoCombustible, revisarTipoContraPrecio, tiposEnTexto } from "../lib/radar/tipo-voucher";
 
@@ -189,6 +196,111 @@ const chk = (nombre: string, ok: boolean, extra = "") => {
   const corregido = resolverTipoCombustible({ declarado: "diesel", producto: "GLP-G" });
   chk("corregido por el papel, el precio ya no protesta",
     revisarTipoContraPrecio({ tipo: corregido.tipo!, precio: 7.55, referenciales: refs }).anomalia === null);
+}
+
+
+// ── 6. EL PUENTE CON `precios_combustible` ──────────────────────────────────
+//
+// El bug que llevaba meses vivo: la tabla guarda `Diésel` CON TILDE y los dos consumidores
+// comparaban con `.toLowerCase()`. `"diésel" !== "diesel"`, así que el referencial del diésel
+// resolvía 0 y el control de precio ±20 % **nunca se aplicó a una carga de diésel**.
+{
+  // Tal como está cargada la tabla hoy.
+  const filas = [
+    { tipo: "Diésel", precio: 25.74 },
+    { tipo: "Gasolina", precio: 17.9 },
+    { tipo: "GLP", precio: 7.55 },
+    { tipo: "GNV", precio: 1.78 },
+    { tipo: "UREA", precio: 5.5 },
+  ];
+
+  chk("la etiqueta con tilde deriva a su código del catálogo",
+    tipoDeEtiquetaPrecio("Diésel") === "diesel", String(tipoDeEtiquetaPrecio("Diésel")));
+  chk("y `Biodiésel` también", tipoDeEtiquetaPrecio("Biodiésel") === "biodiesel");
+  chk("EL BUG: el diésel ya encuentra su referencial",
+    precioReferencialDe(filas, "diesel") === 25.74, String(precioReferencialDe(filas, "diesel")));
+  chk("…y con `.toLowerCase()` a secas no lo encontraba (el algoritmo viejo)",
+    filas.map((f) => f.tipo.toLowerCase()).find((t) => t === "diesel") === undefined);
+
+  // Lo que el `MAPA_TIPO` escrito a mano se había dejado fuera: la gasolina por octanaje.
+  chk("gasolina_premium cae a la fila de su FAMILIA",
+    precioReferencialDe(filas, "gasolina_premium") === 17.9);
+  const pr = filaPrecioReferencial(filas, "gasolina_premium");
+  chk("…y declara que no fue coincidencia exacta", pr !== null && pr.exacto === false);
+  chk("con fila propia por grado, gana la exacta",
+    precioReferencialDe([...filas, { tipo: "Gasolina premium", precio: 19.2 }], "gasolina_premium") === 19.2);
+  chk("el legado `gasolina` sigue casando", precioReferencialDe(filas, "gasolina") === 17.9);
+  chk("un tipo sin fila devuelve 0, como antes", precioReferencialDe(filas, "biodiesel") === 0);
+  chk("sin filas no se inventa nada", precioReferencialDe([], "diesel") === 0 && filaPrecioReferencial([], "diesel") === null);
+
+  // Lo que NO se puede aflojar: los cuatro que YA funcionaban siguen igual.
+  for (const [tipo, esperado] of [["glp", 7.55], ["gnv", 1.78], ["urea", 5.5]] as const) {
+    chk(`${tipo} sigue resolviendo lo mismo que antes`, precioReferencialDe(filas, tipo) === esperado);
+  }
+}
+
+// ── 7. ¿ESTE NÚMERO PUEDE SER UN PRECIO DE ESTA UNIDAD? ─────────────────────
+{
+  const det = (t: string, precio: number, unidad?: string) =>
+    revisarPrecioUnitario({ tipo: t, precio, unidad });
+
+  // Los precios REALES de la flota no pueden levantar nada: un ámbar que sale siempre se
+  // vuelve paisaje, y esta banda existe justo para no ser eso.
+  for (const [t, p] of [["diesel", 24.7], ["diesel", 26.15], ["glp", 6.99], ["glp", 7.55],
+                        ["gnv", 1.78], ["gasolina_regular", 17.9], ["urea", 5.5]] as const) {
+    chk(`${t} a S/ ${p} es un precio normal`, det(t, p).estado === "ok", det(t, p).estado);
+  }
+
+  // EL CASO QUE JUSTIFICA LA BANDA: el mismo precio en la otra unidad.
+  const litro = det("diesel", 26.15 / LITROS_POR_GALON);
+  chk("un diésel a precio POR LITRO rotulado en galones se detecta",
+    litro.estado === "parece_otra_unidad", litro.estado);
+  chk("…y NOMBRA la unidad que encaja",
+    litro.estado === "parece_otra_unidad" && litro.unidadProbable === "litros");
+  const glpLitro = det("glp", 7.55 / LITROS_POR_GALON);
+  chk("lo mismo con el GLP capturado en litros (el caso del Paso 3)",
+    glpLitro.estado === "parece_otra_unidad");
+  // Y al revés: un precio por galón en una fila que dice litros.
+  const alReves = det("diesel", 26.15, "litros");
+  chk("y el caso espejo: precio por galón con la fila en litros",
+    alReves.estado === "parece_otra_unidad" && alReves.unidadProbable === "galones");
+
+  // Órdenes de magnitud: aquí no hay otra unidad que lo explique, y se dice así.
+  const gnvCaro = det("gnv", 25);
+  chk("un precio de galón en una fila de GNV no cabe en ninguna banda",
+    gnvCaro.estado === "fuera_de_banda", gnvCaro.estado);
+  chk("…y el m³ NUNCA propone otra unidad (es otra magnitud, no una conversión)",
+    gnvCaro.estado === "fuera_de_banda");
+
+  // Tri-estado: sin precio no se afirma nada.
+  chk("sin precio no se juzga", det("diesel", 0).estado === "sin_base");
+  chk("una unidad que no se sabe convertir tampoco",
+    det("diesel", 26, "m3").estado === "sin_base");
+
+  // La conversión, que es de donde sale todo lo anterior.
+  chk("litros → galones multiplica por 3.785",
+    factorAUnidadCanonica("litros", "diesel") === LITROS_POR_GALON);
+  chk("sin unidad declarada se asume la canónica", factorAUnidadCanonica(null, "diesel") === 1);
+  chk("m³ no se convierte a galones", factorAUnidadCanonica("galones", "gnv") === null);
+}
+
+// ── 8. LA UNIDAD SE DERIVA DEL PRODUCTO ─────────────────────────────────────
+//
+// `registrarCombustible` del Radar escribía `esLitros ? "litros" : "galones"` para TODO, así que
+// cada carga de GNV —el 70 % de la flota— quedaba rotulada en GALONES con un número que son m³.
+{
+  chk("EL BUG: una carga de GNV se guarda en m³, no en galones",
+    unidadDeCarga("gnv", "galones") === "m3", unidadDeCarga("gnv", "galones"));
+  chk("…y ni siquiera un 'litros' explícito la mueve (un gas no se vende por litro)",
+    unidadDeCarga("gnv", "litros") === "m3");
+
+  // Lo que NO se puede aflojar: las familias galoneras se comportan exactamente igual que antes.
+  for (const t of ["diesel", "glp", "gasolina_regular", "gasolina_premium", "gasolina", "biodiesel"]) {
+    chk(`${t} sin declarar sigue en galones`, unidadDeCarga(t, "galones") === "galones");
+    chk(`${t} declarado en litros sigue en litros`, unidadDeCarga(t, "litros") === "litros");
+  }
+  chk("la urea declarada en litros queda en litros", unidadDeCarga("urea", "litros") === "litros");
+  chk("y la abreviatura de pantalla también se entiende", unidadDeCarga("diesel", "lt") === "litros");
 }
 
 console.log(fallos ? `\n${fallos} FALLO(S)` : "\nTODO OK");

@@ -16,7 +16,10 @@
 import { registrarLectura, contextoOdometro, type Flota, type ContextoOdometro } from "@/lib/odometro";
 import { elegirOdometro } from "@/lib/odometro-seleccion";
 import { revisarCoherenciaVoucher, numeroDeTranscripcion, detectarInversionCantidadPrecio } from "./coherencia-voucher";
-import { familiaCombustible, capacidadTanqueDe } from "@/lib/combustible-tipos";
+import {
+  familiaCombustible, capacidadTanqueDe,
+  tipoDeEtiquetaPrecio, precioReferencialDe, revisarPrecioUnitario, unidadDeCarga,
+} from "@/lib/combustible-tipos";
 import { resolverTipoCombustible, revisarTipoContraPrecio } from "./tipo-voucher";
 import { serieRendimiento, juzgarTramo, TECHO_FAMILIA, type CargaRendimiento } from "@/lib/rendimiento";
 import { leerAlbumRecargas, buscarDuplicado, type RecargaAlbum, type DespachoGuardado } from "./album-recargas";
@@ -1092,9 +1095,16 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
       const { data: precios } = await sb.from("precios_combustible").select("tipo, precio");
       // El referencial es por FAMILIA: `gasolina_premium` y `gasolina_regular` comparten la
       // fila de gasolina si el operador no cargó una por grado.
-      const filas = ((precios as any[]) ?? []).map((p) => ({ tipo: String(p.tipo ?? "").toLowerCase(), precio: Number(p.precio) }));
-      const ref = filas.find((p) => p.tipo === tipoComb) ?? filas.find((p) => p.tipo === familiaCombustible(tipoComb));
-      const pRef = ref ? ref.precio : 0;
+      //
+      // LA CLAVE SE DERIVA CON `tipoDeEtiquetaPrecio`, NO CON `.toLowerCase()`. La tabla guarda
+      // `Diésel` CON TILDE, así que el `"diésel" === "diesel"` de antes era falso SIEMPRE: el
+      // diésel de toda la flota resolvía `pRef = 0` y ni este ±20 % ni `revisarTipoContraPrecio`
+      // se aplicaron nunca a una carga de diésel. Ver el puente en lib/combustible-tipos.ts.
+      const filas = ((precios as any[]) ?? []).map((p) => ({
+        tipo: tipoDeEtiquetaPrecio(p.tipo) ?? String(p.tipo ?? "").toLowerCase(),
+        precio: Number(p.precio),
+      }));
+      const pRef = precioReferencialDe(filas, tipoComb);
 
       // Antes del "precio fuera de rango": ¿no estarán la cantidad y el precio intercambiados?
       // El cuadre aritmético es CIEGO a esto (la multiplicación es conmutativa), así que hace
@@ -1128,11 +1138,24 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
           leido: tipoLeido != null,
         });
         if (vPrecio.anomalia) anomalias.push(vPrecio.anomalia);
-        else if (pRef > 0 && Math.abs(precioUnit - pRef) / pRef > 0.2) {
-          anomalias.push({
-            codigo: "precio_fuera_de_rango",
-            detalle: `Precio ${fmtSoles(precioUnit)} se aleja más de 20% del referencial ${fmtSoles(pRef)} (${tipoComb})`,
-          });
+        else {
+          // ¿Y si el número no puede ser un precio de ESTA unidad? El ±20 % juzga el MERCADO y
+          // se mueve todos los meses; esto juzga la MAGNITUD y no se mueve nunca. Va antes por
+          // la misma razón que los dos de arriba: con la unidad equivocada, "se aleja del
+          // referencial" es el síntoma. Y aquí el detalle es exacto — dice qué unidad encaja.
+          const vUnidad = revisarPrecioUnitario({ tipo: tipoComb, precio: precioUnit, unidad: unidadDeCarga(tipoComb, unidadCant) });
+          if (vUnidad.estado === "parece_otra_unidad" || vUnidad.estado === "fuera_de_banda") {
+            anomalias.push({
+              codigo: "precio_fuera_de_rango",
+              detalle: vUnidad.detalle,
+              bloquea: vUnidad.estado === "parece_otra_unidad",
+            });
+          } else if (pRef > 0 && Math.abs(precioUnit - pRef) / pRef > 0.2) {
+            anomalias.push({
+              codigo: "precio_fuera_de_rango",
+              detalle: `Precio ${fmtSoles(precioUnit)} se aleja más de 20% del referencial ${fmtSoles(pRef)} (${tipoComb})`,
+            });
+          }
         }
       }
     } catch {
@@ -1176,7 +1199,10 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
     // La carga entrante entra como fila virtual: es el tramo que hay que juzgar.
     const entrante: CargaRendimiento = {
       id: -1, unidad: String(veh.id), fecha,
-      kilometraje: km, cantidad, unidadCantidad: esLitros ? "litros" : "galones", tipo: tipoComb,
+      // Misma derivación que la fila que se va a escribir: si el motor juzga el tramo con una
+      // unidad y la fila se guarda con otra, el veredicto del Radar y el de /combustible dejan
+      // de hablar del mismo número.
+      kilometraje: km, cantidad, unidadCantidad: unidadDeCarga(tipoComb, esLitros ? "litros" : "galones"), tipo: tipoComb,
     };
     const familia = familiaCombustible(tipoComb);
     // Las cargas del OTRO combustible de esta misma unidad van como marcas, no como cargas:
@@ -1350,7 +1376,10 @@ async function accionCombustible({ sb, mensaje, datos, confianza, config, previo
         conductor: conductorNombre,
         observaciones,
         tipo_combustible: tipoComb,
-        unidad: esLitros ? "litros" : "galones",
+        // La unidad se DERIVA del producto (lib/combustible-tipos.ts). El `esLitros ?
+        // "litros" : "galones"` que había aquí rotulaba en GALONES cada carga de GNV —el
+        // 70 % de la flota— con un número que son METROS CÚBICOS.
+        unidad: unidadDeCarga(tipoComb, esLitros ? "litros" : "galones"),
       })
       .select("id")
       .single();
