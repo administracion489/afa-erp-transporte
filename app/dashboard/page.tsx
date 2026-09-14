@@ -881,9 +881,12 @@ export default function DashboardPage() {
         <AreaTile icon={I.Circle} label="Neumáticos"
           value={neuCrit > 0 ? `${neuCrit} críticos` : "OK"}
           sub={`${neuPorVenc} por vencer`} intent={areaIntentNeu} onClick={() => router.push("/neumaticos")}/>
+        {/* Decía «Carga del mes» y NO es del mes: como el resto de esta pantalla, la consulta
+            trae la tabla entera sin filtro de fecha. El número estaba bien; el rótulo mentía,
+            y con él se comparaba contra el gasto mensual de /combustible, que sí es del mes. */}
         <AreaTile icon={I.Fuel} label="Combustible"
           value={fmtSoles(gastoCombustible)}
-          sub="Carga del mes" intent="neutral" onClick={() => router.push("/combustible")}/>
+          sub="Gasto acumulado" intent="neutral" onClick={() => router.push("/combustible")}/>
         <AreaTile icon={I.Shield} label="Seguros"
           value={segOblVenc > 0 ? `${segOblVenc} venc.` : "Al día"}
           sub={segPorVenc > 0 ? `${segPorVenc} por vencer` : "Pólizas vigentes"} intent={areaIntentSeg} onClick={() => router.push("/seguros")}/>
