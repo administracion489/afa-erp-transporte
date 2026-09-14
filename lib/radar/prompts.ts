@@ -312,6 +312,7 @@ El tipo se lee de la DESCRIPCIÓN del producto:
 - "GASOHOL 84/90" o "G-90" → gasolina_regular   ·   "GASOHOL 95/97/98", "PREMIUM", "SÚPER" → gasolina_premium
 - "UREA", "ADBLUE" → urea   ·   "BIODIESEL" → biodiesel
 En Perú el GLP se despacha en GALONES: con GLP la cantidad va en "galones", nunca en "litros".
+EL GNV SE DESPACHA EN METROS CÚBICOS (m³). Pon ese número TAL CUAL en "galones" y **no lo conviertas a galones**: el ERP sabe que el GNV va en m³ por el producto y rotula la unidad él mismo. Convertirlo sería inventar una cantidad que ningún surtidor entregó.
 
 Si NO se pudo leer la cantidad/importe pero SÍ había una foto de la nota o del surtidor, igual marca vio_nota/vio_surtidor en true y deja los números en null (para distinguir "foto ilegible" de "dato ausente").
 Marca vio_nota/vio_surtidor/vio_tablero según qué fotos realmente viste.
