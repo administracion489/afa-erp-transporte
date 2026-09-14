@@ -352,7 +352,12 @@ export default function AnaliticaVehiculo({ veh, onClose }: { veh: VehiculoAnali
                     color="#0f766e"
                   />
                   <Kpi label="Costo / km" valor={eco.costoPorKm != null ? fmtSoles(eco.costoPorKm) : "—"} color="#991b1b" />
-                  <Kpi label="Costo total" valor={fmtSoles(eco.costoTotal)} sub={`${fmtDec(eco.galonesTotal)} gal`} />
+                  {/* Cada familia con SU unidad: el "gal" fijo de antes rotulaba en galones los
+                      metros cúbicos de una unidad de GNV y los litros de una fila del Radar. */}
+                  <Kpi label="Costo total" valor={fmtSoles(eco.costoTotal)}
+                    sub={eco.cantidadPorFamilia.length
+                      ? eco.cantidadPorFamilia.map(f => `${fmtDec(f.cantidad)} ${f.unidadLabel}`).join(" · ")
+                      : "sin cantidad medible"} />
                   <Kpi label="Costo / día" valor={fmtSoles(eco.costoPromedioDia)} color="#854d0e" />
                 </div>
               )}

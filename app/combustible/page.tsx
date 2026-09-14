@@ -49,7 +49,7 @@ import { paginarFilas } from "@/lib/huella";
 import {
   seriesRendimiento, tramosPorCarga, juzgarTramo, etiquetaMotivo,
   resumirVentana, compararVentanas, MIN_TRAMOS_CONFIABLE,
-  movilesPorCarga, revisarSaltoKm, claveSerie,
+  movilesPorCarga, revisarSaltoKm, claveSerie, normalizarCantidad,
   type CargaRendimiento, type Tramo, type ResumenUnidad, type VeredictoSalto,
 } from "@/lib/rendimiento";
 import { hoyLima, sumarDias } from "@/lib/odometro-analitica";
@@ -657,9 +657,14 @@ export default function CombustiblePage() {
   }, [registros, rendDeCarga]);
 
   // KPIs por tipo de combustible
+  // La tarjeta rotula con la unidad del CATÁLOGO, así que la cantidad tiene que llegar en esa
+  // unidad: el Radar guarda litros en la misma columna `galones`, y sumarlos crudos publicaba
+  // "398.6 gal" sobre un total que mezclaba litros dentro. `normalizarCantidad` es la misma
+  // conversión que usa el motor de rendimiento — una segunda aquí sería otra copia.
   const kpisPorTipo = Object.entries(COMBUSTIBLES).map(([tipo, cfg]) => {
     const regs = registros.filter(r => (r.tipo_combustible || "diesel") === tipo);
-    return { tipo, cfg, cantidad: regs.reduce((s, r) => s + Number(r.galones || 0), 0), costo: regs.reduce((s, r) => s + Number(r.total || 0), 0), cargas: regs.length };
+    const cantidad = regs.reduce((s, r) => s + (normalizarCantidad(r.galones, r.unidad, cfg.familia) ?? 0), 0);
+    return { tipo, cfg, cantidad, costo: regs.reduce((s, r) => s + Number(r.total || 0), 0), cargas: regs.length };
   }).filter(d => d.cargas > 0);
 
   // Anomalías. El hallazgo de rendimiento lo decide `juzgarTramo`, que ahora mira las DOS
@@ -668,7 +673,9 @@ export default function CombustiblePage() {
   const totalAnomalias = registros.filter(r => {
     const tipo = r.tipo_combustible || "diesel";
     const cap  = getCapacidad(unidadDe(uidReg(r)), tipo);
-    if (Number(r.galones) > cap * 1.1) return true;
+    // En la unidad del tanque, no en la de la fila: 60 litros no superan un tanque de 20 gal.
+    const q = normalizarCantidad(r.galones, r.unidad, familiaCombustible(tipo));
+    if (q != null && q > cap * 1.1) return true;
     const e = rendDeCarga[r.id];
     return !!(e && juzgarTramo(e.tramo, e.resumen));
   }).length;
