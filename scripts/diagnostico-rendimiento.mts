@@ -414,4 +414,80 @@ if (cambian) {
   console.log(`\n   Ninguna placa cambia de presupuesto: el cambio es seguro tal cual.`);
 }
 
+// ── 7 · LA BICOMBUSTIBLE EN EL PRESUPUESTO — CONDICIÓN DE MERGE DE `otrasFamilias` ──
+//
+// `lib/costeo-servicio.ts` pre-filtra por familia y durante meses NO le pasó `otrasFamilias`
+// a `serieRendimiento`. En una unidad que carga DOS combustibles (la CWQ400: GLP + gasolina),
+// los km hechos con el otro caen igual en el delta del odómetro y no están en el denominador,
+// así que la mediana de la familia dominante sale INFLADA — y con ella el presupuesto costea
+// el combustible POR DEBAJO del real.
+//
+// Esta sección aísla EXACTAMENTE ese cambio: la misma ventana, la misma familia, lo único que
+// varía es si se le pasan o no las marcas del otro combustible. Una unidad de un solo
+// combustible tiene que salir IDÉNTICA; si alguna se mueve, el cambio hizo algo que no era.
+
+linea("7 · rendimientoMedido · SIN otrasFamilias vs CON otrasFamilias");
+console.log("   Aísla el cambio de lib/costeo-servicio.ts. Solo pueden moverse las unidades");
+console.log("   que cargan DOS combustibles (sin contar aditivos): en las demás no hay marcas");
+console.log("   que pasar y el resultado es byte a byte el mismo.\n");
+
+let bicomb = 0;
+let movidasBi = 0;
+for (const v of propios) {
+  const suyas = cargas.filter((c) => c.vehiculo_id === v.id);
+  if (suyas.length < 2) continue;
+
+  // La MISMA ventana que usa el módulo: las 9 cargas más recientes por fecha.
+  const ventana = [...suyas]
+    .sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)) || Number(b.kilometraje) - Number(a.kilometraje))
+    .slice(0, 9);
+
+  const fams = new Map<string, number>();
+  for (const c of ventana) {
+    const f = familiaCombustible(c.tipo_combustible);
+    if (TECHO_FAMILIA[f] !== null) fams.set(f, (fams.get(f) ?? 0) + 1);
+  }
+  const fam = [...fams].sort((a, b) => b[1] - a[1])[0]?.[0];
+  if (!fam) continue;
+  // Solo las que MUEVEN el bus: la urea no cuenta, y contarla borraría media flota.
+  if (fams.size > 1) bicomb++;
+
+  const deLaFamilia = ventana
+    .filter((c) => familiaCombustible(c.tipo_combustible) === fam)
+    .map((c) => ({
+      id: c.id, unidad: `p${v.id}`, fecha: String(c.fecha).slice(0, 10),
+      kilometraje: c.kilometraje, cantidad: c.galones, unidadCantidad: c.unidad, tipo: c.tipo_combustible,
+    }));
+  const otras = ventana
+    .filter((c) => { const f = familiaCombustible(c.tipo_combustible); return f !== fam && TECHO_FAMILIA[f] !== null; })
+    .map((c) => ({ id: c.id, fecha: String(c.fecha).slice(0, 10), kilometraje: c.kilometraje ?? null, familia: familiaCombustible(c.tipo_combustible) }));
+
+  const antes = serieRendimiento(deLaFamilia).resumen;
+  const despues = serieRendimiento(deLaFamilia, otras).resumen;
+  const a = antes.mediana === null ? null : Math.round(antes.mediana * 100) / 100;
+  const b = despues.mediana === null ? null : Math.round(despues.mediana * 100) / 100;
+  if (a === b && antes.n === despues.n && antes.confiable === despues.confiable) continue;
+  movidasBi++;
+
+  const otrasFams = [...new Set(otras.map((o) => o.familia))].join("+");
+  console.log(
+    `   ${v.placa.padEnd(10)} ${(a === null ? "—" : n1(a)).padStart(7)} → ${(b === null ? "—" : n1(b)).padStart(7)} ${despues.label}` +
+    `   (${antes.n} → ${despues.n} tramos${antes.confiable !== despues.confiable ? `, ${despues.confiable ? "pasa a" : "deja de ser"} fiable` : ""})`
+  );
+  console.log(`      carga además ${otrasFams}: los km hechos con ese combustible inflaban la mediana de ${fam}`);
+  if (a !== null && b !== null && b > a) {
+    console.log(`      ⚠  SUBIÓ: eso costearía MENOS combustible. Revisar a mano — no es el efecto esperado.`);
+  }
+}
+
+console.log(`\n   ${bicomb} placa(s) cargan más de un combustible · ${movidasBi} cambian de mediana`);
+if (movidasBi) {
+  console.log(`\n   ⚠  CONDICIÓN DE MERGE de lib/costeo-servicio.ts: abrir cada placa de arriba.`);
+  console.log(`      Lo esperado es que la mediana BAJE o desaparezca (el tramo cruzado deja de`);
+  console.log(`      medirse), y entonces el presupuesto costea MÁS combustible — el lado seguro.`);
+  console.log(`      Una mediana que SUBE no tiene explicación en este cambio: revisarla.`);
+} else {
+  console.log(`\n   Ninguna placa se mueve: pasar otrasFamilias no cambia ningún presupuesto hoy.`);
+}
+
 console.log("");

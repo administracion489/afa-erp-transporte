@@ -145,6 +145,31 @@ export async function rendimientoMedido(
   const familia = [...cuenta].sort((a, b) => b[1] - a[1])[0]?.[0];
   if (!familia) return null;
 
+  // UNA BICOMBUSTIBLE NO TIENE UN RENDIMIENTO, TIENE DOS — Y NINGUNO SE MIDE EN UN TRAMO
+  // COMPARTIDO. Este módulo pre-filtra por familia y durante meses NO le pasó `otrasFamilias`
+  // a `serieRendimiento`, así que los km hechos con el OTRO combustible caían igual en el
+  // delta del odómetro sin estar en el denominador: la mediana de la familia dominante salía
+  // INFLADA, y con ella el presupuesto costeaba el combustible POR DEBAJO del real y el margen
+  // de esos servicios salía por encima. La CWQ400 (GLP + gasolina) es el caso de la flota.
+  //
+  // Los ADITIVOS no cuentan: la urea no mueve el bus, y contarla borraría el rendimiento de
+  // media flota (por eso el filtro es el mismo `TECHO_FAMILIA[f] !== null` de arriba).
+  //
+  // La dirección del cambio es la SEGURA: un tramo cruzado deja de publicar un número inflado,
+  // así que el combustible presupuestado sube y el margen baja. Equivocarse hacia abajo es lo
+  // caro —un costo corto se descubre cuando el servicio ya se prestó—, y esto lo corrige.
+  const otrasFamilias = filas
+    .filter((r) => {
+      const f = familiaCombustible(r.tipo_combustible);
+      return f !== familia && TECHO_FAMILIA[f] !== null;
+    })
+    .map((r) => ({
+      id: r.id,
+      fecha: String(r.fecha ?? "").slice(0, 10),
+      kilometraje: r.kilometraje ?? null,
+      familia: familiaCombustible(r.tipo_combustible),
+    }));
+
   const { resumen } = serieRendimiento(
     filas
       .filter((r) => familiaCombustible(r.tipo_combustible) === familia)
@@ -156,7 +181,8 @@ export async function rendimientoMedido(
         cantidad: r.galones,
         unidadCantidad: r.unidad,
         tipo: r.tipo_combustible,
-      }))
+      })),
+    otrasFamilias
   );
   // Se devuelve la medición ENTERA, incluida la que no llega a `confiable`: quien decide si
   // manda sobre el parámetro es `decidirRendimiento`, y el renglón del presupuesto necesita
