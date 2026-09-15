@@ -21,9 +21,15 @@
 const GRAPH_VERSION = "v25.0";
 const GRAPH = `https://graph.facebook.com/${GRAPH_VERSION}`;
 
-/** App de Meta del ERP. El id también está en el cliente (no es secreto); el secret jamás. */
+/**
+ * App de Meta del ERP. El id NO es secreto — ya viaja en el bundle del navegador
+ * (ConectarWhatsAppModal lo necesita para FB.init), así que cae al mismo valor por
+ * defecto que usa el cliente en vez de exigir una variable de entorno más. Eso deja
+ * `META_APP_SECRET` como la única variable imprescindible para conectar un número:
+ * una env var menos que se puede olvidar y hacer fallar el canje en producción.
+ */
 export function appId(): string | undefined {
-  return process.env.META_APP_ID ?? process.env.NEXT_PUBLIC_META_APP_ID;
+  return process.env.META_APP_ID ?? process.env.NEXT_PUBLIC_META_APP_ID ?? "1776032736701552";
 }
 function appSecret(): string | undefined {
   return process.env.META_APP_SECRET;
