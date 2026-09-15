@@ -242,6 +242,7 @@ async function handler(req: NextRequest) {
           const plan = planDeEnvioConductor({
             ahoraMs,
             fechaServicio: r.fecha_servicio,
+            horaServicio: horaCorta(r.hora_servicio),
             horario: horarioDe(cfg),
           });
           if (plan.enviar) return false;

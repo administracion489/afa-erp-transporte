@@ -22,23 +22,36 @@
 // "PRINCIPIO ANTI-PÉRDIDA" que ya gobierna el tick.
 //
 // LA REGLA QUE NO SE PUEDE AFLOJAR, y es la que ordena todas las demás:
-//   **SOLO SE RETIENE UN AVISO QUE SE VAYA A ENTREGAR LA VÍSPERA DEL SERVICIO.**
+//   **SE RETIENE MIENTRAS EL HORARIO TODAVÍA LLEGUE A TIEMPO. Si no llega, es URGENTE
+//   y sale al instante.**
 // Un aviso a deshora molesta y se perdona; uno que llega encima de la hora de salida es
 // un bus sin conductor. Misma asimetría de `montoDe` con el falso flete: siempre el lado
 // del error reversible.
 //
-// La primera versión de esta regla decía «no se retiene más allá de la HORA del servicio»
-// y era demasiado literal — lo reportó el dueño preguntando por los servicios urgentes.
-// Con la ventana 11:59–21:00, un servicio del 15 a las 12:00 programado el 14 a las 21:01
-// se retenía hasta las 11:59 del 15: técnicamente «antes del servicio», y **un minuto de
-// aviso**. Las 12:00 pasaban el filtro por un minuto y las 14:00 por dos horas.
+// ESTA REGLA SE ESCRIBIÓ TRES VECES, Y LAS DOS PRIMERAS LAS ROMPIÓ EL DUEÑO CON UN CASO
+// REAL. Vale la pena tenerlas escritas, porque las dos parecían correctas:
 //
-// Por eso la unidad de la regla es el DÍA, no el minuto: se retiene solo si la ventana
-// abre ANTES del día en que se presta el servicio. Y eso NO es un umbral elegido —es la
-// promesa que el dueño pidió con sus palabras, «que le llegue el día anterior»—, así que
-// no hay ningún margen en minutos que calibrar ni que envejezca. De paso absorbe los dos
-// casos que antes eran reglas aparte: un servicio de HOY y uno cuya hora ya pasó caen
-// dentro por construcción.
+//  (1) «No se retiene más allá de la HORA del servicio». Demasiado literal: con la
+//      ventana 11:59–21:00, un servicio del 15 a las 12:00 programado el 14 a las 21:01
+//      se retenía hasta las 11:59 — técnicamente «antes del servicio», y UN MINUTO de
+//      aviso. Las 12:00 pasaban el filtro por un minuto; las 14:00, por dos horas.
+//
+//  (2) «Solo se retiene lo que se entregue la VÍSPERA», o sea por DÍA en vez de por hora.
+//      Cerraba (1) sin inventar ningún umbral, y por eso se eligió — pero sobre-corregía:
+//      programar a las 23:00 del 14 un servicio del 15 a las 15:00 pasaba a despertar al
+//      conductor a las 23:00, cuando el horario abría a las 11:59 con tres horas de
+//      sobra. Justo lo que el módulo existe para evitar.
+//
+//  (3) La formulación del dueño —«romper la regla solo si el servicio cae dentro del
+//      horario de no molestar»— TAMPOCO sirve, y es la trampa más fina de las tres: un
+//      servicio de pasado mañana a las 06:00 también cae en horas de silencio, así que
+//      volvería a avisarse a las 00:05. **Lo que hace urgente a un aviso no es la hora
+//      del servicio: es que la próxima apertura del horario ya no llegue a tiempo.**
+//
+// De ahí la regla actual, que es (3) bien planteada: se compara la próxima apertura
+// contra la hora del servicio y se exige un MARGEN mínimo de antelación. Ese margen es el
+// único número del módulo, es editable por tipo, y su valor por defecto se HEREDA de
+// `proximo_inicio` (90 min): es lo que este ERP ya declara como «esto está por empezar».
 
 /** Minutos de un día completo. */
 const MIN_DIA = 1440;
@@ -82,6 +95,17 @@ export function limaAUtcMs(fecha?: string | null, horaHHMM?: string | null): num
   return Date.UTC(y, m - 1, d, hh + 5, mm || 0);
 }
 
+/**
+ * Antelación mínima con la que el aviso tiene que llegar para que valga la pena esperar.
+ * Si al abrir el horario faltara menos que esto para el servicio, es URGENTE y sale ya.
+ *
+ * HEREDADO de `proximo_inicio` (90 min), que es lo que este ERP ya declara como «esto
+ * está por empezar» — no es un umbral elegido para este módulo. Es editable por tipo
+ * (`alerta_config.horario_margen_min`) porque es la definición de "urgente" de cada
+ * operación, y esa la firma una persona, no el código.
+ */
+export const MARGEN_URGENTE_MIN = 90;
+
 /** Ventana de envío de un tipo de mensaje, ya resuelta a minutos del día. */
 export type Horario = {
   /** ¿Este tipo de aviso acepta esperar? Los pre-inicio son urgentes por diseño y no. */
@@ -90,6 +114,8 @@ export type Horario = {
   desdeMin: number | null;
   /** Minuto del día en que CIERRA (exclusivo). */
   hastaMin: number | null;
+  /** Minutos de antelación por debajo de los cuales el aviso se considera urgente. */
+  margenMin: number;
 };
 
 export type CodigoEnvio =
@@ -99,11 +125,10 @@ export type CodigoEnvio =
   | "sin_ventana"
   /** Estamos dentro del horario de envío. */
   | "en_ventana"
-  /** El servicio es HOY: un cambio de hoy sobre un servicio de hoy se avisa al instante. */
-  | "servicio_hoy"
-  /** La ventana solo abriría el MISMO DÍA del servicio: esperar dejaría de ser un aviso
-   *  de la víspera y pasaría a ser un aviso de última hora. */
-  | "no_es_vispera"
+  /** URGENTE: al abrir el horario ya faltaría menos del margen para el servicio (o el
+   *  servicio ya habría empezado). Esperar sería avisar tarde, así que sale al instante
+   *  aunque sea de madrugada. */
+  | "urgente"
   /** Sin fecha del servicio no se puede garantizar que la espera no lo tape. */
   | "sin_fecha";
 
@@ -123,11 +148,19 @@ export function horarioDe(cfg: {
   respeta_horario?: boolean | null;
   horario_desde?: string | null;
   horario_hasta?: string | null;
+  horario_margen_min?: number | null;
 }): Horario {
+  // El margen es la ÚNICA excepción a "sin columna = comportamiento anterior", y es
+  // deliberado: sin él la regla vuelve a retener un aviso hasta un minuto antes del
+  // servicio, que es el defecto que este margen existe para cerrar. La columna solo lo
+  // hace editable; que falte no puede reabrir el agujero. Un 0 explícito SÍ se respeta
+  // («no consideres nada urgente»), por eso no se usa `||`.
+  const margen = Number(cfg.horario_margen_min);
   return {
     respeta: cfg.respeta_horario === true,
     desdeMin: hhmmAMinutos(cfg.horario_desde),
     hastaMin: hhmmAMinutos(cfg.horario_hasta),
+    margenMin: Number.isFinite(margen) && margen >= 0 ? margen : MARGEN_URGENTE_MIN,
   };
 }
 
@@ -178,7 +211,9 @@ export function ventanaCubreMadrugada(desdeMin: number | null, hastaMin: number 
  * confusión que costó el error fue de DIRECCIÓN (qué mitad del día es la que envía), y
  * una frase compuesta en la pantalla puede volver a describirla al revés sin que nada falle.
  */
-export function describirHorario(desdeMin: number | null, hastaMin: number | null): string {
+export function describirHorario(
+  desdeMin: number | null, hastaMin: number | null, margenMin?: number | null,
+): string {
   if (desdeMin == null || hastaMin == null) {
     return "Horario incompleto: el aviso sale al instante, como si la casilla estuviera apagada.";
   }
@@ -186,7 +221,20 @@ export function describirHorario(desdeMin: number | null, hastaMin: number | nul
     return "La ventana no dura nada: el aviso sale al instante, como si la casilla estuviera apagada.";
   }
   const d = minutosAHhmm(desdeMin), h = minutosAHhmm(hastaMin);
-  return `Se ENVÍA entre las ${d} y las ${h}. Detectado fuera de ese rango, el aviso espera a las ${d}.`;
+  const m = Number.isFinite(Number(margenMin)) && Number(margenMin) >= 0
+    ? Number(margenMin) : MARGEN_URGENTE_MIN;
+  const urgencia = m === 0
+    ? " Nada se considera urgente: todo lo detectado fuera del rango espera."
+    : ` Salvo que al abrir ya falte menos de ${textoDuracion(m)} para el servicio: eso es urgente y sale al instante, sea la hora que sea.`;
+  return `Se ENVÍA entre las ${d} y las ${h}. Detectado fuera de ese rango, el aviso espera a las ${d}.${urgencia}`;
+}
+
+/** "90 min" → "1 h 30 min". Solo para texto de pantalla. */
+export function textoDuracion(min: number): string {
+  const m = Math.max(0, Math.round(min));
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60), resto = m % 60;
+  return resto ? `${h} h ${resto} min` : `${h} h`;
 }
 
 /** Próximo instante (ms UTC) en que el reloj de Lima marca `desdeMin`. */
@@ -209,26 +257,28 @@ const sale = (codigo: CodigoEnvio, motivo: string): PlanEnvio => ({ enviar: true
  *  2. Sin ventana declarada → sale. No se inventa un horario, igual que `elegirOdometro`
  *     no inventa un techo cuando no hay historial.
  *  3. Dentro de la ventana → sale.
- *  4. No se sabe QUÉ DÍA es el servicio → sale. Sin fecha no hay forma de comprobar (6),
+ *  4. No se sabe QUÉ DÍA es el servicio → sale. Sin fecha no hay forma de comprobar (5),
  *     y ante la duda se envía: molestar es reversible, dejar un bus sin conductor no.
- *  5. El servicio es HOY → sale, sea la hora que sea. Que alguien toque un servicio de
- *     hoy a las 03:00 es un hecho real y urgente, no el artefacto de medianoche. (Es un
- *     caso particular de (6), separado solo para que el motivo se lea claro.)
- *  6. La ventana no abre antes del DÍA del servicio → sale. **La regla dura.** Cubre al
- *     urgente que se programa de noche para la madrugada siguiente y al que se programa
- *     de noche para el mediodía siguiente — que es el que se colaba cuando la regla
- *     miraba la hora en vez del día.
- *  7. Si no, ESPERA — y el plan dice hasta cuándo.
+ *  5. Al abrir el horario faltaría menos del MARGEN para el servicio → sale (`urgente`).
+ *     **La regla dura**, y la que decide los tres casos que rompieron las versiones
+ *     anteriores: el servicio de madrugada programado anoche (la apertura ya no llega),
+ *     el del mediodía programado anoche (llegaría con un minuto) y el de la tarde
+ *     programado anoche (llegaría con tres horas — ése SÍ espera).
+ *  6. Si no, ESPERA — y el plan dice hasta cuándo.
  *
- * La HORA del servicio no entra en la decisión, y es deliberado: con la regla en días, el
- * aviso retenido se entrega siempre en una fecha anterior, así que ninguna hora puede
- * alcanzarlo. Pedirla invitaría a reintroducir comparaciones al minuto como la que falló.
+ * Ya no hay regla de «servicio de HOY»: era una excepción demasiado ancha que despertaba
+ * al conductor a las 03:00 por un servicio de las 15:00 del mismo día. Un servicio de hoy
+ * cuya hora está cerca cae en (5) por su cuenta, que es lo correcto.
  */
 export function planDeEnvioConductor(args: {
   /** Instante actual en ms UTC (Date.now() en producción; fijo en las pruebas). */
   ahoraMs: number;
   /** Fecha del servicio que anuncia el aviso ("YYYY-MM-DD"). */
   fechaServicio?: string | null;
+  /** Hora pactada del servicio ("HH:MM" o "HH:MM:SS"). Sin ella se supone el inicio más
+   *  temprano posible (00:00 de su día), que es el lado seguro: solo puede adelantar el
+   *  envío, nunca retenerlo de más. */
+  horaServicio?: string | null;
   horario: Horario;
 }): PlanEnvio {
   const { ahoraMs, horario } = args;
@@ -247,15 +297,15 @@ export function planDeEnvioConductor(args: {
 
   const fecha = String(args.fechaServicio || "").slice(0, 10);
   if (!fecha) return sale("sin_fecha", "el aviso no dice de qué día es el servicio");
-  if (fecha === fechaLima(ahoraMs)) return sale("servicio_hoy", "el servicio es hoy");
+  const inicioMs = limaAUtcMs(fecha, String(args.horaServicio || "00:00").slice(0, 5));
+  if (inicioMs == null) return sale("sin_fecha", "el aviso no dice cuándo es el servicio");
 
-  // Las fechas ISO se comparan en binario, nunca con localeCompare: es texto ordenable por
-  // construcción y localeCompare ignora la puntuación (misma razón que el Anexo 1).
   const abreMs = proximaAperturaMs(ahoraMs, desdeMin);
-  const diaApertura = fechaLima(abreMs);
-  if (diaApertura >= fecha) {
-    return sale("no_es_vispera",
-      `el horario no volvería a abrir hasta el ${diaApertura}, el día del servicio`);
+  const antelacionMin = Math.floor((inicioMs - abreMs) / 60_000);
+  if (antelacionMin < horario.margenMin) {
+    return sale("urgente", antelacionMin <= 0
+      ? `al abrir el horario el servicio ya habría empezado`
+      : `al abrir el horario faltarían ${antelacionMin} min para el servicio`);
   }
 
   return {

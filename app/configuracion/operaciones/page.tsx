@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 // Módulo PURO (no lee la base): la frase y el aviso salen de los MISMOS números que usa
 // el motor del tick, para que la pantalla no pueda describir la ventana al revés.
-import { describirHorario, hhmmAMinutos, ventanaCubreMadrugada } from "@/lib/alertas-horario";
+import { MARGEN_URGENTE_MIN, describirHorario, hhmmAMinutos, ventanaCubreMadrugada } from "@/lib/alertas-horario";
 
 type Destinatario = { id: number; nombre: string; funcion: string | null; telefono: string; activo: boolean; es_contingencia?: boolean };
 type ModoTiempo = "evento" | "anticipacion" | "hora_fija";
@@ -20,6 +20,8 @@ type AlertaCfg = {
   tiempo_editable: boolean;
   // Horario de envío al conductor (supabase/alertas-horario-conductor.sql)
   respeta_horario: boolean; horario_desde: string | null; horario_hasta: string | null;
+  /** Antelación por debajo de la cual el aviso es URGENTE y rompe el horario. */
+  horario_margen_min: number | null;
   /** false = este aviso NO le escribe al directorio → la tarjeta oculta el selector, en vez
    *  de ofrecer contactos a los que el motor nunca les va a mandar nada. Gemela de
    *  `tiempo_editable` (supabase/alertas-controles-que-no-aplican.sql). */
@@ -112,6 +114,7 @@ export default function ConfigOperacionesPage() {
       respeta_horario:                      x.respeta_horario                      ?? false,
       horario_desde:                        x.horario_desde                        ?? null,
       horario_hasta:                        x.horario_hasta                        ?? null,
+      horario_margen_min:                   x.horario_margen_min                   ?? MARGEN_URGENTE_MIN,
       // Sin la columna, se muestra: ocultar el selector por una migración que falta
       // escondería contactos que sí están configurados y funcionando.
       usa_directorio:                       x.usa_directorio                       ?? true,
@@ -134,6 +137,7 @@ export default function ConfigOperacionesPage() {
       respeta_horario: c.respeta_horario,
       horario_desde: c.respeta_horario ? (c.horario_desde || "12:00") : c.horario_desde,
       horario_hasta: c.respeta_horario ? (c.horario_hasta || "22:00") : c.horario_hasta,
+      horario_margen_min: c.horario_margen_min ?? MARGEN_URGENTE_MIN,
     };
     const { error } = await supabase.from("alerta_config").update({
       activo: c.activo, modo_tiempo: c.modo_tiempo,
@@ -464,8 +468,14 @@ export default function ConfigOperacionesPage() {
                         <input type="time" className={input + " w-28"} value={c.horario_hasta ?? "22:00"}
                           onChange={(e) => setCfg(c.clave, { horario_hasta: e.target.value })} />
                         <div className="basis-full text-[11px] text-gray-500 pl-20">
-                          {describirHorario(hhmmAMinutos(c.horario_desde ?? "12:00"), hhmmAMinutos(c.horario_hasta ?? "22:00"))}{" "}
-                          Nunca retiene un aviso más allá de la hora del servicio, ni uno de hoy.
+                          {describirHorario(hhmmAMinutos(c.horario_desde ?? "12:00"), hhmmAMinutos(c.horario_hasta ?? "22:00"), c.horario_margen_min)}{" "}
+                        </div>
+                        <div className="basis-full flex flex-wrap items-center gap-2 pl-20">
+                          <span className="text-[11px] font-semibold text-gray-600">Es urgente si faltan menos de</span>
+                          <input type="number" min={0} step={15} className={input + " w-24"}
+                            value={c.horario_margen_min ?? MARGEN_URGENTE_MIN}
+                            onChange={(e) => setCfg(c.clave, { horario_margen_min: Number(e.target.value) })} />
+                          <span className="text-[11px] font-semibold text-gray-600">minutos para el servicio</span>
                         </div>
                         {ventanaCubreMadrugada(hhmmAMinutos(c.horario_desde ?? "12:00"), hhmmAMinutos(c.horario_hasta ?? "22:00")) && (
                           <div className="basis-full ml-20 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
