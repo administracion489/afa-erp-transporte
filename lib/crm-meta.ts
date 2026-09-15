@@ -2,9 +2,28 @@
 // Env vars: META_WA_TOKEN (WhatsApp system user token), META_PAGE_TOKEN (Messenger/Instagram page token)
 // Legacy: META_ACCESS_TOKEN se usa como fallback si los nuevos no están definidos
 
+import { tokenParaNumero } from "@/lib/meta-tokens";
+
 const GRAPH = "https://graph.facebook.com/v25.0";
-const WA_TOKEN = () => process.env.META_WA_TOKEN!;
 const PAGE_TOKEN = () => process.env.META_PAGE_TOKEN!;
+
+// Token de WhatsApp POR NÚMERO, no global.
+//
+// Todos los números de AFA cuelgan del mismo system user (META_WA_TOKEN) y para
+// ellos esto devuelve exactamente lo de siempre. La diferencia aparece al VENDER
+// el ERP: cada empresa que completa el Embedded Signup entrega su propio business
+// token, que queda cifrado en `whatsapp_tokens` y se usa solo para sus números.
+// Sin esto, un segundo cliente sería imposible: su WABA no está bajo el system
+// user de AFA y Meta rechazaría cada envío con un 190/200.
+async function waToken(phoneId: string): Promise<string> {
+  const token = await tokenParaNumero(phoneId);
+  if (!token) {
+    throw new Error(
+      "No hay token de WhatsApp para este número: ni propio (whatsapp_tokens) ni META_WA_TOKEN en el entorno.",
+    );
+  }
+  return token;
+}
 
 // Los DOS números con API oficial de Meta:
 //   • CRM       (+51 966707225) → atención al cliente + CAMPAÑAS  → META_PHONE_NUMBER_ID
@@ -36,10 +55,10 @@ export async function enviarWhatsApp(to: string, texto: string, phoneId?: string
 
   const res = await fetch(`${GRAPH}/${phone}/messages`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${WA_TOKEN()}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await waToken(phone)}` },
     body: JSON.stringify({
       messaging_product: "whatsapp",
-      to: limpioTo, 
+      to: limpioTo,
       type: "text",
       text: { body: texto },
     }),
@@ -96,7 +115,7 @@ export async function enviarWhatsAppPlantilla(
 
   const res = await fetch(`${GRAPH}/${phone}/messages`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${WA_TOKEN()}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await waToken(phone)}` },
     body: JSON.stringify({
       messaging_product: "whatsapp",
       to,
@@ -124,7 +143,7 @@ export async function enviarWhatsAppMedia(
 
   const res = await fetch(`${GRAPH}/${phoneId}/messages`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${WA_TOKEN()}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await waToken(phoneId)}` },
     body: JSON.stringify({
       messaging_product: "whatsapp",
       to,
@@ -183,7 +202,7 @@ export async function marcarLeidoWA(messageId: string): Promise<void> {
   if (!phoneId) return;
   await fetch(`${GRAPH}/${phoneId}/messages`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${WA_TOKEN()}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await waToken(phoneId)}` },
     body: JSON.stringify({ messaging_product: "whatsapp", status: "read", message_id: messageId }),
   });
 }

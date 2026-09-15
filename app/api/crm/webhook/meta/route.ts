@@ -3,6 +3,8 @@ import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { responderConIA } from "@/lib/crm-ia";
 import { esNumeroDeAvisos } from "@/lib/whatsapp-numeros";
+import { procesarEchos, procesarHistorial, procesarContactos } from "@/lib/crm-coexistencia";
+import { resolverContacto, resolverConversacion } from "@/lib/crm-ingesta";
 
 const db = () =>
   createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
@@ -31,11 +33,27 @@ export async function POST(req: NextRequest) {
 
   const { object, entry = [] } = body;
   const conversacionesNuevas = new Set<string>(); // hilos con mensaje entrante → atender con IA
+  // Webhooks de coexistencia apartados para procesarlos después de responder 200.
+  const coexistencia: { campo: string; value: any }[] = [];
 
   for (const e of entry) {
     // ── WhatsApp ──────────────────────────────────────────────────────────
     if (object === "whatsapp_business_account") {
       for (const change of e.changes ?? []) {
+        // ── Webhooks propios de la COEXISTENCIA ──────────────────────────
+        // Solo llegan cuando el número sigue usándose en la app del celular.
+        // Ninguno dispara el agente IA: o los escribió una persona, o son
+        // conversaciones viejas. Ver lib/crm-coexistencia.ts.
+        //
+        // Se APARTAN para procesarlos en `after()`, ya con el 200 entregado: un
+        // chunk de `history` trae cientos de mensajes y Meta reintenta el webhook
+        // si tarda en responder — sin esto, el mismo tramo de historial entraría
+        // varias veces y cada reintento competiría con el anterior.
+        if (change.field === "smb_message_echoes" || change.field === "history" || change.field === "smb_app_state_sync") {
+          coexistencia.push({ campo: change.field, value: change.value });
+          continue;
+        }
+
         if (change.field !== "messages") continue;
         const val = change.value;
         // ¿A QUÉ número llegó? El webhook es a nivel de WABA y ahora hay 2 números:
@@ -100,10 +118,28 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // El agente IA corre DESPUÉS de responder 200 a Meta (no bloquea el webhook).
-  // responderConIA decide solo si está activo, el canal aplica, el hilo no está pausado, etc.
-  if (conversacionesNuevas.size > 0) {
+  // Todo lo pesado corre DESPUÉS de responderle 200 a Meta, en un ÚNICO after():
+  // la coexistencia primero y la IA al final, en ese orden y de forma garantizada.
+  // Importa: un echo (alguien contestó desde el celular) pausa el hilo, y esa
+  // decisión tiene que estar tomada antes de que el agente se plantee responder,
+  // o el cliente recibe dos respuestas al mismo mensaje. Con dos after() por
+  // separado el orden no está garantizado.
+  if (coexistencia.length > 0 || conversacionesNuevas.size > 0) {
     after(async () => {
+      const sb = db();
+      for (const { campo, value } of coexistencia) {
+        try {
+          if (campo === "smb_message_echoes") await procesarEchos(sb, value);
+          else if (campo === "history") await procesarHistorial(sb, value);
+          else if (campo === "smb_app_state_sync") await procesarContactos(sb, value);
+        } catch (err) {
+          // Un chunk malformado no debe impedir el siguiente ni el resto del webhook.
+          console.error(`[webhook] ${campo}:`, err);
+        }
+      }
+
+      // responderConIA decide solo si está activo, el canal aplica, el hilo no
+      // está pausado, etc.
       for (const id of conversacionesNuevas) {
         try {
           await responderConIA(id);
@@ -142,38 +178,18 @@ async function processarMensaje(m: MsgInput): Promise<string | null> {
     .maybeSingle();
   if (dup) return null;
 
-  // Buscar o crear contacto
-  let { data: contacto } = await supabase
-    .from("crm_contactos")
-    .select("id, telefono")
-    .eq(m.idField, m.senderId)
-    .maybeSingle();
-
-  // En WhatsApp el senderId ES el teléfono del cliente en E.164 sin "+" (51987654321).
-  // Se copia además a `telefono` porque `wa_id` es la clave técnica de Meta y las
-  // pantallas del ERP leen `telefono`: sin esta copia el operador veía el nombre del
-  // contacto y ningún número al que llamar. En Messenger/Instagram el senderId es un id
-  // opaco (fb_psid/ig_id), NO un teléfono — ahí no se copia nada.
-  const telefonoWa = m.canal === "whatsapp" ? m.senderId : null;
-
-  if (!contacto) {
-    const { data: nc } = await supabase
-      .from("crm_contactos")
-      .insert({
-        nombre: m.senderName || m.senderId,
-        canal_origen: m.canal,
-        [m.idField]: m.senderId,
-        ...(telefonoWa ? { telefono: telefonoWa } : {}),
-      })
-      .select("id, telefono")
-      .single();
-    contacto = nc;
-  } else if (telefonoWa && !contacto.telefono) {
-    // Contacto anterior a este cambio: se rellena una sola vez. La condición
-    // `!contacto.telefono` es la que impide pisar un número corregido a mano — este
-    // bloque corre en CADA mensaje entrante.
-    await supabase.from("crm_contactos").update({ telefono: telefonoWa }).eq("id", contacto.id);
-  }
+  // Buscar o crear contacto. La copia del teléfono (solo WhatsApp, donde el
+  // senderId ES el número en E.164 sin "+") vive dentro de resolverContacto, así
+  // que también la reciben los echos y el historial de la coexistencia — no solo
+  // los mensajes entrantes como cuando el bloque estaba aquí suelto.
+  const contacto = await resolverContacto(supabase, {
+    campo: m.idField,
+    valor: m.senderId,
+    nombre: m.senderName || null,
+    canal: m.canal,
+    telefono: m.canal === "whatsapp" ? m.senderId : null,
+  });
+  if (!contacto) return null;
 
   // Consentimiento WhatsApp: quien escribe por WhatsApp queda opt-in automático
   // (relación existente → habilitado para campañas de marketing). Si el texto es
@@ -204,33 +220,16 @@ async function processarMensaje(m: MsgInput): Promise<string | null> {
   }
 
   // Buscar o crear conversación abierta
-  let { data: conv } = await supabase
-    .from("crm_conversaciones")
-    .select("id, no_leidos")
-    .eq("contacto_id", contacto!.id)
-    .eq("canal", m.canal)
-    .neq("estado", "resuelta")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const conv = await resolverConversacion(supabase, {
+    contactoId: contacto.id,
+    canal: m.canal,
+    phoneNumberId: m.phoneNumberId ?? null,
+    displayPhoneNumber: m.displayPhoneNumber ?? null,
+  });
+  if (!conv) return null;
 
-  if (!conv) {
-    const { data: nc } = await supabase
-      .from("crm_conversaciones")
-      .insert({
-        contacto_id: contacto!.id,
-        canal: m.canal,
-        estado: "abierta",
-        phone_number_id: m.phoneNumberId ?? null,
-        display_phone_number: m.displayPhoneNumber ?? null,
-      })
-      .select("id, no_leidos")
-      .single();
-    conv = nc;
-  }
-
-  await supabase.from("crm_mensajes").insert({
-    conversacion_id: conv!.id,
+  const fila = {
+    conversacion_id: conv.id,
     direccion: "entrante",
     tipo: m.tipo,
     contenido: m.contenido,
@@ -238,7 +237,14 @@ async function processarMensaje(m: MsgInput): Promise<string | null> {
     meta_message_id: m.metaMessageId,
     phone_number_id: m.phoneNumberId ?? null,
     display_phone_number: m.displayPhoneNumber ?? null,
-  });
+  };
+  // `origen` lo añade supabase/whatsapp-coexistencia.sql. Si esa migración aún no
+  // se corrió, el mensaje se guarda igual sin la etiqueta: un webhook nunca debe
+  // perder un mensaje del cliente por una columna que falta.
+  const { error: errMsg } = await supabase.from("crm_mensajes").insert({ ...fila, origen: "entrante" });
+  if (errMsg && /column .* does not exist/i.test(errMsg.message)) {
+    await supabase.from("crm_mensajes").insert(fila);
+  }
 
   await supabase
     .from("crm_conversaciones")

@@ -1,16 +1,18 @@
 // Registro de un número de WhatsApp recién conectado.
-// Lo llama el modal "Conectar WhatsApp" del CRM cuando el Embedded Signup de Meta
-// termina: ese evento trae phone_number_id y waba_id, que es justo lo que hace falta
-// para poder ENVIAR por ese número. Sin este paso el número recibiría mensajes (el
-// webhook es a nivel de WABA) pero no se podría contestar desde él.
 //
-// El alias y el display_phone_number se piden a Meta, porque el evento no siempre los
-// incluye. Si esa consulta falla igual se guarda la fila: el id es lo imprescindible.
+// Alta MÍNIMA: guarda phone_number_id y waba_id para poder ENVIAR por ese número.
+// Es la red de seguridad de /api/crm/whatsapp/activar — si el canje del código
+// falla (típicamente porque venció: dura 30 s), al menos el número queda anotado
+// y se le puede completar la activación después.
+//
+// El alias y el display_phone_number se piden a Meta, porque el evento del
+// Embedded Signup no siempre los incluye. Si esa consulta falla igual se guarda la
+// fila: el id es lo imprescindible.
 
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { verificarUsuarioApi } from "@/lib/api-auth";
-import { invalidarCacheNumeros } from "@/lib/whatsapp-numeros";
+import { registrarNumero } from "@/lib/whatsapp-registro";
+import { tokenParaNumero } from "@/lib/meta-tokens";
 
 const GRAPH = "https://graph.facebook.com/v25.0";
 
@@ -23,12 +25,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "phone_number_id requerido" }, { status: 400 });
   }
 
-  // Datos del número en Meta: display_phone_number y verified_name (el nombre que ve
-  // el cliente). Best-effort — un token sin permiso sobre ese número no debe impedir
-  // el registro, sólo deja las columnas en null para completarlas después.
+  // Datos del número en Meta: display_phone_number y verified_name (el nombre que
+  // ve el cliente). Best-effort — un token sin permiso sobre ese número no debe
+  // impedir el registro, solo deja las columnas en null para completarlas después.
   let display: string | null = null;
   let nombreMeta: string | null = null;
-  const token = process.env.META_WA_TOKEN;
+  const token = await tokenParaNumero(String(phone_number_id));
   if (token) {
     try {
       const r = await fetch(
@@ -47,51 +49,16 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const db = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { autoRefreshToken: false, persistSession: false } },
-  );
-
-  // display_phone_number también es UNIQUE, así que un upsert por phone_number_id no
-  // basta: si el mismo número físico se reconecta y Meta le da otro phone_number_id,
-  // el upsert intenta INSERTAR y choca contra ese otro índice con un error críptico.
-  // Por eso se busca antes por cualquiera de las dos claves.
-  const { data: existente } = await db
-    .from("whatsapp_numeros")
-    .select("*")
-    .or(
-      display
-        ? `phone_number_id.eq.${phone_number_id},display_phone_number.eq.${display}`
-        : `phone_number_id.eq.${phone_number_id}`,
-    )
-    .maybeSingle();
-
-  // Sin usos a propósito: activarlos aquí desplazaría al número que hoy cumple ese
-  // papel y cambiaría en silencio por dónde salen los mensajes. Se asignan a mano.
-  // `activo` NO se fuerza al actualizar: si alguien dio de baja un número, reconectarlo
-  // no debe revivirlo con sus usos intactos (y el índice único parcial daría un 500).
-  const fila = {
+  const resultado = await registrarNumero({
     phone_number_id: String(phone_number_id),
+    waba_id: waba_id ?? null,
+    alias: alias || nombreMeta || null,
     display_phone_number: display,
-    waba_id: waba_id ? String(waba_id) : existente?.waba_id ?? null,
-    alias: (alias || nombreMeta || existente?.alias || display || "Número nuevo").toString().slice(0, 60),
-    updated_at: new Date().toISOString(),
-  };
+  });
 
-  const q = existente
-    ? db.from("whatsapp_numeros").update(fila).eq("id", existente.id)
-    : db.from("whatsapp_numeros").insert({ ...fila, activo: true });
-
-  const { data, error } = await q.select().single();
-
-  if (error) {
-    return NextResponse.json(
-      { error: `No se pudo registrar: ${error.message}. ¿Corriste supabase/whatsapp-numeros.sql?` },
-      { status: 500 },
-    );
+  if (!resultado.ok) {
+    return NextResponse.json({ error: resultado.error }, { status: 500 });
   }
 
-  invalidarCacheNumeros();
-  return NextResponse.json({ ok: true, numero: data });
+  return NextResponse.json({ ok: true, numero: resultado.numero });
 }
