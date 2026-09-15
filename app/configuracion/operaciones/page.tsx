@@ -399,8 +399,9 @@ export default function ConfigOperacionesPage() {
                 tabla del motor en vez de depender de que alguien mantenga a mano la columna
                 `tiempo_editable` — que sigue mandando cuando dice false (es un AND), pero ya
                 no hace falta correr un SQL para que un control inerte deje de ofrecerse.
-                Doce de los veintiún tipos no lo leen: los de ciclo de vida, el semáforo de
-                puntualidad, el GPS, el checkout y el abandono tienen su propio disparador. */}
+                Catorce de los veintitrés tipos no lo leen: ciclo de vida, semáforo de
+                puntualidad, GPS, checkout, abandono y los dos avisos al pasajero que
+                despacha `lib/notificaciones.ts` tienen su propio disparador. */}
             {(() => { const modoVisible = c.tiempo_editable && leeElModo(c.clave); return (
             <div className="grid md:grid-cols-4 gap-3">
               {modoVisible && (

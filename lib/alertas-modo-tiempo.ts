@@ -34,8 +34,9 @@
 // es la decisión que `montoDe` rechaza con el falso flete. Lo único correcto es DECIRLO
 // antes de guardar. Misma conclusión que la ventana invertida de `alertas-horario.ts`.
 //
-// Y LA OTRA MITAD: doce de los veintiún tipos NO leen el modo en absoluto (ciclo de vida,
-// semáforo de puntualidad, GPS, checkout, abandono). Ofrecerles el selector es ofrecer un
+// Y LA OTRA MITAD: catorce de los veintitrés tipos NO leen el modo en absoluto (ciclo de
+// vida, semáforo de puntualidad, GPS, checkout, abandono, y los dos avisos al pasajero que
+// despacha `lib/notificaciones.ts`). Ofrecerles el selector es ofrecer un
 // control que el sistema no lee — el mismo defecto que `multiples_recargas_en_cluster`
 // declarado y sin emitir. `leeElModo()` lo DERIVA de esta tabla en vez de depender de que
 // alguien mantenga a mano `alerta_config.tiempo_editable`: la columna sigue mandando cuando
@@ -116,6 +117,13 @@ export const VIA_DE_ALERTA: Record<string, ViaDespacho> = {
   gps_silencio: "ignora_modo",
   recordar_checkout: "ignora_modo",
   servicio_abandonado: "ignora_modo",
+  // ── Los dos que NO los despacha el tick, sino `lib/notificaciones.ts` cuando ocurre el
+  //    hecho (se confirma la reserva; el bus llega al paradero). De su fila leen SOLO las
+  //    columnas de canal, vía `cargarCanalesPasajero` — el modo no lo mira nadie. Estaban
+  //    fuera de esta tabla y por eso salían como `sin_via`, que es el default prudente
+  //    (no se afirma nada) pero les dejaba el selector puesto igual que a los demás. ──
+  confirmacion_pasajero: "ignora_modo",
+  llegada_pasajero: "ignora_modo",
 };
 
 /** La vía de una clave, o null si este módulo no la conoce. */
